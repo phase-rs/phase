@@ -1,0 +1,26 @@
+{
+  "viewer": {
+    "title": "リプレイ",
+    "eyebrow": "記録した対戦を観る",
+    "chooseFile": "リプレイファイルを選択",
+    "loading": "リプレイを読み込み中…",
+    "errorGeneric": "リプレイファイルを読み込めませんでした。",
+    "backToMenu": "メニューに戻る"
+  },
+  "controls": {
+    "play": "再生",
+    "pause": "一時停止",
+    "stepBack": "一つ前へ",
+    "stepForward": "一つ先へ",
+    "actionOf": "操作 {{current}} / {{total}}",
+    "speed": "再生速度",
+    "speedValue": "{{value}}倍",
+    "seekError": "リプレイのこの時点を復元できませんでした：{{message}}"
+  },
+  "export": {
+    "button": "リプレイを書き出す",
+    "success": "リプレイを{{filename}}として保存しました",
+    "noRecording": "この対戦にはリプレイの記録がありません。",
+    "error": "リプレイを書き出せませんでした。"
+  }
+}

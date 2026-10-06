@@ -27,7 +27,9 @@ Skill references in this section use the `$skill` / `/skill` convention defined 
 
 | Tier     | Models | Procedure |
 |----------|--------|-----------|
-| Frontier | **Anthropic:** `claude-opus-4-8`+ (including `claude-opus-5`+), `claude-sonnet-5`+ · **OpenAI:** `gpt-5-5`+ (including the `gpt-5.6` family) · **Cursor/Codex:** `codex-5-5`+ | Full pipeline per §4 onward. |
+| Frontier | **Anthropic:** `claude-opus-4-8`+ (including `claude-opus-5`+), `claude-sonnet-5`+ · **OpenAI:** `gpt-5-5`+ (including the `gpt-5.6` family) · **Cursor/Codex:** `codex-5-5`+ · **Meta:** `muse-spark-1.3`+ | Full pipeline per §4 onward. |
+
+**Meta.** Floor `muse-spark-1.3`+, set by maintainer ruling. The Muse Code harness reports the `muse-spark` product name but no canonical versioned identifier, so Muse runs declare via the hedged `Model:` form below; a run that cannot establish itself at or above this floor aborts per the rule above instead of declaring a tier.
 
 **Frontier-tier models only.** There is no longer a Standard tier. The floor is per-vendor and is stated by exact model, not by family wildcard — `claude-sonnet-5` is accepted while `claude-sonnet-4-6` is not, so a `claude-sonnet-*` reading of this table is wrong (but a *newer* version than the one named does qualify — see the reading rule below). **Not accepted:** `claude-opus-4-7` and below, `claude-sonnet-4-6` and below, every `claude-haiku-*` including `claude-haiku-4-5`, every `composer-*`, `gpt-5-4` and below including `gpt-5-3`, and `codex-5-4` and below. If that is your model, abort per §0 rather than opening a PR. A PR declaring a non-Frontier model, or whose commits show one, will be closed as out-of-policy without an implementation review. This is not a judgement about those models generally; it reflects that review capacity here is the scarce resource, and sub-Frontier runs have consistently consumed several maintainer rounds per PR to reach a standard a Frontier run reaches on the first pass.
 
@@ -94,7 +96,7 @@ Tier: Frontier
 
 ## 0.25. Notation — skill invocation
 
-Throughout this document, skills are written with a leading `$` (Codex convention), e.g. `$engine-implementer`, `$review-impl`, `$review-engine-plan`, `$engine-planner`. If you are running under Claude Code, substitute a leading `/` instead — `/engine-implementer`, `/review-impl`, etc. Both forms invoke the same skill file under `.claude/skills/<name>/SKILL.md`. Pick the form your runtime understands; do not mix them in a single command.
+Throughout this document, skills are written with a leading `$` (Codex convention), e.g. `$engine-implementer`, `$review-engine-impl`, `$review-engine-plan`, `$engine-planner`. If you are running under Claude Code, substitute a leading `/` instead — `/engine-implementer`, `/review-engine-impl`, etc. Both forms invoke the same skill file under `.claude/skills/<name>/SKILL.md`. Pick the form your runtime understands; do not mix them in a single command.
 
 ---
 
@@ -135,6 +137,8 @@ git push origin main                                     # keep the fork's main 
 
 If `git merge --ff-only` fails, your fork's `main` has diverged from upstream — do **not** force it. Proceed to §4 regardless: that step cuts your working branch directly from `upstream/main`, so a diverged fork `main` never contaminates your change.
 
+**Refresh upstream again after implementation, before final PR verification.** The skill's [PR preparation handoff](../.claude/skills/engine-implementer/pr-handoff.md#prepare-the-completed-work-for-a-pr) owns this step; the initial sync here does not replace it. It fetches once, integrates that commit, and verifies the resulting branch before §5's final review and §6's Gate A. A later merge or rebase invalidates the old evidence; never reuse PASS records from a different head.
+
 ---
 
 ## 2.5. Bootstrap the repo (Developer track only)
@@ -158,6 +162,8 @@ The `--agent` flag skips the three Scryfall image sidecars (`scryfall-data.json`
 - `client/node_modules/` — required by `pnpm` commands. Same caveat.
 
 Agent mode also implies `--no-tilt` internally: even if `tilt` is on your PATH, setup.sh runs `gen-card-data.sh` and `build-wasm.sh` inline rather than deferring them to `tilt up`, so the required artifacts above are guaranteed present when the script exits.
+
+**Tilt is optional.** For repeated Developer-track iterations, an existing Tilt session can reuse incremental builds. On macOS with Homebrew, install it with `brew install tilt-dev/tap/tilt`, then run `tilt up -- test lint` from the checkout being verified. The first run with a cold cache can compile substantial dependencies for the selected resources and their dependencies; later runs can reuse those artifacts. Startup is profile-dependent: plain `tilt up` does not automatically start all test and lint resources, and Tauri is opt-in. Avoid starting another session against a checkout already managed by Tilt. See the [project-reference skill](../.claude/skills/project-reference/SKILL.md#tilt-resources--operational-rules) for resource names, freshness checks, and log/wait commands.
 
 Skip this section entirely on the Non-developer track — CI runs everything `--agent` mode produces.
 
@@ -213,7 +219,7 @@ The payload is a **single object**, not a bare card list — do not iterate its 
 
 - **`.top_gaps`** — the ROI ranking, and the best place to start. Each entry is a missing parser handler with `single_gap_cards` (how many cards become supported if you implement *just* that one handler), per-format unlock counts, and `oracle_patterns[].example_cards`. Pick a high-`single_gap_cards` handler, implement it **for the class**, then take one of its `example_cards` as your concrete target card. `.gap_bundles` pairs handlers by how many cards fixing them *together* unlocks. This is the coverage-tier analogue of the misparse categories — and the same caveat applies: `single_gap_cards` is the *ceiling* for fully implementing the handler (which spans many sub-patterns), so one combinator arm clears a slice, not the whole number. Let `cargo coverage` tell you which cards actually flipped.
 
-Skip any card whose remaining gap is deferred infrastructure — oracle text referencing Rooms, Enchant Player, or Suspend Aggression (a judgment call from the Oracle text; there is no structured flag for it — see `memory/` notes in the repo if available, otherwise ignore). `cargo parser-gaps` and the `parser-velocity` skill compute the same `top_gaps` ranking locally. Here the "done" signal is `cargo coverage` flipping the card to `supported: true, gap_count: 0`.
+Skip any card whose remaining gap is deferred infrastructure — oracle text referencing Rooms, Enchant Player, or Suspend Aggression (a judgment call from the Oracle text; there is no structured flag for it — see `memory/` notes in the repo if available, otherwise ignore). `cargo parser-gaps`, which the `parser-velocity` skill builds on, regroups the same unsupported cards locally by typed diagnosis and phrase family, each family with its `cards_affected` and `fixes_alone` counts. Here the "done" signal is `cargo coverage` flipping the card to `supported: true, gap_count: 0`.
 
 ### 3.4 Confirm the work isn't already in flight
 
@@ -245,41 +251,45 @@ done
 git checkout -b "$slug" upstream/main   # cut from current upstream, not a stale fork main
 ```
 
-If your work spans more than a few minutes and upstream `main` advances, keep current with `git fetch upstream main && git merge --no-edit upstream/main` so the final diff contains only your change.
+The branch-start fetch above is only the initial sync. Include the PR target (`phase-rs/phase`, base `main`) when invoking the skill, and require its [PR preparation handoff](../.claude/skills/engine-implementer/pr-handoff.md#prepare-the-completed-work-for-a-pr) **after implementation**, before this guide's final review and Gate A. That handoff resolves and commits any merge conflicts, checks the resulting branch against the fetched upstream commit, and preserves prior phase evidence without treating it as evidence for the merged code.
 
 Then invoke the `$engine-implementer` skill with this prompt, substituting `<NAME>`:
 
-> Implement full engine support for the card "<NAME>". Follow `CLAUDE.md` and `AGENTS.md` design principles without exception: build for the class not the card, nom combinators on first pass, CR annotations verified against `docs/MagicCompRules.txt` (and for each cited rule, also read its adjacent rules in the same section — cite the *authorizing* rule for the effect, not just the *layering* rule), idiomatic Rust, engine owns all logic, frontend is display-only. Reuse existing building blocks before writing new ones. Do not ask for clarification — on ordinary implementation ambiguity, take the architecturally idiomatic path. If the card requires protected architecture scope, stop without opening a PR unless a maintainer explicitly appointed you to that work beforehand or the PR closes an issue labeled `accepted`.
+> Implement full engine support for the card "<NAME>". Prepare it for a PR to `phase-rs/phase` targeting `main`, including the skill's final upstream synchronization and verification handoff after implementation. Follow `CLAUDE.md` and `AGENTS.md` design principles without exception: build for the class not the card, nom combinators on first pass, CR annotations verified against `docs/MagicCompRules.txt` (and for each cited rule, also read its adjacent rules in the same section — cite the *authorizing* rule for the effect, not just the *layering* rule), idiomatic Rust, engine owns all logic, frontend is display-only. Reuse existing building blocks before writing new ones. Do not ask for clarification — on ordinary implementation ambiguity, take the architecturally idiomatic path. If the card requires protected architecture scope, stop without opening a PR unless a maintainer explicitly appointed you to that work beforehand or the PR closes an issue labeled `accepted`.
 
-`$engine-implementer`'s published contract is: plan with `engine-planner` → review the plan with `$review-engine-plan` until clean → implement → verify → review the implementation with `$review-impl` until clean → commit. Validate the committed result next.
+`$engine-implementer`'s published contract is: plan with `engine-planner` → review the plan with `$review-engine-plan` until clean → implement → checkpoint the candidate commit → verify the committed candidate → review it with `$review-engine-impl` → accept the clean candidate. Findings return through the skill's fix/checkpoint/verify/review loop. Follow the [skill](../.claude/skills/engine-implementer/SKILL.md) for its stop and escalation rules. Then complete the PR preparation handoff and validate the resulting committed branch next.
 
-**All tiers:** Gate B and its anchors must exist before implementation. After `$engine-implementer` completes and commits, run the final read-only review in §5 against that committed head, then run Gate A. This is one post-commit loop: if the review finds anything or any later change creates a commit, address it and rerun both the final review and Gate A against the new head. If either gate fails, do NOT continue to §7 — return to fix the violations, or stop per §0.1.3 if they cannot be fixed.
+**Budget.** The skill's [run limits](../.claude/skills/engine-implementer/SKILL.md#run-limits) take `budget=tight|standard|until-clean` (default `standard`), which decides who approves spending past a review-loop limit or on verification machinery. An autonomous run under `standard` cannot ask, so the skill's decline path decides: listed residuals ship, and anything else stops with status `partial` and no PR. Add `budget=until-clean` to the prompt only if you accept the extra spend.
+
+**All tiers:** Gate B and its anchors must exist before implementation. After `$engine-implementer` completes its PR preparation handoff, run the final read-only review in §5 against the resulting committed head and complete diff from the fetched upstream commit, then run Gate A. This is one post-commit loop: if the review finds anything other than listed residuals, or any later change creates a commit, address it and rerun both the final review and Gate A against the new head. If either gate fails, do NOT continue to §7 — return to fix the violations, or stop per §0.1.3 if they cannot be fixed.
 
 ---
 
 ## 5. Validate the review actually happened and was addressed
 
-> This is the most important step. `$engine-implementer` must actually run `$review-impl` and address findings before committing. The outside caller (you, the LLM reading this) must verify.
+> This is the most important step. `$engine-implementer` must actually run `$review-engine-impl` against the committed candidate and address findings before accepting it. The outside caller (you, the LLM reading this) must verify.
 
-**A final read-only `$review-impl` pass is mandatory against the committed head before Gate A and before the PR opens.** Address findings with code, amend or add the final commit, and rerun until the reviewer reports clean. Then run Gate A against that same committed head. Record the exact line `Final review-impl PASS head=<40-hex-sha>` under `## Final review-impl`; that SHA must equal the PR's current head. Acknowledgement without a diff, a dirty-tree review, or a later push does not satisfy the gate. Any later commit invalidates both records and requires rerunning the final review followed by Gate A.
+**A final read-only `$review-engine-impl` pass is mandatory against the committed head before Gate A and before the PR opens.** Address findings with code, amend or add the final commit, and rerun until the reviewer reports clean — or, when the skill's decline path applies, until its only findings are residuals that path allows, each listed under `## Validation Failures`. Then run Gate A against that same committed head. Record the exact line `Final review-impl PASS head=<40-hex-sha>` under `## Final review-impl`; that SHA must equal the PR's current head. Acknowledgement without a diff, a dirty-tree review, or a later push does not satisfy the gate. Any later commit invalidates both records and requires rerunning the final review followed by Gate A.
 
 Apply **all three** checks:
 
-1. **Review section exists with concrete findings.** The final report must contain an explicit `$review-impl` section enumerating findings with file:line references, or a clear clean-review result that states an implementation review ran against the full diff.
-2. **Findings were addressed with code.** For every finding classified as a defect, gap, or missing case, there must be a corresponding change in `git diff HEAD~ HEAD` (or the working tree if not yet committed). An acknowledgement without a diff is a failure.
-3. **Clean-review cross-check (fresh context).** If the report claims zero findings, run an independent pass when your environment supports it; otherwise note the limitation in the PR body. Hand the reviewer ONLY the unified diff (`git diff HEAD~ HEAD`), `CLAUDE.md`, and the relevant skills under `.claude/skills/`. No prior conversation. The reviewer must explicitly check: (a) **correct seam / location** — is the change at the layer/module/function the design says owns this responsibility, or a symptom-patch at the wrong seam that merely makes a test pass? A wrong-location fix is debt even when green; flag it as disqualifying and name the correct seam; (b) **most idiomatic change at the seam** — given the right location, is this the implementation a principal engineer steeped in this repo would write (established building-block reuse over re-implementation, combinator composition over string dispatch, enum parameterization over a new bool/sibling)? A correct-but-unidiomatic change is a finding, not a nit; (c) **nom-mandate compliance** — flag any `match` over a stringified parser-text variable with string-literal arms, any chained `if let Ok(..) = tag(..)` blocks, and any string-method dispatch (`.contains("…")`, `.find("…")`, `.rfind("…")`, `.split(`, `.split_once`, `.splitn`, etc. — `.rfind`/`.split` are not caught by `check-parser-combinators.sh`, so grep the diff for them by hand); (d) **CR-citation completeness** — for each cited rule, did the implementation also cite the *authorizing* rule, not just the *layering* rule? (e) **pattern coverage** — does this work for ≥10 cards or just one? (f) **logic placement** — engine vs frontend per `CLAUDE.md`; (g) **building-block reuse** — did the implementation duplicate logic an existing helper already handles? Re-implementing what `oracle_util.rs`, `oracle_quantity.rs`, `game/filter.rs`, `game/zones.rs`, etc. already provide is a defect even if the new code works; (h) **bool-flag avoidance** — any new `bool` field/parameter where a typed enum (`ControllerRef`, `Comparator`, `Option<T>`, etc.) would express the design space better is a defect; (i) **test discrimination** — does at least one test drive the real pipeline (`apply()` / scenario runner / cast harness) and FAIL if the fix were reverted? A test that only asserts parsed AST shape — an `assert_eq!` on a parsed `Effect` / `StaticMode` / `AbilityDefinition` without resolving it — is a shape test, not a regression test, and is the single most common gap on keyword and parser PRs; name it as a defect and require a discriminating runtime test before the PR opens. Negative assertions (`!detector(...)`, "does not parse to X") are vacuous unless the same test carries a positive reach-guard proving the input got past upstream short-circuits (e.g. `check_swallowed_clauses` early-returns on `Effect::Unimplemented`) — flag any bare negative as a defect; If the cross-check produces findings, feed them back into `$engine-implementer` and loop.
+1. **Review section exists with concrete findings.** The final report must contain an explicit `$review-engine-impl` section enumerating findings with file:line references, or a clear clean-review result that states an implementation review ran against the full diff.
+2. **Findings were addressed with code.** For every finding classified as a defect, gap, or missing case, there must be a corresponding change in `git diff HEAD~ HEAD` (or the working tree if not yet committed). An acknowledgement without a diff is a failure. A residual the skill's decline path allows, listed under `## Validation Failures` with evidence and follow-up, satisfies this check without a diff.
+3. **Clean-review cross-check (fresh context).** If the report claims zero findings, run an independent pass when your environment supports it; otherwise note the limitation in the PR body. Hand the reviewer ONLY the complete PR diff (`git diff <fetched-target-commit> HEAD`, using the upstream commit retained by the PR preparation handoff), `CLAUDE.md`, and the relevant skills under `.claude/skills/`. Do not use `HEAD~`: after a merge or follow-up fix it does not represent the complete submitted change. No prior conversation. The reviewer must explicitly check: (a) **correct seam / location** — is the change at the layer/module/function the design says owns this responsibility, or a symptom-patch at the wrong seam that merely makes a test pass? A wrong-location fix is debt even when green; flag it as disqualifying and name the correct seam; (b) **most idiomatic change at the seam** — given the right location, is this the implementation a principal engineer steeped in this repo would write (established building-block reuse over re-implementation, combinator composition over string dispatch, enum parameterization over a new bool/sibling)? A correct-but-unidiomatic change is a finding, not a nit; (c) **nom-mandate compliance** — flag any `match` over a stringified parser-text variable with string-literal arms, any chained `if let Ok(..) = tag(..)` blocks, and any string-method dispatch (`.contains("…")`, `.find("…")`, `.rfind("…")`, `.split(`, `.split_once`, `.splitn`, etc. — `.rfind`/`.split` are not caught by `check-parser-combinators.sh`, so grep the diff for them by hand); (d) **CR-citation completeness** — for each cited rule, did the implementation also cite the *authorizing* rule, not just the *layering* rule? (e) **pattern coverage** — does this work for ≥10 cards or just one? (f) **logic placement** — engine vs frontend per `CLAUDE.md`; (g) **building-block reuse** — did the implementation duplicate logic an existing helper already handles? Re-implementing what `oracle_util.rs`, `oracle_quantity.rs`, `game/filter.rs`, `game/zones.rs`, etc. already provide is a defect even if the new code works; (h) **bool-flag avoidance** — any new `bool` field/parameter where a typed enum (`ControllerRef`, `Comparator`, `Option<T>`, etc.) would express the design space better is a defect; (i) **test discrimination** — does at least one test drive the real pipeline (`apply()` / scenario runner / cast harness) and FAIL if the fix were reverted? A test that only asserts parsed AST shape — an `assert_eq!` on a parsed `Effect` / `StaticMode` / `AbilityDefinition` without resolving it — is a shape test, not a regression test, and is the single most common gap on keyword and parser PRs; name it as a defect and require a discriminating runtime test before the PR opens. Negative assertions (`!detector(...)`, "does not parse to X") are vacuous unless the same test carries a positive reach-guard proving the input got past upstream short-circuits (e.g. `check_swallowed_clauses` early-returns on `Effect::Unimplemented`) — flag any bare negative as a defect; If the cross-check produces findings, feed them back into `$engine-implementer` and loop.
 
-**If any check fails:** rerun `$engine-implementer` or continue the same skill workflow with explicit instructions to execute `$review-impl` and address every finding with code changes. Do **not** proceed to Step 6 until validation passes. Retry at most 2 times; on a third failure, abort the run and record the gap in the PR body under a "Validation Failures" heading so the maintainer can triage.
+**If any check fails:** rerun `$engine-implementer` or continue the same skill workflow with explicit instructions to execute `$review-engine-impl` and address every finding with code changes. Do **not** proceed to Step 6 until validation passes. Retry at most 2 times; on a third failure, abort the run and record the gap in the PR body under a "Validation Failures" heading so the maintainer can triage.
 
 ---
 
 ## 6. Record verification and run Gate A (track-specific)
 
-**Developer track** — the implementation workflow must run the mechanical checks below before its final commit. On any failure, fix in-loop (max 2 retries) before committing. If still failing after retries, record the failure in the PR body under "CI Failures" and continue to Step 7 — do not abort. After §5's clean read-only review, run only the Gate A command shown after the mechanical checks; if it finds a problem, change and commit the fix, rerun §5, and then rerun Gate A.
+**Developer track** — the implementation workflow must run the mechanical checks below against its committed candidate before acceptance. On any failure, fix in-loop (max 2 retries), commit the fix, and verify the new candidate. If still failing after retries, record the failure in the PR body under "CI Failures" and continue to Step 7 — do not abort. After §5's clean read-only review, run only the Gate A command shown after the mechanical checks; if it finds a problem, change and commit the fix, rerun §5, and then rerun Gate A.
+
+**Avoid redundant confirmation builds.** Reuse evidence from the same candidate and build configuration instead of adding a one-off build merely to reproduce it for the PR body. Changing Cargo features, profile, or target can trigger additional compilation. Run extra checks when they answer a specific unresolved correctness question or are required by the changed surface; this guidance does not waive required tests, coverage, semantic audits, or parser measurements. Prefer existing production-path tests and required audit output as evidence. For Markdown-only policy changes, inspect the diff, scope, and referenced workflow contracts; Cargo, Tilt, and frontend builds provide no additional signal.
 
 Step 2.5 (`./scripts/setup.sh --agent`) is a prerequisite for this section — `cargo coverage` and `cargo semantic-audit` both read `client/public/card-data.json`, and the integration suite self-skips without it.
 
-If Tilt is running locally (`tilt get uiresource clippy >/dev/null 2>&1` succeeds), prefer `tilt-wait.sh` for clippy/tests/card-data — it reuses Tilt's already-warm rebuild loop instead of fighting it for the cargo target lock. See CLAUDE.md § "Canonical verification pattern".
+If Tilt is running locally (`tilt get uiresource clippy >/dev/null 2>&1` succeeds), prefer `tilt-wait.sh` for clippy/tests/card-data — it reuses Tilt's already-warm rebuild loop instead of fighting it for the cargo target lock. See the [project-reference skill](../.claude/skills/project-reference/SKILL.md#tilt-resources--operational-rules). Results from Tilt watching another checkout do not verify this candidate; `tilt-wait.sh` exit 3 means unavailable evidence, not a failed build.
 
 ```bash
 cargo fmt --all                               # always direct — Tilt doesn't auto-format
@@ -389,11 +399,11 @@ None.
 
 ## Scope Expansion
 None.
-<!-- Describe any change that crosses the issue/card's stated scope. -->
+<!-- Describe any change that crosses the issue/card's stated scope: the item it closes and why leaving it would ship the defect. -->
 
 ## Validation Failures
 None.
-<!-- Replace with the unresolved validation failure and its evidence. -->
+<!-- Replace with each unresolved validation failure or shipped residual finding, with its evidence and follow-up. -->
 
 ## CI Failures
 None.
@@ -415,7 +425,7 @@ Print the PR URL. Print a one-line status: `success`, `partial`, or `aborted`. E
 Use skills when the runtime supports them:
 
 - **Invoking `$engine-implementer`:** load `.claude/skills/engine-implementer/SKILL.md` and follow its full plan → review → implement → verify → review → commit pipeline.
-- **Invoking `$review-impl`:** load `.claude/skills/review-impl/SKILL.md` and execute its checklist against the uncommitted diff or commit diff.
+- **Invoking `$review-engine-impl`:** load `.claude/skills/review-engine-impl/SKILL.md` and execute its checklist against the uncommitted diff or commit diff.
 - **Invoking `commit-push-pr`:** run the raw `git` + `gh` sequence shown in Step 7.
 
 Every other step (quality floor, track selection, clone, card pick, validation, verify, report) is tool-agnostic.
@@ -509,8 +519,8 @@ Steps:
    take the idiomatic path, and stop without opening a PR if the work expands
    protected architecture without a prior maintainer appointment or a linked
    issue labeled `accepted`. Review the
-   implementation with $review-impl until clean, then commit.
-5. Validate $engine-implementer actually ran $review-impl AND addressed every
+   implementation with $review-engine-impl until clean, then commit.
+5. Validate $engine-implementer actually ran $review-engine-impl AND addressed every
    finding with code changes. If not, send it a follow-up to do so (max 2
    retries). If the review claims zero findings, use an independent reviewer
    or fresh context when available and hand it only the diff + CLAUDE.md.
@@ -526,7 +536,7 @@ Steps:
 8. Print the PR URL and exit.
 
 All-tier gates: after the final commit and before pushing, run the final
-$review-impl and then Gate A against that exact HEAD; include their SHA-bound PASS lines,
+$review-engine-impl and then Gate A against that exact HEAD; include their SHA-bound PASS lines,
 at least two file:line anchors and no unchecked required verification boxes.
 A later commit invalidates both PASS
 lines. Tier cannot satisfy these gates. If protected architecture lacks a prior

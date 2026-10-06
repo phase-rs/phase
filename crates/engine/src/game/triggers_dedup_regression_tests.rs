@@ -167,6 +167,7 @@ fn attacks_observer_fires_once_per_event() {
             attacker,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     };
 
     process_triggers(&mut state, &[event]);
@@ -180,6 +181,43 @@ fn attacks_observer_fires_once_per_event() {
     assert_eq!(
         observer_triggers, 1,
         "Attack observer should register exactly one trigger per AttackersDeclared"
+    );
+}
+
+/// CR 508.1a + CR 603.4: narrowing an attack event retains every
+/// declaration-time record for the selected attacker, including records with
+/// a repeated object id.
+#[test]
+fn singleton_attack_events_retain_duplicate_declaration_records() {
+    let mut state = setup();
+    let attacker = make_creature(&mut state, PlayerId(0), "Attacker", 2, 2);
+    let first = state.objects[&attacker].snapshot_for_attack_declaration(attacker);
+    let mut second = first.clone();
+    second.lki.power = Some(4);
+
+    let events = singleton_attack_events(
+        PlayerId(1),
+        vec![(
+            attacker,
+            crate::game::combat::AttackTarget::Player(PlayerId(1)),
+        )],
+        vec![first, second],
+    );
+
+    let [GameEvent::AttackersDeclared {
+        declaration_records,
+        ..
+    }] = events.as_slice()
+    else {
+        panic!("one attacker must produce one narrowed event");
+    };
+    assert_eq!(
+        declaration_records
+            .iter()
+            .map(|record| record.lki.power)
+            .collect::<Vec<_>>(),
+        vec![Some(2), Some(4)],
+        "record-level filtering must not deduplicate declarations by object id"
     );
 }
 
@@ -610,8 +648,10 @@ fn ezio_verbatim_oracle_text_eliminates_damaged_player_when_optional_paid() {
 /// combat damage event would unlock Freerunning for every spell,
 /// silently breaking the keyword's gating semantics.
 ///
-/// Issue #1962 hardening (TEST-ONLY): the type-and-commander gate at
-/// triggers.rs:1696-1709 is currently exercised only indirectly
+/// Issue #1962 hardening (TEST-ONLY): the type-and-commander gate
+/// (the `is_assassin_creature || is_commander` expression in
+/// `triggers::collect_pending_triggers_with_collection`'s `DamageDealt` handling)
+/// is currently exercised only indirectly
 /// (through casting tests that assume the ledger is populated). This
 /// test pins down the **negative** branch directly: a vanilla
 /// Creature with no Assassin subtype and `is_commander == false`
@@ -1229,6 +1269,7 @@ fn isshin_doubles_attack_triggers() {
             observer,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     };
 
     process_triggers(&mut state, &[event]);
@@ -1329,6 +1370,7 @@ fn panharmonicon_does_not_double_attack_triggers() {
             observer,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     };
 
     process_triggers(&mut state, &[event]);
@@ -1426,6 +1468,7 @@ fn veyran_does_not_double_attack_triggers() {
             observer,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     };
 
     process_triggers(&mut state, &[event]);
@@ -1588,6 +1631,7 @@ fn splinter_doubles_ninja_source_trigger() {
             observer,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     };
 
     process_triggers(&mut state, &[event]);
@@ -1635,6 +1679,7 @@ fn splinter_does_not_double_non_ninja_source_trigger() {
             observer,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     };
 
     process_triggers(&mut state, &[event]);
@@ -1670,6 +1715,7 @@ fn harmonic_prodigy_parsed_static_doubles_wizard_source_trigger() {
             observer,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     };
 
     process_triggers(&mut state, &[event]);
@@ -1706,6 +1752,7 @@ fn harmonic_prodigy_parsed_static_does_not_double_unrelated_source_trigger() {
             observer,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     };
 
     process_triggers(&mut state, &[event]);
@@ -1742,6 +1789,7 @@ fn delney_parsed_static_doubles_low_power_creature_trigger() {
             observer,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     };
 
     process_triggers(&mut state, &[event]);
@@ -1778,6 +1826,7 @@ fn delney_parsed_static_does_not_double_high_power_creature_trigger() {
             observer,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     };
 
     process_triggers(&mut state, &[event]);
@@ -1813,6 +1862,7 @@ fn delney_parsed_static_does_not_double_non_creature_source_trigger() {
             observer,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     };
 
     process_triggers(&mut state, &[event]);
@@ -1857,6 +1907,7 @@ fn isshin_and_panharmonicon_only_isshin_matches_attack_event() {
             observer,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     };
 
     process_triggers(&mut state, &[event]);
@@ -2100,6 +2151,7 @@ fn attack_event(attacker: ObjectId) -> GameEvent {
             attacker,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     }
 }
 
@@ -2400,6 +2452,7 @@ fn mangara_trigger_fires_when_exactly_one_attacker() {
         attacker_ids: vec![attacker],
         defending_player: controller,
         attacks: vec![(attacker, AttackTarget::Player(controller))],
+        declaration_records: Vec::new(),
     };
 
     // Verify the condition is met
@@ -2493,6 +2546,7 @@ fn mangara_trigger_does_not_fire_when_two_attackers() {
             (attacker1, AttackTarget::Player(controller)),
             (attacker2, AttackTarget::Player(controller)),
         ],
+        declaration_records: Vec::new(),
     };
 
     // Verify the condition is NOT met
@@ -2670,6 +2724,7 @@ fn breena_triggers_when_defending_opponent_has_more_life_than_another_opponent()
                 (attacker, AttackTarget::Player(defending_player)),
                 (second_attacker, AttackTarget::Player(defending_player)),
             ],
+            declaration_records: Vec::new(),
         }],
     );
 
@@ -2708,6 +2763,7 @@ fn breena_triggers_when_defending_opponent_has_more_life_than_another_opponent()
                 (attacker, AttackTarget::Player(defending_player)),
                 (second_attacker, AttackTarget::Player(defending_player)),
             ],
+            declaration_records: Vec::new(),
         }],
     );
 
@@ -2767,6 +2823,7 @@ fn defending_player_life_quantity_reads_attack_event_player_target() {
         attacker_ids: vec![attacker],
         defending_player: attacked_player,
         attacks: vec![(attacker, AttackTarget::Player(attacked_player))],
+        declaration_records: Vec::new(),
     };
 
     assert!(
@@ -3898,6 +3955,7 @@ fn owner_collected_filter_never_drops_non_zone_change_events() {
     let life = GameEvent::LifeChanged {
         player_id: PlayerId(0),
         amount: -1,
+        new_total: crate::types::events::LifeTotalReading::default(),
     };
     let events = vec![zone_change.clone(), life.clone()];
     state

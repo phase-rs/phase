@@ -5,8 +5,9 @@
 
 use nom::branch::alt;
 use nom::bytes::complete::tag;
-use nom::character::complete::space1;
-use nom::combinator::{map, not, opt, value};
+use nom::character::complete::{satisfy, space1};
+use nom::combinator::{all_consuming, eof, map, not, opt, peek, value};
+use nom::multi::separated_list1;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -36,8 +37,14 @@ pub fn parse_declared_target_prefix(input: &str) -> OracleResult<'_, ()> {
 /// Parse a type phrase into a `TargetFilter`.
 ///
 /// Handles: optional "non" prefix, optional supertype, optional color prefix,
-/// core type(s) joined by " or ", and optional controller suffix. This is the
-/// nom equivalent of `oracle_target::parse_type_phrase`.
+/// core type(s) joined by " or ", and optional controller suffix.
+///
+/// Not a drop-in for `crate::parser::oracle_target::parse_type_phrase_folding`,
+/// which reads the same grammatical slot with a wider grammar and an infallible
+/// return. The measured differences are tabulated on the private
+/// `TypePhraseGrammar` enum in `oracle_nom/quantity.rs`, which selects between
+/// the two as an explicit typed parameter; this reader is its `Strict` arm, and
+/// reports an unrecognized phrase as `Err`.
 pub fn parse_type_phrase(input: &str) -> OracleResult<'_, TargetFilter> {
     // Optional "non" prefix (consumed separately from type negation)
     let (rest, non_prefix) = opt(parse_non_prefix).parse(input)?;
@@ -147,7 +154,7 @@ fn type_filter_can_name_attacker(filter: &TypeFilter) -> bool {
 }
 
 /// Parse a "non" prefix: "non" or "non-" followed by implicit word boundary.
-fn parse_non_prefix(input: &str) -> OracleResult<'_, &str> {
+pub(crate) fn parse_non_prefix(input: &str) -> OracleResult<'_, &str> {
     alt((tag("non-"), tag("non"))).parse(input)
 }
 
@@ -281,6 +288,11 @@ pub fn parse_type_filter_word(input: &str) -> OracleResult<'_, TypeFilter> {
         // entry, so the plural must be an explicit head-noun word here.
         ("battles", TypeFilter::Battle),
         ("battle", TypeFilter::Battle),
+        // CR 308: Kindred card type (and legacy Tribal terminology).
+        ("kindreds", TypeFilter::Kindred),
+        ("kindred", TypeFilter::Kindred),
+        ("tribals", TypeFilter::Kindred),
+        ("tribal", TypeFilter::Kindred),
         ("permanents", TypeFilter::Permanent),
         ("permanent", TypeFilter::Permanent),
         ("cards", TypeFilter::Card),
@@ -916,6 +928,94 @@ fn build_type_filter(
         controller,
         properties,
     })
+}
+
+/// CR 607.2d + CR 608.2c: Parse the object-axis chosen-value reader "the chosen
+/// &lt;battlefield object noun&gt;" into [`TargetFilter::ChosenCard`] — the shared reader
+/// atom for the trigger-subject arm (`oracle_trigger`), the exclusion-list item
+/// (`oracle_effect/subject.rs`), and the chain reader scan
+/// ([`chain_text_mentions_chosen_object`]) that gates the durability reconcile.
+///
+/// Only SINGULAR battlefield-object nouns are accepted. The word-boundary peek
+/// refuses the plural forms ("the chosen creatures"), the possessive
+/// ("the chosen creature's"), and every non-battlefield-or-player axis
+/// ("the chosen card"/"player"/"color"/"name") — those are other CR 607.2d
+/// choice axes (choice types, players, labels) read through other typed
+/// carriers, never a remembered battlefield object.
+///
+/// Input must already be lowercase (the caller's chunk/subject text is).
+pub fn parse_chosen_object_reference(input: &str) -> OracleResult<'_, TargetFilter> {
+    value(
+        TargetFilter::ChosenCard,
+        preceded(
+            tag("the chosen "),
+            terminated(
+                alt((
+                    // Longest-first to keep the boundary peek meaningful.
+                    tag("nonland permanent"),
+                    tag("artifact"),
+                    tag("creature"),
+                    tag("enchantment"),
+                    tag("land"),
+                    tag("permanent"),
+                    tag("planeswalker"),
+                )),
+                peek(alt((
+                    value((), eof),
+                    value(
+                        (),
+                        satisfy(|c| !c.is_alphanumeric() && c != '\'' && c != '\u{2019}'),
+                    ),
+                ))),
+            ),
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 607.2d: Word-boundary scan for any "the chosen &lt;battlefield object&gt;" reader
+/// in an already-lowercase text. Tries [`parse_chosen_object_reference`] at every
+/// word boundary via the shared [`super::primitives::scan_at_word_boundaries`]
+/// primitive, so a phrase that merely CONTAINS the words (a longer noun phrase,
+/// a possessive, a plural) does not count — the same scanning discipline as
+/// `scan_timing_restrictions`/`scan_for_phase`.
+///
+/// This is the single reader-scan authority shared by Gate A (the parse-time
+/// chain gate in `imperative.rs`) and Gate B (the assembly-time IR-fragment
+/// gate), so the two consideration sets can never drift.
+pub(crate) fn chain_text_mentions_chosen_object(input_lower: &str) -> bool {
+    super::primitives::scan_at_word_boundaries(input_lower, parse_chosen_object_reference).is_some()
+}
+
+/// CR 608.2c: One item of an "other than ‹ref› and ‹ref›" exclusion list on a
+/// bare-plural subject. `Source` is the ability's own object ("~"), excludable
+/// via [`FilterProp::Another`]; `ChosenObject` is the remembered CR 607.2d
+/// object, excludable via [`TargetFilter::Not`] over [`TargetFilter::ChosenCard`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObjectExclusion {
+    Source,
+    ChosenObject,
+}
+
+/// CR 608.2c: Parse a complete "‹ref› and ‹ref›" exclusion list. Each item is
+/// either a self-reference (the `~` normalization of the source's own name, the
+/// same atom [`parse_self_reference`] provides for every other channel) or the
+/// chosen-object reader ([`parse_chosen_object_reference`]). `all_consuming` +
+/// `separated_list1` is deliberate: a list with any unparsed item
+/// ("enchanted creature", "those that attacked this turn") is refused whole, so
+/// the caller's existing single-referent path keeps charge of every form it
+/// already consumes.
+pub(crate) fn parse_object_exclusion_list(input: &str) -> OracleResult<'_, Vec<ObjectExclusion>> {
+    all_consuming(separated_list1(
+        tag(" and "),
+        alt((
+            map(parse_self_reference, |_| ObjectExclusion::Source),
+            map(parse_chosen_object_reference, |_| {
+                ObjectExclusion::ChosenObject
+            }),
+        )),
+    ))
+    .parse(input)
 }
 
 #[cfg(test)]

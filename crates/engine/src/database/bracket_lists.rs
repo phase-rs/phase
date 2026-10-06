@@ -98,6 +98,19 @@ impl BracketLists {
         }
     }
 
+    /// True when `name` (case-insensitively) appears on any curated list.
+    ///
+    /// Callers that must decide whether a name is a *whole* printed card name
+    /// use this alongside the card-database indexes: the curated lists key on
+    /// the raw lowercased printed name with no index membership, so a
+    /// lists-only card is known here and nowhere else.
+    pub fn contains(&self, name: &str) -> bool {
+        let key = name.to_lowercase();
+        self.mass_land_denial.contains(&key)
+            || self.extra_turns.contains(&key)
+            || self.efficient_tutors.contains(&key)
+    }
+
     /// Iterate every distinct card name across all four lists, used by the
     /// export pipeline to warn on names that don't match any printed card.
     pub fn all_names(&self) -> impl Iterator<Item = &str> {

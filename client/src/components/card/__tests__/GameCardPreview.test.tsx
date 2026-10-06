@@ -63,8 +63,10 @@ afterEach(() => {
   useGameStore.setState({ gameState: null, spellCosts: {} });
   useUiStore.setState({
     inspectedObjectId: null,
+    inspectedCardName: null,
     inspectedFaceIndex: 0,
     previewPlacement: "cursor",
+    previewSource: null,
     isDragging: false,
     mobileHandGesture: null,
     shiftHeld: false,
@@ -84,6 +86,19 @@ describe("GameCardPreview", () => {
     expect(screen.getAllByAltText("Pithing Needle").length).toBeGreaterThan(0);
   });
 
+  it("previews a public historical log card after its live object is gone", () => {
+    useGameStore.setState({ gameState: null, spellCosts: {} });
+    useUiStore.setState({
+      inspectedObjectId: 999,
+      inspectedCardName: "Pithing Needle",
+      previewSticky: true,
+    });
+
+    render(<GameCardPreview />);
+
+    expect(screen.getAllByAltText("Pithing Needle").length).toBeGreaterThan(0);
+  });
+
   it("docks a preview opened from a modal even when cursor-follow is preferred", () => {
     inspect(battlefieldObject());
     useUiStore.setState({ previewPlacement: "side" });
@@ -93,6 +108,67 @@ describe("GameCardPreview", () => {
     expect(container.querySelector<HTMLElement>("[data-card-preview]")).toHaveStyle({
       right: "calc(env(safe-area-inset-right) + 1rem + var(--game-right-rail-offset, 0px))",
     });
+  });
+
+  it("disables hand pointer interaction and clears a stale hand preview for a board choice", () => {
+    const handCard = gameObjectFactory
+      .withId(201)
+      .inHand()
+      .named("Hand Card")
+      .build();
+    const gameState = gameStateFactory
+      .withPlayers({ id: 0, hand: [handCard.id] }, 1)
+      .withObjects(handCard)
+      .build();
+    useGameStore.setState({ gameState, spellCosts: {} });
+    useUiStore.setState({
+      inspectedObjectId: handCard.id,
+      previewSource: "playerHand",
+      previewSticky: true,
+    });
+
+    const { container } = render(
+      <PlayerHand interactionDisabled />,
+    );
+
+    expect(container.querySelector("[data-player-hand]")).toHaveClass("pointer-events-none");
+    expect(useUiStore.getState().inspectedObjectId).toBeNull();
+    expect(useUiStore.getState().previewSticky).toBe(false);
+  });
+
+  it("preserves a modal sticky preview of the same hand object when interaction becomes disabled", () => {
+    const handCard = gameObjectFactory
+      .withId(202)
+      .inHand()
+      .named("Hand Card")
+      .build();
+    const gameState = gameStateFactory
+      .withPlayers({ id: 0, hand: [handCard.id] }, 1)
+      .withObjects(handCard)
+      .build();
+    useGameStore.setState({ gameState, spellCosts: {} });
+
+    const { container, rerender } = render(
+      <>
+        <PlayerHand />
+        <GameCardPreview />
+      </>,
+    );
+
+    act(() => {
+      useUiStore.getState().inspectObjectSticky(handCard.id, 0, "side");
+    });
+    rerender(
+      <>
+        <PlayerHand interactionDisabled />
+        <GameCardPreview />
+      </>,
+    );
+
+    expect(useUiStore.getState().inspectedObjectId).toBe(handCard.id);
+    expect(useUiStore.getState().previewSource).toBeNull();
+    expect(container.querySelector("[data-card-preview]")).not.toBeNull();
+    expect(screen.getAllByAltText("Hand Card").length).toBeGreaterThan(0);
   });
 
   it("keeps an explicit sticky preview visible in Hold Shift mode", () => {
@@ -166,6 +242,7 @@ describe("GameCardPreview", () => {
       expect(preview).toHaveStyle({ bottom: "0px" });
       expect(within(preview!).getByAltText("Hovered Card")).toBeInTheDocument();
     });
+    expect(useUiStore.getState().previewSource).toBe("playerHand");
   });
 
   it("keeps the held card in the stable fan until direct dragging begins", () => {

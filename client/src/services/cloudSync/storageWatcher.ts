@@ -47,12 +47,18 @@ export function watchUserStorage(onDirty: (key: string) => void): () => void {
     originalRemoveItem = nativeRemoveItem;
 
     Storage.prototype.setItem = function (this: Storage, key: string, value: string) {
+      const before = observedUserStorageValue(this, key);
       nativeSetItem.call(this, key, value);
-      notifyUserStorageWrite(this, key);
+      if (before !== observedUserStorageValue(this, key)) {
+        notifyUserStorageWrite(this, key);
+      }
     };
     Storage.prototype.removeItem = function (this: Storage, key: string) {
+      const before = observedUserStorageValue(this, key);
       nativeRemoveItem.call(this, key);
-      notifyUserStorageWrite(this, key);
+      if (before !== observedUserStorageValue(this, key)) {
+        notifyUserStorageWrite(this, key);
+      }
     };
   }
 
@@ -68,6 +74,18 @@ export function watchUserStorage(onDirty: (key: string) => void): () => void {
     originalSetItem = null;
     originalRemoveItem = null;
   };
+}
+
+function observedUserStorageValue(storage: Storage, key: string): string | null | undefined {
+  if (
+    storage !== localStorage ||
+    suppressionDepth > 0 ||
+    !isUserOwnedStorageKey(key)
+  ) {
+    return undefined;
+  }
+
+  return storage.getItem(key);
 }
 
 function notifyUserStorageWrite(storage: Storage, key: string): void {

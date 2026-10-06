@@ -65,7 +65,7 @@ fn play_from_exile_grant() -> CastingPermission {
         card_filter: None,
         single_use_group: None,
         single_use: false,
-        cast_cost_raise: None,
+        cast_cost_modifier: None,
         alt_ability_cost: None,
         land_enter_tapped: EtbTapState::Unspecified,
     }
@@ -93,6 +93,7 @@ fn exile_and_grant_ability(count: i32) -> AbilityDefinition {
             count: QuantityExpr::Fixed { value: count },
             position: engine::types::ability::LibraryPosition::Top,
             face_down: false,
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
         },
     )
     .player_scope(PlayerFilter::All)
@@ -465,9 +466,9 @@ fn memory_vessel_oracle_text_lowers_fully() {
     // ISSUE #7923 / V-U2e3 — `[BASE]`. THIS ASSERTION CARRIES THE REVERT-FAILING
     // CONTENT OF DELETING `try_parse_exile_play_grant_with_play_prohibition`.
     //
-    // CR 608.2c: the printed text is ONE sentence
-    // whose conjuncts are comma-joined steps of a single instruction, so the link
-    // between the grant and the prohibition is a `ContinuationStep`;
+    // CR 608.2c: the printed text is ONE sentence whose conjuncts are
+    // comma-joined steps of a single instruction, so the link between the grant
+    // and the prohibition is a `ContinuationStep`;
     // `SubAbilityLink::SequentialSibling` is reserved for the NEXT printed
     // instruction (a `Sentence` boundary). The deleted one-off HAND-SET
     // `SequentialSibling`; the general path now derives the link from

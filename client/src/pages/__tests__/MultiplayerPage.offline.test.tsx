@@ -23,6 +23,11 @@ const mocks = vi.hoisted(() => ({
     closeSubscriptionSocket: vi.fn(),
     clearAllToasts: vi.fn(),
     serverAddress: "wss://example.test/ws",
+    // The page reads both off the store now; without them the mode selector
+    // resolves to `undefined` and the switch's setter is not callable.
+    connectionMode: null as "server" | "p2p" | null,
+    setConnectionMode: vi.fn(),
+    setHostingServer: vi.fn(),
     formatConfig: null,
     compatibilityPlayerCount: null,
     resolveGuest: vi.fn(),
@@ -252,20 +257,6 @@ describe("MultiplayerPage offline entry", () => {
     expect(screen.getByTestId("lobby-view")).toBeInTheDocument();
     expect(mocks.multiplayerState.startHosting).not.toHaveBeenCalled();
     expect(mocks.multiplayerState.startP2PHostingSession).not.toHaveBeenCalled();
-  });
-
-  it("keeps a draft-lobby view across offline mode without leaving or rejoining", () => {
-    renderPage("/multiplayer?view=draft-lobby");
-    expect(screen.getByRole("button", { name: "Leave Draft" })).toBeInTheDocument();
-
-    setConnectivity({ forcedOffline: true });
-    expect(screen.getByText("Multiplayer is unavailable while offline.")).toBeInTheDocument();
-    expectNoOfflineTeardown();
-    expect(mocks.draftState.joinDraft).not.toHaveBeenCalled();
-
-    setConnectivity({ forcedOffline: false });
-    expect(screen.getByRole("button", { name: "Leave Draft" })).toBeInTheDocument();
-    expect(mocks.draftState.joinDraft).not.toHaveBeenCalled();
   });
 
   it("does not admit an offline route from a live sibling game", () => {

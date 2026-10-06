@@ -89,6 +89,7 @@ fn real_single_owner_mass_library_order_state(
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: Some(LibraryPosition::Bottom),
+            library_shuffle: Default::default(),
             random_order: false,
         },
         vec![],

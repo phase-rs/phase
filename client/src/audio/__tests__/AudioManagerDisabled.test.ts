@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Separate file from AudioManager.test.ts on purpose: `disable()` is
 // deliberately sticky on the module singleton, so these tests get a fresh
@@ -79,13 +79,21 @@ vi.mock("../audioCache", () => ({
   clearThemeCache: vi.fn().mockResolvedValue(undefined),
 }));
 
+let activeAudioManager: { dispose(): void } | undefined;
+
 async function freshAudioManager() {
   vi.resetModules();
   const { audioManager } = await import("../AudioManager");
+  activeAudioManager = audioManager;
   return audioManager;
 }
 
 describe("AudioManager.disable", () => {
+  afterEach(() => {
+    activeAudioManager?.dispose();
+    activeAudioManager = undefined;
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     contextState = "running";

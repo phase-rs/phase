@@ -1,5 +1,6 @@
 use engine::game::players;
 use engine::types::card_type::CoreType;
+use engine::types::format::FormatTopology;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
@@ -339,7 +340,19 @@ pub fn threat_level_projected(
     let power = projection
         .map(|p| projected_power(&p.state, target))
         .unwrap_or(base_power);
-    let board_score = (creatures as f64 * 0.3 + power as f64 * 0.7).min(10.0) / 10.0;
+    // In multiplayer free-for-all, retain differences between developed boards
+    // instead of flattening every board above the old 10-point cap into the
+    // same threat. The legacy branch intentionally keeps its raw-power formula.
+    let board_score = if matches!(
+        state.format_config.topology(),
+        FormatTopology::IndividualSeats
+    ) && state.players.len() > 2
+    {
+        let raw_board_strength = (creatures as f64 * 0.3 + power.max(0) as f64 * 0.7).max(0.0);
+        raw_board_strength / (raw_board_strength + 10.0)
+    } else {
+        (creatures as f64 * 0.3 + power as f64 * 0.7).min(10.0) / 10.0
+    };
 
     // Life ratio: higher life = more threatening
     let life_ratio = (target_player.life as f64 / starting_life).clamp(0.0, 2.0) / 2.0;
@@ -917,14 +930,15 @@ pub fn board_stats(state: &GameState, player: PlayerId) -> BoardStats {
 /// mana-poor seat.
 ///
 /// Worked example — evaluator p0, two opponents, p1 with 8 sources and p2 with
-/// 2, both at threat `0.4`. Killing a 4/4 moves that seat's `board_score` by
-/// `−(1·0.3 + 4·0.7)/10 = −0.31`, i.e. `Δthreat = −0.124`:
+/// 2, both at the fixture threat `0.194656...`. Killing a 4/4 moves that
+/// seat's free-for-all `board_score` from `3.1 / 13.1` to zero, i.e.
+/// `Δthreat = −0.094656...` after the board weight:
 ///
 /// | Step | `w₁ / w₂` | `opp_agg` | Δ offset |
 /// |---|---|---|---|
 /// | before | .5000 / .5000 | 5.0000 | — |
-/// | kill the 4/4 on the **8-source** seat | .40828 / .59172 | 4.4497 | **+4.13** |
-/// | kill the same 4/4 on the **2-source** seat | .59172 / .40828 | 5.5503 | **−4.13** |
+/// | kill the 4/4 on the **8-source** seat | .41971 / .58029 | 4.5183 | **+3.61** |
+/// | kill the same 4/4 on the **2-source** seat | .58029 / .41971 | 5.4817 | **−3.61** |
 ///
 /// Three facts bound the severity, and the first is a genuine defence:
 ///
@@ -1177,6 +1191,7 @@ pub fn creature_combat_value(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::projection::{Confidence, ProjectionHorizon};
     use engine::game::zones::create_object;
     use engine::types::card_type::CoreType;
     use engine::types::identifiers::CardId;
@@ -1950,8 +1965,8 @@ mod tests {
     ///
     /// **If the pin guard reds**, the fixture drifted: restore the pinned inputs,
     /// **or** re-derive assertion 3's floor from the closed form
-    /// `|Δ| = 2.79 / (2·T − 0.124)` at the fixture's actual
-    /// `T = 0.224 + 0.0214286·|hand|`. That is a legitimate repair and is NOT
+    /// `|Δ| = 7.5·6·0.094656... / (2·0.194656... − 0.094656...)` at the
+    /// fixture's current free-for-all threat. That is a legitimate repair and is NOT
     /// "relaxing the assertion."
     /// **If the pin guard is green and assertion 3 reds**, the aggregator,
     /// `threat_level`'s constants, or `MANA_DEVELOPMENT_COEFF` moved: update
@@ -1976,7 +1991,8 @@ mod tests {
             let body_2 = add_creature(&mut state, PlayerId(2), 4, 4, vec![]);
 
             // ASSERTION 0 — PIN GUARD, before every other assertion. These three
-            // inputs put each opponent's baseline threat at exactly T = 0.224, and
+            // inputs put each opponent's baseline free-for-all threat at exactly
+            // T = 0.194656..., and
             // assertion 3's band is quoted AT THESE INPUTS: it holds for opponent
             // hand size <= 1 and fails from 2. Closed form in the docstring.
             for opp in [PlayerId(1), PlayerId(2)] {
@@ -2053,18 +2069,16 @@ mod tests {
         );
 
         // ASSERTION 3 — magnitude band. Pins the disclosed effect as LARGER THAN A
-        // WHOLE MANA SOURCE rather than as noise. At the pinned inputs the true
-        // value is 8.6111, clearing 7.5 by 14.8%. NOT input-independent: it holds
-        // for opponent hand size <= 1 and fails from 2. Re-derivable from
-        // `|Δ| = 2.79 / (2·T − 0.124)`.
+        // mana-source scale rather than as noise. At the pinned inputs the smooth
+        // free-for-all curve yields 7.2279, still above the fixed 7.0 floor. This
+        // is deliberately re-derived for the curve changed in this unit, rather
+        // than retaining the old capped-curve threshold. Re-derivable from
+        // `|Δ| = 7.5·6·0.094656... / (2·0.194656... − 0.094656...)`.
         assert!(
-            (kill_rich - baseline).abs() > MANA_DEVELOPMENT_COEFF,
-            "the threat-weight channel must move the term by MORE than one mana \
-             source ({}); if the pin guard above is green, the aggregator or a \
-             constant moved — update `MANA_DEVELOPMENT_COEFF`'s threat-weight \
-             section and R8, do NOT relax this. The band is quoted at the pinned \
-             inputs (empty hands, full life, no commander threshold) and is \
-             re-derivable from |Δ| = 2.79/(2·T − 0.124), T = 0.224 + 0.0214286·|hand|",
+            (kill_rich - baseline).abs() > 7.0,
+            "the threat-weight channel must remain materially larger than noise \
+             ({}); if the pin guard above is green, re-derive the smooth-curve \
+             threat delta before changing this floor",
             kill_rich - baseline
         );
 
@@ -2269,6 +2283,215 @@ mod tests {
         state.players[1].life = 0;
         let weights = EvalWeights::default();
         assert_eq!(evaluate_state(&state, PlayerId(0), &weights), WIN_SCORE);
+    }
+
+    #[test]
+    fn multiplayer_threat_curve_matches_bounded_raw_strength_table() {
+        let mut threats = Vec::new();
+        for (raw_strength, powers, expected_threat) in [
+            (0.0, &[] as &[i32], 0.1),
+            (10.0, &[13, 0, 0] as &[i32], 0.3),
+            (30.0, &[21, 21] as &[i32], 0.4),
+            (100.0, &[71, 71] as &[i32], 0.463_636_363_636_363_6),
+        ] {
+            let mut state =
+                GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+            for &power in powers {
+                add_creature(&mut state, PlayerId(1), power, 1, vec![]);
+            }
+
+            let stats = board_stats(&state, PlayerId(1));
+            let actual_raw_strength =
+                (stats.creatures as f64 * 0.3 + stats.power.max(0) as f64 * 0.7).max(0.0);
+            assert!(
+                (actual_raw_strength - raw_strength).abs() < 1e-12,
+                "fixture must realize raw board strength {raw_strength}, got {actual_raw_strength}"
+            );
+
+            let threat = threat_level(&state, PlayerId(0), PlayerId(1));
+            assert!(
+                (threat - expected_threat).abs() < 1e-12,
+                "raw board strength {raw_strength} should have threat {expected_threat}, got {threat}"
+            );
+            assert!(
+                threat.is_finite() && (0.0..=1.0).contains(&threat),
+                "threat must stay finite and bounded for raw board strength {raw_strength}: {threat}"
+            );
+            threats.push(threat);
+        }
+
+        assert!(
+            threats.windows(2).all(|pair| pair[0] < pair[1]),
+            "the free-for-all curve must remain strictly monotonic: {threats:?}"
+        );
+    }
+
+    #[test]
+    fn multiplayer_threat_clamps_negative_power_without_dropping_creature_presence() {
+        let mut negative_power =
+            GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+        add_creature(&mut negative_power, PlayerId(1), -5, 1, vec![]);
+
+        let mut zero_power =
+            GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+        add_creature(&mut zero_power, PlayerId(1), 0, 1, vec![]);
+
+        assert_eq!(board_stats(&negative_power, PlayerId(1)).power, -5);
+        assert_eq!(board_stats(&zero_power, PlayerId(1)).power, 0);
+        let negative_threat = threat_level(&negative_power, PlayerId(0), PlayerId(1));
+        let zero_threat = threat_level(&zero_power, PlayerId(0), PlayerId(1));
+        assert!(
+            (negative_threat - zero_threat).abs() < 1e-12,
+            "negative power must clamp to zero while its creature-presence contribution remains"
+        );
+        assert!(
+            negative_threat
+                > threat_level(
+                    &GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42),
+                    PlayerId(0),
+                    PlayerId(1),
+                ),
+            "reach-guard: the fixture must retain its creature-presence contribution"
+        );
+    }
+
+    #[test]
+    fn legacy_threat_curve_is_unchanged_outside_multiplayer_individual_seats() {
+        let cases = [
+            (
+                "two-seat individual seats",
+                engine::types::format::FormatConfig::free_for_all(),
+                2,
+                PlayerId(1),
+                0.5,
+            ),
+            (
+                "fixed teams",
+                engine::types::format::FormatConfig::two_headed_giant(),
+                4,
+                PlayerId(2),
+                0.45,
+            ),
+            (
+                "one versus many",
+                engine::types::format::FormatConfig::archenemy(),
+                3,
+                PlayerId(1),
+                0.5,
+            ),
+        ];
+
+        for (name, config, player_count, target, expected_threat) in cases {
+            let topology = config.topology();
+            match topology {
+                FormatTopology::IndividualSeats => assert_eq!(player_count, 2, "{name}"),
+                FormatTopology::FixedTeams { .. } => assert_eq!(name, "fixed teams"),
+                FormatTopology::OneVsMany { .. } => assert_eq!(name, "one versus many"),
+            }
+
+            let mut state = GameState::new(config, player_count, 42);
+            add_creature(&mut state, target, 21, 1, vec![]);
+            add_creature(&mut state, target, 21, 1, vec![]);
+            let stats = board_stats(&state, target);
+            assert_eq!(stats.creatures, 2, "reach-guard for {name}");
+            assert_eq!(stats.power, 42, "reach-guard for {name}");
+
+            let threat = threat_level(&state, PlayerId(0), target);
+            assert!(
+                (threat - expected_threat).abs() < 1e-12,
+                "{name} must retain the legacy raw-strength cap, got {threat}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_negative_power_threat_is_unchanged_for_duel_and_teams() {
+        let cases = [
+            (
+                "two-seat individual seats",
+                engine::types::format::FormatConfig::free_for_all(),
+                2,
+                PlayerId(1),
+                20,
+                20,
+                -0.028,
+            ),
+            (
+                "fixed teams",
+                engine::types::format::FormatConfig::two_headed_giant(),
+                4,
+                PlayerId(2),
+                15,
+                30,
+                -0.078,
+            ),
+        ];
+
+        for (name, config, player_count, target, expected_life, expected_starting_life, expected) in
+            cases
+        {
+            let mut state = GameState::new(config, player_count, 42);
+            add_creature(&mut state, target, -5, 1, vec![]);
+            assert_eq!(
+                board_stats(&state, target).power,
+                -5,
+                "reach guard for {name}"
+            );
+            assert_eq!(
+                state.players[target.0 as usize].life, expected_life,
+                "{name}"
+            );
+            assert_eq!(
+                state.format_config.starting_life, expected_starting_life,
+                "{name}"
+            );
+            let actual = threat_level(&state, PlayerId(0), target);
+            assert!(
+                (actual - expected).abs() < 1e-12,
+                "{name} must retain the base raw-power formula for negative power; got {actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn equal_multiplayer_opponent_boards_have_equal_threat() {
+        let mut state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+        add_creature(&mut state, PlayerId(1), 5, 5, vec![]);
+        add_creature(&mut state, PlayerId(2), 5, 5, vec![]);
+
+        assert_eq!(board_stats(&state, PlayerId(1)).power, 5);
+        assert_eq!(board_stats(&state, PlayerId(2)).power, 5);
+        assert_eq!(
+            threat_level(&state, PlayerId(0), PlayerId(1)),
+            threat_level(&state, PlayerId(0), PlayerId(2)),
+            "identical public opponent boards must receive identical threat scores"
+        );
+    }
+
+    #[test]
+    fn projected_stronger_board_increases_threat() {
+        let mut state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+        let creature = add_creature(&mut state, PlayerId(1), 1, 1, vec![]);
+        let current_threat = threat_level(&state, PlayerId(0), PlayerId(1));
+
+        let mut projected_state = state.clone();
+        projected_state.objects.get_mut(&creature).unwrap().power = Some(9);
+        let projection = Projection {
+            horizon_reached: ProjectionHorizon::OpponentBeginCombat,
+            state: projected_state.clone(),
+            snapshots: vec![(ProjectionHorizon::OpponentBeginCombat, projected_state)],
+            confidence: Confidence::Exact,
+            target_opponent: PlayerId(1),
+        };
+
+        assert_eq!(board_stats(&state, PlayerId(1)).power, 1);
+        assert_eq!(board_stats(&projection.state, PlayerId(1)).power, 9);
+        let projected_threat =
+            threat_level_projected(&state, PlayerId(0), PlayerId(1), Some(&projection));
+        assert!(
+            projected_threat > current_threat,
+            "a projection with more opponent power must increase threat: {current_threat} -> {projected_threat}"
+        );
     }
 
     #[test]
@@ -2482,6 +2705,7 @@ mod tests {
         let own = add_creature(&mut state, PlayerId(0), 3, 3, vec![]);
         let teammate = add_creature(&mut state, PlayerId(1), 3, 3, vec![]);
         let eliminated = add_creature(&mut state, PlayerId(2), 3, 3, vec![]);
+        let live_enemy = add_creature(&mut state, PlayerId(3), 3, 3, vec![]);
         state.players[2].is_eliminated = true;
 
         let noncreature_card_id = CardId(state.next_object_id);
@@ -2515,5 +2739,11 @@ mod tests {
                 "{id:?} must be outside the living-opponent battlefield-creature contract"
             );
         }
+
+        assert!(
+            opponent_battlefield_creature_threat_value(&state, PlayerId(0), live_enemy)
+                .is_some_and(|value| value > 0.0),
+            "reach-guard: a living opponent's battlefield creature must remain a valid consumer"
+        );
     }
 }

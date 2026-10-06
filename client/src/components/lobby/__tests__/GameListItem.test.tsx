@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -75,6 +75,26 @@ describe("GameListItem", () => {
     expect(onJoin).toHaveBeenCalledWith(row);
   });
 
+  it("confirms a sandbox game in-app before joining", async () => {
+    const user = userEvent.setup();
+    const onJoin = vi.fn();
+    const sandbox = entry(officialSource, { ...baseGame, is_sandbox: true });
+
+    render(<GameListItem entry={sandbox} onJoin={onJoin} />);
+
+    await user.click(screen.getByRole("button", { name: /Join/ }));
+
+    expect(onJoin).not.toHaveBeenCalled();
+    const dialog = screen.getByRole("heading", {
+      name: "This game allows debug actions. Use for testing — not a competitive match.",
+    }).parentElement;
+    expect(dialog).not.toBeNull();
+
+    await user.click(within(dialog!).getByRole("button", { name: "Join" }));
+
+    expect(onJoin).toHaveBeenCalledWith(sandbox);
+  });
+
   it("renders the listing source beside the row", () => {
     render(<GameListItem entry={entry(userSource)} onJoin={vi.fn()} />);
 
@@ -129,5 +149,41 @@ describe("GameListItem", () => {
     // when the kind is actually known.
     expect(screen.getByTitle("Listed by play.example.com")).toBeInTheDocument();
     expect(screen.queryByTitle(/game server/)).not.toBeInTheDocument();
+  });
+
+  it("shows a draft row's draft badge and no format badge", () => {
+    const draftRow = entry(officialSource, {
+      ...baseGame,
+      format: undefined,
+      draft_metadata: { setCode: "MKM", draftKind: "Premier" },
+    });
+
+    render(<GameListItem entry={draftRow} onJoin={vi.fn()} />);
+
+    expect(screen.getByText("MKM Draft")).toBeInTheDocument();
+    expect(screen.queryByText("STD")).not.toBeInTheDocument();
+  });
+
+  it("keeps the Standard badge for a constructed row that omits its format", () => {
+    const noFormatRow = entry(officialSource, { ...baseGame, format: undefined });
+
+    render(<GameListItem entry={noFormatRow} onJoin={vi.fn()} />);
+
+    expect(screen.getByText("STD")).toBeInTheDocument();
+  });
+
+  it("labels a cube row by its cube name, not its source id", () => {
+    const cubeRow = entry(officialSource, {
+      ...baseGame,
+      draft_metadata: { setCode: "custom-cube", draftKind: "Premier", cubeName: "Friday Cube" },
+    });
+
+    render(<GameListItem entry={cubeRow} onJoin={vi.fn()} />);
+
+    const badge = screen.getByText("Friday Cube Draft");
+    expect(badge).toBeInTheDocument();
+    expect(screen.queryByText(/custom-cube/)).not.toBeInTheDocument();
+    expect(badge).toHaveAttribute("title", expect.stringContaining("Friday Cube"));
+    expect(badge.getAttribute("title")).not.toContain("custom-cube");
   });
 });

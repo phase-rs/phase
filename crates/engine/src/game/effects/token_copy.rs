@@ -1,8 +1,8 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::{DisplaySource, GameObject};
-use crate::game::layers::compute_current_copiable_values;
 #[cfg(test)]
 use crate::game::layers::has_active_copy_layer_effects;
+use crate::game::layers::{compute_current_copiable_values, remove_subtype_set};
 #[cfg(test)]
 use crate::game::printed_cards::intrinsic_copiable_values;
 use crate::game::quantity::resolve_quantity;
@@ -12,7 +12,6 @@ use crate::types::ability::{
     TargetFilter, TargetRef, TriggerCondition, TriggerDefinition,
 };
 use crate::types::card::PrintedLoyalty;
-use crate::types::card_type::SubtypeSet;
 #[cfg(test)]
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::GameEvent;
@@ -78,7 +77,9 @@ pub fn resolve(
         ),
         _ => return Err(EffectError::MissingParam("CopyTokenOf".to_string())),
     };
-    let count = resolve_quantity(state, &count_expr, ability.controller, ability.source_id).max(0);
+    // CR 107.3a + CR 601.2b: `count` may be the X announced while casting, which resolves from `ability.chosen_x`.
+    let count =
+        crate::game::quantity::resolve_quantity_with_targets(state, &count_expr, ability).max(0);
 
     // CR 109.4 + CR 111.2: The token's creator (and therefore controller) is
     // determined by the `owner` filter. Resolved once, before the creation
@@ -119,13 +120,25 @@ pub fn resolve(
             .filter(|id| matches_target_filter(state, *id, source_filter, &filter_ctx))
             .collect()
     } else if matches!(target_filter, TargetFilter::CostPaidObject) {
-        ability
-            .cost_paid_object
-            .as_ref()
-            .map(|snapshot| vec![snapshot.object_id])
-            .ok_or_else(|| {
-                EffectError::MissingParam("CopyTokenOf requires a cost-paid object".to_string())
-            })?
+        // CR 400.7: resolve through the shared live-reference guard — a
+        // referent that changed zones is a new object and must not become the
+        // copy source (no fallback to a same-id object).
+        // An ABSENT referent is a malformed ability (nothing was ever bound) and
+        // stays a parameter error. A PRESENT but stale referent is different:
+        // the object was bound and then became a new object (CR 400.7), so the
+        // copy has no legal source and resolves as a clean no-op through the
+        // empty-source path below, which still emits `EffectResolved`.
+        match ability.cost_paid_object.as_ref() {
+            None => {
+                return Err(EffectError::MissingParam(
+                    "CopyTokenOf requires a cost-paid object".to_string(),
+                ));
+            }
+            Some(snapshot) => snapshot
+                .live_object_id(state)
+                .map(|id| vec![id])
+                .unwrap_or_default(),
+        }
     } else if matches!(
         target_filter,
         TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
@@ -177,9 +190,7 @@ pub fn resolve(
         } else {
             ability
         };
-        let effective_targets =
-            crate::game::targeting::resolved_targets(resolution_ability, target_filter, state);
-        crate::game::effects::effect_object_targets(target_filter, &effective_targets)
+        crate::game::effects::resolved_effect_object_ids(state, resolution_ability, target_filter)
     };
 
     // CR 609.3 + CR 101.3: "Do as much as possible" — when the copy source
@@ -220,6 +231,10 @@ pub fn resolve(
                 display_source: source.display_source,
                 printed_ref: source.printed_ref.clone(),
                 token_image_ref: source.token_image_ref.clone(),
+                // Created copy-tokens derive their descriptor from their
+                // own base at injection (copy exceptions included), so the
+                // source's captured body is deliberately not carried here.
+                token_art: None,
                 extra_keywords: extra_keywords.clone(),
                 additional_modifications: additional_modifications.clone(),
                 tapped,
@@ -278,6 +293,15 @@ pub(crate) fn drain_pending_copy_token_resolution(
         return;
     };
     drain_copy_token_resolution(state, pending, events);
+    // CR 608.2c + CR 117.3b: a continuation left directly beneath the consumed
+    // owner resumes now, before any player receives priority.
+    if matches!(
+        state.waiting_for,
+        crate::types::game_state::WaitingFor::Priority { .. }
+    ) && state.active_ability_continuation().is_some()
+    {
+        super::drain_pending_continuation(state, events);
+    }
 }
 
 fn drain_copy_token_resolution(
@@ -421,6 +445,7 @@ fn resolve_predefined_token_display(
             display_name: token.name.clone(),
             power: token.power,
             toughness: token.toughness,
+            loyalty: None,
             core_types: token.card_types.core_types.clone(),
             subtypes: token.card_types.subtypes.clone(),
             supertypes: token.card_types.supertypes.clone(),
@@ -489,6 +514,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         display_source,
         printed_ref,
         token_image_ref,
+        token_art,
         extra_keywords,
         additional_modifications,
         tapped,
@@ -553,6 +579,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                 display_source,
                 printed_ref: printed_ref.clone(),
                 token_image_ref: token_image_ref.clone(),
+                token_art: token_art.clone(),
                 extra_keywords: extra_keywords.clone(),
                 additional_modifications: additional_modifications.clone(),
                 tapped,
@@ -682,6 +709,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             display_source,
             printed_ref: printed_ref.clone(),
             token_image_ref: token_image_ref.clone(),
+            token_art: token_art.clone(),
             extra_keywords: extra_keywords.clone(),
             additional_modifications: additional_modifications.clone(),
             tapped,
@@ -837,6 +865,11 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                         crate::types::ability::Effect::Attach {
                             attachment: crate::types::ability::TargetFilter::SelfRef,
                             target: crate::types::ability::TargetFilter::Any,
+                            // Aura-attachment delivery: the attachment is the
+                            // entering Aura; only its host is chosen here.
+                            selection: crate::types::ability::AttachSelection::AtResolution {
+                                count: crate::types::ability::AttachCardinality::One,
+                            },
                         },
                         Vec::new(),
                         source_id,
@@ -1821,37 +1854,6 @@ pub(crate) fn copy_starting_loyalty_override(
     })
 }
 
-/// CR 205.1a + CR 613.1d: remove every subtype belonging to the given
-/// [`SubtypeSet`] from a token's subtype list. Creature types are recognised
-/// against the game's live `all_creature_types` list (Changeling / set-defined
-/// types are runtime data); every other set has a fixed CR-defined membership.
-fn remove_subtype_set(subtypes: &mut Vec<String>, set: SubtypeSet, all_creature_types: &[String]) {
-    match set {
-        // CR 205.3m: creature types.
-        SubtypeSet::Creature => {
-            subtypes.retain(|s| {
-                !all_creature_types
-                    .iter()
-                    .any(|creature_type| creature_type == s)
-            });
-        }
-        SubtypeSet::Land => subtypes.retain(|s| !crate::types::card_type::is_land_subtype(s)),
-        SubtypeSet::Artifact => {
-            subtypes.retain(|s| !crate::types::card_type::ARTIFACT_SUBTYPES.contains(&s.as_str()))
-        }
-        SubtypeSet::Enchantment => subtypes
-            .retain(|s| !crate::types::card_type::ENCHANTMENT_SUBTYPES.contains(&s.as_str())),
-        SubtypeSet::Planeswalker => subtypes
-            .retain(|s| !crate::types::card_type::PLANESWALKER_SUBTYPES.contains(&s.as_str())),
-        SubtypeSet::Spell => {
-            subtypes.retain(|s| !crate::types::card_type::SPELL_SUBTYPES.contains(&s.as_str()));
-        }
-        SubtypeSet::Battle => {
-            subtypes.retain(|s| !crate::types::card_type::BATTLE_SUBTYPES.contains(&s.as_str()));
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1866,7 +1868,7 @@ mod tests {
     };
     use crate::types::actions::GameAction;
     use crate::types::card::PrintedCardRef;
-    use crate::types::card_type::{CardType, CoreType, Supertype};
+    use crate::types::card_type::{CardType, CoreType, SubtypeSet, Supertype};
     use crate::types::game_state::WaitingFor;
     use crate::types::identifiers::{ObjectId, TrackedSetId};
     use crate::types::keywords::Keyword;
@@ -2947,6 +2949,7 @@ mod tests {
             CostPaidObjectSnapshot {
                 object_id: artifact_id,
                 lki: artifact.snapshot_for_mana_spent(),
+                incarnation: 0,
             }
         };
         let mut ability = ResolvedAbility::new(
@@ -4023,7 +4026,7 @@ mod tests {
                     AbilityKind::Spell,
                     Effect::BecomeCopy {
                         target: TargetFilter::Typed(TypedFilter::creature()),
-                        recipient: TargetFilter::SelfRef,
+                        recipient: crate::types::ability::CopyRecipient::Source,
                         duration: None,
                         mana_value_limit: None,
                         additional_modifications: Vec::new(),

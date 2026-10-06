@@ -4,6 +4,8 @@
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use crate::parser::oracle_nom::defender_exception;
+use crate::parser::oracle_nom::defender_exception::DefenderExceptionSegment;
 
 /// CR 509.1b / CR 702.111b: "<N> or more creatures" minimum-blocker phrase.
 /// Composed from `parse_number` + `tag(" or more creatures")`.
@@ -102,7 +104,7 @@ pub(crate) fn parse_doubler_source_filter(lower: &str) -> Option<TargetFilter> {
 
     // CR 603.2d: The source may be a flat type union sharing one trailing
     // controller scope — "a Shaman or another Wizard you control" (Harmonic
-    // Prodigy). `parse_type_phrase`'s own disjunction recursion only fires when
+    // Prodigy). `parse_type_phrase_folding`'s own disjunction recursion only fires when
     // the trailing disjunct opens with a bare type word, not an article or an
     // "another"/"other" designation ("another Wizard"), so it stops after the
     // first disjunct and leaves the connector in the remainder. Dispatch on that
@@ -174,13 +176,13 @@ fn doubler_source_is_restrictive(filter: &TargetFilter) -> bool {
 }
 
 /// CR 603.2d + CR 301.5a: Parse one disjunct of a trigger-doubler's source
-/// phrase, handling the two source-relative referents `parse_type_phrase` cannot
+/// phrase, handling the two source-relative referents `parse_type_phrase_folding` cannot
 /// express before falling back to it for ordinary typed clauses:
 /// - `~` — the normalized source name → [`TargetFilter::SelfRef`] (Cloud doubling
 ///   "a triggered ability of ~").
 /// - "an Equipment attached to it" — here "it" is anaphoric on the doubler's own
 ///   source, so it is the source-relative [`FilterProp::AttachedToSource`] set.
-///   `parse_type_phrase` maps "attached to it" to `AttachedToRecipient` (an
+///   `parse_type_phrase_folding` maps "attached to it" to `AttachedToRecipient` (an
 ///   enchanted-creature host), which is the wrong referent in a doubler, so this
 ///   clause is hand-built.
 fn parse_doubler_disjunct(phrase: &str) -> (TargetFilter, &str) {
@@ -202,7 +204,7 @@ fn parse_doubler_disjunct(phrase: &str) -> (TargetFilter, &str) {
     {
         return (filter, rest);
     }
-    parse_type_phrase(phrase)
+    parse_type_phrase_folding(phrase)
 }
 
 pub(crate) fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMode> {
@@ -396,12 +398,12 @@ pub(crate) fn parse_leading_except_for_rule_static(
 /// [`parse_leading_except_for_rule_static`]: a bare type-phrase exemption
 /// ("artifact creatures") or a named exemption within a type class ("creatures
 /// named Akron Legionnaire"). The " named " split happens BEFORE
-/// `parse_type_phrase` runs (mirroring `parse_control_named_type_filter` in
-/// `oracle_nom/condition.rs`) — `parse_type_phrase` has no grammar for a
+/// `parse_type_phrase_folding` runs (mirroring `parse_control_named_type_filter` in
+/// `oracle_nom/condition.rs`) — `parse_type_phrase_folding` has no grammar for a
 /// trailing "named `<Name>`" clause and would otherwise leave it unconsumed.
 fn parse_exempt_conjunct(conjunct: &str) -> Option<TargetFilter> {
     if let Ok((_, (type_text, name_text))) = nom_primitives::split_once_on(conjunct, " named ") {
-        let (filter, remainder) = parse_type_phrase(type_text);
+        let (filter, remainder) = parse_type_phrase_folding(type_text);
         // `merge_filter_prop` silently no-ops on a non-`Typed` filter (Or/And/
         // SelfRef/…), which would drop the Named constraint and over-claim
         // every object of the bare type instead of just the named one — fail
@@ -420,7 +422,7 @@ fn parse_exempt_conjunct(conjunct: &str) -> Option<TargetFilter> {
             },
         ));
     }
-    let (filter, remainder) = parse_type_phrase(conjunct);
+    let (filter, remainder) = parse_type_phrase_folding(conjunct);
     if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
         return Some(filter);
     }
@@ -475,7 +477,7 @@ pub(crate) fn parse_compound_subject_keyword_static(
     // leading comma leaves the 2-item path's existing fallthrough to
     // `parse_rule_static_subject_filter` (which itself resolves an object
     // subject with an internal bare "and", e.g. "artifacts and creatures you
-    // control", via `parse_type_phrase`'s own trailing-suffix distribution)
+    // control", via `parse_type_phrase_folding`'s own trailing-suffix distribution)
     // completely unchanged.
     let (after_you, multi_object) = match nom_tag_tp(&body, "you, ") {
         Some(rest) => (rest, true),
@@ -554,7 +556,7 @@ pub(crate) fn parse_compound_subject_keyword_static(
 /// other creatures you control".
 ///
 /// Each conjunct is a COMPLETE, independently-resolvable subject phrase — unlike
-/// the Silkguard-class object list in `parse_type_phrase` (`oracle_target.rs`),
+/// the Silkguard-class object list in `parse_type_phrase_folding` (`oracle_target.rs`),
 /// where a single trailing suffix distributes backward across bare type nouns
 /// with no clause of their own ("Auras, Equipment, and modified creatures you
 /// control"). So every conjunct here is resolved one at a time through the same
@@ -562,7 +564,7 @@ pub(crate) fn parse_compound_subject_keyword_static(
 /// bespoke list grammar. Splitting is nom-based (`split_once_on`), peeling
 /// `", "`-separated conjuncts and stripping the final conjunct's `"and "`
 /// connector — never a bare `" and "` split, so the 2-item form's own
-/// internal-"and" handling (via `parse_type_phrase`'s trailing-suffix
+/// internal-"and" handling (via `parse_type_phrase_folding`'s trailing-suffix
 /// distribution) is never shadowed.
 ///
 /// Declines (returns `None`, the strict-fail signal) if any conjunct fails to
@@ -792,7 +794,7 @@ pub(crate) fn is_extra_blockers_static_candidate(lower: &str) -> bool {
 ///   old single `tag`, so unfiltered lines are unchanged.
 /// - Slot B — "<type-phrase> able to block " (Talruum Piper "creatures with
 ///   flying", Marble Priest "Walls") → `Some(filter)`. The type slot is parsed by
-///   the shared `parse_type_phrase` building block; the phrase must fully consume
+///   the shared `parse_type_phrase_folding` building block; the phrase must fully consume
 ///   up to the literal " able to block " (else the Some form is rejected as
 ///   mis-scoped and this returns `None`, letting the line fall through).
 ///
@@ -809,12 +811,12 @@ pub(crate) fn parse_forced_block_blocker_slot(input: &str) -> Option<(&str, Opti
         return Some((rest, None));
     }
     // Slot B: "<type-phrase> able to block " → Some(filter). Scope the type phrase
-    // to the text before the literal " able to block " so `parse_type_phrase`
+    // to the text before the literal " able to block " so `parse_type_phrase_folding`
     // cannot over-consume into the subject.
     let (rest, type_text) = take_until::<_, _, OracleError<'_>>(" able to block ")
         .parse(input)
         .ok()?;
-    let (filter, filter_remainder) = parse_type_phrase(type_text);
+    let (filter, filter_remainder) = parse_type_phrase_folding(type_text);
     if !filter_remainder.trim().is_empty() {
         return None; // mis-scoped Some — reject rather than accept a partial filter.
     }
@@ -867,17 +869,87 @@ pub(crate) fn is_forced_block_static_candidate(lower: &str) -> bool {
 }
 
 /// CR 702.3b + CR 611.3a + CR 613: Decompose `"<predicate_1> and can attack
-/// as though <pronoun> didn't have defender[ as long as <cond>]"` into two
-/// independent `StaticDefinition`s sharing the same `affected` + `condition`.
+/// [<segment>] as though <pronoun> didn't have defender[ as long as <cond>]"`
+/// into two independent `StaticDefinition`s sharing the same `affected`.
+///
+/// `<segment>` — the optional INTERPOSED SEGMENT — names the class of defenders
+/// the permission covers. It is recognized by the ONE shared
+/// `defender_exception::defender_exception_ir`, never by a local grammar here.
 ///
 /// Strategy: locate the conjunction phrase at a word boundary via
 /// `scan_preceded`, splice it out of the text, and re-parse the remainder
 /// via `parse_static_line_multi`. Recursion is safe — the spliced text no
-/// longer contains the conjunction marker. The first conjunct's `affected`
-/// and `condition` are cloned onto a companion `CanAttackWithDefender`
-/// definition. All emitted definitions share the original full-line
-/// description, matching the convention used by other compound handlers
-/// (e.g., `CantBeEquipped` + `CantBeEnchanted`).
+/// longer contains the conjunction marker. The first conjunct's `affected` is
+/// cloned onto a companion `CanAttackWithDefender` definition. Its `condition`
+/// is NOT: the interposed segment's condition and Line A's own condition are
+/// INDEPENDENT gates that must both hold, so they are CONJOINED via
+/// `combine_conditions` rather than one replacing the other. All emitted
+/// definitions share the original full-line description, matching the convention
+/// used by other compound handlers (e.g., `CantBeEquipped` + `CantBeEnchanted`).
+/// CR 702.3b + CR 509.1b: the MIRROR of
+/// [`try_split_and_can_attack_despite_defender`] — a defender exception printed
+/// FIRST, with a rules-bearing companion clause after it:
+///
+/// > "As long as …, this creature can attack as though it didn't have defender
+/// > **and it can't be blocked**."  (Expedition Lookout, the one corpus card)
+///
+/// The forward splitter handles "<predicate> and can attack … defender" by
+/// SPLICING the defender clause out and re-parsing what remains. That technique
+/// does not transfer here: the companion shares this line's SUBJECT and its
+/// leading condition, so splicing leaves a malformed fragment.
+///
+/// It does not need to. The sibling `can't be blocked` arm already parses this
+/// whole line correctly — same `affected`, same leading gate — it simply ignores
+/// the defender clause. So the companion comes from `parse_static_line`, and this
+/// function supplies only the half that was missing, inheriting `affected` and
+/// conjoining conditions through the one `combine_conditions` authority.
+///
+/// Both halves therefore carry the same gate, which is what the printed text says:
+/// the graveyard condition governs the permission and the evasion alike.
+pub(crate) fn try_defender_exception_with_companion(text: &str) -> Option<Vec<StaticDefinition>> {
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+    let (body_tp, _condition_tp) = match tp.split_around(" as long as ") {
+        Some((before, after)) => (before, Some(after)),
+        None => (tp, None),
+    };
+    let (_subject_prefix, segment, rest) =
+        defender_exception::split_defender_exception_predicate(body_tp.lower)?;
+    if matches!(segment, DefenderExceptionSegment::DurationAdverbial) {
+        return None;
+    }
+    // Only the rules-bearing case composes; a punctuation-only tail is production
+    // (b)'s to answer on its own, and routing it here would mint a duplicate.
+    if rest.trim().trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+
+    // The companion half, from the arm that already handles it. Production (b)
+    // declines this line (rules-bearing remainder), so this cannot recurse into
+    // the defender production and re-enter here.
+    let companion = parse_static_line(text)?;
+    if matches!(companion.mode, StaticMode::CanAttackWithDefender) {
+        // Defensive: if production (b) ever stops declining, composing would
+        // duplicate the permission rather than add the missing half.
+        return None;
+    }
+
+    let mut permission =
+        StaticDefinition::new(StaticMode::CanAttackWithDefender).description(text.to_string());
+    if let Some(affected) = companion.affected.clone() {
+        permission = permission.affected(affected);
+    }
+    // CR 508.1c: the interposed class (if any) and the line's own printed
+    // gate are INDEPENDENT restrictions — same conjoin authority as production (b)
+    // and the forward splitter.
+    if let Some(condition) =
+        combine_conditions(segment.permission_condition(), companion.condition.clone())
+    {
+        permission = permission.condition(condition);
+    }
+    Some(vec![permission, companion])
+}
+
 pub(crate) fn try_split_and_can_attack_despite_defender(
     text: &str,
 ) -> Option<Vec<StaticDefinition>> {
@@ -887,18 +959,35 @@ pub(crate) fn try_split_and_can_attack_despite_defender(
     // `scan_preceded` advances past each space so `remaining` always starts on
     // a word — so the tag begins at "and", not at the leading space. We then
     // strip the trailing space of `before` to produce clean Line A text.
-    let (before, matched, _rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
-        alt((
-            tag::<_, _, VE>("and can attack as though it didn't have defender"),
-            tag::<_, _, VE>("and can attack as though they didn't have defender"),
-        ))
+    //
+    // CR 702.3b: the SHARED recognizer, so the interposed class cannot be
+    // supported on the non-conjunctive shape and misparsed here. NOTE the third
+    // binding: base DISCARDED `rest` as `_rest`; the widened form MUST bind it,
+    // because the combinator's output type is no longer a `&str` with a length.
+    let (before, segment, rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
+        preceded(
+            tag::<_, _, VE>("and "),
+            defender_exception::defender_exception_ir,
+        )
         .parse(i)
     })?;
+    // Base declined the duration form here too — its `alt` had no `this turn` arm.
+    if matches!(segment, DefenderExceptionSegment::DurationAdverbial) {
+        return None;
+    }
 
-    // ASCII lowercasing preserves byte lengths, so `before`/`matched` byte
-    // offsets into `lower` also index into the original-case `text`.
+    // ASCII lowercasing preserves byte lengths, so `before`, the consumed span and
+    // `rest` all index `lower` and therefore also index the original-case `text`.
     let before_len = before.len();
-    let matched_len = matched.len();
+    // The consumed span is everything the scanner neither skipped nor left over.
+    // It CANNOT be `matched.len()` any more: the combinator's output is a
+    // `DefenderExceptionSegment`, whose payload is a `StaticCondition` or an owned
+    // `String` — neither is a slice of `lower`, and an offset computed from either
+    // would splice at the wrong byte: a short splice leaves `"and can attack"`
+    // fragments in Line A, `parse_static_line_multi` returns `[]`, and the whole
+    // splitter returns `None`. Guarded by
+    // `adjacent_defender_grammars_keep_their_own_parse`.
+    let matched_len = lower.len() - before.len() - rest.len();
     // Drop the trailing space that precedes the "and" marker so Line A doesn't
     // end up with " ." before its terminating period.
     let cut_end = if before.ends_with(' ') {
@@ -924,8 +1013,18 @@ pub(crate) fn try_split_and_can_attack_despite_defender(
     if let Some(affected) = template.affected.clone() {
         companion = companion.affected(affected);
     }
-    if let Some(cond) = template.condition.clone() {
-        companion = companion.condition(cond);
+    // CR 508.1c: the interposed class and Line A's OWN condition are
+    // INDEPENDENT gates and both must hold, so they conjoin rather than one
+    // replacing the other. SAME helper and SAME `(Some, Some)` arm as production
+    // (b). Guarded by `spire_serpent_conjunctive_split_composes_both_conditions`
+    // (Spire Serpent, whose Line A carries its own `QuantityComparison`), which
+    // fails if either gate is dropped or one overwrites the other. With no
+    // interposed segment this degenerates to `(None, Some)` and reproduces base
+    // exactly — guarded by `adjacent_defender_grammars_keep_their_own_parse`.
+    if let Some(condition) =
+        combine_conditions(segment.permission_condition(), template.condition.clone())
+    {
+        companion = companion.condition(condition);
     }
     defs.push(companion);
     Some(defs)
@@ -1723,7 +1822,7 @@ pub(crate) fn cant_be_blocked_mode(clause: &str) -> Option<(StaticMode, Option<S
         let (filter, remainder) = if let Some(filter) = parse_chosen_qualifier_subject(&filter_tp) {
             (filter, "")
         } else {
-            parse_type_phrase(filter_text)
+            parse_type_phrase_folding(filter_text)
         };
         if !matches!(filter, TargetFilter::Any) {
             let condition = parse_compound_cant_be_blocked_condition(remainder);
@@ -3004,12 +3103,15 @@ pub(crate) fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxPa
 /// didn't have defender [as long as <condition>]" into a StaticMode::
 /// CanAttackWithDefender on `affected` with an optional condition.
 ///
-/// Uses `scan_split_at_phrase(tag("can attack as though"))` to locate the
-/// phrase at a word boundary (unlike the old ` can attack` form which
-/// required a leading space and silently failed when the subject was `~`).
-/// Fails gracefully (returns `None`) when the phrase is missing, the tail
-/// doesn't match either pronoun form, or the subject cannot be resolved
-/// to a known filter — letting subsequent dispatch branches try.
+/// Delegates the whole predicate to
+/// `defender_exception::split_defender_exception_predicate`, the ONE shared
+/// recognizer, which scans for it at a word boundary and returns the subject
+/// prefix together with the classified interposed segment. (The older form
+/// scanned for a literal leading-space ` can attack`, which silently failed when
+/// the subject was `~`.) Fails gracefully (returns `None`) when the predicate is
+/// missing, when the segment is a duration adverbial rather than a player class,
+/// or when the subject cannot be resolved to a known filter — letting subsequent
+/// dispatch branches try.
 pub(crate) fn parse_can_attack_despite_defender(
     tp: &TextPair<'_>,
     description: &str,
@@ -3022,22 +3124,39 @@ pub(crate) fn parse_can_attack_despite_defender(
         None => (*tp, None),
     };
 
-    let (subject_prefix, _) = nom_primitives::scan_split_at_phrase(body_tp.lower, |i| {
-        tag::<_, _, OracleError<'_>>("can attack as though").parse(i)
-    })?;
-
-    // Verify the rest of the phrase: " it didn't have defender" or
-    // " they didn't have defender". Guards against "can attack as though
-    // it had haste" reaching subject dispatch.
-    type VE<'a> = OracleError<'a>;
-    let after_phrase = &body_tp.lower[subject_prefix.len() + "can attack as though".len()..];
-    let tail_ok = alt((
-        tag::<_, _, VE>(" it didn't have defender"),
-        tag::<_, _, VE>(" they didn't have defender"),
-    ))
-    .parse(after_phrase)
-    .is_ok();
-    if !tail_ok {
+    // CR 702.3b + CR 609.4: ONE recognizer for this grammar, shared
+    // with the attached-subject arm, the effect-side production, the conjunctive
+    // static splitter and the effect-side continuous compound — so the class cannot
+    // be supported on one printed shape and misparsed on another.
+    //
+    // The consuming policy is a PREFIX match plus an explicit remainder check
+    // below. Base bound the remainder as `_rest` and ignored it outright, which is
+    // what let Expedition Lookout keep a permission while losing its printed
+    // evasion. Guarded by `adjacent_defender_grammars_keep_their_own_parse` and
+    // `defender_exception_rules_bearing_remainder_composes_both_halves`.
+    let (subject_prefix, segment, rest) =
+        defender_exception::split_defender_exception_predicate(body_tp.lower)?;
+    // A duration adverbial is not a player class and has no static-line reading —
+    // declined here exactly as at base, where the contiguous-phrase scan missed it.
+    if matches!(segment, DefenderExceptionSegment::DurationAdverbial) {
+        return None;
+    }
+    // A rules-bearing remainder is NOT this production's to answer. Base bound it
+    // as `_rest` and DISCARDED it, so Expedition Lookout — "…didn't have defender
+    // AND IT CAN'T BE BLOCKED." — kept its defender exception while silently losing
+    // its printed evasion, and coverage reported the card as supported.
+    //
+    // This production returns ONE definition and cannot carry two static modes, so
+    // it declines and `try_defender_exception_with_companion` (below, reached via
+    // `parse_static_line_multi`) composes BOTH halves instead. Declining without
+    // that composer would merely move the loss: the line falls through to the
+    // `can't be blocked` arm, which emits the evasion and drops the PERMISSION —
+    // the mirror of the original defect, and still green. Measured, not assumed.
+    //
+    // Punctuation-only tails ("." — Animate Wall's shape, and every other corpus
+    // card on this arm) are NOT rules-bearing and still parse here. Guarded by
+    // `defender_exception_rules_bearing_remainder_composes_both_halves`.
+    if !rest.trim().trim_end_matches('.').trim().is_empty() {
         return None;
     }
 
@@ -3060,15 +3179,47 @@ pub(crate) fn parse_can_attack_despite_defender(
     let mut def = StaticDefinition::new(StaticMode::CanAttackWithDefender)
         .affected(affected)
         .description(description.to_string());
-    if let Some(cond_tp) = condition_tp {
+    // CR 508.1c: the interposed class and a trailing " as long as " gate are
+    // INDEPENDENT restrictions and both must hold, so they compose with `And` rather
+    // than one replacing the other. `needs_defending_player_anchor` walks leaves
+    // (`any_leaf`), so the compound still defers correctly at creature level.
+    let interposed = segment.permission_condition();
+    let trailing = condition_tp.map(|cond_tp| {
         let cond_text = cond_tp.original.trim().trim_end_matches('.');
-        let condition =
-            parse_static_condition(cond_text).unwrap_or(StaticCondition::Unrecognized {
-                text: cond_text.to_string(),
-            });
+        // FAIL CLOSED on a gate this parser cannot type. The base fallback was a
+        // BARE `StaticCondition::Unrecognized`, which `evaluate_condition` reads
+        // as TRUE (`game/layers.rs`) — so a printed `" as long as <gate>"`
+        // restriction the parser did not understand became an UNCONDITIONAL
+        // attack permission. `unenforceable_gate_marker` is this repo's standing
+        // remedy for exactly that: its `Not(Unrecognized)` shape reads FALSE
+        // forever, while `contains_unrecognized` and `coverage::check_statics`
+        // still surface the clause as an unimplemented gap rather than hiding it.
+        // Guarded by
+        // `unsupported_trailing_gate_on_the_defender_permission_fails_closed`.
+        parse_static_condition(cond_text)
+            .unwrap_or_else(|| super::static_helpers::unenforceable_gate_marker(cond_text))
+    });
+    if let Some(condition) = combine_conditions(interposed, trailing) {
         def = def.condition(condition);
     }
     Some(def)
+}
+
+/// CR 508.1c: two independent gates on one static conjoin.
+///
+/// `pub(super)` so the attached-subject production in `grammar.rs` conjoins
+/// through this one authority rather than growing a second spelling.
+pub(super) fn combine_conditions(
+    a: Option<StaticCondition>,
+    b: Option<StaticCondition>,
+) -> Option<StaticCondition> {
+    match (a, b) {
+        (None, None) => None,
+        (Some(c), None) | (None, Some(c)) => Some(c),
+        (Some(x), Some(y)) => Some(StaticCondition::And {
+            conditions: vec![x, y],
+        }),
+    }
 }
 
 /// CR 602.5a: parse "[You may ]activate abilities of <subject> as though
@@ -3286,22 +3437,21 @@ pub(crate) fn try_parse_scoped_must_attack_block(
     )
 }
 
-/// CR 611.3a + CR 613.1f: Detect and split
-/// `"PRIMARY and FOREIGN_SUBJECT have/has/gains/gain KEYWORD [as long as COND]"`
-/// (including the inverted form `"As long as COND, PRIMARY and FOREIGN_SUBJECT …"`).
-///
-/// A "foreign subject" is any noun phrase parseable by `parse_continuous_subject_filter`
-/// that does NOT resolve to `SelfRef`. Example: "creatures you control have vigilance"
-/// after "~ gets +2/+2 and" — Angelic Field Marshal's Lieutenant ability.
-///
-/// Returns two `StaticDefinition`s: one for the primary (existing `affected`) plus a
-/// companion `Continuous` def for the foreign-subject keyword grant. Both inherit the
-/// same `StaticCondition` when present so the gate applies to both effects.
-///
-/// CR 109.5 + CR 611.3a: the condition binds each effect independently (CR 611.3a),
-/// but MTG print convention always states one condition for the whole clause, so both
-/// defs receive the same condition object.
-pub(crate) fn try_split_and_foreign_keyword_grant(text: &str) -> Option<Vec<StaticDefinition>> {
+/// CR 611.3a + CR 613.1f + CR 613.4c: Split
+/// `"PRIMARY and FOREIGN_SUBJECT <predicate> [as long as COND]"` (and the inverted
+/// `"As long as COND, …"` form) into the primary's static(s) plus one `Continuous`
+/// companion scoped to FOREIGN_SUBJECT — any subject `parse_continuous_subject_filter`
+/// resolves to something other than `SelfRef`. The predicate is a keyword grant
+/// ("~ gets +2/+2 and creatures you control have vigilance") or a characteristic
+/// modification ("~ gets +2/+2 and other creatures you control get +2/+2 and have
+/// trample"). Both halves are gated on the clause's condition.
+pub(crate) fn try_split_and_foreign_subject_grant(text: &str) -> Option<Vec<StaticDefinition>> {
+    #[derive(Clone, Copy)]
+    enum ForeignPredicate {
+        KeywordGrant,
+        Modification,
+    }
+
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
@@ -3324,9 +3474,15 @@ pub(crate) fn try_split_and_foreign_keyword_grant(text: &str) -> Option<Vec<Stat
 
     let effect_lower = effect_original.to_lowercase();
 
-    // Scan for "and FOREIGN_SUBJECT verb KEYWORD" in the effect text.
-    // We try each grant verb and check every " and " position.
-    for verb in [" have ", " has ", " gains ", " gain "] {
+    // Scan for "and FOREIGN_SUBJECT <verb> <predicate>" in the effect text.
+    for (verb, predicate_kind) in [
+        (" have ", ForeignPredicate::KeywordGrant),
+        (" has ", ForeignPredicate::KeywordGrant),
+        (" gains ", ForeignPredicate::KeywordGrant),
+        (" gain ", ForeignPredicate::KeywordGrant),
+        (" get ", ForeignPredicate::Modification),
+        (" gets ", ForeignPredicate::Modification),
+    ] {
         let mut search_lower = effect_lower.as_str();
         let mut search_offset = 0;
         while let Some((before_and, subject_lower, keyword_lower)) =
@@ -3356,7 +3512,7 @@ pub(crate) fn try_split_and_foreign_keyword_grant(text: &str) -> Option<Vec<Stat
                 }
             };
 
-            // Keyword text is everything after the verb.
+            // Predicate text is everything after the verb.
             let kw_start = effect_lower.len() - keyword_lower.len();
             if kw_start >= effect_original.len() {
                 search_offset = and_pos + "and ".len();
@@ -3370,11 +3526,23 @@ pub(crate) fn try_split_and_foreign_keyword_grant(text: &str) -> Option<Vec<Stat
                 continue;
             }
 
-            // Parse keyword list into companion modifications.
-            let mut companion_mods = Vec::new();
-            for part in split_keyword_list(keyword_text) {
-                push_grant_clause_modifications(&mut companion_mods, part.as_ref(), None);
-            }
+            let companion_mods = match predicate_kind {
+                ForeignPredicate::KeywordGrant => {
+                    let mut companion_mods = Vec::new();
+                    for part in split_keyword_list(keyword_text) {
+                        push_grant_clause_modifications(&mut companion_mods, part.as_ref(), None);
+                    }
+                    companion_mods
+                }
+                ForeignPredicate::Modification => {
+                    let predicate_start = kw_start - verb.trim_start().len();
+                    parse_continuous_modifications(
+                        effect_original[predicate_start..]
+                            .trim()
+                            .trim_end_matches('.'),
+                    )
+                }
+            };
             if companion_mods.is_empty() {
                 search_offset = and_pos + "and ".len();
                 search_lower = &effect_lower[search_offset..];
@@ -3397,7 +3565,13 @@ pub(crate) fn try_split_and_foreign_keyword_grant(text: &str) -> Option<Vec<Stat
                 format!("{primary_text}.")
             };
             let mut primary_defs = parse_static_line_multi(&primary_full);
-            if primary_defs.is_empty() {
+            // Also decline when the primary re-parses to a `Continuous` def with no
+            // modifications (e.g. "Insects" of "Insects and Spiders you control get …").
+            if primary_defs.is_empty()
+                || primary_defs.iter().any(|def| {
+                    matches!(def.mode, StaticMode::Continuous) && def.modifications.is_empty()
+                })
+            {
                 search_offset = and_pos + "and ".len();
                 search_lower = &effect_lower[search_offset..];
                 continue;

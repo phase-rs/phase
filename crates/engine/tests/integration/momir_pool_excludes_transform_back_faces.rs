@@ -1,34 +1,26 @@
-//! BUG A repro: the Momir Basic random-token pool must NOT include transform
-//! (TDFC) back faces.
+//! CR 202.1b + CR 202.3b + CR 712.8a: a transform/flip/meld BACK face must
+//! never be a Momir-pickable creature card.
 //!
-//! `rehydrate_card_db_metadata` (crates/engine/src/game/printed_cards.rs:1234)
-//! builds the pool by iterating `db.face_index.values()` — which contains BOTH
-//! faces of every multi-face card (oracle_loader.rs:65-67) — and keys each by
-//! `face.mana_cost.mana_value()`. A transform DFC's BACK face has no castable
-//! mana cost, so MTGJSON sends it with no `manaCost`; synthesis maps that to
-//! `ManaCost::NoCost` (synthesis.rs:9739-9743), whose `mana_value()` is 0
-//! (mana.rs:894-896). The back face is therefore added to the pool keyed at
-//! MV 0 — a bogus Momir pick that is not a real "creature card".
+//! Outside the battlefield a double-faced card has only its front face's
+//! characteristics, so its back face is not a separately castable creature card
+//! and must not be drawable by `Effect::CreateTokenCopyFromPool`. A back face
+//! has no printed mana cost, which maps to `ManaCost::NoCost` and therefore to
+//! mana value 0 — without the guard it would be drawable at every `{X}` of 0.
 //!
-//! CR 202.3b: a nonmodal double-faced card's back face is treated as having
-//! the mana cost of its FRONT face, and a copy of the back face has mana value
-//! 0. CR 712.8a: outside the battlefield/stack a DFC has only its front face's
-//! characteristics — the back face is not an independent card object there.
-//! CR 202.1b: a face with no mana symbols has no mana cost (`NoCost`). The back
-//! face is the same physical card, not a separately castable creature card, and
-//! must not appear in the pool at MV 0 (or at all).
-//!
-//! The shared MTGJSON test fixture contains exactly such a card:
-//! `Delver of Secrets // Insectile Aberration`. The back face
-//! "Insectile Aberration" is a creature with no mana cost.
+//! These assert on `face_is_eligible`, the resolver's single eligibility
+//! authority, against the REAL card fixture. Asserting the predicate directly
+//! (rather than sampling the random draw) makes the guarantee class-general and
+//! deterministic: it covers every costless face in the corpus, not whichever
+//! one an RNG seed happened to surface.
 
 use std::path::Path;
 use std::sync::OnceLock;
 
 use engine::database::card_db::CardDatabase;
-use engine::game::printed_cards::rehydrate_game_from_card_db;
-use engine::types::format::FormatConfig;
-use engine::types::game_state::GameState;
+use engine::game::effects::create_token_copy_from_pool::face_is_eligible;
+use engine::types::ability::{Comparator, TargetFilter};
+use engine::types::card_type::CoreType;
+use engine::types::mana::ManaCost;
 
 fn fixture_db() -> &'static CardDatabase {
     static DB: OnceLock<CardDatabase> = OnceLock::new();
@@ -39,65 +31,58 @@ fn fixture_db() -> &'static CardDatabase {
     })
 }
 
-/// Build the Momir pool through the REAL builder and return the (state, db).
-fn build_momir_pool() -> GameState {
-    let db = fixture_db();
-    // Sanity: the fixture really does carry the transform DFC we rely on.
-    assert!(
-        db.get_face_by_name("Insectile Aberration").is_some(),
-        "test fixture must contain the transform back face 'Insectile Aberration'"
-    );
-    let mut state = GameState::new(FormatConfig::momir(), 2, 42);
-    // Drives `rehydrate_card_db_metadata`, which builds `momir_pool` /
-    // `momir_pool_faces` exactly as the live engine does on game start.
-    rehydrate_game_from_card_db(&mut state, db);
-    assert!(
-        !state.momir_pool.is_empty(),
-        "the Momir pool must be populated by the real builder"
-    );
-    state
-}
-
 /// BUG A DISCRIMINATING TEST.
 ///
-/// Asserts the built pool does NOT contain the transform back face
-/// "Insectile Aberration". BEFORE the fix this FAILS: the back face is present
-/// at MV 0. AFTER the fix (excluding `NoCost` creature faces) it passes.
+/// "Insectile Aberration" is the transform back face of Delver of Secrets. It
+/// is a creature face with no printed mana cost, so before the guard it was
+/// eligible at mana value 0.
 #[test]
-fn momir_pool_excludes_transform_back_face() {
-    let state = build_momir_pool();
-
-    let all_pool_names: Vec<&String> = state.momir_pool.values().flatten().collect();
+fn transform_back_face_is_never_eligible() {
+    let db = fixture_db();
+    let face = db
+        .get_face_by_name("Insectile Aberration")
+        .expect("test fixture must contain the transform back face 'Insectile Aberration'");
 
     assert!(
-        !all_pool_names
-            .iter()
-            .any(|n| n.as_str() == "Insectile Aberration"),
-        "CR 202.3b: the transform back face 'Insectile Aberration' must NOT be in \
-         the Momir pool — it is not a separately castable creature card. \
-         MV-0 pool entries: {:?}",
-        state.momir_pool.get(&0)
+        face.card_type.core_types.contains(&CoreType::Creature),
+        "precondition: the back face really is a creature face"
     );
-
-    // The FRONT face (Delver of Secrets) is itself an Instant, not a creature,
-    // so it is correctly absent too — but the assertion that matters is the
-    // back face is gone.
+    assert!(
+        matches!(face.mana_cost, ManaCost::NoCost),
+        "precondition: a transform back face carries no printed mana cost"
+    );
+    assert!(
+        !face_is_eligible(face, Comparator::EQ, 0, &TargetFilter::Any),
+        "CR 202.3b: the transform back face 'Insectile Aberration' must not be \
+         drawable at mana value 0 — it is not a separately castable creature card"
+    );
 }
 
-/// Generalization guard (build-for-the-class): NO face whose name is a back
-/// face of a transform/flip/meld card (i.e. a creature face carrying no mana
-/// cost) may appear in the pool. We approximate "no mana cost" by checking the
-/// hydrated faces map: every pooled face must have a non-`NoCost` mana cost.
+/// Generalization guard (build-for-the-class): NO creature face carrying no
+/// castable mana cost may be drawable, at any bound, under any comparator.
 #[test]
-fn momir_pool_contains_no_costless_creature_faces() {
-    let state = build_momir_pool();
+fn no_costless_creature_face_is_eligible_under_any_comparator() {
+    let db = fixture_db();
+    let comparators = [
+        Comparator::EQ,
+        Comparator::NE,
+        Comparator::LE,
+        Comparator::LT,
+        Comparator::GE,
+        Comparator::GT,
+    ];
 
     let mut offenders: Vec<String> = Vec::new();
-    for names in state.momir_pool.values() {
-        for name in names {
-            if let Some(face) = state.momir_pool_faces.get(&name.to_lowercase()) {
-                if matches!(face.mana_cost, engine::types::mana::ManaCost::NoCost) {
-                    offenders.push(name.clone());
+    for face in db.faces_in_scan_order() {
+        if !matches!(face.mana_cost, ManaCost::NoCost) {
+            continue;
+        }
+        // A costless face must be ineligible for every comparator and every
+        // bound it could plausibly be compared against.
+        for comparator in comparators {
+            for bound in -1..=16 {
+                if face_is_eligible(face, comparator, bound, &TargetFilter::Any) {
+                    offenders.push(format!("{} ({comparator:?} {bound})", face.name));
                 }
             }
         }
@@ -106,6 +91,28 @@ fn momir_pool_contains_no_costless_creature_faces() {
     assert!(
         offenders.is_empty(),
         "CR 202.1b: creature faces with no castable mana cost (transform/flip/meld \
-         back faces, suspend-only cards) must not be Momir-pickable. Offenders: {offenders:?}"
+         back faces) must never be Momir-pickable. Offenders: {offenders:?}"
+    );
+}
+
+/// Positive control: a normal creature face with a real mana cost IS eligible
+/// at its own mana value. Without this, the test above would still pass if
+/// `face_is_eligible` were changed to reject everything.
+#[test]
+fn ordinary_creature_face_is_eligible_at_its_mana_value() {
+    let db = fixture_db();
+    let face = db
+        .faces_in_scan_order()
+        .find(|face| {
+            face.card_type.core_types.contains(&CoreType::Creature)
+                && !matches!(face.mana_cost, ManaCost::NoCost)
+        })
+        .expect("fixture must contain at least one ordinary creature card");
+
+    let mana_value = face.mana_cost.mana_value() as i32;
+    assert!(
+        face_is_eligible(face, Comparator::EQ, mana_value, &TargetFilter::Any),
+        "an ordinary creature card must be drawable at its own mana value ({})",
+        face.name
     );
 }

@@ -36,7 +36,7 @@
 //!   - CR 508.5 / CR 508.5a: an ability referring to both an attacking creature
 //!     and a defending player means the player THAT creature is attacking, and
 //!     in multiplayer that player is determined individually per attacker.
-//!   - CR 310.8d: a battle's protector, and a planeswalker's controller, are the
+//!   - CR 310.9d: a battle's protector, and a planeswalker's controller, are the
 //!     defending player for an attack against them (Test 5's planeswalker).
 //!   - CR 603.2 / CR 603.2c: the trigger fires once per matching attacker.
 //!   - CR 603.4: the intervening-if is checked at fire time AND again as the

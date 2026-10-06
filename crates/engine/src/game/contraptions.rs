@@ -500,6 +500,33 @@ fn next_sprocket(current: u8) -> u8 {
     }
 }
 
+/// CR 706.4: the difference between this instruction's two die results.
+///
+/// CR 706.6 (survivors only): under a die-roll ignore replacement (Barbarian
+/// Class, Pixie Guide, Wyll), an ignored roll "is considered to have never
+/// happened... no effects apply to that roll", so it must not contribute to
+/// this difference. That is satisfied structurally rather than by a check here:
+/// `resume_after_ignore` (`game/effects/roll_die.rs`) emits `DieRolled` for
+/// SURVIVORS ONLY, so an ignored roll is invisible to this scan.
+///
+/// ORDERING INVARIANT — read before re-timing die-roll emission. This scan has
+/// NO resolution boundary: it walks the entire shared `events` vec backwards and
+/// takes the last two rolls it finds, whoever produced them. It is correct only
+/// because the reflexive `AssembleContraptionsFromRollDifference` cannot resolve
+/// until this instruction's rolls are already in that vec. Under a CR 706.6
+/// ignore replacement, emission is deferred past a `SelectDieRolls` action
+/// boundary, and what preserves the ordering is `WaitingFor::DieKeepChoice`'s
+/// membership in `waits_for_resolution_choice` (`game/effects/mod.rs`): the
+/// effect chain suspends, so the reflexive assemble is stashed and drained only
+/// AFTER `resume_after_ignore` has pushed the survivors' events. Remove that
+/// allowlist arm, or move emission later again, and this returns 0 (its "fewer
+/// than two rolls found" value) — a SILENT failure: Hard Hat Area assembles
+/// nothing, `EffectResolved` is still emitted, and no error surfaces.
+///
+/// This is ONE OF TWO events-slice die-result consumers; the other is
+/// `snapshot_resolution_context_quantity` (`game/effects/effect.rs`), which
+/// depends on the same ordering for the same reason. A change here almost
+/// certainly needs a matching look there.
 fn recent_roll_difference(events: &[GameEvent]) -> u32 {
     let mut rolls = events.iter().rev().filter_map(|event| match event {
         GameEvent::DieRolled {

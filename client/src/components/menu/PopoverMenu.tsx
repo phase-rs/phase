@@ -211,6 +211,11 @@ export function PopoverMenu({
             // dismissal listens in the capture phase, so it is unaffected.
             onPointerDown={(event) => event.stopPropagation()}
             onClick={(event) => event.stopPropagation()}
+            onKeyDown={variant === "dialog" ? (event) => {
+              // Keep dialog controls' native defaults without invoking game shortcuts.
+              event.stopPropagation();
+              if (event.key === "Escape") close();
+            } : undefined}
             style={{
               top: style.top,
               bottom: style.bottom,

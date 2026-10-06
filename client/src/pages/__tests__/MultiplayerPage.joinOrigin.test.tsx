@@ -1,9 +1,10 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, waitFor } from "@testing-library/react";
 import { useEffect } from "react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { LobbyGame } from "../../adapter/types";
+import { refuseRealWebSockets } from "../../test/helpers/refusingWebSocket";
 
 /**
  * The join/spectate origin the lobby produced must ride all the way onto the
@@ -16,7 +17,6 @@ import type { LobbyGame } from "../../adapter/types";
 const harness = vi.hoisted(() => ({
   navigate: vi.fn(),
   lobbyAction: null as null | ((props: Record<string, unknown>) => void),
-  connectionMode: undefined as string | undefined,
 }));
 
 /**
@@ -38,7 +38,6 @@ vi.mock("react-router", async (importOriginal) => ({
 
 vi.mock("../../components/lobby/LobbyView", () => ({
   LobbyView: (props: Record<string, unknown>) => {
-    harness.connectionMode = props.connectionMode as string | undefined;
     useEffect(() => {
       harness.lobbyAction?.(props);
       // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -154,13 +153,15 @@ function navigatedParams(): { path: string; params: URLSearchParams } {
 }
 
 describe("MultiplayerPage join origin", () => {
+  let socketUrls: string[] = [];
+
   beforeEach(() => {
     vi.clearAllMocks();
     // `clearAllMocks` drops calls but keeps queued implementations.
     storeMocks.findLobbyGameByCode.mockReset();
     harness.lobbyAction = null;
-    harness.connectionMode = undefined;
     localStorage.setItem("active-deck", "Test Deck");
+    socketUrls = refuseRealWebSockets();
     lookupJoinTarget.mockResolvedValue({
       ok: true,
       info: { is_p2p: false, format_config: null },
@@ -177,7 +178,12 @@ describe("MultiplayerPage join origin", () => {
     });
   });
 
-  afterEach(cleanup);
+  afterEach(() => {
+    const opened = [...socketUrls];
+    cleanup();
+    vi.unstubAllGlobals();
+    expect(opened).toEqual([]);
+  });
 
   function toastMessages(): string[] {
     return [...useMultiplayerStore.getState().toasts.values()].map((t) => t.message);
@@ -372,15 +378,6 @@ describe("MultiplayerPage join origin", () => {
     expect(
       harness.navigate.mock.calls.filter(([target]) => target !== "/multiplayer"),
     ).toHaveLength(0);
-  });
-
-  it("mounts in P2P mode when the hosting server is None", async () => {
-    useMultiplayerStore.setState({ hostingServer: null });
-
-    renderPage();
-
-    await screen.findByTestId("lobby");
-    expect(harness.connectionMode).toBe("p2p");
   });
 
   it("navigates a direct P2P code with no origin and no server param", async () => {

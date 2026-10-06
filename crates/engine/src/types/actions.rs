@@ -5,8 +5,8 @@ use super::counter::CounterType;
 use super::game_state::{
     AutoMayChoice, AutoPassRequest, CastPaymentMode, CombatDamageAssignmentMode,
     CompanionDeclaration, CounterCostChoice, CounterMoveChoice, CounterRemoveChoice,
-    MayTriggerAutoChoiceScope, MayTriggerAutoChoiceSelector, PriorityPassingMode, ShardChoice,
-    YieldScope, YieldTarget,
+    MayTriggerAutoChoiceScope, MayTriggerAutoChoiceSelector, PriorityPassingMode,
+    ReplacementAutoChoiceId, ShardChoice, YieldScope, YieldTarget,
 };
 use super::identifiers::{CardId, ObjectId};
 use super::keywords::Keyword;
@@ -94,7 +94,7 @@ pub enum AlternativeCastDecision {
     Normal,
     /// Pay the keyword-granted alternative cost. Resolution applies the
     /// keyword's post-payment effects (Overload's target→each text change per
-    /// CR 702.96b-c, Evoke's ETB-sacrifice trigger per CR 702.74b, Bestow's
+    /// CR 702.96b-c, Evoke's ETB-sacrifice trigger per CR 702.74a, Bestow's
     /// Aura transformation per CR 702.103b, Warp's exile-at-end-step rider).
     Alternative,
 }
@@ -313,6 +313,15 @@ pub enum GameAction {
     SelectCoinFlips {
         keep_indices: Vec<usize>,
     },
+    /// CR 706.6: Die-roll ignore choice — indices into `results` the roller
+    /// IGNORES (the rest survive). Note the inversion from
+    /// [`GameAction::SelectCoinFlips`], which names the flips KEPT: CR 705.1
+    /// instructs the player to keep one, while CR 706.6 instructs them to ignore
+    /// the lowest. Length must equal `ignore_count`, and every index must be one
+    /// the engine offered in `ignorable_indices`.
+    SelectDieRolls {
+        ignore_indices: Vec<usize>,
+    },
     /// CR 400.11 + CR 406.3: Player commits one or more selections from the
     /// offered outside-game pool. Each selection is a discriminated source —
     /// a sideboard slot (wishboard) or a face-up exile object (Karn / Coax).
@@ -328,6 +337,14 @@ pub enum GameAction {
     ChooseReplacement {
         index: usize,
     },
+    /// CR 616.1: remember the complete ordering or plain optional decision.
+    ChooseReplacementAndRemember {
+        choice: ReplacementAutoChoice,
+    },
+    /// Forget only the authenticated actor's replacement preferences.
+    SetReplacementAutoChoice {
+        selector: Option<ReplacementAutoChoiceId>,
+    },
     /// CR 614.12a: choose which eligible opponent controls an entering
     /// permanent. This is distinct from CR 616 replacement ordering.
     ChooseEntryController {
@@ -339,6 +356,20 @@ pub enum GameAction {
     /// that controller's group on the stack — resolves last, CR 405.3 LIFO).
     OrderTriggers {
         order: Vec<usize>,
+    },
+    /// CR 601.2b + CR 601.2f: Caster submits their cost-determination election.
+    /// `order` is a permutation of indices into the
+    /// `WaitingFor::OrderCostReductions.reductions` vec the caster was prompted
+    /// with; index 0 = applied first ("If multiple cost reductions apply, the
+    /// player may apply them in any order"). `hybrid_announcement` is the
+    /// announced nonhybrid equivalent for each entry of that prompt's
+    /// `hybrid_symbols` vec, in the same order ("the player announces the
+    /// nonhybrid equivalent cost they intend to pay"), or empty to announce
+    /// nothing and leave every hybrid symbol in the locked cost.
+    OrderCostReductions {
+        order: Vec<usize>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        hybrid_announcement: Vec<crate::types::mana::ManaCostShard>,
     },
     CancelCast,
     Equip {
@@ -710,7 +741,7 @@ pub enum GameAction {
     ChooseLegend {
         keep: ObjectId,
     },
-    /// CR 310.11 + CR 704.5w + CR 704.5x: Choose which player becomes the
+    /// CR 310.11 + CR 704.5x: Choose which player becomes the
     /// battle's new protector when the SBA pauses with a `BattleProtectorChoice`.
     ChooseBattleProtector {
         protector: PlayerId,
@@ -931,8 +962,7 @@ pub enum GameAction {
     /// The CURRENT FRONTEND always sends `null` (`LoopShortcutModal`, pinned by that modal's T2
     /// test) — that is a client-side policy, NOT this action's contract. Engine-side per-iteration
     /// pin CAPTURE is what remains outstanding, as part of the "Shortcut-system rules-correctness
-    /// completion" follow-up in `.deferred-backlog.md` (see
-    /// `analysis::loop_check::ShortcutResponse`'s deficiency note).
+    /// completion" follow-up in `.deferred-backlog.md`.
     DeclareShortcut {
         count: crate::analysis::decision_template::IterationCount,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1055,6 +1085,14 @@ pub enum PriorityYieldOp {
     ClearAll,
 }
 
+/// CR 616.1: a complete ordering and an optional branch are distinct decisions.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ReplacementAutoChoice {
+    Order { order: Vec<usize> },
+    Optional { index: usize },
+}
+
 /// CR 603.5: The mutation a `GameAction::SetMayTriggerAutoChoice` performs on the
 /// acting player's stored "don't ask again" auto-choices for optional ("may")
 /// triggers. `Remove` echoes a stored selector verbatim; `ClearAll` drops every stored
@@ -1105,6 +1143,17 @@ fn default_debug_create_count() -> u32 {
     1
 }
 
+/// Whether a sandbox Create Card request materializes a printed card object or
+/// a token with that card's printed characteristics.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub enum DebugCardCreationKind {
+    #[default]
+    Card,
+    Token,
+}
+
 /// Direct game-state manipulation actions for debugging, testing, and remediation.
 /// Bypasses `WaitingFor` validation — fires from any game state without disrupting
 /// the current prompt. Gated on `GameState::debug_mode`.
@@ -1113,8 +1162,10 @@ fn default_debug_create_count() -> u32 {
 pub enum DebugAction {
     // ── Object Zone Manipulation ──────────────────────────────────────────
     /// Move an existing object to a different zone.
-    /// When `simulate` is true, runs the full pipeline (triggers placed on stack, SBAs).
-    /// When false, raw placement with no triggers or SBAs.
+    /// When `simulate` is true, runs the full pipeline (triggers placed on stack, SBAs);
+    /// a `Battlefield` destination also consults ETB replacements (enters tapped,
+    /// enters with counters, "as enters" choices), like `CreateCard { run_etb: true }`.
+    /// When false, raw placement with no replacements, triggers, or SBAs.
     MoveToZone {
         object_id: ObjectId,
         to_zone: Zone,
@@ -1153,6 +1204,11 @@ pub enum DebugAction {
         /// characteristics.
         #[serde(default)]
         nonlegendary: bool,
+        /// A token retains the card's printed copiable characteristics and
+        /// artwork while obeying token zone behavior once it leaves the
+        /// battlefield.
+        #[serde(default)]
+        creation_kind: DebugCardCreationKind,
     },
     /// Remove an object from the game entirely.
     RemoveObject { object_id: ObjectId },
@@ -1471,6 +1527,7 @@ impl DebugAction {
                 attach_to,
                 run_etb,
                 nonlegendary,
+                creation_kind,
             } => {
                 let attach_suffix = match attach_to {
                     Some(AttachTarget::Object(id)) => format!(" attached to {}", obj(*id)),
@@ -1481,8 +1538,12 @@ impl DebugAction {
                 };
                 let etb_suffix = if *run_etb { "" } else { " (no ETB)" };
                 let nonlegendary_suffix = if *nonlegendary { " (nonlegendary)" } else { "" };
+                let token_suffix = match creation_kind {
+                    DebugCardCreationKind::Card => "",
+                    DebugCardCreationKind::Token => " (token)",
+                };
                 format!(
-                    "CreateCard ({} ×{} for {} in {:?}{}{}{})",
+                    "CreateCard ({} ×{} for {} in {:?}{}{}{}{})",
                     card_name,
                     count,
                     player_label(*owner),
@@ -1490,6 +1551,7 @@ impl DebugAction {
                     attach_suffix,
                     etb_suffix,
                     nonlegendary_suffix,
+                    token_suffix,
                 )
             }
             DebugAction::RemoveObject { object_id } => {
@@ -1808,9 +1870,33 @@ impl GameAction {
                 | GameAction::SetPriorityPassingMode { .. }
                 | GameAction::SetPriorityYield { .. }
                 | GameAction::SetMayTriggerAutoChoice { .. }
+                | GameAction::SetReplacementAutoChoice { .. }
                 | GameAction::SetTriggerOrderTemplate { .. }
                 | GameAction::ReorderHand { .. }
         )
+    }
+
+    /// Whether this action names the submitting seat itself rather than a
+    /// decision slot the engine is waiting on.
+    ///
+    /// CR 723.5b: the controller of another player can't make choices or
+    /// decisions for that player that aren't called for by the rules or by any
+    /// objects. A UI preference mutates the submitter's own slot and a debug
+    /// capability grant authorizes the submitting connection — neither is such
+    /// a choice, so controlling a player must not redirect either one.
+    ///
+    /// Not `game::interaction::action_preserves_interaction`, whose
+    /// near-identical list answers a different question: this one decides
+    /// whether an action may skip the seat check, that one whether an action
+    /// leaves an open interaction standing. The two lists may diverge.
+    pub fn is_submitter_scoped(&self) -> bool {
+        self.is_actor_scoped_preference()
+            || matches!(
+                self,
+                GameAction::Debug(_)
+                    | GameAction::GrantDebugPermission { .. }
+                    | GameAction::RevokeDebugPermission { .. }
+            )
     }
 
     /// Issue #4878: allocation-free total order over `GameAction`, used for
@@ -1876,9 +1962,13 @@ impl GameAction {
             | Self::SpendPoolMana { .. }
             | Self::UnspendPoolMana { .. }
             | Self::SelectCoinFlips { .. }
+            | Self::SelectDieRolls { .. }
             | Self::ChooseReplacement { .. }
+            | Self::ChooseReplacementAndRemember { .. }
+            | Self::SetReplacementAutoChoice { .. }
             | Self::ChooseEntryController { .. }
             | Self::OrderTriggers { .. }
+            | Self::OrderCostReductions { .. }
             | Self::CancelCast
             | Self::SubmitSideboard { .. }
             | Self::ChoosePlayDraw { .. }
@@ -2211,12 +2301,15 @@ impl GameAction {
             | GameAction::SelectCards { .. }
             | GameAction::ChooseRemoveCounterCostDistribution { .. }
             | GameAction::SelectCoinFlips { .. }
+            | GameAction::SelectDieRolls { .. }
             | GameAction::ChooseOutsideGameCards { .. }
             | GameAction::SelectTargets { .. }
             | GameAction::ChooseTarget { .. }
             | GameAction::ChooseReplacement { .. }
+            | GameAction::ChooseReplacementAndRemember { .. }
             | GameAction::ChooseEntryController { .. }
             | GameAction::OrderTriggers { .. }
+            | GameAction::OrderCostReductions { .. }
             | GameAction::CancelCast
             | GameAction::BackToManaPayment
             | GameAction::SubmitSideboard { .. }
@@ -2272,6 +2365,7 @@ impl GameAction {
             | GameAction::SetPriorityPassingMode { .. }
             | GameAction::SetPriorityYield { .. }
             | GameAction::SetMayTriggerAutoChoice { .. }
+                | GameAction::SetReplacementAutoChoice { .. }
             | GameAction::SetTriggerOrderTemplate { .. }
             | GameAction::AssignCombatDamage { .. }
             | GameAction::AssignBlockerDamage { .. }

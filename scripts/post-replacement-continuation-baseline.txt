@@ -35,13 +35,14 @@ crates/engine/src/game/effects/mod.rs	resume_resolution_frames	consumer	1
 crates/engine/src/game/effects/scry.rs	resolve	consumer	1
 crates/engine/src/game/effects/token_copy.rs	apply_copy_token_after_replacement_with_created_ids	consumer	1
 crates/engine/src/game/engine.rs	handle_play_land	consumer	1
+crates/engine/src/game/engine_debug.rs	route_debug_token_to_battlefield	consumer	1
 crates/engine/src/game/engine_replacement.rs	apply_pending_post_replacement_effect	resolved	1
 crates/engine/src/game/engine_replacement.rs	apply_pending_post_replacement_effect	template	1
 crates/engine/src/game/engine_replacement.rs	handle_replacement_choice_inner	consumer	3
 crates/engine/src/game/planechase.rs	planeswalk_through_replacements	consumer	1
 crates/engine/src/game/replacement.rs	apply_single_replacement	resolved	1
 crates/engine/src/game/replacement.rs	apply_single_replacement	stash	2
-crates/engine/src/game/replacement.rs	apply_single_replacement	template	3
+crates/engine/src/game/replacement.rs	apply_single_replacement	template	5
 crates/engine/src/game/replacement.rs	continue_replacement_impl	template	1
 crates/engine/src/game/replacement.rs	replace_combat_damage_batch	consumer	1
 crates/engine/src/game/stack.rs	resolve_top	consumer	1

@@ -2,6 +2,7 @@ import path from "node:path";
 import type { Plugin } from "vite";
 import { defineConfig } from "vitest/config";
 import { resolveMultiplayerServerUrls } from "./src/config/multiplayerServerUrls";
+import { resolveTurnCredentialsUrl } from "./src/config/turnCredentials";
 
 const multiplayerServers = resolveMultiplayerServerUrls((name) => process.env[name]);
 
@@ -12,6 +13,17 @@ const multiplayerServers = resolveMultiplayerServerUrls((name) => process.env[na
  * any test whose import graph reaches a `import("@wasm/...")` fails at
  * transform time. The stub also lets vi.mock("@wasm/engine", factory) work.
  */
+function isCoverageExplicitlyDisabledArgv(argv: readonly string[]): boolean {
+  for (let index = 0; index < argv.length; index += 1) {
+    if (argv[index] === "--") break;
+    if (argv[index] === "--coverage.enabled=false") return true;
+    if (argv[index] === "--coverage.enabled" && argv[index + 1] === "false") return true;
+  }
+  return false;
+}
+
+const coverageExplicitlyDisabled = isCoverageExplicitlyDisabledArgv(process.argv);
+
 function wasmStubPlugin(): Plugin {
   const artifacts: Record<string, string> = {
     "@wasm/engine": path.resolve(__dirname, "src/wasm/engine_wasm.js"),
@@ -64,6 +76,7 @@ export default defineConfig({
     __DRAFT_POOLS_URL__: JSON.stringify("/draft-pools.json"),
     __DECKS_URL__: JSON.stringify("/decks.json"),
     __CARD_DATA_URL__: JSON.stringify("/card-data.json"),
+      __CARD_DATA_META_URL__: JSON.stringify("/card-data-meta.json"),
     __CARD_DATA_LOCALE_URL_TEMPLATE__: JSON.stringify("/card-data.{lng}.json"),
     __SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE__: JSON.stringify("/scryfall-images.v2.{lng}.json"),
     __CHANGELOG_URL__: JSON.stringify("/changelog.json"),
@@ -75,6 +88,9 @@ export default defineConfig({
     // Same resolver vite.config.ts uses — the order is single-authority.
     __OFFICIAL_MULTIPLAYER_SERVER_URL__: JSON.stringify(multiplayerServers.official),
     __DEFAULT_MULTIPLAYER_SERVER_URL__: JSON.stringify(multiplayerServers.buildDefault),
+    __TURN_CREDENTIALS_URL__: JSON.stringify(
+      resolveTurnCredentialsUrl(process.env.TURN_CREDENTIALS_URL),
+    ),
     __GIT_REPO_URL__: JSON.stringify("https://github.com/phase-rs/phase"),
     __PREVIEW_SITE_URL__: JSON.stringify("https://preview.phase-rs.dev"),
     __RELEASE_SITE_URL__: JSON.stringify("https://phase-rs.dev"),
@@ -84,15 +100,39 @@ export default defineConfig({
   },
   test: {
     environment: "happy-dom",
+    server: {
+      deps: {
+        /**
+         * `react-i18next` must be processed by Vite rather than externalized to
+         * the Node ESM loader.
+         *
+         * Its `TransWithoutContext` entry does a bare `import
+         * "html-parse-stringify"`. Under pnpm that dependency is reached
+         * through a symlink, and Vitest 4's externalized path resolves the
+         * IMPORTER to its realpath under `.pnpm/react-i18next@.../`, then looks
+         * for `html-parse-stringify` beneath that directory instead of
+         * following the link — so every test file fails to load at import time
+         * with "Cannot find package ...". Node's own resolver handles it fine
+         * (`require.resolve` finds it); only the externalized loader does not.
+         *
+         * `test-setup.ts` imports `react-i18next` globally, so this took down
+         * the WHOLE suite, not just the tests that render translated UI.
+         */
+        inline: ["react-i18next"],
+      },
+    },
     include: ["src/**/*.test.{ts,tsx}"],
     exclude: ["src/**/*.integration.test.{ts,tsx}"],
     setupFiles: ["src/test-setup.ts"],
     pool: "threads",
     coverage: {
+      enabled: !coverageExplicitlyDisabled,
       provider: "v8",
       reporter: ["text", "lcov"],
       include: ["src/**/*.{ts,tsx}"],
-      exclude: ["src/**/__tests__/**", "src/**/*.test.*", "src/wasm/**"],
+      // Stories are documentation rendered by Storybook, not app code, so
+      // they neither add nor owe coverage.
+      exclude: ["src/**/__tests__/**", "src/**/*.test.*", "src/**/*.stories.*", "src/wasm/**"],
       thresholds: {
         lines: 10,
         functions: 10,

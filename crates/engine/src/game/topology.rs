@@ -21,13 +21,39 @@ pub(crate) fn team_id(state: &GameState, player: PlayerId) -> TeamId {
     }
 }
 
+/// Which seats an APNAP or team walk admits. Live rules walks admit only
+/// players still in the game (CR 800.4a); `IncludingDeparted` exists for
+/// restore-time reconstruction of a population fixed before players left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SeatAdmission {
+    Living,
+    IncludingDeparted,
+}
+
+impl SeatAdmission {
+    fn admits(self, state: &GameState, player: PlayerId) -> bool {
+        match self {
+            SeatAdmission::Living => super::players::is_alive(state, player),
+            SeatAdmission::IncludingDeparted => true,
+        }
+    }
+}
+
 pub(crate) fn team_members(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
+    team_members_admitting(state, player, SeatAdmission::Living)
+}
+
+fn team_members_admitting(
+    state: &GameState,
+    player: PlayerId,
+    admission: SeatAdmission,
+) -> Vec<PlayerId> {
     match state.format_config.topology() {
         FormatTopology::IndividualSeats => state
             .seat_order
             .iter()
             .copied()
-            .filter(|&id| id == player && super::players::is_alive(state, id))
+            .filter(|&id| id == player && admission.admits(state, id))
             .collect(),
         FormatTopology::FixedTeams { team_count, .. } => {
             let team = team_id(state, player);
@@ -39,7 +65,7 @@ pub(crate) fn team_members(state: &GameState, player: PlayerId) -> Vec<PlayerId>
                 .players
                 .iter()
                 .map(|player| player.id)
-                .filter(|&id| team_id(state, id) == team && super::players::is_alive(state, id))
+                .filter(|&id| team_id(state, id) == team && admission.admits(state, id))
                 .collect()
         }
         FormatTopology::OneVsMany { archenemy, .. } => {
@@ -48,14 +74,14 @@ pub(crate) fn team_members(state: &GameState, player: PlayerId) -> Vec<PlayerId>
                     .seat_order
                     .iter()
                     .copied()
-                    .filter(|&id| id == archenemy && super::players::is_alive(state, id))
+                    .filter(|&id| id == archenemy && admission.admits(state, id))
                     .collect()
             } else {
                 state
                     .seat_order
                     .iter()
                     .copied()
-                    .filter(|&id| id != archenemy && super::players::is_alive(state, id))
+                    .filter(|&id| id != archenemy && admission.admits(state, id))
                     .collect()
             }
         }
@@ -122,6 +148,14 @@ pub(crate) fn apnap_choice_groups_from(
     state: &GameState,
     start_player: PlayerId,
 ) -> Vec<Vec<PlayerId>> {
+    apnap_choice_groups_admitting(state, start_player, SeatAdmission::Living)
+}
+
+fn apnap_choice_groups_admitting(
+    state: &GameState,
+    start_player: PlayerId,
+    admission: SeatAdmission,
+) -> Vec<Vec<PlayerId>> {
     let seat_order = &state.seat_order;
     let len = seat_order.len();
     if len == 0 {
@@ -139,7 +173,9 @@ pub(crate) fn apnap_choice_groups_from(
                 let idx =
                     super::players::turn_order_index(start_idx, offset, len, state.turn_direction);
                 let candidate = seat_order[idx];
-                super::players::is_alive(state, candidate).then_some(vec![candidate])
+                admission
+                    .admits(state, candidate)
+                    .then_some(vec![candidate])
             })
             .collect();
     }
@@ -154,12 +190,12 @@ pub(crate) fn apnap_choice_groups_from(
         // CR 101.4 + CR 103.1: APNAP follows the current turn-order direction.
         let idx = super::players::turn_order_index(start_idx, offset, len, state.turn_direction);
         let candidate = seat_order[idx];
-        if !super::players::is_alive(state, candidate) {
+        if !admission.admits(state, candidate) {
             continue;
         }
         let key = team_dedup_key(state, candidate);
         if seen.insert(key) {
-            groups.push(team_members(state, candidate));
+            groups.push(team_members_admitting(state, candidate, admission));
         }
     }
     groups
@@ -167,6 +203,20 @@ pub(crate) fn apnap_choice_groups_from(
 
 pub(crate) fn apnap_order_from(state: &GameState, start_player: PlayerId) -> Vec<PlayerId> {
     apnap_choice_groups_from(state, start_player)
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+/// APNAP order from `start_player` over the given seat admission, following
+/// the current turn-order direction (CR 101.4 + CR 103.1) and, under the
+/// shared team turns option, team order (CR 805.6).
+pub(crate) fn apnap_order_admitting(
+    state: &GameState,
+    start_player: PlayerId,
+    admission: SeatAdmission,
+) -> Vec<PlayerId> {
+    apnap_choice_groups_admitting(state, start_player, admission)
         .into_iter()
         .flatten()
         .collect()

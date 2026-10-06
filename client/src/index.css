@@ -134,6 +134,11 @@
   --action-btn-bottom: 0.75rem;
   --action-btn-right: 3.5rem;
   --game-edge-right: 0.75rem;
+  --game-mobile-hand-lift: 0rem;
+  --game-player-row-height: min(calc(0.18 * (100dvh - var(--game-top-overlay-offset, 0px))), 150px);
+  --game-board-choice-bottom: calc(
+    env(safe-area-inset-bottom) + var(--game-player-row-height) + var(--game-mobile-hand-lift) + 0.75rem
+  );
   --card-base: clamp(4rem, calc((7vw + 11vh) / 2), 6.75rem);
   --card-w: calc(var(--card-base) * var(--card-size-scale) * var(--card-viewport-scale));
   --card-h: calc(var(--card-w) * 1.4);
@@ -172,8 +177,18 @@ html {
 }
 
 @utility draft-card-area-drop-active {
+  isolation: isolate;
   background-color: rgb(255 255 255 / 0.08);
-  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.92), 0 0 18px 2px rgb(255 255 255 / 0.42);
+
+  &::after {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    border: 1px solid rgb(255 255 255 / 0.96);
+    border-radius: inherit;
+    box-shadow: 0 0 18px 2px rgb(255 255 255 / 0.68);
+    content: "";
+  }
 }
 
 body {
@@ -542,14 +557,11 @@ select.select-dark option {
 @media (width < 64rem) and (orientation: portrait) {
   :root {
     --game-mobile-hand-lift: 1rem;
+    --game-player-row-height: min(calc(0.24 * (100dvh - var(--game-top-overlay-offset, 0px))), 190px);
     --game-mobile-pile-lift: 16rem;
     --game-mobile-command-lift: 0.5rem;
     --game-mobile-player-hud-lift: 0.5rem;
     --game-mobile-player-hud-shift-x: 1.125rem;
-  }
-
-  [data-flex-zone="player-row"] {
-    height: min(calc(0.24 * (100dvh - var(--game-top-overlay-offset, 0px))), 190px) !important;
   }
 
   [data-flex-zone="playerHandRow"] {

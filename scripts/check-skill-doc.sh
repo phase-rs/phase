@@ -15,7 +15,10 @@
 #       interleaved handlers are documented as `| — |` rows, which the count
 #       ignores.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+# Resolved BEFORE the cd: a relative $0 re-resolves against the new working
+# directory, and the self-test block below would then silently find no suite.
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SELF_DIR/.."
 
 SKILL=".claude/skills/oracle-parser/SKILL.md"
 ORACLE="crates/engine/src/parser/oracle.rs"
@@ -109,75 +112,89 @@ EOF
 # ---------------------------------------------------------------------------
 # (2) Documented anchor symbols exist in the documented files.
 #     Format: "<grep pattern>\t<file>"
+#     The pattern is an ERE, and every row anchors its symbol with a trailing
+#     \b. Unanchored, a bare name absorbs its own longer siblings
+#     (`pub fn parse_number` also matches `parse_number_or_x`; `fn parse_target`
+#     also matches `parse_target_with_ctx`), so a row keeps passing after the
+#     symbol it names has been renamed away -- the exact drift this invariant
+#     exists to catch.
+#
+#     A row body must contain no unescaped ERE metacharacter. Under the old
+#     substring match a row like `fn peel_clause(` was a valid literal; under
+#     -E it is a regex syntax error, and grep's exit 2 is reported by the `||`
+#     below as documented-symbol-missing -- a regex bug wearing a doc-drift
+#     message. Escape the character, or pin the row with the declaration
+#     keyword instead (`const FOO`, `struct Bar`).
 # ---------------------------------------------------------------------------
 while IFS=$'\t' read -r pat file; do
-  grep -q "$pat" "$file" || err "documented symbol missing: '$pat' in $file"
+  grep -qE "$pat" "$file" || err "documented symbol missing: '$pat' in $file"
 done <<'EOF'
-fn parse_oracle_text	crates/engine/src/parser/oracle.rs
-fn parse_oracle_ir	crates/engine/src/parser/oracle.rs
-fn lower_oracle_ir	crates/engine/src/parser/oracle.rs
-fn peel_clause	crates/engine/src/parser/clause_shell.rs
-struct ClauseContext	crates/engine/src/parser/clause_shell.rs
-fn is_static_pattern	crates/engine/src/parser/oracle_classifier.rs
-fn is_replacement_pattern	crates/engine/src/parser/oracle_classifier.rs
-fn dispatch_line_nom	crates/engine/src/parser/oracle_dispatch.rs
-fn parse_effect_chain	crates/engine/src/parser/oracle_effect/mod.rs
-fn parse_effect_clause	crates/engine/src/parser/oracle_effect/mod.rs
-fn parse_imperative_effect	crates/engine/src/parser/oracle_effect/mod.rs
-fn split_leading_conditional	crates/engine/src/parser/oracle_effect/conditions.rs
-fn strip_leading_general_conditional	crates/engine/src/parser/oracle_effect/conditions.rs
-fn static_condition_to_ability_condition	crates/engine/src/parser/oracle_effect/conditions.rs
-fn static_condition_to_trigger_condition	crates/engine/src/parser/oracle_trigger.rs
-fn static_condition_to_restriction_condition	crates/engine/src/parser/oracle_condition.rs
-fn parse_keyword_line_core	crates/engine/src/parser/oracle_keyword.rs
-fn parse_router_keyword_line	crates/engine/src/parser/oracle_keyword.rs
-fn parse_granted_keyword_fragment	crates/engine/src/parser/oracle_keyword.rs
-fn extract_granted_keyword_list	crates/engine/src/parser/oracle_keyword.rs
-fn is_keyword_cost_line	crates/engine/src/parser/oracle_keyword.rs
-ROUTER_KEYWORD_CASES	crates/engine/src/parser/oracle_keyword.rs
-KNOWN_NOUN_PARAM_LEAKS	crates/engine/src/parser/oracle_keyword.rs
-fn strip_trailing_duration	crates/engine/src/parser/oracle_effect/lower.rs
-fn strip_leading_duration	crates/engine/src/parser/oracle_effect/lower.rs
-fn parse_search_library_details	crates/engine/src/parser/oracle_effect/search.rs
-fn parse_seek_details	crates/engine/src/parser/oracle_effect/search.rs
-fn parse_search_destination	crates/engine/src/parser/oracle_effect/search.rs
-fn strip_subject_clause	crates/engine/src/parser/oracle_effect/subject.rs
-fn try_parse_subject_predicate_ast	crates/engine/src/parser/oracle_effect/subject.rs
-fn try_parse_targeted_controller_gain_life	crates/engine/src/parser/oracle_effect/subject.rs
-fn parse_imperative_family_ast	crates/engine/src/parser/oracle_effect/imperative.rs
-fn parse_numeric_imperative_ast	crates/engine/src/parser/oracle_effect/imperative.rs
-fn parse_zone_counter_ast	crates/engine/src/parser/oracle_effect/imperative.rs
-fn split_clause_sequence	crates/engine/src/parser/oracle_effect/sequence.rs
-fn parse_followup_continuation_ast	crates/engine/src/parser/oracle_effect/sequence.rs
-fn try_parse_token	crates/engine/src/parser/oracle_effect/token.rs
-fn parse_animation_spec	crates/engine/src/parser/oracle_effect/animation.rs
-fn try_parse_put_counter	crates/engine/src/parser/oracle_effect/counter.rs
-fn try_parse_add_mana_effect	crates/engine/src/parser/oracle_effect/mana.rs
-fn parse_target	crates/engine/src/parser/oracle_target.rs
-fn parse_type_phrase	crates/engine/src/parser/oracle_target.rs
-fn parse_number	crates/engine/src/parser/oracle_util.rs
-fn contains_possessive	crates/engine/src/parser/oracle_util.rs
-fn contains_object_pronoun	crates/engine/src/parser/oracle_util.rs
-fn match_phrase_variants	crates/engine/src/parser/oracle_util.rs
-fn parse_trigger_line	crates/engine/src/parser/oracle_trigger.rs
-fn parse_static_line	crates/engine/src/parser/oracle_static/mod.rs
-fn parse_static_line_inner	crates/engine/src/parser/oracle_static/dispatch.rs
-fn parse_static_line_multi	crates/engine/src/parser/oracle_static/shared.rs
-fn parse_continuous_modifications	crates/engine/src/parser/oracle_static/keyword_grant.rs
-fn strip_casting_prohibition_subject	crates/engine/src/parser/oracle_static/restriction.rs
-fn parse_replacement_line	crates/engine/src/parser/oracle_replacement.rs
-fn parse_inner_condition	crates/engine/src/parser/oracle_nom/condition.rs
-pub fn parse_duration	crates/engine/src/parser/oracle_nom/duration.rs
-pub fn parse_quantity_ref	crates/engine/src/parser/oracle_nom/quantity.rs
-pub fn parse_number	crates/engine/src/parser/oracle_nom/primitives.rs
-pub fn parse_number_or_x	crates/engine/src/parser/oracle_nom/primitives.rs
-pub fn parse_color	crates/engine/src/parser/oracle_nom/primitives.rs
-pub fn parse_mana_cost	crates/engine/src/parser/oracle_nom/primitives.rs
-pub fn scan_at_word_boundaries	crates/engine/src/parser/oracle_nom/primitives.rs
-fn oracle_err	crates/engine/src/parser/oracle_nom/error.rs
-pub type OracleError	crates/engine/src/parser/oracle_nom/error.rs
-pub type OracleResult	crates/engine/src/parser/oracle_nom/error.rs
-pub fn nom_on_lower	crates/engine/src/parser/oracle_nom/bridge.rs
+fn parse_oracle_text\b	crates/engine/src/parser/oracle.rs
+fn parse_oracle_ir\b	crates/engine/src/parser/oracle.rs
+fn lower_oracle_ir\b	crates/engine/src/parser/oracle.rs
+fn peel_clause\b	crates/engine/src/parser/clause_shell.rs
+struct ClauseContext\b	crates/engine/src/parser/clause_shell.rs
+fn is_static_pattern\b	crates/engine/src/parser/oracle_classifier.rs
+fn is_replacement_pattern\b	crates/engine/src/parser/oracle_classifier.rs
+fn dispatch_line_nom\b	crates/engine/src/parser/oracle_dispatch.rs
+fn parse_effect_chain\b	crates/engine/src/parser/oracle_effect/mod.rs
+fn parse_effect_clause\b	crates/engine/src/parser/oracle_effect/mod.rs
+fn parse_imperative_effect\b	crates/engine/src/parser/oracle_effect/mod.rs
+fn split_leading_conditional\b	crates/engine/src/parser/oracle_effect/conditions.rs
+fn strip_leading_general_conditional\b	crates/engine/src/parser/oracle_effect/conditions.rs
+fn static_condition_to_ability_condition\b	crates/engine/src/parser/oracle_effect/conditions.rs
+fn static_condition_to_trigger_condition\b	crates/engine/src/parser/oracle_trigger.rs
+fn static_condition_to_restriction_condition\b	crates/engine/src/parser/oracle_condition.rs
+fn parse_keyword_line_core\b	crates/engine/src/parser/oracle_keyword.rs
+fn parse_router_keyword_line\b	crates/engine/src/parser/oracle_keyword.rs
+fn parse_granted_keyword_fragment\b	crates/engine/src/parser/oracle_keyword.rs
+fn extract_granted_keyword_list\b	crates/engine/src/parser/oracle_keyword.rs
+fn is_keyword_cost_line\b	crates/engine/src/parser/oracle_keyword.rs
+const ROUTER_KEYWORD_CASES\b	crates/engine/src/parser/oracle_keyword.rs
+const KNOWN_NOUN_PARAM_LEAKS\b	crates/engine/src/parser/oracle_keyword.rs
+fn strip_trailing_duration\b	crates/engine/src/parser/oracle_effect/lower.rs
+fn strip_leading_duration\b	crates/engine/src/parser/oracle_effect/lower.rs
+fn parse_search_library_details\b	crates/engine/src/parser/oracle_effect/search.rs
+fn parse_seek_details\b	crates/engine/src/parser/oracle_effect/search.rs
+fn parse_search_destination\b	crates/engine/src/parser/oracle_effect/search.rs
+fn strip_subject_clause\b	crates/engine/src/parser/oracle_effect/subject.rs
+fn try_parse_subject_predicate_ast\b	crates/engine/src/parser/oracle_effect/subject.rs
+fn try_parse_targeted_controller_gain_life\b	crates/engine/src/parser/oracle_effect/subject.rs
+fn parse_imperative_family_ast\b	crates/engine/src/parser/oracle_effect/imperative.rs
+fn parse_numeric_imperative_ast\b	crates/engine/src/parser/oracle_effect/imperative.rs
+fn parse_zone_counter_ast\b	crates/engine/src/parser/oracle_effect/imperative.rs
+fn split_clause_sequence\b	crates/engine/src/parser/oracle_effect/sequence.rs
+fn parse_followup_continuation_ast\b	crates/engine/src/parser/oracle_effect/sequence.rs
+fn try_parse_token\b	crates/engine/src/parser/oracle_effect/token.rs
+fn parse_animation_spec\b	crates/engine/src/parser/oracle_effect/animation.rs
+fn try_parse_put_counter\b	crates/engine/src/parser/oracle_effect/counter.rs
+fn try_parse_add_mana_effect\b	crates/engine/src/parser/oracle_effect/mana.rs
+fn parse_target\b	crates/engine/src/parser/oracle_target.rs
+fn parse_type_phrase_folding\b	crates/engine/src/parser/oracle_target.rs
+fn parse_type_phrase\b	crates/engine/src/parser/oracle_nom/target.rs
+fn parse_number\b	crates/engine/src/parser/oracle_util.rs
+fn contains_possessive\b	crates/engine/src/parser/oracle_util.rs
+fn contains_object_pronoun\b	crates/engine/src/parser/oracle_util.rs
+fn match_phrase_variants\b	crates/engine/src/parser/oracle_util.rs
+fn parse_trigger_line\b	crates/engine/src/parser/oracle_trigger.rs
+fn parse_static_line\b	crates/engine/src/parser/oracle_static/mod.rs
+fn parse_static_line_inner\b	crates/engine/src/parser/oracle_static/dispatch.rs
+fn parse_static_line_multi\b	crates/engine/src/parser/oracle_static/shared.rs
+fn parse_continuous_modifications\b	crates/engine/src/parser/oracle_static/keyword_grant.rs
+fn strip_casting_prohibition_subject\b	crates/engine/src/parser/oracle_static/restriction.rs
+fn parse_replacement_line\b	crates/engine/src/parser/oracle_replacement.rs
+fn parse_inner_condition\b	crates/engine/src/parser/oracle_nom/condition.rs
+pub fn parse_duration\b	crates/engine/src/parser/oracle_nom/duration.rs
+pub fn parse_quantity_ref\b	crates/engine/src/parser/oracle_nom/quantity.rs
+pub fn parse_number\b	crates/engine/src/parser/oracle_nom/primitives.rs
+pub fn parse_number_or_x\b	crates/engine/src/parser/oracle_nom/primitives.rs
+pub fn parse_color\b	crates/engine/src/parser/oracle_nom/primitives.rs
+pub fn parse_mana_cost\b	crates/engine/src/parser/oracle_nom/primitives.rs
+pub fn scan_at_word_boundaries\b	crates/engine/src/parser/oracle_nom/primitives.rs
+fn oracle_err\b	crates/engine/src/parser/oracle_nom/error.rs
+pub type OracleError\b	crates/engine/src/parser/oracle_nom/error.rs
+pub type OracleResult\b	crates/engine/src/parser/oracle_nom/error.rs
+pub fn nom_on_lower\b	crates/engine/src/parser/oracle_nom/bridge.rs
 EOF
 
 # ---------------------------------------------------------------------------
@@ -219,19 +236,71 @@ done < <(grep -oE '// Priority [^:]+:' "$ORACLE" | sed -E 's#// Priority ##; s#:
 # Each entry is a symbol REMOVED or RENAMED by a landed refactor. If a future
 # rename retires a name the doc cites, add it here in the same commit.
 # ---------------------------------------------------------------------------
+# Both greps anchor the retired name with a trailing \b. Unanchored, a dead
+# name matches its own longer siblings, and both guards then fire on a tree that
+# is not stale: a NEW `parse_keyword_from_oracle_v2()` anywhere under the parser
+# trips the non-vacuity guard, and a SKILL.md citation of
+# `extract_keyword_line_v2()` trips the dead-cite guard. Both fail closed (a
+# spurious red, never a silent green), which is why this trailed invariant (2).
+#
+# Anchored on BOTH edges. Trailing alone still absorbs on the leading side, so a
+# legitimate citation of `new_extract_keyword_line()` matched retired
+# `extract_keyword_line` and redded a tree that was not stale. The non-vacuity
+# guard needs no leading `\b`: `fn ` already pins that edge, and a leading
+# boundary there would reject the `pub fn ` and `fn ` forms it must match.
+#
+# As with invariant (2), these are EREs now: an entry below must be a bare
+# identifier with no unescaped ERE metacharacter, or grep exits 2 and the `||`
+# reports a regex bug as doc drift.
 while IFS= read -r dead; do
   [ -n "$dead" ] || continue
-  if grep -q "$dead" "$SKILL"; then
+  if grep -qE "\b$dead\b" "$SKILL"; then
     err "SKILL.md cites '$dead', which no longer exists in the parser tree (renamed/removed)"
   fi
   # Non-vacuity: if the symbol came BACK, this list is the stale thing.
-  if grep -rq "fn $dead" crates/engine/src/parser/; then
+  if grep -rqE "fn $dead\b" crates/engine/src/parser/; then
     err "'$dead' is listed as dead but exists in the parser tree — update this list, not the doc"
   fi
 done <<'EOF'
 parse_keyword_from_oracle
 extract_keyword_line
 EOF
+
+# ---------------------------------------------------------------------------
+# (5) This gate's own regression suite, run ahead of the verdict.
+#
+# Every invariant above stands on its patterns discriminating: a row that keeps
+# matching after the symbol it names is renamed away reports green while the doc
+# it guards has rotted. That has shipped twice (an unanchored row absorbing its
+# longer siblings, and a row with no declaration keyword satisfied by a comment),
+# and neither was visible from this script's own output. The suite pins those as
+# properties, so it runs where the gate runs.
+#
+# Recursion stops on `Cargo.toml`: the throwaway repos the suite builds copy the
+# parser tree and this script, never the manifest, while every real checkout has
+# one. That is deliberately NOT the file-presence check it replaces, which
+# answered "am I a fixture?" and "does the suite exist?" with a single test --
+# so DELETING the suite read as "I am a fixture" and the gate went green in 5s
+# having verified nothing. Separating the two lets a missing suite be the error
+# it is. Deriving the answer from the tree, rather than from an environment
+# variable, also leaves no switch a caller could set to skip its own gate.
+#
+# Skipped when the tree is already failing. The fixtures copy the LIVE tree, so
+# genuine drift breaks them too, and reporting it a second time as "self-tests
+# failed" points at the suite rather than at the drift that actually caused it.
+# ---------------------------------------------------------------------------
+if [ "$fail" -eq 0 ] && [ -f "Cargo.toml" ]; then
+  # Invoked through the repo-relative path (we are at the repo root by now), so
+  # the interpreter never sees $SELF_DIR's shell-native spelling -- which is not
+  # the same string as a native path on every host. The guard below uses the
+  # same base, so the two cannot disagree about which file they mean.
+  if [ ! -f "scripts/check_skill_doc_tests.py" ]; then
+    err "gate self-tests missing: scripts/check_skill_doc_tests.py"
+  elif ! self_test_output="$(python3 scripts/check_skill_doc_tests.py 2>&1)"; then
+    printf '%s\n' "$self_test_output" >&2
+    err "gate self-tests failed — rerun: python3 scripts/check_skill_doc_tests.py"
+  fi
+fi
 
 if [ "$fail" -ne 0 ]; then
   echo "✗ STALE — update .claude/skills/oracle-parser/SKILL.md (see §12)" >&2

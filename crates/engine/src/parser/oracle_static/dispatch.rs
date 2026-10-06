@@ -80,7 +80,7 @@ fn parse_enchanted_is_copy_of_chosen(tp: &TextPair, text: &str) -> Option<Static
     // Subject type of the enchanted host (creature / permanent). Trim the
     // trailing period first so the donor phrase parses to an empty remainder.
     let subject_lower = rest.lower.trim_end_matches('.').trim();
-    let (subject_filter, after_subject) = parse_type_phrase(subject_lower);
+    let (subject_filter, after_subject) = parse_type_phrase_folding(subject_lower);
     let TargetFilter::Typed(mut subject) = subject_filter else {
         return None;
     };
@@ -90,7 +90,7 @@ fn parse_enchanted_is_copy_of_chosen(tp: &TextPair, text: &str) -> Option<Static
     // The donor type ("creature" / "permanent") must parse and fully consume the
     // remainder — a trailing rider (e.g. "except it has flying") is not modeled
     // by the marker, so bail rather than silently drop it.
-    let (_donor_filter, donor_rest) = parse_type_phrase(donor_lower);
+    let (_donor_filter, donor_rest) = parse_type_phrase_folding(donor_lower);
     if !donor_rest.trim().is_empty() {
         return None;
     }
@@ -275,8 +275,8 @@ fn parse_max_untap_per_type_static(tp: &TextPair<'_>, text: &str) -> Option<Stat
         // cap's own source, so the self-pronoun rewrite always applies
         // (unlike parse_continuous_gets_has's SelfRef-only guard).
         let condition = parse_static_condition(&rewrite_self_pronoun_subject(condition_text))
-            .unwrap_or(StaticCondition::Unrecognized {
-                text: condition_text.to_string(),
+            .unwrap_or_else(|| {
+                unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive)
             });
         def.condition = Some(condition);
         return Some(def);
@@ -284,9 +284,9 @@ fn parse_max_untap_per_type_static(tp: &TextPair<'_>, text: &str) -> Option<Stat
 
     let rest = nom_tag_tp(tp, "players can't untap more than ")?;
     let (after_count, count) = nom_primitives::parse_number(rest.lower).ok()?;
-    let (filter, remainder) = parse_type_phrase(after_count.trim_start());
+    let (filter, remainder) = parse_type_phrase_folding(after_count.trim_start());
     parse_during_their_untap_step_suffix(remainder).ok()?;
-    // Require a real permanent-type filter (parse_type_phrase returns a typed
+    // Require a real permanent-type filter (parse_type_phrase_folding returns a typed
     // filter for "creature"/"artifact"/"permanent"/"nonbasic land"); a bare
     // unrecognized subject would over-broaden the cap.
     if !matches!(&filter, TargetFilter::Typed(_)) {
@@ -336,10 +336,10 @@ fn parse_untaps_during_each_other_players_untap_step(
     // "Untap all/each <type> you control during each other player's untap
     // step." — Seedborn Muse prints "all"; Prop Room and Ivorytusk Fortress
     // print "each" for the same subject shape, so both tags share this arm.
-    // Delegate the subject to `parse_type_phrase`, which handles the full
+    // Delegate the subject to `parse_type_phrase_folding`, which handles the full
     // range of type + controller + property phrases.
     if let Some(rest) = nom_tag_tp(tp, "untap all ").or_else(|| nom_tag_tp(tp, "untap each ")) {
-        let (filter, remainder) = parse_type_phrase(rest.original);
+        let (filter, remainder) = parse_type_phrase_folding(rest.original);
         let remainder_lower = remainder.to_lowercase();
         let during_ok = nom_on_lower(
             remainder,
@@ -657,7 +657,7 @@ pub(crate) fn parse_damage_not_removed_during_cleanup(
     {
         (TargetFilter::SelfRef, rest)
     } else {
-        let (filter, rest) = parse_type_phrase(body);
+        let (filter, rest) = parse_type_phrase_folding(body);
         if matches!(&filter, TargetFilter::Any) {
             return None;
         }
@@ -776,6 +776,51 @@ fn parse_attacking_defender_scope<'a>(tp: &TextPair<'a>) -> Option<(&'a str, Con
     None
 }
 
+/// CR 604.1 + CR 611.3a + CR 613.1: a recursed static may carry a composed
+/// leading timing window only when the layer system will actually honor it.
+///
+/// `StaticMode::Continuous` is the mode whose `condition` is evaluated by
+/// `game::layers::gather_active_continuous_effects` → `evaluate_condition`, so
+/// it is the mode where a composed window is guaranteed to be enforced.
+///
+/// This is CONSERVATIVE, not necessary, and the cost is measured rather than
+/// assumed: several non-`Continuous` enforcement points DO evaluate `condition`
+/// (`game::combat` for `CantBlock`/`CantAttack` via
+/// `layers::evaluate_condition_with_recipient`; `game::casting` for
+/// `CastWithKeyword` via `layers::evaluate_condition`). Measured today, the
+/// restriction costs ZERO corpus coverage — of the corpus lines this arm would
+/// otherwise reach, none parses to a non-`Continuous` mode — while off-corpus
+/// it declines the `MustAttack` / `CastWithKeyword` / `CantBlock` shapes, which
+/// therefore stay honestly `Effect::Unimplemented`. Widening is per-mode work:
+/// each admitted mode needs its own runtime discriminating test proving its
+/// enforcement point honors the window.
+///
+/// The non-empty check is the fail-closed half, and it is load-bearing:
+/// measured, Elvish Refueler's remainder parses to a `Continuous` static with an
+/// `Unrecognized` condition and ZERO modifications. Accepting it would replace
+/// an honest `Effect::Unimplemented` with a silent no-op that reports as
+/// supported — a lying green. Mirrors the fail-closed acceptance bar on
+/// `parse_extra_blockers_static` below.
+/// The third conjunct closes the remaining half of the same hazard. A remainder
+/// can parse to a `Continuous` static that has modifications but whose condition
+/// tree carries `StaticCondition::Unrecognized` (an unparsed `as long as …`
+/// clause). `game::layers::evaluate_condition` maps `Unrecognized` to `true`, so
+/// composing the window onto it would apply the modification for the whole of
+/// the controller's turn while silently discarding the printed condition —
+/// wrong game behavior, not merely missing behavior. `contains_unrecognized`
+/// (`types/ability.rs`) is the single authority for that test and already
+/// recurses through `And`/`Or`/`Not`; `game::coverage` uses the same helper to
+/// keep such a static out of the supported set, so refusing here keeps the
+/// parser and the coverage report telling the same story.
+fn is_enforceable_continuous_static(def: &StaticDefinition) -> bool {
+    matches!(def.mode, StaticMode::Continuous)
+        && !def.modifications.is_empty()
+        && !def
+            .condition
+            .as_ref()
+            .is_some_and(StaticCondition::contains_unrecognized)
+}
+
 pub(crate) fn parse_static_line_inner(
     text: &str,
     inverted: InvertedAsLongAs,
@@ -864,6 +909,10 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    if let Some(def) = parse_tagged_ability_activation_timing_permission(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 510.1c: Attached-object conditional variants must precede the generic
     // inverted "As long as ..." rewrite so the condition binds to the
     // enchanted/equipped creature rather than becoming an unrecognized SelfRef
@@ -901,6 +950,16 @@ pub(crate) fn parse_static_line_inner(
     if matches!(inverted, InvertedAsLongAs::Allow) {
         if let Some(split) = try_split_inverted_as_long_as(&tp) {
             if let Some(def) = try_parse_inverted_attached_subject_grant(&split, &text) {
+                return Some(def);
+            }
+            // CR 611.3a + CR 607.2a: the persistent exile-cast permission reads
+            // its own leading gate (`strip_leading_permission_condition`) — "As
+            // long as <condition>, you may cast the exiled card, and mana of any
+            // type can be spent to cast that spell" (Null Summoner). The canonical
+            // rewrite below would put the gate after the concession conjunct,
+            // where no permission grammar reads it, and the generic fallback
+            // would keep only the gate.
+            if let Some(def) = try_parse_persistent_exile_play_permission(&text, &lower) {
                 return Some(def);
             }
             // CR 400.2 + CR 701.20a: "As long as <condition>, all players
@@ -1216,6 +1275,7 @@ pub(crate) fn parse_static_line_inner(
             StaticDefinition::new(StaticMode::SpendManaAsAnyColor {
                 spell_filter: None,
                 activation_source_filter: None,
+                concession: crate::types::ability::ManaSpendPermission::AnyColor,
             })
             .affected(TargetFilter::Player)
             .description(text.to_string()),
@@ -1315,7 +1375,7 @@ pub(crate) fn parse_static_line_inner(
         tp.lower.trim_end_matches('.'),
         "you control enchanted ",
     ) {
-        let (type_filter, remainder) = parse_type_phrase(type_word);
+        let (type_filter, remainder) = parse_type_phrase_folding(type_word);
         if remainder.is_empty() {
             if let TargetFilter::Typed(mut tf) = type_filter {
                 tf.properties.push(FilterProp::EnchantedBy);
@@ -1371,10 +1431,15 @@ pub(crate) fn parse_static_line_inner(
     if let Some(rest) = nom_tag_tp(&tp, "enchanted creature ") {
         let filter =
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]));
-        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text)
-            .into_iter()
-            .next()
-        {
+        // A COMPOSED pair (permission + companion) cannot be represented by this
+        // single-return caller, and taking `.next()` would silently drop the
+        // second definition — reintroducing the partial-prefix defect one layer
+        // up. Decline instead: `parse_static_line_multi` owns those lines.
+        let defs = parse_enchanted_equipped_predicate(rest.original, filter, &text);
+        if defs.len() > 1 {
+            return None;
+        }
+        if let Some(def) = defs.into_iter().next() {
             return Some(def);
         }
     }
@@ -1383,10 +1448,15 @@ pub(crate) fn parse_static_line_inner(
     if let Some(rest) = nom_tag_tp(&tp, "enchanted permanent ") {
         let filter =
             TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy]));
-        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text)
-            .into_iter()
-            .next()
-        {
+        // A COMPOSED pair (permission + companion) cannot be represented by this
+        // single-return caller, and taking `.next()` would silently drop the
+        // second definition — reintroducing the partial-prefix defect one layer
+        // up. Decline instead: `parse_static_line_multi` owns those lines.
+        let defs = parse_enchanted_equipped_predicate(rest.original, filter, &text);
+        if defs.len() > 1 {
+            return None;
+        }
+        if let Some(def) = defs.into_iter().next() {
             return Some(def);
         }
     }
@@ -1435,10 +1505,15 @@ pub(crate) fn parse_static_line_inner(
     if let Some(rest) = nom_tag_tp(&tp, "enchanted land ") {
         let filter =
             TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::EnchantedBy]));
-        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text)
-            .into_iter()
-            .next()
-        {
+        // A COMPOSED pair (permission + companion) cannot be represented by this
+        // single-return caller, and taking `.next()` would silently drop the
+        // second definition — reintroducing the partial-prefix defect one layer
+        // up. Decline instead: `parse_static_line_multi` owns those lines.
+        let defs = parse_enchanted_equipped_predicate(rest.original, filter, &text);
+        if defs.len() > 1 {
+            return None;
+        }
+        if let Some(def) = defs.into_iter().next() {
             return Some(def);
         }
     }
@@ -1447,10 +1522,15 @@ pub(crate) fn parse_static_line_inner(
     if let Some(rest) = nom_tag_tp(&tp, "equipped creature ") {
         let filter =
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy]));
-        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text)
-            .into_iter()
-            .next()
-        {
+        // A COMPOSED pair (permission + companion) cannot be represented by this
+        // single-return caller, and taking `.next()` would silently drop the
+        // second definition — reintroducing the partial-prefix defect one layer
+        // up. Decline instead: `parse_static_line_multi` owns those lines.
+        let defs = parse_enchanted_equipped_predicate(rest.original, filter, &text);
+        if defs.len() > 1 {
+            return None;
+        }
+        if let Some(def) = defs.into_iter().next() {
             return Some(def);
         }
     }
@@ -2032,10 +2112,9 @@ pub(crate) fn parse_static_line_inner(
         // instead, so the line reaches an authority that can model it or is
         // surfaced honestly as unimplemented.
         if let Some(keyword) = map_keyword(keyword_text) {
-            let condition =
-                parse_static_condition(condition_text).unwrap_or(StaticCondition::Unrecognized {
-                    text: condition_text.to_string(),
-                });
+            let condition = parse_static_condition(condition_text).unwrap_or_else(|| {
+                unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive)
+            });
             return Some(
                 StaticDefinition::continuous()
                     .affected(TargetFilter::SelfRef)
@@ -2178,10 +2257,9 @@ pub(crate) fn parse_static_line_inner(
                 .description(text.to_string());
             if let Some(cond_tp) = condition_tp {
                 let cond_text = cond_tp.original.trim().trim_end_matches('.');
-                let condition =
-                    parse_static_condition(cond_text).unwrap_or(StaticCondition::Unrecognized {
-                        text: cond_text.to_string(),
-                    });
+                let condition = parse_static_condition(cond_text).unwrap_or_else(|| {
+                    unparsed_gate_condition(cond_text, ConditionGatePolarity::Positive)
+                });
                 def = def.condition(condition);
             }
             return Some(def);
@@ -2260,14 +2338,14 @@ pub(crate) fn parse_static_line_inner(
                 // CR 105.4 + CR 608.2c (issue #327): Try the chosen-qualifier
                 // parser first so "creatures of that color" / "creatures of
                 // the chosen color" produces a filter with
-                // `FilterProp::IsChosenColor`. Falls back to `parse_type_phrase`
+                // `FilterProp::IsChosenColor`. Falls back to `parse_type_phrase_folding`
                 // for non-anaphor filter shapes.
                 let by_rest_tp = TextPair::new(by_rest, by_rest);
                 let (filter, remainder) =
                     if let Some(chosen) = parse_chosen_qualifier_subject(&by_rest_tp) {
                         (chosen, "")
                     } else {
-                        parse_type_phrase(by_rest)
+                        parse_type_phrase_folding(by_rest)
                     };
                 if !matches!(filter, TargetFilter::Any) {
                     let mut def = StaticDefinition::new(StaticMode::CantBeBlockedBy { filter })
@@ -2546,7 +2624,7 @@ pub(crate) fn parse_static_line_inner(
     // --- "~ can be attached only to {filter}" ---
     // CR 301.5 + CR 303.4 + CR 701.3a: Positive attachment restriction on an
     // Aura/Equipment — the source can only attach to a host matching the parsed
-    // `TargetFilter` (Strata Scythe, Brass Knuckles, Konda's Banner). Enforced in
+    // `TargetFilter` (O-Naginata, Gate Smasher, Konda's Banner). Enforced in
     // game/effects/attach.rs::attachment_illegality.
     if let Some(def) = parse_attach_only_restriction(&tp, &text) {
         return Some(def);
@@ -2650,12 +2728,27 @@ pub(crate) fn parse_static_line_inner(
                 "Unconsumed conditional in 'can't be countered' catch-all — parser may need extension"
             );
         } else {
-            let affected = parse_cant_be_countered_subject(&tp);
-            return Some(
-                StaticDefinition::new(StaticMode::CantBeCountered)
-                    .affected(affected)
-                    .description(text.to_string()),
-            );
+            // CR 101.2 + CR 604.1: a leading "if <cond>," gates the whole static
+            // (Dragonlord's Prerogative, Banefire). A typed condition is attached
+            // through the single gate authority. A condition the static grammar
+            // does not type, or a line with text beyond "<subject> can't be
+            // countered" (Banefire's "and the damage can't be prevented"), keeps the
+            // static but gates it on the always-inert, coverage-visible marker, so
+            // the card reads as an unsupported gap instead of an unconditional
+            // "can't be countered".
+            let (gate_text, body) = split_leading_if_gate(&tp);
+            let mut def = StaticDefinition::new(StaticMode::CantBeCountered)
+                .affected(parse_cant_be_countered_subject(&body))
+                .description(text.to_string());
+            if let Some(gate_text) = gate_text {
+                match parse_static_condition(gate_text)
+                    .filter(|_| is_bare_cant_be_countered_clause(body.lower))
+                {
+                    Some(condition) => attach_gated_condition(&mut def, condition, gate_text),
+                    None => def.condition = Some(unenforceable_gate_marker(gate_text)),
+                }
+            }
+            return Some(def);
         }
     }
 
@@ -2969,7 +3062,7 @@ pub(crate) fn parse_static_line_inner(
         Ok((i, n as u8))
     }) {
         // Parse the affected filter from the beginning of the text (before "can boast")
-        let (affected, _) = parse_type_phrase(tp.original);
+        let (affected, _) = parse_type_phrase_folding(tp.original);
         return Some(
             StaticDefinition::new(StaticMode::ModifyActivationLimit {
                 keyword: "boast".to_string(),
@@ -2986,21 +3079,24 @@ pub(crate) fn parse_static_line_inner(
         && nom_primitives::scan_contains(tp.lower, "less to activate")
     {
         // Extract keyword name and amount via nom combinators
-        if let Some(((keyword, amount), remainder)) = nom_on_lower(tp.original, tp.lower, |i| {
-            let (i, kw) = terminated(
-                nom::bytes::complete::take_until(" abilities you activate"),
-                tag(" abilities you activate"),
-            )
-            .parse(i)?;
-            let (i, _) = take_until(" cost ").parse(i)?;
-            let (i, _) = tag(" cost ").parse(i)?;
-            let (i, amt) =
-                nom::sequence::delimited(tag("{"), nom_primitives::parse_number, tag("}"))
-                    .parse(i)?;
-            let (i, _) = tag(" less to activate").parse(i)?;
-            Ok((i, (kw.to_string(), amt)))
-        })
-        .filter(|((keyword, _), _)| !keyword.trim().is_empty())
+        if let Some(((keyword, source, targets, amount), remainder)) =
+            nom_on_lower(tp.original, tp.lower, |i| {
+                let (i, kw) = terminated(
+                    nom::bytes::complete::take_until(" abilities you activate"),
+                    tag(" abilities you activate"),
+                )
+                .parse(i)?;
+                let (i, target_text) = take_until(" cost ").parse(i)?;
+                let (_, (source, targets)) =
+                    split_ability_source_and_target_restriction(target_text)?;
+                let (i, _) = tag(" cost ").parse(i)?;
+                let (i, amt) =
+                    nom::sequence::delimited(tag("{"), nom_primitives::parse_number, tag("}"))
+                        .parse(i)?;
+                let (i, _) = tag(" less to activate").parse(i)?;
+                Ok((i, (kw.to_string(), source, targets, amt)))
+            })
+            .filter(|((keyword, _, _, _), _)| !keyword.trim().is_empty())
         {
             // CR 601.2f: Extract optional "for each [X]" dynamic count clause from remainder.
             let remainder_lower = remainder.to_lowercase();
@@ -3021,19 +3117,106 @@ pub(crate) fn parse_static_line_inner(
             // not who controls the ability's source. Emit the activator axis rather
             // than a `controller(You)` source filter, which mis-scoped abilities on
             // permanents another player controls but this player may activate.
-            return Some(
-                StaticDefinition::new(StaticMode::ReduceAbilityCost {
-                    mode: CostModifyMode::Reduce,
-                    keyword: keyword.trim().to_string(),
-                    amount,
-                    minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
-                    dynamic_count,
-                    exemption: ActivationExemption::None,
-                    activator: Some(PlayerFilter::Controller),
-                })
-                .description(text.to_string()),
-            );
+            // CR 602.2: an "of <sources>" qualifier additionally scopes WHICH
+            // abilities by their source ("of other Equipment").
+            let mut def = StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Reduce,
+                keyword: keyword.trim().to_string(),
+                amount,
+                minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
+                dynamic_count,
+                exemption: ActivationExemption::None,
+                activator: Some(PlayerFilter::Controller),
+                targets,
+                frequency: None,
+            })
+            .description(text.to_string());
+            if let Some(source) = source {
+                def = def.affected(source);
+            }
+            return Some(def);
         }
+    }
+
+    // --- "The first activated ability [of <subject>] you activate ... that targets <X> costs {N} less to activate" ---
+    // CR 118.7 + CR 602.2b: once-per-turn activation-cost discount. The
+    // frequency applies to the turn's first QUALIFYING activation (including
+    // any target gate), read from the turn's activation journal (CR 611.3a:
+    // activations made before this source existed count too).
+    //
+    // CR 605.1a: admitted ONLY when the line carries a target restriction. A
+    // mana ability "doesn't require a target", so a target-restricted ability can
+    // never be a mana ability. Without a target restriction a mana ability can be
+    // the turn's first activation (Tezzeret, Betrayer of Flesh's own ruling: the
+    // discount "does not exclude mana abilities"), and the mana-ability path
+    // applies no `ReduceAbilityCost`, so the discount would go unapplied to it: a
+    // misprice. Such lines (Tezzeret) decline here and stay a strict parse
+    // failure until the mana-ability path prices activations.
+    if let Some(((affected, timing, targets, amount), _)) =
+        nom_on_lower(tp.original, tp.lower, |i| {
+            let (i, _) = tag("the first activated ability ").parse(i)?;
+            let (i, subject) = alt((
+                map(
+                    preceded(
+                        tag::<_, _, OracleError<'_>>("of "),
+                        terminated(
+                            take_until::<_, _, OracleError<'_>>(" you activate "),
+                            tag(" you activate "),
+                        ),
+                    ),
+                    Some,
+                ),
+                value(None, tag("you activate ")),
+            ))
+            .parse(i)?;
+            // CR 602.2: an "of <sources>" subject must be consumed whole; one the
+            // grammar can't read declines the line rather than widening the
+            // discount to every activated ability.
+            let affected = subject
+                .map(|subject| parse_ability_source_subject(subject.trim()).map(|(_, f)| f))
+                .transpose()?;
+            let (i, timing) = alt((
+                value(
+                    Some(StaticCondition::DuringYourTurn),
+                    tag("during your turn"),
+                ),
+                value(None, tag("each turn")),
+            ))
+            .parse(i)?;
+            let (i, target_text) = take_until(" costs {").parse(i)?;
+            let (_, targets) = split_bare_ability_target_restriction(target_text)?;
+            let (i, _) = tag(" costs {").parse(i)?;
+            let (i, amount) = nom_primitives::parse_number(i)?;
+            let (i, _) = tag("} less to activate").parse(i)?;
+            Ok((i, (affected, timing, targets, amount)))
+        })
+        .filter(|((_, _, targets, _), _)| targets.is_some())
+    {
+        let mut def = StaticDefinition::new(StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Reduce,
+            keyword: "activated".to_string(),
+            amount,
+            minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
+            dynamic_count: None,
+            exemption: ActivationExemption::None,
+            activator: Some(PlayerFilter::Controller),
+            targets,
+            // CR 118.7 + CR 602.2b: "the FIRST … you activate [during your turn |
+            // each turn]" — the turn's first qualifying activation, whatever
+            // its source and whenever this static's source entered (CR 611.3a).
+            // The relative clause restricts the counting set, so it is the first
+            // activation that satisfies the target gate, not the first
+            // activation of any kind (Hojo's own ruling).
+            frequency: Some(CastFrequency::OncePerTurn),
+        })
+        .description(text.to_string());
+        if let Some(affected) = affected {
+            def = def.affected(affected);
+        }
+        if let Some(condition) = timing {
+            def = def.condition(condition);
+        }
+        return Some(def);
     }
 
     // --- "<Keyword> abilities of [subject] cost {N} less to activate" ---
@@ -3042,20 +3225,26 @@ pub(crate) fn parse_static_line_inner(
     // ("power-up", "exhaust", "boast", "outlast"); the static runtime gate
     // (`apply_static_activated_ability_cost_reduction`) matches the activating
     // ability's `AbilityTag::keyword_str()`. The `<subject>` filter is routed
-    // through `parse_type_phrase`, which handles the "other" self-exclusion.
+    // through `parse_ability_source_subject`, which handles the "other"
+    // self-exclusion and declines a subject it can't consume whole (CR 602.2: an
+    // unread qualifier must not widen the modifier to every such ability).
     //   - Hulk / Gamma Goliath: "Power-up abilities of other creatures you control…"
     //   - Boom Scholar: "Exhaust abilities of other permanents you control…"
-    if let Some(((keyword, subject, amount), _)) = nom_on_lower(tp.original, tp.lower, |i| {
-        let (i, keyword) = parse_taggable_ability_keyword(i)?;
-        let (i, _) = tag(" abilities of ").parse(i)?;
-        let (i, subject) = take_until(" cost ").parse(i)?;
-        let (i, _) = tag(" cost ").parse(i)?;
-        let (i, amount) =
-            nom::sequence::delimited(tag("{"), nom_primitives::parse_number, tag("}")).parse(i)?;
-        let (i, _) = tag(" less to activate").parse(i)?;
-        Ok((i, (keyword, subject.to_string(), amount)))
-    }) {
-        let (affected, _rest) = parse_type_phrase(&subject);
+    if let Some(((keyword, affected, targets, amount), _)) =
+        nom_on_lower(tp.original, tp.lower, |i| {
+            let (i, keyword) = parse_taggable_ability_keyword(i)?;
+            let (i, _) = tag(" abilities of ").parse(i)?;
+            let (i, subject) = take_until(" cost ").parse(i)?;
+            let (_, (subject, targets)) = split_ability_target_restriction(subject)?;
+            let (_, affected) = parse_ability_source_subject(subject.trim())?;
+            let (i, _) = tag(" cost ").parse(i)?;
+            let (i, amount) =
+                nom::sequence::delimited(tag("{"), nom_primitives::parse_number, tag("}"))
+                    .parse(i)?;
+            let (i, _) = tag(" less to activate").parse(i)?;
+            Ok((i, (keyword, affected, targets, amount)))
+        })
+    {
         return Some(
             StaticDefinition::new(StaticMode::ReduceAbilityCost {
                 mode: CostModifyMode::Reduce,
@@ -3067,6 +3256,8 @@ pub(crate) fn parse_static_line_inner(
                 // Source-scoped ("abilities of <subject>"): scope is the `affected`
                 // filter below; no activator gate.
                 activator: None,
+                targets,
+                frequency: None,
             })
             .affected(affected)
             .description(text.to_string()),
@@ -3103,7 +3294,7 @@ pub(crate) fn parse_static_line_inner(
         {
             TargetFilter::SelfRef
         } else {
-            parse_type_phrase(&subject).0
+            parse_type_phrase_folding(&subject).0
         };
         let minimum_mana = matches!(mode, CostModifyMode::Reduce)
             .then(|| parse_activated_cost_reduction_minimum_mana(tp.lower))
@@ -3119,6 +3310,8 @@ pub(crate) fn parse_static_line_inner(
                 // Source-scoped ("<subject>'s <keyword> abilities"): scope is the
                 // `affected` filter below; no activator gate.
                 activator: None,
+                targets: None,
+                frequency: None,
             })
             .affected(affected)
             .description(text.to_string()),
@@ -3135,7 +3328,7 @@ pub(crate) fn parse_static_line_inner(
         let (i, _) = tag(" can be activated an additional time").parse(i)?;
         Ok((i, subject.to_string()))
     }) {
-        let (affected, _rest) = parse_type_phrase(&subject);
+        let (affected, _rest) = parse_type_phrase_folding(&subject);
         return Some(
             StaticDefinition::new(StaticMode::ModifyActivationLimit {
                 keyword: "power-up".to_string(),
@@ -3163,7 +3356,7 @@ pub(crate) fn parse_static_line_inner(
         Ok((i, (prefix, filter_part.to_string(), amount)))
     }) {
         let filter_text = format!("{prefix}{filter_part}");
-        let (affected, _rest) = parse_type_phrase(&filter_text);
+        let (affected, _rest) = parse_type_phrase_folding(&filter_text);
         return Some(
             StaticDefinition::new(StaticMode::ReduceAbilityCost {
                 mode: CostModifyMode::Reduce,
@@ -3175,6 +3368,8 @@ pub(crate) fn parse_static_line_inner(
                 // Source-scoped ("[Enchanted/Equipped] <type>'s activated
                 // abilities"): scope is the `affected` filter below; no activator gate.
                 activator: None,
+                targets: None,
+                frequency: None,
             })
             .affected(affected)
             .description(text.to_string()),
@@ -3193,35 +3388,43 @@ pub(crate) fn parse_static_line_inner(
     // runtime gate matches `keyword == "loyalty"` against a loyalty ability's cost.
     // Combinator: prefix → subject → " cost {N} " → direction. The subject is
     // either the chosen-name source phrase (→ HasChosenName) or a type phrase.
-    if let Some(((amount_n, is_x, mode, subject_filter, dynamic_count, keyword, exemption), _)) =
-        nom_on_lower(tp.original, tp.lower, |i| {
-            // CR 601.2f + CR 606.1: shared grammar head (also used by the transient
-            // this-turn form, which lowers to a `GenericEffect` carrying this same
-            // `ReduceAbilityCost` static) — "<activated|loyalty> abilities of
-            // <subject> cost {N|X} <less|more> to activate".
-            let (i, (keyword, subject, amount_n, is_x, mode)) =
-                super::cost_mod::parse_activated_ability_cost_head(i)?;
-            // CR 208.1 + CR 113.7: optional dynamic referent for `{X}`
-            // ("where X is ~'s power", Agatha).
-            let (i, dynamic_count) = opt(parse_where_x_is_self_stat).parse(i)?;
-            // CR 605.1a: consume the optional mana-ability carve-out at the
-            // source-scoped grammar boundary, accepting both apostrophe forms.
-            let (i, exemption) =
-                opt(super::shared::parse_mana_ability_exemption_suffix).parse(i)?;
-            Ok((
-                i,
-                (
-                    amount_n,
-                    is_x,
-                    mode,
-                    subject.to_string(),
-                    dynamic_count,
-                    keyword,
-                    exemption,
-                ),
-            ))
-        })
-    {
+    if let Some((
+        (amount_n, is_x, mode, subject_filter, dynamic_count, keyword, exemption, targets),
+        _,
+    )) = nom_on_lower(tp.original, tp.lower, |i| {
+        // CR 601.2f + CR 606.1: shared grammar head (also used by the transient
+        // this-turn form, which lowers to a `GenericEffect` carrying this same
+        // `ReduceAbilityCost` static) — "<activated|loyalty> abilities of
+        // <subject> cost {N|X} <less|more> to activate".
+        let (i, head) = super::cost_mod::parse_activated_ability_cost_head(i)?;
+        let super::cost_mod::ActivatedAbilityCostHead {
+            keyword,
+            subject,
+            targets,
+            amount: amount_n,
+            is_x,
+            mode,
+        } = head;
+        // CR 208.1 + CR 113.7: optional dynamic referent for `{X}`
+        // ("where X is ~'s power", Agatha).
+        let (i, dynamic_count) = opt(parse_where_x_is_self_stat).parse(i)?;
+        // CR 605.1a: consume the optional mana-ability carve-out at the
+        // source-scoped grammar boundary, accepting both apostrophe forms.
+        let (i, exemption) = opt(super::shared::parse_mana_ability_exemption_suffix).parse(i)?;
+        Ok((
+            i,
+            (
+                amount_n,
+                is_x,
+                mode,
+                subject.to_string(),
+                dynamic_count,
+                keyword,
+                exemption,
+                targets,
+            ),
+        ))
+    }) {
         // CR 601.2f: A fixed `{N}` reduces by exactly `N`; a `{X}` reduces by
         // `1 × resolve_quantity(dynamic_count)` (Agatha: X = ~'s power). A bare
         // `{X}` with no recognized referent is unresolvable — leave it for a
@@ -3235,7 +3438,7 @@ pub(crate) fn parse_static_line_inner(
             // CR 113.6 + CR 201.2: "sources with the chosen name" → HasChosenName,
             // shared with the CantBeActivated name-picker class. Otherwise a type phrase.
             let affected = parse_chosen_name_source_filter(&subject_filter)
-                .unwrap_or_else(|| parse_type_phrase(&subject_filter).0);
+                .unwrap_or_else(|| parse_type_phrase_folding(&subject_filter).0);
             // CR 118.7: a one-mana floor only applies to reductions.
             let minimum_mana = matches!(mode, CostModifyMode::Reduce)
                 .then(|| parse_activated_cost_reduction_minimum_mana(tp.lower))
@@ -3255,6 +3458,8 @@ pub(crate) fn parse_static_line_inner(
                     // Source-scoped ("Activated/Loyalty abilities of <filter>"):
                     // scope is the `affected` filter below; no activator gate.
                     activator: None,
+                    targets,
+                    frequency: None,
                 })
                 .affected(affected)
                 .description(text.to_string()),
@@ -3282,7 +3487,7 @@ pub(crate) fn parse_static_line_inner(
     // sets `activator = Some(PlayerFilter::Controller)` ("you" = the static's
     // controller) and leaves `affected = None` — the discount keys off who
     // activates the ability, never who controls its source.
-    if let Some(((activator, exemption, amount, mode), _)) =
+    if let Some(((activator, targets, exemption, amount, mode), _)) =
         nom_on_lower(tp.original, tp.lower, |i| {
             let (i, (activator, prefix_exempt)) = alt((
                 // CR 602.2: opponent-activator scope — "abilities your opponents
@@ -3318,6 +3523,8 @@ pub(crate) fn parse_static_line_inner(
                 value((None::<PlayerFilter>, false), tag("activated abilities")),
             ))
             .parse(i)?;
+            let (i, target_text) = take_until(" cost {").parse(i)?;
+            let (_, targets) = split_bare_ability_target_restriction(target_text)?;
             let (i, _) = tag(" cost {").parse(i)?;
             let (i, amount) = nom_primitives::parse_number(i)?;
             let (i, _) = tag("} ").parse(i)?;
@@ -3334,7 +3541,7 @@ pub(crate) fn parse_static_line_inner(
             } else {
                 ActivationExemption::None
             };
-            Ok((i, (activator, exemption, amount, mode)))
+            Ok((i, (activator, targets, exemption, amount, mode)))
         })
     {
         // CR 118.7: a one-mana floor only applies to reductions.
@@ -3350,6 +3557,8 @@ pub(crate) fn parse_static_line_inner(
                 dynamic_count: None,
                 exemption,
                 activator,
+                targets,
+                frequency: None,
             })
             .description(text.to_string()),
         );
@@ -3573,10 +3782,9 @@ pub(crate) fn parse_static_line_inner(
     // only NARROW the set of lines that end up `Unrecognized`, never widen it.
     if let Some(rest_tp) = nom_tag_tp(&tp, "as long as ") {
         let condition_text = rest_tp.original.trim_end_matches('.');
-        let condition =
-            parse_static_condition(condition_text).unwrap_or(StaticCondition::Unrecognized {
-                text: condition_text.to_string(),
-            });
+        let condition = parse_static_condition(condition_text).unwrap_or_else(|| {
+            unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive)
+        });
         return Some(
             StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)
@@ -3691,7 +3899,87 @@ pub(crate) fn parse_static_line_inner(
         if let Some(filter) = parse_doubler_source_filter(tp.lower) {
             def = def.affected(filter);
         }
+        // CR 603.2d + CR 604.1: "…triggers while <condition>, that ability triggers
+        // an additional time" (Sanctum of All: "while you control six or more
+        // Shrines") gates the doubling on a game-state condition, evaluated live
+        // by `active_static_definitions`. `parse_static_condition` delegates to
+        // `parse_inner_condition`, the single condition authority.
+        if nom_primitives::scan_contains(tp.lower, "triggers while ") {
+            // A printed gate whose continuation is not the doubler's own must not
+            // degrade to an unconditional doubler: decline so the line stays a
+            // flagged gap.
+            let (_, condition_text, _) = nom_primitives::scan_preceded(tp.lower, |i| {
+                preceded(
+                    tag::<_, _, OracleError<'_>>("triggers while "),
+                    // Anchor on the doubler's own continuation so a condition that
+                    // itself contains a comma is not cut at its first ", ".
+                    terminated(
+                        take_until(", that ability trigger"),
+                        tag(", that ability trigger"),
+                    ),
+                )
+                .parse(i)
+            })?;
+            def.condition = Some(parse_static_condition(condition_text)?);
+        }
         return Some(def);
+    }
+
+    // --- TERMINAL: "During your turn, <static>" / "During turns other than
+    //     yours, <static>" — leading timing-window composition. ---
+    //
+    // CR 604.1: a static ability's statement is simply true, so a printed
+    // timing clause is an intrinsic gate on the WHOLE statement, not part of
+    // its subject. CR 102.1 + CR 109.5: "your turn" binds to the source
+    // object's controller, which is exactly what `StaticCondition::DuringYourTurn`
+    // means to `game::layers::evaluate_condition`. CR 611.3a: the composed gate
+    // is re-evaluated live, never locked in.
+    //
+    // WHY THIS IS TERMINAL, and why it must never move earlier. Many sites
+    // under `crates/engine/src/parser/` peel this same prefix internally
+    // (regenerate the list with:
+    //   grep -rn '"during your turn, "\|"during turns other than yours, "' \
+    //     crates/engine/src/parser/ | grep -v tests
+    // ). Each is MORE SPECIFIC than the general subject-static path, and several
+    // are dispatched AFTER it. Running the peel before those parsers have
+    // refused the FULL line would hand a specific line's remainder to the
+    // general path and change which authority owns it: measured, Bello, Bard of
+    // the Brambles' remainder is claimed by `anthem::parse_subject_continuous_static`
+    // and emits the same modification SET in a different ORDER than its rightful
+    // owner `type_change::parse_each_compound_subject_type_change`. Placing the
+    // peel LAST makes it a pure addition — it can only claim lines this entire
+    // dispatcher has already refused, so no card that parses today can change.
+    //
+    // The composition mirrors `anthem::parse_leading_condition_peel` (which owns
+    // the compound "During your turn, as long as <cond>, " form): compose with
+    // any condition the recursed static already carries via `StaticCondition::And`
+    // rather than dropping one.
+    //
+    // `nom_on_lower` (not a raw tag on `tp.lower`) is required so the remainder
+    // keeps its ORIGINAL case: a granted quoted ability's mana symbols must
+    // reach the cost parser un-lowercased (issue #5599).
+    if let Some((turn_condition, remainder)) =
+        nom_on_lower(tp.original, tp.lower, super::parse_leading_turn_scope)
+    {
+        if let Some(mut def) = parse_static_line_inner(remainder.trim(), inverted) {
+            if is_enforceable_continuous_static(&def) {
+                // CR 611.3a: both gates survive.
+                def.condition = Some(match def.condition.take() {
+                    Some(existing) => StaticCondition::And {
+                        conditions: vec![turn_condition, existing],
+                    },
+                    None => turn_condition,
+                });
+                // The description is the FULL line as this function sees it —
+                // i.e. the REMINDER-STRIPPED line, because `text` is shadowed by
+                // `strip_reminder_text(text)` at the top of
+                // `parse_static_line_inner` and every sibling arm's `description`
+                // is that same shadowed `text`. Never the peeled remainder
+                // (matches `parse_leading_condition_peel`).
+                def.description = Some(text.to_string());
+                return Some(def);
+            }
+        }
     }
 
     None
@@ -3900,7 +4188,7 @@ fn parse_counters_cant_be_removed_static(
     // Composed grammar (CR 122.1d + CR 101.2):
     //   <counter_type> " counters can't be removed from " <subject> [.] EOF
     // Uses nom combinators for the counter-type prefix and the fixed anchor,
-    // then parse_type_phrase for the subject (same pattern as
+    // then parse_type_phrase_folding for the subject (same pattern as
     // parse_damage_not_removed_during_cleanup).
 
     // Step 1: Parse the counter type from the start of the lowercase text.
@@ -3917,7 +4205,7 @@ fn parse_counters_cant_be_removed_static(
     // offset as `body` within `tp.lower`.
     let consumed = tp.lower.len() - body.len();
     let subject_original = tp.original[consumed..].trim_end_matches('.').trim();
-    let (filter, remainder) = parse_type_phrase(subject_original);
+    let (filter, remainder) = parse_type_phrase_folding(subject_original);
     if matches!(&filter, TargetFilter::Any) || !remainder.trim().is_empty() {
         return None;
     }

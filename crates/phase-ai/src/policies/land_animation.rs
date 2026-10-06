@@ -4,18 +4,12 @@
 //! animating lands every turn regardless of strategic value, considering mana needs,
 //! color requirements, and combat value.
 
-use std::collections::HashSet;
-
-use engine::game::casting::can_pay_ability_mana_cost_after_auto_tap_excluding;
 use engine::game::game_object;
-use engine::types::ability::{
-    AbilityCost, AbilityDefinition, ContinuousModification, CostCategory, Effect, ManaProduction,
-};
+use engine::types::ability::{Effect, ManaProduction};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaCost;
 use engine::types::player::PlayerId;
 
 use super::activation::turn_only;
@@ -94,7 +88,7 @@ impl TacticalPolicy for LandAnimationPolicy {
             };
         };
 
-        if !ability_animates_land(ability_def) {
+        if !crate::manland::animates_source(ability_def) {
             return PolicyVerdict::Score {
                 delta: 0.0,
                 reason: PolicyReason::new("land_animation_not_animation"),
@@ -109,7 +103,13 @@ impl TacticalPolicy for LandAnimationPolicy {
         // manland for mana to help pay its own {1}{W}{B} animation cost and
         // turns it into a useless tapped creature. Strongly disprefer any
         // activation that leaves the source tapped.
-        if animation_leaves_source_tapped(ctx, *source_id, *ability_index, obj, ability_def) {
+        if crate::manland::activation_leaves_source_tapped(
+            ctx.state,
+            ctx.ai_player,
+            *source_id,
+            *ability_index,
+            ability_def,
+        ) {
             // Route the critical penalty through the band helper (CR-equivalent
             // score contract) rather than a raw Score literal so the delta stays
             // clamped to the critical band before `activation` scaling.
@@ -225,99 +225,6 @@ fn colors_produced_by_land(land: &game_object::GameObject) -> Vec<engine::types:
     colors
 }
 
-fn ability_animates_land(ability: &AbilityDefinition) -> bool {
-    crate::cast_facts::collect_definition_effects(ability)
-        .into_iter()
-        .any(effect_animates_land)
-}
-
-fn effect_animates_land(effect: &Effect) -> bool {
-    match effect {
-        Effect::Animate { .. } => true,
-        Effect::GenericEffect {
-            static_abilities, ..
-        } => static_abilities.iter().any(|static_ability| {
-            static_ability
-                .modifications
-                .iter()
-                .any(modification_adds_creature_type)
-        }),
-        _ => false,
-    }
-}
-
-fn modification_adds_creature_type(modification: &ContinuousModification) -> bool {
-    matches!(
-        modification,
-        ContinuousModification::AddType {
-            core_type: CoreType::Creature
-        }
-    )
-}
-
-fn ability_taps_source(ability: &AbilityDefinition) -> bool {
-    ability.cost.as_ref().is_some_and(|cost| {
-        cost.categories()
-            .into_iter()
-            .any(|category| category == CostCategory::TapsSelf)
-    })
-}
-
-/// CR 508.1a / CR 509.1a: returns true when activating `ability` would leave
-/// the source land tapped — making the animated creature unable to attack or
-/// block this turn. Three ways this happens:
-///   1. the land is already tapped (e.g. used for mana earlier this turn),
-///   2. the activation cost itself taps the source, or
-///   3. paying the mana cost would force tapping the source for mana. The
-///      engine's auto-tap (CR 605.3b) deprioritizes the source but still taps
-///      it as a last resort, so the source is forced exactly when the cost
-///      can't be paid *without* it. We answer that by asking the engine's own
-///      payment solver to pay the cost with the source excluded — keeping color
-///      and multi-mana yield exact instead of re-deriving them here.
-fn animation_leaves_source_tapped(
-    ctx: &PolicyContext<'_>,
-    source_id: ObjectId,
-    ability_index: usize,
-    source: &game_object::GameObject,
-    ability: &AbilityDefinition,
-) -> bool {
-    if source.tapped || ability_taps_source(ability) {
-        return true;
-    }
-
-    // Only plain mana costs are assessable here; non-mana or dynamically-priced
-    // animation costs (none exist among current man-lands) fall through to the
-    // additive scoring below rather than being penalized blind.
-    let Some(AbilityCost::Mana { cost }) = ability.cost.as_ref() else {
-        return false;
-    };
-    if cost.mana_value() == 0 {
-        return false;
-    }
-
-    !can_pay_cost_excluding_source(ctx, source_id, ability_index, cost)
-}
-
-/// True iff the AI can pay `cost` for `source_id`'s ability without tapping the
-/// source itself. Delegates to the engine's payment solver (color- and
-/// yield-accurate) with the source added to the excluded set.
-fn can_pay_cost_excluding_source(
-    ctx: &PolicyContext<'_>,
-    source_id: ObjectId,
-    ability_index: usize,
-    cost: &ManaCost,
-) -> bool {
-    let excluded = HashSet::from([source_id]);
-    can_pay_ability_mana_cost_after_auto_tap_excluding(
-        ctx.state,
-        ctx.ai_player,
-        source_id,
-        Some(ability_index),
-        cost,
-        &excluded,
-    )
-}
-
 /// Check if the AI needs mana for spells in hand.
 fn mana_needed_in_hand(ctx: &PolicyContext<'_>) -> bool {
     // Check if AI has spells in hand that require mana
@@ -375,7 +282,8 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityKind, PtValue, QuantityExpr, StaticDefinition, TargetFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, PtValue, QuantityExpr,
+        StaticDefinition, TargetFilter,
     };
     use engine::types::game_state::WaitingFor;
     use engine::types::identifiers::CardId;
@@ -603,7 +511,7 @@ mod tests {
             animate_effect(),
         )));
 
-        assert!(ability_animates_land(&ability));
+        assert!(crate::manland::animates_source(&ability));
     }
 
     #[test]
@@ -611,7 +519,7 @@ mod tests {
         let ability =
             AbilityDefinition::new(AbilityKind::Activated, generic_creature_type_effect());
 
-        assert!(ability_animates_land(&ability));
+        assert!(crate::manland::animates_source(&ability));
     }
 
     #[test]

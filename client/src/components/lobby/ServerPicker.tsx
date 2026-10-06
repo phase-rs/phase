@@ -14,7 +14,9 @@ import {
   useMultiplayerStore,
   type LobbySource,
 } from "../../stores/multiplayerStore";
-import type { ReconnectState } from "../../services/openPhaseSocket";
+import { openPhaseSocket, type ReconnectState } from "../../services/openPhaseSocket";
+import { initializeLanCapabilities, isLanEndpoint } from "../../services/lan";
+import { LanServers } from "./LanServers";
 import { menuButtonClass } from "../menu/buttonStyles";
 import { ServerFlag } from "./ServerFlag";
 
@@ -86,13 +88,23 @@ export function ServerPicker({ onClose }: ServerPickerProps) {
   // `onerror` or timeout. Cheap diagnostic that catches the common cases
   // (server down, wrong port, blocked by firewall) before the user
   // commits the address.
-  const testUrl = (url: string) => {
+  const testUrl = async (url: string) => {
     const trimmed = url.trim();
     if (!isValidWebSocketUrl(trimmed)) {
       setConnTest("fail");
       return;
     }
     setConnTest("testing");
+    if (isLanEndpoint(trimmed)) {
+      try {
+        await initializeLanCapabilities();
+        const blocked = mixedContentBlockReason(trimmed);
+        if (blocked) { setError(blocked); setConnTest("fail"); return; }
+        const socket = await openPhaseSocket(trimmed, { timeoutMs: 3000 });
+        socket.close(); setConnTest("ok");
+      } catch { setConnTest("fail"); }
+      return;
+    }
     const ws = new WebSocket(trimmed);
     const timeout = window.setTimeout(() => {
       ws.close();
@@ -128,12 +140,13 @@ export function ServerPicker({ onClose }: ServerPickerProps) {
     };
   }, [onClose]);
 
-  const addSource = () => {
+  const addSource = async () => {
     const trimmed = customUrl.trim();
     // Mixed content is refused here, at the page-origin boundary: an https
     // page cannot open a remote `ws://` socket at all, and the browser blocks
     // it before the handshake, which is otherwise indistinguishable from an
     // unreachable server.
+    if (isLanEndpoint(trimmed)) await initializeLanCapabilities();
     const blocked = mixedContentBlockReason(trimmed);
     if (blocked) {
       setError(blocked);
@@ -150,6 +163,7 @@ export function ServerPicker({ onClose }: ServerPickerProps) {
       );
       return;
     }
+    void useMultiplayerStore.getState().ensureSubscriptionSocket(result.source.url);
     setCustomUrl("");
     setError(null);
     setConnTest("idle");
@@ -163,8 +177,9 @@ export function ServerPicker({ onClose }: ServerPickerProps) {
         initial={{ opacity: 0, scale: 0.97 }}
         animate={{ opacity: 1, scale: 1 }}
         transition={{ duration: 0.15 }}
-        className="relative z-10 w-full max-w-md rounded-[22px] border border-white/10 bg-[#0b1020]/96 p-5 shadow-2xl backdrop-blur-md sm:p-6"
+        className="relative z-10 max-h-[85dvh] overflow-y-auto w-full max-w-md rounded-[22px] border border-white/10 bg-[#0b1020]/96 p-5 shadow-2xl backdrop-blur-md sm:p-6"
       >
+        <LanServers />
         <h2 className="text-base font-semibold text-white">{t("serverPicker.title")}</h2>
         <p className="mt-1 text-xs text-slate-400">
           {t("serverPicker.subtitle")}
@@ -208,25 +223,6 @@ export function ServerPicker({ onClose }: ServerPickerProps) {
                 </button>
               );
             })}
-            {/* "None" bypasses the matchmaking broker entirely. `null` is the
-             * direct-codes sentinel: no lobby is browsed and `MultiplayerPage`
-             * forces P2P mode, so the UI lands directly on the direct-code
-             * flow without a round-trip through the offline prompt. */}
-            <button
-              type="button"
-              onClick={() => setHostingServer(null)}
-              className={
-                "flex w-full items-center justify-between rounded-[16px] border px-4 py-2.5 text-left text-sm transition-colors "
-                + (hostingServer === null
-                  ? "border-cyan-400/40 bg-cyan-500/10 text-cyan-100"
-                  : "border-white/10 bg-black/18 text-gray-200 hover:border-white/18 hover:bg-white/6")
-              }
-            >
-              <span className="font-medium">{t("serverPicker.noneLabel")}</span>
-              <span className="shrink-0 pl-2 font-mono text-[10px] text-slate-500">
-                {t("serverPicker.directCodes")}
-              </span>
-            </button>
           </div>
         </div>
 

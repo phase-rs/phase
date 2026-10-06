@@ -52,6 +52,11 @@ function RevealCard({ card }: { card: { name: string; oracleId?: string; faceNam
  * (Thoughtseize) are not top-of-library and are excluded by the library filter.
  * The overlay mounts below modals (z-30), so the choosing player's DigChoice
  * modal occludes it while watching players — who have no modal — see the reveal.
+ *
+ * CR 702.60a: Ripple also lands here — its top-N reveal stays in the library
+ * (CR 701.20b) and is published to `revealed_cards` for the duration of the
+ * same-named free-cast offer, so this strip persists behind `CascadeChoiceModal`
+ * after `RippleRevealAnimation`'s transient fan has faded.
  */
 export function RevealOverlay() {
   const gameState = useGameStore((s) => s.gameState);

@@ -55,8 +55,8 @@ pub use combat_withdrawal::{
     combat_withdrawal_fact_for_current_target, CombatWithdrawalFact, CombatWithdrawalTargetRole,
 };
 pub use context::{
-    build_decision_context, build_decision_context_for_semantic_owner, AiDecisionContext,
-    AiDecisionContract,
+    apply_ai_action_proposal, build_decision_context, build_decision_context_for_semantic_owner,
+    AiDecisionContext, AiDecisionContract, AiProposalApplication,
 };
 pub use copy::{
     copy_effect_adds_flying, copy_target_filter, copy_target_mana_value_ceiling,
@@ -236,7 +236,9 @@ pub(crate) fn structurally_valid_tap_for_convoke_payment(
     };
 
     match mode {
-        ConvokeMode::Delve => obj.is_delve_eligible(*player) && *mana_type == ManaType::Colorless,
+        ConvokeMode::Delve => {
+            state.is_delve_selectable(*player, *object_id) && *mana_type == ManaType::Colorless
+        }
         ConvokeMode::Convoke => {
             if !obj.is_convoke_eligible(*player) {
                 return false;
@@ -365,11 +367,39 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             },
             GameAction::ChooseReplacement { index },
         ) => *index >= *candidate_count,
+        (WaitingFor::ReplacementChoice { .. }, GameAction::ChooseReplacementAndRemember { choice }) => {
+            !crate::game::replacement::validate_remembered_replacement(state, choice)
+        }
         // CR 603.3b: Order must be a permutation of 0..triggers.len() — same
         // validity check the engine handler enforces. Reject early so the
         // simulation filter never fires a known-rejected action.
         (WaitingFor::OrderTriggers { triggers, .. }, GameAction::OrderTriggers { order }) => {
             !crate::game::triggers::is_valid_permutation(order, triggers.len())
+        }
+        // CR 601.2b + CR 601.2f: same strict-permutation check the engine
+        // handler enforces, plus the announcement's legality against the
+        // prompt's own hybrid symbols (CR 107.4e).
+        (
+            WaitingFor::OrderCostReductions {
+                reductions,
+                hybrid_symbols,
+                ..
+            },
+            GameAction::OrderCostReductions {
+                order,
+                hybrid_announcement,
+            },
+        ) => {
+            !crate::game::triggers::is_valid_permutation(order, reductions.len())
+                || (!hybrid_announcement.is_empty()
+                    && (hybrid_announcement.len() != hybrid_symbols.len()
+                        || hybrid_announcement.iter().zip(hybrid_symbols).any(
+                            |(announced, symbol)| {
+                                !symbol
+                                    .announceable_halves()
+                                    .is_some_and(|halves| halves.contains(announced))
+                            },
+                        )))
         }
         (
             WaitingFor::CopyTargetChoice { valid_targets, .. },
@@ -425,13 +455,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             },
             GameAction::ChooseActivationCostBranch { index },
         ) => costs.get(*index).is_none_or(|cost| {
-            !casting::can_pay_ability_cost_now(
-                state,
-                *player,
-                pending_cast.object_id,
-                cost,
-                pending_cast.activation_ability_index,
-            )
+            !casting::activation_one_of_branch_payable(state, *player, pending_cast, cost)
         }),
         (
             WaitingFor::DamageSourceChoice { options, .. },
@@ -847,6 +871,16 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             selection_mismatch(chosen, selectable_cards, exact)
                 || (*up_to && chosen.len() > *keep_count)
         }
+        // CR 401.2 + CR 401.4 + CR 608.2c: the response is a full ARRANGEMENT
+        // of the fixed remainder pile, not a subset of it — the leading
+        // `top_count` entries take the library top and the rest take the
+        // bottom. So the legality gate is "exactly the whole pile, no
+        // duplicates", the same gate the sibling `RippleBottomOrder`
+        // permutation uses.
+        (
+            WaitingFor::DigRestSplitChoice { cards, .. },
+            GameAction::SelectCards { cards: chosen },
+        ) => selection_mismatch(chosen, cards, Some(cards.len())),
         (
             WaitingFor::CollectEvidenceChoice {
                 player: _, cards, ..
@@ -1026,6 +1060,7 @@ fn resolve_mana_option_for_trigger_probe(
     option: &mana_sources::ManaSourceOption,
 ) -> bool {
     let mut probe = state.clone();
+    let deferred_before = probe.deferred_triggers.len();
     let mut events = Vec::new();
 
     for (trigger_ref, override_value) in &option.taps_for_mana_overrides {
@@ -1088,7 +1123,7 @@ fn resolve_mana_option_for_trigger_probe(
         });
     }
 
-    triggers::events_would_queue_non_mana_trigger(&mut probe, &events)
+    triggers::simulated_action_would_queue_non_mana_trigger(&mut probe, deferred_before, &events)
 }
 
 fn activate_mana_action_would_queue_non_mana_trigger(
@@ -1126,6 +1161,7 @@ fn activate_mana_action_would_queue_non_mana_trigger(
         return false;
     };
     let mut probe = state.clone();
+    let deferred_before = probe.deferred_triggers.len();
     let mut events = Vec::new();
     if mana_abilities::resolve_mana_ability(
         &mut probe,
@@ -1139,7 +1175,7 @@ fn activate_mana_action_would_queue_non_mana_trigger(
     {
         return false;
     }
-    triggers::events_would_queue_non_mana_trigger(&mut probe, &events)
+    triggers::simulated_action_would_queue_non_mana_trigger(&mut probe, deferred_before, &events)
 }
 
 fn tap_land_action_would_queue_non_mana_trigger(
@@ -1284,12 +1320,15 @@ fn classify_flat_priority_action(action: &GameAction) -> FlatPriorityActionClass
         | GameAction::SelectCards { .. }
         | GameAction::ChooseRemoveCounterCostDistribution { .. }
         | GameAction::SelectCoinFlips { .. }
+        | GameAction::SelectDieRolls { .. }
         | GameAction::ChooseOutsideGameCards { .. }
         | GameAction::SelectTargets { .. }
         | GameAction::ChooseTarget { .. }
         | GameAction::ChooseReplacement { .. }
+        | GameAction::ChooseReplacementAndRemember { .. }
         | GameAction::ChooseEntryController { .. }
         | GameAction::OrderTriggers { .. }
+        | GameAction::OrderCostReductions { .. }
         | GameAction::CancelCast
         | GameAction::Equip { .. }
         | GameAction::CrewVehicle { .. }
@@ -1357,6 +1396,7 @@ fn classify_flat_priority_action(action: &GameAction) -> FlatPriorityActionClass
         | GameAction::SetPriorityPassingMode { .. }
         | GameAction::SetPriorityYield { .. }
         | GameAction::SetMayTriggerAutoChoice { .. }
+        | GameAction::SetReplacementAutoChoice { .. }
         | GameAction::SetTriggerOrderTemplate { .. }
         | GameAction::AssignCombatDamage { .. }
         | GameAction::AssignBlockerDamage { .. }
@@ -1621,12 +1661,16 @@ pub fn stage_two_action_set(
 ///     call below; the wider phrasing would claim coverage of shapes neither
 ///     stage enumerates.
 ///
-/// Otherwise the seat still Shortens and gets its window
-/// (`game::engine::apply_action`'s `RespondToShortcut(Shorten)` arm).
+/// Otherwise the seat still Shortens and gets its window — at the place 0 every AI site emits,
+/// the shortened proposal admits no place, so the shortcut is taken at once and CR 732.2b's new
+/// ending point IS that window, held by this seat.
 ///
 /// READ-ORDER: the proposal is read off the ORIGINAL `state`, before
 /// [`shortcut_probe`] re-parks its clone at `Priority` — the probe state carries
 /// no offer at all, so reading the crown from it would make arm (A) dead code.
+/// That same read supplies the CR 732.2b precondition ahead of both stages: a
+/// proposal admitting no place cannot be answered by naming one, so the seat
+/// Accepts rather than emitting a verdict `apply()` refuses.
 pub fn smart_shortcut_response(
     state: &GameState,
     polled_player: PlayerId,
@@ -1637,15 +1681,33 @@ pub fn smart_shortcut_response(
     // two-named-arms + `_` shape is the module's existing idiom for the same
     // question (`game::precast_copy_shortcut::normalize_untrusted_restore`,
     // `::rekey_after_trusted_restore`).
-    let crowned_winner = match &state.waiting_for {
-        WaitingFor::RespondToShortcut { proposal, .. } => proposal.predicted_winner,
+    let (crowned_winner, shortening_places) = match &state.waiting_for {
+        WaitingFor::RespondToShortcut { proposal, .. } => (
+            proposal.predicted_winner,
+            Some(proposal.shortening_places()),
+        ),
         // STRUCTURAL, not an oversight: `RespondToPrecastCopyShortcut` carries no
-        // proposal summary and therefore no `predicted_winner` field, so the
-        // pre-cast route has no crown to read and arm (A) is inapplicable rather
-        // than skipped. Stage 1 and arm (B) do apply, and both run below.
-        WaitingFor::RespondToPrecastCopyShortcut { .. } => None,
-        _ => None,
+        // proposal summary and therefore neither a `predicted_winner` field nor a
+        // range, so the pre-cast route has no crown to read and arm (A) is
+        // inapplicable rather than skipped, and the precondition below is inert
+        // there. Stage 1 and arm (B) do apply, and both run below.
+        WaitingFor::RespondToPrecastCopyShortcut { .. } => (None, None),
+        _ => (None, None),
     };
+
+    // CR 732.2b: a shortening responder names "a place where they will make a game
+    // choice that's different than what's been proposed", so the place must be one
+    // the proposal admits. A proposal of zero repetitions proposes no choice, its
+    // range holds no place, and `apply()` refuses every `Shorten` against it, place
+    // 0 included. Accept is then the only answer this seat can give that the reducer
+    // will take: `ai_support::candidates` builds exactly one candidate here and
+    // validates it against the reducer, so a verdict naming an excluded place is
+    // dropped rather than refused on submit, leaving the polled seat no legal action
+    // at all. Reading the range here answers for every ingress that reaches the
+    // window — the declare path's own mint and a restored `WaitingFor` alike.
+    if shortening_places.is_some_and(|places| places.is_empty()) {
+        return crate::analysis::loop_check::ShortcutResponse::Accept;
+    }
 
     let (probe, actions) = shortcut_probe(state, polled_player);
     if !has_meaningful_priority_action(probe.state(), &actions) {
@@ -2294,6 +2356,15 @@ pub fn flat_priority_actions_with_probe(
 /// flat `actions` list; auto-pass consumes the flat list, while board
 /// interaction consumes the grouped map.
 pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
+    // CR 601.2h + CR 608.2c: enumerate against the replayed payment shadow so
+    // the live choice remains actionable while canonical resources stay staged.
+    let payment_projected;
+    let state = if state.payment_transaction.is_some() {
+        payment_projected = crate::game::payment_transaction::project(state);
+        &payment_projected
+    } else {
+        state
+    };
     let priority_probe_storage;
     let flushed_storage;
     let (state, priority_probe) = match &state.waiting_for {
@@ -2614,9 +2685,14 @@ fn collect_activation_block_reasons_for_object(
 /// actionable in that window. The gate is the rule, not an optimisation.
 ///
 /// Scoped to the acting player across the same five zones and behind the same
-/// `obj.controller == player` / `!is_mana_ability` filters as the enforcement
-/// sites in `candidates.rs`, so an entry can only ever describe an object the
-/// viewer controls.
+/// player-scoping / `!is_mana_ability` filters as the enforcement sites in
+/// `candidates.rs`, so an entry can only ever describe an object the viewer
+/// controls. Battlefield and command-zone scans scope by `obj.controller`; the
+/// owner-keyed hand and graveyard scans scope by `obj.owner` (CR 108.4 +
+/// CR 108.4a — a card that is not a permanent or spell has no controller). The
+/// two files MUST agree: this read-out and the offered action set partition one
+/// ability space, so a scope that differs between them yields a blocked row for
+/// an ability that is never offered.
 ///
 /// Bounded by [`MAX_ACTIVATION_BLOCK_TOTAL`]. Returns a map, never a `Result`.
 pub fn activation_block_reasons(state: &GameState) -> HashMap<ObjectId, Vec<AbilityBlockEntry>> {
@@ -2657,8 +2733,9 @@ pub fn activation_block_reasons(state: &GameState) -> HashMap<ObjectId, Vec<Abil
     // search hot path and is deliberately out of scope.
 
     // CR 602.2: "Only an object's controller (or its owner, if it doesn't have a
-    // controller) can activate its activated ability" — battlefield, therefore
-    // controller-scoped, with no `activation_zone` filter
+    // controller) can activate its activated ability unless the object
+    // specifically says otherwise." Battlefield, therefore controller-scoped,
+    // with no `activation_zone` filter
     // (the gate itself checks `obj.zone != required_zone`).
     for &obj_id in &state.battlefield {
         if let Some(obj) = state.objects.get(&obj_id) {
@@ -2698,9 +2775,12 @@ pub fn activation_block_reasons(state: &GameState) -> HashMap<ObjectId, Vec<Abil
     }
 
     // CR 602.1: hand-activated abilities (Cycling per CR 702.29a, etc.).
+    // CR 108.4 + CR 108.4a: a card in a hand is neither a permanent nor a spell,
+    // so it has no controller and the owner stands in. Mirrors the hand loop in
+    // `candidates.rs`.
     for &obj_id in &state.players[player.0 as usize].hand {
         if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.controller == player {
+            if obj.owner == player {
                 collect_activation_block_reasons_for_object(
                     state,
                     player,
@@ -2715,9 +2795,12 @@ pub fn activation_block_reasons(state: &GameState) -> HashMap<ObjectId, Vec<Abil
     }
 
     // CR 113.6b + CR 602.2: graveyard-activated abilities.
+    // CR 108.4 + CR 108.4a: same owner fallback as the hand loop above, and
+    // CR 404.1 puts a card into its OWNER's graveyard. Mirrors the graveyard
+    // loop in `candidates.rs`.
     for &obj_id in &state.players[player.0 as usize].graveyard {
         if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.controller == player {
+            if obj.owner == player {
                 collect_activation_block_reasons_for_object(
                     state,
                     player,
@@ -4126,6 +4209,7 @@ mod tests {
             candidates: Vec::new(),
             kind: Default::default(),
             last_applied_decides: false,
+            remember_identity: None,
         };
 
         assert!(cheap_reject_candidate(
@@ -4409,7 +4493,7 @@ mod tests {
             Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::BecomeCopy {
-                    recipient: TargetFilter::SelfRef,
+                    recipient: crate::types::ability::CopyRecipient::Source,
                     target: TargetFilter::Any,
                     duration: Some(crate::types::ability::Duration::UntilEndOfTurn),
                     mana_value_limit: None,
@@ -7042,8 +7126,8 @@ mod tests {
         );
         let strict_mana_readiness_clones =
             strict_baseline.strict_fast_path_mana_readiness_state_clones;
-        assert_eq!(strict_mana_readiness_clones, 5);
-        assert_eq!(strict_baseline.strict_fast_path_state_clones, 7);
+        assert_eq!(strict_mana_readiness_clones, 2);
+        assert_eq!(strict_baseline.strict_fast_path_state_clones, 4);
         assert_eq!(
             strict_baseline.strict_fast_path_state_clones,
             strict_baseline.strict_fast_path_auto_payment_wrapper_calls

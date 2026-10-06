@@ -6,18 +6,18 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
+import { motion, useReducedMotion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import type { DraftCardInstance, DraftPoolGroups } from "../../../adapter/draft-adapter";
 import { usePreferencesStore } from "../../../stores/preferencesStore";
 import type { CardHoverInfo } from "../../card/CardPreview";
-import { useCardImage } from "../../../hooks/useCardImage";
 import { PoolPanel } from "../PoolPanel";
 import { CardPoolBoard } from "./CardPoolBoard";
 import { CompactSideboard } from "./CompactSideboard";
 import { DeckTypeCounts } from "./DeckTypeCounts";
-import type { DraftWorkspaceDragController } from "./useDraftWorkspaceDrag";
-import { normalizeWorkspaceForBoardGeometry } from "./workspacePlacement";
+import type { DraftWorkspaceDragController, WorkspaceDragSource } from "./useDraftWorkspaceDrag";
+import { normalizeWorkspaceForBoardGeometry, resolveWorkspaceRow } from "./workspacePlacement";
 import type { DraftWorkspaceFilter, DraftWorkspaceState, DraftZone } from "./types";
 import type {
   DraftBoardPreferences,
@@ -34,6 +34,8 @@ import {
 } from "./workspacePreferences";
 
 const DRAG_PREVIEW_SCALE = 0.55;
+const DESKTOP_DRAFT_PACK_DRAG_PREVIEW_SCALE = DRAG_PREVIEW_SCALE * 1.5;
+const COMPACT_WORKSPACE_DRAG_PREVIEW_SCALE = 0.4;
 const DRAG_PREVIEW_GAP = 4;
 const DRAG_PREVIEW_OFFSET = 12;
 const DESKTOP_DRAFT_COLLAPSED_SIDEBOARD_SCALE = 0.8;
@@ -46,6 +48,23 @@ interface VisualColumnCapDescriptor {
   maximum: number;
   orientation: VisualColumnCapOrientation;
   target: VisualColumnCapPreferenceTarget;
+}
+
+interface DragProjectionRect {
+  readonly left: number;
+  readonly top: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+interface DragProjectionMeasurement extends DragProjectionRect {
+  readonly token: number;
+  readonly source: WorkspaceDragSource;
+  readonly sourceInstanceId: string;
+  readonly zone: DraftZone;
+  readonly column: number;
+  readonly row: number;
+  readonly geometryRevision: number;
 }
 
 export function shouldShowDraftWorkspaceDeck(
@@ -61,6 +80,7 @@ function dragPreviewPosition(
   cardCount: number,
   cardWidth: number,
   cardHeight: number,
+  maximumScale = DRAG_PREVIEW_SCALE,
 ) {
   const viewport = window.visualViewport;
   const finiteOrZero = (value: number) => Number.isFinite(value) ? value : 0;
@@ -78,11 +98,11 @@ function dragPreviewPosition(
   );
   const widthScale = safeCardCount * safeCardWidth > 0
     ? (viewportWidth - gapWidth) / (safeCardCount * safeCardWidth)
-    : DRAG_PREVIEW_SCALE;
+    : maximumScale;
   const heightScale = safeCardHeight > 0
     ? viewportHeight / safeCardHeight
-    : DRAG_PREVIEW_SCALE;
-  const scale = Math.max(0, Math.min(DRAG_PREVIEW_SCALE, widthScale, heightScale));
+    : maximumScale;
+  const scale = Math.max(0, Math.min(maximumScale, widthScale, heightScale));
   const overlayWidth = safeCardCount * safeCardWidth * scale + gapWidth;
   const overlayHeight = safeCardHeight * scale;
   const maximumLeft = viewportLeft + viewportWidth - overlayWidth;
@@ -97,21 +117,58 @@ function dragPreviewPosition(
   };
 }
 
-function DragPreviewCard({ card, width, height }: {
-  card: DraftCardInstance;
+function DragPreviewCard({ image, instanceId, width, height }: {
+  image: { readonly src: string | null; readonly alt: string };
+  instanceId: string;
   width: number;
   height: number;
 }) {
-  const { src } = useCardImage(card.name, {
-    size: "normal",
-    sourcePrinting: { setCode: card.set_code, collectorNumber: card.collector_number },
-  });
-  return src === null ? (
-    <span data-drag-instance-id={card.instance_id} className="flex items-center justify-center rounded bg-neutral-900 px-2 text-center text-xs text-white" style={{ width, height }}>
-      {card.name}
-    </span>
-  ) : (
-    <img data-drag-instance-id={card.instance_id} src={src} alt="" draggable={false} className="rounded object-contain" style={{ width, height }} />
+  return image.src === null
+    ? <span aria-hidden="true" data-drag-instance-id={instanceId} className="block rounded bg-neutral-900" style={{ width, height }} />
+    : <img data-drag-instance-id={instanceId} src={image.src} alt="" draggable={false} className="rounded object-contain" style={{ width, height }} />;
+}
+
+function WorkspaceDragProjectionOverlay({
+  projection,
+  rect,
+  onSettled,
+}: {
+  projection: import("./WorkspaceCard").WorkspaceDragProjection & {
+    readonly zone: DraftZone;
+    readonly geometryRevision: number;
+  };
+  rect: DragProjectionRect;
+  onSettled(): void;
+}) {
+  const shouldReduceMotion = useReducedMotion();
+  const previewImage = projection.previewImage;
+  return (
+    <motion.div
+      aria-hidden="true"
+      data-drag-projection={projection.sourceInstanceId}
+      data-drag-projection-source-instance-id={projection.sourceInstanceId}
+      data-drag-projection-zone={projection.zone}
+      data-drag-projection-column={projection.column}
+      data-drag-projection-row={projection.row}
+      data-drag-projection-geometry-revision={projection.geometryRevision}
+      data-workspace-drag-motion={shouldReduceMotion ? "reduced" : "enabled"}
+      className="pointer-events-none fixed z-50 overflow-hidden rounded-md"
+      initial={{
+        left: projection.origin.left,
+        top: projection.origin.top,
+        width: projection.origin.width,
+        height: projection.origin.height,
+      }}
+      animate={{ left: rect.left, top: rect.top, width: rect.width, height: rect.height }}
+      transition={shouldReduceMotion ? { duration: 0 } : { duration: 0.16, ease: "easeOut" }}
+      onAnimationComplete={onSettled}
+    >
+      {previewImage?.src === null || previewImage === undefined ? (
+        <span aria-hidden="true" className="block h-full w-full bg-neutral-900" />
+      ) : (
+        <img src={previewImage.src} alt="" draggable={false} className="h-full w-full object-cover shadow-lg" />
+      )}
+    </motion.div>
   );
 }
 
@@ -156,6 +213,7 @@ export function DraftWorkspace({
   const [filter, setFilter] = useState<DraftWorkspaceFilter>("deck");
   const [compactSort, setCompactSort] = useState<DraftBoardSort>(preferences.deck.sort);
   const [deckCollapsed, setDeckCollapsed] = useState(false);
+  const [phoneDraftView, setPhoneDraftView] = useState<DraftWorkspaceView>("compact");
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const cardPreviewMode = usePreferencesStore((state) => state.draftCardPreviewMode);
   const normalizedWorkspaceSourceRef = useRef<DraftWorkspaceState | null>(null);
@@ -171,12 +229,17 @@ export function DraftWorkspace({
     && (responsiveLayout === "phone-portrait" || responsiveLayout === "phone-landscape");
   const tabletDraftLayout = responsiveContext === "draft"
     && (responsiveLayout === "tablet-portrait" || responsiveLayout === "tablet-landscape");
+  const phoneDraftOverlay = responsiveContext === "draft" && phoneWorkspaceOverlayOpen;
   const view: DraftWorkspaceView = resolveDraftWorkspaceView(
     preferences.explicitView,
     viewportWidth,
     responsiveLayout,
   );
-  const renderedView: DraftWorkspaceView = phoneWorkspaceOverlayOpen || tabletDraftLayout ? "board" : view;
+  const renderedView: DraftWorkspaceView = tabletDraftLayout
+    ? "board"
+    : phoneDraftOverlay
+      ? phoneDraftView
+      : view;
   const sideboardCollapsed = resolveDraftWorkspaceSideboardCollapsed(
     preferences.sideboardCollapsed,
     viewportWidth,
@@ -186,14 +249,185 @@ export function DraftWorkspace({
   );
   const sideboardDropActive = dragController?.activeTarget?.zone === "sideboard";
   const dragPreview = dragController?.dragPreview;
-  const dragPreviewStyle = dragPreview === null || dragPreview === undefined
+  const desktopWorkspace = responsiveLayout === "desktop";
+  const workspaceProjection = desktopWorkspace ? dragController?.workspaceProjection : undefined;
+  const activeDragTarget = workspaceProjection?.target;
+  const geometryRevision = dragController?.geometryRevision;
+  const workspaceShellRef = useRef<HTMLElement>(null);
+  const [workspaceProjectionRect, setWorkspaceProjectionRect] = useState<DragProjectionMeasurement | undefined>();
+  const [deckVisualColumnWidth, setDeckVisualColumnWidth] = useState<number | undefined>();
+  const workspaceDragSource = workspaceProjection === undefined || workspaceProjection === null
+    ? undefined
+    : workspaceProjection.source;
+  const canonicalSource = workspaceDragSource === undefined
+    ? undefined
+    : normalized.placements[workspaceDragSource.instanceIds[0]];
+  const projectionRow = activeDragTarget === null || activeDragTarget === undefined || workspaceDragSource === undefined
+    ? undefined
+    : activeDragTarget.row ?? resolveWorkspaceRow(
+      workspaceDragSource.instanceIds[0],
+      boardPreferences[activeDragTarget.zone],
+      poolGroups,
+    );
+  const workspaceDragProjectionTarget = workspaceDragSource !== undefined
+    && activeDragTarget !== null
+    && activeDragTarget !== undefined
+    && canonicalSource !== undefined
+    && projectionRow !== undefined
+    && geometryRevision !== undefined
+    ? {
+      source: workspaceDragSource,
+      card: workspaceDragSource.cards[0],
+      sourceInstanceId: workspaceDragSource.instanceIds[0],
+      zone: activeDragTarget.zone,
+      column: activeDragTarget.column,
+      row: projectionRow,
+      geometryRevision,
+      origin: workspaceDragSource.origin,
+      previewImage: workspaceDragSource.previewImage,
+    }
+    : undefined;
+  const hasTokenLocalWorkspaceProjection = workspaceProjection?.token !== undefined
+    && workspaceProjection.token !== 0;
+  const targetIsDifferent = canonicalSource?.zone !== workspaceDragProjectionTarget?.zone
+    || canonicalSource?.column !== workspaceDragProjectionTarget?.column
+    || canonicalSource?.row !== workspaceDragProjectionTarget?.row;
+  const showWorkspaceProjection = hasTokenLocalWorkspaceProjection
+    && workspaceDragProjectionTarget !== undefined
+    && (workspaceProjection?.hasLeftCanonicalTarget === true || targetIsDifferent || workspaceProjection?.settling === true);
+  const workspaceProjectionSource = workspaceDragProjectionTarget?.source;
+  const workspaceProjectionSourceId = workspaceDragProjectionTarget?.sourceInstanceId;
+  const workspaceProjectionZone = workspaceDragProjectionTarget?.zone;
+  const workspaceProjectionColumn = workspaceDragProjectionTarget?.column;
+  const workspaceProjectionRow = workspaceDragProjectionTarget?.row;
+  const workspaceProjectionGeometryRevision = workspaceDragProjectionTarget?.geometryRevision;
+
+  useLayoutEffect(() => {
+    if (
+      workspaceProjectionSource === undefined
+      || workspaceProjectionSourceId === undefined
+      || workspaceProjectionZone === undefined
+      || workspaceProjectionColumn === undefined
+      || workspaceProjectionRow === undefined
+      || workspaceProjectionGeometryRevision === undefined
+    ) {
+      setWorkspaceProjectionRect(undefined);
+      return;
+    }
+    const slot = workspaceShellRef.current?.querySelector<HTMLElement>(
+      `[data-drag-projection-slot="${workspaceProjectionSourceId}"]`,
+    );
+    if (slot === null || slot === undefined) return;
+    const { left, top, width, height } = slot.getBoundingClientRect();
+    const next = {
+      token: workspaceProjection!.token,
+      source: workspaceProjectionSource,
+      sourceInstanceId: workspaceProjectionSourceId,
+      zone: workspaceProjectionZone,
+      column: workspaceProjectionColumn,
+      row: workspaceProjectionRow,
+      geometryRevision: workspaceProjectionGeometryRevision,
+      left,
+      top,
+      width,
+      height,
+    };
+    setWorkspaceProjectionRect((current) => (
+      current?.token === next.token
+      && current.source === next.source
+      && current.sourceInstanceId === next.sourceInstanceId
+      && current.zone === next.zone
+      && current.column === next.column
+      && current.row === next.row
+      && current.geometryRevision === next.geometryRevision
+      && current.left === next.left
+      && current.top === next.top
+      && current.width === next.width
+      && current.height === next.height
+        ? current
+        : next
+    ));
+  }, [
+    workspaceProjectionColumn,
+    workspaceProjectionGeometryRevision,
+    workspaceProjectionRow,
+    workspaceProjectionSource,
+    workspaceProjectionSourceId,
+    workspaceProjectionZone,
+    workspaceProjection?.token,
+  ]);
+  const projectionMeasurementMatches = workspaceDragProjectionTarget !== undefined
+    && workspaceProjectionRect !== undefined
+    && workspaceProjectionRect.token === workspaceProjection?.token
+    && workspaceProjectionRect.source === workspaceDragSource
+    && workspaceProjectionRect.sourceInstanceId === workspaceDragProjectionTarget.sourceInstanceId
+    && workspaceProjectionRect.zone === workspaceDragProjectionTarget.zone
+    && workspaceProjectionRect.column === workspaceDragProjectionTarget.column
+    && workspaceProjectionRect.row === workspaceDragProjectionTarget.row
+    && workspaceProjectionRect.geometryRevision === workspaceDragProjectionTarget.geometryRevision;
+  const workspaceDragProjection = !showWorkspaceProjection
+    || workspaceProjectionRect === undefined
+    || workspaceProjectionRect.source !== workspaceDragSource
+    ? undefined
+    : projectionMeasurementMatches
+      ? workspaceDragProjectionTarget
+      : {
+        card: workspaceDragSource.cards[0],
+        sourceInstanceId: workspaceProjectionRect.sourceInstanceId,
+        zone: workspaceProjectionRect.zone,
+        column: workspaceProjectionRect.column,
+        row: workspaceProjectionRect.row,
+        geometryRevision: workspaceProjectionRect.geometryRevision,
+        origin: workspaceDragSource.origin,
+        previewImage: workspaceDragSource.previewImage,
+      };
+  const pointerProjectionRect = workspaceProjection === undefined || workspaceProjection === null
     ? undefined
     : dragPreviewPosition(
-      dragPreview.clientX,
-      dragPreview.clientY,
-      dragPreview.source.cards.length,
-      dragPreview.source.previewWidth,
-      dragPreview.source.previewHeight,
+      workspaceProjection.clientX,
+      workspaceProjection.clientY,
+      1,
+      workspaceDragSource?.previewWidth ?? 0,
+      workspaceDragSource?.previewHeight ?? 0,
+    );
+  const renderedWorkspaceProjectionRect = projectionMeasurementMatches
+    ? workspaceProjectionRect
+    : pointerProjectionRect === undefined
+      ? undefined
+      : {
+        left: pointerProjectionRect.left,
+        top: pointerProjectionRect.top,
+        width: pointerProjectionRect.cardWidth,
+        height: pointerProjectionRect.cardHeight,
+      };
+  const workspaceProjectionDestinationReady = workspaceProjection?.settling === true
+    && projectionMeasurementMatches
+    && canonicalSource?.zone === workspaceDragProjectionTarget?.zone
+    && canonicalSource?.column === workspaceDragProjectionTarget?.column
+    && canonicalSource?.row === workspaceDragProjectionTarget?.row;
+  useLayoutEffect(() => {
+    if (!workspaceProjectionDestinationReady || workspaceProjection?.token === undefined || workspaceProjection.token === 0) return;
+    dragController?.markWorkspaceProjectionDestinationReady?.(workspaceProjection.token, workspaceProjectionGeometryRevision!);
+  }, [dragController, workspaceProjection?.token, workspaceProjectionDestinationReady, workspaceProjectionGeometryRevision]);
+  const draggedSourceInstanceId = showWorkspaceProjection
+    ? workspaceDragSource?.instanceIds[0]
+    : undefined;
+  const fixedDragPreview = dragPreview?.source.kind === "workspace" && desktopWorkspace
+    ? undefined
+    : dragPreview;
+  const dragPreviewStyle = fixedDragPreview === null || fixedDragPreview === undefined
+    ? undefined
+    : dragPreviewPosition(
+      fixedDragPreview.clientX,
+      fixedDragPreview.clientY,
+      fixedDragPreview.source.cards.length,
+      fixedDragPreview.source.previewWidth,
+      fixedDragPreview.source.previewHeight,
+      fixedDragPreview.source.kind === "workspace"
+        ? COMPACT_WORKSPACE_DRAG_PREVIEW_SCALE
+        : desktopWorkspace
+          ? DESKTOP_DRAFT_PACK_DRAG_PREVIEW_SCALE
+          : DRAG_PREVIEW_SCALE,
     );
   const counts = Object.values(normalized.placements).reduce(
     (totals, placement) => ({ ...totals, [placement.zone]: totals[placement.zone] + 1 }),
@@ -220,6 +454,7 @@ export function DraftWorkspace({
   const builderPhonePortraitLayout = builderPhoneLayout && responsiveLayout === "phone-portrait";
   const builderPhoneLandscapeLayout = builderPhoneLayout && responsiveLayout === "phone-landscape";
   const draftPhoneLayout = responsiveContext === "draft" && phoneLayout;
+  const phoneDraftTextLayout = draftPhoneLayout && renderedView === "compact";
   const tabletPortraitLayout = responsiveLayout === "tablet-portrait";
   const visualColumnCap = resolveDraftWorkspaceVisualColumnCap(
     responsiveLayout,
@@ -242,13 +477,21 @@ export function DraftWorkspace({
   const touchDragEnabled = responsiveLayout !== "desktop";
   const mobileOverlayActive = mobileOverlay && phoneLayout;
   const tabletLandscapeLayout = responsiveLayout === "tablet-landscape";
+  const expandedDraftLandscapeLayout = responsiveContext === "draft"
+    && (responsiveLayout === "phone-landscape" || tabletLandscapeLayout)
+    && !sideboardCollapsed;
   const builderPhoneOrTabletLayout = responsiveContext === "builder" && (phoneLayout || tabletLayout);
   const builderCompact = builderPhoneOrTabletLayout && renderedView === "compact";
+  const builderTouchVisualToolbar = responsiveContext === "builder"
+    && responsiveLayout !== "desktop"
+    && renderedView === "board";
   const showDeckContents = shouldShowDraftWorkspaceDeck(deckCollapsed, builderCompact);
   const collapsedSideboardCardWidth = responsiveContext === "draft" && responsiveLayout === "desktop"
     ? `clamp(${208 * DESKTOP_DRAFT_COLLAPSED_SIDEBOARD_SCALE}px, 16vw, ${DRAFT_WORKSPACE_COLLAPSED_SIDEBOARD_CARD_WIDTH_PX * DESKTOP_DRAFT_COLLAPSED_SIDEBOARD_SCALE}px)`
     : `${DRAFT_WORKSPACE_COLLAPSED_SIDEBOARD_CARD_WIDTH_PX}px`;
-  const collapsedCompositionClass = builderCompact
+  const collapsedCompositionClass = phoneDraftTextLayout
+    ? "flex h-full min-h-0 min-w-0 flex-col overflow-hidden"
+    : builderCompact
     ? tabletLayout
       ? "flex h-full min-h-0 min-w-0 flex-col overflow-hidden"
       : "h-full min-h-0 min-w-0"
@@ -262,6 +505,8 @@ export function DraftWorkspace({
         : "grid h-full min-h-0 min-w-0 grid-rows-[minmax(0,1fr)_minmax(168px,42%)] gap-2"
     : builderPhonePortraitLayout
     ? "flex min-h-full min-w-0 flex-col gap-2"
+    : expandedDraftLandscapeLayout
+    ? "grid h-full min-h-0 min-w-0 grid-cols-1 grid-rows-[minmax(0,1fr)_minmax(152px,32vh)] gap-2"
     : (builderPhoneLayout || tabletLandscapeLayout) && !sideboardCollapsed
     ? responsiveLayout === "phone-landscape"
       ? "grid h-full min-h-0 min-w-0 grid-cols-[minmax(0,1fr)_172px] gap-2"
@@ -295,6 +540,42 @@ export function DraftWorkspace({
       {t("limitedDeck.visualBuilder")}
     </button>
   ) : undefined;
+  const phoneDraftCloseControl = phoneDraftOverlay ? (
+    <button
+      type="button"
+      onClick={() => onMobileWorkspaceOpenChange?.(false)}
+      aria-label={t("common:actions.close")}
+      className="min-h-11 min-w-11 shrink-0 rounded-[6px] border border-hairline bg-slate-950 text-lg text-fg"
+    >
+      <span aria-hidden="true">×</span>
+    </button>
+  ) : undefined;
+  const phoneDraftTextControls = phoneDraftOverlay ? (
+    <>
+      <button
+        type="button"
+        data-phone-draft-view="visual"
+        onClick={() => setPhoneDraftView("board")}
+        className="min-h-11 shrink-0 whitespace-nowrap px-2 text-xs font-medium text-jade"
+      >
+        {t("limitedDeck.visualBuilder")}
+      </button>
+      {phoneDraftCloseControl}
+    </>
+  ) : undefined;
+  const phoneDraftVisualControls = phoneDraftOverlay ? (
+    <>
+      <button
+        type="button"
+        data-phone-draft-view="text"
+        onClick={() => setPhoneDraftView("compact")}
+        className="min-h-11 shrink-0 whitespace-nowrap px-2 text-xs font-medium text-jade"
+      >
+        {t("limitedDeck.textBuilder")}
+      </button>
+      {phoneDraftCloseControl}
+    </>
+  ) : undefined;
   const visualBuilderControls = builderPhoneOrTabletLayout ? (
     <button
       type="button"
@@ -304,6 +585,30 @@ export function DraftWorkspace({
       {t("limitedDeck.textBuilder")}
     </button>
   ) : undefined;
+
+  useLayoutEffect(() => {
+    if (responsiveContext !== "draft" || responsiveLayout === "desktop" || renderedView !== "board") {
+      setDeckVisualColumnWidth(undefined);
+      return;
+    }
+    const deckCardArea = workspaceShellRef.current?.querySelector<HTMLElement>(
+      '[data-zone="deck"] [data-board-column] [data-card-area]',
+    );
+    if (deckCardArea === null || deckCardArea === undefined) return;
+    const measure = () => {
+      const style = getComputedStyle(deckCardArea);
+      const next = deckCardArea.getBoundingClientRect().width
+        - (Number.parseFloat(style.borderLeftWidth) || 0)
+        - (Number.parseFloat(style.borderRightWidth) || 0);
+      if (next <= 0) return;
+      setDeckVisualColumnWidth((current) => current === next ? current : next);
+    };
+    measure();
+    if (typeof ResizeObserver !== "function") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(deckCardArea);
+    return () => observer.disconnect();
+  }, [renderedView, responsiveContext, responsiveLayout, viewportWidth, visualColumnCap]);
 
   useEffect(() => {
     if (normalized === workspace) {
@@ -374,7 +679,7 @@ export function DraftWorkspace({
             : t("workspace.count.deck", { count: counts.deck })}
           deckTypeCounts={deckTypeCounts}
           deckControls={deckControls}
-          trailingControls={visualBuilderControls}
+          trailingControls={phoneDraftVisualControls ?? visualBuilderControls}
           zone="deck"
           pool={pool}
           poolGroups={poolGroups}
@@ -396,7 +701,10 @@ export function DraftWorkspace({
           phoneLayoutDialog={phoneLayout || tabletLayout}
           phonePortraitDeckToolbar={responsiveLayout === "phone-portrait"}
           tabletMode={tabletLayout}
+          responsiveDraftGrouping={responsiveContext === "draft" && (phoneLayout || tabletLayout)}
+          compactPhoneDraft={draftPhoneLayout}
           compactDeckTypeCounts={phoneLayout}
+          builderTouchVisualToolbar={builderTouchVisualToolbar}
           visualColumnCapValue={visualColumnCapDescriptor?.value}
           visualColumnCapMax={visualColumnCapDescriptor?.maximum}
           onVisualColumnCapChange={(next) => {
@@ -412,6 +720,9 @@ export function DraftWorkspace({
           }}
           touchDragEnabled={touchDragEnabled}
           touchScrollEnabled={builderPhoneLayout || tabletLayout}
+          desktopCardAreaMinHeight={responsiveLayout === "desktop"}
+          draggedSourceInstanceId={draggedSourceInstanceId}
+          dragProjection={draggedSourceInstanceId !== undefined && workspaceDragProjectionTarget?.zone === "deck" ? workspaceDragProjectionTarget : undefined}
         />
       ) : (
         responsiveLayout === "desktop" ? (
@@ -432,9 +743,11 @@ export function DraftWorkspace({
                 onSortChange: setCompactSort,
                 onWorkspaceChange: (next) => { if (!interactionLocked) onWorkspaceChange(next); },
                 compactPrimaryControls: compactBuilderPrimaryControls,
-                compactCount: compactBuilderCount,
-                compactTrailingControls: compactBuilderTrailingControls,
-                builderCompact,
+                compactCount: phoneDraftTextLayout
+                  ? <DeckTypeCounts counts={deckTypeCounts} compact />
+                  : compactBuilderCount,
+                compactTrailingControls: phoneDraftTextControls ?? compactBuilderTrailingControls,
+                builderCompact: builderCompact || phoneDraftTextLayout,
               }}
             />
           </>
@@ -468,9 +781,11 @@ export function DraftWorkspace({
                 onSortChange: setCompactSort,
                 onWorkspaceChange: (next) => { if (!interactionLocked) onWorkspaceChange(next); },
                 compactPrimaryControls: compactBuilderPrimaryControls,
-                compactCount: compactBuilderCount,
-                compactTrailingControls: compactBuilderTrailingControls,
-                builderCompact,
+                compactCount: phoneDraftTextLayout
+                  ? <DeckTypeCounts counts={deckTypeCounts} compact />
+                  : compactBuilderCount,
+                compactTrailingControls: phoneDraftTextControls ?? compactBuilderTrailingControls,
+                builderCompact: builderCompact || phoneDraftTextLayout,
               }}
             />
           )}
@@ -489,6 +804,7 @@ export function DraftWorkspace({
       />
     )}
     <section
+      ref={workspaceShellRef}
       aria-label={t("workspace.shell.label")}
       data-responsive-workspace-layout={responsiveLayout}
       className={mobileOverlayActive
@@ -502,20 +818,10 @@ export function DraftWorkspace({
           : "relative flex h-full min-h-0 w-full flex-col overflow-hidden rounded-card surface-card text-fg shadow-panel"}
       style={mobileOverlayActive && mobileWorkspaceOpen
         ? responsiveLayout === "phone-landscape"
-          ? { inset: "58px 9px 58px", padding: 6 }
-          : { inset: "52px 9px 112px", padding: 7 }
+          ? { inset: "58px 9px 58px", padding: responsiveContext === "draft" ? 4 : 6 }
+          : { inset: "52px 9px 112px", padding: responsiveContext === "draft" ? 4 : 7 }
         : undefined}
     >
-      {mobileOverlayActive && mobileWorkspaceOpen && (
-        <button
-          type="button"
-          onClick={() => onMobileWorkspaceOpenChange?.(false)}
-          aria-label={t("common:actions.close")}
-          className="absolute right-2 top-2 z-50 h-9 w-9 rounded-[6px] border border-hairline bg-slate-950 text-fg"
-        >
-          <span aria-hidden="true">×</span>
-        </button>
-      )}
       <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
         {interactionLocked ? t("workspace.locked") : dragController?.announcement ?? ""}
       </div>
@@ -529,7 +835,7 @@ export function DraftWorkspace({
             className={collapsedCompositionClass}
           >
             {deck}
-            {!deckCollapsed && !builderCompact && <section
+            {!phoneDraftTextLayout && !deckCollapsed && !builderCompact && <section
               aria-label={t("workspace.zone.sideboard")}
               data-zone="sideboard"
               className={tabletPortraitLayout
@@ -557,7 +863,15 @@ export function DraftWorkspace({
                 onCardHover={interactionLocked ? undefined : onCardHover}
                 responsiveLayout={responsiveLayout}
                 responsiveContext={responsiveContext}
+                visualColumnCap={responsiveContext === "draft" && responsiveLayout !== "desktop"
+                  ? visualColumnCap
+                  : undefined}
+                visualColumnWidth={responsiveContext === "draft" && responsiveLayout !== "desktop"
+                  ? deckVisualColumnWidth
+                  : undefined}
                 touchDragEnabled={touchDragEnabled}
+                draggedSourceInstanceId={draggedSourceInstanceId}
+                dragProjection={draggedSourceInstanceId !== undefined && workspaceDragProjectionTarget?.zone === "sideboard" ? workspaceDragProjectionTarget : undefined}
               />
             </section>}
           </div>
@@ -611,16 +925,33 @@ export function DraftWorkspace({
             phoneToolbar={phoneLayout}
             touchDragEnabled={touchDragEnabled}
             touchScrollEnabled={builderPhoneLayout}
+            desktopCardAreaMinHeight={responsiveLayout === "desktop"}
+            draggedSourceInstanceId={draggedSourceInstanceId}
+            dragProjection={draggedSourceInstanceId !== undefined && workspaceDragProjectionTarget?.zone === "sideboard" ? workspaceDragProjectionTarget : undefined}
           />
             </section>
           </div>
         )}
       </fieldset>
-      {dragPreview !== null && dragPreview !== undefined && dragPreviewStyle !== undefined && (
+      {workspaceDragProjection !== undefined && renderedWorkspaceProjectionRect !== undefined && (
+        <WorkspaceDragProjectionOverlay
+          projection={workspaceDragProjection}
+          rect={renderedWorkspaceProjectionRect}
+          onSettled={() => {
+            if (workspaceProjection?.token !== undefined && workspaceProjection.token !== 0) {
+              dragController?.completeWorkspaceProjection?.(
+                workspaceProjection.token,
+                workspaceDragProjection.geometryRevision,
+              );
+            }
+          }}
+        />
+      )}
+      {fixedDragPreview !== null && fixedDragPreview !== undefined && dragPreviewStyle !== undefined && (
         <div
           data-testid="draft-drag-preview"
           aria-hidden="true"
-          className="fixed z-50 flex gap-1 opacity-70"
+          className={`fixed z-50 flex gap-1 ${fixedDragPreview.source.kind === "workspace" ? "opacity-60" : "opacity-70"}`}
           style={{
             left: dragPreviewStyle.left,
             top: dragPreviewStyle.top,
@@ -628,10 +959,13 @@ export function DraftWorkspace({
             pointerEvents: "none",
           }}
         >
-          {dragPreview.source.cards.map((card) => (
+          {fixedDragPreview.source.cards.map((card, index) => (
             <DragPreviewCard
               key={card.instance_id}
-              card={card}
+              image={fixedDragPreview.source.kind === "workspace"
+                ? fixedDragPreview.source.previewImage ?? { src: null, alt: card.name }
+                : fixedDragPreview.source.previewImages?.[index] ?? { src: null, alt: card.name }}
+              instanceId={card.instance_id}
               width={dragPreviewStyle.cardWidth}
               height={dragPreviewStyle.cardHeight}
             />

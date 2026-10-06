@@ -30,4 +30,31 @@ describe("MenuShell", () => {
 
     expect(container.firstElementChild).toHaveClass("py-9");
   });
+
+  it("adds three flex-height boundaries only for embedded opt-in", () => {
+    const { container, rerender } = render(
+      <ShellProvider value>
+        <MenuShell fillEmbeddedHeight>
+          <span>Responsive draft</span>
+        </MenuShell>
+      </ShellProvider>,
+    );
+
+    const outer = container.firstElementChild!;
+    const layout = outer.firstElementChild!;
+    const children = layout.lastElementChild!;
+    expect(outer).toHaveClass("h-full", "min-h-0", "flex-1");
+    expect(layout).toHaveClass("min-h-0", "flex-1", "flex", "flex-col");
+    expect(children).toHaveClass("min-h-0", "flex-1", "flex", "flex-col");
+
+    rerender(
+      <ShellProvider value>
+        <MenuShell>
+          <span>Default draft</span>
+        </MenuShell>
+      </ShellProvider>,
+    );
+
+    expect(container.firstElementChild).not.toHaveClass("h-full", "min-h-0", "flex-1");
+  });
 });

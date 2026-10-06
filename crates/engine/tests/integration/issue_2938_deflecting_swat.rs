@@ -173,6 +173,7 @@ fn deflecting_swat_retargets_opponent_spell_on_stack() {
         scope,
         current_targets,
         legal_new_targets,
+        ..
     } = &runner.state().waiting_for
     else {
         unreachable!();

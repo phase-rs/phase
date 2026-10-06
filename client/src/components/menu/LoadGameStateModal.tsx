@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import { menuButtonClass } from "./buttonStyles";
-import type { GameState } from "../../adapter/types";
+import type { PersistedGameState } from "../../adapter/types";
 import {
   gameStateFromImportText,
   readImportFile,
@@ -15,9 +15,9 @@ type LoadTab = "paste" | "file";
 interface LoadGameStateModalProps {
   open: boolean;
   onClose: () => void;
-  /** Invoked with a validated GameState once parsing succeeds. The caller owns
+  /** Invoked with a validated persisted game state once parsing succeeds. The caller owns
    *  persistence + navigation into the game. */
-  onLoaded: (state: GameState) => void;
+  onLoaded: (state: PersistedGameState) => void;
 }
 
 export function LoadGameStateModal({ open, onClose, onLoaded }: LoadGameStateModalProps) {

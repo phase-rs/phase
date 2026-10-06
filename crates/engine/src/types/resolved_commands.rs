@@ -736,6 +736,42 @@ pub enum ResolvedInformationLifetime {
     /// CR 400.7: The published fact belongs to this object incarnation and
     /// expires when that object changes zones.
     UntilZoneChange,
+    /// CR 701.20a: "If revealing a card causes a triggered ability to trigger,
+    /// the card remains revealed until that triggered ability leaves the
+    /// stack." A per-stack-entry public lease on one exact occurrence. Each
+    /// entry owns its own lease row (`GameState::stack_bound_reveals`), so
+    /// overlapping leases on one occurrence release independently. The lease
+    /// also ends if the occurrence changes zones first (CR 400.7).
+    UntilStackObjectLeaves { stack_entry: ObjectId },
+}
+
+/// CR 701.20a + CR 400.7: the single authority for which audience may carry
+/// which reveal lifetime. Shared by live application
+/// (`GameState::apply_information_edit`) and serialized-journal validation
+/// (`information_command_is_invalid`), so the two can never disagree.
+pub(crate) fn information_audience_lifetime_is_valid(
+    audience: ResolvedInformationAudience,
+    lifetime: ResolvedInformationLifetime,
+) -> bool {
+    match (audience, lifetime) {
+        (
+            ResolvedInformationAudience::Controller(_),
+            ResolvedInformationLifetime::UntilActionBoundary,
+        )
+        | (ResolvedInformationAudience::Public, ResolvedInformationLifetime::UntilZoneChange)
+        | (
+            ResolvedInformationAudience::Public,
+            ResolvedInformationLifetime::UntilStackObjectLeaves { .. },
+        ) => true,
+        (
+            ResolvedInformationAudience::Controller(_),
+            ResolvedInformationLifetime::UntilZoneChange
+            | ResolvedInformationLifetime::UntilStackObjectLeaves { .. },
+        )
+        | (ResolvedInformationAudience::Public, ResolvedInformationLifetime::UntilActionBoundary) => {
+            false
+        }
+    }
 }
 
 /// The final information-boundary transition for exact object occurrences.
@@ -800,11 +836,22 @@ pub enum ResolvedLedgerEdit {
         expected_game_history_len: u32,
     },
     /// CR 602.5b: Increment exactly one activated-ability occurrence's facts.
+    ///
+    /// CR 602.2 + CR 601.2i: `record` and `expected_turn_history_len` are a
+    /// PAIR, both present or both absent. Present: append `record` to the
+    /// activator's turn journal, whose length must equal
+    /// `expected_turn_history_len`. Absent: a command written before the
+    /// journal existed; it replays its counts and appends nothing (never a
+    /// defaulted historical activation). A half-present pair is refused.
     AbilityActivated {
         source: super::identifiers::ObjectId,
         ability_index: usize,
         expected_turn_count: u32,
         expected_game_count: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        record: Option<Box<super::game_state::AbilityActivationRecord>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_turn_history_len: Option<u32>,
     },
     /// CR 700.13: Record the first committed crime of the turn after its
     /// targeting action is successfully placed on the stack.
@@ -1268,8 +1315,7 @@ pub struct ResolvedStackRemovalCommand {
     /// CR 405.2: the index the entry occupied. Recorded rather than re-found,
     /// because the production sites locate it by a `position`/`rposition` scan
     /// whose predicate can match a DIFFERENT entry on a stack that has since
-    /// diverged — `counter.rs` in particular scans on `id OR source_id`, which
-    /// matches every ability sharing a source permanent.
+    /// diverged.
     pub index: usize,
     /// Stack depth AFTER the removal (CR 405.2).
     pub resulting_depth: usize,
@@ -3207,16 +3253,7 @@ fn object_counter_edit_is_empty(edit: &ResolvedObjectCounterEdit) -> bool {
 }
 
 fn information_command_is_invalid(command: &ResolvedInformationCommand) -> bool {
-    let valid_lifetime = matches!(
-        (command.audience, command.lifetime),
-        (
-            ResolvedInformationAudience::Controller(_),
-            ResolvedInformationLifetime::UntilActionBoundary
-        ) | (
-            ResolvedInformationAudience::Public,
-            ResolvedInformationLifetime::UntilZoneChange
-        )
-    );
+    let valid_lifetime = information_audience_lifetime_is_valid(command.audience, command.lifetime);
     let mut object_ids = HashSet::new();
     command.occurrences.is_empty()
         || !valid_lifetime
@@ -3259,10 +3296,21 @@ pub(crate) fn ledger_edit_is_invalid(edit: &ResolvedLedgerEdit) -> bool {
                 || *expected_game_history_len == u32::MAX
         }
         ResolvedLedgerEdit::AbilityActivated {
+            source,
             expected_turn_count,
             expected_game_count,
+            record,
+            expected_turn_history_len,
             ..
-        } => *expected_turn_count == u32::MAX || *expected_game_count == u32::MAX,
+        } => {
+            *expected_turn_count == u32::MAX
+                || *expected_game_count == u32::MAX
+                || record.is_some() != expected_turn_history_len.is_some()
+                || *expected_turn_history_len == Some(u32::MAX)
+                // CR 602.2: the record describes the very activation the
+                // command counts; a record for another source is malformed.
+                || record.as_ref().is_some_and(|record| record.source != *source)
+        }
         ResolvedLedgerEdit::CrimeCommitted {
             expected_turn_count,
             ..
@@ -3805,6 +3853,8 @@ mod tests {
                     ability_index: 0,
                     expected_turn_count: 0,
                     expected_game_count: 0,
+                    record: None,
+                    expected_turn_history_len: None,
                 },
                 cause,
             })
@@ -3868,10 +3918,106 @@ mod tests {
             ability_index: 0,
             expected_turn_count: u32::MAX,
             expected_game_count: 0,
+            record: None,
+            expected_turn_history_len: None,
         };
         assert!(serde_json::from_value::<ResolvedRulesJournal>(
             serde_json::to_value(impossible_ledger).unwrap()
         )
         .is_err());
+    }
+
+    /// r5c #4: an `AbilityActivated` command's record and history length are a
+    /// pair. The paired and the legacy (neither) shapes decode; either half
+    /// alone is refused at the journal's decode prescreen.
+    #[test]
+    fn an_activation_command_decodes_only_with_a_paired_or_absent_record() {
+        let object = crate::game::game_object::GameObject::new(
+            ObjectId(9),
+            crate::types::identifiers::CardId(9),
+            PlayerId(0),
+            "Journal Source".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        let record = crate::types::game_state::AbilityActivationRecord {
+            activator: PlayerId(0),
+            source: ObjectId(9),
+            source_lki: object.snapshot_public_characteristics(),
+            source_zone: crate::types::zones::Zone::Battlefield,
+            ability_tag: None,
+            is_loyalty_ability: false,
+            targets: vec![crate::types::game_state::ActivationTargetFact::Player(
+                PlayerId(1),
+            )],
+        };
+        let journal_with = |record: Option<Box<_>>, expected_turn_history_len: Option<u32>| {
+            let mut journal = ResolvedRulesJournal::default();
+            let cause = journal.begin_proposal().unwrap();
+            journal
+                .record_ledger_edit(ResolvedLedgerEditCommand {
+                    edit: ResolvedLedgerEdit::AbilityActivated {
+                        source: ObjectId(9),
+                        ability_index: 0,
+                        expected_turn_count: 0,
+                        expected_game_count: 0,
+                        record,
+                        expected_turn_history_len,
+                    },
+                    cause,
+                })
+                .map(|_| journal)
+        };
+        for (label, record, len) in [
+            ("paired", Some(Box::new(record.clone())), Some(0)),
+            ("legacy", None, None),
+        ] {
+            let journal = journal_with(record, len).expect(label);
+            assert_eq!(
+                serde_json::from_value::<ResolvedRulesJournal>(
+                    serde_json::to_value(&journal).unwrap()
+                )
+                .expect(label),
+                journal,
+                "{label}"
+            );
+        }
+        // Built well-formed, then one half removed on the wire, so the refusal
+        // is the decode prescreen's, not the recorder's.
+        let paired =
+            serde_json::to_value(journal_with(Some(Box::new(record)), Some(0)).expect("paired"))
+                .unwrap();
+        let edit = |value: &mut serde_json::Value| -> serde_json::Map<String, serde_json::Value> {
+            value["entries"][1]["command"]["LedgerEdit"]["edit"]["AbilityActivated"]
+                .as_object()
+                .expect("the AbilityActivated edit")
+                .clone()
+        };
+        for (label, drop) in [
+            ("record without length", "expected_turn_history_len"),
+            ("length without record", "record"),
+        ] {
+            let mut wire = paired.clone();
+            let mut fields = edit(&mut wire);
+            assert!(fields.remove(drop).is_some(), "{label}: reach guard");
+            wire["entries"][1]["command"]["LedgerEdit"]["edit"]["AbilityActivated"] =
+                serde_json::Value::Object(fields);
+            assert!(
+                serde_json::from_value::<ResolvedRulesJournal>(wire).is_err(),
+                "{label}"
+            );
+        }
+        // CR 602.2: a record for another source than the command's.
+        let mut wire = paired.clone();
+        let fields = edit(&mut wire);
+        assert!(
+            fields["record"]["source"] == serde_json::json!(9),
+            "reach guard: {fields:?}"
+        );
+        wire["entries"][1]["command"]["LedgerEdit"]["edit"]["AbilityActivated"]["record"]
+            ["source"] = serde_json::json!(10);
+        assert!(
+            serde_json::from_value::<ResolvedRulesJournal>(wire).is_err(),
+            "a record for another source"
+        );
     }
 }

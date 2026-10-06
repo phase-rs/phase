@@ -1,15 +1,14 @@
 //! CR 810.8a — Two-Headed Giant team propagation for `CantLoseTheGame` /
 //! `CantWinTheGame`.
 //!
-//! CR 810.8a: "Players win
-//! and lose the game only as a team, not as individuals. ... If an effect
-//! says that a player can't win the game, that player's team can't win the
-//! game. If an effect says that a player can't lose the game, that player's
-//! team can't lose the game." The Platinum Angel example in the same rule
-//! ("Neither that player nor their teammate can lose the game ... neither
-//! player on the opposing team can win the game") is the exact clause Angel's
-//! Grace prints ("You can't lose the game this turn and your opponents can't
-//! win the game this turn").
+//! CR 810.8a: "Players win and lose the game only as a team, not as
+//! individuals. ... If an effect says that a player can't win the game, that
+//! player's team can't win the game. If an effect says that a player can't
+//! lose the game, that player's team can't lose the game." The Platinum Angel
+//! example in the same rule ("Neither that player nor their teammate can lose
+//! the game ... neither player on the opposing team can win the game") is the
+//! exact clause Angel's Grace prints ("You can't lose the game this turn and
+//! your opponents can't win the game this turn").
 //!
 //! `angels_grace.rs` exercises only two-player fixtures, so it can't
 //! distinguish "protects the named player" from "protects the named player's

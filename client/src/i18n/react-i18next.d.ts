@@ -11,6 +11,7 @@ import type menu from "./locales/en/menu.json";
 import type multiplayer from "./locales/en/multiplayer.json";
 import type replay from "./locales/en/replay.json";
 import type settings from "./locales/en/settings.json";
+import type tournament from "./locales/en/tournament.json";
 
 declare module "react-i18next" {
   interface CustomTypeOptions {
@@ -24,6 +25,7 @@ declare module "react-i18next" {
       settings: typeof settings;
       multiplayer: typeof multiplayer;
       replay: typeof replay;
+      tournament: typeof tournament;
     };
   }
 }

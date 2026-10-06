@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import type { GameLogEntry, LogImportance } from "../../adapter/types";
-import { filterLogByView, logPresentation, timelineRows, toneClass } from "../logFormatting";
+import {
+  filterLogByView,
+  importanceClass,
+  logPresentation,
+  timelineRows,
+  toneClass,
+} from "../logFormatting";
 
 function entry(
   importance: LogImportance,
@@ -33,6 +39,16 @@ describe("game log presentation", () => {
     expect(filterLogByView(entries, "details").map((value) => value.seq)).toEqual([1, 2, 3]);
     expect(filterLogByView(entries, "diagnostics").map((value) => value.seq)).toEqual([1, 2, 3, 4]);
     expect(filterLogByView(entries, "timeline", new Set(["Debug"]))).toEqual([entries[3]]);
+
+    const boundary = entry("Context", {
+      seq: 5,
+      category: "Turn",
+      presentation: { importance: "Context", tone: "Neutral", boundary: "Turn", visibility: "Public" },
+    });
+    expect(filterLogByView([boundary, entries[0]], "timeline", new Set(["Stack"]))).toEqual([
+      boundary,
+      entries[0],
+    ]);
   });
 
   it("requires an explicit diagnostics opt-in for hidden information", () => {
@@ -75,15 +91,43 @@ describe("game log presentation", () => {
 
     expect(timelineRows([firstBoundary, secondBoundary])).toEqual([]);
     expect(timelineRows([firstBoundary, secondBoundary], true)).toEqual([
-      { type: "divider", divider: { seq: 1, turn: 1, phase: "Upkeep", boundary: "Turn" } },
-      { type: "divider", divider: { seq: 2, turn: 2, phase: "Draw", boundary: "Turn" } },
+      {
+        type: "divider",
+        divider: {
+          seq: 1,
+          turn: 1,
+          phase: "Upkeep",
+          boundary: "Turn",
+          turnSegments: firstBoundary.segments,
+        },
+      },
+      {
+        type: "divider",
+        divider: {
+          seq: 2,
+          turn: 2,
+          phase: "Draw",
+          boundary: "Turn",
+          turnSegments: secondBoundary.segments,
+        },
+      },
     ]);
     expect(timelineRows([{ ...firstBoundary, turn: 0 }], true)).toEqual([]);
   });
 
-  it("uses typed tones for non-color style cues", () => {
+  it("uses typed tones for both rail and surface cues", () => {
     expect(toneClass("Positive")).toContain("border-l-emerald");
+    expect(toneClass("Positive")).toContain("bg-emerald");
     expect(toneClass("Negative")).toContain("border-l-red");
+    expect(toneClass("Negative")).toContain("bg-red");
     expect(toneClass("Diagnostic")).toContain("border-l-fuchsia");
+    expect(toneClass("Diagnostic")).toContain("bg-fuchsia");
+  });
+
+  it("uses typed importance for text hierarchy", () => {
+    expect(importanceClass("Essential")).toBe("text-gray-100");
+    expect(importanceClass("Context")).toBe("text-gray-200");
+    expect(importanceClass("Detail")).toBe("text-gray-300");
+    expect(importanceClass("Diagnostic")).toBe("text-gray-400");
   });
 });

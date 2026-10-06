@@ -1,6 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 764
+assertion_line: 2112
 expression: "&lowered"
 ---
 {
@@ -120,7 +120,8 @@ expression: "&lowered"
               "origin": null,
               "destination": "Hand",
               "target": {
-                "type": "ParentTarget"
+                "type": "TrackedSet",
+                "id": 0
               },
               "owner_library": false,
               "enter_transformed": false,
@@ -203,7 +204,8 @@ expression: "&lowered"
               "origin": null,
               "destination": "Hand",
               "target": {
-                "type": "ParentTarget"
+                "type": "TrackedSet",
+                "id": 0
               },
               "owner_library": false,
               "enter_transformed": false,

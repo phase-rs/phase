@@ -75,18 +75,21 @@ pub async fn admin_delete_draft(
     if !is_valid_draft_code(&code) {
         return (StatusCode::BAD_REQUEST, "Invalid draft code").into_response();
     }
-    let mut drafts = app_state.draft_sessions.lock().await;
-    match drafts.remove_draft(&code) {
+    let removed = app_state.draft_sessions.lock().await.remove_draft(&code);
+    match removed {
         Some(session) => {
-            // Remove active game sessions spawned by this draft (Pitfall 4 mitigation)
-            if !session.active_matches.is_empty() {
-                let mut sessions = app_state.sessions.lock().await;
-                for game_code in session.active_matches.values() {
-                    sessions.remove_game(game_code);
-                }
-            }
-            // Delete from persistence
-            let _ = app_state.game_db.delete_draft_session(&code);
+            crate::teardown_removed_draft(
+                &app_state.sessions,
+                &app_state.connections,
+                &app_state.draft_spectators,
+                &app_state.game_spectators,
+                &app_state.lobby,
+                &app_state.lobby_subscribers,
+                &app_state.game_db,
+                &code,
+                session,
+            )
+            .await;
             info!(draft = %code, "admin force-deleted draft session");
             (StatusCode::OK, "Deleted").into_response()
         }
@@ -215,5 +218,263 @@ pub async fn p2p_backup_delete(
             warn!(error = %e, "P2P backup load failed");
             (StatusCode::INTERNAL_SERVER_ERROR, "Load failed").into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicU32;
+    use std::sync::Arc;
+
+    use axum::extract::{Path, State};
+    use axum::response::IntoResponse;
+    use draft_core::types::{
+        DeckAddableCards, DraftConfig, DraftKind, DraftSource, PodPolicy, SpectatorVisibility,
+        TournamentFormat,
+    };
+    use lobby_broker::lobby::RegisterGameRequest;
+    use lobby_broker::{Broker, BrokerEnv};
+    use server_core::draft_session::DraftSessionManager;
+    use server_core::session::SessionManager;
+    use tokio::sync::{mpsc, Mutex};
+
+    use crate::{draft_pools, persistence, AppState, PlayerId, ServerContext, ServerMode};
+
+    struct FixedEnv;
+    impl BrokerEnv for FixedEnv {
+        fn now_ms(&self) -> u64 {
+            1_000
+        }
+        fn new_token(&self) -> String {
+            "token".to_string()
+        }
+        fn new_game_code(&self) -> String {
+            "CODE00".to_string()
+        }
+    }
+
+    fn draft_config() -> DraftConfig {
+        DraftConfig {
+            source: DraftSource::single_set("TST".to_string()),
+            set_code: "TST".to_string(),
+            kind: DraftKind::Premier,
+            pod_size: 8,
+            cards_per_pack: 14,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 42,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        }
+    }
+
+    fn app_state(temp_dir: &tempfile::TempDir) -> AppState {
+        let game_db = Arc::new(
+            persistence::GameDb::open(
+                &temp_dir.path().join("games.db"),
+                persistence::SessionRetention::Multiplayer,
+            )
+            .expect("game db"),
+        );
+        AppState {
+            sessions: Arc::new(Mutex::new(SessionManager::new())),
+            draft_sessions: Arc::new(Mutex::new(DraftSessionManager::new())),
+            draft_pools: Arc::new(draft_pools::DraftPools::default()),
+            connections: Arc::new(Mutex::new(HashMap::new())),
+            db: Arc::new(engine::database::CardDatabase::default()),
+            lobby: Arc::new(Mutex::new(Broker::new())),
+            lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
+            player_count: Arc::new(AtomicU32::new(0)),
+            game_db,
+            draft_spectators: Arc::new(Mutex::new(HashMap::new())),
+            game_spectators: Arc::new(Mutex::new(HashMap::new())),
+            mode: ServerMode::Full,
+            context: ServerContext::default(),
+            public_url: None,
+            allowed_origin: None,
+        }
+    }
+
+    /// A force-deleted draft leaves no orphaned routing behind, for both kinds
+    /// of subject it destroys: the draft itself and each game it spawned.
+    #[tokio::test]
+    async fn force_delete_orphans_no_map_for_the_draft_or_its_matches() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let state = app_state(&temp_dir);
+        let match_code = "MATCH1".to_string();
+
+        let draft_code = {
+            let mut drafts = state.draft_sessions.lock().await;
+            let (draft_code, _token, _seat) =
+                drafts.create_draft(draft_config(), "Host".to_string());
+            drafts
+                .sessions
+                .get_mut(&draft_code)
+                .expect("draft")
+                .active_matches
+                .insert("m1".to_string(), match_code.clone());
+            draft_code
+        };
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        state.connections.lock().await.insert(
+            draft_code.clone(),
+            HashMap::from([(PlayerId(0), tx.clone())]),
+        );
+        state.connections.lock().await.insert(
+            match_code.clone(),
+            HashMap::from([(PlayerId(0), tx.clone())]),
+        );
+        state.draft_spectators.lock().await.insert(
+            draft_code.clone(),
+            vec![(SpectatorVisibility::default(), tx.clone())],
+        );
+        state
+            .game_spectators
+            .lock()
+            .await
+            .insert(match_code.clone(), vec![tx.clone()]);
+        {
+            let mut lob = state.lobby.lock().await;
+            lob.lobby_mut().register_game(
+                &draft_code,
+                RegisterGameRequest {
+                    host_name: "Host".to_string(),
+                    public: true,
+                    ..Default::default()
+                },
+                &FixedEnv,
+            );
+        }
+
+        // Reach guard: every map really is populated before the delete, so the
+        // emptiness assertions below cannot pass on a fixture that never wired
+        // anything up.
+        assert!(state.connections.lock().await.contains_key(&draft_code));
+        assert!(state.connections.lock().await.contains_key(&match_code));
+        assert!(state
+            .draft_spectators
+            .lock()
+            .await
+            .contains_key(&draft_code));
+        assert!(state.game_spectators.lock().await.contains_key(&match_code));
+        assert!(state.lobby.lock().await.lobby_mut().has_game(&draft_code));
+        let snapshot = {
+            let mut drafts = state.draft_sessions.lock().await;
+            drafts.handle_disconnect(&draft_code, 0);
+            assert!(drafts.reconnect.is_disconnected(&draft_code, PlayerId(0)));
+            drafts.sessions[&draft_code].to_persisted()
+        };
+        state
+            .game_db
+            .save_draft_session(&draft_code, &serde_json::to_string(&snapshot).unwrap())
+            .unwrap();
+        assert!(draft_rows(&state).contains(&draft_code));
+
+        let response = super::admin_delete_draft(State(state.clone()), Path(draft_code.clone()))
+            .await
+            .into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+        assert!(!state
+            .draft_sessions
+            .lock()
+            .await
+            .sessions
+            .contains_key(&draft_code));
+        assert!(!state.connections.lock().await.contains_key(&draft_code));
+        assert!(!state.connections.lock().await.contains_key(&match_code));
+        assert!(!state
+            .draft_spectators
+            .lock()
+            .await
+            .contains_key(&draft_code));
+        assert!(!state.game_spectators.lock().await.contains_key(&match_code));
+        assert!(!state.lobby.lock().await.lobby_mut().has_game(&draft_code));
+        assert!(!draft_rows(&state).contains(&draft_code));
+        assert!(!state
+            .draft_sessions
+            .lock()
+            .await
+            .reconnect
+            .is_disconnected(&draft_code, PlayerId(0)));
+    }
+
+    fn draft_rows(state: &AppState) -> Vec<String> {
+        state
+            .game_db
+            .load_all_drafts()
+            .expect("load rows")
+            .into_iter()
+            .map(|(code, _)| code)
+            .collect()
+    }
+
+    /// Persists queued behind a busy blocking pool land after a force-delete
+    /// and a reap; neither removed pod's row may come back.
+    #[test]
+    fn a_queued_persist_cannot_resurrect_a_removed_draft() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let temp_dir = tempfile::tempdir().expect("temp dir");
+            let state = app_state(&temp_dir);
+            let (deleted, kept, reaped) = {
+                let mut drafts = state.draft_sessions.lock().await;
+                let (a, _, _) = drafts.create_draft(draft_config(), "Host".to_string());
+                let (b, _, _) = drafts.create_draft(draft_config(), "Host".to_string());
+                let (c, _, _) = drafts.create_draft(draft_config(), "Host".to_string());
+                drafts.reconnect.grace_period = std::time::Duration::ZERO;
+                drafts.handle_disconnect(&c, 0);
+                (a, b, c)
+            };
+            let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+            let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                gate_rx.recv().unwrap();
+            });
+            started_rx.recv().unwrap();
+            for code in [&deleted, &kept, &reaped] {
+                crate::persist_draft_session_async(&state.game_db, code, &state.draft_sessions)
+                    .await;
+            }
+            let response = super::admin_delete_draft(State(state.clone()), Path(deleted.clone()))
+                .await
+                .into_response();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            crate::sweep_draft_seat_expiry(
+                &state.draft_sessions,
+                &state.sessions,
+                &state.connections,
+                &state.draft_spectators,
+                &state.game_spectators,
+                &state.lobby,
+                &state.lobby_subscribers,
+                &state.game_db,
+            )
+            .await;
+            assert!(!state
+                .draft_sessions
+                .lock()
+                .await
+                .sessions
+                .contains_key(&reaped));
+            gate_tx.send(()).unwrap();
+            blocker.await.unwrap();
+            tokio::task::spawn_blocking(|| ()).await.unwrap();
+
+            let rows = draft_rows(&state);
+            assert!(rows.contains(&kept), "the queued save ran");
+            assert!(!rows.contains(&deleted));
+            assert!(!rows.contains(&reaped));
+        });
     }
 }

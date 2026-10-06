@@ -477,6 +477,89 @@ describe("fetchCardData — combined multi-face names", () => {
   });
 });
 
+describe("fetchCardData — names containing a bare slash", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // "Summon: Choco/Mog" is a single-faced card whose printed name contains a
+  // bare "/", keyed the way the export does it: by its own printed name only.
+  // "Revival" is a split card keyed by its front face, whose entry carries the
+  // full composite `name` — the same convention `makeDfcDataMap` uses above.
+  function makeSlashDataMap(): Response {
+    const map: Record<string, unknown> = {
+      "summon: choco/mog": {
+        oracle_id: "choco-oracle",
+        face_names: ["summon: choco/mog"],
+        faces: [
+          { normal: "https://img.example/choco.jpg", art_crop: "https://img.example/choco-art.jpg" },
+        ],
+        name: "Summon: Choco/Mog",
+        mana_cost: "{2}{R}",
+        cmc: 3,
+        type_line: "Enchantment Creature — Saga Bird Moogle",
+        colors: ["R"],
+        color_identity: ["R"],
+        keywords: [],
+      },
+      revival: {
+        oracle_id: "revival-oracle",
+        face_names: ["revival", "revenge"],
+        faces: [
+          { normal: "https://img.example/revival.jpg", art_crop: "https://img.example/revival-art.jpg" },
+          { normal: "https://img.example/revenge.jpg", art_crop: "https://img.example/revenge-art.jpg" },
+        ],
+        layout: "split",
+        name: "Revival // Revenge",
+        mana_cost: "{1}{W}",
+        cmc: 2,
+        type_line: "Sorcery",
+        colors: ["W"],
+        color_identity: ["W"],
+        keywords: [],
+      },
+    };
+    return new Response(JSON.stringify(map), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  it("resolves the legacy spaced spelling of a bare-slash name to the printed name", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeSlashDataMap());
+
+    const { fetchCardData } = await loadScryfallModule();
+    const card = await fetchCardData("Summon: Choco // Mog");
+
+    expect(card.name).toBe("Summon: Choco/Mog");
+  });
+
+  it("resolves a single-slash split-card name via the front face", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeSlashDataMap());
+
+    const { fetchCardData } = await loadScryfallModule();
+    const card = await fetchCardData("Revival/Revenge");
+
+    expect(card.name).toBe("Revival // Revenge");
+  });
+
+  it("resolves the exact bare-slash printed name directly", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeSlashDataMap());
+
+    const { fetchCardData } = await loadScryfallModule();
+    const card = await fetchCardData("Summon: Choco/Mog");
+
+    expect(card.name).toBe("Summon: Choco/Mog");
+  });
+
+  it("rejects a front-segment-only name that is not itself a card", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeSlashDataMap());
+
+    const { fetchCardData } = await loadScryfallModule();
+    await expect(fetchCardData("Summon: Choco")).rejects.toThrow(/not in local data/);
+  });
+});
+
 describe("manaSymbolSourceUrl", () => {
   it.each([
     ["W/U", "WU"],
@@ -960,6 +1043,203 @@ describe("fetchTokenImageUrl — ability-aware printing selection (issue #502)",
     });
 
     expect(url).toBe("https://img.example/vanilla-human.jpg");
+  });
+});
+
+describe("fetchTokenImageUrl - printed-shape art selection", () => {
+  const LOCAL_ART = "https://img.example/local-goblin.jpg";
+  const REMOTE_ART = "https://img.example/remote-goblin.jpg";
+
+  function makeTokenLocalMap(entry: Record<string, unknown>): Response {
+    return new Response(
+      JSON.stringify({
+        "token:goblin": {
+          oracle_id: "goblin-token",
+          face_names: ["goblin"],
+          faces: [{ normal: LOCAL_ART, art_crop: LOCAL_ART }],
+          layout: "token",
+          name: "Goblin",
+          mana_cost: "",
+          cmc: 0,
+          type_line: "Token Creature — Goblin",
+          oracle_text: null,
+          colors: [],
+          color_identity: [],
+          keywords: [],
+          power: null,
+          toughness: null,
+          ...entry,
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
+  function makeRemoteTokenHit(): Response {
+    return new Response(
+      JSON.stringify({
+        data: [{
+          name: "Goblin Token",
+          image_uris: { normal: REMOTE_ART },
+        }],
+        total_cards: 1,
+        has_more: false,
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
+  function make404(): Response {
+    return new Response("", { status: 404 });
+  }
+
+  function capturedQueries(fetchMock: ReturnType<typeof vi.fn>): string[] {
+    return fetchMock.mock.calls
+      .map((c) => String(c[0]))
+      .filter((u) => u.includes("/cards/search?"))
+      .map((u) => decodeURIComponent(new URL(u).searchParams.get("q") ?? ""));
+  }
+
+  it("serves the local hit when every filtered axis matches", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      makeTokenLocalMap({
+        colors: ["R"],
+        power: "1",
+        toughness: "1",
+      }),
+    );
+
+    const { fetchTokenImageUrl } = await loadScryfallModule();
+    const url = await fetchTokenImageUrl("Goblin", "normal", {
+      power: 1,
+      toughness: 1,
+      colors: ["Red"],
+      subtypes: ["Goblin"],
+      hasAbilities: false,
+    });
+
+    expect(url).toBe(LOCAL_ART);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    {
+      label: "P/T mismatch (stored 2/1 haste Goblin vs requested 1/1)",
+      entry: { colors: ["R"], power: "2", toughness: "1", keywords: ["Haste"], oracle_text: "Haste" },
+      filters: { power: 1, toughness: 1, colors: ["Red"], subtypes: ["Goblin"], hasAbilities: false },
+    },
+    {
+      label: "color mismatch (stored blue Spirit vs requested white)",
+      entry: { colors: ["U"], power: "1", toughness: "1", keywords: ["Flying"], oracle_text: "Flying", type_line: "Token Creature — Spirit" },
+      filters: { power: 1, toughness: 1, colors: ["White"], subtypes: ["Spirit"], hasAbilities: true, keywords: ["flying"] },
+    },
+    {
+      label: "vanilla requested but stored printing has abilities",
+      entry: { colors: ["W"], power: "2", toughness: "2", keywords: ["Protection"], oracle_text: "Protection from red", type_line: "Token Creature — Knight" },
+      filters: { power: 2, toughness: 2, colors: ["White"], subtypes: ["Knight"], hasAbilities: false },
+    },
+    {
+      label: "keyword mismatch (stored flying vs requested vigilance)",
+      entry: { colors: ["W"], power: "1", toughness: "1", keywords: ["Flying"], oracle_text: "Flying", type_line: "Token Creature — Spirit" },
+      filters: { power: 1, toughness: 1, colors: ["White"], subtypes: ["Spirit"], hasAbilities: true, keywords: ["vigilance"] },
+    },
+    {
+      label: "subtype mismatch (stored Goblin vs requested Goblin Warrior)",
+      entry: { colors: ["R"], power: "1", toughness: "1" },
+      filters: { power: 1, toughness: 1, colors: ["Red"], subtypes: ["Goblin", "Warrior"], hasAbilities: false },
+    },
+    {
+      label: "star P/T never serves a numeric request",
+      entry: { colors: ["B"], power: "*", toughness: "*", type_line: "Token Creature — Zombie" },
+      filters: { power: 2, toughness: 2, colors: ["Black"], subtypes: ["Zombie"], hasAbilities: false },
+    },
+  ])("falls through to the API on $label", async ({ entry, filters }) => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(makeTokenLocalMap(entry))
+      .mockResolvedValue(makeRemoteTokenHit());
+    global.fetch = fetchMock;
+
+    const { fetchTokenImageUrl } = await loadScryfallModule();
+    const url = await fetchTokenImageUrl("Goblin", "normal", filters);
+
+    expect(url).toBe(REMOTE_ART);
+    expect(capturedQueries(fetchMock).length).toBeGreaterThan(0);
+  });
+
+  it("serves the local hit when its keywords cover the requested set", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      makeTokenLocalMap({
+        colors: ["W"],
+        power: "1",
+        toughness: "1",
+        keywords: ["Flying", "First strike"],
+        oracle_text: "Flying, first strike",
+        type_line: "Token Creature — Spirit",
+      }),
+    );
+
+    const { fetchTokenImageUrl } = await loadScryfallModule();
+    const url = await fetchTokenImageUrl("Goblin", "normal", {
+      power: 1,
+      toughness: 1,
+      colors: ["White"],
+      subtypes: ["Spirit"],
+      hasAbilities: true,
+      keywords: ["flying"],
+    });
+
+    expect(url).toBe(LOCAL_ART);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("leads the remote ladder with a kw-narrowed rung when keywords are present", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(makeEmptyCardDataMap())
+      .mockResolvedValue(makeRemoteTokenHit());
+    global.fetch = fetchMock;
+
+    const { fetchTokenImageUrl } = await loadScryfallModule();
+    await fetchTokenImageUrl("Spirit", "normal", {
+      power: 1,
+      toughness: 1,
+      colors: ["White"],
+      subtypes: ["Spirit"],
+      hasAbilities: true,
+      keywords: ["flying", "first strike"],
+    });
+
+    const queries = capturedQueries(fetchMock);
+    // Exactly one query fires (the mock always hits), and it carries the
+    // keywords — proving the kw rung leads the ladder.
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain('kw:"flying"');
+    expect(queries[0]).toContain('kw:"first strike"');
+  });
+
+  it("a 404 on the kw rung degrades to the wider ladder, never to no image", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(makeEmptyCardDataMap())
+      .mockResolvedValueOnce(make404())
+      .mockResolvedValue(makeRemoteTokenHit());
+    global.fetch = fetchMock;
+
+    const { fetchTokenImageUrl } = await loadScryfallModule();
+    const url = await fetchTokenImageUrl("Spirit", "normal", {
+      power: 1,
+      toughness: 1,
+      colors: ["White"],
+      subtypes: ["Spirit"],
+      hasAbilities: true,
+      keywords: ["flying"],
+    });
+
+    expect(url).toBe(REMOTE_ART);
+    const queries = capturedQueries(fetchMock);
+    expect(queries[0]).toContain('kw:"flying"');
+    expect(queries[1]).not.toContain("kw:");
   });
 });
 

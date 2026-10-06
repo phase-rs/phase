@@ -7,8 +7,8 @@
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::{alphanumeric1, space1};
-use nom::combinator::{map, not, opt, value};
-use nom::sequence::preceded;
+use nom::combinator::{map, not, opt, peek, value};
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::error::OracleResult;
@@ -17,8 +17,8 @@ use super::primitives::{
 };
 use super::quantity::{parse_quantity_expr_number, parse_quantity_ref};
 use crate::types::ability::{
-    AggregateFunction, Comparator, ControllerRef, FilterProp, ObjectProperty, PtStat, PtValueScope,
-    QuantityExpr, SourceExclusion,
+    AggregateFunction, AttackerBlockStatus, Comparator, ControllerRef, FilterProp, ObjectProperty,
+    PtStat, PtValueScope, QuantityExpr, SourceExclusion,
 };
 use crate::types::card_type::CoreType;
 #[cfg(test)]
@@ -27,6 +27,40 @@ use crate::types::counter::{parse_counter_type, CounterMatch};
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
+/// CR 201.2 + CR 201.2a: "not named <name>" — a NAME predicate, lowered to
+/// `Not(Named)`. It's never a self-exclusion (`Another`): a different object
+/// with the excluded name is excluded too, and an object with no name is "not
+/// named" anything, so it passes.
+///
+/// The name span ends at the shared named-filter clause boundary
+/// (`oracle_target::named_filter_name_end`), so comma-bearing names survive
+/// ("Ebondeath, Dracolich"). Any text after that boundary is returned as the
+/// remainder, and a caller that requires the whole subject to be consumed can
+/// fail closed on it. The input is the lowercase shadow, so the name is stored
+/// lowercase and compared case-insensitively at evaluation.
+///
+/// Fails on an empty name, and on a name carrying the `~` self-reference token
+/// (CR 201.5). `Named{"~"}` would match no object, so its negation would accept
+/// every object.
+pub(crate) fn parse_not_named_suffix(input: &str) -> OracleResult<'_, FilterProp> {
+    let (name_text, _) = tag("not named ").parse(input)?;
+    let name_end = crate::parser::oracle_target::named_filter_name_end(name_text);
+    let name = name_text[..name_end].trim();
+    if name.is_empty() || name.contains('~') {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    Ok((
+        &name_text[name_end..],
+        FilterProp::Not {
+            prop: Box::new(FilterProp::Named {
+                name: name.to_string(),
+            }),
+        },
+    ))
+}
 /// Parse a zone filter phrase from Oracle text.
 ///
 /// Matches "on the battlefield", "in your graveyard", "in your hand",
@@ -165,7 +199,23 @@ pub fn parse_property_filter(input: &str) -> OracleResult<'_, FilterProp> {
         value(FilterProp::FaceDown, tag("face down")),
         // CR 701.27g: "transformed permanent"/"transformed creature" selector.
         value(FilterProp::Transformed, tag("transformed")),
-        value(FilterProp::Unblocked, tag("unblocked")),
+        value(
+            FilterProp::BlockStatus {
+                status: AttackerBlockStatus::Unblocked,
+            },
+            tag("unblocked"),
+        ),
+        // CR 509.1h: "blocked" as a prefix adjective; postfix "blocked by"/"blocked this
+        // turn" are handled elsewhere and must not be consumed here.
+        value(
+            FilterProp::BlockStatus {
+                status: AttackerBlockStatus::Blocked,
+            },
+            terminated(
+                tag("blocked"),
+                peek(preceded(tag(" "), not(alt((tag("by"), tag("this turn")))))),
+            ),
+        ),
         value(FilterProp::Suspected, tag("suspected")),
         value(FilterProp::Renowned, tag("renowned")),
         // CR 701.15b/c: standalone "goaded" designation property token.
@@ -300,7 +350,7 @@ pub fn parse_pt_comparison(input: &str) -> OracleResult<'_, FilterProp> {
 /// caller's business: an explicit "among `<set>`" (CR 109.2, owned by
 /// `oracle_target::parse_superlative_property_suffix`), or the enclosing noun
 /// phrase itself (CR 109.2, owned by the bare-form pass in
-/// `parse_type_phrase_with_ctx`).
+/// `parse_type_phrase_folding_with_ctx`).
 ///
 /// The `not(alphanumeric1)` tail guard enforces a word boundary so "mana values"
 /// or "powerstone" cannot half-match the property word. The `among`-form caller
@@ -503,6 +553,132 @@ pub fn parse_color_property(input: &str) -> OracleResult<'_, FilterProp> {
     .parse(input)
 }
 
+/// CR 105.4: the trailing "of the color of your choice" object-filter
+/// qualifier — the clause PRINTS its own colour choice (Wash Out,
+/// Root Greevil).
+///
+/// The tag is SPACE-FREE: the caller trims and tracks the separating
+/// whitespace itself, exactly as the sibling chosen-TYPE arm in
+/// `oracle_target.rs` does, so an upstream suffix arm that already consumed
+/// the space cannot silently defeat this one.
+///
+/// The ANAPHOR forms ("of the chosen color", "of that color") are
+/// deliberately NOT recognized here. Their referent is a colour chosen by an
+/// EARLIER clause, and no in-chain "Choose a color." currently persists that
+/// colour onto its source (`ChoiceType::Color` is absent from the `persist:`
+/// match in `oracle_effect/imperative.rs`), so `FilterProp::IsChosenColor`
+/// would be a fail-closed match-NOTHING filter. They stay with the existing
+/// count-phrase recognizer `parse_pre_controller_chosen_filter_suffix`
+/// (`oracle_nom/quantity.rs`), unchanged, until that gap is fixed.
+pub(crate) fn parse_printed_color_choice_qualifier(input: &str) -> OracleResult<'_, FilterProp> {
+    value(
+        FilterProp::IsChosenColor,
+        tag("of the color of your choice"),
+    )
+    .parse(input)
+}
+
+/// CR 607.2d + CR 608.2d: which KIND of chosen-colour reference a
+/// KEYWORD GRANT printed. CR 607.2d links only a reader saying "the chosen
+/// [value]", "the last chosen [value]", "or similar"; "the color of your choice"
+/// is a FRESH CR 608.2d choice the player announces while applying the effect.
+/// `types/keywords.rs::parse_protection_target` / `parse_hexproof_filter` map both
+/// onto `ProtectionTarget::ChosenColor` / `HexproofFilter::ChosenColor`, which is
+/// correct at RUNTIME (the layer applier bakes either identically) and lossy for
+/// CR 607.2d LINKAGE. This recovers the lost axis at parse time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub(crate) enum ChosenColorGrantReference {
+    /// Every chosen-colour grant phrase in this clause is a CR 607.2d anaphor.
+    AnaphoricOnly,
+    /// At least one grant phrase printed a fresh CR 608.2d "the color of your
+    /// choice", so this clause must keep a chooser of its own.
+    IncludesIndependentChoice,
+}
+
+/// The GRANT prefix, shared by both forms.
+///
+/// DOMAIN, stated exactly. This text classifier's domain is a strict SUPERSET of
+/// the injector's: `oracle_effect/mod.rs::effect_grants_chosen_color_keyword`
+/// destructures `Effect::GenericEffect { static_abilities, .. }` and returns
+/// `false` for everything else, so a clause whose printed text carries the grant
+/// phrase inside, say, a `ReturnAsAura { grants }` quoted body is classified here
+/// and never visited there. The excess is EMPTY today — measured: 16 pool cards
+/// print an "…Aura enchantment with enchant…" quoted-grant body and NONE contains
+/// a chosen-colour grant phrase — but the excess direction is
+/// `IncludesIndependentChoice`, i.e. suppression WITHHELD, the unsafe direction.
+/// That is why phase 1's `floating_shield_sacrifice_grant_reads_the_as_enters_color`
+/// is the load-bearing regression guard for this file.
+///
+/// "becomes the color of your choice" (`AddChosenColor`, Mondo Gecko) is
+/// deliberately NOT in the prefix — the injector never visits that modification.
+fn parse_chosen_color_grant_prefix(input: &str) -> OracleResult<'_, ()> {
+    value((), alt((tag("protection from "), tag("hexproof from ")))).parse(input)
+}
+
+/// CR 607.2d's own phrase list. `the last chosen color` is DEFENSIVE ONLY: no
+/// `ChosenColor` keyword is ever produced from it — `parse_protection_target` has
+/// no such arm and `grep -rn "last chosen color" crates/engine/src/` returns zero
+/// — so the alternative can never fire on a grant the injector visits. It is kept
+/// because it is CR 607.2d's own wording and because its failure direction is
+/// `AnaphoricOnly`, i.e. suppression preserved.
+fn parse_anaphoric_chosen_color_grant(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        preceded(
+            parse_chosen_color_grant_prefix,
+            alt((
+                tag("the last chosen color"),
+                tag("the chosen color"),
+                tag("chosen color"),
+                tag("that color"),
+            )),
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 608.2d: a fresh choice this clause's own text offers.
+fn parse_independent_chosen_color_grant(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        preceded(
+            parse_chosen_color_grant_prefix,
+            alt((
+                tag("the color of your choice"),
+                tag("a color of your choice"),
+                tag("color of your choice"),
+            )),
+        ),
+    )
+    .parse(input)
+}
+
+/// SINGLE AUTHORITY for a clause's chosen-colour grant provenance. `None` = the
+/// clause prints no chosen-colour keyword grant at all.
+///
+/// Clause `source_text` is ORIGINAL-CASED (the committed Mother of Runes IR
+/// snapshot's fragment begins "Target creature you control gains …") and every
+/// `tag()` above is lowercase and case-sensitive, so the scan runs over an
+/// explicitly lowercased copy. This is the same shape
+/// `oracle_replacement.rs::parse_as_enters_choose` already uses
+/// (`scan_at_word_boundaries(norm_lower, …)`); `bridge::nom_on_lower` is NOT
+/// applicable — it applies its parser ONCE at offset 0 and maps the consumed
+/// length back onto original-cased text, so it cannot wrap a scanner.
+pub(crate) fn classify_chosen_color_grant(clause_text: &str) -> Option<ChosenColorGrantReference> {
+    let lower = clause_text.to_ascii_lowercase();
+    let independent =
+        super::primitives::scan_at_word_boundaries(&lower, parse_independent_chosen_color_grant)
+            .is_some();
+    let anaphoric =
+        super::primitives::scan_at_word_boundaries(&lower, parse_anaphoric_chosen_color_grant)
+            .is_some();
+    match (independent, anaphoric) {
+        (true, _) => Some(ChosenColorGrantReference::IncludesIndependentChoice),
+        (false, true) => Some(ChosenColorGrantReference::AnaphoricOnly),
+        (false, false) => None,
+    }
+}
+
 /// CR 614.1a + CR 109.1: the parsed "\[other\] `<plural-type>` you control" tail
 /// of a compound damage recipient. A named struct rather than a tuple so both
 /// axes are explicit at every call site.
@@ -516,9 +692,8 @@ pub struct ControlledPermanentsConjunct {
     pub source_scope: SourceExclusion,
 }
 
-/// CR 614.1a + CR 109.1: SINGLE AUTHORITY for the "\[other\] `<plural-type>` you
-/// control" noun phrase that follows "…to you and " in a compound damage
-/// recipient.
+/// CR 614.1a + CR 109.1: SINGLE AUTHORITY for the controlled-permanent noun
+/// phrase that follows "…to you and " in a compound damage recipient.
 ///
 /// Both damage surfaces compose this one combinator rather than re-spelling the
 /// noun list:
@@ -532,21 +707,59 @@ pub struct ControlledPermanentsConjunct {
 ///
 /// They previously kept two hand-rolled copies that had already drifted apart in
 /// both directions — one knew six nouns but not "other", the other knew "other"
-/// but only three nouns. One combinator, one noun `alt()`, one article `opt()`.
+/// but only three nouns. One combinator with composable cardinality and article
+/// axes keeps those noun forms in one authority.
 ///
-/// Composed one axis per combinator: the optional CR 109.1 "other" article, the
-/// plural type noun, and the fixed " you control" suffix.
+/// Composed one axis per combinator: plural cardinality (including "other" and
+/// "one or more") or singular article ("a"/"another"), the corresponding type
+/// noun, and the fixed " you control" suffix. Singular nouns must retain their
+/// article; accepting bare "creature you control" here would make this shared
+/// authority claim ungrammatical recipient text.
 pub fn parse_controlled_permanents_conjunct(
     input: &str,
 ) -> OracleResult<'_, ControlledPermanentsConjunct> {
-    let (input, other) = opt(tag("other ")).parse(input)?;
-    let (input, permanent_type) = alt((
-        value(Some(CoreType::Planeswalker), tag("planeswalkers")),
-        value(Some(CoreType::Creature), tag("creatures")),
-        value(Some(CoreType::Artifact), tag("artifacts")),
-        value(Some(CoreType::Enchantment), tag("enchantments")),
-        value(Some(CoreType::Land), tag("lands")),
-        value(None, tag("permanents")),
+    let (input, (permanent_type, source_scope)) = alt((
+        map(
+            (
+                opt(tag("one or more ")),
+                opt(tag("other ")),
+                alt((
+                    value(Some(CoreType::Planeswalker), tag("planeswalkers")),
+                    value(Some(CoreType::Creature), tag("creatures")),
+                    value(Some(CoreType::Artifact), tag("artifacts")),
+                    value(Some(CoreType::Enchantment), tag("enchantments")),
+                    value(Some(CoreType::Land), tag("lands")),
+                    value(None, tag("permanents")),
+                )),
+            ),
+            |(_, other, permanent_type)| {
+                (
+                    permanent_type,
+                    if other.is_some() {
+                        SourceExclusion::Exclude
+                    } else {
+                        SourceExclusion::Include
+                    },
+                )
+            },
+        ),
+        map(
+            (
+                alt((
+                    value(SourceExclusion::Include, tag("a ")),
+                    value(SourceExclusion::Exclude, tag("another ")),
+                )),
+                alt((
+                    value(Some(CoreType::Planeswalker), tag("planeswalker")),
+                    value(Some(CoreType::Creature), tag("creature")),
+                    value(Some(CoreType::Artifact), tag("artifact")),
+                    value(Some(CoreType::Enchantment), tag("enchantment")),
+                    value(Some(CoreType::Land), tag("land")),
+                    value(None, tag("permanent")),
+                )),
+            ),
+            |(source_scope, permanent_type)| (permanent_type, source_scope),
+        ),
     ))
     .parse(input)?;
     let (input, _) = tag(" you control").parse(input)?;
@@ -554,10 +767,7 @@ pub fn parse_controlled_permanents_conjunct(
         input,
         ControlledPermanentsConjunct {
             permanent_type,
-            source_scope: match other {
-                Some(_) => SourceExclusion::Exclude,
-                None => SourceExclusion::Include,
-            },
+            source_scope,
         },
     ))
 }
@@ -600,6 +810,31 @@ mod tests {
                 "the \"other\" article must reach the caller, not be opt()-discarded"
             );
         }
+
+        for (phrase, expected_type, expected_scope) in [
+            ("a permanent you control", None, SourceExclusion::Include),
+            (
+                "another permanent you control",
+                None,
+                SourceExclusion::Exclude,
+            ),
+            (
+                "one or more creatures you control",
+                Some(CoreType::Creature),
+                SourceExclusion::Include,
+            ),
+            (
+                "a creature you control",
+                Some(CoreType::Creature),
+                SourceExclusion::Include,
+            ),
+        ] {
+            let (rest, parsed) = parse_controlled_permanents_conjunct(phrase)
+                .unwrap_or_else(|_| panic!("{phrase} must parse"));
+            assert!(rest.is_empty(), "{phrase} must be fully consumed");
+            assert_eq!(parsed.permanent_type, expected_type);
+            assert_eq!(parsed.source_scope, expected_scope);
+        }
     }
 
     /// Hostile: the combinator must not claim a phrase whose controller clause is
@@ -611,6 +846,10 @@ mod tests {
             "creatures",
             "other stuff you control",
             "creature you control",
+            "other creature you control",
+            "a creatures you control",
+            "another creatures you control",
+            "one or more creature you control",
         ] {
             assert!(
                 parse_controlled_permanents_conjunct(phrase).is_err(),
@@ -1110,5 +1349,109 @@ mod tests {
             }
         );
         assert_eq!(rest3, "");
+    }
+
+    /// V-FORMS (SHAPE) — CR 105.4. The printed chosen-colour qualifier must
+    /// CHOMP (not peek) its text and must reject every adjacent form.
+    ///
+    /// The anaphor rejections are load-bearing, not incidental: the anaphor
+    /// referent is a colour chosen by an EARLIER clause, and no in-chain
+    /// "Choose a color." persists that colour onto its source today, so
+    /// stamping `IsChosenColor` for them would produce a fail-closed
+    /// match-NOTHING filter.
+    #[test]
+    fn printed_color_choice_qualifier_chomps_and_rejects_adjacent_forms() {
+        // Positive reach-guards, in this same test, so the negatives below
+        // cannot pass vacuously on a combinator that matches nothing at all.
+        let (rest, prop) =
+            parse_printed_color_choice_qualifier("of the color of your choice").unwrap();
+        assert_eq!(prop, FilterProp::IsChosenColor);
+        assert_eq!(rest, "", "the bare form must be fully consumed, not peeked");
+
+        let (rest, prop) = parse_printed_color_choice_qualifier(
+            "of the color of your choice to their owners' hands",
+        )
+        .unwrap();
+        assert_eq!(prop, FilterProp::IsChosenColor);
+        assert_eq!(rest, " to their owners' hands");
+
+        for adjacent in [
+            "of the chosen color",
+            "of that color",
+            "of the same color",
+            "of your choice",
+            "of the chosen type",
+            "of the colors of your choice",
+        ] {
+            assert!(
+                parse_printed_color_choice_qualifier(adjacent).is_err(),
+                "{adjacent:?} must NOT be recognized as the printed chosen-colour qualifier"
+            );
+        }
+    }
+
+    /// CR 607.2d vs CR 608.2d: `classify_chosen_color_grant`'s single-authority
+    /// contract. Cases 1-8 are positive reach-guards (real or synthetic clauses
+    /// that DO print a chosen-colour grant); cases 9-12 are the negatives, so
+    /// they cannot pass vacuously on a classifier that matches nothing.
+    ///
+    /// Case 1 is the committed Mother of Runes IR-snapshot fragment, verbatim
+    /// and original-cased — exactly the string production hands the classifier.
+    /// Cases 2 and 3 are SYNTHETIC and exist only to pin the lowercase step:
+    /// zero pool cards print a capitalised chosen-colour grant phrase at a line
+    /// or sentence start (measured: 0 of 35,961 faces, against a reach-guard of
+    /// 150 faces printing a capitalised `Protection from ` / `Hexproof from ` at
+    /// a line or sentence start), so no real-cased pool fragment can catch a
+    /// dropped `to_ascii_lowercase()` — only these two synthetic rows can.
+    #[test]
+    fn classify_chosen_color_grant_distinguishes_anaphoric_from_independent() {
+        let cases: &[(&str, Option<ChosenColorGrantReference>)] = &[
+            (
+                "Target creature you control gains protection from the color of your choice until end of turn",
+                Some(ChosenColorGrantReference::IncludesIndependentChoice),
+            ),
+            (
+                "Protection from the color of your choice",
+                Some(ChosenColorGrantReference::IncludesIndependentChoice),
+            ),
+            (
+                "Hexproof from the chosen color",
+                Some(ChosenColorGrantReference::AnaphoricOnly),
+            ),
+            (
+                "gains protection from the chosen color until end of turn",
+                Some(ChosenColorGrantReference::AnaphoricOnly),
+            ),
+            (
+                "gains protection from the color of your choice until end of turn",
+                Some(ChosenColorGrantReference::IncludesIndependentChoice),
+            ),
+            (
+                "gains hexproof from that color",
+                Some(ChosenColorGrantReference::AnaphoricOnly),
+            ),
+            (
+                "gains protection from a color of your choice",
+                Some(ChosenColorGrantReference::IncludesIndependentChoice),
+            ),
+            (
+                "gains protection from the chosen color and hexproof from the color of your choice",
+                Some(ChosenColorGrantReference::IncludesIndependentChoice),
+            ),
+            ("gains protection from red", None),
+            ("gains protection from the chosen card type", None),
+            ("becomes the color of your choice", None),
+            ("draw a card", None),
+        ];
+
+        for (i, (input, want)) in cases.iter().enumerate() {
+            let got = classify_chosen_color_grant(input);
+            assert_eq!(
+                got,
+                *want,
+                "case {} ({input:?}): got {got:?}, want {want:?}",
+                i + 1
+            );
+        }
     }
 }

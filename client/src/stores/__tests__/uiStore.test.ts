@@ -11,6 +11,7 @@ describe("uiStore", () => {
         selectedObjectId: null,
         hoveredObjectId: null,
         inspectedObjectId: null,
+        inspectedCardName: null,
         inspectedFaceIndex: 0,
         altHeld: false,
         selectedCardIds: [],
@@ -34,6 +35,19 @@ describe("uiStore", () => {
   it("inspectObject sets inspectedObjectId", () => {
     act(() => useUiStore.getState().inspectObject(99));
     expect(useUiStore.getState().inspectedObjectId).toBe(99);
+  });
+
+  it("keeps a public log card name when its live object is unavailable", () => {
+    act(() => useUiStore.getState().inspectObjectSticky(99, 0, "cursor", "Pithing Needle"));
+
+    expect(useUiStore.getState()).toMatchObject({
+      inspectedObjectId: 99,
+      inspectedCardName: "Pithing Needle",
+      previewSticky: true,
+    });
+
+    act(() => useUiStore.getState().dismissPreview());
+    expect(useUiStore.getState().inspectedCardName).toBeNull();
   });
 
   it("inspecting a different object resets a pinned altHeld", () => {
@@ -141,6 +155,37 @@ describe("uiStore", () => {
 
     act(() => useUiStore.getState().removeBlockerAssignment(10, 100));
     expect(blockerAssignmentPairs(useUiStore.getState().blockerAssignments)).toEqual([[10, 101]]);
+  });
+
+  it("setGroupBlockerAssignments replaces only in-group attackers, keeping out-of-group ones", () => {
+    act(() => {
+      useUiStore.getState().assignBlocker(10, 100);
+      useUiStore.getState().assignBlocker(10, 200);
+      useUiStore.getState().setGroupBlockerAssignments(10, [100, 101], [101]);
+    });
+
+    expect(blockerAssignmentPairs(useUiStore.getState().blockerAssignments).sort()).toEqual([
+      [10, 101],
+      [10, 200],
+    ].sort());
+  });
+
+  it("setGroupBlockerAssignments deletes the blocker's key when the result is empty", () => {
+    act(() => {
+      useUiStore.getState().assignBlocker(10, 100);
+      useUiStore.getState().setGroupBlockerAssignments(10, [100], []);
+    });
+
+    expect(useUiStore.getState().blockerAssignments.has(10)).toBe(false);
+  });
+
+  it("clearCombatSelection resets pendingBlocker", () => {
+    act(() => {
+      useUiStore.getState().setPendingBlocker(100);
+      useUiStore.getState().clearCombatSelection();
+    });
+
+    expect(useUiStore.getState().pendingBlocker).toBeNull();
   });
 
   it("toggleDebugClickModeButtonVisible flips the pinned click-mode control", () => {

@@ -103,7 +103,8 @@ expression: "&ir"
                 "prefix_delayed_condition": null,
                 "multi_target": null,
                 "where_x_expression": null,
-                "unless_pay": null
+                "unless_pay": null,
+                "chosen_color_grant": "IncludesIndependentChoice"
               }
             ],
             "kind": "Activated",

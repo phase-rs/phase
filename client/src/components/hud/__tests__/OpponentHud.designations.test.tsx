@@ -156,6 +156,20 @@ describe("OpponentHud designations (single-opponent path)", () => {
                 dungeon_name: "Tomb of Annihilation",
                 room: { index: 0, name: "Trapped Entry", text: "Each player loses 1 life." },
                 room_count: 5,
+                card: {
+                  oracle_id: "d2ea2605-0ca0-4782-851d-e706bd0114e4",
+                  scryfall_id: "70b284bd-7a8f-4b60-8238-f746bdc5b236",
+                  face_name: "Tomb of Annihilation",
+                },
+                rooms: [
+                  {
+                    index: 0,
+                    name: "Trapped Entry",
+                    text: "Each player loses 1 life.",
+                    next_rooms: [1, 2],
+                    marker: { x_permille: 500, y_permille: 220 },
+                  },
+                ],
               },
             },
           },

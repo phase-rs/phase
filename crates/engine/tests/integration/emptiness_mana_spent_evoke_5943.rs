@@ -800,12 +800,9 @@ fn fully_convoked_cast_leaves_stamps_default() {
 /// transient clear must not wipe it before the spell resolves. Verbatim
 /// Dawnglow Infusion Oracle text.
 ///
-/// NOTE (pre-existing parser gap, out of scope for issue #5943): the parser
-/// currently collapses the two conjoined spend-color branches into a single
-/// `GainLife` conditioned on `ManaColorSpent { White }`, dropping the {G}
-/// branch. This row therefore exercises the surviving {W} branch — which is
-/// also rules-correct for the real card — and adds no {G}-branch sibling so
-/// the misparse is not enshrined as expected behavior.
+/// The two conjoined spend-color branches are independent instructions
+/// (CR 608.2c); this row pays only {W}, so only the {W} branch resolves. The
+/// {G}-only and both-color rows live in `mana_spent_independent_conjuncts`.
 #[test]
 fn dawnglow_spend_color_condition_reads_stack_tally() {
     let mut scenario = GameScenario::new();
@@ -856,7 +853,8 @@ fn dawnglow_spend_color_condition_reads_stack_tally() {
     // Reach-guard: the intermediate cast-trigger batch really ran.
     outcome.assert_hand_drawn(P0, 1);
     // CR 601.2h + CR 608.2c: the {W} spend-color branch reads the Stack
-    // object's surviving tally at resolution and pays out X (=2) life.
+    // object's surviving tally at resolution and pays out X (=2) life; the {G}
+    // branch is a separate gated instruction and adds nothing.
     outcome.assert_life_delta(P0, 2);
 }
 

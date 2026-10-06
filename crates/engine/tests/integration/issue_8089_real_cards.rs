@@ -60,6 +60,33 @@ fn cephalid_facetaker_copy_expires_at_cleanup() {
     resolve_facetaker_combat_trigger(&mut runner, target);
     assert_eq!(runner.state().objects[&facetaker].name, "Facetaker Target");
 
+    // CR 707.9b: the copy exception's bare-P/T body ("except it's 1/4") is part
+    // of the copy's COPIABLE values, so the live copy is 1/4 and NOT the 5/5 it
+    // copied. Production-path discriminator for the `parse_subject_pt_only`
+    // arm: with that arm unregistered, the body is skipped fail-soft and the
+    // copy resolves as a plain copy at the copied creature's P/T.
+    //
+    // REACH GUARD: the name assertion directly above proves the copy effect is
+    // live (the object is "Facetaker Target", not "Cephalid Facetaker"), so a
+    // 1/4 read here cannot be the printed body of an uncopied Facetaker; and
+    // the copy source is a 5/5, so 1/4 can only come from the exception.
+    assert_eq!(
+        (
+            runner.state().objects[&target].power,
+            runner.state().objects[&target].toughness
+        ),
+        (Some(5), Some(5)),
+        "reach guard: the copied creature must really be a 5/5"
+    );
+    assert_eq!(
+        (
+            runner.state().objects[&facetaker].power,
+            runner.state().objects[&facetaker].toughness
+        ),
+        (Some(1), Some(4)),
+        "the live copy must take the exception's overridden 1/4, not the copied 5/5"
+    );
+
     execute_cleanup(runner.state_mut(), &mut Vec::new());
     flush_layers(runner.state_mut());
     assert_eq!(
@@ -107,7 +134,13 @@ fn cephalid_facetaker_live_copy_does_not_follow_it_to_hand() {
 fn glasspool_mimic_copy_target_choice_does_not_survive_a_return_to_hand() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let target = scenario.add_creature(P0, "Glasspool Target", 5, 5).id();
+    // CR 205.1b reach guard: give the copied creature its own subtype
+    // (Merfolk) so retention of the copy source's subtypes is provable
+    // rather than vacuous.
+    let target = scenario
+        .add_creature(P0, "Glasspool Target", 5, 5)
+        .with_subtypes(vec!["Merfolk"])
+        .id();
     let mimic = scenario
         .add_creature_to_hand_from_oracle(P0, "Glasspool Mimic", 0, 0, GLASSPOOL_ORACLE)
         .id();
@@ -142,6 +175,37 @@ fn glasspool_mimic_copy_target_choice_does_not_survive_a_return_to_hand() {
 
     assert_eq!(runner.state().objects[&mimic].zone, Zone::Battlefield);
     assert_eq!(runner.state().objects[&mimic].name, "Glasspool Target");
+
+    // CR 707.9b: the copy exception's "except it's a Shapeshifter Rogue in
+    // addition to its other types" body is part of the copy's COPIABLE
+    // values, so the live copy carries Shapeshifter AND Rogue as two
+    // separate subtypes, never a fabricated single "Shapeshifter Rogue"
+    // value. CR 205.1b: the "in addition to its other types" carve-out
+    // means the copy RETAINS the copied creature's own subtypes (here,
+    // Merfolk) rather than replacing them.
+    //
+    // Production-path discriminator for `parse_its_a_type_in_addition`
+    // (`append_color_and_type_modifications`'s per-word classification):
+    // with that arm's routing disabled, the multi-word descriptor list
+    // falls through unclassified and the live copy's subtypes are just the
+    // copied Merfolk, missing both Shapeshifter and Rogue.
+    let live_subtypes = &runner.state().objects[&mimic].card_types.subtypes;
+    assert!(
+        live_subtypes.contains(&"Shapeshifter".to_string()),
+        "expected Shapeshifter as its own subtype, got {live_subtypes:?}"
+    );
+    assert!(
+        live_subtypes.contains(&"Rogue".to_string()),
+        "expected Rogue as its own subtype, got {live_subtypes:?}"
+    );
+    assert!(
+        !live_subtypes.contains(&"Shapeshifter Rogue".to_string()),
+        "must not fabricate a single \"Shapeshifter Rogue\" subtype, got {live_subtypes:?}"
+    );
+    assert!(
+        live_subtypes.contains(&"Merfolk".to_string()),
+        "CR 205.1b: the copy must retain the copied creature's own subtypes, got {live_subtypes:?}"
+    );
 
     assert!(
         !move_object_for_test(

@@ -425,18 +425,15 @@ pub enum TriggerMode {
     /// ability tagged by `AbilityTag`. Parameterized to avoid per-keyword sibling proliferation:
     /// `AbilityTag::Boast`, `AbilityTag::Exhaust`, `AbilityTag::Outlast` are the current values.
     KeywordAbilityActivated(AbilityTag),
-    /// CR 602.1 + CR 605.1a: Triggers when any activated ability is activated.
-    /// Listens to `GameEvent::AbilityActivated`, which is emitted only for
-    /// stack-using activated abilities — by CR 605.3b, mana abilities resolve
-    /// without using the stack and do not produce this event. The
-    /// "that isn't a mana ability" qualifier on cards like Burning-Tree Shaman
-    /// and Flamescroll Celebrant is thus automatically satisfied by listening
-    /// here, and is additionally preserved in the AST via
-    /// `TriggerCondition::ActivatedAbilityIsNonMana` for future-proofing should
-    /// the event family ever widen. Player scope (`a player` / `an opponent` /
-    /// `you`) lives on `valid_target` (`TargetFilter`); source-object filters
-    /// (e.g., "an ability of an artifact source") live on `valid_card` — both
-    /// reuse existing infrastructure shared with `KeywordAbilityActivated`.
+    /// CR 602.2b + CR 605.3: Triggers when any activated ability is activated —
+    /// stack-using and mana abilities alike (activating a mana ability follows
+    /// CR 602.2; Elrond, Moon-Reader's ruling). Listens to
+    /// `GameEvent::AbilityActivated`; the "that isn't a mana ability" qualifier
+    /// (Burning-Tree Shaman, Flamescroll Celebrant) is
+    /// `TriggerCondition::ActivatedAbilityIsNonMana`, checked against the
+    /// event's `kind`. Player scope (`a player` / `an opponent` / `you`) lives on
+    /// `valid_target` (`TargetFilter`); the activated source's filter ("an
+    /// ability of an artifact they control") lives on `valid_card`.
     AbilityActivated,
     /// CR 606.2 + CR 603.2: Triggers when a player activates a loyalty ability
     /// (a planeswalker activated ability paid with loyalty counters). Listens to

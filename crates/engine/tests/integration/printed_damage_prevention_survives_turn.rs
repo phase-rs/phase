@@ -530,6 +530,38 @@ fn finish_combat(runner: &mut GameRunner) -> bool {
     false
 }
 
+/// Drive out of the End Combat STEP and into the postcombat main phase.
+///
+/// CR 511.3: "until end of combat" effects expire when the End Combat step ENDS,
+/// after its priority window — not when it begins. `finish_combat` above returns
+/// the moment `state.phase` IS `Phase::EndCombat`, i.e. at the START of that step,
+/// so an `EndOfCombat` shield is still legitimately live at that point. Only after
+/// leaving the step does `turns::complete_end_combat_teardown` run and prune it.
+fn leave_end_combat_step(runner: &mut GameRunner) -> bool {
+    for _ in 0..400 {
+        if matches!(runner.state().phase, Phase::PostCombatMain) {
+            return true;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                if runner.act(GameAction::PassPriority).is_err() {
+                    break;
+                }
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                if runner
+                    .act(GameAction::OrderTriggers { order: vec![0] })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    false
+}
+
 /// **T3b — the production reach-guard for the `EndOfCombat` value.** Sewers of
 /// Estark is the corpus's only card whose prevention window rides on
 /// `prevention_duration: UntilEndOfCombat`, and its "If it's blocking" gate makes
@@ -587,13 +619,46 @@ fn sewers_of_estark_stamps_end_of_combat_on_the_blocking_creature() {
         "the shielded blocker must survive combat damage"
     );
 
-    // Pre-existing behavior: the window ends with the combat phase.
+    // CR 511.3: the window ends when the End Combat STEP ends — and this assertion
+    // is only now able to observe that.
+    //
+    // DO NOT "simplify" this back to asserting emptiness right after
+    // `finish_combat`. `finish_combat` returns at the START of `Phase::EndCombat`,
+    // whereas `turns::complete_end_combat_teardown` runs under
+    // `if leaving == Phase::EndCombat` in `advance_phase` — i.e. when the step ENDS,
+    // after its priority window (CR 511.3). At the earlier point the shield is
+    // legitimately still live.
+    //
+    // Until issue #8485 this assertion passed at the earlier point anyway, for the
+    // WRONG reason: the CR 613.1 layer reset in
+    // `layers::seed_live_characteristics_from_base` re-seeded
+    // `replacement_definitions` from base every pass and silently deleted the
+    // resolution-created shield long before any prune ran. The assertion was
+    // measuring the bug, not the prune. Now that CR 611.2c shields survive the
+    // reset, the EndOfCombat prune is genuinely observable for the first time — so
+    // this test must drive past the step to make the claim real.
+    //
+    // Reach-guard first: the shield is STILL PRESENT at the start of the End Combat
+    // step, which is what makes the emptiness assertion below non-vacuous.
+    assert_eq!(
+        runner.state().objects[&blocker]
+            .replacement_definitions
+            .as_slice()
+            .len(),
+        1,
+        "CR 511.3: the shield is still live at the START of the End Combat step"
+    );
+    assert!(
+        leave_end_combat_step(&mut runner),
+        "the End Combat step must end so its teardown runs"
+    );
     assert!(
         runner.state().objects[&blocker]
             .replacement_definitions
             .as_slice()
             .is_empty(),
-        "CR 511.2: effects that last 'until end of combat' expire at the end of the combat phase"
+        "CR 511.2 + CR 511.3: effects that last 'until end of combat' expire when \
+         the End Combat step ends"
     );
 }
 

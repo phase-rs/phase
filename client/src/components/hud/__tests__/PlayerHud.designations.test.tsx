@@ -172,6 +172,27 @@ describe("PlayerHud designations", () => {
                     text: "Create a 1/1 red Goblin creature token.",
                   },
                   room_count: 7,
+                  card: {
+                    oracle_id: "5c446a7f-0301-4343-b0df-146cf2db605b",
+                    scryfall_id: "59b11ff8-f118-4978-87dd-509dc0c8c932",
+                    face_name: "Lost Mine of Phandelver",
+                  },
+                  rooms: [
+                    {
+                      index: 0,
+                      name: "Cave Entrance",
+                      text: "Scry 1.",
+                      next_rooms: [1, 2],
+                      marker: { x_permille: 500, y_permille: 215 },
+                    },
+                    {
+                      index: 1,
+                      name: "Goblin Lair",
+                      text: "Create a 1/1 red Goblin creature token.",
+                      next_rooms: [3, 4],
+                      marker: { x_permille: 310, y_permille: 390 },
+                    },
+                  ],
                 },
               },
             },
@@ -183,9 +204,9 @@ describe("PlayerHud designations", () => {
         screen.getByLabelText("Venturing in Lost Mine of Phandelver, Goblin Lair, room 2 of 7"),
       ).toBeInTheDocument();
       expect(screen.getByText("Lost Mine of Phandelver")).toBeInTheDocument();
-      // CR 309.4b-c: the tooltip names the room and repeats what it did.
-      expect(screen.getByText("Goblin Lair — room 2 of 7")).toBeInTheDocument();
-      expect(screen.getByText("Create a 1/1 red Goblin creature token.")).toBeInTheDocument();
+      // The chip itself shows the marker's place in the dungeon; the room's
+      // name and printed effect now live in the map panel the chip opens.
+      expect(screen.getByText("2/7")).toBeInTheDocument();
     });
 
     it("does not render when the player has progress but no active dungeon", () => {
@@ -216,6 +237,20 @@ describe("PlayerHud designations", () => {
                   dungeon_name: "Undercity",
                   room: { index: 0, name: "Secret Entrance", text: "Scry 1." },
                   room_count: 9,
+                  card: {
+                    oracle_id: "36b61021-72f0-4c22-a41d-9b2f093d7ca8",
+                    scryfall_id: "2c65185b-6cf0-451d-985e-56aa45d9a57d",
+                    face_name: "Undercity",
+                  },
+                  rooms: [
+                    {
+                      index: 0,
+                      name: "Secret Entrance",
+                      text: "Scry 1.",
+                      next_rooms: [1, 2],
+                      marker: { x_permille: 500, y_permille: 268 },
+                    },
+                  ],
                 },
               },
             },

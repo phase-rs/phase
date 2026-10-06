@@ -46,6 +46,7 @@ fn white_mana_cost() -> ManaCost {
 fn kenzo_alternative_face() -> BackFaceData {
     BackFaceData {
         is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: "Kenzo the Hardhearted".to_string(),
         power: Some(3),
         toughness: Some(4),
@@ -107,6 +108,7 @@ Whenever this creature deals damage to an opponent, flip it.";
 fn tok_tok_alternative_face() -> BackFaceData {
     BackFaceData {
         is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: "Tok-Tok, Volcano Born".to_string(),
         power: Some(2),
         toughness: Some(2),

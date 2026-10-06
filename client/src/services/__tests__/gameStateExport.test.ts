@@ -2,6 +2,10 @@ import { strFromU8, unzipSync } from "fflate";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useGameStore } from "../../stores/gameStore.ts";
+import {
+  clearAiDecisionDiagnostic,
+  recordAiDecisionDiagnostic,
+} from "../../game/aiDecisionDiagnostics.ts";
 import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory.ts";
 import { buildGameState } from "../../test/factories/gameStateFactory.ts";
 import {
@@ -9,10 +13,12 @@ import {
   exportAuthoritativeGameStateZip,
   serializeGameStateDebugSnapshot,
 } from "../gameStateExport.ts";
+import { gameStateFromImportText, readImportFile } from "../gameStateImport.ts";
 
 describe("gameStateExport", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    clearAiDecisionDiagnostic();
     Reflect.deleteProperty(window, "showSaveFilePicker");
   });
 
@@ -33,6 +39,29 @@ describe("gameStateExport", () => {
       waitingFor: { type: "Priority" },
       legalActions: [{ type: "PassPriority" }],
       turnCheckpoints: [{ turn_number: 7 }],
+      clientAiDecision: {
+        stage: "idle",
+        playerId: null,
+        difficulty: null,
+        waitingFor: null,
+      },
+    });
+  });
+
+  it("includes the AI controller stage in a display snapshot", () => {
+    const gameState = buildGameState({ turn_number: 7 });
+    recordAiDecisionDiagnostic({
+      stage: "awaiting-proposal",
+      playerId: 1,
+      difficulty: "VeryHard",
+      waitingFor: "Priority for player 1",
+    });
+
+    expect(JSON.parse(serializeGameStateDebugSnapshot(gameState)).clientAiDecision).toEqual({
+      stage: "awaiting-proposal",
+      playerId: 1,
+      difficulty: "VeryHard",
+      waitingFor: "Priority for player 1",
     });
   });
 
@@ -56,9 +85,12 @@ describe("gameStateExport", () => {
       turnCheckpoints: [],
     });
 
-    const filename = await exportGameStateDebugZip(gameState);
+    const result = await exportGameStateDebugZip(gameState);
 
-    expect(filename).toMatch(/^game-state-turn-7-.*\.zip$/);
+    expect(result).toStrictEqual({
+      kind: "saved",
+      filename: expect.stringMatching(/^game-state-turn-7-.*\.zip$/),
+    });
     expect(write).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
     expect(writtenBlob).not.toBeNull();
@@ -73,11 +105,13 @@ describe("gameStateExport", () => {
     expect(JSON.parse(json).gameState.turn_number).toBe(7);
   });
 
-  it("writes the trusted engine envelope, not the client snapshot", async () => {
-    const trustedState = JSON.stringify({
-      state: { stack_resolution_session: { policy: "RecheckNoMeaningfulPriorityAction" } },
-      schema_version: 1,
-    });
+  it("imports an authoritative state ZIP without discarding its trusted envelope", async () => {
+    const gameState = buildGameState({ turn_number: 7 });
+    const trustedEnvelope = {
+      state: gameState,
+      precast_shortcut_runtime: { nonce: "trusted-runtime" },
+    };
+    const trustedState = JSON.stringify(trustedEnvelope);
     let writtenBlob: Blob | null = null;
     const write = vi.fn(async (blob: Blob) => {
       writtenBlob = blob;
@@ -93,14 +127,43 @@ describe("gameStateExport", () => {
     });
     useGameStore.setState({ gameMode: "ai" });
 
-    const filename = await exportAuthoritativeGameStateZip(adapter);
+    const result = await exportAuthoritativeGameStateZip(adapter);
 
-    expect(filename).toMatch(/^authoritative-game-state-.*\.zip$/);
+    expect(result).toStrictEqual({
+      kind: "saved",
+      filename: expect.stringMatching(/^authoritative-game-state-.*\.zip$/),
+    });
     expect(adapter.exportPersistenceState).toHaveBeenCalledOnce();
     const entries = unzipSync(new Uint8Array(await writtenBlob!.arrayBuffer()));
     const [entryName] = Object.keys(entries);
     expect(entryName).toMatch(/^authoritative-game-state-.*\.json$/);
     expect(strFromU8(entries[entryName])).toBe(trustedState);
+
+    const imported = gameStateFromImportText(
+      await readImportFile(
+        new File([writtenBlob!], result.filename, { type: "application/zip" }),
+      ),
+    );
+    expect(imported).toEqual(trustedEnvelope);
+  });
+
+  it("rejects an incomplete game state import", () => {
+    expect(gameStateFromImportText(JSON.stringify({ waiting_for: { type: "Priority" } }))).toBe(
+      "JSON does not look like a GameState (missing waiting_for or players)",
+    );
+  });
+
+  it("rejects a display snapshot before the restore path discards it", () => {
+    const displaySnapshot = JSON.stringify({
+      gameState: buildGameState({ turn_number: 7 }),
+      waitingFor: { type: "Priority" },
+      legalActions: [],
+      turnCheckpoints: [],
+    });
+
+    expect(gameStateFromImportText(displaySnapshot)).toBe(
+      "This is a display snapshot, not a restorable game state. Export an Authoritative Game State from the Debug Panel instead.",
+    );
   });
 
   it("exports the trusted envelope from the P2P host", async () => {
@@ -126,5 +189,61 @@ describe("gameStateExport", () => {
       "Authoritative state export is unavailable for shared games",
     );
     expect(exportPersistenceState).not.toHaveBeenCalled();
+  });
+
+  it("falls back to an anchor download when the save picker fails", async () => {
+    // Chrome exposes showSaveFilePicker but the picker path can fail there;
+    // the export must then degrade to the plain download Firefox uses.
+    Object.defineProperty(window, "showSaveFilePicker", {
+      configurable: true,
+      value: vi.fn(async () => {
+        throw new DOMException("The picker is unavailable", "SecurityError");
+      }),
+    });
+    let downloadedBlob: Blob | null = null;
+    vi.spyOn(URL, "createObjectURL").mockImplementation((blob) => {
+      downloadedBlob = blob as Blob;
+      return "blob:mock-url";
+    });
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    const trustedState = JSON.stringify({ state: "trusted-envelope" });
+    const adapter = buildEngineAdapterMock(undefined, {
+      exportPersistenceState: vi.fn().mockResolvedValue(trustedState),
+    });
+    useGameStore.setState({ gameMode: "ai" });
+
+    const result = await exportAuthoritativeGameStateZip(adapter);
+
+    expect(result).toStrictEqual({
+      kind: "saved",
+      filename: expect.stringMatching(/^authoritative-game-state-.*\.zip$/),
+    });
+    expect(clickSpy).toHaveBeenCalledOnce();
+    expect(downloadedBlob).not.toBeNull();
+    const entries = unzipSync(new Uint8Array(await downloadedBlob!.arrayBuffer()));
+    const [entryName] = Object.keys(entries);
+    expect(entryName).toMatch(/^authoritative-game-state-.*\.json$/);
+    expect(strFromU8(entries[entryName])).toBe(trustedState);
+  });
+
+  it("does not download when the user cancels the save picker", async () => {
+    Object.defineProperty(window, "showSaveFilePicker", {
+      configurable: true,
+      value: vi.fn(async () => {
+        throw new DOMException("The user aborted a request", "AbortError");
+      }),
+    });
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    const adapter = buildEngineAdapterMock(undefined, {
+      exportPersistenceState: vi.fn().mockResolvedValue("{}"),
+    });
+    useGameStore.setState({ gameMode: "ai" });
+
+    const err = await exportAuthoritativeGameStateZip(adapter).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(DOMException);
+    expect((err as DOMException).name).toBe("AbortError");
+    expect(clickSpy).not.toHaveBeenCalled();
   });
 });

@@ -21,6 +21,8 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
+use crate::channels::{PREVIEW_ORIGIN, RELEASE_ORIGIN};
+use crate::lan::{self, LanServerStatus, RunningLan};
 use crate::native_bridge::BridgeHandle;
 use crate::native_engine_contract::{
     NativeEngineCapabilities, NativeEngineError, NativeEngineIntent, NativeEngineKey,
@@ -47,8 +49,6 @@ const RELEASE_RATCHET_FILE: &str = "native-engine-highest-release-version.json";
 const PREVIEW_RATCHET_FILE: &str = "native-engine-preview-generated-at.json";
 const MANIFEST_DATA_FILE: &str = "manifest-data.json";
 const SIGNED_MANIFEST_ENVELOPE_FILE: &str = "signed-manifest-envelope.json";
-const RELEASE_ORIGIN: &str = "https://phase-rs.dev";
-const PREVIEW_ORIGIN: &str = "https://preview.phase-rs.dev";
 const PROGRESS_EVENT: &str = "native-engine-progress";
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
 const STOP_GRACE: Duration = Duration::from_millis(250);
@@ -531,6 +531,7 @@ impl RunningEngine {
 
 struct NativeEngineState {
     running: Option<RunningEngine>,
+    lan: Option<RunningLan>,
     bridges: BTreeMap<u64, BridgeHandle>,
     next_bridge_id: u64,
 }
@@ -539,6 +540,7 @@ impl Default for NativeEngineState {
     fn default() -> Self {
         Self {
             running: None,
+            lan: None,
             bridges: BTreeMap::new(),
             next_bridge_id: 1,
         }
@@ -590,16 +592,17 @@ pub(crate) fn native_engine_bridge_sender(
 }
 
 pub(crate) fn close_native_engine_bridge(bridge_id: u64) -> bool {
-    let bridge = engine_state()
+    engine_state()
         .lock()
-        .ok()
-        .and_then(|mut state| state.bridges.remove(&bridge_id));
-    if let Some(bridge) = bridge {
-        bridge.abort();
-        true
-    } else {
-        false
-    }
+        .is_ok_and(|mut state| close_registered_bridge(&mut state.bridges, bridge_id))
+}
+
+fn close_registered_bridge(bridges: &mut BTreeMap<u64, BridgeHandle>, bridge_id: u64) -> bool {
+    let Some(bridge) = bridges.remove(&bridge_id) else {
+        return false;
+    };
+    bridge.close();
+    true
 }
 
 pub(crate) fn remove_native_engine_bridge(bridge_id: u64) {
@@ -790,7 +793,9 @@ fn ensure_native_engine_sync(
         Some(resolved) => resolved,
         None => resolve_artifact(app, &fetch, &files, &key, intent)?,
     };
-    let repair_allowed = !held_is_healthy_for_key && retained_record.is_none();
+    let repair_allowed = !held_is_healthy_for_key
+        && retained_record.is_none()
+        && !state.lan.as_ref().is_some_and(|lan| lan.key == key);
 
     let spawn_plan = provision_resolved_artifact(
         Some(app),
@@ -833,7 +838,7 @@ fn ensure_native_engine_sync(
         &files.games_db(&key),
         &files.log_directory(),
         &files.startup_log(),
-        port,
+        ServerMode::Solo(port),
         &spawn_plan.arguments,
     )?;
     if let Err(error) = wait_for_health(&client, port, &mut child) {
@@ -861,7 +866,9 @@ fn ensure_native_engine_sync(
         child,
         stdin: Some(stdin),
     });
-    if let Err(error) = gc_after_successful_spawn(&files, &key) {
+    if let Err(error) =
+        gc_after_successful_spawn(&files, &key, state.lan.as_ref().map(|lan| &lan.key))
+    {
         eprintln!("native engine GC after successful spawn failed: {error:?}");
     }
     Ok(NativeEngineReady { port })
@@ -888,6 +895,131 @@ fn stop_native_engine_sync(app: &AppHandle) -> Result<(), NativeEngineError> {
         // is resolved by the adopt-or-kill at the next ensure_native_engine.
         Ok(())
     }
+}
+
+pub(crate) fn start_lan_server_sync(
+    app: &AppHandle,
+    key: NativeEngineKey,
+    intent: NativeEngineIntent,
+) -> Result<LanServerStatus, NativeEngineError> {
+    key.validate()?;
+    if intent == NativeEngineIntent::PrepareForOffline {
+        return Err(NativeEngineError::invalid_key(
+            "LAN hosting requires a start intent",
+        ));
+    }
+    let files = NativeEngineFiles::from_app(app)?;
+    let client = http_client()?;
+    let mut state = engine_state().lock().map_err(lan::lan_error)?;
+    clear_exited_lan(&mut state)?;
+    if let Some(running) = &state.lan {
+        return if running.key == key {
+            Ok(running.status())
+        } else {
+            Err(lan::lan_error(
+                "stop the current LAN server before changing its engine key",
+            ))
+        };
+    }
+    let ips = lan::private_addresses()?;
+    fs::create_dir_all(&files.base).map_err(NativeEngineError::storage)?;
+    check_release_ratchet(&files, &key)?;
+    let fetch = |url: &str| fetch_bytes(&client, url);
+    let resolved = resolve_artifact(app, &fetch, &files, &key, intent)?;
+    // Both runtimes share verified artifacts; never repair files a live solo
+    // process (including a persisted/adoptable child) could still be reading.
+    let record = read_spawn_record(&files)?;
+    let repair_allowed = !state
+        .running
+        .as_ref()
+        .is_some_and(|running| running.key() == &key)
+        && !record
+            .as_ref()
+            .is_some_and(|record| record.key == key && health_passes(&client, record.port));
+    let plan = provision_resolved_artifact(
+        Some(app),
+        &fetch,
+        &files,
+        &key,
+        &resolved,
+        intent,
+        repair_allowed,
+    )?;
+    let port = reserve_port()?;
+    let addresses: Vec<_> = ips
+        .iter()
+        .map(|ip| format!("ws://{ip}:{port}/ws"))
+        .collect();
+    let logs = files.log_directory().join("lan");
+    let database = files
+        .base
+        .join("games")
+        .join(format!("lan-{}.db", key.channel()));
+    let arguments = lan_server_arguments(key.origin(), intent, &addresses[0]);
+    let (child, stdin) = spawn_server(
+        &plan.binary,
+        &plan.data_directory,
+        &database,
+        &logs,
+        &logs.join("server-startup.log"),
+        ServerMode::Lan(port),
+        &arguments,
+    )?;
+    let mut running = RunningLan {
+        key: key.clone(),
+        child,
+        stdin: Some(stdin),
+        addresses,
+        advertisement: None,
+    };
+    wait_for_health(&client, port, &mut running.child)?;
+    running.advertisement = Some(lan::advertise(&ips, port, key.channel())?);
+    persist_release_ratchet(&files, &key)?;
+    let status = running.status();
+    state.lan = Some(running);
+    // Solo GC retains the LAN key; LAN startup doesn't evict a persisted solo
+    // owner's files, whose liveness can outlast the in-memory running slot.
+    Ok(status)
+}
+
+fn lan_server_arguments(origin: &str, intent: NativeEngineIntent, public_url: &str) -> Vec<String> {
+    let mut arguments = vec![
+        "--bind".into(),
+        "0.0.0.0".into(),
+        "--exit-on-stdin-close".into(),
+        "--allowed-origin".into(),
+        origin.into(),
+        "--public-url".into(),
+        public_url.into(),
+    ];
+    if intent != NativeEngineIntent::StartOnline {
+        arguments.push("--no-data-download".into());
+    }
+    arguments
+}
+
+fn clear_exited_lan(state: &mut NativeEngineState) -> Result<(), NativeEngineError> {
+    if let Some(running) = &mut state.lan {
+        if running.child.try_wait().map_err(lan::lan_error)?.is_some() {
+            state.lan.take();
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn lan_server_status_sync() -> Result<LanServerStatus, NativeEngineError> {
+    let mut state = engine_state().lock().map_err(lan::lan_error)?;
+    clear_exited_lan(&mut state)?;
+    Ok(state
+        .lan
+        .as_ref()
+        .map(RunningLan::status)
+        .unwrap_or_default())
+}
+
+pub(crate) fn stop_lan_server_sync() -> Result<(), NativeEngineError> {
+    engine_state().lock().map_err(lan::lan_error)?.lan.take();
+    Ok(())
 }
 
 fn http_client() -> Result<Client, NativeEngineError> {
@@ -1085,6 +1217,9 @@ fn resolved_artifact_from_envelope_with_key(
 /// minisign signature is retained alongside the executable so every launch
 /// still verifies what it is about to execute; a missing or invalid cache is
 /// simply replaced from the first-party artifact source.
+// Internal provisioning helper: the args are the separately-borrowed
+// inputs the provisioning chain threads through; `public_key` is the test seam.
+#[allow(clippy::too_many_arguments)]
 fn provision_binary_with_key<F>(
     public_key: &str,
     app: Option<&AppHandle>,
@@ -1454,6 +1589,9 @@ fn plan_spawn_with_key(
     })
 }
 
+// Internal provisioning helper: the args are the separately-borrowed
+// inputs the provisioning chain threads through; `public_key` is the test seam.
+#[allow(clippy::too_many_arguments)]
 fn apply_spawn_plan_with_key<F>(
     public_key: &str,
     app: Option<&AppHandle>,
@@ -1519,6 +1657,9 @@ where
     )
 }
 
+// Internal provisioning helper: the args are the separately-borrowed
+// inputs the provisioning chain threads through; `public_key` is the test seam.
+#[allow(clippy::too_many_arguments)]
 fn provision_resolved_artifact_with_key<F>(
     public_key: &str,
     app: Option<&AppHandle>,
@@ -1625,13 +1766,18 @@ fn reserve_port() -> Result<u16, NativeEngineError> {
         })
 }
 
+enum ServerMode {
+    Solo(u16),
+    Lan(u16),
+}
+
 fn spawn_server(
     binary: &Path,
     data_directory: &Path,
     games_db: &Path,
     log_directory: &Path,
     startup_log: &Path,
-    port: u16,
+    mode: ServerMode,
     arguments: &[String],
 ) -> Result<(Child, ChildStdin), NativeEngineError> {
     fs::create_dir_all(log_directory).map_err(NativeEngineError::storage)?;
@@ -1641,6 +1787,9 @@ fn spawn_server(
         .truncate(true)
         .open(startup_log)
         .map_err(NativeEngineError::storage)?;
+    let port = match mode {
+        ServerMode::Solo(port) | ServerMode::Lan(port) => port,
+    };
     let mut command = Command::new(binary);
     command
         .env("PORT", port.to_string())
@@ -1655,6 +1804,15 @@ fn spawn_server(
         // structured logger. Keep the latest one beside its rolling logs so a
         // server that exits before `/health` is diagnosable without a console.
         .stderr(Stdio::from(startup_log));
+
+    if matches!(mode, ServerMode::Lan(_)) {
+        command
+            .env_remove("PHASE_SINGLE_USER")
+            .env_remove("PHASE_LOBBY_ONLY")
+            .env_remove("PHASE_ANNOUNCE_TO")
+            .env_remove("NGROK_AUTHTOKEN")
+            .env_remove("PHASE_METRICS_PORT");
+    }
 
     // The shell is a GUI-subsystem app but phase-server is console-subsystem, so
     // Windows would otherwise pop a console window for the child on every launch.
@@ -1842,14 +2000,16 @@ fn process_is_plausibly_ours(pid: u32, binary: &Path) -> bool {
 fn gc_after_successful_spawn(
     files: &NativeEngineFiles,
     retained: &NativeEngineKey,
+    other_active: Option<&NativeEngineKey>,
 ) -> Result<(), NativeEngineError> {
-    gc_channel_directories(files, retained)?;
+    gc_channel_directories(files, retained, other_active)?;
     gc_cache(files)
 }
 
 fn gc_channel_directories(
     files: &NativeEngineFiles,
     retained: &NativeEngineKey,
+    other_active: Option<&NativeEngineKey>,
 ) -> Result<(), NativeEngineError> {
     let retained_name = retained.directory_name();
     let prefix = format!("{}-", retained.channel());
@@ -1859,6 +2019,7 @@ fn gc_channel_directories(
         let name = name.to_string_lossy();
         if name.starts_with(&prefix)
             && name != retained_name
+            && !other_active.is_some_and(|key| name == key.directory_name())
             && entry
                 .file_type()
                 .map_err(NativeEngineError::storage)?
@@ -1994,29 +2155,61 @@ fn make_executable(_path: &Path) -> Result<(), NativeEngineError> {
     Ok(())
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn target_triple() -> Result<&'static str, NativeEngineError> {
-    Ok("aarch64-apple-darwin")
+/// A desktop platform `shell-release.yml`'s `build-shell` matrix publishes.
+/// Each variant resolves to the triple naming the `phase-server-slim-<triple>`
+/// release asset and the preview `binaries` key a desktop on it provisions.
+#[derive(Clone, Copy, Debug)]
+enum ServerPlatform {
+    MacosAarch64,
+    WindowsX86_64,
+    LinuxX86_64,
+    LinuxAarch64,
 }
 
-#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-fn target_triple() -> Result<&'static str, NativeEngineError> {
-    Ok("x86_64-pc-windows-msvc")
+impl ServerPlatform {
+    const ALL: [Self; 4] = [
+        Self::MacosAarch64,
+        Self::WindowsX86_64,
+        Self::LinuxX86_64,
+        Self::LinuxAarch64,
+    ];
+
+    /// The pair as `std::env::consts::{OS, ARCH}` spells it, which is also how
+    /// `packaging/desktop-platforms.txt` and the `build-shell` matrix spell
+    /// their `os` and `arch`.
+    fn os_arch(self) -> (&'static str, &'static str) {
+        match self {
+            Self::MacosAarch64 => ("macos", "aarch64"),
+            Self::WindowsX86_64 => ("windows", "x86_64"),
+            Self::LinuxX86_64 => ("linux", "x86_64"),
+            Self::LinuxAarch64 => ("linux", "aarch64"),
+        }
+    }
+
+    fn target_triple(self) -> &'static str {
+        match self {
+            Self::MacosAarch64 => "aarch64-apple-darwin",
+            Self::WindowsX86_64 => "x86_64-pc-windows-msvc",
+            Self::LinuxX86_64 => "x86_64-unknown-linux-musl",
+            Self::LinuxAarch64 => "aarch64-unknown-linux-musl",
+        }
+    }
+
+    fn from_os_arch(os: &str, arch: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|platform| platform.os_arch() == (os, arch))
+    }
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-fn target_triple() -> Result<&'static str, NativeEngineError> {
-    Ok("x86_64-unknown-linux-musl")
+fn server_target_triple(os: &str, arch: &str) -> Option<&'static str> {
+    ServerPlatform::from_os_arch(os, arch).map(ServerPlatform::target_triple)
 }
 
-#[cfg(not(any(
-    all(target_os = "macos", target_arch = "aarch64"),
-    all(target_os = "windows", target_arch = "x86_64"),
-    all(target_os = "linux", target_arch = "x86_64")
-)))]
 fn target_triple() -> Result<&'static str, NativeEngineError> {
-    Err(NativeEngineError::UnsupportedPlatform {
-        detail: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+    let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+    server_target_triple(os, arch).ok_or_else(|| NativeEngineError::UnsupportedPlatform {
+        detail: format!("{os}-{arch}"),
     })
 }
 
@@ -2046,6 +2239,9 @@ fn emit_progress(app: &AppHandle, phase: NativeEngineProgressPhase, detail: Opti
 mod tests {
     use std::{cell::RefCell, fs, time::Duration};
 
+    use tokio::sync::mpsc::error::TryRecvError;
+    use tokio_tungstenite::tungstenite::Message;
+
     use super::*;
 
     const TEST_PUBLIC_KEY: &str = "RWRkGDPsxuBykSbl2mdODJL2Wa/o8ow/1LHjD7Vg8ucmQEM4loTWhAyw";
@@ -2055,11 +2251,11 @@ mod tests {
     // this public key/signature are retained; the temporary private key was
     // never added to the repository.
     const TEST_MANIFEST_PUBLIC_KEY: &str =
-        "RWShXyki5XOg0I93KFq/y1ZmJM80FRzQ2yw7POGQ9KSjxscp/2FDTqNU";
+        "RWRDnhhtb7/nrWMP2ITc9DaLnywLbWRXbVAHOCZ8TRfCFCffRzLfzfBe";
     const TEST_RELEASE_MANIFEST: &[u8] = br#"{"schema":1,"channel":"release","version":"1.2.3","generated_at":"2026-01-01T00:00:00Z","data":[]}"#;
-    const TEST_RELEASE_MANIFEST_SIGNATURE: &str = "untrusted comment: signature from minisign secret key\nRUShXyki5XOg0GM/CqvIehBL/PgNuvRzKsR+fjxvdYZq3TWNW5QrsDlAsSCra8g3dGsB5V2Kf6QwUO9jjYbCwznNEpfqNJkHAwE=\ntrusted comment: timestamp:1788355523\tfile:release.json\thashed\nxYDP6Cn8xpjf4DJ3dwQ5UUXEAlRK15QJyis1l2/TFXc4kxRRgmxJwIAJ1nwuk4zM6nrob0dsIEJIRv5l265OBw==";
-    const TEST_PREVIEW_MANIFEST: &[u8] = br#"{"schema":1,"channel":"preview","generated_at":"2026-01-02T00:00:00Z","current":"0123456789abcdef","previous":null,"fingerprints":{"0123456789abcdef":{"commit":"abc","binaries":{"aarch64-apple-darwin":{"url":"https://example.test/macos","sig_url":"https://example.test/macos.minisig"},"x86_64-pc-windows-msvc":{"url":"https://example.test/windows","sig_url":"https://example.test/windows.minisig"},"x86_64-unknown-linux-musl":{"url":"https://example.test/linux","sig_url":"https://example.test/linux.minisig"}},"data":[]}}}"#;
-    const TEST_PREVIEW_MANIFEST_SIGNATURE: &str = "untrusted comment: signature from minisign secret key\nRUShXyki5XOg0Hztqsw1GFwxMgrX5o0/vRLNsbcGz32R1gVODVfUg+ZR4L/PreI9Nsu8u+BGPoGHYw5CNXQlpWHn6ndKe/vFVwM=\ntrusted comment: timestamp:1788355523\tfile:preview.json\thashed\nQwTR8roTR23UbV+hOm3MZMChfMFtZzbZHFH3fPLoPSp6y0HH2zxx7Jqo2/51r+4oeKjzyjptqWFOXk+1mdRaDQ==";
+    const TEST_RELEASE_MANIFEST_SIGNATURE: &str = "untrusted comment: signature from minisign secret key\nRURDnhhtb7/nrZaTnVS9BKwQkuFNEUSnb36Zzf4vfNeQJctAqksY8Bc14W3ygJR9QhbImWmwmgnxa/IalcVWMqcjqjkya2jJbQY=\ntrusted comment: timestamp:1789512543\tfile:release.json\thashed\n/iN3TrIHifX/THa5Vzsbkr9aaQmxvMwlWUYwBviuAP1AUbGMENjFK0ePp5d90ld2YTJ3Eim6FEe5YQ+iOuVKDA==";
+    const TEST_PREVIEW_MANIFEST: &[u8] = br#"{"schema":1,"channel":"preview","generated_at":"2026-01-02T00:00:00Z","current":"0123456789abcdef","previous":null,"fingerprints":{"0123456789abcdef":{"commit":"abc","binaries":{"aarch64-apple-darwin":{"url":"https://example.test/macos","sig_url":"https://example.test/macos.minisig"},"aarch64-unknown-linux-musl":{"url":"https://example.test/linux-arm64","sig_url":"https://example.test/linux-arm64.minisig"},"x86_64-pc-windows-msvc":{"url":"https://example.test/windows","sig_url":"https://example.test/windows.minisig"},"x86_64-unknown-linux-musl":{"url":"https://example.test/linux","sig_url":"https://example.test/linux.minisig"}},"data":[]}}}"#;
+    const TEST_PREVIEW_MANIFEST_SIGNATURE: &str = "untrusted comment: signature from minisign secret key\nRURDnhhtb7/nrYtCCrTg8zqSH+NNPjgDbn9BJUBArB/ZJUuDshbyb9YQNunwijZe8PI3axvrQ61iPHNYycCWm87p81fBuKvm8wM=\ntrusted comment: timestamp:1789512543\tfile:preview.json\thashed\nGEeXonnUs85CowR1YMGev+sRiFt0O4Ijlma1GsukYUMpC7XjaQEzcLmj7ox3kmYgOR5mLwGSm5tE0Bq8X6u7DA==";
 
     fn test_directory(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -2803,6 +2999,75 @@ mod tests {
     }
 
     #[test]
+    fn lan_launch_is_multiplayer_with_explicit_origin_and_public_address() {
+        let args = lan_server_arguments(
+            RELEASE_ORIGIN,
+            NativeEngineIntent::StartOffline,
+            "ws://192.168.1.2:9374/ws",
+        );
+        assert_eq!(
+            args,
+            [
+                "--bind",
+                "0.0.0.0",
+                "--exit-on-stdin-close",
+                "--allowed-origin",
+                RELEASE_ORIGIN,
+                "--public-url",
+                "ws://192.168.1.2:9374/ws",
+                "--no-data-download"
+            ]
+        );
+        assert!(!lan_server_arguments(
+            PREVIEW_ORIGIN,
+            NativeEngineIntent::StartOnline,
+            "ws://10.0.0.1:9374/ws"
+        )
+        .iter()
+        .any(|arg| arg == "--no-data-download"));
+    }
+
+    #[test]
+    fn gc_retains_both_active_artifact_keys() {
+        let files = test_files("lan-active-gc");
+        let solo = release_key("3.0.0");
+        let lan = release_key("2.0.0");
+        let stale = release_key("1.0.0");
+        for key in [&solo, &lan, &stale] {
+            fs::create_dir_all(files.key_directory(key)).unwrap();
+        }
+        gc_after_successful_spawn(&files, &solo, Some(&lan)).unwrap();
+        assert!(files.key_directory(&solo).is_dir());
+        assert!(files.key_directory(&lan).is_dir());
+        assert!(!files.key_directory(&stale).exists());
+        fs::remove_dir_all(files.app_directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exited_lan_child_clears_running_status() {
+        let mut child = Command::new("sh")
+            .args(["-c", "exit 0"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take();
+        child.wait().unwrap();
+        let mut state = NativeEngineState {
+            lan: Some(RunningLan {
+                key: release_key("1.0.0"),
+                child,
+                stdin,
+                addresses: vec![],
+                advertisement: None,
+            }),
+            ..Default::default()
+        };
+        clear_exited_lan(&mut state).unwrap();
+        assert!(state.lan.is_none());
+    }
+
+    #[test]
     fn manifest_diff_cache_gc_and_different_key_directory_gc() {
         let files = test_files("gc");
         let current = release_key("2.0.0");
@@ -2822,7 +3087,7 @@ mod tests {
             fs::create_dir_all(files.key_directory(key)).unwrap();
             write_json_atomically(&files.manifest_data(key), &StoredManifestData { data }).unwrap();
         }
-        gc_after_successful_spawn(&files, &current).unwrap();
+        gc_after_successful_spawn(&files, &current, None).unwrap();
         assert!(files.key_directory(&current).exists());
         assert!(!files.key_directory(&old_release).exists());
         assert!(files.key_directory(&preview).exists());
@@ -3188,6 +3453,7 @@ mod tests {
         let (outbound, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut state = NativeEngineState {
             running: Some(RunningEngine::Adopted(retained)),
+            lan: None,
             bridges: BTreeMap::from([(1, BridgeHandle::new(abort, outbound))]),
             next_bridge_id: 2,
         };
@@ -3207,6 +3473,58 @@ mod tests {
         assert!(state.bridges.contains_key(&1));
         assert_eq!(read_spawn_record(&files).unwrap().unwrap().key, other);
         fs::remove_dir_all(files.app_directory).unwrap();
+    }
+
+    #[test]
+    fn server_target_triple_maps_every_published_desktop_platform() {
+        let mut listed = HashSet::new();
+        for line in include_str!("../../../packaging/desktop-platforms.txt").lines() {
+            let content = line.split_once('#').map_or(line, |(before, _)| before);
+            let fields: Vec<&str> = content.split_whitespace().collect();
+            if fields.is_empty() {
+                continue;
+            }
+            let [os, arch, triple] = fields[..] else {
+                panic!("expected `os arch triple`, got {line:?}")
+            };
+            assert_eq!(server_target_triple(os, arch), Some(triple), "{os}-{arch}");
+            listed.insert((os, arch));
+        }
+        // The set, not its size: a duplicated row would otherwise stand in for
+        // a variant no row covers.
+        assert_eq!(
+            listed,
+            HashSet::from(ServerPlatform::ALL.map(ServerPlatform::os_arch))
+        );
+        for (os, arch) in [
+            ("macos", "x86_64"),
+            ("windows", "aarch64"),
+            ("linux", "arm"),
+            ("freebsd", "x86_64"),
+        ] {
+            assert_eq!(server_target_triple(os, arch), None, "{os}-{arch}");
+        }
+    }
+
+    #[test]
+    fn signed_preview_fixture_lists_a_binary_for_every_server_target() {
+        let manifest = PreviewManifest::parse(TEST_PREVIEW_MANIFEST).unwrap();
+        let entry = manifest.entry_for("0123456789abcdef").unwrap();
+        for platform in ServerPlatform::ALL {
+            let triple = platform.target_triple();
+            assert!(
+                entry.binaries.contains_key(triple),
+                "{platform:?}: no fixture binary for {triple}"
+            );
+        }
+    }
+
+    #[test]
+    fn target_triple_resolves_the_host_through_the_mapping() {
+        assert_eq!(
+            target_triple().ok(),
+            server_target_triple(std::env::consts::OS, std::env::consts::ARCH)
+        );
     }
 
     #[test]
@@ -3237,15 +3555,36 @@ mod tests {
         let (abort, registration) = futures_util::future::AbortHandle::new_pair();
         let (outbound, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut state = NativeEngineState::default();
-        state.bridges.insert(1, BridgeHandle::new(abort, outbound));
+        state
+            .bridges
+            .insert(1, BridgeHandle::new(abort.clone(), outbound));
 
         abort_all_native_engine_bridges(&mut state.bridges);
 
         assert!(state.running.is_none());
         assert!(state.bridges.is_empty());
+        assert!(abort.is_aborted());
         let result = tauri::async_runtime::block_on(async {
             futures_util::future::Abortable::new(std::future::pending::<()>(), registration).await
         });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn closing_a_registered_bridge_closes_its_queue_without_aborting() {
+        let (abort, _registration) = futures_util::future::AbortHandle::new_pair();
+        let (outbound, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut bridges = BTreeMap::from([(1, BridgeHandle::new(abort.clone(), outbound))]);
+        bridges[&1]
+            .outbound()
+            .send(Message::Text("queued".into()))
+            .unwrap();
+
+        assert!(close_registered_bridge(&mut bridges, 1));
+
+        assert!(!close_registered_bridge(&mut bridges, 1));
+        assert!(!abort.is_aborted());
+        assert_eq!(receiver.try_recv().unwrap(), Message::Text("queued".into()));
+        assert_eq!(receiver.try_recv(), Err(TryRecvError::Disconnected));
     }
 }

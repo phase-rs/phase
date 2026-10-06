@@ -73,6 +73,18 @@ export function RetargetChoiceModal({ data }: { data: RetargetChoice["data"] }) 
 
   const activeSelection = isMultiSlot ? selected[activeSlot] : selected[0];
 
+  // CR 115.7d + INVARIANT SC (phase-rs/phase#8355 round-8 review finding
+  // MED-2): admission is PER-SLOT (`engine::apply_retarget`'s `pool_for`),
+  // but this modal rendered the FLAT UNION for whichever slot was active —
+  // measured on a multi-slot prompt where the union had 5 entries and
+  // `slot_pools[0]` had 2, so three rendered choices were rejected on
+  // click. Index by the active slot's OWN pool; `slot_pools` empty (an
+  // outer-empty compat payload, INVARIANT SC) falls back to the union,
+  // which is what a `Legacy`-enforced or pre-field prompt's pool equals
+  // anyway.
+  const renderSlot = isMultiSlot ? activeSlot : 0;
+  const slotOptions = data.slot_pools[renderSlot] ?? data.legal_new_targets;
+
   return (
     <ChoiceOverlay
       title={t("retargetChoice.title")}
@@ -112,7 +124,7 @@ export function RetargetChoiceModal({ data }: { data: RetargetChoice["data"] }) 
         </div>
       )}
       <ScrollableCardStrip>
-        {data.legal_new_targets.map((target, index) => {
+        {slotOptions.map((target, index) => {
           const key = targetKey(target);
           const isSelected = activeSelection != null && targetsEqual(activeSelection, target);
           const obj = "Object" in target ? objects?.[String(target.Object)] : undefined;

@@ -78,6 +78,8 @@ fn blocks_lethal_attack() {
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
+            must_be_blocked_targets: Default::default(),
+            block_capacities: Default::default(),
         };
     }
 
@@ -114,6 +116,8 @@ fn does_not_block_when_safe() {
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
+            must_be_blocked_targets: Default::default(),
+            block_capacities: Default::default(),
         };
     }
 
@@ -1185,6 +1189,8 @@ fn ai_vs_ai_completes_combat_sequence() {
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
+            must_be_blocked_targets: Default::default(),
+            block_capacities: Default::default(),
         };
     }
 
@@ -1250,6 +1256,8 @@ fn run_ai_actions_non_empty_batch_carries_break_reason() {
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
+            must_be_blocked_targets: Default::default(),
+            block_capacities: Default::default(),
         };
     }
 
@@ -1318,6 +1326,8 @@ fn declare_blockers_never_produces_pass_priority() {
             ]),
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
+            must_be_blocked_targets: Default::default(),
+            block_capacities: Default::default(),
         };
     }
 
@@ -1361,6 +1371,86 @@ fn attacks_when_opponent_is_at_lethal() {
                 );
             }
             other => panic!("{diff:?}: expected DeclareAttackers, got {other:?}"),
+        }
+    }
+}
+
+/// A land whose `{1}` activated ability turns it into a 3/3 creature until end
+/// of turn — the man-land shape (Mutavault / Treetop Village family).
+fn animate_land_ability() -> AbilityDefinition {
+    use engine::types::ability::{AbilityCost, ContinuousModification, Duration, StaticDefinition};
+    use engine::types::statics::StaticMode;
+
+    let mut ability = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::new(StaticMode::Continuous).modifications(
+                vec![
+                    ContinuousModification::SetPower { value: 3 },
+                    ContinuousModification::SetToughness { value: 3 },
+                    ContinuousModification::AddType {
+                        core_type: CoreType::Creature,
+                    },
+                ],
+            )],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: None,
+            end_cost: None,
+        },
+    );
+    ability.cost = Some(AbilityCost::Mana {
+        cost: ManaCost::generic(1),
+    });
+    ability
+}
+
+/// Difficulty-gated latent-blocker sight: a 2/2 swinging into an untapped
+/// man-land the defender has open mana to animate into a 3/3. VeryEasy/Easy only
+/// see creatures that already exist, so they swing; Medium+ (`DownsideWeighted`)
+/// treat the man-land as a live blocker that eats the 2/2 for a downgrade and
+/// hold it back.
+#[test]
+fn strong_ai_holds_attack_into_animatable_manland_weak_ai_swings() {
+    let mut scenario = GameScenario::new();
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, 20);
+    let attacker = scenario.add_creature(P0, "Bear", 2, 2).id();
+    scenario
+        .add_land_from_oracle(P1, "Wildland", "")
+        .with_ability_definition(animate_land_ability());
+    scenario.add_basic_land(P1, engine::types::mana::ManaColor::Green); // pays the {1}
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.turn_number = 3;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = P0;
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: P0,
+            valid_attacker_ids: vec![attacker],
+            valid_attack_targets: vec![AttackTarget::Player(P1)],
+            valid_attack_targets_by_attacker: None,
+            attacker_constraints: Default::default(),
+        };
+    }
+
+    for (diff, action) in ai_choose_at_all_difficulties(runner.state()) {
+        let attacks_bear = match &action {
+            GameAction::DeclareAttackers { attacks, .. } => {
+                attacks.iter().any(|(id, _)| *id == attacker)
+            }
+            other => panic!("{diff:?}: expected DeclareAttackers, got {other:?}"),
+        };
+        match diff {
+            AiDifficulty::VeryEasy | AiDifficulty::Easy => assert!(
+                attacks_bear,
+                "{diff:?}: Basic model has no latent-blocker sight, so it swings"
+            ),
+            _ => assert!(
+                !attacks_bear,
+                "{diff:?}: DownsideWeighted treats the animatable 3/3 land as a blocker and holds"
+            ),
         }
     }
 }

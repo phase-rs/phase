@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use super::activation_patience::ActivationPatiencePolicy;
 use super::aggro_pressure::AggroPressurePolicy;
 use super::anthem_priority::AnthemPriorityPolicy;
 use super::anti_self_harm::AntiSelfHarmPolicy;
@@ -9,6 +10,7 @@ use super::board_wipe_telegraph::BoardWipeTelegraphPolicy;
 use super::card_advantage::CardAdvantagePolicy;
 use super::chalice_avoidance::ChaliceAvoidancePolicy;
 use super::combat_withdrawal::CombatWithdrawalPolicy;
+use super::commander_zone_return::CommanderZoneReturnPolicy;
 use super::context::{PolicyContext, PriorsEnv};
 use super::copy_value::CopyValuePolicy;
 use super::creature_type_choice::CreatureTypeChoicePolicy;
@@ -20,6 +22,7 @@ use super::etb_value::EtbValuePolicy;
 use super::evasion_removal_priority::EvasionRemovalPriorityPolicy;
 use super::fetch_land_patience::FetchLandPatiencePolicy;
 use super::free_outlet_activation::FreeOutletActivationPolicy;
+use super::graveyard_authority::GraveyardAuthorityPolicy;
 use super::graveyard_types::GraveyardTypesPolicy;
 use super::hand_disruption::HandDisruptionPolicy;
 use super::hold_mana_up::HoldManaUpForInteractionPolicy;
@@ -28,6 +31,7 @@ use super::landfall_timing::LandfallTimingPolicy;
 use super::lethality_awareness::LethalityAwarenessPolicy;
 use super::life_total_resource::LifeTotalResourcePolicy;
 use super::loop_shortcut::LoopShortcutPolicy;
+use super::momir_curve::MomirCurvePolicy;
 use super::payment_selection::PaymentSelectionPolicy;
 use super::payoff::{
     PayoffPolicy, ARTIFACT_SYNERGY, BLINK_PAYOFF, ENCHANTMENTS_PAYOFF, ENERGY_PAYOFF,
@@ -64,6 +68,7 @@ use engine::types::player::PlayerId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PolicyId {
     AntiSelfHarm,
+    MomirCurve,
     ArtifactSynergyTactical,
     BoardDevelopment,
     EtbValue,
@@ -102,6 +107,7 @@ pub enum PolicyId {
     SweeperTiming,
     FreeOutletActivation,
     FetchLandPatience,
+    ActivationPatience,
     AristocratsKeepablesMulligan,
     AggroPressure,
     AggroKeepablesMulligan,
@@ -112,7 +118,6 @@ pub enum PolicyId {
     PlusOneCountersMulligan,
     SpellslingerCasting,
     SpellslingerKeepablesMulligan,
-    CombatTaxPayment,
     ReactiveSelfProtection,
     /// CR 601.2f + CR 702.34a: a cast whose mandatory sacrifice cost — an
     /// additional cost, or a flashback alternative cost — could only be paid by
@@ -153,6 +158,7 @@ pub enum PolicyId {
     GraveyardTypes,
     CrewTiming,
     CombatWithdrawal,
+    CommanderZoneReturn,
     /// CR 608.2c: "return a land you control" self-bounce target choice.
     SelfBounceTarget,
     /// CR 601.2f: deploy a "spells you cast cost less" engine before the spells
@@ -168,6 +174,9 @@ pub enum PolicyId {
     /// CR 205.3m: pick a creature type the AI actually has members of, instead
     /// of the alphabetically first option the engine offers.
     CreatureTypeChoice,
+    /// CR 601.2a + CR 601.2b: announce the graveyard permission whose
+    /// commitments (slot, extra cost, counter) give up least.
+    GraveyardAuthority,
     /// CR 700.3a: every eligible object goes in exactly one pile; split them
     /// into two piles of equal value, since the adversary chooses which pile
     /// the AI ends up with.
@@ -397,13 +406,15 @@ impl Default for PolicyRegistry {
             Box::new(HoldManaUpForInteractionPolicy),
             Box::new(SweeperTimingPolicy),
             Box::new(FreeOutletActivationPolicy),
+            Box::new(MomirCurvePolicy),
             Box::new(FetchLandPatiencePolicy),
+            Box::new(ActivationPatiencePolicy),
             Box::new(AggroPressurePolicy),
             Box::new(TokensWidePolicy),
             Box::new(AnthemPriorityPolicy),
             Box::new(PlusOneCountersPolicy),
             Box::new(SpellslingerCastingPolicy),
-            Box::new(super::combat_tax::CombatTaxPaymentPolicy),
+            Box::new(CommanderZoneReturnPolicy),
             Box::new(ReactiveSelfProtectionPolicy),
             Box::new(SacrificeCostManaGatePolicy),
             Box::new(SacrificeLandProtectionPolicy),
@@ -437,6 +448,7 @@ impl Default for PolicyRegistry {
             Box::new(super::discard_payoff::DiscardPayoffPolicy),
             Box::new(super::vehicle_deployment::VehicleDeploymentPolicy),
             Box::new(CreatureTypeChoicePolicy),
+            Box::new(GraveyardAuthorityPolicy),
             Box::new(super::pile_partition::PilePartitionPolicy),
             Box::new(super::ritual_sink::RitualSinkPolicy),
         ];

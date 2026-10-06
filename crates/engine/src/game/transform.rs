@@ -303,6 +303,7 @@ mod tests {
 
         obj.back_face = Some(BackFaceData {
             is_swap_snapshot: false,
+            trigger_printed_origins: Vec::new(),
             name: "Werewolf Back".to_string(),
             power: Some(4),
             toughness: Some(4),

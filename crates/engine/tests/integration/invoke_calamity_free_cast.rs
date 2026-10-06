@@ -707,6 +707,17 @@ fn a_free_cast_bound_the_window_cannot_represent_is_refused_not_fabricated() {
         // it here is what keeps the runtime row below non-vacuous — an unrelated
         // upstream parse loss would also produce "no permission", but it would
         // not produce this name.
+        //
+        // Exactly ONE name, deliberately. The printed rider ("If those spells
+        // would be put into your graveyard, exile them instead") is orphaned by
+        // the head's refusal and reaches `oracle::guard_owner` with the refusal
+        // node as its parent, where R-a suppresses a second gap over it. That
+        // suppression is load-bearing for HONESTY, not for this assertion: the
+        // reach-guard above measures the same surface with a representable cap
+        // parsing with zero gaps, so the rider is fully represented whenever the
+        // cap is — its gap here would be derived from the cap's, and fixing the
+        // cap fixes both. Loosening this to `contains` would cost the row its
+        // discrimination without buying any coverage signal.
         assert_eq!(
             gap_names(&oracle_for(bound)),
             vec!["unrepresentable_cast_cap".to_string()],

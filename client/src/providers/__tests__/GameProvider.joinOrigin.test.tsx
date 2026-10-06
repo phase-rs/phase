@@ -126,7 +126,8 @@ vi.mock("../../stores/gameStore", () => ({
   useGameStore,
 }));
 
-vi.mock("../../constants/storage", () => ({
+vi.mock("../../constants/storage", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../constants/storage")>(),
   ACTIVE_DECK_KEY: "active-deck",
   isRandomDeckSelection: () => false,
   loadActiveDeck: () => ({ main: ["Island"], sideboard: [] }),
@@ -289,6 +290,23 @@ describe("GameProvider join origin", () => {
     await waitFor(() => {
       expect(tryReconnect).toHaveBeenCalled();
     });
+  });
+
+  it("opens no socket for an online route with neither a join code nor a saved session", async () => {
+    const onWsEvent = vi.fn();
+
+    render(
+      <GameProvider gameId="g1" mode="online" onWsEvent={onWsEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(onWsEvent).toHaveBeenCalledWith({ type: "reconnectFailed" });
+    });
+    expect(adapters).toHaveLength(0);
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    expect(multiplayerState.setConnectionStatus).toHaveBeenLastCalledWith("disconnected");
   });
 
   it("does not open a socket when a terminal delivery is waiting", async () => {

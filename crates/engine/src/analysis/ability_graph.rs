@@ -47,6 +47,7 @@ use crate::types::ability::{
 use crate::types::card::CardFace;
 use crate::types::counter::CounterMatch;
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
+use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::player::PlayerId;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
@@ -812,13 +813,14 @@ fn effect_projection(effect: &Effect) -> Projection {
             }
         }
         // ----- EXTRA TURNS / PHASES (CR 500.7 / CR 500.8) -----
-        Effect::ExtraTurn { .. } => {
-            b.add_extra_turn(1, AxisMagnitude::Fixed(1));
+        Effect::ExtraTurn { count, .. } => {
+            let (a, mag) = count_seed(count);
+            b.add_extra_turn(a, mag);
         }
         // CR 500.8: only an additional *combat* phase pumps a modeled axis; any
         // other extra phase carries no countable resource ⇒ Unmodeled (M2).
-        Effect::AdditionalPhase { phase, count, .. } => {
-            if phase.is_combat() {
+        Effect::AdditionalPhase { segment, count, .. } => {
+            if *segment == TurnSegment::Phase(PhaseGroup::Combat) {
                 let (a, mag) = count_seed(count);
                 b.add_combat(a, mag);
             } else {
@@ -1012,6 +1014,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
+        | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
         | Effect::Specialize
         | Effect::Renown { .. }
@@ -2150,7 +2153,7 @@ pub(crate) fn candidate_cycles_from_nodes(nodes: Vec<AbilityNode>) -> Vec<Candid
 mod tests {
     use super::*;
     use crate::types::ability::{
-        default_target_filter_any, EffectScope, PlayerFilter, PtValue, SacrificeCost,
+        default_target_filter_any, EffectScope, PlayerFilter, PtValue, QuantityRef, SacrificeCost,
         TriggerDefinition, TypedFilter,
     };
     use crate::types::counter::CounterType;
@@ -2968,19 +2971,42 @@ mod tests {
             "TimeWalk",
             &activated(Effect::ExtraTurn {
                 target: TargetFilter::Controller,
+                count: fixed(1),
             }),
             None,
         );
         assert_eq!(et.net.extra_turns, 1);
         assert!(et.produces.contains(&AxisKey::ExtraTurn));
 
+        let two = build_node(
+            "TimeStretch",
+            &activated(Effect::ExtraTurn {
+                target: TargetFilter::Controller,
+                count: fixed(2),
+            }),
+            None,
+        );
+        assert_eq!(two.net.extra_turns, 2);
+
+        let dynamic = effect_projection(&Effect::ExtraTurn {
+            target: TargetFilter::Controller,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name: "X".into() },
+            },
+        });
+        assert!(matches!(
+            dynamic,
+            Projection::Modeled { ref magnitudes, .. }
+                if magnitudes.get(&AxisKey::ExtraTurn) == Some(&AxisMagnitude::Unbounded)
+        ));
+
         // CR 500.8: an additional combat phase pumps the Combat axis.
         let combat = build_node(
             "Aggravated",
             &activated(Effect::AdditionalPhase {
-                target: TargetFilter::Controller,
-                phase: crate::types::phase::Phase::BeginCombat,
-                after: crate::types::phase::Phase::PostCombatMain,
+                recipient: crate::types::ability::ExtraPhaseRecipient::Controller,
+                segment: TurnSegment::Phase(PhaseGroup::Combat),
+                after: crate::types::ability::ExtraPhaseAnchor::this_main_phase(),
                 followed_by: Vec::new(),
                 count: fixed(1),
                 attacker_restriction: None,
@@ -2993,9 +3019,9 @@ mod tests {
         // A non-combat extra phase carries no modeled axis ⇒ Unmodeled (M2).
         assert!(matches!(
             effect_projection(&Effect::AdditionalPhase {
-                target: TargetFilter::Controller,
-                phase: crate::types::phase::Phase::Upkeep,
-                after: crate::types::phase::Phase::Upkeep,
+                recipient: crate::types::ability::ExtraPhaseRecipient::Controller,
+                segment: TurnSegment::Step(crate::types::phase::Phase::Upkeep),
+                after: crate::types::ability::ExtraPhaseAnchor::ThisStep,
                 followed_by: Vec::new(),
                 count: fixed(1),
                 attacker_restriction: None,

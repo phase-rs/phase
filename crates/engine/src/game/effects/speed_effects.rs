@@ -1,6 +1,8 @@
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::speed::{decrease_speed, increase_speed, set_speed};
-use crate::types::ability::{Effect, EffectError, PlayerFilter, ResolvedAbility, SpeedDelta};
+use crate::types::ability::{
+    Effect, EffectError, PlayerFilter, ResolvedAbility, SpeedDelta, TargetFilter, TargetRef,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::player::PlayerId;
@@ -122,6 +124,11 @@ pub(crate) fn players_for_filter(
         // `matches_player_scope` predicate cannot. This is the authoritative
         // resolver for `AllExcept` effect-iteration (see the player_scope driver
         // routing in `effects::mod.rs`).
+        PlayerFilter::AllExcept { exclude }
+            if matches!(exclude.as_ref(), PlayerFilter::ParentObjectTargetOwner) =>
+        {
+            players_except_required_owner_anchor(state, ability)
+        }
         PlayerFilter::AllExcept { exclude } => {
             let excluded = players_for_filter(state, exclude, ability);
             state
@@ -257,17 +264,9 @@ pub(crate) fn players_for_filter(
         }
         // CR 108.3 + CR 109.4: the owner of the first object target — owner-axis
         // sibling of `ParentObjectTargetController`.
-        PlayerFilter::ParentObjectTargetOwner => {
-            crate::game::ability_utils::parent_target_owner(ability, state)
-                .filter(|pid| {
-                    state
-                        .players
-                        .iter()
-                        .any(|player| player.id == *pid && !player.is_eliminated)
-                })
-                .into_iter()
-                .collect()
-        }
+        PlayerFilter::ParentObjectTargetOwner => parent_object_target_owner_player(state, ability)
+            .into_iter()
+            .collect(),
         // CR 608.2c + CR 109.4: the resolution-scoped chosen player at `index`.
         PlayerFilter::ChosenPlayer { index } => ability
             .chosen_players
@@ -312,31 +311,43 @@ pub(crate) fn players_for_filter(
         }
         // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class] whose [scalar
         // attr] [comparator] [value]" — candidates satisfying both `relation`
-        // and the per-candidate scalar comparison. `attr` is read directly off
-        // each candidate; `value` is the controller-relative threshold,
-        // resolved once.
+        // and the per-candidate scalar comparison. `attr` is read for each
+        // candidate; `value` keeps the ability controller and binds
+        // `scoped_player` to that candidate.
         PlayerFilter::PlayerAttribute {
             relation,
             attr,
             comparator,
             value,
-        } => {
-            let threshold =
-                crate::game::quantity::resolve_quantity(state, value, controller, source_id);
-            state
-                .players
-                .iter()
-                .filter(|player| !player.is_eliminated)
-                .filter(|player| {
-                    crate::game::players::matches_relation(state, player.id, controller, *relation)
-                        && crate::game::effects::candidate_player_scalar_with_state(
-                            state, player, controller, attr,
-                        )
-                        .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
-                })
-                .map(|player| player.id)
-                .collect()
-        }
+        } => state
+            .players
+            .iter()
+            .filter(|player| !player.is_eliminated)
+            .filter(|player| {
+                crate::game::players::matches_relation(state, player.id, controller, *relation) && {
+                    let threshold = crate::game::quantity::resolve_quantity_with_ctx(
+                        state,
+                        value,
+                        controller,
+                        crate::game::quantity::QuantityContext {
+                            entering: None,
+                            source: source_id,
+                            trigger_source: None,
+                            recipient: None,
+                            scoped_player: Some(player.id),
+                            damage_source: None,
+                            spell: None,
+                            event_amount: None,
+                        },
+                    );
+                    crate::game::effects::candidate_player_scalar_with_state(
+                        state, player, controller, attr,
+                    )
+                    .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
+                }
+            })
+            .map(|player| player.id)
+            .collect(),
         // CR 608.2c + CR 608.2h + CR 109.4: "each [player class] who
         // controlled/owned a [filter] this way" — candidates satisfying both
         // `relation` and possession of a member of the most recent tracked
@@ -365,6 +376,56 @@ pub(crate) fn players_for_filter(
             .map(|player| player.id)
             .collect(),
     }
+}
+
+fn live_player(state: &GameState, player_id: PlayerId) -> Option<PlayerId> {
+    state
+        .players
+        .iter()
+        .any(|player| player.id == player_id && !player.is_eliminated)
+        .then_some(player_id)
+}
+
+fn parent_object_target_owner_player(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<PlayerId> {
+    parent_object_target_owner_anchor(state, ability).and_then(|player| live_player(state, player))
+}
+
+fn parent_object_target_owner_anchor(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<PlayerId> {
+    crate::game::ability_utils::parent_target_owner(ability, state).or_else(|| {
+        crate::game::targeting::resolve_event_context_target(
+            state,
+            &TargetFilter::ParentTargetOwner,
+            ability.source_id,
+        )
+        .and_then(|target| match target {
+            TargetRef::Player(player) => Some(player),
+            TargetRef::Object(object_id) => state.objects.get(&object_id).map(|obj| obj.owner),
+        })
+    })
+}
+
+fn players_except_required_owner_anchor(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Vec<PlayerId> {
+    // CR 108.3 + CR 800.4a: "each other player" excludes the object's owner
+    // even if that owner has left the game before this still-controlled trigger
+    // resolves; only recipients are filtered to live players below.
+    let Some(owner) = parent_object_target_owner_anchor(state, ability) else {
+        return Vec::new();
+    };
+    state
+        .players
+        .iter()
+        .filter(|player| !player.is_eliminated && player.id != owner)
+        .map(|player| player.id)
+        .collect()
 }
 
 /// CR 702.179a: Effects that instruct players to start their engines set speed to 1
@@ -433,10 +494,53 @@ pub fn resolve_change_speed(
 mod tests {
     use super::*;
     use crate::types::ability::{
-        Comparator, PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, TargetRef,
+        Comparator, PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetRef,
     };
+    use crate::types::events::GameEvent;
     use crate::types::format::FormatConfig;
+    use crate::types::game_state::ZoneChangeRecord;
     use crate::types::identifiers::ObjectId;
+    use crate::types::zones::Zone;
+
+    #[test]
+    fn player_attribute_starting_life_threshold_binds_each_speed_recipient() {
+        // CR 103.4 + CR 904.5 + CR 119.1: P1 has a 40-life baseline;
+        // both hero seats have a 20-life baseline.
+        let mut format = FormatConfig::archenemy();
+        format.archenemy_player = Some(PlayerId(1));
+        let mut state = GameState::new(format, 3, 42);
+        state.players[1].life = 15;
+        state.players[2].life = 15;
+        let filter = PlayerFilter::PlayerAttribute {
+            relation: PlayerRelation::Opponent,
+            attr: Box::new(QuantityRef::LifeTotal {
+                player: PlayerScope::ScopedPlayer,
+            }),
+            comparator: Comparator::LT,
+            value: Box::new(QuantityExpr::DivideRounded {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::StartingLifeTotal {
+                        player: PlayerScope::ScopedPlayer,
+                    },
+                }),
+                divisor: 2,
+                rounding: RoundingMode::Down,
+            }),
+        };
+        let ability = ResolvedAbility::new(
+            Effect::StartYourEngines {
+                player_scope: filter.clone(),
+            },
+            Vec::<TargetRef>::new(),
+            ObjectId(900),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve_start(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(state.players[1].speed, Some(1));
+        assert_eq!(state.players[2].speed, None);
+    }
 
     /// CR 119.1 + CR 810.9a: `players_for_filter` with a `PlayerAttribute`
     /// life-total predicate reads each candidate's TEAM total through the
@@ -529,6 +633,69 @@ mod tests {
             selected,
             vec![PlayerId(0), PlayerId(2)],
             "AllExcept excludes the parent target's controller (P1)"
+        );
+    }
+
+    /// CR 108.3 + CR 603.10a + CR 608.2c + CR 608.2h: owner-relative
+    /// `AllExcept { ParentObjectTargetOwner }` must exclude the departed
+    /// object's owner from the zone-change record, not the trigger controller.
+    #[test]
+    fn all_except_parent_target_owner_excludes_zone_change_owner() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 0);
+        let moved = ObjectId(7);
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: moved,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord {
+                owner: PlayerId(0),
+                controller: PlayerId(1),
+                ..ZoneChangeRecord::test_minimal(moved, Some(Zone::Battlefield), Zone::Graveyard)
+            }),
+        });
+
+        let filter = PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
+        };
+        let ability = ResolvedAbility::new(
+            Effect::StartYourEngines {
+                player_scope: PlayerFilter::Controller,
+            },
+            Vec::<TargetRef>::new(),
+            ObjectId(900),
+            PlayerId(1),
+        );
+
+        let mut selected = players_for_filter(&state, &filter, &ability);
+        selected.sort_by_key(|p| p.0);
+        assert_eq!(
+            selected,
+            vec![PlayerId(1), PlayerId(2)],
+            "owner P0 is excluded; controller P1 and third player P2 remain"
+        );
+    }
+
+    /// CR 108.3 + CR 608.2c: `AllExcept { ParentObjectTargetOwner }` is an
+    /// owner-required composite. With no target or event owner anchor, it fails
+    /// closed instead of treating the excluded set as empty and selecting all.
+    #[test]
+    fn all_except_parent_target_owner_without_anchor_returns_no_players() {
+        let state = GameState::new(FormatConfig::standard(), 3, 0);
+        let filter = PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
+        };
+        let ability = ResolvedAbility::new(
+            Effect::StartYourEngines {
+                player_scope: PlayerFilter::Controller,
+            },
+            Vec::<TargetRef>::new(),
+            ObjectId(900),
+            PlayerId(1),
+        );
+
+        assert!(
+            players_for_filter(&state, &filter, &ability).is_empty(),
+            "missing owner anchor must not leak to every player"
         );
     }
 }

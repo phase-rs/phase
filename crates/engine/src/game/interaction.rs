@@ -58,8 +58,8 @@ use crate::types::interaction::{
     MAX_INTERACTION_LIST_LEN, MAX_SHORTCUT_PREVIEW_ELEMENTS,
 };
 use crate::types::mana::{
-    AbilityActivationScope, ManaColor, ManaCost, ManaRestriction, ManaSourceSelection, ManaType,
-    SpecialAction, SpellCostCriterion, ZoneSpendPolarity,
+    AbilityActivationScope, ManaColor, ManaCost, ManaRestriction, ManaSourceOutput,
+    ManaSourceSelection, ManaType, SpecialAction, SpellCostCriterion, ZoneSpendPolarity,
 };
 use crate::types::match_config::DeckCardCount;
 use crate::types::player::PlayerId;
@@ -170,7 +170,11 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
     match waiting_for {
         WaitingFor::GameOver { .. } => HumanResponseModel::Terminal,
         WaitingFor::OrderTriggers { .. } => HumanResponseModel::TriggerOrder,
-        WaitingFor::CoinFlipKeepChoice { .. } => HumanResponseModel::CoinFlipSequence,
+        // CR 705.1 / CR 706.6: both are "pick exactly K of N" sequences; the
+        // materializer forks on the variant to produce the right action.
+        WaitingFor::CoinFlipKeepChoice { .. } | WaitingFor::DieKeepChoice { .. } => {
+            HumanResponseModel::CoinFlipSequence
+        }
         WaitingFor::ChooseXValue { .. } => {
             HumanResponseModel::NumberRange(NumberResponseAction::ChooseX)
         }
@@ -228,8 +232,11 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::KeepWithinTotalPowerChoice { .. }
         | WaitingFor::KeepExactPermanentsChoice { .. }
         | WaitingFor::ScryChoice { .. }
+        | WaitingFor::RippleBottomOrder { .. }
+        | WaitingFor::RevealUntilBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::DigChoice { .. }
+        | WaitingFor::DigRestSplitChoice { .. }
         | WaitingFor::SurveilChoice { .. }
         | WaitingFor::SearchChoice { .. }
         | WaitingFor::SearchPartitionChoice { .. }
@@ -302,6 +309,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::RedistributeLifeTotals { .. }
         | WaitingFor::RevealChoice { .. }
         | WaitingFor::BeholdChoice { .. }
+        | WaitingFor::EmpowerJaceChoice { .. }
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::LearnChoice { .. }
         | WaitingFor::ManifestDreadChoice { .. }
@@ -312,7 +320,18 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::OptionalCostChoice { .. }
         | WaitingFor::SpliceOffer { .. }
         | WaitingFor::DefilerPayment { .. }
+        // CR 601.2f: the candidate generator emits exactly one action per
+        // distinct locked total cost the engine proved reachable, so the
+        // schema it projects IS complete for this prompt — two orders that
+        // lock the same cost are indistinguishable to the game.
+        | WaitingFor::OrderCostReductions { .. }
         | WaitingFor::CastOffer { .. }
+        // CR 702.60a: Ripple's "you **may** reveal the top N" is a binary
+        // reveal/decline offer answered with `GameAction::RippleChoice` — the
+        // same finite two-action shape as the `CastOffer` free-cast decision
+        // above it, and it selects no cards. Only `RippleBottomOrder` (the
+        // "in any order" permutation) is a `Select`.
+        | WaitingFor::RippleRevealChoice { .. }
         | WaitingFor::ModalFaceChoice { .. }
         | WaitingFor::AlternativeCastChoice { .. }
         | WaitingFor::MutateMergeChoice { .. }
@@ -403,7 +422,14 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
             None,
             Some(InteractionSlotKind::Single),
         ),
-        WaitingFor::CoinFlipKeepChoice { .. } => (
+        // CR 601.2f: a permutation submission, same response shape as
+        // `OrderTriggers`.
+        WaitingFor::OrderCostReductions { .. } => (
+            InteractionWaitingForCode::Sequence,
+            None,
+            Some(InteractionSlotKind::Single),
+        ),
+        WaitingFor::CoinFlipKeepChoice { .. } | WaitingFor::DieKeepChoice { .. } => (
             InteractionWaitingForCode::Sequence,
             None,
             Some(InteractionSlotKind::Single),
@@ -501,8 +527,11 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::KeepWithinTotalPowerChoice { .. }
         | WaitingFor::KeepExactPermanentsChoice { .. }
         | WaitingFor::ScryChoice { .. }
+        | WaitingFor::RippleBottomOrder { .. }
+        | WaitingFor::RevealUntilBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::DigChoice { .. }
+        | WaitingFor::DigRestSplitChoice { .. }
         | WaitingFor::SurveilChoice { .. }
         | WaitingFor::SearchChoice { .. }
         | WaitingFor::SearchPartitionChoice { .. }
@@ -537,6 +566,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::EquipTarget { .. }
         | WaitingFor::RevealChoice { .. }
         | WaitingFor::BeholdChoice { .. }
+        | WaitingFor::EmpowerJaceChoice { .. }
         | WaitingFor::DiscardChoice {
             unless_filter: Some(_),
             ..
@@ -551,6 +581,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::OptionalCostChoice { .. }
         | WaitingFor::SpliceOffer { .. }
         | WaitingFor::CastOffer { .. }
+        | WaitingFor::RippleRevealChoice { .. }
         | WaitingFor::ModalFaceChoice { .. }
         | WaitingFor::AlternativeCastChoice { .. }
         | WaitingFor::MutateMergeChoice { .. }
@@ -857,6 +888,11 @@ pub(crate) fn semantic_owner_for_actor(state: &GameState, actor: PlayerId) -> Op
         .find(|owner| interaction_submitter_for_owner(state, *owner) == actor)
 }
 
+/// Whether this action leaves an open interaction standing.
+///
+/// Not [`GameAction::is_submitter_scoped`], whose near-identical list answers a
+/// different question — whether an action may skip the seat check. The two
+/// lists may diverge.
 pub(crate) fn action_preserves_interaction(action: &GameAction) -> bool {
     matches!(
         action,
@@ -864,6 +900,7 @@ pub(crate) fn action_preserves_interaction(action: &GameAction) -> bool {
             | GameAction::SetPriorityPassingMode { .. }
             | GameAction::SetPriorityYield { .. }
             | GameAction::SetMayTriggerAutoChoice { .. }
+            | GameAction::SetReplacementAutoChoice { .. }
             | GameAction::SetTriggerOrderTemplate { .. }
             | GameAction::CancelAutoPass
             | GameAction::GrantDebugPermission { .. }
@@ -1005,10 +1042,43 @@ struct TriggerOrderProjection {
     count: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
+/// The "pick exactly K distinct items out of N" presentation shape shared by
+/// CR 705.1 coin-flip keep choices and CR 706.6 die-roll ignore choices. The two
+/// rules differ in what a picked item MEANS — a flip kept vs. a roll ignored —
+/// which is resolved by the materializer's action type, not here.
+#[derive(Debug, Clone)]
 struct CoinFlipProjection {
     candidate_count: usize,
-    keep_count: usize,
+    /// How many choice-ids the client must submit. For `CoinFlipKeepChoice`
+    /// this is `keep_count` (CR 705.1 — flips KEPT); for `DieKeepChoice` it is
+    /// `ignore_count` (CR 706.6 — rolls IGNORED).
+    pick_count: usize,
+    /// CR 706.6: indices the player may legally pick. `None` = every index is
+    /// legal (coin flip). `Some(set)` = only these — for "ignore the lowest
+    /// roll", only the rolls tied for the lowest natural. Without this the
+    /// Sequence spec would not constrain submissions and a client could ignore a
+    /// non-lowest roll.
+    selectable_indices: Option<Vec<usize>>,
+}
+
+impl CoinFlipProjection {
+    /// The candidate indices, in presentation order, that the client may pick.
+    fn selectable(&self) -> Vec<usize> {
+        match &self.selectable_indices {
+            Some(indices) => indices.clone(),
+            None => (0..self.candidate_count).collect(),
+        }
+    }
+
+    /// The choice-id tag: CR 705.1 flips and CR 706.6 rolls mint distinct ids so
+    /// a stale id from one prompt cannot be replayed against the other.
+    fn tag(&self) -> char {
+        if self.selectable_indices.is_some() {
+            'd'
+        } else {
+            'f'
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1356,11 +1426,27 @@ fn target_sequence_projection(
         WaitingFor::RetargetChoice {
             scope,
             current_targets,
+            slot_pools,
             legal_new_targets,
             ..
         } => {
             let (candidates, count) = match scope {
-                crate::types::game_state::RetargetScope::Single => (legal_new_targets.clone(), 1),
+                // CR 115.7a + INVARIANT SC (phase-rs/phase#8355 round-8 review
+                // finding MED-2): admission for a `Single` submission is
+                // `slot_pools[0]` (`engine::apply_retarget`'s `pool_for(0)`),
+                // not the flat union — offering the union here can project a
+                // candidate this projection's own reducer rejects, the same
+                // defect fixed for `RetargetChoiceModal.tsx`. `slot_pools`
+                // empty is the deliberate outer-empty compat fallback
+                // (INVARIANT SC), where the union already equals the sole
+                // position's real pool.
+                crate::types::game_state::RetargetScope::Single => (
+                    slot_pools
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| legal_new_targets.clone()),
+                    1,
+                ),
                 crate::types::game_state::RetargetScope::All => {
                     (legal_new_targets.clone(), current_targets.len())
                 }
@@ -1952,15 +2038,17 @@ fn shortcut_reply_projection(waiting_for: &WaitingFor) -> Option<ShortcutReplyPr
     let WaitingFor::RespondToShortcut { proposal, .. } = waiting_for else {
         return None;
     };
-    let max_iteration = match proposal.count {
-        crate::analysis::decision_template::IterationCount::Fixed(iterations) => {
-            iterations.saturating_sub(1)
-        }
-        crate::analysis::decision_template::IterationCount::UntilLethal => u32::MAX,
-    };
+    // CR 732.2b: the proposal states which places it admits; this publishes that range's two
+    // ends verbatim, never a second derivation of them. The engine stays the authority inside
+    // that range: a place it cannot drive is refused at the responder's seam even though the
+    // published range admits it, so published and honored part company above the budget --
+    // `the_published_range_and_the_reducer_agree_below_the_budget_and_part_above_it` pins both
+    // sides. An empty range therefore arrives with its floor above its ceiling, which the
+    // submission guard reads as admitting no place at all.
+    let places = proposal.shortening_places();
     Some(ShortcutReplyProjection {
-        min_iteration: 0,
-        max_iteration,
+        min_iteration: *places.start(),
+        max_iteration: *places.end(),
     })
 }
 
@@ -2072,8 +2160,8 @@ fn mana_payment_direct_actions(
     );
     if has_delve {
         actions.extend(state.objects.values().filter_map(|object| {
-            object
-                .is_delve_eligible(player)
+            state
+                .is_delve_selectable(player, object.id)
                 .then_some(GameAction::TapForConvoke {
                     object_id: object.id,
                     mana_type: ManaType::Colorless,
@@ -2518,21 +2606,48 @@ fn trigger_order_projection(
 fn coin_flip_projection(
     waiting_for: &WaitingFor,
 ) -> Result<Option<CoinFlipProjection>, InteractionReasonCode> {
-    let WaitingFor::CoinFlipKeepChoice {
-        results,
-        keep_count,
-        ..
-    } = waiting_for
-    else {
-        return Ok(None);
+    let projection = match waiting_for {
+        // CR 705.1: keep K of N flips; every flip is a legal keep.
+        WaitingFor::CoinFlipKeepChoice {
+            results,
+            keep_count,
+            ..
+        } => {
+            if results.len() > MAX_INTERACTION_LIST_LEN || *keep_count > results.len() {
+                return Err(InteractionReasonCode::PayloadTooLarge);
+            }
+            CoinFlipProjection {
+                candidate_count: results.len(),
+                pick_count: *keep_count,
+                selectable_indices: None,
+            }
+        }
+        // CR 706.6: ignore K of N rolls, but only from the tied-lowest set the
+        // engine already narrowed — the client must not decide which roll is
+        // lowest.
+        WaitingFor::DieKeepChoice {
+            results,
+            ignorable_indices,
+            ignore_count,
+            ..
+        } => {
+            if results.len() > MAX_INTERACTION_LIST_LEN
+                || *ignore_count > ignorable_indices.len()
+                || ignorable_indices
+                    .iter()
+                    .any(|index| *index >= results.len())
+            {
+                return Err(InteractionReasonCode::PayloadTooLarge);
+            }
+            CoinFlipProjection {
+                candidate_count: results.len(),
+                pick_count: *ignore_count,
+                selectable_indices: Some(ignorable_indices.clone()),
+            }
+        }
+        _ => return Ok(None),
     };
-    if results.len() > MAX_INTERACTION_LIST_LEN || *keep_count > results.len() {
-        return Err(InteractionReasonCode::PayloadTooLarge);
-    }
-    Ok(Some(CoinFlipProjection {
-        candidate_count: results.len(),
-        keep_count: *keep_count,
-    }))
+    Ok(Some(projection))
 }
 
 fn number_projection(waiting_for: &WaitingFor) -> Option<NumberProjection> {
@@ -2755,51 +2870,50 @@ struct VictimCharge {
 ///
 /// **A `victim_slot` magnitude is an aggregate, not a per-slot charge.** Every entry carries
 /// the same number — the worst single seat's life loss over the whole period — so no victim
-/// identity is recoverable from it, and reading it as one seat's charge names whichever seat
-/// loses the most. This therefore resolves a victim only on the shape where the aggregate
-/// provably IS the slot's charge: a period whose `delta.life` names exactly ONE losing seat,
-/// and where that seat is one the declaration allocates to. Outside it the answer is `None`
-/// and the fold keeps `payload_seat`'s own keys — an unsplit magnitude on the right seat
-/// beats a split one on the wrong seats.
+/// identity is recoverable from it, and no seat's rate either. The victim is identified from
+/// the period's own life map instead, on the one cardinality that names it without ambiguity:
+/// a `delta.life` with exactly ONE losing seat, and that seat one the declaration allocates
+/// to. Outside it the answer is `None` and the fold keeps `payload_seat`'s own keys — an
+/// unsplit magnitude on the right seat beats a split one on the wrong seats.
 ///
 /// Deliberately NOT `analysis::resource::slot_charged_life`, which answers a different
 /// question — what TOTAL is liftable, largest loss first, refusing a tie.
 ///
 /// Four refusals, all fail-closed: no entry for the slot, a period whose life map names zero or
-/// several losing seats, a losing seat the declaration does not announce, and a charge that is
-/// not the whole of that seat's per-period loss.
+/// several losing seats, a losing seat the declaration does not announce, and a per-period loss
+/// no negation can state.
 ///
-/// A resolved charge is POSITIVE by construction rather than by a guard of its own: the sum
-/// below is zero only when `rate` negates a magnitude the iterator already restricted to
-/// losses. `checked_add` states that over the whole of `i64`, so there is no negation to
-/// overflow and no positivity conjunct to keep.
+/// A resolved charge is POSITIVE because the iterator already restricted the map to losses;
+/// `checked_neg` is what refuses the one loss whose negation is not an `i64`, `i64::MIN`.
 ///
-/// That last one is the FOLD's precondition, not a second identification rule. CR 732.2a states
-/// a count's magnitudes as the period times the count, and `shortcut_preview_entries` re-states
-/// the charged seat's life by dropping that axis and re-adding `rate` once per allocated cycle.
-/// The substitution preserves the period's life total exactly when `rate` is the seat's whole
-/// loss; under any other charge the published magnitudes total less than the drain the
-/// declaration takes, and CR 119.3 is the number the player is deciding on. The equality is
-/// tested on the already-identified seat rather than used to pick one — filtering the life map
-/// by it would name whichever seat happened to match the aggregate.
+/// The `rate` is the identified seat's OWN per-period loss, read from the very life map that
+/// seat was identified in — the published `victim_slot` magnitude is consulted as the GATE
+/// saying this point's slot is one the period charges, and is otherwise discarded. That is what
+/// makes the FOLD's precondition hold by construction rather than by coincidence: CR 732.2a
+/// states a count's magnitudes as the period times the count, and `shortcut_preview_entries`
+/// re-states the charged seat's life by dropping that axis and re-adding `rate` once per
+/// allocated cycle, so the substitution preserves the period's life total exactly. The reader is
+/// thereby INDIFFERENT to which derivation minted the aggregate.
 fn victim_charge(
     periodic: &crate::analysis::resource::PeriodicDelta,
     point: &LoopShortcutPointProjection,
     seats: &[PlayerId],
 ) -> Option<VictimCharge> {
-    let rate = periodic
+    periodic
         .victim_slot
         .iter()
-        .find(|(slot, _)| *slot == point.slot)
-        .map(|(_, magnitude)| *magnitude)?;
+        .find(|(slot, _)| *slot == point.slot)?;
     let mut losing = periodic
         .delta
         .life
         .iter()
         .filter(|(_, magnitude)| **magnitude < 0);
     let (seat, loss) = losing.next()?;
-    (losing.next().is_none() && seats.contains(seat) && loss.checked_add(rate) == Some(0))
-        .then_some(VictimCharge { rate, seat: *seat })
+    (losing.next().is_none() && seats.contains(seat)).then_some(())?;
+    Some(VictimCharge {
+        rate: loss.checked_neg()?,
+        seat: *seat,
+    })
 }
 
 /// CR 119.3: how one element's count spreads the charged life magnitude over the seats the
@@ -3023,25 +3137,136 @@ fn loop_shortcut_preview(
         .collect()
 }
 
+/// CR 732.2a: the declaration a pin naming NOTHING states — the offer's own canonical split of
+/// the declared count, minted on demand at any count in the published window.
+///
+/// The offer's `preview` list is a bounded SAMPLE of that window (`shortcut_preview_counts`),
+/// while the ingress admits every count in it. At an unsampled count there is no published
+/// element to restate, so the pin the client can honestly send names nothing — and CR 732.2a
+/// leaves the count the proposer's to specify regardless of how many the payload published.
+/// This completes that declaration with the same `canonical_allocation` the sampled counts
+/// already publish, so the answer at an unsampled count is the offer's own answer.
+///
+/// It is a COMPLETION of the player's declaration, not the engine making a CR 601.2c
+/// announcement for them, and every conjunct below is what keeps that true:
+///
+/// * An AUTHORED pin wins — the substitution fires only on a pin naming no ids and no amounts.
+///   An ABSENT pin is not a nothing-naming one: the `?` on the lookup returns `None`, leaving
+///   the ingress's own missing-pin refusal exactly where it is.
+/// * `(min, max) == (1, 1)` on the announced point, each half buying its own outcome. `max == 1`
+///   is the ingress's own gate on a sequenced partition (`sequenced_partition`), so the minted
+///   pin is the shape it accepts a split on. `min == 1` is what makes the empty pin a
+///   non-declaration: at `min == 0` the point is OPTIONAL and an empty pin already MEANS
+///   "announce no target here", which is confirmable today, so completing it would replace one
+///   stated declaration with a different one.
+/// * The domain's point is the offer's ONLY announced-target point, asked by re-calling
+///   `allocation_point` over the points after it rather than by a second `Targets` predicate.
+///   With a second such point published, the offer's one published split is not a complete
+///   answer to the declaration, and an empty pin there is a decision the player has not made.
+///
+/// The count resolution is the exhaustive `(decision, count_spec)` match
+/// `declared_shortcut_preview` performs, `AcceptSuggested` included — that decision reaches this
+/// completion exactly as a `Fixed` one does. `UntilLethal` names no number to partition and
+/// returns on every arm, so this is structurally unreachable there; a new
+/// `InteractionShortcutCountSpec` variant build-breaks the match rather than falling through.
+///
+/// Consulted BEFORE legality, at the one chokepoint both the preview and the submit paths share,
+/// so a request that previews `Confirmable` submits the same sequenced announcement.
+fn completed_shortcut_declaration(
+    interaction_id: &InteractionId,
+    projection: &LoopShortcutProjection,
+    response: &InteractionResponse,
+) -> Option<InteractionResponse> {
+    let InteractionResponse::Shortcut { decision, pins } = response else {
+        return None;
+    };
+    let count = match (*decision, projection.count) {
+        (
+            InteractionShortcutDecision::AcceptSuggested,
+            InteractionShortcutCountSpec::Fixed { suggested, .. },
+        ) => suggested,
+        (
+            InteractionShortcutDecision::Fixed { iterations },
+            InteractionShortcutCountSpec::Fixed { .. },
+        ) => iterations,
+        (InteractionShortcutDecision::Decline, _)
+        | (
+            InteractionShortcutDecision::AcceptSuggested,
+            InteractionShortcutCountSpec::UntilLethal,
+        )
+        | (InteractionShortcutDecision::Fixed { .. }, InteractionShortcutCountSpec::UntilLethal) => {
+            return None;
+        }
+    };
+    // The offer publishes a sampled element list at all: without a basis it publishes none, and
+    // there is no published split for a nothing-naming pin to defer to.
+    shortcut_preview_basis(interaction_id, projection)?;
+    let domain = shortcut_allocation_domain(interaction_id, projection)?;
+    let sole_point = allocation_point(
+        projection
+            .points
+            .iter()
+            .skip(usize::try_from(domain.group).ok()? + 1),
+    )
+    .is_none();
+    if domain.ids.is_empty() || (domain.point.min, domain.point.max) != (1, 1) || !sole_point {
+        return None;
+    }
+    let pin = pins.iter().find(|pin| pin.group == domain.group)?;
+    if !pin.choice_ids.is_empty() || !pin.amounts.is_empty() {
+        return None;
+    }
+    let allocation = canonical_allocation(&domain.ids, count);
+    if allocation.is_empty() {
+        return None;
+    }
+    Some(InteractionResponse::Shortcut {
+        decision: *decision,
+        pins: pins
+            .iter()
+            .map(|pin| {
+                if pin.group != domain.group {
+                    return pin.clone();
+                }
+                InteractionShortcutPin {
+                    group: pin.group,
+                    choice_ids: allocation
+                        .iter()
+                        .map(|assignment| assignment.choice_id.clone())
+                        .collect(),
+                    amounts: allocation.clone(),
+                }
+            })
+            .collect(),
+    })
+}
+
 /// CR 732.2a: the previewed element for the declaration this response states — the same
 /// arithmetic the published list carries, over the allocation the player authored.
 ///
 /// CR 732.1b: the sequence is deliberately never performed, so this is `n x delta` and reaches
 /// no `GameState`.
 ///
-/// Fail-closed: a pin carrying no `amounts` states no split, so no element is minted for it
-/// rather than one being invented from the canonical order. The count is not re-validated
-/// here — an out-of-window count is refused by the ingress in the same call, and the payload
-/// is attached only on the confirmable arm.
+/// Fail-closed: a pin NAMING a subject but carrying no `amounts` states no split, so no element
+/// is minted for it rather than one being invented from the canonical order. A pin naming
+/// NOTHING is `completed_shortcut_declaration`'s own case and reaches the destructure below
+/// already carrying the offer's canonical split. The count is not re-validated here — an
+/// out-of-window count is refused by the ingress in the same call, and the payload is attached
+/// only on the confirmable arm.
 fn declared_shortcut_preview(
     waiting_for: &WaitingFor,
     interaction_id: &InteractionId,
     response: &InteractionResponse,
 ) -> Option<InteractionShortcutPreview> {
-    let InteractionResponse::Shortcut { decision, pins } = response else {
+    let projection = loop_shortcut_projection(waiting_for).ok()?;
+    // The same completion the ingress consults, over an EQUAL projection minted from the state
+    // both preview entry points hand to this function and to `materialize_response`. Sharing the
+    // authority rather than the value is what keeps the element and the action one declaration.
+    let completed = completed_shortcut_declaration(interaction_id, &projection, response);
+    let InteractionResponse::Shortcut { decision, pins } = completed.as_ref().unwrap_or(response)
+    else {
         return None;
     };
-    let projection = loop_shortcut_projection(waiting_for).ok()?;
     let count = match (*decision, projection.count) {
         (
             InteractionShortcutDecision::AcceptSuggested,
@@ -3228,9 +3453,11 @@ fn declared_shortcut_projection(waiting_for: &WaitingFor) -> Option<DeclaredSequ
     // The single hidden-information authority has already set this to `None` for a viewer who
     // may not see the declaration, so an identity that authority dropped is unreachable here.
     let template = proposal.template.as_ref()?;
-    // The DECLARED count as a degenerate one-point window. Nothing on this path samples a count
-    // — the count sampler is never called here — so stating the declared count is the honest
-    // value for a field the offer-side projection requires.
+    // The proposal's LIVE count as a degenerate one-point window — the proposer's declaration
+    // until a responder shortens, and that responder's named place afterwards (CR 732.2b), which
+    // is what the seats still queued are being asked about. Nothing on this path samples a count
+    // — the count sampler is never called here — so reading the proposal's own count is the
+    // honest value for a field the offer-side projection requires.
     let count = match proposal.count {
         IterationCount::Fixed(iterations) => InteractionShortcutCountSpec::Fixed {
             min: iterations,
@@ -3409,11 +3636,11 @@ fn declared_sequence_preview(
     //
     // `victim_charge` refuses for FOUR reasons: no `victim_slot` entry for this point's slot; a
     // life map naming zero or several losing seats; a losing seat the seats-in-hand do not name;
-    // and a charge that is not the whole of that seat's per-period loss. Only the THIRD is about
-    // this call site's narrower domain — `basis.seats` here is the declaration's announced
-    // subjects, a subset of the offer's candidate domain. On the other three the offer's own
-    // element refuses in exactly the same way, so both sides fold the period's seat keys and
-    // stating the magnitudes is correct.
+    // and a per-period loss no negation can state. Only the THIRD is about this call site's
+    // narrower domain — `basis.seats` here is the declaration's announced subjects, a subset of
+    // the offer's candidate domain. On the other three the offer's own element refuses in
+    // exactly the same way, so both sides fold the period's seat keys and stating the
+    // magnitudes is correct.
     //
     // So re-ask the SAME landed rule over the life map's OWN KEYS. That domain satisfies the
     // third conjunct by construction (the seat it tests is drawn from that very map), leaving the
@@ -3937,7 +4164,10 @@ fn selection_projection(
         WaitingFor::DigChoice {
             selectable_cards, ..
         } => selectable_cards.len(),
+        WaitingFor::DigRestSplitChoice { cards, .. } => cards.len(),
         WaitingFor::SeparatePilesPartition { eligible, .. } => eligible.len(),
+        WaitingFor::RippleBottomOrder { cards, .. }
+        | WaitingFor::RevealUntilBottomOrder { cards, .. } => cards.len(),
         _ => 0,
     };
     if candidate_count > MAX_INTERACTION_LIST_LEN {
@@ -4249,6 +4479,21 @@ fn selection_projection(
                 source_id: None,
             })
         }
+        // CR 702.60a + CR 608.2d: the controller submits a full permutation of
+        // the uncast revealed pile as its bottom-placement order.
+        WaitingFor::RippleBottomOrder {
+            cards, source_id, ..
+        }
+        | WaitingFor::RevealUntilBottomOrder {
+            cards, source_id, ..
+        } => Some(SelectionProjection {
+            object_ids: cards.clone(),
+            constraint: count_constraint(cards.len(), cards.len()),
+            confirm: ConfirmSemantics::Explicit,
+            intent: InteractionIntentCode::Choose,
+            action: SelectionAction::SelectCards,
+            source_id: Some(*source_id),
+        }),
         WaitingFor::ArrangePlanarDeckTopChoice {
             cards, keep_on_top, ..
         } => Some(SelectionProjection {
@@ -4276,6 +4521,21 @@ fn selection_projection(
                 source_id: *source_id,
             })
         }
+        // CR 401.2 + CR 401.4 + CR 608.2d: the whole remainder pile is offered
+        // and the player submits a full permutation of it — the leading
+        // `top_count` entries take the top, the rest take the bottom, each in
+        // the submitted order. Exact bounds of `cards.len()`, identical to the
+        // sibling `RippleBottomOrder` arrangement projection above; the client
+        // never computes a second list and never computes the split point
+        // (`top_count` is engine-supplied on the prompt).
+        WaitingFor::DigRestSplitChoice { cards, source_id, .. } => Some(SelectionProjection {
+            object_ids: cards.clone(),
+            constraint: count_constraint(cards.len(), cards.len()),
+            confirm: ConfirmSemantics::Explicit,
+            intent: InteractionIntentCode::Choose,
+            action: SelectionAction::SelectCards,
+            source_id: *source_id,
+        }),
         WaitingFor::SearchChoice {
             cards,
             count,
@@ -4487,9 +4747,11 @@ fn selection_projection(
         | WaitingFor::EquipTarget { .. }
         | WaitingFor::RedistributeLifeTotals { .. }
         | WaitingFor::CoinFlipKeepChoice { .. }
+        | WaitingFor::DieKeepChoice { .. }
         | WaitingFor::RevealChoice { .. }
         | WaitingFor::OutsideGameChoice { .. }
         | WaitingFor::BeholdChoice { .. }
+        | WaitingFor::EmpowerJaceChoice { .. }
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::LearnChoice { .. }
         | WaitingFor::ManifestDreadChoice { .. }
@@ -4504,7 +4766,13 @@ fn selection_projection(
         | WaitingFor::OptionalCostChoice { .. }
         | WaitingFor::SpliceOffer { .. }
         | WaitingFor::DefilerPayment { .. }
+        // CR 601.2f: the candidate generator emits exactly one action per
+        // distinct locked total cost the engine proved reachable, so the
+        // schema it projects IS complete for this prompt — two orders that
+        // lock the same cost are indistinguishable to the game.
+        | WaitingFor::OrderCostReductions { .. }
         | WaitingFor::CastOffer { .. }
+        | WaitingFor::RippleRevealChoice { .. }
         | WaitingFor::ModalFaceChoice { .. }
         | WaitingFor::AlternativeCastChoice { .. }
         | WaitingFor::MutateMergeChoice { .. }
@@ -5293,6 +5561,14 @@ fn push_produced_mana_surfaces(
     let Ok(option) = resolve(state, player, selection) else {
         return;
     };
+    // CR 106.1a + CR 106.1b: A deferred activation has no selected type yet. The
+    // post-cost mana-choice resolver remains the authority for its output.
+    if matches!(
+        selection.output,
+        ManaSourceOutput::DeferredColorChoice { .. }
+    ) {
+        return;
+    }
     for (index, unit) in mana_sources::live_mana_output_for_option(state, player, &option)
         .into_iter()
         .enumerate()
@@ -5499,6 +5775,14 @@ fn project_action_payload(
                 push_value_surface(surfaces, InteractionRoleCode::CoinFlipIndex, index);
             }
         }
+        // CR 706.6: the ignored roll indices. Reuses the flip-index role — the
+        // surface is a bare ordinal position in the presented list, and the
+        // prompt's own summary carries which rule is being answered.
+        GameAction::SelectDieRolls { ignore_indices } => {
+            for index in ignore_indices {
+                push_value_surface(surfaces, InteractionRoleCode::CoinFlipIndex, index);
+            }
+        }
         GameAction::ChooseOutsideGameCards { selections } => {
             for selection in selections {
                 match selection {
@@ -5538,6 +5822,16 @@ fn project_action_payload(
                 push_value_surface(surfaces, InteractionRoleCode::Target, "none");
             }
         }
+        GameAction::ChooseReplacementAndRemember { choice } => match choice {
+            crate::types::actions::ReplacementAutoChoice::Order { order } => {
+                for index in order {
+                    push_value_surface(surfaces, InteractionRoleCode::OptionIndex, index);
+                }
+            }
+            crate::types::actions::ReplacementAutoChoice::Optional { index } => {
+                push_value_surface(surfaces, InteractionRoleCode::OptionIndex, index)
+            }
+        },
         GameAction::ChooseReplacement { index }
         | GameAction::ChooseBranch { index }
         | GameAction::ChooseCastingVariant { index }
@@ -5547,6 +5841,19 @@ fn project_action_payload(
         GameAction::OrderTriggers { order } => {
             for index in order {
                 push_value_surface(surfaces, InteractionRoleCode::TriggerIndex, index);
+            }
+        }
+        // CR 601.2f: indices into the prompt's snapshotted reduction list.
+        // CR 601.2b: the announced nonhybrid equivalents ride the same action.
+        GameAction::OrderCostReductions {
+            order,
+            hybrid_announcement,
+        } => {
+            for index in order {
+                push_value_surface(surfaces, InteractionRoleCode::OptionIndex, index);
+            }
+            for shard in hybrid_announcement {
+                push_value_surface(surfaces, InteractionRoleCode::Option, shard.symbol());
             }
         }
         GameAction::Equip { target_id, .. } => {
@@ -5830,6 +6137,7 @@ fn project_action_payload(
         | GameAction::SetPriorityPassingMode { .. }
         | GameAction::SetPriorityYield { .. }
         | GameAction::SetMayTriggerAutoChoice { .. }
+        | GameAction::SetReplacementAutoChoice { .. }
         | GameAction::SetTriggerOrderTemplate { .. } => {}
         GameAction::AssignCombatDamage {
             assignments,
@@ -6123,6 +6431,15 @@ fn project_prompt_payload(
         ) => {
             if let Some(option) = options.get(*index) {
                 project_casting_variant(option.variant, state, surfaces);
+                push_value_surface(
+                    surfaces,
+                    InteractionRoleCode::Face,
+                    match option.face {
+                        crate::types::game_state::CastingVariantFace::Current => "Current",
+                        crate::types::game_state::CastingVariantFace::Left => "Left",
+                        crate::types::game_state::CastingVariantFace::Right => "Right",
+                    },
+                );
                 surfaces.push(InteractionPresentationSurface::Mana {
                     role: InteractionRoleCode::CastingCost,
                     index: None,
@@ -6196,12 +6513,20 @@ fn action_code(action: &GameAction) -> InteractionActionCode {
             InteractionActionCode::ChooseRemoveCounterCostDistribution
         }
         GameAction::SelectCoinFlips { .. } => InteractionActionCode::SelectCoinFlips,
+        GameAction::SelectDieRolls { .. } => InteractionActionCode::SelectDieRolls,
         GameAction::ChooseOutsideGameCards { .. } => InteractionActionCode::ChooseOutsideGameCards,
         GameAction::SelectTargets { .. } => InteractionActionCode::SelectTargets,
         GameAction::ChooseTarget { .. } => InteractionActionCode::ChooseTarget,
         GameAction::ChooseReplacement { .. } => InteractionActionCode::ChooseReplacement,
+        GameAction::ChooseReplacementAndRemember { .. } => {
+            InteractionActionCode::ChooseReplacementAndRemember
+        }
+        GameAction::SetReplacementAutoChoice { .. } => {
+            InteractionActionCode::SetReplacementAutoChoice
+        }
         GameAction::ChooseEntryController { .. } => InteractionActionCode::ChooseEntryController,
         GameAction::OrderTriggers { .. } => InteractionActionCode::OrderTriggers,
+        GameAction::OrderCostReductions { .. } => InteractionActionCode::OrderCostReductions,
         GameAction::CancelCast => InteractionActionCode::CancelCast,
         GameAction::Equip { .. } => InteractionActionCode::Equip,
         GameAction::CrewVehicle { .. } => InteractionActionCode::CrewVehicle,
@@ -6746,11 +7071,14 @@ fn trigger_order_choices(
 
 fn coin_flip_choices(
     interaction_id: &InteractionId,
-    projection: CoinFlipProjection,
+    projection: &CoinFlipProjection,
 ) -> Vec<InteractionChoice> {
-    (0..projection.candidate_count)
+    let tag = projection.tag();
+    projection
+        .selectable()
+        .into_iter()
         .map(|index| InteractionChoice {
-            id: interaction_choice_id(interaction_id, 'f', index),
+            id: interaction_choice_id(interaction_id, tag, index),
             surfaces: vec![
                 InteractionPresentationSurface::Summary {
                     code: InteractionSummaryCode::Candidate,
@@ -7580,31 +7908,32 @@ fn opportunity_for_slot(
                 Ok(None) => unreachable!("coin-flip model requires coin-flip projection"),
                 Err(_) => return payload_too_large_opportunity(&slot.interaction_id),
             };
-            let keep_count = projection.keep_count as u32;
+            let pick_count = projection.pick_count as u32;
+            let selectable_count = projection.selectable().len();
             (
                 InteractionOpportunity {
                     interaction_id: slot.interaction_id.clone(),
                     response: InteractionOpportunityResponse::Schema {
                         spec: InteractionResponseSpec::Sequence {
-                            min: keep_count,
-                            max: keep_count,
+                            min: pick_count,
+                            max: pick_count,
                             unique: true,
-                            include_all: projection.keep_count == projection.candidate_count,
+                            include_all: projection.pick_count == selectable_count,
                             engine_validated: false,
                             escape: None,
                             confirm: ConfirmSemantics::Explicit,
                         },
-                        candidates: coin_flip_choices(&slot.interaction_id, projection),
+                        candidates: coin_flip_choices(&slot.interaction_id, &projection),
                     },
                     surfaces: vec![InteractionPresentationSurface::Summary {
                         code: InteractionSummaryCode::Decision,
                     }],
                     progress: InteractionProgress {
                         selected: 0,
-                        minimum: keep_count,
-                        maximum: Some(keep_count),
+                        minimum: pick_count,
+                        maximum: Some(pick_count),
                         aggregate: None,
-                        confirmable: keep_count == 0,
+                        confirmable: pick_count == 0,
                     },
                 },
                 InteractionAvailability::InputRequired,
@@ -9467,39 +9796,81 @@ fn materialize_trigger_order_response(
     ))
 }
 
-fn materialize_coin_flip_response(
+/// Resolve submitted choice-ids back to candidate indices, shared by the CR
+/// 705.1 keep and CR 706.6 ignore materializers.
+///
+/// Ids are matched only against `projection.selectable()`, so a die-roll
+/// submission naming a roll that is not tied for the lowest yields
+/// `UnknownChoice` rather than being silently accepted, and the per-rule tag
+/// makes a coin-flip id unusable on a die prompt.
+fn resolve_pick_indices(
     interaction_id: &InteractionId,
-    projection: CoinFlipProjection,
+    projection: &CoinFlipProjection,
     response: &InteractionResponse,
-) -> Result<(GameAction, InteractionProgress), InteractionReasonCode> {
+) -> Result<Vec<usize>, InteractionReasonCode> {
     let InteractionResponse::Sequence { choice_ids } = response else {
         return Err(InteractionReasonCode::MalformedResponse);
     };
-    if choice_ids.len() != projection.keep_count {
+    if choice_ids.len() != projection.pick_count {
         return Err(InteractionReasonCode::ConstraintUnsatisfied);
     }
+    let selectable = projection.selectable();
+    let tag = projection.tag();
     let mut seen = HashSet::with_capacity(choice_ids.len());
-    let keep_indices = choice_ids
+    choice_ids
         .iter()
         .map(|choice_id| {
-            let index = (0..projection.candidate_count)
-                .find(|index| interaction_choice_id(interaction_id, 'f', *index) == *choice_id)
+            let index = selectable
+                .iter()
+                .copied()
+                .find(|index| interaction_choice_id(interaction_id, tag, *index) == *choice_id)
                 .ok_or(InteractionReasonCode::UnknownChoice)?;
             if !seen.insert(index) {
                 return Err(InteractionReasonCode::ConstraintUnsatisfied);
             }
             Ok(index)
         })
-        .collect::<Result<_, _>>()?;
+        .collect()
+}
+
+fn pick_progress(projection: &CoinFlipProjection) -> InteractionProgress {
+    InteractionProgress {
+        selected: projection.pick_count as u32,
+        minimum: projection.pick_count as u32,
+        maximum: Some(projection.pick_count as u32),
+        aggregate: None,
+        confirmable: true,
+    }
+}
+
+fn materialize_coin_flip_response(
+    interaction_id: &InteractionId,
+    projection: &CoinFlipProjection,
+    response: &InteractionResponse,
+) -> Result<(GameAction, InteractionProgress), InteractionReasonCode> {
+    let keep_indices = resolve_pick_indices(interaction_id, projection, response)?;
     Ok((
         GameAction::SelectCoinFlips { keep_indices },
-        InteractionProgress {
-            selected: projection.keep_count as u32,
-            minimum: projection.keep_count as u32,
-            maximum: Some(projection.keep_count as u32),
-            aggregate: None,
-            confirmable: true,
-        },
+        pick_progress(projection),
+    ))
+}
+
+/// CR 706.6: materialize a die-roll ignore choice.
+///
+/// Structurally identical to the CR 705.1 keep response, but produces a
+/// different `GameAction`: `SelectCoinFlips` names the flips KEPT while
+/// `SelectDieRolls` names the rolls IGNORED. Same presentation shape, opposite
+/// meaning — which is why the dispatch below keys on the `WaitingFor` variant
+/// rather than on the shared `HumanResponseModel`.
+fn materialize_die_roll_response(
+    interaction_id: &InteractionId,
+    projection: &CoinFlipProjection,
+    response: &InteractionResponse,
+) -> Result<(GameAction, InteractionProgress), InteractionReasonCode> {
+    let ignore_indices = resolve_pick_indices(interaction_id, projection, response)?;
+    Ok((
+        GameAction::SelectDieRolls { ignore_indices },
+        pick_progress(projection),
     ))
 }
 
@@ -10712,7 +11083,15 @@ fn materialize_response(
         HumanResponseModel::CoinFlipSequence => {
             let projection = coin_flip_projection(&filtered_state.waiting_for)?
                 .ok_or(InteractionReasonCode::UnsupportedResponse)?;
-            return materialize_coin_flip_response(interaction_id, projection, response);
+            // Dispatch on the STATE, not the model: `CoinFlipSequence` names a
+            // presentation shape shared by two rules (CR 705.1 keep / CR 706.6
+            // ignore), and each produces a DIFFERENT `GameAction`.
+            return match &filtered_state.waiting_for {
+                WaitingFor::DieKeepChoice { .. } => {
+                    materialize_die_roll_response(interaction_id, &projection, response)
+                }
+                _ => materialize_coin_flip_response(interaction_id, &projection, response),
+            };
         }
         HumanResponseModel::TargetSequence => {
             let projection = target_sequence_projection(&filtered_state.waiting_for)?
@@ -10792,13 +11171,17 @@ fn materialize_response(
             if *proposer != semantic_owner {
                 return Err(InteractionReasonCode::InvalidAuthorityState);
             }
+            // CR 732.2a: a pin naming nothing over the offer's one announced-target point is
+            // completed with the offer's own canonical split BEFORE legality, so the preview and
+            // the submit paths — which share this chokepoint — answer one question.
+            let completed = completed_shortcut_declaration(interaction_id, &projection, response);
             return materialize_loop_shortcut_response(
                 interaction_id,
                 &projection,
                 *proposer,
                 schema,
                 authoritative_state,
-                response,
+                completed.as_ref().unwrap_or(response),
             );
         }
         HumanResponseModel::AmountAssignments => {
@@ -11107,6 +11490,66 @@ mod tests {
             .expect("choose-objects is a target sequence");
         assert_eq!((projection.min, projection.max), (1, 3));
         assert!(projection.unique);
+    }
+
+    /// MED-2 (phase-rs/phase#8355 round-8 review, second pass): CR 115.7a +
+    /// INVARIANT SC — admission for a `Single` retarget submission is
+    /// `slot_pools[0]` (`engine::apply_retarget`'s `pool_for(0)`), not the flat
+    /// union. This projection fed the union to every consumer regardless,
+    /// which could offer a candidate the reducer then rejects — measured on a
+    /// prompt whose union has 3 entries but `slot_pools[0]` has 1.
+    #[test]
+    fn retarget_choice_single_scope_projection_uses_the_slot_pool_not_the_union() {
+        let object_a = TargetRef::Object(ObjectId(1));
+        let object_b = TargetRef::Object(ObjectId(2));
+        let object_c = TargetRef::Object(ObjectId(3));
+        let waiting = WaitingFor::RetargetChoice {
+            player: PlayerId(0),
+            stack_entry_index: 0,
+            scope: crate::types::game_state::RetargetScope::Single,
+            current_targets: vec![object_a.clone()],
+            slots: vec![crate::types::game_state::RetargetSlotAddress {
+                path: vec![],
+                slot: 0,
+            }],
+            slot_pools: vec![vec![object_b.clone()]],
+            legal_new_targets: vec![object_a, object_b.clone(), object_c],
+        };
+        let projection = target_sequence_projection(&waiting)
+            .expect("projection must succeed")
+            .expect("RetargetChoice is a target sequence");
+        assert_eq!(
+            projection.candidates,
+            vec![object_b],
+            "CR 115.7a: a Single-scope projection must offer the addressed \
+             position's own pool, not the 3-entry flat union"
+        );
+    }
+
+    /// Paired positive control: an outer-empty `slot_pools` (a compat payload
+    /// predating the field, INVARIANT SC) falls back to the union — the fix
+    /// above must not turn this row's absence into a silent "offer nothing."
+    #[test]
+    fn retarget_choice_single_scope_projection_falls_back_to_the_union_when_slot_pools_is_empty() {
+        let object_a = TargetRef::Object(ObjectId(1));
+        let object_b = TargetRef::Object(ObjectId(2));
+        let waiting = WaitingFor::RetargetChoice {
+            player: PlayerId(0),
+            stack_entry_index: 0,
+            scope: crate::types::game_state::RetargetScope::Single,
+            current_targets: vec![object_a.clone()],
+            slots: vec![],
+            slot_pools: vec![],
+            legal_new_targets: vec![object_a, object_b],
+        };
+        let projection = target_sequence_projection(&waiting)
+            .expect("projection must succeed")
+            .expect("RetargetChoice is a target sequence");
+        assert_eq!(
+            projection.candidates.len(),
+            2,
+            "an outer-empty slot_pools must fall back to the union"
+        );
     }
 
     /// F4 — the preview is budgeted like every other outbound list on the shortcut spec, at

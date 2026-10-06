@@ -16,6 +16,22 @@ function renderMenu(onSelect = vi.fn()) {
 }
 
 describe("MenuSelect", () => {
+  it("skips disabled options for selection and keyboard navigation", () => {
+    const onSelect = vi.fn();
+    render(<MenuSelect label="Server" selectedValue="offline" items={[
+      { value: "offline", label: "Offline", disabled: true },
+      { value: "one", label: "One" },
+      { value: "two", label: "Two" },
+    ]} onSelect={onSelect} />);
+    fireEvent.click(screen.getByRole("button", { name: "Server" }));
+    expect(screen.getByRole("option", { name: "One" })).toHaveFocus();
+    fireEvent.click(screen.getByRole("option", { name: "Offline" }));
+    expect(onSelect).not.toHaveBeenCalled();
+    fireEvent.keyDown(window, { key: "ArrowUp" });
+    expect(screen.getByRole("option", { name: "Two" })).toHaveFocus();
+    fireEvent.click(screen.getByRole("option", { name: "Two" }));
+    expect(onSelect).toHaveBeenCalledWith("two");
+  });
   it("renders a closed trigger with no menu", () => {
     renderMenu();
     expect(screen.getByRole("button", { name: "Load deck..." })).toHaveAttribute(

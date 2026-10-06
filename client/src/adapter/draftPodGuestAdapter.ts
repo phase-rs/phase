@@ -10,14 +10,19 @@
  * participates in an 8-seat draft pod instead of a game.
  */
 
-import type { DraftPlayerView, SeatPublicView } from "./draft-adapter";
+import type { DraftPlayerView, SeatPublicView, SharedStackPileDecision } from "./draft-adapter";
 import {
   P2PDraftGuest,
   type DraftGuestConnection,
   type DraftGuestEvent,
   type DraftGuestRecoveryFailure,
 } from "./p2p-draft-guest";
-import type { DraftMatchLaunch, DraftMatchSettlement, DraftPauseReason } from "../network/draftProtocol";
+import type {
+  DraftCommanderLaunch,
+  DraftMatchLaunch,
+  DraftMatchSettlement,
+  DraftPauseReason,
+} from "../network/draftProtocol";
 import type { DraftIntergameCommand, DraftIntergameCommandAck } from "../services/intergameCommandLedger";
 import { joinRoom, type JoinResult } from "../network/connection";
 import type { DraftWorkspaceState } from "../components/draft/workspace/types";
@@ -44,6 +49,7 @@ export type DraftPodGuestEvent =
   | { type: "viewUpdated"; view: DraftPlayerView }
   | { type: "pickAcknowledged"; view: DraftPlayerView }
   | { type: "deckSubmissionAcknowledged"; submissionId: string; view: DraftPlayerView }
+  | { type: "recoveredDeckSubmissionAccepted"; mainDeck: string[]; commanders: string[]; view: DraftPlayerView }
   | { type: "lobbyUpdate"; seats: SeatPublicView[]; joined: number; total: number }
   | { type: "draftPaused"; reason: DraftPauseReason }
   | { type: "draftResumed" }
@@ -59,6 +65,7 @@ export type DraftPodGuestEvent =
   | { type: "matchSettlementAcknowledged"; matchId: string; receiptId: string; revision: number }
   | { type: "timerSync"; remainingMs: number }
   | { type: "matchStart"; launch: DraftMatchLaunch }
+  | { type: "commanderLaunch"; launch: DraftCommanderLaunch }
   | { type: "bo3SideboardPrompt"; matchId: string; gameNumber: number; score: { p0_wins: number; p1_wins: number; draws: number }; loserSeat: number | null; timerMs: number }
   | { type: "bo3ChoosePlayDraw"; matchId: string; gameNumber: number; score: { p0_wins: number; p1_wins: number; draws: number }; timerMs: number }
   | { type: "bo3GameStart"; matchId: string; gameNumber: number; firstPlayerSeat: number }
@@ -283,6 +290,14 @@ export class DraftPodGuestAdapter {
           view: event.view,
         });
         break;
+      case "recoveredDeckSubmissionAccepted":
+        this.emit({
+          type: "recoveredDeckSubmissionAccepted",
+          mainDeck: event.mainDeck,
+          commanders: event.commanders,
+          view: event.view,
+        });
+        break;
       case "lobbyUpdate":
         this.emit({
           type: "lobbyUpdate",
@@ -331,6 +346,12 @@ export class DraftPodGuestAdapter {
           type: "matchStart",
           launch: event.launch,
         });
+        break;
+      // A PURE re-emit, deliberately unlike `matchStart` above: a Commander
+      // launch does not change pod phase. The pod stays `complete`, which is
+      // the view the guest's join affordance is rendered from.
+      case "commanderLaunch":
+        this.emit({ type: "commanderLaunch", launch: event.launch });
         break;
       case "kicked":
         this.setStatus("kicked");
@@ -433,6 +454,19 @@ export class DraftPodGuestAdapter {
     await this.guest.submitPickWithDraftEffect(effectCardInstanceId, cardInstanceIds);
   }
 
+  /**
+   * One whole shared-stack turn decision for this pod's local seat. Like
+   * `submitPick`, it returns nothing: the host answers out of band with
+   * `draft_pick_ack`, which the store awaits as `pickAcknowledged`.
+   */
+  async submitSharedStackDecision(
+    pile: number,
+    decision: SharedStackPileDecision,
+  ): Promise<void> {
+    if (!this.guest) throw new Error("Guest not initialized");
+    await this.guest.submitSharedStackDecision(pile, decision);
+  }
+
   async submitDeck(mainDeck: string[], commanders: string[]): Promise<void> {
     if (!this.guest) throw new Error("Guest not initialized");
     await this.guest.submitDeck(mainDeck, commanders);
@@ -441,6 +475,11 @@ export class DraftPodGuestAdapter {
   async updateWorkspace(state: DraftWorkspaceState): Promise<void> {
     if (!this.guest) throw new Error("Guest not initialized");
     await this.guest.updateWorkspace(state);
+  }
+
+  async suggestLands(): Promise<Record<string, number>> {
+    if (!this.guest) throw new Error("Guest not initialized");
+    return this.guest.suggestLands();
   }
 
   sendMatchSettlement(settlement: DraftMatchSettlement): void {

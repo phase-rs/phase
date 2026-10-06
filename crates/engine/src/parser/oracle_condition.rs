@@ -10,7 +10,7 @@ use nom::Parser;
 
 use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::primitives as nom_primitives;
-use super::oracle_target::parse_type_phrase;
+use super::oracle_target::parse_type_phrase_folding;
 use crate::types::ability::{
     Comparator, FilterProp, ParsedCondition, QuantityExpr, QuantityRef, StaticCondition,
     TargetFilter, TypedFilter,
@@ -424,12 +424,22 @@ fn static_condition_to_restriction_condition(
         | StaticCondition::TopOfLibraryMatches { .. }
         | StaticCondition::SourceIsPaired
         | StaticCondition::AdditionalCostPaid
-        // CR 508.6: "a player attacked you during their last turn" is a real
-        // game-state predicate (Avenge's cost reduction), but it is not a
-        // cast/activation restriction and has no `ParsedCondition` counterpart —
-        // it is evaluated via `layers::evaluate_condition` on the self-spell cost
-        // path, so lowering here returns `None`.
-        | StaticCondition::AnyPlayerAttackedYouLastTurn
+        // CR 508.6 + CR 601.2: a real game-state predicate on both scopes, but
+        // neither is a cast/activation restriction, and `None` is right for
+        // DIFFERENT reasons.
+        //
+        // Default (`AnyPlayer`) scope: it is evaluated via
+        // `layers::evaluate_condition` on the self-spell cost path, not at a
+        // cast/activation gate; there is no `ParsedCondition` counterpart.
+        //
+        // Anchored (`AttackedPlayer`) scope: a cast/activation gate is evaluated
+        // OUTSIDE combat declaration entirely — no `declared_attack` is bound and
+        // the caster need not be an attacking creature — so the anchor can never
+        // resolve at this boundary. Approximating it with the existential form
+        // would be a PERMISSIVE lie (it would pass whenever ANY player attacked
+        // you), the same failure mode this match rejects for
+        // `TopOfLibraryMatches` above.
+        | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
         | StaticCondition::CastingAsVariant { .. } => None,
     }
 }
@@ -748,10 +758,10 @@ fn parse_color_word(text: &str) -> Option<ManaColor> {
 
 /// CR 601.3d + CR 608.2c: Parse `"it targets a <type_phrase>"` (or `"it targets <type_phrase>"`)
 /// into a `ParsedCondition::SpellTargetsFilter` whose filter is derived from
-/// `parse_type_phrase`. The pronoun `it` refers to the spell being cast — this
+/// `parse_type_phrase_folding`. The pronoun `it` refers to the spell being cast — this
 /// condition gates target-dependent casting permissions ("you may cast this spell
 /// as though it had flash if it targets a commander" — Timely Ward). The trailing
-/// remainder returned by `parse_type_phrase` must be empty for the parse to
+/// remainder returned by `parse_type_phrase_folding` must be empty for the parse to
 /// succeed; otherwise we'd silently truncate qualifying clauses that the filter
 /// layer hasn't absorbed.
 pub(crate) fn parse_spell_targets_filter(text: &str) -> Option<ParsedCondition> {
@@ -764,7 +774,7 @@ pub(crate) fn parse_spell_targets_filter(text: &str) -> Option<ParsedCondition> 
     .ok()?
     .0;
     // CR 903.3: Bare "commander" / "commanders" without a possessive or
-    // controller suffix is not lifted by `parse_type_phrase` (which expects
+    // controller suffix is not lifted by `parse_type_phrase_folding` (which expects
     // type words) or by the possessive arms of `parse_target` (which require
     // "your" / "their" / a trailing controller-suffix). Recognize it here
     // explicitly so "it targets a commander" maps to the `IsCommander`
@@ -783,7 +793,7 @@ pub(crate) fn parse_spell_targets_filter(text: &str) -> Option<ParsedCondition> 
         }
     }
     // CR 115.1: "it targets a permanent or player" — proliferate-style pool
-    // (Shiko and Narset, Unified Flurry gate). Matched before `parse_type_phrase`
+    // (Shiko and Narset, Unified Flurry gate). Matched before `parse_type_phrase_folding`
     // so the "or player" half is not dropped.
     if rest.trim() == "permanent or player" {
         return Some(ParsedCondition::SpellTargetsFilter {
@@ -803,11 +813,11 @@ pub(crate) fn parse_spell_targets_filter(text: &str) -> Option<ParsedCondition> 
     )))
     .parse(rest)
     .ok()?;
-    let (filter, remainder) = parse_type_phrase(rest);
+    let (filter, remainder) = parse_type_phrase_folding(rest);
     if !remainder.trim().is_empty() {
         return None;
     }
-    // `parse_type_phrase` falls back to `TargetFilter::Any` when no type word
+    // `parse_type_phrase_folding` falls back to `TargetFilter::Any` when no type word
     // matched. A bare "it targets a frob" must not silently widen the gate to
     // "any target"; refuse the parse instead so the casting permission is not
     // emitted (strictly safe — the spell stays sorcery-speed until the

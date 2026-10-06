@@ -3,14 +3,15 @@ use serde::Serialize;
 use crate::parser::oracle_nom::enters_under::ControlClausePossessor;
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, BounceSelection,
-    CastingPermission, ChosenCounterCountCondition, ControlWindow, ControllerRef,
-    CopyRetargetPermission, CounterAdjustment, CounterKindChooser, CounterKindDomain,
-    CounterSourceRider, DigRestOrder, DoorLockOp, Duration, Effect, EffectScope, FaceDownProfile,
-    ForceBlockAttackerRef, LibraryPosition, ManaProduction, ManaSpendRestriction, ManaTargetRole,
-    ModalSelectionConstraint, OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr,
-    SearchDestinationSplit, SearchSelectionConstraint, SpellStackToGraveyardReplacement,
-    StaticCondition, StaticDefinition, SubAbilityLink, TargetFilter, ThisWayCause,
+    AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, AttachSelection,
+    BounceSelection, CastingPermission, ChosenCounterCountCondition, ContinuousModification,
+    ControlWindow, ControllerRef, CopyRetargetPermission, CounterAdjustment, CounterKindChooser,
+    CounterKindDomain, CounterSourceRider, DigRestOrder, DoorLockOp, Duration, Effect, EffectScope,
+    FaceDownProfile, ForceBlockAttackerRef, GuardReading, LibraryInstructionActor, LibraryPosition,
+    ManaProduction, ManaSpendRestriction, ManaTargetRole, ModalSelectionConstraint,
+    OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit,
+    SearchSelectionConstraint, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
+    SubAbilityLink, TargetFilter, ThisWayCause, UnloweredGuard,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -49,7 +50,7 @@ pub(crate) struct ParsedEffectClause {
     /// Set when `parse_clause_ast` detects a leading conditional and the condition
     /// text is parseable by the nom condition combinator pipeline.
     pub(crate) condition: Option<AbilityCondition>,
-    /// CR 608.2c + CR 117.3a: Set when the parsed subject phrase carried a "may"
+    /// CR 608.2c + CR 608.2d: Set when the parsed subject phrase carried a "may"
     /// modal (e.g., "its controller may search their library"). Lowered into
     /// `AbilityDefinition.optional` so the resolver prompts the acting player.
     pub(crate) optional: bool,
@@ -59,6 +60,11 @@ pub(crate) struct ParsedEffectClause {
     /// resolution-time runtime owns the payment choice via the unified
     /// `unless_pay` pipeline (rather than a per-effect bespoke path).
     pub(crate) unless_pay: Option<crate::types::ability::UnlessPayModifier>,
+    /// CR 608.2c + CR 614.1a: set when this clause's leading guard did not lower and its
+    /// body is an ownership candidate. Copied onto the assembled `AbilityDefinition` and
+    /// resolved after line routing; see [`crate::types::ability::UnloweredGuard`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unlowered_guard: Option<UnloweredGuard>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -174,10 +180,30 @@ pub(crate) enum ClauseAst {
         predicate: Box<PredicateAst>,
     },
     Conditional {
-        /// CR 608.2c: Parsed leading "if" guard, when recognized by the condition pipeline.
-        condition: Option<AbilityCondition>,
+        /// CR 608.2c: the leading "if" guard's lowering outcome.
+        guard: ConditionalGuard,
+        /// The byte-unchanged "if <guard>, <body>" clause the gap is recorded over.
+        clause_text: String,
         clause: Box<ClauseAst>,
     },
+}
+
+/// CR 608.2c: the outcome of lowering a clause's leading `"if <guard>,"` gate.
+///
+/// Replaces an `Option<AbilityCondition>` whose `None` conflated "no guard" (impossible
+/// in this variant — it exists only because the splitter fired) with "the condition
+/// authority refused the guard". Making the second representable is what lets
+/// `lower_clause_ast` stop emitting an unguarded body.
+///
+/// `Lowered` boxes its payload, as `AbilityCondition::ConditionInstead` does for the same
+/// type. Unboxed, `AbilityCondition` is ~200 bytes and `ClauseAst::Conditional` — which
+/// also gained `clause_text: String` — crossed clippy's `large_enum_variant` threshold
+/// (232-byte largest vs 24-byte second largest, limit 200), making `ClauseAst` 232 bytes
+/// at every node of a recursive tree whose other variants hold only pointers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) enum ConditionalGuard {
+    Lowered(Box<AbilityCondition>),
+    Unlowered(GuardReading),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -238,8 +264,8 @@ pub(crate) enum PredicateAst {
     },
 }
 
-/// CR 110.2a: the resolved battlefield-entry
-/// controller for a zone change, as the IR carries it.
+/// CR 110.2a: the resolved battlefield-entry controller for a zone change,
+/// as the IR carries it.
 ///
 /// Three states, not two: `Default` (no explicit controller override in the
 /// IR; lowering carries it as `None` to the existing resolver), `Override` (a
@@ -280,15 +306,40 @@ impl EntersUnderSpec {
     }
 }
 
+/// Grammatical number of an anaphoric pronoun that refers back to earlier
+/// instructions ("it" vs "they" / "those").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) enum AnaphorNumber {
+    /// "It" — the nearest antecedent instruction.
+    Singular,
+    /// "They" / "those" — every instruction of the preceding run.
+    Plural,
+}
+
+/// CR 608.2c: how a clause following a hand reveal refers to the card chosen
+/// from the revealed hand. The binding decides which chain-builder rules apply
+/// to the consumer (who it addresses, and how its object is re-bound).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) enum RevealChoiceBinding {
+    /// CR 608.2c: "choose a <type> card from it / from among them" — the consumer
+    /// names the choice itself over the revealed hand ("it") and is absorbed into
+    /// it (Kitesail Freebooter, Deep-Cavern Bat).
+    FromIt,
+    /// CR 608.2c: "<verb> a <type> card [they] revealed this way" — the consumer
+    /// acts on a card chosen from what the reveal showed, so its object is the
+    /// chosen card (Valki, God of Lies).
+    RevealedThisWay,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum ContinuationAst {
     SearchDestination {
         destination: Zone,
         /// CR 701.23a: When true, the searched card enters the battlefield tapped.
         enter_tapped: bool,
-        /// CR 110.2a: the battlefield-entry
-        /// controller for the searched card. `Default` lowers through the
-        /// existing no-override carrier; `UnboundAnaphor` fails closed.
+        /// CR 110.2a: the battlefield-entry controller for the searched
+        /// card. `Default` lowers through the existing no-override
+        /// carrier; `UnboundAnaphor` fails closed.
         enters_under: EntersUnderSpec,
         /// CR 701.23a: When true, the searched card is revealed before it moves.
         reveal: bool,
@@ -299,6 +350,9 @@ pub(crate) enum ContinuationAst {
     RevealHandFilter {
         card_filter: Option<TargetFilter>,
         choice_optional: bool,
+        /// CR 608.2c: how the consuming clause refers to the card chosen from
+        /// the revealed hand.
+        binding: RevealChoiceBinding,
     },
     ManaRestriction {
         restrictions: Vec<ManaSpendRestriction>,
@@ -342,8 +396,10 @@ pub(crate) enum ContinuationAst {
     /// rather than lowering to `Effect::Unimplemented`.
     SelfCostKeywordCostClarification,
     /// CR 701.19c: "It can't be regenerated" / "They can't be regenerated" — sets
-    /// `cant_regenerate: true` on the preceding Destroy/DestroyAll effect.
-    CantRegenerate,
+    /// `cant_regenerate: true` on the preceding Destroy/DestroyAll effect(s).
+    /// `scope` says whether the pronoun names the nearest Destroy or every
+    /// Destroy of the preceding run (CR 608.2c).
+    CantRegenerate { scope: AnaphorNumber },
     /// CR 116.2c + CR 608.2c: "You may pay {W} to end this effect." — later text
     /// modifying the continuous effect an EARLIER clause of the same chain
     /// created (CR 608.2c: "later text may modify earlier text"). Stamps
@@ -371,6 +427,10 @@ pub(crate) enum ContinuationAst {
     /// library-to-hand search continuation are already represented by the intrinsic
     /// SearchDestination + reveal flag and should be absorbed.
     SearchResultClauseHandled,
+    /// "Exile it face down" after a SearchLibrary. The preceding search
+    /// definition carries a typed delivery intent rather than a battlefield
+    /// face-down profile marker.
+    ExileSearchResultFaceDown,
     /// "reveal it" immediately after a SearchLibrary whose destination is handled
     /// by a later conditional branch. Patches SearchLibrary.reveal without adding
     /// a default ChangeZone.
@@ -429,6 +489,23 @@ pub(crate) enum ContinuationAst {
         /// "put two of them into your hand and the rest on the bottom of your library".
         /// When None, a subsequent PutRest continuation handles rest_destination.
         rest_destination: Option<Zone>,
+        /// CR 401.2 + CR 701.20e + CR 608.2c: Set when the same clause names
+        /// BOTH library positions for the remainder instead of one destination
+        /// for all of it — "put one of those cards into your hand, one on top
+        /// of your library, and one on the bottom of your library" (Telling
+        /// Time). Carries how many of the remainder go on TOP; CR 401.2 leaves
+        /// the bottom as the only other position a library instruction can
+        /// name, so the bottom count is implied rather than stored twice.
+        /// Always accompanied by `rest_destination: Some(Zone::Library)`.
+        /// `None` for every uniform-remainder form, including the plain
+        /// "... and the rest on the bottom of your library".
+        ///
+        /// Boxed only to keep `clippy::large_enum_variant` satisfied:
+        /// `DigFromAmong` is already this enum's largest variant, and an
+        /// inline `QuantityExpr` here pushes it past the lint's ratio against
+        /// the second-largest variant.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rest_split_top_count: Option<Box<QuantityExpr>>,
         /// CR 400.5 + CR 608.2c: Only exact "in a random order" text sets
         /// `Random`; every other accepted form preserves existing behavior.
         #[serde(default)]
@@ -508,6 +585,11 @@ pub(crate) enum ContinuationAst {
         /// "put that card …" form (`KeepEach`).
         any_number: bool,
         rest_destination: Option<Zone>,
+        /// CR 400.5 + CR 608.2c + CR 701.20a: Rest-pile ordering. Defaults to
+        /// `Random` for library rest piles under CR 701.20a, or `PlayerChoice`
+        /// when "in any order" is specified.
+        #[serde(default)]
+        rest_order: crate::types::ability::DigRestOrder,
         /// CR 110.2a: "under your control" on the kept-card clause.
         enters_under: Option<ControllerRef>,
         /// CR 701.20a + CR 608.2c: `Some(decline_zone)` when the kept clause is
@@ -524,7 +606,14 @@ pub(crate) enum ContinuationAst {
     /// `rest_destination`. Used by cards like Balustrade Spy, Consuming Aberration,
     /// and Destroy the Evidence where "those cards" refers to all cards revealed
     /// during the RevealUntil resolution, not only the non-matching ones.
-    RevealUntilAllToZone { destination: Zone },
+    RevealUntilAllToZone {
+        destination: Zone,
+        #[serde(
+            default,
+            skip_serializing_if = "crate::types::ability::DigRestOrder::is_preserve"
+        )]
+        rest_order: crate::types::ability::DigRestOrder,
+    },
     /// CR 202.3 + CR 608.2c: "If its mana value is <comparator> <dynamic
     /// quantity>, put it onto <zone>[. Otherwise, put it into <zone>]." after
     /// RevealUntil — a card-property branch on the hit card's own mana value
@@ -901,10 +990,19 @@ pub(crate) enum ImperativeFamilyAst {
         counter_kind: PlayerCounterKind,
         count: QuantityExpr,
     },
-    /// CR 701.41a: Support N — put a +1/+1 counter on each of up to N target creatures.
-    /// `is_other` is true on permanents (targets "other" creatures), false on spells.
+    /// CR 701.41a: Support N — put a +1/+1 counter on each of up to N target
+    /// creatures. `count` is a `QuantityExpr` because the printed N is not
+    /// always a literal: Blitzball Stadium and The Crowd Goes Wild print
+    /// `support X`, whose value is the X announced for the spell that produced
+    /// the source (CR 107.3a).
+    ///
+    /// `is_other` follows CR 701.41a's own axis: true on a PERMANENT source,
+    /// false on an instant or sorcery spell. It excludes exactly one object —
+    /// the source — so it is load-bearing only when the source can itself be a
+    /// legal "target creature", and inert (but harmless, and correct under
+    /// animation) on a permanent that currently is not one.
     Support {
-        count: u32,
+        count: QuantityExpr,
         is_other: bool,
     },
 }
@@ -1162,12 +1260,12 @@ pub(crate) enum TargetedImperativeAst {
         origin: Option<Zone>,
         /// CR 712.2: "return ... transformed" (DFC entering with back face up)
         enter_transformed: bool,
-        /// CR 110.2a: the battlefield-entry
-        /// controller. `Override(r)` routes the object to the player resolved
-        /// from `r`; `Default` lowers through the existing no-override carrier;
-        /// `UnboundAnaphor` marks a printed control clause whose antecedent
-        /// could not be named, and the lowering site turns it into an honest
-        /// `Effect::unimplemented` rather than a silently-wrong controller.
+        /// CR 110.2a: the battlefield-entry controller. `Override(r)` routes
+        /// the object to the player resolved from `r`; `Default` lowers through
+        /// the existing no-override carrier; `UnboundAnaphor` marks a printed
+        /// control clause whose antecedent could not be named, and the lowering
+        /// site turns it into an honest `Effect::unimplemented` rather than a
+        /// silently-wrong controller.
         enters_under: EntersUnderSpec,
         /// CR 614.1: "tapped" — enters tapped.
         enter_tapped: bool,
@@ -1215,9 +1313,9 @@ pub(crate) enum TargetedImperativeAst {
         target: TargetFilter,
         origin: Option<Zone>,
         destination: Zone,
-        /// CR 110.2a: the battlefield-entry
-        /// controller for mass returns. `Default` preserves default controller
-        /// assignment; `UnboundAnaphor` fails closed at the lowering site.
+        /// CR 110.2a: the battlefield-entry controller for mass returns.
+        /// `Default` preserves default controller assignment; `UnboundAnaphor`
+        /// fails closed at the lowering site.
         enters_under: EntersUnderSpec,
         enter_tapped: bool,
         /// CR 122.1 + CR 122.1h: Counters placed on each returned object as it
@@ -1389,6 +1487,11 @@ pub(crate) enum MultiZoneExileQuantifier {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+// Intentional: variants carry parser IR directly (the `Attach` arm's printed
+// role/cardinality plus its announced-count spec), mirroring
+// `oracle_ir::effect_chain` and `oracle_ir::doc`; boxing a field here would add
+// an allocation per parsed clause without changing what is carried.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum UtilityImperativeAst {
     Prevent {
         text: String,
@@ -1405,6 +1508,12 @@ pub(crate) enum UtilityImperativeAst {
         target: TargetFilter,
         /// CR 707.10c: set when the imperative remainder is a copy-retarget grant.
         retarget: CopyRetargetPermission,
+        /// CR 707.9a + CR 707.10: typed modifications declared by a trailing
+        /// `"[,] except <body>"` copy exception ("copy it, except the copy
+        /// isn't legendary"). Mirrors the `additional_modifications` channel
+        /// `BecomeCopy` and `CopyTokenOf` already carry, and lowers into
+        /// `Effect::CopySpell.additional_modifications`.
+        additional_modifications: Vec<ContinuousModification>,
     },
     Transform {
         target: TargetFilter,
@@ -1428,6 +1537,26 @@ pub(crate) enum UtilityImperativeAst {
         /// target ..." cardinality belongs to the ability's target selection,
         /// not the `Effect::Attach` payload.
         multi_target: Option<MultiTargetSpec>,
+        /// CR 115.1a/c/d/e + CR 608.2d: the printed role of the ATTACHMENT
+        /// operand — `Targeted` when the phrase prints "target …", otherwise
+        /// `AtResolution { count }` with the printed cardinality. Mirrored onto
+        /// `Effect::Attach.selection`; the HOST operand's timing stays the
+        /// ability-level `TargetChoiceTiming`.
+        selection: AttachSelection,
+    },
+    /// CR 608.2c (rules of English — number agreement) + CR 400.7: an Attach
+    /// instruction whose ATTACHMENT operand is a plural anaphor ("attach
+    /// them/those …"). The antecedent set has no typed provenance in the AST
+    /// (`TargetFilter` is singular; `GainControlAll` and the conjure family
+    /// publish no set), so the clause cannot be implemented correctly and
+    /// lowers to `Effect::unimplemented("plural_attachment_anaphor", fragment)`
+    /// — honest coverage instead of a wrong-operand attach.
+    ///
+    /// Follow-up: when the producers publish the affected set as typed
+    /// provenance, this variant becomes a set-valued attachment operand.
+    AttachPluralAnaphor {
+        /// The printed clause, for the `Unimplemented` description.
+        fragment: String,
     },
     UnattachAll {
         attachment: TargetFilter,
@@ -1496,6 +1625,12 @@ pub(crate) enum ChooseImperativeAst {
         chooser: crate::types::ability::Chooser,
         /// CR 608.2d (override): `Random` for "choose one of them at random".
         selection: crate::types::ability::CardSelectionMode,
+        /// CR 608.2d: WHICH set the anaphor names. The bare "of them"/"of those"
+        /// anaphors keep the historic tracked-set fallback (`Legacy`); the
+        /// source-bound "of the exiled cards" form inside an ability whose own
+        /// cost exiled the cards names that cost-payment record instead
+        /// (`CostPaidObjects`, CR 400.7j).
+        candidate_source: crate::types::ability::ZoneChoiceCandidateSource,
     },
     /// "choose a [filter] card in/from [player's] [zone]" — direct selection
     /// from visible/resolution-scoped zone contents. Lowered to `Effect::ChooseFromZone`.
@@ -1508,6 +1643,11 @@ pub(crate) enum ChooseImperativeAst {
         up_to: bool,
         /// CR 608.2d (override): `Random` for "choose ... at random".
         selection: crate::types::ability::CardSelectionMode,
+        /// CR 607.2a + CR 406.6 vs CR 608.2c: which pool the clause names — the
+        /// source's linked pile ("exiled with ~", `Direct` zone scan filtered by
+        /// linkage) or the chain's own exile output ("exiled this way", `Legacy`
+        /// tracked-set provenance).
+        candidate_source: crate::types::ability::ZoneChoiceCandidateSource,
     },
     /// "choose from among the permanents ... an artifact, a creature, ..." —
     /// multi-category selection where each player keeps one per type, then sacrifices the rest.
@@ -1549,23 +1689,50 @@ pub(crate) enum ChooseImperativeAst {
         domain: CounterKindDomain,
         chooser: CounterKindChooser,
     },
+    /// CR 115.1 + CR 608.2d: A standalone, NON-target battlefield-object choice
+    /// ("choose a creature an opponent controls"). The chooser is the ability's
+    /// controller; the pick is made while the effect resolves (CR 608.2d), not
+    /// as a declared target. Parser IR only — it lowers onto the existing
+    /// `Effect::ChooseObjectsIntoTrackedSet`, which publishes the pick into the
+    /// resolution chain's tracked set so a linked "the chosen ‹object›" reader
+    /// (CR 607.2d) can consume it.
+    ///
+    /// `min`/`max` carry the printed quantifier ("a"/"an"/"another" → `(1, Some(1))`,
+    /// "up to N" → `(0, Some(N))` with a dynamic N collapsing to `None`,
+    /// "any number of" → `(0, None)`).
+    BattlefieldObject {
+        filter: TargetFilter,
+        min: u32,
+        max: Option<u32>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum PutImperativeAst {
+    /// CR 701.17a: "put the top <count> cards of <owner> library into <owner>
+    /// graveyard" — a mill whose owner and count are carried, never assumed.
     Mill {
-        count: u32,
+        count: QuantityExpr,
+        target: TargetFilter,
+    },
+    /// A put clause the engine cannot yet model (e.g. CR 404.1 "put the top
+    /// card of <possessive> graveyard …", a graveyard-sourced move it cannot
+    /// select); lowers to an honest `Effect::unimplemented` named `gap` and
+    /// carrying the printed clause.
+    Unimplemented {
+        gap: &'static str,
+        fragment: String,
     },
     ZoneChange {
         origin: Option<Zone>,
         destination: Zone,
         target: TargetFilter,
-        /// CR 110.2a: the battlefield-entry
-        /// controller. `Override(r)` routes the object to the player resolved
-        /// from `r`; `Default` lowers through the existing no-override carrier;
-        /// `UnboundAnaphor` marks a printed control clause whose antecedent
-        /// could not be named, and the lowering site turns it into an honest
-        /// `Effect::unimplemented` rather than a silently-wrong controller.
+        /// CR 110.2a: the battlefield-entry controller. `Override(r)` routes
+        /// the object to the player resolved from `r`; `Default` lowers through
+        /// the existing no-override carrier; `UnboundAnaphor` marks a printed
+        /// control clause whose antecedent could not be named, and the lowering
+        /// site turns it into an honest `Effect::unimplemented` rather than a
+        /// silently-wrong controller.
         enters_under: EntersUnderSpec,
         /// CR 603.6d: "enters tapped" — enters the battlefield tapped.
         enter_tapped: bool,
@@ -1593,8 +1760,8 @@ pub(crate) enum PutImperativeAst {
         origin: Option<Zone>,
         destination: Zone,
         target: TargetFilter,
-        /// CR 110.2a: the battlefield-entry
-        /// controller for the moved population. `UnboundAnaphor` fails closed.
+        /// CR 110.2a: the battlefield-entry controller for the moved
+        /// population. `UnboundAnaphor` fails closed.
         enters_under: EntersUnderSpec,
         enter_tapped: bool,
         /// CR 401.4: Specific library placement for mass library moves.
@@ -1781,8 +1948,9 @@ pub(crate) enum ZoneCounterImperativeAst {
         /// ("exile a card … with N <type> counters on it"). Empty for the
         /// common no-counter case. Mirrors `Effect::ChangeZone.enter_with_counters`.
         enter_with_counters: Vec<(CounterType, QuantityExpr)>,
-        /// CR 700.4 (#5649): a counted graveyard exile — "exile <N> cards from
-        /// your graveyard" (Nefarious Lich: "exile that many cards … instead").
+        /// CR 107.1 + CR 608.2c + CR 701.13a: a counted graveyard exile —
+        /// "exile <N> cards from your graveyard" (Nefarious Lich: "exile that
+        /// many cards … instead").
         /// `Effect::ChangeZone` carries no count, so the quantity rides the
         /// clause's `MultiTargetSpec` (mirroring Forage), threaded at lowering by
         /// `lower_imperative_family_ast`. `None` for the ordinary single-object
@@ -1799,6 +1967,8 @@ pub(crate) enum ZoneCounterImperativeAst {
         /// Oracle text terminates with "face down" (Necropotence / Bomat
         /// Courier / Asmodeus class).
         face_down: bool,
+        /// CR 608.2c: the player performing the exile instruction.
+        actor: LibraryInstructionActor,
     },
     Counter {
         target: TargetFilter,
@@ -1956,6 +2126,7 @@ pub(crate) fn parsed_clause(effect: Effect) -> ParsedEffectClause {
         condition: None,
         optional: false,
         unless_pay: None,
+        unlowered_guard: None,
     }
 }
 
@@ -1975,10 +2146,10 @@ pub(crate) fn placeholder_parsed_clause(name: &str) -> ParsedEffectClause {
     })
 }
 
-/// CR 611.2a: "A continuous effect generated by the
-/// resolution of a spell or ability lasts as long as stated by the spell or ability
-/// creating it." A duration field that already holds a value the parser deliberately
-/// wrote IS a stated window, and a governing prefix must not overwrite it.
+/// CR 611.2a: "A continuous effect generated by the resolution of a spell or ability
+/// lasts as long as stated by the spell or ability creating it." A duration field
+/// that already holds a value the parser deliberately wrote IS a stated window, and
+/// a governing prefix must not overwrite it.
 ///
 /// THE RULE: a duration carrier is "unset" iff it holds `None` or
 /// `Some(Duration::Permanent)`. Every other value is treated as explicitly written
@@ -2077,6 +2248,86 @@ pub(crate) fn cast_bound_lost_to_duration_gap(
     )
 }
 
+/// CR 601.2b + CR 611.2a: a `CastFromZone` on the lingering-permission
+/// mechanism that still carries an `additional_cost` would drop that cost at
+/// resolution (the permission has no slot for it), so the clause becomes the
+/// `ADDITIONAL_COST_ON_LINGERING_CAST_GAP` instead. Called at every seam that
+/// can leave a cast grant on that mechanism: the Branch-2 producer in
+/// `oracle_effect::try_parse_cast_effect`, the alt-cost fold
+/// (`oracle_effect::attach_alt_cost_to_prior_cast_from_zone`), and the three
+/// duration seams that degrade a during-resolution driver
+/// (`apply_duration_to_effect`, `reconcile_coordinated_cast`, the
+/// trailing-duration peel in `oracle_effect::parse_effect_clause`). Zero
+/// printed carriers today.
+pub(crate) fn refuse_additional_cost_on_lingering_cast(effect: &mut Effect) {
+    let Effect::CastFromZone {
+        driver,
+        additional_cost: Some(cost),
+        ..
+    } = effect
+    else {
+        return;
+    };
+    if *driver == crate::types::ability::CastFromZoneDriver::DuringResolution {
+        return;
+    }
+    *effect = Effect::unimplemented(
+        crate::types::ability::ADDITIONAL_COST_ON_LINGERING_CAST_GAP,
+        format!("additional cost the lingering permission cannot carry: {cost:?}"),
+    );
+}
+
+/// CR 601.2f + CR 608.2c: the honest gap a "cast this way" cost rider becomes
+/// when no preceding grant can carry it.
+///
+/// Both refusal sites below build it here, so the no-host shape and the
+/// unsupported-driver shape name one gap rather than two that can drift. The
+/// description records the MODIFIER that was about to be lost rather than the
+/// Oracle fragment: the driver seam runs after lowering and no longer holds the
+/// source text, and the modifier is the load-bearing fact for anyone auditing
+/// the gap.
+pub(crate) fn cast_cost_modifier_without_host_gap(
+    modifier: &crate::types::ability::CastCostModifier,
+) -> Effect {
+    Effect::unimplemented(
+        crate::types::ability::CAST_COST_MODIFIER_WITHOUT_HOST_GAP,
+        format!("\"cast this way\" cost rider no preceding grant can carry: {modifier:?}"),
+    )
+}
+
+/// CR 601.2f + CR 608.2c: a `CastFromZone` that still carries a
+/// `cast_cost_modifier` on a driver OTHER than `LingeringPermission` would drop
+/// that rider at resolution, so the clause becomes the
+/// `CAST_COST_MODIFIER_WITHOUT_HOST_GAP` instead.
+///
+/// Twin of [`refuse_additional_cost_on_lingering_cast`], inverted on the driver
+/// axis because the two riders ride opposite mechanisms:
+/// `record_lingering_permissions` is the one site that stamps a cost modifier
+/// onto the permissions the grant creates, so `LingeringPermission` is the only
+/// driver with a slot — while an additional cost is charged only by the
+/// during-resolution cast.
+///
+/// Called at the one seam that can DEGRADE an already-stamped grant off the
+/// lingering mechanism (`attach_alt_cost_to_prior_cast_from_zone`, beside its
+/// twin); the absorption site refuses a non-`LingeringPermission` host up front
+/// (`attach_cast_cost_modifier_to_prior_cast_from_zone`), so that path never
+/// stamps one for this to find. Zero printed carriers today.
+pub(crate) fn refuse_cast_cost_modifier_on_unsupported_driver(effect: &mut Effect) {
+    let Effect::CastFromZone {
+        driver,
+        cast_cost_modifier: Some(modifier),
+        ..
+    } = effect
+    else {
+        return;
+    };
+    if *driver == crate::types::ability::CastFromZoneDriver::LingeringPermission {
+        return;
+    }
+    let gap = cast_cost_modifier_without_host_gap(modifier);
+    *effect = gap;
+}
+
 /// CR 611.2a + CR 608.2g + CR 608.2c: Carry a sentence's LEADING duration onto a
 /// later coordinated clause of that same sentence.
 ///
@@ -2133,6 +2384,30 @@ fn apply_sentence_duration_to_coordinated_cast_defs(
     }
 }
 
+/// CR 601.3 + CR 611.2c: whether `effect` is a resolution-created graveyard
+/// cast permission bound to its controller — the shape
+/// `oracle_effect::graveyard_permission_grant` builds (Yawgmoth's Will, The
+/// Great Work, Liliana, Untouched by Death).
+pub(crate) fn is_graveyard_permission_grant(effect: &Effect) -> bool {
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = effect
+    else {
+        return false;
+    };
+    let [grant] = static_abilities.as_slice() else {
+        return false;
+    };
+    matches!(
+        grant.modifications.as_slice(),
+        [ContinuousModification::GrantStaticAbility { definition }]
+            if matches!(
+                definition.mode,
+                crate::types::statics::StaticMode::GraveyardCastPermission { .. }
+            )
+    )
+}
+
 /// CR 611.2a: stamp the sentence's duration on one cast grant and reconcile its
 /// mechanism with it. A duration the clause stated for ITSELF always wins.
 fn reconcile_coordinated_cast(
@@ -2140,6 +2415,17 @@ fn reconcile_coordinated_cast(
     node_duration: &mut Option<Duration>,
     duration: &Duration,
 ) {
+    // CR 611.2a: the class-wide graveyard permission is a later conjunct of the
+    // same sentence ("Until end of turn, you may play lands and cast spells from
+    // your graveyard"), so the sentence's window is its window; without it the
+    // grant would last until the end of the game. It has no driver to reconcile.
+    if is_graveyard_permission_grant(effect) {
+        if duration_is_unset_sentinel(node_duration) {
+            *node_duration = Some(duration.clone());
+        }
+        apply_duration_to_effect(effect, duration);
+        return;
+    }
     let Effect::CastFromZone {
         duration: effect_duration,
         driver,
@@ -2169,8 +2455,10 @@ fn reconcile_coordinated_cast(
         None => {
             let bounds = driver.window_bounds().unwrap_or_default();
             *effect = cast_bound_lost_to_duration_gap(bounds);
+            return;
         }
     }
+    refuse_additional_cost_on_lingering_cast(effect);
 }
 
 pub(crate) fn with_clause_duration(
@@ -2188,9 +2476,9 @@ pub(crate) fn with_clause_duration(
     clause
 }
 
-/// CR 611.2a: "A continuous effect generated by the
-/// resolution of a spell or ability lasts as long as stated by the spell or ability
-/// creating it (such as 'until end of turn')."
+/// CR 611.2a: "A continuous effect generated by the resolution of a spell or ability
+/// lasts as long as stated by the spell or ability creating it (such as 'until end
+/// of turn')."
 ///
 /// The single authority for writing a stated duration into an effect's OWN embedded
 /// duration field. Extracted from `with_clause_duration` so the clause path and the
@@ -2258,12 +2546,12 @@ pub(crate) fn with_clause_duration(
 /// See `duration_arms_match_governed_set`.
 ///
 /// Four of the five writers above are guarded on `duration_is_unset_sentinel`, the
-/// single authority for "this duration carrier is unset" (CR 611.2a): an
-/// explicitly written embedded window survives a governing prefix. The fifth,
+/// single authority for "this duration carrier is unset" (CR 611.2a): an explicitly
+/// written embedded window survives a governing prefix. The fifth,
 /// `GrantCastingPermission { PlayFromExile }`, is unguarded because its `duration`
 /// is a non-`Option` `Duration` and therefore has no unset sentinel to test. A new
-/// duration-bearing variant whose field DOES have a distinguishable sentinel must
-/// be guarded the same way. (`duration_arms_match_governed_set` pins the 9/5 split.)
+/// duration-bearing variant whose field DOES have a distinguishable sentinel must be
+/// guarded the same way. (`duration_arms_match_governed_set` pins the 9/5 split.)
 fn apply_duration_to_effect(effect: &mut Effect, duration: &Duration) {
     // Both gap outcomes are recorded here and applied AFTER the match, so the
     // borrow of `*effect` taken by the arms has ended before it is replaced.
@@ -2271,13 +2559,16 @@ fn apply_duration_to_effect(effect: &mut Effect, duration: &Duration) {
     let mut refused_bound: Option<crate::types::ability::ResolutionCastWindow> = None;
     // CR 611.2a (#7959): the inner lifetime condition the engine cannot evaluate.
     let mut unevaluable_lifetime: Option<String> = None;
+    // CR 601.2b + CR 118.9: the card filter of a hand-origin FREE cast grant that
+    // a stated lifetime turns into a player-scoped permission (see the arm below).
+    let mut hand_free_permission_filter: Option<TargetFilter> = None;
     match effect {
-        // CR 611.2a: yield to an explicitly written
-        // inner duration. The two parser-default sentinels (`None`,
-        // `Some(Permanent)`) still take the governing prefix; any other value was
-        // deliberately written by the recognizer that built this effect and IS a
-        // stated window. `duration_is_unset_sentinel` is the single authority for
-        // that distinction — see its doc.
+        // CR 611.2a: yield to an explicitly written inner duration. The two
+        // parser-default sentinels (`None`, `Some(Permanent)`) still take the
+        // governing prefix; any other value was deliberately written by the
+        // recognizer that built this effect and IS a stated window.
+        // `duration_is_unset_sentinel` is the single authority for that distinction
+        // — see its doc.
         //
         // WHY EACH ARM IS GUARDED, and why the three are NOT one guarantee. The
         // precedence below was read at each resolver, not inferred:
@@ -2347,8 +2638,96 @@ fn apply_duration_to_effect(effect: &mut Effect, duration: &Duration) {
         Effect::CastFromZone {
             duration: ref mut effect_duration,
             ref mut driver,
+            ref target,
+            without_paying_mana_cost,
+            mode,
+            cast_transformed,
+            ref alt_ability_cost,
+            ref constraint,
+            ref mana_spend_permission,
+            ref additional_cost,
             ..
         } => {
+            // CR 601.2b + CR 118.9 + CR 611.2a: "Until end of turn, you may cast
+            // spells FROM YOUR HAND without paying their mana costs" (Chandra,
+            // Flame's Catalyst) is Omniscience for a turn — a PLAYER-scoped
+            // permission over a set the game keeps re-reading, not a per-object
+            // grant handed out once. `CastFromZone` cannot express that: its
+            // permissions are recorded per object at resolution
+            // (`CastFromZoneDriver::for_batch_bounds`' capability table: that
+            // mechanism "writes an INDEPENDENT `CastingPermission` per object"),
+            // so a card drawn later in the same turn is never covered, and the
+            // printed effect says it is.
+            //
+            // The mechanism that CAN express it already exists and is already the
+            // one this exact sentence lowers to when a permanent prints it as a
+            // static: `StaticMode::CastFromHandFree` (Omniscience, the Tamiyo
+            // emblem), built by `oracle_static::restriction::
+            // try_parse_cast_free_permission`. Promote to it here, where the
+            // stated lifetime is in hand, and carry it as the duration-bound
+            // player grant `game/effects/effect.rs` already installs for
+            // `MayLookAtFaceDown` (Lumbering Laundry) — a grant that survives the
+            // source leaving play, which this one MUST: paying Chandra's [-8]
+            // takes her to zero loyalty and CR 704.5i puts her in the graveyard
+            // before her own ability resolves.
+            //
+            // GATED ON THE STATED LIFETIME, and that is the whole point:
+            // Electrodominance prints nearly the same sentence WITHOUT one and is
+            // a genuine CR 608.2g resolution-time pick. It never reaches this
+            // function. `without_paying_mana_cost` is required because
+            // `CastFromHandFree` means exactly "without paying the mana cost";
+            // a full-cost hand grant (Sen Triplets) has no faithful form here and
+            // keeps the per-object mechanism below.
+            //
+            // FAIL-CLOSED ON THE FILTER SHAPE, and that is not decoration. The
+            // promotion drops the zone leg and carries the rest as the
+            // permission's filter, which is only faithful while `extract_zones`
+            // and `without_prop` agree about the tree: `extract_zones` descends
+            // into `Or`/`And`/`Not`, `without_prop` rewrites only a top-level
+            // `Typed`. An `Or[InZone Hand, InZone Graveyard]` grant would
+            // therefore be admitted and silently lose its graveyard leg. Asking
+            // `extract_zones() == [Hand]` on a `Typed` target refuses every such
+            // shape instead. No card in the corpus prints one today — the double
+            // parse moves exactly one card — so this costs nothing now, and when
+            // such a card appears the gate DECLINES the promotion and leaves the
+            // clause on the per-object mechanism rather than lowering it wrong.
+            // That is a fallback, not a CR-level refusal: the per-object mechanism
+            // is the one this change exists to move away from, so a declined
+            // clause is a known-imperfect landing, not a correct one.
+            //
+            // `cast_transformed` and `mana_spend_permission` are in the list for
+            // the same reason: CR 310.12b's "cast it transformed" and CR 609.4b's
+            // "mana of any type can be spent" both ride on the `CastFromZone`
+            // effect and have no home on a `CastFromHandFree` static, so a clause
+            // carrying either keeps the per-object mechanism rather than losing
+            // the instruction. Every payload field the effect owns is now either
+            // checked here or (`driver`) reconciled below; the `..` in the pattern
+            // is what a future field would slip through, so a new one belongs in
+            // this list or in a refusal.
+            if *without_paying_mana_cost
+                && *mode == crate::types::ability::CardPlayMode::Cast
+                && !*cast_transformed
+                && alt_ability_cost.is_none()
+                && constraint.is_none()
+                && mana_spend_permission.is_none()
+                && additional_cost.is_none()
+                && duration_is_unset_sentinel(effect_duration)
+                && matches!(target, TargetFilter::Typed(_))
+                && target.extract_zones() == vec![crate::types::zones::Zone::Hand]
+            {
+                // The zone leg is discharged by the promotion itself: the runtime
+                // gate `cast_free_origin_admits_object` re-derives hand+owner from
+                // `CastFreeOrigin::Hand`. (`without_prop` removes the exact
+                // `InZone { Hand }` form; an `InAnyZone { [Hand] }` would ride on
+                // intact — harmless, because that same gate enforces it anyway,
+                // but a leftover rather than a discharge.) Every other leg the clause printed (a
+                // type restriction, a colour) rides on as the permission's filter.
+                hand_free_permission_filter = Some(target.without_prop(
+                    &crate::types::ability::FilterProp::InZone {
+                        zone: crate::types::zones::Zone::Hand,
+                    },
+                ));
+            }
             match driver.with_lingering_duration() {
                 Some(reconciled) => *driver = reconciled,
                 None => refused_bound = Some(driver.window_bounds().unwrap_or_default()),
@@ -2390,16 +2769,16 @@ fn apply_duration_to_effect(effect: &mut Effect, duration: &Duration) {
             recipient,
             ..
         } => {
-            // CR 611.2b + CR 301.5: a leading "for as long as ~
-            // remains attached to it" binds a singular become-copy to the
-            // attachment host. UNCONDITIONAL — this rewrite must run whether or not
-            // the duration write below is declined, which is exactly why the guard
-            // is on the ASSIGNMENT and not on the match arm. Normalizing this into
-            // an arm guard silently loses the binding;
+            // CR 611.2b + CR 301.5: a leading "for as long as ~ remains attached to
+            // it" binds a singular become-copy to the attachment host.
+            // UNCONDITIONAL — this rewrite must run whether or not the duration
+            // write below is declined, which is exactly why the guard is on the
+            // ASSIGNMENT and not on the match arm. Normalizing this into an arm
+            // guard silently loses the binding;
             // `become_copy_recipient_rewrite_survives_a_declined_duration_write`
-            // turns red if anyone does.
-            // The duration is stripped before the body is parsed, so this is the
-            // first point where both the copy and its final duration are available.
+            // turns red if anyone does. The duration is stripped before the body is
+            // parsed, so this is the first point where both the copy and its final
+            // duration are available.
             if matches!(
                 duration,
                 Duration::ForAsLongAs {
@@ -2407,9 +2786,10 @@ fn apply_duration_to_effect(effect: &mut Effect, duration: &Duration) {
                         filter: TargetFilter::AttachedTo,
                     },
                 }
-            ) && *recipient == TargetFilter::SelfRef
+            ) && copy_recipient_is_attachment_host_anaphor(recipient)
             {
-                *recipient = TargetFilter::AttachedTo;
+                *recipient =
+                    crate::types::ability::CopyRecipient::Untargeted(TargetFilter::AttachedTo);
             }
             // CR 611.2a: yield to an explicitly written window, same rule as the
             // siblings above. `become_copy::resolve` reads this field FIRST, so an
@@ -2427,7 +2807,72 @@ fn apply_duration_to_effect(effect: &mut Effect, duration: &Duration) {
         *effect = cast_bound_lost_to_duration_gap(bounds);
     } else if let Some(fragment) = unevaluable_lifetime {
         *effect = Effect::unimplemented("cast_from_zone_unevaluable_lifetime", fragment);
+    } else if let Some(filter) = hand_free_permission_filter {
+        // CR 601.2b + CR 118.9: see the `CastFromZone` arm. `modifications`
+        // carries the mode a second time because that is the shape
+        // `effect.rs::register_transient_effect` dispatches on — the same pairing
+        // `MayLookAtFaceDown` uses. The duration is written here rather than left
+        // as the unset sentinel for the `GenericEffect` arm above to fill: the
+        // `match` is over by the time this replacement happens — exactly as it is
+        // for the two gap outcomes beside it — so no arm will see this effect.
+        let mode = crate::types::statics::StaticMode::CastFromHandFree {
+            frequency: crate::types::statics::CastFrequency::Unlimited,
+            origin: crate::types::statics::CastFreeOrigin::Hand,
+        };
+        *effect = Effect::GenericEffect {
+            static_abilities: vec![crate::types::ability::StaticDefinition::new(mode.clone())
+                .affected(filter)
+                .modifications(vec![
+                    crate::types::ability::ContinuousModification::AddStaticMode { mode },
+                ])],
+            duration: Some(duration.clone()),
+            target: None,
+            end_cost: None,
+        };
     }
+    // CR 601.2b: a grant the stated lifetime just moved onto the lingering
+    // mechanism cannot keep an additional cost.
+    refuse_additional_cost_on_lingering_cast(effect);
+}
+
+/// CR 611.2b + CR 301.5: does this `BecomeCopy` recipient anaphorically name the
+/// permanent the source is attached to?
+///
+/// Only meaningful under the attachment window
+/// `ForAsLongAs { RecipientMatchesFilter { AttachedTo } }`, which is the sole
+/// caller. Assimilation Aegis is the canonical print: *"Whenever this Equipment
+/// becomes attached to a creature, for as long as this Equipment remains
+/// attached to it, **that creature** becomes a copy of a creature card exiled
+/// with this Equipment."* Under that window "that creature" IS the attached
+/// host, so the recipient is rewritten to `AttachedTo` and the copy follows the
+/// host across re-attachment.
+///
+/// Members:
+/// - `Source` — the elided/self-framed spelling, and the incumbent shape this
+///   rewrite has always fired on.
+/// - `Untargeted(TriggeringSource)` — "that creature", the creature named by the
+///   becomes-attached trigger. This is what the subject parser now yields; it
+///   previously reached here as `Source` only because the singular become-copy
+///   arm discarded its subject entirely.
+/// - `Untargeted(ParentTarget)` — the sibling anaphor spelling, admitted so a
+///   reworded print of the same class does not silently fall out.
+///
+/// Deliberately EXCLUDED:
+/// - `Target(..)` — a declared target names its own announced object (CR 115.1);
+///   rewriting it would silently retarget a player's choice onto the host.
+/// - `Untargeted(<concrete population>)` — e.g. `Typed(Creature, You)`, which
+///   already names a real set and must not collapse to a single host.
+fn copy_recipient_is_attachment_host_anaphor(
+    recipient: &crate::types::ability::CopyRecipient,
+) -> bool {
+    use crate::types::ability::CopyRecipient;
+    matches!(
+        recipient,
+        CopyRecipient::Source
+            | CopyRecipient::Untargeted(
+                TargetFilter::TriggeringSource | TargetFilter::ParentTarget
+            )
+    )
 }
 
 /// CR 611.2a: a stated duration governs the lifetime of the effect it
@@ -2441,11 +2886,11 @@ fn apply_duration_to_effect(effect: &mut Effect, duration: &Duration) {
 /// At the time of writing that returns SEVEN duration-bearing variants —
 /// GenericEffect, CastFromZone, BecomeCopy, GainActivatedAbilitiesOfTarget,
 /// ForceAttack, ForceBlock, and PreventDamage (whose field is named
-/// `prevention_duration`, which is exactly why an eye-enumeration missed it).
-/// All seven are members. Two more are members without an embedded field:
+/// `prevention_duration`, which is exactly why an eye-enumeration missed it). All
+/// seven are members. Two more are members without an embedded field:
 /// `GrantCastingPermission { permission: CastingPermission::PlayFromExile { .. } }`,
-/// and `AddRestriction`, whose expiry derives from `AbilityDefinition.duration`
-/// in `add_restriction::fill_runtime_fields` (CR 514.2).
+/// and `AddRestriction`, whose expiry derives from `AbilityDefinition.duration` in
+/// `add_restriction::fill_runtime_fields` (CR 514.2).
 ///
 /// FOUR of the nine deliberately get NO `apply_duration_to_effect` arm —
 /// `AddRestriction`, `ForceAttack`, `ForceBlock`, `PreventDamage`; four of the
@@ -2681,6 +3126,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
+        | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
         | Effect::Specialize
         | Effect::Renown { .. }
@@ -2710,21 +3156,20 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
     }
 }
 
-/// CR 611.2a + CR 608.2c: one stated duration governs the WHOLE
-/// instruction it prefixes — "read the whole text and apply the rules of English".
-/// When a clause recognizer builds its own sequential sibling chain (Xanathar,
-/// Guild Kingpin; Abeyance; Kiora, the Crashing Wave), the duration must reach every
-/// governed link, not only the head. Without this, Xanathar's `CastFromZone`
-/// play-permission is installed with `duration: None` — a permission that is never
-/// pruned (CR 611.2a: "If no duration is stated, it lasts until the end of the
-/// game") — and Kiora's "and dealt by" prevention shield is CREATED with the
-/// engine's end-of-turn `is_shield` default instead of the printed "until your next
-/// turn". (Whether that corrected window is ever OBSERVED is a separate,
-/// pre-existing defect: a resolution-created prevention shield hosted on an object
-/// is discarded by the next layer pass — CR 613.1's top-of-pass reset — before any
-/// damage event consults it. Measured; see the scope-boundary note and its
-/// follow-up. This function puts the right value on the right carrier; it does not
-/// and cannot fix the flush.)
+/// CR 611.2a + CR 608.2c: one stated duration governs the WHOLE instruction it
+/// prefixes — "read the whole text and apply the rules of English". When a clause
+/// recognizer builds its own sequential sibling chain (Xanathar, Guild Kingpin;
+/// Abeyance; Kiora, the Crashing Wave), the duration must reach every governed link,
+/// not only the head. Without this, Xanathar's `CastFromZone` play-permission is
+/// installed with `duration: None` — a permission that is never pruned (CR 611.2a:
+/// "If no duration is stated, it lasts until the end of the game") — and Kiora's
+/// "and dealt by" prevention shield is CREATED with the engine's end-of-turn
+/// `is_shield` default instead of the printed "until your next turn". (Whether that
+/// corrected window is ever OBSERVED is a separate, pre-existing defect: a
+/// resolution-created prevention shield hosted on an object is discarded by the next
+/// layer pass — CR 613.1's top-of-pass reset — before any damage event consults it.
+/// Measured; see the scope-boundary note and its follow-up. This function puts the
+/// right value on the right carrier; it does not and cannot fix the flush.)
 ///
 /// Yields to an explicitly stated narrower duration: a link already carrying
 /// `Some(d)` with `d != Permanent` had that duration deliberately attached by its
@@ -2743,9 +3188,9 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
 /// Walks ONLY `sub_ability` — CR 608.2c: "The controller of the spell or ability
 /// follows its instructions in the order written." `else_ability` and
 /// `mode_abilities` are deliberately NOT walked: a mode is one of several options
-/// of which only the chosen one applies (CR 700.2; CR 700.2c), and an
-/// "otherwise" branch is separately-printed alternative text whose own duration, if
-/// any, is stated in that text (CR 608.2c's "read the whole text").
+/// of which only the chosen one applies (CR 700.2; CR 700.2c), and an "otherwise"
+/// branch is separately-printed alternative text whose own duration, if any, is
+/// stated in that text (CR 608.2c's "read the whole text").
 pub(crate) fn with_clause_chain_duration(
     clause: ParsedEffectClause,
     duration: Duration,
@@ -2801,9 +3246,8 @@ fn unrecognized_condition_text(condition: &StaticCondition) -> Option<&str> {
     }
 }
 
-/// CR 611.2a: the fragment naming an inner lifetime
-/// that MASKS a printed outer window, or `None` when the inner lifetime is either
-/// understood or absent.
+/// CR 611.2a: the fragment naming an inner lifetime that MASKS a printed outer
+/// window, or `None` when the inner lifetime is either understood or absent.
 ///
 /// "Masks" is literal for an effect whose EMBEDDED duration is the sole runtime
 /// authority: if the inner condition cannot be evaluated, nothing ever ends the
@@ -3011,7 +3455,7 @@ mod duration_distribution_tests_7923 {
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             // #7948: a self-standing play permission with full cast authority,
             // which is what this duration fixture models — NOT the
@@ -3039,6 +3483,8 @@ mod duration_distribution_tests_7923 {
             duration,
             driver: CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
+            additional_cost: None,
+            cast_cost_modifier: None,
         }
     }
 
@@ -3057,6 +3503,7 @@ mod duration_distribution_tests_7923 {
                 constraint,
                 duration,
                 mana_spend_permission,
+                additional_cost,
                 ..
             } => Effect::CastFromZone {
                 target,
@@ -3068,6 +3515,8 @@ mod duration_distribution_tests_7923 {
                 duration,
                 driver,
                 mana_spend_permission,
+                additional_cost,
+                cast_cost_modifier: None,
             },
             other => other,
         }
@@ -3086,7 +3535,7 @@ mod duration_distribution_tests_7923 {
     fn become_copy(duration: Option<Duration>) -> Effect {
         Effect::BecomeCopy {
             target: TargetFilter::Any,
-            recipient: TargetFilter::SelfRef,
+            recipient: crate::types::ability::CopyRecipient::Source,
             duration,
             mana_value_limit: None,
             additional_modifications: Vec::new(),
@@ -3124,6 +3573,7 @@ mod duration_distribution_tests_7923 {
             amount: PreventionAmount::All,
             amount_dynamic: None,
             target: TargetFilter::Any,
+            recipient_scope: EffectScope::Single,
             scope: PreventionScope::AllDamage,
             damage_source_filter: None,
             prevention_duration,
@@ -3497,7 +3947,7 @@ mod duration_distribution_tests_7923 {
             } => {
                 assert_eq!(
                     recipient,
-                    TargetFilter::AttachedTo,
+                    crate::types::ability::CopyRecipient::Untargeted(TargetFilter::AttachedTo),
                     "CR 611.2b rewrite fires"
                 );
                 assert_eq!(
@@ -3519,7 +3969,7 @@ mod duration_distribution_tests_7923 {
             } => {
                 assert_eq!(
                     recipient,
-                    TargetFilter::AttachedTo,
+                    crate::types::ability::CopyRecipient::Untargeted(TargetFilter::AttachedTo),
                     "the CR 611.2b attachment rewrite is UNCONDITIONAL — moving the guard onto \
                      the match arm silently drops it"
                 );
@@ -3542,7 +3992,7 @@ mod duration_distribution_tests_7923 {
             } => {
                 assert_eq!(
                     recipient,
-                    TargetFilter::SelfRef,
+                    crate::types::ability::CopyRecipient::Source,
                     "no attachment window, no rewrite"
                 );
                 assert_eq!(duration, Some(Duration::UntilEndOfCombat));
@@ -3626,10 +4076,10 @@ mod duration_distribution_tests_7923 {
         // link 4 — the shape this change exists for, on a `CastFromZone` carrier: the
         // carrier is unset (so the walk's gate ADMITS the link and stamps it) while the
         // embedded field already holds a written window. The carrier IS stamped; the
-        // embedded window SURVIVES (CR 611.2a). This link sits AFTER the
-        // declined `explicit` link, so it also pins that the walk ADVANCES past a
-        // decline instead of stopping — `link = def.sub_ability.as_deref_mut();` must
-        // stay OUTSIDE the gate `if` in `with_clause_chain_duration`.
+        // embedded window SURVIVES (CR 611.2a). This link sits AFTER the declined
+        // `explicit` link, so it also pins that the walk ADVANCES past a decline
+        // instead of stopping — `link = def.sub_ability.as_deref_mut();` must stay
+        // OUTSIDE the gate `if` in `with_clause_chain_duration`.
         let l4 = l3.sub_ability.as_deref().expect("link 4");
         assert_eq!(
             l4.duration,

@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { P2PDraftHost } from "../p2p-draft-host";
+import type { DraftPlayerView, PairingView } from "../draft-adapter";
+import type { DraftMatchLaunch } from "../../network/draftProtocol";
 
 /**
  * U17 — the commander designation's submission channel at the P2P host seam.
@@ -45,6 +47,9 @@ type PrivateHost = {
   guestSessions: Map<number, { send: ReturnType<typeof vi.fn> }>;
   adapter: Record<string, ReturnType<typeof vi.fn>>;
   handleGuestMessage: (seat: number, message: unknown) => Promise<void>;
+  dispatchMatchLaunch: (pairing: PairingView, view: DraftPlayerView) => Promise<void>;
+  persistSessionStrict: () => Promise<void>;
+  matchLaunches: Map<string, Map<number, DraftMatchLaunch>>;
 };
 
 function asPrivate(host: P2PDraftHost): PrivateHost {
@@ -83,6 +88,147 @@ function seatGuestSession(privateHost: PrivateHost, seat: number) {
 }
 
 describe("P2P deck-submission channel", () => {
+  /**
+   * Adjacent host-side reach for Set bot launch. The adapter is stubbed here:
+   * draft-wasm's no-database proposal is tested in its Rust entry-point test.
+   */
+  it("launches a submitted Set Premier deck against a full bot proposal", async () => {
+    const host = newHost("Premier");
+    const privateHost = asPrivate(host);
+    privateHost.draftStarted = true;
+    privateHost.paused = false;
+    privateHost.persistSessionStrict = vi.fn(async () => {});
+    const humanDeck = Array<string>(40).fill("Forest");
+    const getBotDeck = vi.fn(async () => ({
+      main_deck: ["Alpha", "Beta", "Gamma", "Delta"],
+      lands: { Plains: 36 },
+      commander: [],
+    }));
+    privateHost.adapter = stubAdapter({
+      exportSession: vi.fn(async () => JSON.stringify({
+        pools: [[], []],
+        submitted_decks: { 0: { seat: 0, main_deck: humanDeck, commanders: [] } },
+      })),
+      getBotDeck,
+      boosterPackPoolForGame: vi.fn(async () => null),
+    });
+    const launches: DraftMatchLaunch[] = [];
+    host.onEvent((event) => {
+      if (event.type === "matchStart") launches.push(event.launch);
+    });
+
+    await host.submitHostDeck(humanDeck, []);
+    expect(privateHost.adapter.submitDeckForSeat).toHaveBeenCalledWith(0, humanDeck, []);
+    await privateHost.dispatchMatchLaunch({
+      match_id: "set-bot-match", round: 1, seat_a: 0, seat_b: 1,
+      name_a: "Host", name_b: "Bot 1",
+    } as PairingView, {
+      seats: [
+        { seat_index: 0, is_bot: false },
+        { seat_index: 1, is_bot: true },
+      ],
+      match_config: { match_type: "Bo1" },
+    } as DraftPlayerView);
+
+    expect(getBotDeck).toHaveBeenCalledWith(1);
+    expect(launches).toHaveLength(1);
+    expect(launches[0]).toMatchObject({
+      type: "Bot", matchId: "set-bot-match", localSeat: 0, botSeat: 1,
+      deckPayload: {
+        player: { main_deck: humanDeck },
+        opponent: { main_deck: ["Alpha", "Beta", "Gamma", "Delta", ...Array<string>(36).fill("Plains")] },
+        booster_pack_pool: null,
+      },
+    });
+    expect(privateHost.matchLaunches.get("set-bot-match")?.get(0)).toEqual(launches[0]);
+  });
+
+  /**
+   * The original Cube multiset is private to the host's device. In a pod of
+   * three or more, a pairing that excludes seat 0 elects a guest as its engine
+   * authority (`HumanHost`, or the human side of a `Bot` launch); that
+   * launch must name no source (its engine then opens ordinary set boosters),
+   * never the undealt sentinel or its duplicate count. The same pod's seat-0
+   * pairing is the reach-guard: the host's own launch still carries the exact
+   * source Booster Tutor opens from.
+   *
+   * REVERT-PROBE: return `this.adapter.boosterPackPoolForGame()` unconditionally
+   * from `boosterPackPoolForMatchAuthority` (the pre-fix behaviour) and the
+   * seat-2 launch assertions fail on `booster_pack_pool: null` and on the
+   * sentinel scan.
+   */
+  it.each([false, true])(
+    "withholds the Cube source from a participant match authority (bot opponents: %s)",
+    async (bot) => {
+      const host = newHost("Premier");
+      const privateHost = asPrivate(host);
+      const source = ["Cube A", "Cube A", "Undealt sentinel"];
+      const draftView = {
+        seats: [0, 1, 2, 3].map((seat_index) => ({
+          seat_index,
+          is_bot: bot && (seat_index === 1 || seat_index === 3),
+        })),
+        match_config: { match_type: "Bo1" },
+      } as DraftPlayerView;
+      privateHost.adapter = stubAdapter({
+        exportSession: vi.fn(async () => JSON.stringify({
+          pools: [[], [], [], []], submitted_decks: {
+            0: { seat: 0, main_deck: ["Host deck"], commanders: [] },
+            1: { seat: 1, main_deck: ["Seat 1 deck"], commanders: [] },
+            2: { seat: 2, main_deck: ["Human deck"], commanders: [] },
+            3: { seat: 3, main_deck: ["Guest deck"], commanders: [] },
+          },
+        })),
+        getBotDeck: vi.fn(async () => ({ main_deck: ["Bot deck"], lands: {}, commander: [] })),
+        boosterPackPoolForGame: vi.fn(async () => source),
+      });
+      privateHost.persistSessionStrict = vi.fn(async () => {});
+      const hostLaunches: DraftMatchLaunch[] = [];
+      host.onEvent((event) => {
+        if (event.type === "matchStart") hostLaunches.push(event.launch);
+      });
+      const seatSends = [1, 2, 3].map((seat) => seatGuestSession(privateHost, seat));
+
+      await privateHost.dispatchMatchLaunch({
+        match_id: "host-match", round: 1, seat_a: 0, seat_b: 1, name_a: "Host", name_b: "Seat 1",
+      } as PairingView, draftView);
+      await privateHost.dispatchMatchLaunch({
+        match_id: "guest-match", round: 1, seat_a: 2, seat_b: 3, name_a: "Human", name_b: "Other",
+      } as PairingView, draftView);
+
+      // Reach-guard: the host's own launch opens from the exact original source.
+      expect(hostLaunches).toHaveLength(1);
+      expect(hostLaunches[0]).toMatchObject({
+        type: bot ? "Bot" : "HumanHost", localSeat: 0,
+        deckPayload: { booster_pack_pool: source, player: { main_deck: ["Host deck"] } },
+      });
+
+      // The guest authority receives no source, exactly like a set draft.
+      expect(seatSends[1]).toHaveBeenCalledWith(expect.objectContaining({
+        type: "draft_match_start", launch: expect.objectContaining({
+          type: bot ? "Bot" : "HumanHost", localSeat: 2,
+          deckPayload: expect.objectContaining({ booster_pack_pool: null,
+            player: expect.objectContaining({ main_deck: ["Human deck"] }) }),
+        }),
+      }));
+      // Every guest frame, and the guest match's durable launch record (which
+      // is persisted and later echoed as Bo3 intergame launch authority),
+      // must be free of every source entry.
+      const participantFrames = JSON.stringify(seatSends.map((send) => send.mock.calls));
+      const guestRecord = JSON.stringify([...privateHost.matchLaunches.get("guest-match")!.values()]);
+      for (const entry of source) {
+        expect(participantFrames).not.toContain(entry);
+        expect(guestRecord).not.toContain(entry);
+      }
+
+      // The host-local N-seat Commander payload never leaves this device.
+      const commander = await host.podCommanderDeckPayload({ ...draftView, seats: draftView.seats.slice(2) }, 3);
+      expect(commander.booster_pack_pool).toEqual(source);
+      expect(commander.player.main_deck).toEqual([bot ? "Bot deck" : "Guest deck"]);
+      expect(commander.opponent.main_deck).toEqual(["Human deck"]);
+    },
+  );
+
   /**
    * V-TS-1. The wire message's designation reaches the adapter, in order.
    *
@@ -254,204 +400,5 @@ describe("P2P deck-submission channel", () => {
       submissionId: "submission-1",
       submissionDisposition: "Rejected",
     });
-  });
-});
-
-/**
- * U15/U21 — the CR 903.3 designation's LAUNCH channel at the same host seam.
- *
- * The submission suite above carries a designation INTO the session; this one
- * carries it back OUT, through `podCommanderDeckPayload` -> `botDeckForSeat` /
- * `submittedDeckForSeat` -> `deckPayload`. It drives the REAL assembler against
- * a stubbed adapter, so `deckPayload`'s widening is exercised rather than
- * mocked over — `DraftPodPage.commanderLaunch.test.tsx` mocks the host adapter
- * and therefore cannot reach any of these three functions.
- *
- * REVERT-PROBE: `deckPayload`'s hardcoded `commander: []`. Restore it and every
- * designation assertion below fails while the ordering assertions still pass,
- * so the two axes are independently guarded.
- */
-describe("P2PDraftHost.podCommanderDeckPayload", () => {
-  /** Seat 0 is the human host; seats 1..3 are bots. */
-  function commanderPodView(seatCount: number, draftSetCodes: string[] = []) {
-    return {
-      kind: "CommanderDraft",
-      status: "Complete",
-      draft_set_codes: draftSetCodes,
-      seats: Array.from({ length: seatCount }, (_, i) => ({
-        seat_index: i,
-        is_bot: i !== 0,
-      })),
-    } as never;
-  }
-
-  /**
-   * `exportSession` returns the JSON `exportDraftSession` parses. Seat 0's
-   * submission carries its OWN designation, and its pool holds one card the
-   * main deck does not, so `sideboardFromPool` has something to produce and an
-   * empty sideboard cannot pass as "the pool was read".
-   */
-  function launchAdapter(botCommander = "Bot Legend") {
-    return {
-      exportSession: vi.fn(async () =>
-        JSON.stringify({
-          pools: [[{ name: "Human Legend" }, { name: "Spare Card" }]],
-          submitted_decks: {
-            "0": {
-              seat: 0,
-              main_deck: ["Human Legend", "Plains"],
-              commanders: ["Human Legend"],
-            },
-          },
-        }),
-      ),
-      getBotDeck: vi.fn(async () => ({
-        main_deck: [botCommander, "Bot Spell"],
-        lands: { Plains: 2 },
-        commander: [botCommander],
-      })),
-    } as unknown as Record<string, ReturnType<typeof vi.fn>>;
-  }
-
-  it("carries each seat's OWN commander, human and bot", async () => {
-    const host = newHost();
-    asPrivate(host).adapter = launchAdapter();
-
-    const payload = await host.podCommanderDeckPayload(commanderPodView(4), 0);
-
-    // Reach guard before any designation claim: the assembler really built a
-    // deck, so an empty designation would be a real absence.
-    expect(payload.player.main_deck.length).toBeGreaterThan(0);
-    // REVERT-FAILING: `deckPayload` hardcodes `commander: []` at base, so this
-    // is `[]` and the inequality below cannot hold either.
-    expect(payload.player.commander).toEqual(["Human Legend"]);
-    expect(payload.opponent.commander).toEqual(["Bot Legend"]);
-    // Two seats with DIFFERENT designations, so "they differ" cannot pass on
-    // two empties.
-    expect(payload.player.commander).not.toEqual(payload.opponent.commander);
-    // The bot's designation is a member of its main deck (CR 903.5a), and
-    // `botDeckForSeat` flattens `lands` into it, so no name is added or lost.
-    expect(payload.opponent.main_deck).toContain("Bot Legend");
-    expect(payload.opponent.main_deck).toEqual([
-      "Bot Legend",
-      "Bot Spell",
-      "Plains",
-      "Plains",
-    ]);
-    // The human's sideboard is pool-minus-maindeck, proving the session's pools
-    // were read rather than an empty default returned.
-    expect(payload.player.sideboard).toEqual(["Spare Card"]);
-  });
-
-  it("maps the local seat to game player 0 and the rest in ascending seat order", async () => {
-    const host = newHost();
-    const adapter = launchAdapter();
-    asPrivate(host).adapter = adapter;
-
-    const payload = await host.podCommanderDeckPayload(commanderPodView(4), 0);
-
-    expect(payload.player.main_deck.length).toBeGreaterThan(0);
-    // N-1 non-local seats: one becomes `opponent`, the rest `ai_decks`.
-    expect(payload.ai_decks).toHaveLength(2);
-    expect(adapter.getBotDeck.mock.calls.map((c) => c[0])).toEqual([1, 2, 3]);
-    // `exportDraftSession` is called ONCE for the whole payload, not per seat.
-    expect(adapter.exportSession).toHaveBeenCalledTimes(1);
-  });
-
-  it("reads the pod's own seat count rather than a fixed four", async () => {
-    const host = newHost();
-    const adapter = launchAdapter();
-    asPrivate(host).adapter = adapter;
-
-    const payload = await host.podCommanderDeckPayload(commanderPodView(5), 0);
-
-    // A 5-seat pod: 1 player + 1 opponent + 3 ai_decks. A hardcoded four would
-    // give 2 here, so this is the row a fixed pod size reddens.
-    expect(payload.ai_decks).toHaveLength(3);
-    expect(adapter.getBotDeck.mock.calls.map((c) => c[0])).toEqual([1, 2, 3, 4]);
-  });
-
-  /**
-   * U22. The draft's set codes reach the launch payload.
-   *
-   * CR 903.13f(3): a draft that contained Commander Masters boosters grants the
-   * partner ability, for deckbuilding purposes, to any card that can be a
-   * commander by itself whose color identity is one or fewer colors. The engine
-   * decides that from `DeckList.draft_set_codes`, and this is the client hop
-   * that supplies them — read off the SAME view the assembler already builds
-   * the decks from.
-   *
-   * The MIXED half is what makes the plural load-bearing: a CMM+CLB draft
-   * contained Commander Masters, so the grant is in force, and an assembler
-   * that forwarded one representative code would drop whichever set it did not
-   * pick. The engine takes the union; this hop must hand it every code.
-   *
-   * REVERT-PROBE: drop `draft_set_codes: view.draft_set_codes` from
-   * `podCommanderDeckPayload`'s return and `payload.draft_set_codes` is
-   * `undefined` here.
-   */
-  it("carries the view's draft set codes into the launch payload", async () => {
-    const host = newHost();
-    asPrivate(host).adapter = launchAdapter();
-
-    const payload = await host.podCommanderDeckPayload(
-      commanderPodView(4, ["CMM"]),
-      0,
-    );
-
-    // Reach guard (the same precedent as the `carries each seat's OWN commander`
-    // row): the assembler ran, so an absent set code below would be a real
-    // absence rather than a dead harness.
-    expect(payload.player.commander).toEqual(["Human Legend"]);
-    // REVERT-FAILING: `undefined` at base.
-    expect(payload.draft_set_codes).toEqual(["CMM"]);
-
-    const mixed = await host.podCommanderDeckPayload(
-      commanderPodView(4, ["CMM", "CLB"]),
-      0,
-    );
-    expect(mixed.draft_set_codes).toEqual(["CMM", "CLB"]);
-  });
-
-  it("leaves the launch payload's set codes empty when the view carries none", async () => {
-    const host = newHost();
-    asPrivate(host).adapter = launchAdapter();
-
-    const payload = await host.podCommanderDeckPayload(commanderPodView(4), 0);
-
-    expect(payload.player.commander).toEqual(["Human Legend"]);
-    // Paired negative: the assembler forwards the view's value verbatim rather
-    // than manufacturing a set code, so constructed-shaped views stay grantless.
-    expect(payload.draft_set_codes ?? []).toEqual([]);
-  });
-
-  it("propagates a draft-wasm refusal rather than shipping an unjudged deck", async () => {
-    const host = newHost();
-    asPrivate(host).adapter = {
-      ...launchAdapter(),
-      getBotDeck: vi.fn(async () => {
-        throw new Error(
-          "Card database must be loaded before a Commander Draft bot deck",
-        );
-      }),
-    } as unknown as Record<string, ReturnType<typeof vi.fn>>;
-
-    await expect(
-      host.podCommanderDeckPayload(commanderPodView(4), 0),
-    ).rejects.toThrow("Card database");
-  });
-
-  it("throws when the local seat has no submitted deck", async () => {
-    const host = newHost();
-    asPrivate(host).adapter = {
-      ...launchAdapter(),
-      exportSession: vi.fn(async () =>
-        JSON.stringify({ pools: [[]], submitted_decks: {} }),
-      ),
-    } as unknown as Record<string, ReturnType<typeof vi.fn>>;
-
-    await expect(
-      host.podCommanderDeckPayload(commanderPodView(4), 0),
-    ).rejects.toThrow("Seat 0 has no submitted deck");
   });
 });

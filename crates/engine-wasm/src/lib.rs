@@ -8,17 +8,17 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use engine::ai_support::{
-    auto_pass_recommended, auto_pass_recommended_for_viewer, end_continuous_effect_offers,
-    legal_actions_for_viewer, legal_actions_full, AiDecisionContract,
+    apply_ai_action_proposal, auto_pass_recommended, auto_pass_recommended_for_viewer,
+    end_continuous_effect_offers, legal_actions_for_viewer, legal_actions_full, AiDecisionContract,
+    AiProposalApplication,
 };
 use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
 use engine::database::{CardDatabase, CardSearchQuery};
 #[cfg(test)]
 use engine::game::engine::apply;
 use engine::game::engine::{
-    apply_interaction_with_rejection, apply_with_rejection, preflight_debug_action_with_rejection,
-    resume_restored_stack_automation, RestoredStackAutomationOutcome,
-    RestoredStackAutomationPresentation,
+    apply_with_rejection, preflight_debug_action_with_rejection, resume_restored_stack_automation,
+    RestoredStackAutomationOutcome, RestoredStackAutomationPresentation,
 };
 use engine::game::interaction::{
     bind_interaction_authority, preview_interaction, submit_interaction_with_rejection,
@@ -32,16 +32,20 @@ use engine::game::deck_validation::{draft_set_concessions_for, evaluate_deck_for
 use engine::game::CardDbRehydrationFinalization;
 use engine::game::{
     can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket,
-    evaluate_deck_compatibility, filter_state_for_viewer, is_brawl_commander_eligible,
-    is_commander_eligible, is_tiny_leader_eligible, load_and_hydrate_decks, max_deck_copies,
+    evaluate_deck_compatibility, filter_events_for_viewer, filter_state_for_viewer,
+    is_brawl_commander_eligible, is_commander_eligible, is_freeform_commander_eligible,
+    is_tiny_leader_eligible, load_and_hydrate_decks, max_deck_copies,
     rehydrate_game_from_card_db_with_finalization, resolve_deck_list,
     signature_spell_selection_policy, start_game, start_game_with_starting_player,
     validate_name_deck_for_format_full, BracketEstimate, DeckCompatibilityRequest, DeckList,
     PlayerDeckList, ReplayPlayer,
 };
-use engine::types::actions::DebugAction;
+use engine::types::actions::{DebugAction, DebugCardCreationKind};
 use engine::types::custom_format::{CustomFormatDef, CustomFormatRules};
-use engine::types::format::{DeckCopyLimit, FormatConfig, GameFormat};
+use engine::types::events::GameEvent;
+use engine::types::format::{
+    validate_starting_life_bounds, DeckCopyLimit, FormatConfig, GameFormat,
+};
 use engine::types::game_state::{
     PersistedGameState, PersistedRestoreFinalization, PreparedPersistedGameState,
     TrustedGameStateEnvelope, WaitingFor,
@@ -150,6 +154,11 @@ struct PreparedRestoredGameState {
     debug_permitted_was_serialized: bool,
 }
 
+/// Stable machine-recognizable prefix for a paused cast menu created before a
+/// face was part of its selection tuple. Callers can offer recovery without
+/// parsing the human-facing guidance that follows it.
+const LEGACY_CASTING_VARIANT_FACE_RESTORE_ERROR: &str = "RESTORE_INCOMPATIBLE_CASTING_VARIANT_FACE";
+
 #[derive(Debug)]
 struct DecodedRestoredGameState {
     state: GameState,
@@ -163,6 +172,11 @@ fn prepare_restored_game_state(json_str: &str) -> Result<PreparedRestoredGameSta
         .get("state")
         .and_then(serde_json::Value::as_object)
         .or_else(|| serialized.as_object());
+    if state.is_some_and(legacy_casting_variant_choice_lacks_face) {
+        return Err(format!(
+            "{LEGACY_CASTING_VARIANT_FACE_RESTORE_ERROR}: Cannot restore paused CastingVariantChoice without required face; start a new game or undo to a state before this casting choice."
+        ));
+    }
     let debug_permitted_was_serialized =
         state.is_some_and(|state| state.contains_key("debug_permitted"));
     let state = serde_json::from_value::<PersistedGameState>(serialized)
@@ -173,6 +187,35 @@ fn prepare_restored_game_state(json_str: &str) -> Result<PreparedRestoredGameSta
         state,
         debug_permitted_was_serialized,
     })
+}
+
+/// Reject only the pre-face paused cast menu before generic serde reports a
+/// field-path error. A menu index cannot be recovered because Fuse now has two
+/// different Normal choices, so selecting a guessed face would change a cast.
+fn legacy_casting_variant_choice_lacks_face(
+    state: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    let Some(waiting_for) = state
+        .get("waiting_for")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return false;
+    };
+    if waiting_for.get("type").and_then(serde_json::Value::as_str) != Some("CastingVariantChoice") {
+        return false;
+    }
+    waiting_for
+        .get("data")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|data| data.get("options"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|options| {
+            options.iter().any(|option| {
+                option
+                    .as_object()
+                    .is_some_and(|option| !option.contains_key("face"))
+            })
+        })
 }
 
 /// Native-only decode helper for restore-boundary tests that do not need card
@@ -196,6 +239,26 @@ fn validate_external_format_config(config: &FormatConfig, player_count: u8) -> R
     config.reject_unimplemented_range_of_influence()
 }
 
+/// Resolves and validates `initialize_game_impl`'s effective `FormatConfig`
+/// from an already-decoded declared config (if any) and the resolved
+/// `player_count`. `decoded_format_config` is `None` exactly when the JS
+/// caller supplied no format config (`null`/`undefined`) — in that case this
+/// is the WASM boundary's own site that supplies an UNDECLARED default (see
+/// `FormatConfig::validate_for_player_count`'s doc comment for the taxonomy
+/// of call sites), via the same shared `FormatConfig::default_for_player_count`
+/// authority `server_core::session::SessionManager::create_game_n_players`
+/// uses, so the two ingresses never disagree about what an undeclared config
+/// defaults to for a given seat count.
+fn resolve_and_validate_initialize_format_config(
+    decoded_format_config: Option<FormatConfig>,
+    resolved_player_count: u8,
+) -> Result<FormatConfig, String> {
+    let format_config = decoded_format_config
+        .unwrap_or_else(|| FormatConfig::default_for_player_count(resolved_player_count));
+    validate_external_format_config(&format_config, resolved_player_count)?;
+    Ok(format_config)
+}
+
 fn parse_initialize_format_config(
     decoded: Result<FormatConfig, String>,
 ) -> Result<FormatConfig, serde_json::Value> {
@@ -213,6 +276,35 @@ mod external_format_config_tests {
 
     use super::*;
     use engine::types::format::RangeOfInfluenceConfig;
+
+    #[test]
+    fn restore_refuses_only_legacy_paused_casting_variant_menu_without_face() {
+        let mut paused =
+            serde_json::to_value(GameState::new_two_player(42)).expect("state serializes");
+        paused["waiting_for"] = serde_json::json!({
+            "type": "CastingVariantChoice",
+            "data": {
+                "player": 0,
+                "object_id": 1,
+                "card_id": 1,
+                "options": [{ "variant": "Normal", "mana_cost": { "type": "NoCost" } }]
+            }
+        });
+        let error = prepare_restored_game_state(&paused.to_string())
+            .expect_err("legacy paused menu must receive actionable refusal");
+        assert_eq!(
+            error,
+            format!(
+                "{LEGACY_CASTING_VARIANT_FACE_RESTORE_ERROR}: Cannot restore paused CastingVariantChoice without required face; start a new game or undo to a state before this casting choice."
+            )
+        );
+
+        paused["waiting_for"]["data"]["options"][0]["face"] = serde_json::json!("Left");
+        assert!(
+            prepare_restored_game_state(&paused.to_string()).is_ok(),
+            "a paused menu with an explicit face must continue through generic restore handling"
+        );
+    }
 
     #[test]
     fn object_id_records_serialize_with_json_string_keys() {
@@ -235,6 +327,117 @@ mod external_format_config_tests {
         assert!(validate_external_format_config(&config, 2)
             .expect_err("limited range must remain disabled at the WASM boundary")
             .contains("not supported"));
+    }
+
+    /// `validate_external_format_config`'s `validate_for_player_count` call
+    /// (used by `initialize_game_impl`) is one of the five production call
+    /// sites: `CommanderDraft`'s registry range is 3-8, so a 2-player
+    /// initialize request must be rejected here too — a retryable wire
+    /// rejection, unlike the same check's use at
+    /// `server_core::session::GameSession::from_persisted`.
+    #[test]
+    fn external_initialization_rejects_player_count_outside_format_registry_range() {
+        let config = FormatConfig::commander_draft();
+
+        assert!(validate_external_format_config(&config, 2)
+            .expect_err("2 players is outside CommanderDraft's 3-8 registry range")
+            .contains("player_count"));
+    }
+
+    /// `format_config_for_custom_rules` resolves a saved custom-format
+    /// definition into a live `FormatConfig` for the "select a saved custom
+    /// format" lobby action; `custom_rules` is user-editable localStorage
+    /// data, so bounding `starting_life` here fails early with a readable
+    /// lobby-level message rather than a raw `FormatConfig::deserialize`
+    /// error at game start — defense in depth, since that `Deserialize`
+    /// remains the closing gate either way.
+    /// `resolve_and_validate_custom_format_config` is the resolve-plus-bound
+    /// step behind the `#[wasm_bindgen]` shell (which cannot be exercised
+    /// natively — see its own doc comment).
+    #[test]
+    fn resolve_and_validate_custom_format_config_rejects_starting_life_outside_bounds() {
+        use engine::types::custom_format::{
+            CommandZoneMode, CustomFormatId, CustomFormatRules, LegacyRuleSet, LegalityRules,
+            StructuralRules,
+        };
+        use engine::types::format::{DeckSizeRule, SideboardPolicy, MAX_STARTING_LIFE};
+
+        fn rules_with_starting_life(starting_life: i32) -> CustomFormatRules {
+            CustomFormatRules {
+                id: CustomFormatId(1),
+                structural: StructuralRules {
+                    starting_life,
+                    min_players: 2,
+                    max_players: 4,
+                    deck_size: DeckSizeRule::Minimum(60),
+                    singleton: false,
+                    command_zone_mode: CommandZoneMode::Disabled,
+                    range_of_influence: None,
+                    team_based: false,
+                    sideboard_policy: SideboardPolicy::Unlimited,
+                    default_deck_copy_limit: DeckCopyLimit::UpTo(4),
+                },
+                legality: LegalityRules {
+                    legal_sets: None,
+                    legal_cards: Vec::new(),
+                    banned: Vec::new(),
+                    restricted: Vec::new(),
+                    legacy: LegacyRuleSet::default(),
+                },
+            }
+        }
+
+        assert!(
+            resolve_and_validate_custom_format_config(&rules_with_starting_life(20)).is_ok(),
+            "a playable, in-bounds starting_life must resolve"
+        );
+        assert!(
+            resolve_and_validate_custom_format_config(&rules_with_starting_life(0))
+                .expect_err("0 starting life loses every seat at the first SBA check (CR 704.5a)")
+                .contains("starting_life"),
+        );
+        assert!(
+            resolve_and_validate_custom_format_config(&rules_with_starting_life(
+                MAX_STARTING_LIFE + 1
+            ))
+            .expect_err("a starting_life above MAX_STARTING_LIFE risks i32 overflow")
+            .contains("starting_life"),
+        );
+    }
+
+    /// Regression: `initialize_game_impl` previously defaulted an undeclared
+    /// config to `FormatConfig::standard()` unconditionally, so a local
+    /// 4-player game with no declared format config was rejected with
+    /// "player_count 4 is outside Standard's seat range 2-2" — naming a
+    /// format the caller never chose. `resolve_and_validate_initialize_
+    /// format_config` is the exact function `initialize_game_impl` calls for
+    /// this decision, so this test would fail if the fix were reverted.
+    #[test]
+    fn initialize_without_a_declared_format_config_accepts_a_four_player_local_game() {
+        let config = resolve_and_validate_initialize_format_config(None, 4).expect(
+            "an undeclared config for 4 players must default to a format that admits 4 seats",
+        );
+        assert_eq!(
+            config.format,
+            GameFormat::FreeForAll,
+            "4 seats must default via FormatConfig::default_for_player_count, not Standard"
+        );
+    }
+
+    #[test]
+    fn initialize_with_a_declared_format_config_validates_that_config_unchanged() {
+        let commander_draft = FormatConfig::commander_draft();
+
+        let resolved =
+            resolve_and_validate_initialize_format_config(Some(commander_draft.clone()), 4)
+                .expect("CommanderDraft's registry range (3-8) admits 4 players");
+        assert_eq!(resolved.format, GameFormat::CommanderDraft);
+
+        assert!(
+            resolve_and_validate_initialize_format_config(Some(commander_draft), 2)
+                .expect_err("2 players is outside CommanderDraft's 3-8 registry range")
+                .contains("player_count")
+        );
     }
 
     #[test]
@@ -374,7 +577,7 @@ thread_local! {
     /// panics leaves the borrow flag permanently set — every subsequent call fails.
     /// Cell::take() + Cell::set() has no borrow guard, making it panic-resilient.
     static GAME_STATE: Cell<Option<GameState>> = const { Cell::new(None) };
-    static CARD_DB: RefCell<Option<CardDatabase>> = const { RefCell::new(None) };
+    static CARD_DB: RefCell<Option<std::sync::Arc<CardDatabase>>> = const { RefCell::new(None) };
     /// When set, this engine is claimed by a multiplayer host session. The
     /// engine claims it itself, in the same call that installs the game
     /// (`initialize_multiplayer_host_game`, `resume_multiplayer_host_state`),
@@ -737,7 +940,7 @@ pub fn load_card_database(json_str: &str) -> Result<u32, JsValue> {
         .map_err(|e| JsValue::from_str(&format!("Failed to parse card database: {}", e)))?;
     let count = db.card_count() as u32;
     CARD_DB.with(|cell| {
-        *cell.borrow_mut() = Some(db);
+        *cell.borrow_mut() = Some(std::sync::Arc::new(db));
     });
     Ok(count)
 }
@@ -750,9 +953,11 @@ pub fn build_ai_card_subset() -> Result<String, JsValue> {
         let db = db_cell.borrow();
         GAME_STATE.with(|state_cell| {
             let state = state_cell.take();
+            // `Option<&Arc<T>>` does not coerce to `Option<&T>` — deref
+            // coercion does not reach inside a generic type constructor.
             let result = engine::game::card_subset::build_ai_card_subset_or_full(
                 state.as_ref(),
-                db.as_ref(),
+                db.as_deref(),
             );
             state_cell.set(state);
             result
@@ -776,6 +981,26 @@ pub fn get_card_face_data(name: &str) -> JsValue {
             Some(face) => to_js(face),
             None => JsValue::NULL,
         }
+    })
+}
+
+/// The canonical printed name of each of `names`, index-aligned, `null` where
+/// `CardDatabase::canonical_name` has none. Errors if the card database is
+/// not loaded.
+#[wasm_bindgen(js_name = canonicalCardNames)]
+pub fn canonical_card_names(names: JsValue) -> Result<JsValue, JsValue> {
+    let names: Vec<String> = serde_wasm_bindgen::from_value(names)
+        .map_err(|e| JsValue::from_str(&format!("Invalid card name list: {e}")))?;
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return Err(JsValue::from_str(
+                "Card database not loaded. Call load_card_database first.",
+            ));
+        };
+        let canonical: Vec<Option<String>> =
+            names.iter().map(|name| db.canonical_name(name)).collect();
+        Ok(to_js(&canonical))
     })
 }
 
@@ -901,6 +1126,7 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
             // affects PAIRING, not eligibility, so Commander Draft uses
             // Commander's own predicate.
             GameFormat::CommanderDraft => is_commander_eligible(face),
+            GameFormat::FreeformCommander => is_freeform_commander_eligible(face),
             GameFormat::TinyLeaders => is_tiny_leader_eligible(face),
             GameFormat::Oathbreaker => face.is_oathbreaker,
             GameFormat::Brawl | GameFormat::HistoricBrawl => is_brawl_commander_eligible(face),
@@ -919,11 +1145,19 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
             | GameFormat::Archenemy
             | GameFormat::FreeForAll
             | GameFormat::TwoHeadedGiant
-            | GameFormat::Limited => false,
-            // Matches `evaluate_selected_format_summary`'s Custom arm: no
-            // CustomFormatRules resolver exists yet, so eligibility cannot be
-            // answered here. `false` is the fail-closed reading — a permissive
-            // `true` would offer an unvalidated card as a commander.
+            | GameFormat::Limited
+            | GameFormat::Freeform => false,
+            // Phase 1d wired a real custom-format deck-legality evaluator
+            // (`evaluate_custom_format`), but it is scoped to non-command-zone
+            // (constructed-shaped) custom formats — a command-zone custom
+            // (`CommandZoneMode::Enabled`, the shape a saved Commander/Brawl/
+            // Tiny-Leaders/Oathbreaker lobby produces) fails closed there too.
+            // This function also only ever receives a bare `GameFormat`, never
+            // the resolved `CommanderEligibilityRule` a command-zone custom
+            // format declares, so eligibility genuinely cannot be answered
+            // here regardless. `false` is the fail-closed reading — a
+            // permissive `true` would offer an unvalidated card as a
+            // commander.
             GameFormat::Custom(_) => false,
         }
     })
@@ -1131,8 +1365,12 @@ pub fn evaluate_deck_compatibility_js(request: JsValue) -> Result<JsValue, JsVal
 /// (`validateGuestDeck` in `client/src/adapter/p2p-adapter.ts`), which kicks a
 /// guest whose deck is illegal for the room's format. UI-hint callers must keep
 /// using `evaluate_deck_compatibility_js`: that one deliberately answers "no
-/// opinion" (`selected_format_compatible: null`) for a Custom format, which is
-/// the honest answer for a legality chip and an unacceptable one for a kick.
+/// opinion" (`selected_format_compatible: null`) for a Custom format — every
+/// request crossing this WASM boundary carries only a bare `GameFormat` tag
+/// (Wire-Inertness Invariant, `types::format::SelectedFormat`), which can never
+/// resolve real rules even though Phase 1d wired a real evaluator
+/// (`evaluate_custom_format`) for a trusted, already-`Resolved` config — which
+/// is the honest answer for a legality chip and an unacceptable one for a kick.
 #[wasm_bindgen(js_name = evaluateDeckFormatGate)]
 pub fn evaluate_deck_format_gate_js(request: JsValue) -> Result<JsValue, JsValue> {
     let request: DeckCompatibilityRequest = serde_wasm_bindgen::from_value(request)
@@ -1176,9 +1414,18 @@ pub fn custom_format_from_lobby_config(
 }
 
 /// The single authoritative `CustomFormatRules -> FormatConfig` resolver,
-/// exposed for the lobby's "select a saved custom format" action. Total and
-/// infallible: a `CustomFormatRules` carries every structural field the config
-/// needs, so there is no unresolvable input.
+/// exposed for the lobby's "select a saved custom format" action.
+/// `FormatConfig::for_custom_rules` itself is total and infallible: a
+/// `CustomFormatRules` carries every structural field the config needs, so
+/// there is no unresolvable input. This wrapper is fallible anyway — beyond
+/// deserializing the JS payload, it also bounds the resolved config's
+/// `starting_life` (CR 704.5a / CR 810.8c playability floor, and the engine's
+/// `MAX_STARTING_LIFE` overflow-safety ceiling) via
+/// `validate_starting_life_bounds`. `custom_rules` is user-editable
+/// localStorage data, so this bound fails early with a readable lobby-level
+/// message rather than a raw `FormatConfig::deserialize` error at game
+/// start. It is defense in depth, not the sole check: `FormatConfig`'s own
+/// `Deserialize` (see below) remains the closing gate regardless.
 ///
 /// The frontend must call this rather than assembling a `FormatConfig` from the
 /// saved rules itself. `FormatConfig`'s own `Deserialize` re-derives the config
@@ -1188,7 +1435,22 @@ pub fn custom_format_from_lobby_config(
 pub fn format_config_for_custom_rules(custom_rules: JsValue) -> Result<JsValue, JsValue> {
     let rules: CustomFormatRules = serde_wasm_bindgen::from_value(custom_rules)
         .map_err(|e| JsValue::from_str(&format!("Invalid CustomFormatRules: {e}")))?;
-    Ok(to_js(&FormatConfig::for_custom_rules(&rules)))
+    let config =
+        resolve_and_validate_custom_format_config(&rules).map_err(|e| JsValue::from_str(&e))?;
+    Ok(to_js(&config))
+}
+
+/// The fallible resolve step behind [`format_config_for_custom_rules`],
+/// extracted so it is reachable from a native `#[cfg(test)]` module: the
+/// `#[wasm_bindgen]` shell above serializes through `to_js`, which panics
+/// outside a wasm32 runtime (see `validate_deck_list_seats`'s own note on the
+/// same constraint).
+fn resolve_and_validate_custom_format_config(
+    rules: &CustomFormatRules,
+) -> Result<FormatConfig, String> {
+    let config = FormatConfig::for_custom_rules(rules);
+    validate_starting_life_bounds(&config)?;
+    Ok(config)
 }
 
 /// Returns the engine-authored Oathbreaker signature-spell selection policy.
@@ -1474,24 +1736,33 @@ fn initialize_game_impl(
 ) -> JsValue {
     let seed = seed.map(|s| s as u64).unwrap_or(42);
 
-    let format_config = if !format_config_js.is_null() && !format_config_js.is_undefined() {
+    // Resolved before the format config: an undeclared config's default must
+    // be chosen FOR this seat count (see
+    // `resolve_and_validate_initialize_format_config`), so `count` has to be
+    // known first.
+    let count = player_count.unwrap_or(2);
+
+    let decoded_format_config = if !format_config_js.is_null() && !format_config_js.is_undefined() {
         match parse_initialize_format_config(
             serde_wasm_bindgen::from_value::<FormatConfig>(format_config_js)
                 .map_err(|error| error.to_string()),
         ) {
-            Ok(config) => config,
+            Ok(config) => Some(config),
             Err(error) => return to_js(&error),
         }
     } else {
-        FormatConfig::standard()
+        None
     };
-    let count = player_count.unwrap_or(2);
-    if let Err(reason) = validate_external_format_config(&format_config, count) {
-        return to_js(&serde_json::json!({
-            "error": true,
-            "reasons": [reason],
-        }));
-    }
+    let format_config =
+        match resolve_and_validate_initialize_format_config(decoded_format_config, count) {
+            Ok(config) => config,
+            Err(reason) => {
+                return to_js(&serde_json::json!({
+                    "error": true,
+                    "reasons": [reason],
+                }));
+            }
+        };
 
     let mut state = GameState::new(format_config.clone(), count, seed);
     // Read the posture from `kind`, not from `is_multiplayer_mode()`: the flag
@@ -1575,8 +1846,11 @@ fn initialize_game_impl(
             // a hard error instead of a silently-wrong-format game.
             let payload = resolve_deck_list(db, &deck_list);
 
-            load_and_hydrate_decks(&mut state, &payload, Some(db));
+            load_and_hydrate_decks(&mut state, &payload, Some(&**db));
             state.all_card_names = db.card_names().into();
+            // CR 707.2 + CR 202.3: resolvers that draw from the whole corpus
+            // (the Momir Basic emblem) read the database through this handle.
+            engine::game::install_card_db(&mut state, std::sync::Arc::clone(db));
             None
         });
 
@@ -1711,11 +1985,10 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
         if debug_action.is_zero_count_create() {
             return match with_state(|state| {
                 preflight_debug_action_with_rejection(state, actor, debug_action)?;
-                Ok::<_, ActionRejection>(engine::types::game_state::ActionResult {
-                    events: vec![],
-                    waiting_for: state.waiting_for.clone(),
-                    log_entries: vec![],
-                })
+                Ok::<_, ActionRejection>(engine::types::game_state::ActionResult::applied(
+                    vec![],
+                    state.waiting_for.clone(),
+                ))
             }) {
                 Ok(result) => action_outcome(result),
                 Err(error) => error,
@@ -1731,6 +2004,7 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
         attach_to,
         run_etb,
         nonlegendary,
+        creation_kind,
     }) = action
     {
         return handle_debug_create_card(DebugCreateCardRequest {
@@ -1742,6 +2016,7 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
             attach_to,
             run_etb,
             nonlegendary,
+            creation_kind,
         });
     }
 
@@ -1861,6 +2136,7 @@ struct DebugCreateCardRequest<'a> {
     attach_to: Option<engine::game::game_object::AttachTarget>,
     run_etb: bool,
     nonlegendary: bool,
+    creation_kind: DebugCardCreationKind,
 }
 
 fn handle_debug_create_card(request: DebugCreateCardRequest<'_>) -> JsValue {
@@ -1872,6 +2148,7 @@ fn handle_debug_create_card(request: DebugCreateCardRequest<'_>) -> JsValue {
         attach_to: request.attach_to,
         run_etb: request.run_etb,
         nonlegendary: request.nonlegendary,
+        creation_kind: request.creation_kind,
     };
     match with_state(|state| {
         preflight_debug_action_with_rejection(state, request.actor, &debug_action)
@@ -1903,6 +2180,7 @@ fn handle_debug_create_card_inner(
         attach_to,
         run_etb,
         nonlegendary,
+        creation_kind,
     } = request;
     let debug_action = engine::types::actions::DebugAction::CreateCard {
         card_name: card_name.to_string(),
@@ -1912,6 +2190,7 @@ fn handle_debug_create_card_inner(
         attach_to,
         run_etb,
         nonlegendary,
+        creation_kind,
     };
     let waiting_for = with_state(|state| {
         engine::game::preflight_debug_action(state, actor, &debug_action)
@@ -1920,11 +2199,10 @@ fn handle_debug_create_card_inner(
     })
     .unwrap_or_else(|_| Err(NOT_INITIALIZED_ERR.to_string()))?;
     if count == 0 {
-        return Ok(engine::types::game_state::ActionResult {
-            events: vec![],
+        return Ok(engine::types::game_state::ActionResult::applied(
+            vec![],
             waiting_for,
-            log_entries: vec![],
-        });
+        ));
     }
     let source = CARD_DB.with(|cell| {
         let db = cell.borrow();
@@ -1948,6 +2226,7 @@ fn handle_debug_create_card_inner(
                 attach_to,
                 run_etb,
                 nonlegendary,
+                creation_kind,
             },
         )
         .map_err(|error| format!("Engine error: {error}"))?;
@@ -2136,6 +2415,17 @@ struct ViewerSnapshot<'a> {
     viewer_interaction: engine::types::interaction::ViewerInteraction,
 }
 
+/// ViewerSnapshot plus the event slice that belongs to the same caller-owned
+/// transition. Keeping this as a distinct wire type preserves the legacy
+/// state-only endpoint while making event filtering an engine-owned operation.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ViewerTransitionSnapshot<'a> {
+    #[serde(flatten)]
+    snapshot: ViewerSnapshot<'a>,
+    events: Vec<GameEvent>,
+}
+
 fn legal_actions_result_for_viewer(state: &GameState, viewer: PlayerId) -> LegalActionsResult {
     let (actions, spell_costs, legal_actions_by_object) = legal_actions_for_viewer(state, viewer);
     let auto_pass_recommended = auto_pass_recommended_for_viewer(state, viewer, &actions);
@@ -2160,6 +2450,50 @@ fn legal_actions_result_for_viewer(state: &GameState, viewer: PlayerId) -> Legal
         viewer_interaction: engine::game::interaction::derive_viewer_interaction(
             state, state, viewer,
         ),
+    }
+}
+
+fn viewer_snapshot<'a>(
+    state: &GameState,
+    filtered: &'a GameState,
+    viewer: PlayerId,
+) -> ViewerSnapshot<'a> {
+    let legal = legal_actions_result_for_viewer(state, viewer);
+    let viewer_interaction =
+        engine::game::interaction::derive_viewer_interaction(state, filtered, viewer);
+    ViewerSnapshot {
+        state: engine::game::derived_views::ClientGameStateRef::wrap_filtered(
+            state,
+            filtered,
+            Some(viewer),
+        ),
+        actions: legal.actions,
+        auto_pass_recommended: legal.auto_pass_recommended,
+        end_continuous_effect_offers: legal.end_continuous_effect_offers,
+        mana_payment_shortcut_actions: legal.mana_payment_shortcut_actions,
+        spell_costs: legal.spell_costs,
+        legal_actions_by_object: legal.legal_actions_by_object,
+        activation_block_reasons: legal.activation_block_reasons,
+        stuck_diagnostic: legal.stuck_diagnostic,
+        viewer_interaction,
+    }
+}
+
+fn viewer_player_id(player_id: u32) -> Result<PlayerId, String> {
+    u8::try_from(player_id)
+        .map(PlayerId)
+        .map_err(|_| format!("INVALID_VIEWER_ID: {player_id} exceeds u8 range"))
+}
+
+fn viewer_transition_snapshot<'a>(
+    state: &GameState,
+    filtered: &'a GameState,
+    viewer: PlayerId,
+    events: &[GameEvent],
+) -> ViewerTransitionSnapshot<'a> {
+    ViewerTransitionSnapshot {
+        snapshot: viewer_snapshot(state, filtered, viewer),
+        events: filter_events_for_viewer(events, state, viewer),
     }
 }
 
@@ -2204,6 +2538,22 @@ mod viewer_priority_tests {
             !controlled_result.auto_pass_recommended,
             "the controlled viewer is not authorized to act and must receive false"
         );
+
+        let controller_filtered = filter_state_for_viewer(&state, controller);
+        let controller_snapshot =
+            viewer_transition_snapshot(&state, &controller_filtered, controller, &[]);
+        assert!(controller_snapshot
+            .snapshot
+            .actions
+            .iter()
+            .any(|action| matches!(action, GameAction::PassPriority)));
+        assert!(controller_snapshot.snapshot.viewer_interaction.can_submit);
+
+        let controlled_filtered = filter_state_for_viewer(&state, controlled);
+        let controlled_snapshot =
+            viewer_transition_snapshot(&state, &controlled_filtered, controlled, &[]);
+        assert!(controlled_snapshot.snapshot.actions.is_empty());
+        assert!(!controlled_snapshot.snapshot.viewer_interaction.can_submit);
     }
 
     #[test]
@@ -2222,6 +2572,78 @@ mod viewer_priority_tests {
             "normal P2P must not receive the debug-library capability"
         );
     }
+
+    #[test]
+    fn viewer_transition_projects_hidden_state_and_filters_face_down_exile_events() {
+        let mut state = GameState::new_two_player(42);
+        let owner = PlayerId(1);
+        let card = engine::game::zones::create_object(
+            &mut state,
+            engine::types::identifiers::CardId(7),
+            owner,
+            "Hidden Exile".to_string(),
+            engine::types::zones::Zone::Exile,
+        );
+        {
+            let object = state.objects.get_mut(&card).expect("created object");
+            object.face_down = true;
+            object.foretold = true;
+        }
+        let record = state.objects[&card].snapshot_for_zone_change(
+            card,
+            Some(engine::types::zones::Zone::Library),
+            engine::types::zones::Zone::Exile,
+        );
+        let events = vec![
+            GameEvent::CardDrawn {
+                player_id: owner,
+                object_id: card,
+                nth_in_turn: 1,
+                nth_in_step: 1,
+            },
+            GameEvent::ZoneChanged {
+                object_id: card,
+                from: Some(engine::types::zones::Zone::Library),
+                to: engine::types::zones::Zone::Exile,
+                record: Box::new(record),
+            },
+        ];
+
+        let opponent = PlayerId(0);
+        let opponent_filtered = filter_state_for_viewer(&state, opponent);
+        let opponent_snapshot =
+            viewer_transition_snapshot(&state, &opponent_filtered, opponent, &events);
+        assert_eq!(opponent_snapshot.events, Vec::<GameEvent>::new());
+        assert_eq!(
+            opponent_snapshot.snapshot.state.state.objects[&card].name,
+            "Hidden Card"
+        );
+
+        let owner_filtered = filter_state_for_viewer(&state, owner);
+        let owner_snapshot = viewer_transition_snapshot(&state, &owner_filtered, owner, &events);
+        assert_eq!(owner_snapshot.events, events);
+        assert_eq!(
+            owner_snapshot.snapshot.state.state.objects[&card].name,
+            "Hidden Exile"
+        );
+
+        let legacy = serde_json::to_value(&opponent_snapshot.snapshot)
+            .expect("legacy viewer snapshot serializes");
+        assert!(legacy.get("events").is_none());
+        let transition = serde_json::to_value(&opponent_snapshot)
+            .expect("viewer transition snapshot serializes");
+        assert_eq!(transition["events"], serde_json::json!([]));
+        assert!(transition.get("state").is_some());
+    }
+
+    #[test]
+    fn viewer_transition_rejects_unrepresentable_viewer_ids() {
+        assert_eq!(viewer_player_id(255), Ok(PlayerId(255)));
+        assert_eq!(
+            viewer_player_id(256),
+            Err("INVALID_VIEWER_ID: 256 exceeds u8 range".to_string())
+        );
+    }
 }
 
 #[wasm_bindgen]
@@ -2230,27 +2652,35 @@ pub fn get_viewer_snapshot_js(player_id: u32) -> JsValue {
         engine::game::layers::flush_layers(state);
         let viewer = PlayerId(player_id as u8);
         let filtered = filter_state_for_viewer(state, viewer);
-        let legal = legal_actions_result_for_viewer(state, viewer);
-        let viewer_interaction =
-            engine::game::interaction::derive_viewer_interaction(state, &filtered, viewer);
-        to_js(&ViewerSnapshot {
-            state: engine::game::derived_views::ClientGameStateRef::wrap_filtered(
-                state,
-                &filtered,
-                Some(viewer),
-            ),
-            actions: legal.actions,
-            auto_pass_recommended: legal.auto_pass_recommended,
-            end_continuous_effect_offers: legal.end_continuous_effect_offers,
-            mana_payment_shortcut_actions: legal.mana_payment_shortcut_actions,
-            spell_costs: legal.spell_costs,
-            legal_actions_by_object: legal.legal_actions_by_object,
-            activation_block_reasons: legal.activation_block_reasons,
-            stuck_diagnostic: legal.stuck_diagnostic,
-            viewer_interaction,
-        })
+        to_js(&viewer_snapshot(state, &filtered, viewer))
     }) {
         Ok(val) => val,
+        Err(_) => JsValue::NULL,
+    }
+}
+
+/// Combined viewer projection and event slice for one engine transition.
+/// Unlike the legacy state-only endpoint, this path validates the viewer id
+/// before narrowing it to the engine's representable PlayerId domain.
+#[wasm_bindgen]
+pub fn get_viewer_transition_snapshot_js(player_id: u32, events: JsValue) -> JsValue {
+    let events: Vec<GameEvent> = match serde_wasm_bindgen::from_value(events) {
+        Ok(events) => events,
+        Err(error) => return JsValue::from_str(&format!("INVALID_TRANSITION_EVENTS: {error}")),
+    };
+    let viewer = match viewer_player_id(player_id) {
+        Ok(viewer) => viewer,
+        Err(error) => return JsValue::from_str(&error),
+    };
+
+    match with_state_mut(|state| {
+        engine::game::layers::flush_layers(state);
+        let filtered = filter_state_for_viewer(state, viewer);
+        to_js(&viewer_transition_snapshot(
+            state, &filtered, viewer, &events,
+        ))
+    }) {
+        Ok(value) => value,
         Err(_) => JsValue::NULL,
     }
 }
@@ -2374,24 +2804,33 @@ fn rehydrate_restored_state_from_card_db(state: &mut GameState) -> Result<(), St
             db,
             CardDbRehydrationFinalization::Defer,
         );
+        // `card_db` is `#[serde(skip)]`, so a restored state arrives without a
+        // draw source. Reinstall it or the Momir emblem silently makes nothing.
+        engine::game::install_card_db(state, std::sync::Arc::clone(db));
         Ok(())
     })
 }
 
 fn decode_and_rehydrate_restored_game_state(
     json_str: &str,
-    restore_runtime: impl FnOnce(&mut GameState),
+    restore_runtime: impl FnOnce(&mut GameState) -> Result<(), String>,
 ) -> Result<DecodedRestoredGameState, String> {
     let restored = prepare_restored_game_state(json_str)?;
     let debug_permitted_was_serialized = restored.debug_permitted_was_serialized;
     let state = restored
         .state
         .finalize_after_rehydration(|state| {
+            // Keep the generic decode body compatible with legacy local undo
+            // and localStorage restores. The P2P resume caller uses the
+            // per-caller `restore_runtime` hook to validate the restored seat
+            // count before installing state that can be broadcast to guests
+            // (Issue #8692); widening the format bounds would instead make
+            // the saved config fail its own deserialization admission gate.
             rehydrate_restored_state_from_card_db(state)?;
             // Combat declaration snapshots are display data derived from the rehydrated
             // live board. Rebuild them before this external state becomes interactive.
             engine::game::combat::refresh_combat_declaration_waiting_for(state);
-            restore_runtime(state);
+            restore_runtime(state)?;
             Ok(())
         })
         .map_err(|error| format!("Failed to restore GameState: {error}"))?;
@@ -2439,10 +2878,10 @@ fn backfill_legacy_debug_permissions(
 #[cfg(test)]
 fn load_minimal_test_card_database() {
     CARD_DB.with(|cell| {
-        *cell.borrow_mut() = Some(
+        *cell.borrow_mut() = Some(std::sync::Arc::new(
             CardDatabase::from_json_str("{}")
                 .expect("an empty test card database must deserialize"),
-        );
+        ));
     });
 }
 
@@ -2471,7 +2910,10 @@ fn restore_game_state_inner(json_str: &str) -> Result<(), String> {
     if MULTIPLAYER_MODE.with(|cell| cell.get()) {
         return Err("restore_game_state refused: undo is disabled in multiplayer sessions".into());
     }
-    let restored = decode_and_rehydrate_restored_game_state(json_str, GameState::rehydrate_rng)?;
+    let restored = decode_and_rehydrate_restored_game_state(json_str, |state| {
+        state.rehydrate_rng();
+        Ok(())
+    })?;
     let mut state = restored.state;
     state.debug_mode = true;
     backfill_legacy_debug_permissions(&mut state, restored.debug_permitted_was_serialized, false);
@@ -2562,24 +3004,44 @@ fn resume_loaded_stack_automation(
 /// entry point. Callers must clear any existing state first.
 #[wasm_bindgen]
 pub fn resume_multiplayer_host_state(json_str: &str) -> Result<JsValue, JsValue> {
+    resume_multiplayer_host_state_inner(json_str)
+        .map(|presentation| to_js(&presentation))
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+/// The natively-callable body of [`resume_multiplayer_host_state`].
+///
+/// Keep the fallible engine path separate from the WASM shell so native tests
+/// can assert restore failures without constructing `JsValue` off-wasm32.
+fn resume_multiplayer_host_state_inner(
+    json_str: &str,
+) -> Result<RestoredStackAutomationPresentation, String> {
     if MULTIPLAYER_MODE.with(|cell| cell.get()) {
-        return Err(JsValue::from_str(
-            "resume_multiplayer_host_state refused: multiplayer mode already set",
-        ));
+        return Err("resume_multiplayer_host_state refused: multiplayer mode already set".into());
     }
     if game_state_present() {
-        return Err(JsValue::from_str(
-            "resume_multiplayer_host_state refused: engine already initialized; call clear_game_state first",
-        ));
+        return Err(
+            "resume_multiplayer_host_state refused: engine already initialized; call clear_game_state first"
+                .into(),
+        );
     }
 
     let restored = decode_and_rehydrate_restored_game_state(json_str, |state| {
+        let player_count = u8::try_from(state.players.len()).map_err(|_| {
+            format!(
+                "player_count {} exceeds the supported range",
+                state.players.len()
+            )
+        })?;
+        state
+            .format_config
+            .validate_for_player_count(player_count)?;
         let fresh_seed: u64 = rand::rng().random();
         state.rng_seed = fresh_seed;
         state.rng = ChaCha20Rng::seed_from_u64(fresh_seed);
         state.rng_word_pos = 0;
-    })
-    .map_err(|error| JsValue::from_str(&error))?;
+        Ok(())
+    })?;
     let mut state = restored.state;
     backfill_legacy_debug_permissions(&mut state, restored.debug_permitted_was_serialized, true);
 
@@ -2591,8 +3053,6 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<JsValue, JsValue>
     // session, and no caller can observe the hosted snapshot until this
     // returns its bounded engine presentation.
     resume_loaded_stack_automation(true)
-        .map(|presentation| to_js(&presentation))
-        .map_err(|error| JsValue::from_str(&error))
 }
 
 #[cfg(test)]
@@ -2606,10 +3066,110 @@ mod restored_card_db_requirements_tests {
         CARD_DB.with(|cell| *cell.borrow_mut() = None);
         let json = serde_json::to_string(&GameState::new_two_player(17)).unwrap();
 
-        let error = decode_and_rehydrate_restored_game_state(&json, |_| {})
+        let error = decode_and_rehydrate_restored_game_state(&json, |_| Ok(()))
             .expect_err("restore must require CARD_DB");
         assert!(error.contains("card database"));
         assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));
+        assert!(!is_multiplayer_mode());
+    }
+
+    /// Pins the legacy-compatible generic restore boundary: rounds 4-6 tried,
+    /// in turn, (a) a hard rejection of a persisted seat count outside its
+    /// format's registry range (reverted here because this shared decode body
+    /// serves `restore_game_state` undo/localStorage-save restore) and (b) a
+    /// repair that widens the restored config's `min_players`/`max_players`
+    /// to admit the persisted seat count (also reverted — `min_players` is a
+    /// Locked row in `built_in_axes_no_looser_than_rules`, so a widened
+    /// config fails `FormatConfig::deserialize`'s own admission gate the
+    /// very next time it is loaded, permanently bricking the save). Neither
+    /// alternative survived review; this test fails if either is
+    /// re-introduced into the generic restore path. The P2P resume caller
+    /// applies the separate #8692 boundary after this hook. `FormatConfig::commander_draft()` (registry range
+    /// 3..=8) persisted with 2 seats reproduces both hazards at once: a
+    /// hard-reject alternative would return `Err`, and a repair alternative
+    /// would leave `min_players` widened to 2, which is exactly the
+    /// condition under which `FormatConfig::deserialize` refuses to
+    /// round-trip the config (see `from_persisted_rejects_a_persisted_
+    /// player_count_outside_the_format_registry_range` and this closure's
+    /// own comment for the full history).
+    #[test]
+    fn decoded_restore_neither_rejects_nor_repairs_a_persisted_seat_count_outside_the_format_registry_range(
+    ) {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        let mut state = GameState::new_two_player(17);
+        state.format_config = FormatConfig::commander_draft();
+        let json = serde_json::to_string(&state).unwrap();
+
+        let restored = decode_and_rehydrate_restored_game_state(&json, |_| Ok(())).expect(
+            "2 seats against CommanderDraft's 3-8 registry range must not be hard-rejected \
+             (that is the reverted reject alternative)",
+        );
+        assert_eq!(
+            restored.state.players.len(),
+            2,
+            "the persisted seat count must pass through unchanged"
+        );
+        assert_eq!(
+            restored.state.format_config.min_players, 3,
+            "min_players must NOT widen to admit the persisted seat count — widening is the \
+             reverted repair alternative this test guards against"
+        );
+        assert!(
+            serde_json::from_str::<FormatConfig>(
+                &serde_json::to_string(&restored.state.format_config).unwrap()
+            )
+            .is_ok(),
+            "the restored config must still round-trip through FormatConfig's own Deserialize \
+             admission gate — this is exactly the property a re-introduced min_players-widening \
+             repair would violate, since a widened min_players fails the Locked-row check in \
+             built_in_axes_no_looser_than_rules on the very next load"
+        );
+        assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));
+    }
+
+    #[test]
+    fn multiplayer_host_resume_rejects_out_of_range_persisted_seat_count_before_install() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        let mut state = GameState::new_two_player(17);
+        state.format_config = FormatConfig::commander_draft();
+        let json = serde_json::to_string(&state).unwrap();
+
+        restore_game_state_inner(&json).expect("legacy local restore must remain compatible");
+        clear_game_state();
+        set_multiplayer_mode(false);
+
+        let error = resume_multiplayer_host_state_inner(&json)
+            .expect_err("P2P host resume must reject an invalid seat count before broadcast");
+        assert!(
+            error.contains("player_count"),
+            "resume error must identify the seat-count boundary"
+        );
+        assert!(!game_state_present());
+        assert!(!is_multiplayer_mode());
+    }
+
+    #[test]
+    fn multiplayer_host_resume_rejects_unrepresentable_persisted_seat_count_before_install() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        let mut state = GameState::new_two_player(17);
+        state.format_config = FormatConfig::commander_draft();
+        let player_template = state.players[0].clone();
+        state.players.resize(259, player_template);
+        let json = serde_json::to_string(&state).unwrap();
+
+        let error = resume_multiplayer_host_state_inner(&json)
+            .expect_err("P2P host resume must reject a seat count that cannot fit in u8");
+        assert!(
+            error.contains("player_count"),
+            "resume error must identify the seat-count conversion boundary"
+        );
+        assert!(!game_state_present());
         assert!(!is_multiplayer_mode());
     }
 }
@@ -3273,6 +3833,190 @@ pub fn get_ai_action_proposal_from_scores_with_diagnostics(
     })?
 }
 
+// ── LLM-driven AI seats ──────────────────────────────────────────────────────
+//
+// Strictly opt-in: nothing below runs unless a player has configured an LLM
+// endpoint in Settings AND bound it to an AI seat. Every failure path returns
+// `null`, which the caller treats as "use the heuristic AI for this decision" —
+// an LLM seat can therefore degrade to an ordinary AI seat mid-game without
+// stalling it.
+//
+// The split into two calls is forced by the network round trip sitting between
+// them. `build_llm_decision_request` renders the engine-issued option domain and
+// stamps it with a fingerprint; `get_ai_action_proposal_from_llm_response`
+// re-issues the contract from LIVE state, re-derives the fingerprint, and mints
+// a proposal only when the two agree. A decision that moved on while the request
+// was in flight is refused, never applied to a different option list.
+
+/// The engine-owned LLM provider catalog: vendors, default endpoints, and
+/// suggested model ids for the settings UI. The display layer renders exactly
+/// this rather than carrying a list of its own.
+#[wasm_bindgen(js_name = llmProviderCatalog)]
+pub fn llm_provider_catalog() -> JsValue {
+    to_js(phase_llm::catalog::provider_catalog())
+}
+
+/// Build the connection-probe request for an endpoint.
+///
+/// Stateless by design: a player configures a provider in Settings, usually
+/// with no game running, and a test that required a live board would be
+/// untestable exactly when it is most needed. The request is built by the same
+/// `build_chat_request` a real decision uses, so a probe that succeeds proves
+/// the endpoint, credential and model the game path will use.
+#[wasm_bindgen(js_name = buildLlmProbeRequest)]
+pub fn build_llm_probe_request(endpoint_json: &str) -> Result<JsValue, JsValue> {
+    let endpoint: phase_llm::LlmEndpointConfig = serde_json::from_str(endpoint_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid LLM endpoint config: {error}")))?;
+    let prompt = phase_llm::connection_probe_prompt();
+    match phase_llm::build_chat_request(&endpoint, &prompt) {
+        Ok(request) => Ok(to_js(&serde_json::json!({ "request": request }))),
+        Err(error) => Ok(to_js(&serde_json::json!({ "error": error.to_string() }))),
+    }
+}
+
+/// Validate a probe response through the engine's own extraction and decoding.
+///
+/// The transport deliberately returns non-2xx bodies rather than rejecting, so
+/// that a vendor's error message survives to be shown. That makes "bytes came
+/// back" a meaningless success signal -- a rejected key and an unknown model
+/// both arrive as well-formed bodies. This is the authority that says whether a
+/// reply is one the game path could actually use.
+#[wasm_bindgen(js_name = validateLlmProbeResponse)]
+pub fn validate_llm_probe_response(
+    provider_label: &str,
+    status: u16,
+    response_body: &str,
+) -> JsValue {
+    let provider = phase_llm::LlmProvider::from_label(provider_label);
+    match phase_llm::validate_probe_response(provider, status, response_body) {
+        Ok(()) => to_js(&serde_json::json!({ "ok": true })),
+        Err(error) => to_js(&serde_json::json!({
+            "ok": false,
+            "error": error.to_string(),
+            "errorKind": error,
+        })),
+    }
+}
+
+/// Build the HTTP request for one LLM-driven AI decision.
+///
+/// `endpoint_json` is the player's configured `LlmEndpointConfig`. `history_json`
+/// is the engine-authored game log the caller has accumulated from prior
+/// `ActionResult`s — engine data handed back for rendering, not a client
+/// derivation. Returns `null` when the seat has no decision to make; throws only
+/// on a malformed argument, which is a programming error rather than a runtime
+/// outcome.
+#[wasm_bindgen(js_name = buildLlmDecisionRequest)]
+pub fn build_llm_decision_request(
+    difficulty: &str,
+    player_id: u8,
+    endpoint_json: &str,
+    history_json: &str,
+) -> Result<JsValue, JsValue> {
+    let endpoint: phase_llm::LlmEndpointConfig = serde_json::from_str(endpoint_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid LLM endpoint config: {error}")))?;
+    // An absent or unparsable history is a degraded prompt, never a failed
+    // decision: the position alone is enough to choose an action.
+    let history: Vec<engine::types::log::GameLogEntry> =
+        serde_json::from_str(history_json).unwrap_or_default();
+    let ai_difficulty = AiDifficulty::from_label(difficulty);
+
+    with_state_mut(|state| {
+        engine::game::layers::flush_layers(state);
+        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
+        let contract = AiDecisionContract::issue(state, semantic_owner);
+        if contract.candidates.is_empty() {
+            return Ok(JsValue::NULL);
+        }
+        let request = CARD_DB.with(|cell| {
+            let db = cell.borrow();
+            phase_llm::build_game_decision_prompt(
+                state,
+                &contract,
+                ai_difficulty,
+                db.as_deref(),
+                &history,
+            )
+        });
+        let request = match request {
+            Ok(request) => request,
+            Err(error) => return Ok(to_js(&serde_json::json!({ "error": error.to_string() }))),
+        };
+        let http = match phase_llm::build_chat_request(&endpoint, &request.prompt) {
+            Ok(http) => http,
+            Err(error) => return Ok(to_js(&serde_json::json!({ "error": error.to_string() }))),
+        };
+        Ok(to_js(&serde_json::json!({
+            "fingerprint": request.fingerprint,
+            "optionCount": request.option_count,
+            "request": http,
+        })))
+    })?
+}
+
+/// Convert an LLM completion into an authority-bound proposal.
+///
+/// Mirrors `get_ai_action_proposal_from_scores`: the model's reply is an
+/// untrusted hint, so a fresh contract is derived from the live state and the
+/// selected action is admitted only if that contract contains it. There is
+/// intentionally no endpoint by which model text becomes a `GameAction` without
+/// this check.
+#[wasm_bindgen(js_name = getAiActionProposalFromLlmResponse)]
+pub fn get_ai_action_proposal_from_llm_response(
+    player_id: u8,
+    fingerprint: &str,
+    provider_label: &str,
+    status: u16,
+    response_body: &str,
+) -> Result<JsValue, JsValue> {
+    let provider = phase_llm::LlmProvider::from_label(provider_label);
+    with_state_mut(|state| {
+        engine::game::layers::flush_layers(state);
+        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
+        let contract = AiDecisionContract::issue(state, semantic_owner);
+
+        // Status-aware: a non-2xx response is refused however its body parses,
+        // so a gateway or proxy error cannot masquerade as a decision.
+        let completion = match phase_llm::completion_from_response(provider, status, response_body)
+        {
+            Ok(text) => text,
+            Err(error) => return Ok(llm_failure(&error)),
+        };
+        let selection = match phase_llm::select_action(state, &contract, fingerprint, &completion) {
+            Ok(selection) => selection,
+            Err(error) => return Ok(llm_failure(&error)),
+        };
+        // Same admission check `mint_ai_action_proposal` performs, inlined so the
+        // reasoning can ride alongside the proposal in one payload.
+        if !contract.contains_action(state, &selection.action) {
+            return Ok(llm_failure(&phase_llm::LlmError::StaleDecision));
+        }
+        let actor = contract.authorized_actor;
+        let token = AI_PROPOSALS.with(|registry| registry.borrow_mut().insert(contract));
+        // The reasoning is local diagnostic data bound to the same opaque token.
+        // The engine never reads it back.
+        Ok(to_js(&serde_json::json!({
+            "proposal": {
+                "token": token,
+                "semanticOwner": semantic_owner.0,
+                "actor": actor.0,
+                "action": selection.action,
+            },
+            "reasoning": selection.reasoning,
+        })))
+    })?
+}
+
+/// The tagged failure an LLM decision returns so the caller can both fall back
+/// and tell the player why.
+fn llm_failure(error: &phase_llm::LlmError) -> JsValue {
+    to_js(&serde_json::json!({
+        "proposal": serde_json::Value::Null,
+        "error": error.to_string(),
+        "errorKind": error,
+    }))
+}
+
 /// Submit an action selected from an engine-issued AI proposal.
 ///
 /// A stale or foreign proposal is a normal race outcome and is returned as a
@@ -3297,53 +4041,28 @@ pub fn submit_ai_action_proposal(token: &str, actor: u8, action: JsValue) -> JsV
     };
 
     match with_state_mut(|state| {
-        // Classification lives in the engine (`verified_ai_stack_pass_player`),
-        // not in this adapter: it is the same call the callee gates on, so the
-        // two cannot disagree. CLAUDE.md — transport layers hold zero game
-        // logic.
-        let is_stack_recheck_pass =
-            engine::game::engine::verified_ai_stack_pass_player(state, &action).is_some();
-        // A payment finalize is no longer misclassified, so it now passes
-        // through `permits` — whose `state_revision` equality check can report
-        // `Stale` for a proposal minted against a superseded state. The client
-        // treats `Stale` as a benign race and re-queries without counting a
-        // failure, which is the intended handling for every other action.
-        if !is_stack_recheck_pass && !proposal.contract.permits(state, actor, &action) {
-            return AiProposalSubmission::Stale {
-                reason: "decision_changed_or_action_outside_issued_bounds",
-            };
-        }
-        let applied = if is_stack_recheck_pass {
-            engine::game::engine::apply_verified_ai_priority_pass_with_rejection(
-                state,
-                actor,
-                &proposal.contract,
-                action.clone(),
-            )
-        } else {
-            apply_interaction_with_rejection(
-                state,
-                actor,
-                proposal.contract.semantic_owner,
-                action.clone(),
-            )
-        };
-        match applied {
-            Ok(result) => {
-                if is_stack_recheck_pass {
-                    record_verified_ai_priority_pass(actor, proposal.contract.semantic_owner);
-                } else {
-                    record_replay_action(false, actor, action);
-                }
-                invalidate_ai_proposals();
-                AiProposalSubmission::Applied {
-                    result: Box::new(result),
-                }
-            }
-            Err(rejection) => AiProposalSubmission::Rejected { rejection },
-        }
+        apply_ai_action_proposal(state, &proposal.contract, actor, action.clone())
     }) {
-        Ok(outcome) => to_js(&outcome),
+        Ok(AiProposalApplication::AppliedStackPass { result }) => {
+            record_verified_ai_priority_pass(actor, proposal.contract.semantic_owner);
+            invalidate_ai_proposals();
+            to_js(&AiProposalSubmission::Applied {
+                result: Box::new(result),
+            })
+        }
+        Ok(AiProposalApplication::AppliedAction { result }) => {
+            record_replay_action(false, actor, action);
+            invalidate_ai_proposals();
+            to_js(&AiProposalSubmission::Applied {
+                result: Box::new(result),
+            })
+        }
+        Ok(AiProposalApplication::Stale) => to_js(&AiProposalSubmission::Stale {
+            reason: "decision_changed_or_action_outside_issued_bounds",
+        }),
+        Ok(AiProposalApplication::Rejected { rejection }) => {
+            to_js(&AiProposalSubmission::Rejected { rejection })
+        }
         Err(_) => to_js(&AiProposalSubmission::Stale {
             reason: "state_unavailable",
         }),
@@ -3453,7 +4172,7 @@ mod bracket_estimate_tests {
         )
         .unwrap()
         .with_bracket_lists(BracketLists::from_json_str(r#"{"version":"t"}"#).unwrap());
-        CARD_DB.with(|c| *c.borrow_mut() = Some(db));
+        CARD_DB.with(|c| *c.borrow_mut() = Some(std::sync::Arc::new(db)));
 
         let deck = PlayerDeckList {
             commander: vec!["Atraxa, Praetors' Voice".into()],
@@ -4250,35 +4969,6 @@ mod tests {
     }
 
     #[test]
-    fn stack_pass_proposal_uses_the_verified_recheck_seam() {
-        let player = PlayerId(0);
-        let mut state = priority_state(player);
-        state
-            .stack
-            .push_back(no_op_stack_entry(70_101, PlayerId(1)));
-        add_non_mana_recheck_action(&mut state, PlayerId(1));
-        let action = GameAction::PassPriority;
-        let token = install_issued_candidate(state, player, &action);
-
-        assert_eq!(
-            proposal_outcome(&token, player, &action)["status"],
-            "applied"
-        );
-        with_state(|state| {
-            assert_eq!(
-                state
-                    .stack_resolution_session
-                    .as_ref()
-                    .map(|session| session.policy),
-                Some(engine::types::game_state::StackResolutionPolicy::RecheckNoMeaningfulPriorityAction),
-                "the WASM proposal boundary must not downgrade a verified stack pass"
-            );
-        })
-        .expect("test state must remain installed");
-        clear_game_state();
-    }
-
-    #[test]
     fn public_proposal_issuer_mints_a_submitable_priority_capability() {
         let player = PlayerId(0);
         clear_game_state();
@@ -4834,28 +5524,6 @@ mod tests {
         assert!(has_replay_recording());
     }
 
-    fn add_non_mana_recheck_action(state: &mut GameState, controller: PlayerId) {
-        let object_id = create_object(
-            state,
-            CardId(70_100),
-            controller,
-            "Wasm Recheck Action".to_string(),
-            Zone::Battlefield,
-        );
-        let object = state
-            .objects
-            .get_mut(&object_id)
-            .expect("created battlefield object");
-        object.card_types.core_types.push(CoreType::Artifact);
-        Arc::make_mut(&mut object.abilities).push(AbilityDefinition::new(
-            AbilityKind::Activated,
-            Effect::Draw {
-                count: QuantityExpr::Fixed { value: 1 },
-                target: TargetFilter::Controller,
-            },
-        ));
-    }
-
     #[test]
     fn restore_is_decode_only_until_explicit_stack_automation_resume() {
         clear_game_state();
@@ -5182,6 +5850,39 @@ mod replay_bridge_tests {
     use super::*;
     use engine::types::game_state::WaitingFor;
 
+    #[test]
+    fn copied_trigger_occurrence_wire_shape_preserves_printed_origin() {
+        let occurrence = engine::types::ability::TriggerDefinitionOccurrenceRef::CopiedValue {
+            copy_effect: engine::types::ability::CopyEffectInstanceRef {
+                continuous_effect_id: 17,
+                modification_index: 2,
+            },
+            copied_slot: 3,
+            printed_origin: Some(engine::types::ability::TriggerPrintedOrigin {
+                printed_ref: engine::types::card::PrintedCardRef {
+                    oracle_id: "oracle-id".to_string(),
+                    face_name: "Printed Face".to_string(),
+                },
+                printed_occurrence: 4,
+            }),
+        };
+
+        let serialized = serde_json::to_value(&occurrence).unwrap();
+        assert_eq!(serialized["type"], "CopiedValue");
+        assert_eq!(serialized["data"]["copied_slot"], 3);
+        assert_eq!(
+            serialized["data"]["printed_origin"]["printed_ref"]["face_name"],
+            "Printed Face"
+        );
+        assert_eq!(
+            serde_json::from_value::<engine::types::ability::TriggerDefinitionOccurrenceRef>(
+                serialized
+            )
+            .unwrap(),
+            occurrence
+        );
+    }
+
     /// Exercises the bridge wiring (auto-start in `initialize_game`, append
     /// in `submit_action`, clear in `restore_game_state`) through the
     /// inner helpers rather than the `#[wasm_bindgen]` entry points
@@ -5312,7 +6013,7 @@ mod replay_bridge_tests {
             }"#,
         )
         .unwrap();
-        CARD_DB.with(|c| *c.borrow_mut() = Some(db));
+        CARD_DB.with(|c| *c.borrow_mut() = Some(std::sync::Arc::new(db)));
 
         let mut state = GameState::new_two_player(11);
         state.debug_mode = true;
@@ -5333,11 +6034,12 @@ mod replay_bridge_tests {
             actor: PlayerId(0),
             card_name: "Test Card",
             owner: PlayerId(0),
-            zone: engine::types::zones::Zone::Hand,
+            zone: engine::types::zones::Zone::Battlefield,
             count: 2,
             attach_to: None,
-            run_etb: true,
+            run_etb: false,
             nonlegendary: true,
+            creation_kind: DebugCardCreationKind::Token,
         })
         .expect("debug create-card should succeed in this fixture");
         assert_eq!(
@@ -5365,13 +6067,14 @@ mod replay_bridge_tests {
                     .filter(|object| object.name == "Test Card")
                     .count(),
                 2,
-                "a non-battlefield debug CreateCard batch materializes each card"
+                "a raw battlefield debug CreateCard batch materializes each token"
             );
             let card = state
                 .objects
                 .values()
                 .find(|object| object.name == "Test Card")
                 .expect("debug-created card should exist");
+            assert!(card.is_token, "the WASM boundary must preserve Token");
             assert!(!card
                 .card_types
                 .supertypes
@@ -5420,7 +6123,7 @@ mod replay_bridge_tests {
             }"#,
         )
         .unwrap();
-        CARD_DB.with(|cell| *cell.borrow_mut() = Some(db));
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(std::sync::Arc::new(db)));
 
         let mut state = GameState::new_two_player(19);
         state.debug_mode = true;
@@ -5435,6 +6138,7 @@ mod replay_bridge_tests {
             attach_to: None,
             run_etb: true,
             nonlegendary: false,
+            creation_kind: DebugCardCreationKind::Card,
         })
         .expect("a real battlefield debug batch should succeed");
 
@@ -5501,6 +6205,7 @@ mod replay_bridge_tests {
             attach_to: None,
             run_etb: true,
             nonlegendary: false,
+            creation_kind: DebugCardCreationKind::Card,
         })
         .expect("an authorized zero request is a no-op without a card database");
         assert!(result.events.is_empty());
@@ -5544,6 +6249,7 @@ mod replay_bridge_tests {
             attach_to: None,
             run_etb: true,
             nonlegendary: false,
+            creation_kind: DebugCardCreationKind::Card,
         })
         .expect_err("an invalid owner must fail before database access");
         assert!(owner_error.contains("invalid owner player id"));
@@ -5558,6 +6264,7 @@ mod replay_bridge_tests {
             attach_to: None,
             run_etb: true,
             nonlegendary: false,
+            creation_kind: DebugCardCreationKind::Card,
         })
         .expect_err("a real entry off Priority must fail before database access");
         assert!(priority_error.contains("Priority window"));
@@ -5572,6 +6279,7 @@ mod replay_bridge_tests {
             attach_to: None,
             run_etb: true,
             nonlegendary: false,
+            creation_kind: DebugCardCreationKind::Card,
         })
         .expect_err("a missing database must reject a valid nonzero request");
         assert!(lookup_error.contains("card database not loaded"));
@@ -5781,10 +6489,10 @@ mod ai_scoring_rng_bridge_tests {
         // rows this module would then have to keep true. `restored_card_db_requirements_tests`
         // is the row that pins the requirement itself.
         CARD_DB.with(|cell| {
-            *cell.borrow_mut() = Some(
+            *cell.borrow_mut() = Some(std::sync::Arc::new(
                 engine::database::CardDatabase::from_json_str("{}")
                     .expect("an empty card database must parse"),
-            );
+            ));
         });
 
         // The exact shipped plant: `AiWorkerPool` calls `worker.restoreState(..)`
@@ -6215,11 +6923,25 @@ mod deck_list_seat_validation_tests {
         }
     }
 
+    fn forest() -> CardFace {
+        CardFace {
+            name: "Forest".to_string(),
+            card_type: CardType {
+                supertypes: vec![Supertype::Basic],
+                core_types: vec![CoreType::Land],
+                subtypes: vec!["Forest".to_string()],
+            },
+            color_identity: vec![ManaColor::Green],
+            ..CardFace::default()
+        }
+    }
+
     fn test_db() -> CardDatabase {
         let faces = vec![
             legendary_creature(LEGEND_A),
             legendary_creature(LEGEND_B),
             plains(),
+            forest(),
         ];
         let mut entries = BTreeMap::new();
         for f in faces {
@@ -6319,6 +7041,431 @@ mod deck_list_seat_validation_tests {
         assert_eq!(
             validate_deck_list_seats(&db, &three_seat_list(&[]), &FormatConfig::momir(), None, 4),
             None,
+        );
+    }
+
+    fn n_plains(n: usize) -> Vec<String> {
+        std::iter::repeat_n("Plains".to_string(), n).collect()
+    }
+
+    fn seat_with_commander(main_deck: Vec<String>, commander: &str) -> PlayerDeckList {
+        PlayerDeckList {
+            main_deck,
+            commander: vec![commander.to_string()],
+            ..Default::default()
+        }
+    }
+
+    fn two_seat_list(player: PlayerDeckList, opponent: PlayerDeckList) -> DeckList {
+        DeckList {
+            player,
+            opponent,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn limited_initializer_seat_validation_accepts_known_short_decks_and_rejects_unresolved() {
+        let db = test_db();
+        assert!(db.get_face_by_name("Forest").is_some());
+        let legal = PlayerDeckList {
+            main_deck: std::iter::repeat_n("Forest".to_string(), 40).collect(),
+            ..Default::default()
+        };
+        let short_39 = PlayerDeckList {
+            main_deck: std::iter::repeat_n("Forest".to_string(), 39).collect(),
+            ..Default::default()
+        };
+        let custom_20 = PlayerDeckList {
+            main_deck: std::iter::repeat_n("Forest".to_string(), 20).collect(),
+            ..Default::default()
+        };
+        let mut unknown_main = legal.clone();
+        unknown_main.main_deck[0] = "Unknown Limited Probe".to_string();
+        let mut unknown_side = legal.clone();
+        unknown_side.sideboard = vec!["Unknown Limited Probe".to_string()];
+        let mut unknown_20 = custom_20.clone();
+        unknown_20.main_deck[0] = "Unknown Limited Probe".to_string();
+        let check = |player, opponent| {
+            validate_deck_list_seats(
+                &db,
+                &two_seat_list(player, opponent),
+                &FormatConfig::limited(),
+                Some(MatchType::Bo1),
+                2,
+            )
+        };
+
+        assert_eq!(check(legal.clone(), legal.clone()), None);
+        assert_eq!(check(short_39.clone(), legal.clone()), None);
+        assert_eq!(check(legal.clone(), short_39), None);
+        assert_eq!(check(custom_20.clone(), legal.clone()), None);
+        assert_eq!(check(legal.clone(), custom_20), None);
+        for (seat, player, opponent, reason) in [
+            ("Player", unknown_20.clone(), legal.clone(), "Unknown cards"),
+            (
+                "Player",
+                unknown_main.clone(),
+                legal.clone(),
+                "Unknown cards",
+            ),
+            (
+                "Player",
+                unknown_side.clone(),
+                legal.clone(),
+                "Unknown cards",
+            ),
+            ("AI opponent", legal.clone(), unknown_20, "Unknown cards"),
+            ("AI opponent", legal.clone(), unknown_main, "Unknown cards"),
+            ("AI opponent", legal.clone(), unknown_side, "Unknown cards"),
+        ] {
+            let refused = check(player, opponent).expect("the exact seat must be refused");
+            assert!(
+                refused
+                    .iter()
+                    .any(|entry| entry.starts_with(&format!("{seat} deck:"))
+                        && entry.contains(reason)),
+                "{seat}: {refused:?}"
+            );
+        }
+    }
+
+    /// Establishes separately that the verdict is reached
+    /// through the surface the client actually calls — driven through
+    /// `validate_deck_list_seats`, the seat loop `initialize_game_impl` runs
+    /// at the game-creation boundary, rather than censused from source.
+    #[test]
+    fn freeform_commander_is_refused_a_land_commander_through_the_seat_validation_loop() {
+        let db = test_db();
+
+        // The land commander is refused, with this format's own eligibility
+        // reason, behind the loop's own "Player deck: " prefix. This format's
+        // absent deck-size floor (`Minimum(0)`) means a 10-card main deck is
+        // itself accepted, so eligibility is the only reason in play.
+        let land_seat = seat_with_commander(n_plains(10), "Plains");
+        assert_eq!(
+            validate_deck_list_seats(
+                &db,
+                &two_seat_list(land_seat.clone(), land_seat.clone()),
+                &FormatConfig::freeform_commander(),
+                None,
+                2,
+            ),
+            Some(vec![
+                "Player deck: Freeform Commander commanders must be cards that can be cast: \
+                 Plains"
+                    .to_string()
+            ]),
+        );
+
+        // The paired ACCEPT: a legendary creature commander passes every seat,
+        // and the loop returns None.
+        let legend_seat = seat_with_commander(n_plains(10), LEGEND_A);
+        assert_eq!(
+            validate_deck_list_seats(
+                &db,
+                &two_seat_list(legend_seat.clone(), legend_seat),
+                &FormatConfig::freeform_commander(),
+                None,
+                2,
+            ),
+            None,
+        );
+
+        // The degenerate end: an empty main deck with the same land commander
+        // still refuses with the same reason — this format's absent deck-size
+        // floor does not exempt the commander slot from eligibility.
+        let empty_main_land_seat = seat_with_commander(Vec::new(), "Plains");
+        assert_eq!(
+            validate_deck_list_seats(
+                &db,
+                &two_seat_list(empty_main_land_seat.clone(), empty_main_land_seat),
+                &FormatConfig::freeform_commander(),
+                None,
+                2,
+            ),
+            Some(vec![
+                "Player deck: Freeform Commander commanders must be cards that can be cast: \
+                 Plains"
+                    .to_string()
+            ]),
+        );
+
+        // The contrast: the SAME land-commander shape refused by Commander
+        // with Commander's own eligibility reason — not this format's
+        // string. Sized to Commander's exact 100-card requirement (the
+        // commander "Plains" is represented/netted against the identically
+        // named main-deck entries, so the count is the main deck's own
+        // length) so the deck-size reason does not also fire and the vector
+        // isolates the eligibility reason alone.
+        let commander_sized_land_seat = seat_with_commander(n_plains(100), "Plains");
+        assert_eq!(
+            validate_deck_list_seats(
+                &db,
+                &two_seat_list(commander_sized_land_seat.clone(), commander_sized_land_seat,),
+                &FormatConfig::commander(),
+                None,
+                2,
+            ),
+            Some(vec![
+                "Player deck: Commander cards must be legendary creatures or explicitly allow \
+                 being a commander: Plains"
+                    .to_string()
+            ]),
+        );
+    }
+}
+
+/// CR 118.9b: a graveyard permission's required casting method survives the P2P
+/// host's own resume path, not only the persisted-state decoder. Tenacious
+/// Underdog's "using its blitz ability" permission, with its printed {1}{B}
+/// affordable and its blitz not: the host exports the trusted envelope, a fresh
+/// engine resumes it through `resume_multiplayer_host_state`, and the resumed
+/// host still carries `required_cast_keyword == Some(Blitz)` and still refuses
+/// the printed cast, exactly as a host that was never interrupted.
+#[cfg(test)]
+mod graveyard_cast_method_host_resume_tests {
+    use super::*;
+    use engine::game::scenario::{GameScenario, P0};
+    use engine::types::keywords::Keyword;
+    use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use engine::types::phase::Phase;
+    use engine::types::statics::StaticMode;
+
+    const UNDERDOG: &str = "Blitz\u{2014}{2}{B}{B}, Pay 2 life. (If you cast this spell for its blitz cost, it gains haste and \"When this creature dies, draw a card.\" Sacrifice it at the beginning of the next end step.)\nYou may cast this card from your graveyard using its blitz ability.";
+
+    fn underdog_with_only_the_printed_cost_affordable() -> (GameState, ObjectId) {
+        let parsed = engine::parser::oracle::parse_oracle_text(
+            UNDERDOG,
+            "Tenacious Underdog",
+            &[],
+            &["Creature".into()],
+            &["Human".into(), "Warrior".into()],
+        );
+        let blitz = parsed
+            .extracted_keywords
+            .iter()
+            .find(|k| matches!(k, Keyword::Blitz(_)))
+            .expect("blitz parses")
+            .clone();
+        let rider = parsed.statics.first().expect("the rider parses").clone();
+        let mut s = GameScenario::new_n_player(2, 42);
+        s.at_phase(Phase::PreCombatMain);
+        let dog = s
+            .add_creature_to_graveyard(P0, "Tenacious Underdog", 3, 2)
+            .with_static_definition(rider)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Black],
+            })
+            .with_keyword(blitz)
+            .id();
+        s.with_mana_pool(
+            P0,
+            (0..2)
+                .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, Vec::new()))
+                .collect(),
+        );
+        let mut state = s.build().state().clone();
+        state.players[0].life = 1;
+        (state, dog)
+    }
+
+    fn attempt_printed_cast(state: &mut GameState, dog: ObjectId) -> serde_json::Value {
+        let required = state.objects[&dog]
+            .static_definitions
+            .as_slice()
+            .iter()
+            .find_map(|def| match def.mode {
+                StaticMode::GraveyardCastPermission {
+                    required_cast_keyword,
+                    ..
+                } => Some(format!("{required_cast_keyword:?}")),
+                _ => None,
+            });
+        let card_id = state.objects[&dog].card_id;
+        let cast = engine::game::engine::apply_as_current(
+            state,
+            GameAction::CastSpell {
+                object_id: dog,
+                card_id,
+                targets: vec![],
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            },
+        );
+        serde_json::json!({
+            "required": required,
+            "cast_accepted": cast.is_ok(),
+            "zone": format!("{:?}", state.objects[&dog].zone),
+            "pool": state.players[0].mana_pool.total(),
+            "life": state.players[0].life,
+        })
+    }
+
+    #[test]
+    fn a_blitz_only_permission_resumed_by_the_p2p_host_still_refuses_the_printed_cast() {
+        let (paused, dog) = underdog_with_only_the_printed_cost_affordable();
+
+        let mut uninterrupted = paused.clone();
+        let expected = attempt_printed_cast(&mut uninterrupted, dog);
+        assert_eq!(
+            expected["required"], "Some(Blitz)",
+            "reach guard: {expected}"
+        );
+        assert_eq!(expected["cast_accepted"], false, "{expected}");
+        assert_eq!(expected["zone"], "Graveyard", "{expected}");
+
+        let mut exported = paused.clone();
+        exported.capture_rng_word_pos();
+        let json = serde_json::to_string(&TrustedGameStateEnvelope::capture(exported))
+            .expect("the host exports its state");
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        resume_multiplayer_host_state_inner(&json).expect("the P2P host resumes");
+        let resumed =
+            with_state_mut(|state| attempt_printed_cast(state, dog)).expect("a live game");
+        clear_game_state();
+        set_multiplayer_mode(false);
+
+        assert_eq!(
+            resumed, expected,
+            "the resumed host keeps the method and refuses the printed cast"
+        );
+    }
+}
+
+/// #9248 RT-2's P2P leg: an activation paused at its target-settlement
+/// election (CR 601.2c + CR 601.2f + CR 602.2b) survives the P2P host's own
+/// resume path, not just the persisted-state decoder: the host exports the
+/// trusted envelope, a fresh engine resumes it through
+/// `resume_multiplayer_host_state` (its separate `restore_runtime` hook and
+/// finalization), and the caster's non-default order then locks the same cost,
+/// on the same targets, with the same stack entry and activation journal as a
+/// host that was never interrupted.
+#[cfg(test)]
+mod settlement_election_host_resume_tests {
+    use super::*;
+    use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::types::ability::TargetRef;
+    use engine::types::game_state::{TrustedGameStateEnvelope, WaitingFor};
+    use engine::types::mana::{ManaColor, ManaUnit};
+    use engine::types::phase::Phase;
+
+    const HOJO: &str = "The first activated ability you activate during your turn that targets a creature you control costs {2} less to activate.";
+    const GROUNDS: &str = "Activated abilities of creatures you control cost {2} less to activate. This effect can't reduce the mana in that cost to less than one mana.";
+
+    /// `{3}` under Hojo's unfloored `-2` and a floored `-2`, targeting your own
+    /// creature: the orders lock `{0}` and `{1}`. Paused at that election.
+    fn paused_at_settlement_election() -> (GameState, ObjectId) {
+        let mut s = GameScenario::new_n_player(2, 42);
+        s.at_phase(Phase::PreCombatMain);
+        s.add_artifact_from_oracle(P0, "Training Grounds", GROUNDS);
+        s.add_creature_from_oracle(P0, "Professor Hojo", 2, 2, HOJO);
+        let own = s.add_creature(P0, "Own", 1, 1).id();
+        s.add_creature(P1, "Bear", 2, 2);
+        let src = s
+            .add_creature_from_oracle(P0, "Tapper", 2, 2, "{3}: Tap target creature.")
+            .id();
+        s.with_mana_pool(
+            P0,
+            (0..5)
+                .map(|_| ManaUnit::new(ManaColor::Blue.into(), ObjectId(0), false, Vec::new()))
+                .collect(),
+        );
+        let mut state = s.build().state().clone();
+        state.objects.get_mut(&src).unwrap().has_summoning_sickness = false;
+        engine::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: src,
+                ability_index: 0,
+            },
+        )
+        .expect("the activation starts");
+        engine::game::engine::apply_as_current(
+            &mut state,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(own)],
+            },
+        )
+        .expect("targets settle");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OrderCostReductions { .. }),
+            "reach guard: paused at the settlement election, got {:?}",
+            state.waiting_for
+        );
+        (state, own)
+    }
+
+    /// The costlier order, then priority passes until the activation is on the
+    /// stack and paid. Returns what the comparison reads.
+    fn elect_costlier(state: &mut GameState) -> serde_json::Value {
+        let WaitingFor::OrderCostReductions { outcomes, .. } = state.waiting_for.clone() else {
+            panic!("expected the election, got {:?}", state.waiting_for);
+        };
+        let costly = outcomes
+            .iter()
+            .find(|o| o.locked_cost.mana_value() == 1)
+            .expect("the {1} order");
+        engine::game::engine::apply_as_current(
+            state,
+            GameAction::OrderCostReductions {
+                order: costly.order.clone(),
+                hybrid_announcement: Vec::new(),
+            },
+        )
+        .expect("the election resumes");
+        for _ in 0..4 {
+            if matches!(state.waiting_for, WaitingFor::ManaPayment { .. }) {
+                engine::game::engine::apply_as_current(state, GameAction::PassPriority)
+                    .expect("mana payment");
+            }
+        }
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        serde_json::json!({
+            "pool": state.players[0].mana_pool.total(),
+            "stack": serde_json::to_value(&state.stack).unwrap(),
+            "journal": serde_json::to_value(&state.abilities_activated_this_turn_by_player)
+                .unwrap(),
+        })
+    }
+
+    #[test]
+    fn a_settlement_election_resumed_by_the_p2p_host_prices_like_an_uninterrupted_host() {
+        let (paused, own) = paused_at_settlement_election();
+
+        // The uninterrupted host.
+        let mut uninterrupted = paused.clone();
+        let expected = elect_costlier(&mut uninterrupted);
+        assert_eq!(
+            expected["pool"], 4,
+            "reach guard: the elected {{1}} was paid"
+        );
+        let placed = uninterrupted.stack.back().expect("placed");
+        let engine::types::game_state::StackEntryKind::ActivatedAbility { ability, .. } =
+            &placed.kind
+        else {
+            panic!("an activated ability");
+        };
+        assert_eq!(ability.targets, vec![TargetRef::Object(own)]);
+
+        // The P2P host: export, then resume on a fresh engine.
+        let mut exported = paused.clone();
+        exported.capture_rng_word_pos();
+        let json = serde_json::to_string(&TrustedGameStateEnvelope::capture(exported))
+            .expect("the host exports its state");
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        resume_multiplayer_host_state_inner(&json).expect("the P2P host resumes");
+        let resumed = with_state_mut(elect_costlier).expect("a live game");
+        clear_game_state();
+        set_multiplayer_mode(false);
+
+        assert_eq!(
+            resumed, expected,
+            "the resumed host locks and places the same activation"
         );
     }
 }

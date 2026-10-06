@@ -955,6 +955,7 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
             children: vec![],
+            diagnoses: vec![],
         }
     }
 
@@ -963,6 +964,7 @@ mod tests {
     /// the fixture matches.
     fn card(name: &str, oracle: &str, parse_details: &[ParsedItem]) -> CardCoverageResult {
         CardCoverageResult {
+            card_face_key: None,
             card_name: name.to_string(),
             set_code: String::new(),
             supported: true,
@@ -1254,11 +1256,42 @@ mod tests {
             supported: true,
             details: vec![],
             children: vec![item("Mill", &[("amount", "2")], child_supported)],
+            diagnoses: vec![],
         };
         let changes = diff(&[parent(false)], &[parent(true)]);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].kind, ChangeKind::SupportFlip);
         assert_eq!(changes[0].label, "Mill");
+    }
+
+    #[test]
+    fn token_static_child_is_reported_as_an_added_parse_item() {
+        let token = |with_must_attack: bool| ParsedItem {
+            category: ParseCategory::Ability,
+            label: "Token".into(),
+            source_text: Some("create The Void".into()),
+            supported: true,
+            details: vec![],
+            children: with_must_attack
+                .then(|| ParsedItem {
+                    category: ParseCategory::Static,
+                    label: "MustAttack".into(),
+                    source_text: Some("The Void attacks each combat if able.".into()),
+                    supported: true,
+                    details: vec![("affects".into(), "self".into())],
+                    children: vec![],
+                    diagnoses: vec![],
+                })
+                .into_iter()
+                .collect(),
+            diagnoses: vec![],
+        };
+
+        let changes = diff(&[token(false)], &[token(true)]);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].kind, ChangeKind::ItemAdded);
+        assert_eq!(changes[0].category, "static");
+        assert_eq!(changes[0].label, "MustAttack");
     }
 
     /// The two required positionals plus whatever flags the case is exercising.

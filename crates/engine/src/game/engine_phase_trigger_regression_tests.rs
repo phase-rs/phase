@@ -18,7 +18,7 @@ use crate::types::game_state::{AutoPassMode, TurnBoundary};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
-use crate::types::phase::{PhaseStop, PhaseStopScope};
+use crate::types::phase::{PhaseGroup, PhaseStop, PhaseStopScope, TurnSegment};
 use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::triggers::TriggerMode;
@@ -232,6 +232,8 @@ fn combat_phase_stops_pause_damage_and_end_combat_windows() {
         valid_block_targets: Default::default(),
         block_requirements: Default::default(),
         blocker_constraints: Default::default(),
+        must_be_blocked_targets: Default::default(),
+        block_capacities: Default::default(),
     };
     state.phase_stops.insert(
         PlayerId(0),
@@ -327,9 +329,10 @@ fn inserted_begin_combat_gets_priority_window() {
         .extra_phases
         .push(crate::types::game_state::ExtraPhase {
             anchor: Phase::EndCombat,
-            phase: Phase::BeginCombat,
+            segment: TurnSegment::Phase(PhaseGroup::Combat),
             attacker_restriction: None,
             attacker_restriction_source: None,
+            id: crate::types::identifiers::ExtraPhaseId::default(),
         });
 
     let mut events = Vec::new();
@@ -2113,9 +2116,11 @@ fn optional_effect_choice_accept_preserves_nested_effect_zone_choice_continuatio
         trigger_event: None,
         trigger_events: Vec::new(),
         trigger_match_count: None,
+        return_result_occurrence: None,
     });
     state.waiting_for = WaitingFor::OptionalEffectChoice {
         player: PlayerId(0),
+        decision_subject_id: None,
         source_id,
         description: None,
         may_trigger_key: None,
@@ -2165,9 +2170,11 @@ fn opponent_may_choice_accept_preserves_nested_effect_zone_choice_continuation()
         trigger_event: None,
         trigger_events: Vec::new(),
         trigger_match_count: None,
+        return_result_occurrence: None,
     });
     state.waiting_for = WaitingFor::OpponentMayChoice {
         player: PlayerId(1),
+        decision_subject_id: None,
         remaining: vec![],
         source_id,
         description: None,
@@ -2978,6 +2985,7 @@ fn effect_zone_choice_handler_resolves_sacrifice_and_continuation() {
         enters_attacking: false,
         owner_library: false,
         track_exiled_by_source: false,
+        face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         face_down_profile: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
@@ -3055,6 +3063,7 @@ fn effect_zone_choice_handler_resolves_untap_selection() {
         enters_attacking: false,
         owner_library: false,
         track_exiled_by_source: false,
+        face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         face_down_profile: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
@@ -3107,6 +3116,7 @@ fn effect_zone_choice_up_to_respects_min_count() {
         enters_attacking: false,
         owner_library: false,
         track_exiled_by_source: false,
+        face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         face_down_profile: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
@@ -3505,7 +3515,7 @@ fn post_replacement_choose_sets_named_choice_waiting_for() {
     let waiting_for = engine_replacement::apply_post_replacement_effect(
         &mut state,
         &effect_def,
-        Some(source_id),
+        engine_replacement::ContinuationSubjects::affected_only(Some(source_id)),
         None,
         None,
         Default::default(),
@@ -3715,7 +3725,7 @@ fn copy_target_choice_resolves_become_copy() {
             .execute(crate::types::ability::AbilityDefinition::new(
                 crate::types::ability::AbilityKind::Spell,
                 crate::types::ability::Effect::BecomeCopy {
-                    recipient: TargetFilter::SelfRef,
+                    recipient: crate::types::ability::CopyRecipient::Source,
                     target: TargetFilter::Any,
                     duration: None,
                     mana_value_limit: Some(
@@ -3818,7 +3828,7 @@ fn copy_target_choice_applies_copied_enter_with_counters_replacement_before_sba(
             .execute(crate::types::ability::AbilityDefinition::new(
                 crate::types::ability::AbilityKind::Spell,
                 Effect::BecomeCopy {
-                    recipient: TargetFilter::SelfRef,
+                    recipient: crate::types::ability::CopyRecipient::Source,
                     target: TargetFilter::Typed(crate::types::ability::TypedFilter::new(
                         crate::types::ability::TypeFilter::Creature,
                     )),
@@ -4178,7 +4188,7 @@ fn copy_target_choice_fires_granted_etb_trigger_against_deferred_entry_event() {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::BecomeCopy {
-                    recipient: TargetFilter::SelfRef,
+                    recipient: crate::types::ability::CopyRecipient::Source,
                     target: TargetFilter::Typed(crate::types::ability::TypedFilter::new(
                         crate::types::ability::TypeFilter::Creature,
                     )),
@@ -4366,7 +4376,7 @@ fn copy_target_choice_surfaces_interactive_trigger_prompt_for_deferred_entry() {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::BecomeCopy {
-                    recipient: TargetFilter::SelfRef,
+                    recipient: crate::types::ability::CopyRecipient::Source,
                     target: TargetFilter::Typed(TypedFilter::creature()),
                     duration: None,
                     mana_value_limit: None,
@@ -4583,7 +4593,7 @@ fn superior_spider_man_full_copy_flow_copies_graveyard_card_and_exiles_it() {
         let become_copy = crate::types::ability::AbilityDefinition::new(
             crate::types::ability::AbilityKind::Spell,
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Typed(
                     crate::types::ability::TypedFilter::new(
                         crate::types::ability::TypeFilter::Creature,
@@ -4775,7 +4785,7 @@ fn reflexive_when_you_do_fires_after_become_copy_replacement() {
         let become_copy = crate::types::ability::AbilityDefinition::new(
             crate::types::ability::AbilityKind::Spell,
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Typed(
                     crate::types::ability::TypedFilter::new(
                         crate::types::ability::TypeFilter::Creature,

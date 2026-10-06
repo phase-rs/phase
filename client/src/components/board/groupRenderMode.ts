@@ -1,4 +1,5 @@
 import type { GroupedPermanent } from "../../viewmodel/battlefieldProps.ts";
+import { MELDED_CARD_SCALE } from "./boardSizing.ts";
 
 export type BattlefieldRowType = "creatures" | "lands" | "support" | "planeswalkers" | "other";
 export type GroupRenderMode = "single" | "staggered" | "expanded" | "collapsed";
@@ -19,16 +20,21 @@ export function groupStaggerPx(rowType: BattlefieldRowType): number {
 
 interface GroupRenderOptions {
   manualExpanded: boolean;
-  containsCommittedAttackerDuringBlockers: boolean;
+  containsBlockableAttackerDuringBlockers: boolean;
 }
 
 export function getGroupRenderMode(
   group: GroupedPermanent,
-  { manualExpanded, containsCommittedAttackerDuringBlockers }: GroupRenderOptions,
+  { manualExpanded, containsBlockableAttackerDuringBlockers }: GroupRenderOptions,
 ): GroupRenderMode {
   if (group.count <= 1) return "single";
-  if (manualExpanded || containsCommittedAttackerDuringBlockers) return "expanded";
+  if (manualExpanded) return "expanded";
+  // A pile at or above the threshold stays collapsed even while it contains a
+  // blockable attacker: its members are reached through the collapsed-group
+  // picker (GroupedPermanent.tsx::BlockTargetGroupControls) instead of a
+  // mount per member.
   if (group.count >= GROUP_COLLAPSE_THRESHOLD) return "collapsed";
+  if (containsBlockableAttackerDuringBlockers) return "expanded";
   return "staggered";
 }
 
@@ -37,6 +43,19 @@ export function visibleCardSlotCount(
   group: GroupedPermanent,
 ): number {
   return renderMode === "expanded" ? group.count : 1;
+}
+
+/** Size of a group's cards as a multiple of the row's card size. */
+export function groupCardScale(group: GroupedPermanent): number {
+  return group.representative?.isMelded ? MELDED_CARD_SCALE : 1;
+}
+
+/** Row width a group's visible cards occupy, in normal-card slots. */
+export function visibleCardSlotWidth(
+  renderMode: GroupRenderMode,
+  group: GroupedPermanent,
+): number {
+  return visibleCardSlotCount(renderMode, group) * groupCardScale(group);
 }
 
 export function visibleStaggerCount(

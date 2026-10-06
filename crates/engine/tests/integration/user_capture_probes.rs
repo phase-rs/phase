@@ -6,15 +6,18 @@
 //! over an untracked bug-report attachment until that capture was derived into
 //! `fixtures/dina_conqueror_phase5_no_offer_4p.json.gz` by the lane's recipe —
 //! `jq -c '{gameState}' <dump> | gzip -9 -n`, `-n` so the archive carries no timestamp and is
-//! byte-reproducible (769 606 B, sha256
-//! `97fd7dc70aeccecdd62c3376d7e86ea12c794b23623ca50b332e51b95af3eaad`). Re-gzipping the same way
+//! byte-reproducible (769 608 B, sha256
+//! `c25e214df271bc1adecb1df34d16b3f6978b7853abdcca084e323fe2132e97c9`). Re-gzipping the same way
 //! is still NECESSARY — but it is no longer SUFFICIENT. This capture predates U5, so its bare
 //! `"deck_size": 100` must first become the adjacently-tagged `DeckSizeRule` form
 //! `{"type":"Exactly","data":100}` — the variant taken from the sibling `format` field,
 //! `Commander` here. Piping the raw dump straight through the recipe above does not merely miss
 //! the digest; it yields a fixture `PersistedGameState` cannot decode, so `load_dina_raw`'s
 //! `.expect("dina gameState decodes through the production decoder")` aborts — a red test on a
-//! green engine. `dina_noff_turn5_loader.rs` is the worked example of this two-step form.
+//! green engine. `dina_noff_turn5_loader.rs` is the worked example of this two-step form. Then
+//! the retired `combat_phases_started_this_turn` / `end_steps_started_this_turn` keys must be
+//! rewritten to `steps_started_this_turn` (`{"BeginCombat": n, "End": m}`, zeros dropped, placed
+//! at the first old key).
 //!
 //! No env var gates anything here: the headline result — the offer firing on the user's own board
 //! with a FOREIGN driving period live in state — is reproducible by anyone who can run the suite.
@@ -148,6 +151,21 @@ struct MintFrame {
 /// Generic mandatory-chain beat: pass at `Priority`, otherwise take the first legal action.
 /// The Dina chain opens no player choices, so no preference ordering is needed.
 fn dina_drive_one_beat(state: &mut GameState) -> Result<String, String> {
+    // CR 117.3d: at a priority window this policy always passes, so dispatch the pass instead of
+    // enumerating the whole per-viewer candidate set to find it. This reproduces both halves of the
+    // enumerator's hatch — its structural predicate and the submitter identity it authorizes
+    // (CR 723.5) — so this arm stays inside the subset that hatch asserts equivalent to a
+    // simulated pass; every other shape falls through to the enumerating path below.
+    if let WaitingFor::Priority { player } = state.waiting_for {
+        if engine::game::priority::pass_priority_structurally_legal(state, player) {
+            let action = GameAction::PassPriority;
+            let label = format!("{action:?}");
+            let actor = engine::game::turn_control::authorized_submitter_for_player(state, player);
+            return apply(state, actor, action)
+                .map(|_| label)
+                .map_err(|e| format!("apply err (PassPriority): {e:?}"));
+        }
+    }
     let who = state
         .waiting_for
         .acting_player()
@@ -174,7 +192,8 @@ fn dina_drive_one_beat(state: &mut GameState) -> Result<String, String> {
         )
     })?;
     let label = format!("{action:?}");
-    apply(state, who, action.clone())
+    let actor = engine::game::turn_control::authorized_submitter_for_player(state, who);
+    apply(state, actor, action.clone())
         .map(|_| label)
         .map_err(|e| format!("apply err ({action:?}): {e:?}"))
 }

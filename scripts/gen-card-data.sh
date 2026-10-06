@@ -250,7 +250,9 @@ TOKENS_TMP="$(mktemp "${TOKENS_FILE}.tmp.XXXXXX")"
 # promote below would otherwise strand the staging file in the watched data dir,
 # where nothing else would ever collect it.
 track_tmp "$TOKENS_TMP"
-"$TOOL_BIN/tokens-gen" --input "$DATA_DIR/mtgjson/sets" --output "$TOKENS_TMP"
+"$TOOL_BIN/tokens-gen" --input "$DATA_DIR/mtgjson/sets" \
+  --overlay crates/engine/data/known-tokens.overlay.toml \
+  --output "$TOKENS_TMP"
 # tokens-gen output is deterministic, so only overwrite when content actually
 # changed — an unconditional copy bumps the file's mtime and forces a full
 # (40-65s) engine recompile via build.rs's rerun-if-changed for nothing.
@@ -258,13 +260,21 @@ if cmp -s "$TOKENS_TMP" "$TOKENS_FILE"; then
   rm -f "$TOKENS_TMP"
   untrack_tmp "$TOKENS_TMP"
 elif [ "$ALLOW_TRACKED_WRITES" = "1" ]; then
+  # Count both sides before promoting: after promote_tmp the staged file is gone.
+  # `|| true` because the script runs under `set -euo pipefail` and `grep -c`
+  # exits 1 on a zero count and 2 (printing nothing) when the file is absent;
+  # either would otherwise abort the run or print an empty count.
+  TOKENS_BEFORE="$(grep -c '^\[\[token\]\]' "$TOKENS_FILE" 2>/dev/null || true)"
+  TOKENS_BEFORE="${TOKENS_BEFORE:-0}"
+  TOKENS_AFTER="$(grep -c '^\[\[token\]\]' "$TOKENS_TMP" 2>/dev/null || true)"
+  TOKENS_AFTER="${TOKENS_AFTER:-0}"
   # promote_tmp, not a bare `mv`: it deregisters the path so the EXIT trap
   # cannot delete the file it was just promoted onto.
   promote_tmp "$TOKENS_TMP" "$TOKENS_FILE"
   # The catalog changed, so the generator bins built above embed the stale
   # copy. Rebuild them (same shape) to re-bake the new catalog — this is the
   # one case where an engine recompile is genuinely required.
-  echo "Token catalog changed; rebuilding generators to embed it..."
+  echo "Token catalog changed: $TOKENS_BEFORE -> $TOKENS_AFTER presets; rebuilding generators to embed it..."
   cargo build --profile tool --features "$FEATURES" "${TOOL_BINS[@]}"
 else
   echo "WARNING: refusing to promote $TOKENS_FILE: MTGJSON input date $INPUT_DATE is older than committed vintage $STAMP_DATE. Refresh MTGJSON inputs (rerun without MTGJSON_SKIP_REFRESH=1 or set PHASE_REFRESH_MTGJSON=1) before retrying." >&2

@@ -22,10 +22,10 @@ use engine::types::card::CardFace;
 use engine::types::counter::{CounterMatch, CounterType};
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{
-    AlternativeCastKeyword, AutoPassMode, CastPaymentMode, GameState, MulliganBottomEntry,
-    MulliganDecisionEntry, MulliganDecisionPhase, OpeningHandBottomReason, PendingTriggerSummary,
-    PlayerDeckPool, ResolutionOptionalPaymentOption, TurnBoundary, WaitingFor,
-    ZoneOpponentChooserPurpose,
+    AlternativeCastKeyword, AutoPassMode, CastPaymentMode, GameState, ManaChoice, ManaChoicePrompt,
+    MulliganBottomEntry, MulliganDecisionEntry, MulliganDecisionPhase, OpeningHandBottomReason,
+    PendingTriggerSummary, PlayerDeckPool, ResolutionOptionalPaymentOption, TurnBoundary,
+    WaitingFor, ZoneOpponentChooserPurpose,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::interaction::{
@@ -1181,10 +1181,8 @@ fn reordering_hand_rotates_indexed_choices_before_the_new_projection_is_usable()
 }
 
 #[test]
-fn exact_casting_variant_choices_include_index_variant_and_mana_cost() {
-    let Some(db) = load_db() else {
-        return;
-    };
+fn exact_casting_variant_choices_include_index_variant_face_and_mana_cost() {
+    let db = load_db().expect("interaction contract requires the real card database");
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let spell = scenario.add_real_card(P0, "Breaking", Zone::Hand, db);
@@ -1227,65 +1225,66 @@ fn exact_casting_variant_choices_include_index_variant_and_mana_cost() {
     else {
         panic!("casting variants are exact choices");
     };
-    assert_eq!(choices.len(), 2);
-    assert!(choices
+    assert_eq!(choices.len(), 3);
+    let tuples: Vec<_> = choices
         .iter()
-        .all(|choice| choice.surfaces.iter().any(|surface| matches!(
-            surface,
-            InteractionPresentationSurface::Mana {
-                role: InteractionRoleCode::CastingCost,
-                ..
-            }
-        ))));
-    let indices: std::collections::HashSet<_> = choices
-        .iter()
-        .flat_map(|choice| &choice.surfaces)
-        .filter_map(|surface| match surface {
-            InteractionPresentationSurface::Value {
-                role: InteractionRoleCode::OptionIndex,
-                value,
-                ..
-            } => Some(value.clone()),
-            _ => None,
+        .map(|choice| {
+            let value = |role| {
+                choice.surfaces.iter().find_map(|surface| match surface {
+                    InteractionPresentationSurface::Value {
+                        role: actual,
+                        value,
+                        ..
+                    } if *actual == role => Some(value.clone()),
+                    _ => None,
+                })
+            };
+            let cost = choice.surfaces.iter().find_map(|surface| match surface {
+                InteractionPresentationSurface::Mana {
+                    role: InteractionRoleCode::CastingCost,
+                    symbols,
+                    ..
+                } => Some(symbols.clone()),
+                _ => None,
+            });
+            (
+                value(InteractionRoleCode::OptionIndex),
+                value(InteractionRoleCode::CastingVariant),
+                value(InteractionRoleCode::Face),
+                cost,
+            )
         })
         .collect();
     assert_eq!(
-        indices,
-        ["0".to_string(), "1".to_string()].into_iter().collect()
+        tuples,
+        vec![
+            (
+                Some("0".to_string()),
+                Some("Normal".to_string()),
+                Some("Left".to_string()),
+                Some(vec!["U".to_string(), "B".to_string()]),
+            ),
+            (
+                Some("1".to_string()),
+                Some("Normal".to_string()),
+                Some("Right".to_string()),
+                Some(vec!["4".to_string(), "B".to_string(), "R".to_string()]),
+            ),
+            (
+                Some("2".to_string()),
+                Some("Fuse".to_string()),
+                Some("Left".to_string()),
+                Some(vec![
+                    "4".to_string(),
+                    "U".to_string(),
+                    "B".to_string(),
+                    "B".to_string(),
+                    "R".to_string(),
+                ]),
+            ),
+        ],
+        "each indexed response must retain its associated variant, face, and cost"
     );
-    let variants: std::collections::HashSet<_> = choices
-        .iter()
-        .flat_map(|choice| &choice.surfaces)
-        .filter_map(|surface| match surface {
-            InteractionPresentationSurface::Value {
-                role: InteractionRoleCode::CastingVariant,
-                value,
-                ..
-            } => Some(value.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(variants, ["Normal", "Fuse"].into_iter().collect());
-    let costs: std::collections::HashSet<_> = choices
-        .iter()
-        .flat_map(|choice| &choice.surfaces)
-        .filter_map(|surface| match surface {
-            InteractionPresentationSurface::Mana {
-                role: InteractionRoleCode::CastingCost,
-                symbols,
-                ..
-            } => Some(symbols.clone()),
-            _ => None,
-        })
-        .collect();
-    assert!(costs.contains(&vec!["U".to_string(), "B".to_string()]));
-    assert!(costs.contains(&vec![
-        "4".to_string(),
-        "U".to_string(),
-        "B".to_string(),
-        "B".to_string(),
-        "R".to_string(),
-    ]));
 }
 
 #[test]
@@ -3010,6 +3009,7 @@ fn preview_offer_with_points(
                 delta,
                 declarable_victims: Vec::new(),
                 victim_slot,
+                seat_life_charge: Vec::new(),
             }),
         },
         schema: ShortcutDecisionSchema {
@@ -3548,6 +3548,14 @@ fn loop_shortcut_preview_never_routes_through_the_clone_apply_previewer() {
          waiting-for state and the response that states them — not from a board. The pin is what \
          keeps that a fact about the signature rather than a search result"
     );
+    assert_eq!(
+        params_of("completed_shortcut_declaration"),
+        "interaction_id: &InteractionId, projection: &LoopShortcutProjection, response: \
+         &InteractionResponse",
+        "type-level pin: the nothing-naming pin's completion sits on the preview path beside \
+         every producer above it, and it runs on the SUBMIT path too. Widening it to anything \
+         reaching a `GameState` reopens the clone-apply route through a span no textual ban reads"
+    );
 
     for (span_name, body) in [
         ("preview_interaction's attach arm", &response_attach),
@@ -3704,6 +3712,7 @@ fn respond_window_on(
                 ),
             }),
             per_cycle,
+            shortened_by: None,
         },
     };
     bind(&mut state, "respond-declared");
@@ -3793,6 +3802,7 @@ fn respond_period(
         delta,
         declarable_victims: Vec::new(),
         victim_slot,
+        seat_life_charge: Vec::new(),
     }
 }
 
@@ -3868,6 +3878,10 @@ fn declared_amounts(element: &InteractionShortcutPreview) -> Vec<u32> {
 /// the declaration does NOT announce — because folding it without a split would key the whole
 /// drain on the seat the period was measured on, which is the number the responder decides on.
 ///
+/// Leg 1b is the same class on a period whose announced charge is DECOUPLED from that seat's own
+/// loss — the shape a sign-mixed period now mints. The reader resolves on it, so the guard is
+/// what withholds it.
+///
 /// # What the guard withholds is the MAGNITUDES, never the partition
 ///
 /// Segment lengths are not magnitudes, so the declaration's own partition is published on the
@@ -3880,8 +3894,10 @@ fn declared_amounts(element: &InteractionShortcutPreview) -> Vec<u32> {
 /// declaration's own two distinct segments — so "the projection published nothing" cannot satisfy
 /// any of them.
 ///
-/// REVERT-PROBES: delete the guard ⇒ leg 1's empty-entries assertion flips (the responder is
-/// handed `[Life P4 −72]`, the whole drain attributed to a seat the declaration never names);
+/// REVERT-PROBES: delete the guard ⇒ legs 1 and 1b's empty-entries assertions flip (the
+/// responder is handed the whole drain attributed to a seat the declaration never names);
+/// restore the cancel conjunct between the announced charge and the seat's loss ⇒ leg 1b's
+/// assertion flips instead, since the reader would refuse and both sides would fold alike;
 /// delete the `!announced.contains(..)` conjunct ⇒ leg 2 fails; take the charge probe without the
 /// `basis.seats` wrapper ⇒ leg 4 fails; use `basis.charge.is_none()` as the probe ⇒ leg 3 fails
 /// on its first assertion; refuse the whole element on the magnitude leg instead of emptying its
@@ -3929,6 +3945,39 @@ fn the_declared_magnitudes_are_withheld_only_when_the_periods_charge_escapes_the
         "CR 119.3: the period's per-slot charge resolves to a seat this declaration never \
          announces, so NO magnitude is stated rather than one keying the whole drain on the seat \
          the period was measured on. got {:?}",
+        element.entries
+    );
+
+    // ── LEG 1b — the SAME class, on a period whose announced charge is NOT the seat's own
+    //    loss. The reader resolves on it all the same, and the seat it resolves is unannounced.
+    let decoupled = respond_window(
+        IterationCount::Fixed(COUNT),
+        Some(respond_period(
+            &[(R_DRAINED, -36)],
+            vec![(slot.clone(), 12)],
+        )),
+        vec![piecewise_pin(
+            slot.clone(),
+            &STARTS,
+            &seat_subjects(&announced),
+        )],
+    );
+    let reply = respond_reply_of(&decoupled);
+    let element = reply
+        .declared
+        .as_ref()
+        .expect("the partition is published on this board too");
+    assert_eq!(
+        declared_amounts(element),
+        vec![2, 4],
+        "ANTI-VACUITY: TWO segments, pairwise DISTINCT — an element emptied wholesale cannot \
+         satisfy this"
+    );
+    assert!(
+        element.entries.is_empty(),
+        "CR 119.3: an announced charge that is not the seat's own loss no longer refuses, so \
+         the guard is what withholds a drain keyed on the seat the period was measured on. \
+         got {:?}",
         element.entries
     );
 
@@ -3992,10 +4041,6 @@ fn the_declared_magnitudes_are_withheld_only_when_the_periods_charge_escapes_the
         (
             "a life map naming TWO losing seats",
             respond_period(&[(P0, -12), (R_DRAINED, -36)], vec![(slot.clone(), 36)]),
-        ),
-        (
-            "a charge that is not the whole of the seat's loss",
-            respond_period(&[(R_DRAINED, -36)], vec![(slot.clone(), 12)]),
         ),
     ] {
         let expected: Vec<InteractionShortcutPreviewEntry> = period
@@ -5868,27 +5913,29 @@ fn the_allocation_is_empty_exactly_when_the_first_targets_point_holds_no_candida
 }
 
 /// CR 119.3: the published life magnitudes follow the allocation when — and only when — the
-/// period's life map names exactly one losing seat that the declaration itself announces and
-/// the announced charge is the whole of that seat's loss, which is what makes the charge
-/// positive.
+/// period's life map names exactly one losing seat that the declaration itself announces, at
+/// THAT seat's own per-period loss.
 ///
-/// The announced magnitude is an aggregate over every seat, so on any other shape it names the
-/// worst-off seat rather than this slot's victim. The ambiguous, uneven and unannounced-loser
-/// legs carry the magnitude production would announce for their own life map; the
-/// negative-magnitude, undercharge and unnegatable legs stage a charge DECOUPLED from the
-/// period, which production does not emit but the type admits and `WaitingFor` carries across
-/// the persistence boundary.
+/// The announced magnitude is an aggregate over every seat, so it is read as the GATE saying
+/// this point's slot is one the period charges and never as a rate. The ambiguous, uneven and
+/// unannounced-loser legs carry the magnitude production would announce for their own life map;
+/// the gain, undercharge and overcharge legs stage a charge DECOUPLED from the period, which
+/// the sign-mixed periods this engine now mints make ordinary and which `WaitingFor` carries
+/// across the persistence boundary either way. Those three sit at BOTH ends of the same axis —
+/// a charge under, over and unrelated to the seat's loss — and all three resolve alike, which
+/// is what proves the class rather than one end of it.
 ///
 /// REVERT-PROBES: fold with no split at all ⇒ the positive leg publishes one `Life` seat where
 /// the allocation names several; take the FIRST losing seat instead of requiring exactly one ⇒
 /// the ambiguous leg re-attributes a tied seat; pick the seat BY the announced magnitude
 /// instead of by "exactly one loser" ⇒ the uneven leg re-attributes the worst-off seat; drop
 /// the announced-seat requirement ⇒ the unannounced-loser leg erases that seat and charges
-/// announced seats that lose nothing; drop the equality with the losing seat's own loss ⇒ the
-/// negative-magnitude leg spreads a GAIN across the allocated seats and, behind it, the
-/// undercharge leg's `Life` magnitudes total the charge times the count where the period takes
-/// three times that; respell that equality as one against the NEGATED charge ⇒ the unnegatable
-/// leg overflows where the addition refuses.
+/// announced seats that lose nothing; restore the cancel conjunct between the announced charge
+/// and the seat's loss ⇒ the gain, undercharge and overcharge legs all refuse where a spread is
+/// asserted; keep the ANNOUNCED magnitude as the rate ⇒ the undercharge and overcharge legs
+/// publish different amounts where they are asserted identical, and the gain leg spreads a
+/// positive rate; drop `checked_neg` ⇒ the unnegatable leg publishes a split where the unsplit
+/// saturated fold is asserted.
 #[test]
 fn the_preview_spreads_a_charged_life_magnitude_only_over_an_unambiguous_positive_charge() {
     let seats = [P1, PlayerId(2), PlayerId(3)];
@@ -5930,6 +5977,30 @@ fn the_preview_spreads_a_charged_life_magnitude_only_over_an_unambiguous_positiv
         published.sort_unstable();
         published
     };
+    // The spread this producer publishes at `rate`: every allocated candidate charged the rate
+    // times ITS OWN share of the count, plus any seat the split does not name keeping its own
+    // per-cycle term times the whole count.
+    let spread_at =
+        |element: &InteractionShortcutPreview, rate: i64, unsplit: &[(PlayerId, i64)]| {
+            let mut expected: Vec<(Option<u8>, i32)> = seats
+                .iter()
+                .zip(element.allocation.iter())
+                .map(|(seat, assignment)| {
+                    (
+                        Some(seat.0),
+                        i32::try_from(-rate * i64::from(assignment.amount)).unwrap(),
+                    )
+                })
+                .collect();
+            for (seat, per_cycle) in unsplit {
+                expected.push((
+                    Some(seat.0),
+                    i32::try_from(per_cycle * i64::from(element.count)).unwrap(),
+                ));
+            }
+            expected.sort_unstable();
+            expected
+        };
 
     // ── THE CHARGE RESOLVES: rate 3, one matching seat, three announced candidates.
     let rate = 3i64;
@@ -6062,8 +6133,11 @@ fn the_preview_spreads_a_charged_life_magnitude_only_over_an_unambiguous_positiv
         );
     }
 
-    // ── HOSTILE: the announced magnitude is a GAIN, which no losing seat's loss can balance.
-    let gaining_period = vec![(P0, 2i64), (P1, -2i64)];
+    // ── THE CLASS AT ONE END: the announced magnitude is a GAIN — decoupled from the period in
+    //    sign as well as size. The rate is the identified seat's OWN loss, so the split stands.
+    let gain_loss = -2i64;
+    let gain_charge = -2i64;
+    let gaining_period = vec![(P0, 2i64), (P1, gain_loss)];
     assert_eq!(
         gaining_period
             .iter()
@@ -6071,29 +6145,31 @@ fn the_preview_spreads_a_charged_life_magnitude_only_over_an_unambiguous_positiv
             .count(),
         1,
         "reach-guard: exactly one announced seat loses life and that seat is announced, so \
-         this period reaches the charge/loss equality and only that equality refuses it"
+         the period reaches the identification and only the announced charge is unusual"
     );
-    let gaining = offer_at(gaining_period, -2);
+    assert_ne!(
+        gain_charge, -gain_loss,
+        "reach-guard: the announced charge must NOT cancel the seat's loss, or this leg is a \
+         period the superseded conjunct also resolved on and proves nothing"
+    );
+    let gaining = offer_at(gaining_period, gain_charge);
     for element in &gaining.preview {
         assert!(!element.allocation.is_empty());
         assert_eq!(
             life_entries(element),
-            vec![
-                (Some(P0.0), 2 * i32::try_from(element.count).unwrap()),
-                (Some(P1.0), -2 * i32::try_from(element.count).unwrap()),
-            ],
-            "an announced GAIN can never be a losing seat's own loss, so it is refused \
-             rather than spread over the announced candidates"
+            spread_at(element, -gain_loss, &[(P0, 2)]),
+            "CR 119.3: the drain the declaration takes is the identified seat's own 2 per \
+             cycle, spread over the seats it allocates to — the announced GAIN states nothing \
+             about a rate. The seat the split does not name keeps its own term"
         );
     }
 
-    // ── HOSTILE: exactly one losing seat, that seat announced, and the charge positive —
-    //    every conjunct but the equality holds — but the charge is SMALLER than the seat's own
-    //    per-period loss. The fold re-states the charged seat by dropping its whole `Life`
-    //    axis and re-adding the charge once per allocated cycle, so a split here publishes a
-    //    shallower drain than the count actually runs.
+    // ── THE CLASS AT BOTH ENDS: exactly one losing seat, that seat announced, and the charge
+    //    positive but UNEQUAL to the seat's own per-period loss — smaller on one leg, larger on
+    //    the other. The rate is the seat's loss either way, so the two resolve IDENTICALLY.
     let seat_loss = 3i64;
     let undercharge = 1i64;
+    let overcharge = 12i64;
     let coupled = offer_at(vec![(P1, -seat_loss)], seat_loss);
     assert!(
         coupled.preview.iter().any(|element| {
@@ -6104,49 +6180,60 @@ fn the_preview_spreads_a_charged_life_magnitude_only_over_an_unambiguous_positiv
                 .count()
                 > 1
         }),
-        "PAIRED CONTROL: the SAME life map charged its own loss DOES spread over several \
-         seats, so the refusal below is the charge's doing and not an unreachable arm"
+        "PAIRED CONTROL: the SAME life map charged its own loss spreads over several seats, so \
+         the two legs below are read against a charge that changes nothing"
     );
-    let shallow = offer_at(vec![(P1, -seat_loss)], undercharge);
-    for element in &shallow.preview {
-        assert!(
-            !element.allocation.is_empty(),
-            "the declaration is still published — the allocation is its shape, not a \
-             magnitude claim"
+    for (label, charge) in [("undercharge", undercharge), ("overcharge", overcharge)] {
+        assert_ne!(
+            charge, seat_loss,
+            "reach-guard: the {label} charge must NOT be the seat's own loss, or this leg is \
+             the paired control again"
         );
+        let decoupled = offer_at(vec![(P1, -seat_loss)], charge);
         assert_eq!(
-            life_entries(element),
-            vec![(
-                Some(P1.0),
-                -i32::try_from(seat_loss * i64::from(element.count)).unwrap()
-            )],
-            "an undercharge is refused, so the only losing seat keeps its whole per-period loss"
+            decoupled.preview.len(),
+            coupled.preview.len(),
+            "reach-guard: the {label} board publishes the same element set as the control, so \
+             the comparison below is element for element"
         );
-        assert_eq!(
-            life_entries(element)
-                .iter()
-                .map(|(_, amount)| i64::from(*amount))
-                .sum::<i64>(),
-            -seat_loss * i64::from(element.count),
-            "CR 119.3: the published life magnitudes total the period the count runs — a \
-             split at the announced charge states {undercharge} per cycle where the period \
-             takes {seat_loss}"
-        );
+        for (element, control) in decoupled.preview.iter().zip(&coupled.preview) {
+            assert!(
+                !element.allocation.is_empty(),
+                "the declaration is still published — the allocation is its shape, not a \
+                 magnitude claim"
+            );
+            assert_eq!(
+                life_entries(element),
+                spread_at(element, seat_loss, &[]),
+                "CR 119.3: the {label} states nothing about a rate, so the seat's own \
+                 per-period loss is spread over the seats the declaration allocates to"
+            );
+            assert_eq!(
+                life_entries(element),
+                life_entries(control),
+                "and the {label} resolves IDENTICALLY to the charge that equals the loss — \
+                 the class is proved at both ends of the same axis, not at one"
+            );
+            assert_eq!(
+                life_entries(element)
+                    .iter()
+                    .map(|(_, amount)| i64::from(*amount))
+                    .sum::<i64>(),
+                -seat_loss * i64::from(element.count),
+                "the split is exact: the seats together absorb the whole period the count runs"
+            );
+        }
     }
 
-    // ── HOSTILE: a charge no magnitude can negate. `i64::MIN` reaches the same equality
-    //    every leg above ends at, and the addition answers over the whole of `i64` where a
-    //    negation would overflow.
-    let unnegatable = offer_at(vec![(P1, -seat_loss)], i64::MIN);
+    // ── HOSTILE: a per-period loss no negation can state. `i64::MIN` reaches the identified
+    //    seat's own rate, where `checked_neg` refuses over the whole of `i64`.
+    let unnegatable = offer_at(vec![(P1, i64::MIN)], seat_loss);
     for element in &unnegatable.preview {
         assert_eq!(
             life_entries(element),
-            vec![(
-                Some(P1.0),
-                -i32::try_from(seat_loss * i64::from(element.count)).unwrap()
-            )],
-            "a charge that cannot be balanced is refused, so the losing seat keeps its whole \
-             per-period loss"
+            vec![(Some(P1.0), i32::MIN)],
+            "a loss that cannot be negated resolves no charge, so the element folds the \
+             period's own seat key unsplit and saturated"
         );
     }
 }
@@ -7229,6 +7316,166 @@ fn tap_land_for_mana_labels_a_commander_color_identity_land() {
     );
 }
 
+/// CR 106.7 + CR 109.5 + CR 903.4: Fellwar Stone surveys what the opponent's
+/// Command Tower could produce using that opponent's commander color identity.
+#[test]
+fn fellwar_stone_activation_uses_opponents_command_tower_colors() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let stone = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Fellwar Stone",
+            "{T}: Add one mana of any color that a land an opponent controls could produce.",
+        )
+        .id();
+    scenario.add_land_from_oracle(
+        P1,
+        "Command Tower",
+        "{T}: Add one mana of any color in your commander's color identity.",
+    );
+    let rakdos = scenario
+        .add_creature(P0, "Rakdos, Lord of Riots", 6, 6)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+                ManaCostShard::Red,
+                ManaCostShard::Red,
+            ],
+        })
+        .id();
+    scenario.with_commander(rakdos);
+    let brago = scenario
+        .add_creature(P1, "Brago, King Eternal", 2, 4)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::White, ManaCostShard::Blue],
+        })
+        .id();
+    scenario.with_commander(brago);
+    let mut runner = scenario.build();
+    assert_eq!(runner.state().players[P0.0 as usize].mana_pool.total(), 0);
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: stone,
+            ability_index: 0,
+        })
+        .expect("activate parsed Fellwar Stone mana ability");
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseManaColor {
+            choice: ManaChoicePrompt::SingleColor { options },
+            ..
+        } => {
+            let mut offered = options.clone();
+            offered.sort();
+            assert_eq!(
+                offered,
+                vec![ManaType::White, ManaType::Blue],
+                "Command Tower must offer P1's white/blue, not P0's black/red"
+            );
+        }
+        other => panic!("expected Fellwar Stone's SingleColor prompt, got {other:?}"),
+    }
+    // CR 602.2b: the source's tap cost is paid before its mana choice.
+    assert!(runner.state().objects[&stone].tapped);
+
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Blue),
+            count: 1,
+        })
+        .expect("choose blue from Fellwar Stone's offered colors");
+    let pool = &runner.state().players[P0.0 as usize].mana_pool;
+    assert_eq!(pool.count_color(ManaType::Blue), 1);
+    assert_eq!(pool.count_color(ManaType::Black), 0);
+    assert_eq!(pool.count_color(ManaType::Red), 0);
+    assert_eq!(pool.total(), 1);
+    assert!(runner.state().objects[&stone].tapped);
+}
+
+/// CR 106.7 + CR 109.5 + CR 903.4: Exotic Orchard's parsed land ability
+/// surveys the opponent's Command Tower through the same mana rule.
+#[test]
+fn exotic_orchard_activation_uses_opponents_command_tower_colors() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let orchard = scenario
+        .add_land_from_oracle(
+            P0,
+            "Exotic Orchard",
+            "{T}: Add one mana of any color that a land an opponent controls could produce.",
+        )
+        .id();
+    scenario.add_land_from_oracle(
+        P1,
+        "Command Tower",
+        "{T}: Add one mana of any color in your commander's color identity.",
+    );
+    let rakdos = scenario
+        .add_creature(P0, "Rakdos, Lord of Riots", 6, 6)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+                ManaCostShard::Red,
+                ManaCostShard::Red,
+            ],
+        })
+        .id();
+    scenario.with_commander(rakdos);
+    let brago = scenario
+        .add_creature(P1, "Brago, King Eternal", 2, 4)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::White, ManaCostShard::Blue],
+        })
+        .id();
+    scenario.with_commander(brago);
+    let mut runner = scenario.build();
+    assert_eq!(runner.state().players[P0.0 as usize].mana_pool.total(), 0);
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: orchard,
+            ability_index: 0,
+        })
+        .expect("activate parsed Exotic Orchard mana ability");
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseManaColor {
+            choice: ManaChoicePrompt::SingleColor { options },
+            ..
+        } => {
+            let mut offered = options.clone();
+            offered.sort();
+            assert_eq!(
+                offered,
+                vec![ManaType::White, ManaType::Blue],
+                "Command Tower must offer P1's white/blue, not P0's black/red"
+            );
+        }
+        other => panic!("expected Exotic Orchard's SingleColor prompt, got {other:?}"),
+    }
+    // CR 602.2b: the source's tap cost is paid before its mana choice.
+    assert!(runner.state().objects[&orchard].tapped);
+
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Blue),
+            count: 1,
+        })
+        .expect("choose blue from Exotic Orchard's offered colors");
+    let pool = &runner.state().players[P0.0 as usize].mana_pool;
+    assert_eq!(pool.count_color(ManaType::Blue), 1);
+    assert_eq!(pool.count_color(ManaType::Black), 0);
+    assert_eq!(pool.count_color(ManaType::Red), 0);
+    assert_eq!(pool.total(), 1);
+    assert!(runner.state().objects[&orchard].tapped);
+}
+
 #[test]
 fn tap_land_for_mana_labels_an_any_color_among_permanents_land() {
     // ManaProduction::AnyOneColorAmongPermanents.
@@ -7438,12 +7685,34 @@ fn activate_mana_source_labels_fixed_and_flexible_sacrificial_sources() {
         projected_mana_source_labels(runner.state_mut(), flexible, "flexible-mana-source");
     assert_eq!(
         flexible_labels,
-        vec![vec!["R".to_string(), "R".to_string()]],
-        "a flexible source is offered as ONE deferred-color candidate whose label \
-         still carries both produced units; `manual_selection_for_option` collapses \
-         it to Colorless + DeferredColorChoice, so resolving it through the land \
-         authority (the #6944 bug) would drop this label entirely"
+        vec![Vec::<String>::new()],
+        "a deferred source has no selected mana type to project as ProducedMana"
     );
+    let view = viewer_interaction(runner.state(), P0);
+    let InteractionOpportunityResponse::ExactChoices { choices } = &view.opportunities[0].response
+    else {
+        panic!("the deferred mana-source prompt retains exact choices");
+    };
+    assert!(choices.iter().any(|choice| {
+        choice.surfaces.iter().any(|surface| {
+            matches!(
+                surface,
+                InteractionPresentationSurface::Action {
+                    code: InteractionActionCode::ActivateManaSource,
+                    action_id: Some(_),
+                }
+            )
+        }) && choice.surfaces.iter().any(|surface| {
+            matches!(
+                surface,
+                InteractionPresentationSurface::Object {
+                    role: InteractionRoleCode::Source,
+                    reference,
+                    ..
+                } if reference == &flexible.0.to_string()
+            )
+        })
+    }));
 }
 
 // ═════════════════════════════════════════════════════════════════════════════════════════
@@ -8749,6 +9018,505 @@ fn an_unpartitioned_pin_states_no_magnitude_and_accept_suggested_states_the_offe
     );
 }
 
+/// Re-bind the interaction authority over an EDITED offer board and hand back its proposer. The
+/// edit moves the published schema, so the offer's ids are re-minted under a fresh session rather
+/// than carried over.
+fn f4_rebound(mut state: GameState, session: &str) -> (GameState, PlayerId) {
+    let WaitingFor::LoopShortcut { proposer, .. } = state.waiting_for else {
+        panic!(
+            "the edited board must still sit at the CR 732.2a offer, got {:?}",
+            state.waiting_for
+        );
+    };
+    bind_interaction_authority(&mut state, InteractionSessionId(session.to_string()))
+        .expect("the interaction authority binds over the edited offer");
+    assert_eq!(
+        viewer_interaction(&state, proposer).opportunities.len(),
+        1,
+        "liveness control: the edited board still publishes the proposer's own opportunity, so a \
+         refusal below is the ingress's answer and not a dead projection"
+    );
+    (state, proposer)
+}
+
+/// The F4 offer board with its announced `Targets` point made OPTIONAL (`min_targets == 0`),
+/// carried through `PersistedGameState::into_game_state` so the bound under test is one the
+/// production restore contract admits.
+fn f4_optional_announcement_board() -> (GameState, PlayerId) {
+    let (mut state, _) = f4_offer_board();
+    {
+        let WaitingFor::LoopShortcut { schema, .. } = &mut state.waiting_for else {
+            panic!("the F4 board sits at the CR 732.2a offer");
+        };
+        let point = schema
+            .points
+            .iter_mut()
+            .find(|point| matches!(point.kind, DecisionPointKind::Targets { .. }))
+            .expect("the F4 offer announces a Targets point");
+        let DecisionPointKind::Targets { min_targets, .. } = &mut point.kind else {
+            unreachable!("found under that same predicate")
+        };
+        *min_targets = 0;
+    }
+    let restored = engine::types::game_state::PersistedGameState::capture(state)
+        .into_game_state()
+        .expect("the edited snapshot satisfies the checked restore contract");
+    f4_rebound(restored, "interaction-contract-f4-optional")
+}
+
+/// The F4 offer board publishing a SECOND announced-target point — the schema's own `Targets`
+/// point duplicated under a distinct `DecisionSlot` index, which is what makes both publish.
+fn f4_second_announcement_board() -> (GameState, PlayerId) {
+    let (mut state, _) = f4_offer_board();
+    {
+        let WaitingFor::LoopShortcut { schema, .. } = &mut state.waiting_for else {
+            panic!("the F4 board sits at the CR 732.2a offer");
+        };
+        let mut duplicate = schema
+            .points
+            .iter()
+            .find(|point| matches!(point.kind, DecisionPointKind::Targets { .. }))
+            .expect("the F4 offer announces a Targets point")
+            .clone();
+        duplicate.slot.index = duplicate
+            .slot
+            .index
+            .checked_add(1)
+            .expect("the announced slot's sub-index leaves room for a sibling");
+        schema.points.push(duplicate);
+    }
+    f4_rebound(state, "interaction-contract-f4-two-announcements")
+}
+
+/// The announced `Targets` schema point's slot and the seats its candidates name, in published
+/// order — the two halves the submitted announcement is compared against.
+fn f4_announced_slot(state: &GameState) -> (DecisionSlot, Vec<PlayerId>) {
+    let WaitingFor::LoopShortcut { schema, .. } = &state.waiting_for else {
+        panic!("the board sits at the CR 732.2a offer");
+    };
+    let point = schema
+        .points
+        .iter()
+        .find(|point| matches!(point.kind, DecisionPointKind::Targets { .. }))
+        .expect("the F4 offer announces a Targets point");
+    let DecisionPointKind::Targets { legal_targets, .. } = &point.kind else {
+        unreachable!("found under that same predicate")
+    };
+    (
+        point.slot.clone(),
+        legal_targets
+            .iter()
+            .map(|target| match target {
+                TargetRef::Player(seat) => *seat,
+                TargetRef::Object(id) => panic!("the F4 offer announces seats, got object {id:?}"),
+            })
+            .collect(),
+    )
+}
+
+/// **Row 3b** — a pin naming NOTHING is answered, and accepted, with the offer's own canonical
+/// split at a count the published sample omits. The complement of the unpartitioned-pin row
+/// above: that one pins the shape naming WHO without a magnitude, this one the shape naming
+/// neither.
+///
+/// # Discrimination
+///
+/// Each leg names its own failing change:
+/// * leg 1 — without the completion the request is `Rejected { ConstraintUnsatisfied }` with no
+///   element on the answering entry point and `Err` on the other;
+/// * leg 2 — consult the completion at the preview entry points instead of at the ingress and
+///   this leg is `Err` while leg 1 passes, which is the divergence itself;
+/// * leg 3 — mint anything but `canonical_allocation` over the domain's ids and the equality
+///   against the offer's own published element fails;
+/// * leg 4 — drop the `min == 1` conjunct and an element appears where an empty announcement is
+///   already the declaration;
+/// * leg 5 — drop the sole-point conjunct and the answered-second member turns `Confirmable` and
+///   submits, while the both-empty member stays refused either way.
+#[test]
+fn a_nothing_naming_pin_is_completed_with_the_offers_canonical_split() {
+    use engine::analysis::decision_template::PinnedDecision;
+
+    let (state, proposer) = f4_offer_board();
+    let view = viewer_interaction(&state, proposer);
+    let interaction_id = view.opportunities[0].interaction_id.clone();
+    let points = shortcut_points(&view);
+    let point = f4_allocation_point(&points);
+    let (count_spec, published) = f4_published(&view);
+    let InteractionShortcutCountSpec::Fixed { min, max, .. } = count_spec else {
+        panic!("the F4 offer publishes a Fixed count window, got {count_spec:?}");
+    };
+    assert!(
+        (point.min, point.max) == (1, 1) && point.candidate_ids.len() > 1,
+        "reach-guard: the completion fires only on a MANDATORY single-subject announced point, \
+         and a second candidate is what makes its split observable; min={} max={} candidates={}",
+        point.min,
+        point.max,
+        point.candidate_ids.len()
+    );
+    // `f4_pins(.., &[])` builds the nothing-naming pin over the announced point — no ids and no
+    // amounts — while every other answerable point is answered from its own candidate list.
+    let nothing_named = f4_pins(&points, &[]);
+    assert!(
+        nothing_named.iter().any(|pin| pin.group == point.group
+            && pin.choice_ids.is_empty()
+            && pin.amounts.is_empty()),
+        "reach-guard: the request under test must NAME NOTHING over the announced point, else \
+         every leg below is about some other pin shape"
+    );
+
+    // ── LEG 1: the first in-window count the offer's bounded sample published no element for.
+    let unsampled = (min..=max)
+        .find(|count| !published.iter().any(|element| element.count == *count))
+        .expect(
+            "reach-guard: the payload cap must omit a count inside the offer's own window, else \
+             this row is about a fully sampled window and asserts nothing",
+        );
+    let answered = f4_preview(
+        &state,
+        proposer,
+        &interaction_id,
+        unsampled,
+        nothing_named.clone(),
+    );
+    assert_eq!(
+        answered.status,
+        InteractionPreviewStatus::Confirmable,
+        "CR 732.2a: the count is the proposer's to specify, and a pin naming nothing defers to \
+         the offer's own split — a payload cap on which counts PUBLISH an element cannot narrow \
+         which may be declared"
+    );
+    let element = answered
+        .shortcut_preview
+        .clone()
+        .expect("a confirmable completed declaration carries its previewed element");
+    assert_eq!(
+        element.count, unsampled,
+        "the element states the count the request declared"
+    );
+    assert!(
+        !element.entries.is_empty(),
+        "paired positive: the completed element states magnitudes, so the equalities below are \
+         not read off an empty element"
+    );
+    assert!(
+        !element.allocation.is_empty() && element.allocation.iter().all(|part| part.amount > 0),
+        "CR 601.2c: every announced segment takes at least one repetition; {:?}",
+        element.allocation
+    );
+    assert_eq!(
+        element
+            .allocation
+            .iter()
+            .map(|part| part.amount)
+            .sum::<u32>(),
+        unsampled,
+        "the split is a partition OF the declared count"
+    );
+    let rejecting = preview_interaction_with_rejection(
+        &state,
+        proposer,
+        &f4_request(&interaction_id, unsampled, nothing_named.clone()),
+    )
+    .expect("the completed declaration answers on the rejection-typed entry point too");
+    assert_eq!(
+        rejecting.shortcut_preview.as_ref(),
+        Some(&element),
+        "both preview entry points answer one request with one element"
+    );
+
+    // ── LEG 2: the same request SUBMITS, carrying that allocation as a sequenced announcement.
+    let mut submitted = state.clone();
+    let applied = submit_interaction(
+        &mut submitted,
+        proposer,
+        InteractionSubmission {
+            interaction_id: interaction_id.clone(),
+            response: InteractionResponse::Shortcut {
+                decision: InteractionShortcutDecision::Fixed {
+                    iterations: unsampled,
+                },
+                pins: nothing_named.clone(),
+            },
+        },
+    )
+    .expect("what previews confirmable submits: the completion sits at the chokepoint both share");
+    let GameAction::DeclareShortcut {
+        count,
+        template: Some(template),
+    } = &applied.action
+    else {
+        panic!(
+            "a declared shortcut submits a template, got {:?}",
+            applied.action
+        );
+    };
+    assert_eq!(
+        *count,
+        IterationCount::Fixed(unsampled),
+        "the accepted action drives the count the request declared"
+    );
+    let (announced_slot, announced_seats) = f4_announced_slot(&state);
+    let segments = indexed(&point, &element.allocation);
+    let starts: Vec<u32> = segments
+        .iter()
+        .scan(0u32, |start, (_, amount)| {
+            let at = *start;
+            *start += amount;
+            Some(at)
+        })
+        .collect();
+    let seats: Vec<PlayerId> = segments
+        .iter()
+        .map(|(candidate, _)| announced_seats[*candidate])
+        .collect();
+    assert!(
+        template.decisions.contains(&piecewise_pin(
+            announced_slot,
+            &starts,
+            &seat_subjects(&seats)
+        )),
+        "CR 601.2c: the accepted declaration announces the completed split per repetition; \
+         got {:?}",
+        template.decisions
+    );
+
+    // ── LEG 3: the SAMPLED control — the completion's answer is the offer's own published one.
+    let sampled = published
+        .iter()
+        .find(|candidate| {
+            candidate.allocation.len() > 1
+                && candidate
+                    .allocation
+                    .iter()
+                    .any(|part| part.amount != candidate.allocation[0].amount)
+        })
+        .expect(
+            "reach-guard: a published NON-UNIFORM multi-segment element is what keeps an even \
+             split from satisfying the equality below",
+        );
+    let control = f4_preview(
+        &state,
+        proposer,
+        &interaction_id,
+        sampled.count,
+        nothing_named.clone(),
+    );
+    assert_eq!(control.status, InteractionPreviewStatus::Confirmable);
+    assert_eq!(
+        control.shortcut_preview.as_ref(),
+        Some(sampled),
+        "CR 732.2a: at a count the offer DID publish, the completion states that published \
+         element — allocation and entries alike"
+    );
+
+    // ── LEG 4: the OPTIONAL end of the class, where the empty pin is ALREADY a declaration.
+    let (optional_state, optional_proposer) = f4_optional_announcement_board();
+    let optional_view = viewer_interaction(&optional_state, optional_proposer);
+    let optional_id = optional_view.opportunities[0].interaction_id.clone();
+    let optional_points = shortcut_points(&optional_view);
+    let optional_point = f4_allocation_point(&optional_points);
+    assert_eq!(
+        (optional_point.min, optional_point.max),
+        (0, 1),
+        "reach-guard: the restored board must publish the OPTIONAL bound, else this leg is the \
+         mandatory one over again"
+    );
+    let optional_pins = f4_pins(&optional_points, &[]);
+    let optional_preview = f4_preview(
+        &optional_state,
+        optional_proposer,
+        &optional_id,
+        unsampled,
+        optional_pins.clone(),
+    );
+    assert_eq!(
+        optional_preview.status,
+        InteractionPreviewStatus::Confirmable,
+        "an OPTIONAL announced point's empty pin is a legal answer, exactly as it is today"
+    );
+    assert!(
+        optional_preview.shortcut_preview.is_none(),
+        "CR 601.2c: at `min == 0` the empty pin already MEANS 'announce no target here', so \
+         completing it would replace one stated declaration with a different one"
+    );
+    let mut optional_submitted = optional_state.clone();
+    let optional_applied = submit_interaction(
+        &mut optional_submitted,
+        optional_proposer,
+        InteractionSubmission {
+            interaction_id: optional_id,
+            response: InteractionResponse::Shortcut {
+                decision: InteractionShortcutDecision::Fixed {
+                    iterations: unsampled,
+                },
+                pins: optional_pins,
+            },
+        },
+    )
+    .expect("the optional announcement submits, as it does today");
+    let GameAction::DeclareShortcut {
+        template: Some(optional_template),
+        ..
+    } = &optional_applied.action
+    else {
+        panic!(
+            "a declared shortcut submits a template, got {:?}",
+            optional_applied.action
+        );
+    };
+    assert!(
+        optional_template
+            .decisions
+            .contains(&PinnedDecision::Targets {
+                slot: f4_announced_slot(&optional_state).0,
+                targets: Vec::new(),
+            }),
+        "the EMPTY announcement is what submits; got {:?}",
+        optional_template.decisions
+    );
+
+    // ── LEG 5: a SECOND announced-target point leaves the offer's one published split an
+    //    incomplete answer, so nothing is completed on either member.
+    let (spliced_state, spliced_proposer) = f4_second_announcement_board();
+    let spliced_view = viewer_interaction(&spliced_state, spliced_proposer);
+    let spliced_id = spliced_view.opportunities[0].interaction_id.clone();
+    let spliced_points = shortcut_points(&spliced_view);
+    let announced: Vec<&InteractionShortcutPoint> = spliced_points
+        .iter()
+        .filter(|candidate| candidate.kind == InteractionShortcutPointKind::Targets)
+        .collect();
+    assert_eq!(
+        announced.len(),
+        2,
+        "reach-guard: the spliced board must publish TWO announced-target points, else this leg \
+         is the single-point board over again"
+    );
+    let second_group = announced[1].group;
+    let answered_second: Vec<InteractionShortcutPin> = spliced_points
+        .iter()
+        .filter(|candidate| !candidate.read_only)
+        .map(|candidate| match candidate.kind {
+            InteractionShortcutPointKind::Targets if candidate.group == second_group => {
+                sequenced_pin(candidate, &[(0, unsampled)])
+            }
+            InteractionShortcutPointKind::Targets => sequenced_pin(candidate, &[]),
+            _ => InteractionShortcutPin {
+                group: candidate.group,
+                choice_ids: vec![candidate.candidate_ids[0].clone()],
+                amounts: Vec::new(),
+            },
+        })
+        .collect();
+    for (name, pins) in [
+        ("answered-second", answered_second),
+        ("both-empty", f4_pins(&spliced_points, &[])),
+    ] {
+        let refused = f4_preview(
+            &spliced_state,
+            spliced_proposer,
+            &spliced_id,
+            unsampled,
+            pins.clone(),
+        );
+        assert_eq!(
+            refused.status,
+            InteractionPreviewStatus::Rejected {
+                reason: InteractionReasonCode::ConstraintUnsatisfied
+            },
+            "CR 601.2c: with a second announced-target point published the offer's one split is \
+             not a complete answer, so the {name} member keeps today's refusal"
+        );
+        assert!(
+            refused.shortcut_preview.is_none(),
+            "a refused declaration states no magnitude; {name} rendered one"
+        );
+        assert!(
+            preview_interaction_with_rejection(
+                &spliced_state,
+                spliced_proposer,
+                &f4_request(&spliced_id, unsampled, pins.clone()),
+            )
+            .is_err(),
+            "the rejection-typed entry point refuses the {name} member too"
+        );
+        let mut spliced_submitted = spliced_state.clone();
+        assert!(
+            submit_interaction(
+                &mut spliced_submitted,
+                spliced_proposer,
+                InteractionSubmission {
+                    interaction_id: spliced_id.clone(),
+                    response: InteractionResponse::Shortcut {
+                        decision: InteractionShortcutDecision::Fixed {
+                            iterations: unsampled,
+                        },
+                        pins,
+                    },
+                },
+            )
+            .is_err(),
+            "the submit path refuses the {name} member too"
+        );
+    }
+
+    // ── HOSTILE SIBLINGS, all three at the SAME unsampled count leg 1 completes.
+    // A pin naming ONE choice id with empty amounts states WHO without partitioning anything —
+    // still confirmable, and still carrying no element, because the completion fires only on a
+    // pin naming nothing.
+    let one_named: Vec<InteractionShortcutPin> = nothing_named
+        .iter()
+        .cloned()
+        .map(|mut pin| {
+            if pin.group == point.group {
+                pin.choice_ids = vec![point.candidate_ids[0].clone()];
+            }
+            pin
+        })
+        .collect();
+    let unpartitioned = f4_preview(&state, proposer, &interaction_id, unsampled, one_named);
+    assert_eq!(
+        unpartitioned.status,
+        InteractionPreviewStatus::Confirmable,
+        "an unpartitioned declaration stays a legal answer at an unsampled count"
+    );
+    assert!(
+        unpartitioned.shortcut_preview.is_none(),
+        "CR 732.2a: a pin NAMING a subject states no split, so the completion leaves it alone"
+    );
+    // Dropping another point's pin entirely: the completion substitutes the announced group and
+    // nothing else, so a declaration another point leaves unanswered stays refused.
+    let missing_other = nothing_named
+        .iter()
+        .filter(|pin| pin.group == point.group)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        missing_other.len() < nothing_named.len(),
+        "reach-guard: the offer must publish a second answerable point for this sibling to drop"
+    );
+    let incomplete = f4_preview(&state, proposer, &interaction_id, unsampled, missing_other);
+    assert_eq!(
+        incomplete.status,
+        InteractionPreviewStatus::Rejected {
+            reason: InteractionReasonCode::ConstraintUnsatisfied
+        },
+        "the completion is group-local: it cannot carry a declaration another point leaves \
+         unanswered"
+    );
+    assert!(incomplete.shortcut_preview.is_none());
+    // The window is `materialize_loop_shortcut_response`'s single authority, and the completion
+    // does not restate it: an out-of-window count is refused after the substitution as before it.
+    let out_of_window = f4_preview(&state, proposer, &interaction_id, max + 1, nothing_named);
+    assert_eq!(
+        out_of_window.status,
+        InteractionPreviewStatus::Rejected {
+            reason: InteractionReasonCode::ConstraintUnsatisfied
+        },
+        "CR 732.2a: a count outside the offer's own window is refused, completion or not"
+    );
+    assert!(out_of_window.shortcut_preview.is_none());
+}
+
 /// **Row 4** — a declaration the ingress REFUSES carries no magnitude, each refusal asserted by
 /// the reason the ingress actually emits for it.
 ///
@@ -9470,6 +10238,7 @@ fn p10_row_7_a_restored_multi_entry_ranking_still_loads_and_still_drives_head_on
             win_kind: engine::analysis::loop_check::WinKind::Advantage,
             template: Some(declared),
             per_cycle: None,
+            shortened_by: None,
         },
     };
     let wire = serde_json::to_string(&carrying).expect("serialize the pending proposal");

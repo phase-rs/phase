@@ -2,16 +2,15 @@
 //! `"under their control"` must put the permanent under the named player's
 //! control, not under the resolving player's.
 //!
-//! CR 110.2a: "If an effect instructs a player to
-//! put an object onto the battlefield, that object enters the battlefield under
-//! that player's control **unless the effect states otherwise**." Jailbreak
-//! states otherwise: it returns a permanent card from an OPPONENT's graveyard
-//! "under their control".
+//! CR 110.2a: "If an effect instructs a player to put an object onto the
+//! battlefield, that object enters the battlefield under that player's control
+//! **unless the effect states otherwise**." Jailbreak states otherwise: it
+//! returns a permanent card from an OPPONENT's graveyard "under their control".
 //!
-//! CR 400.1 + CR 400.3 + CR 404.1: a card in a graveyard
-//! is in ITS OWNER's graveyard, so "an opponent's graveyard" identifies that
-//! opponent as the card's owner (CR 108.3). The parser therefore binds
-//! the anaphor to `ControllerRef::ParentTargetOwner`.
+//! CR 400.1 + CR 400.3 + CR 404.1: a card in a graveyard is in ITS OWNER's
+//! graveyard, so "an opponent's graveyard" identifies that opponent as the
+//! card's owner (CR 108.3). The parser therefore binds the anaphor to
+//! `ControllerRef::ParentTargetOwner`.
 //!
 //! SCOPE OF THIS TEST — read before trusting it as a regression guard.
 //!

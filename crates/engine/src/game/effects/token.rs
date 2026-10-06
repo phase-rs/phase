@@ -8,13 +8,14 @@ use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, CastingPermission,
-    Comparator, ContinuousModification, ControllerRef, CopiableValues, DelayedTriggerCondition,
-    Duration, Effect, EffectError, EffectKind, FilterProp, ManaContribution, ManaProduction,
-    PermissionGrantee, PlayerFilter, PtValue, QuantityExpr, QuantityRef, ResolvedAbility,
-    SacrificeCost, SearchSelectionConstraint, StaticDefinition, TargetFilter, TargetRef,
-    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, AttachCardinality,
+    AttachSelection, CastingPermission, Comparator, ContinuousModification, ControllerRef,
+    CopiableValues, DelayedTriggerCondition, Duration, Effect, EffectError, EffectKind, FilterProp,
+    ManaContribution, ManaProduction, PermissionGrantee, PlayerFilter, PtValue, QuantityExpr,
+    QuantityRef, ResolvedAbility, SacrificeCost, SearchSelectionConstraint, StaticDefinition,
+    TargetFilter, TargetRef, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
+use crate::types::card::PrintedLoyalty;
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -637,6 +638,7 @@ pub fn resolve(
             // CR 608.2c: drop the consumed set's member-cause provenance too so
             // the side map never outlives its `tracked_object_sets` entry.
             state.tracked_set_member_causes.remove(&id);
+            state.tracked_set_participants.remove(&id);
         }
     }
 
@@ -708,6 +710,7 @@ fn build_token_spec(
             display_name,
             power,
             toughness,
+            loyalty: None,
             core_types,
             subtypes,
             supertypes,
@@ -1286,6 +1289,7 @@ pub(crate) fn materialize_token_spec_body(
     object.token_image_ref = token_image_ref;
     let has_attrs = ch.power.is_some()
         || ch.toughness.is_some()
+        || ch.loyalty.is_some()
         || !ch.core_types.is_empty()
         || !ch.subtypes.is_empty()
         || !ch.supertypes.is_empty()
@@ -1299,6 +1303,14 @@ pub(crate) fn materialize_token_spec_body(
         object.base_toughness = ch.toughness;
         object.layer_base_power = ch.power;
         object.layer_base_toughness = ch.toughness;
+        // CR 306.5b + CR 306.5c: record the token's printed loyalty; live loyalty
+        // stays counter-derived. Placing entry loyalty counters from this value is
+        // not yet done for tokens. Mirrors `printed_cards::apply_face`, so a
+        // planeswalker token and a card-backed planeswalker carry loyalty identically.
+        object.loyalty = ch.loyalty;
+        object.printed_loyalty = ch.loyalty.map(PrintedLoyalty::Fixed);
+        object.base_loyalty = object.loyalty;
+        object.base_printed_loyalty = object.printed_loyalty;
         object.card_types = CardType {
             supertypes: ch.supertypes.clone(),
             core_types: ch.core_types.clone(),
@@ -1371,9 +1383,15 @@ pub(crate) fn materialize_token_copy_body(
     // itself copiable. `install_copiable_values_as_base` already installs
     // `loyalty`/`base_loyalty` from `values.loyalty` (CR 306.5b), so no separate
     // loyalty seed is needed here.
+    let mut values = copy.values.clone();
+    let cda_pruning = super::copy_exception::prune_copy_exception_overridden_cdas(
+        &values.static_definitions,
+        &copy.additional_modifications,
+    );
+    values.static_definitions = Arc::new(cda_pruning.definitions);
     apply_copiable_values_to_liminal_object(
         object,
-        &copy.values,
+        &values,
         copy.display_source,
         copy.printed_ref.clone(),
         copy.token_image_ref.clone(),
@@ -1882,6 +1900,9 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
                     Effect::Attach {
                         attachment: TargetFilter::SelfRef,
                         target: TargetFilter::Any,
+                        selection: AttachSelection::AtResolution {
+                            count: AttachCardinality::One,
+                        },
                     },
                     Vec::new(),
                     entry.source_id,
@@ -2430,8 +2451,9 @@ pub(crate) fn spec_emits_only_etb_pair(spec: &TokenSpec) -> bool {
 
 /// CR 603.6a + CR 111.1: The set of event keys a single produced token EMITS as
 /// it enters the battlefield, given its core types. Mirrors the event-side
-/// deriver exactly (`keys_from_event`, trigger_index.rs:462-468 for the ETB pair
-/// and :529-531 for `TokenCreated`): a token entering emits the broad
+/// deriver exactly (`keys_from_event` — the `to == Zone::Battlefield` branch of
+/// its `GameEvent::ZoneChanged` arm for the ETB pair, and its
+/// `GameEvent::TokenCreated` arm for `TokenCreated`): a token entering emits the broad
 /// `EnterBattlefield(None)`, one narrow `EnterBattlefield(Some(ct))` per core
 /// type, and `TokenCreated`. Kept in lockstep with the deriver so the §2.3a gate
 /// reasons about exactly the events siblings would observe.
@@ -2908,6 +2930,7 @@ pub(crate) fn copy_probe_spec_for(
             display_name: values.name.clone(),
             power: values.power,
             toughness: values.toughness,
+            loyalty: None,
             core_types: values.card_types.core_types.clone(),
             subtypes: values.card_types.subtypes.clone(),
             supertypes: values.card_types.supertypes.clone(),
@@ -3145,9 +3168,10 @@ fn resolve_attach_host(
         // CR 608.2c: a numbered anaphor resolves against the whole resolving
         // chain's targets, which is why it routes through the same authority
         // `attach::resolve_object_filter` uses rather than reading this clause's
-        // nearest target.
+        // nearest target. CR 608.2b: a slot whose target was illegal at
+        // resolution (or whose pinned referent departed, CR 400.7) names no host.
         AttachHostAuthority::ParentSlot(index) => {
-            crate::game::targeting::resolve_parent_slot_from_root(state, ability, index)
+            crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, index)
                 .map(target_ref_to_attach_target)
         }
         AttachHostAuthority::Source => Some(AttachTarget::Object(ability.source_id)),
@@ -3282,6 +3306,7 @@ fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority 
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
@@ -3773,6 +3798,7 @@ fn junk_ability() -> AbilityDefinition {
             count: QuantityExpr::Fixed { value: 1 },
             position: crate::types::ability::LibraryPosition::Top,
             face_down: false,
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
         },
     )
     .sub_ability(AbilityDefinition::new(
@@ -3791,7 +3817,7 @@ fn junk_ability() -> AbilityDefinition {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
-                cast_cost_raise: None,
+                cast_cost_modifier: None,
                 alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             },
@@ -3860,6 +3886,7 @@ fn incubator_phyrexian_back_face() -> BackFaceData {
         parse_warnings: vec![],
         layout_kind: None,
         is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
     }
 }
 
@@ -3914,6 +3941,31 @@ fn heartwood_ability() -> AbilityDefinition {
     .cost(AbilityCost::Tap)
 }
 
+/// CR 701.71a: the Jace planeswalker token created by `empower Jace N` —
+/// "[−1]: Surveil 1." (CR 701.25a) and "[−3]: Draw a card." (CR 121.1).
+/// Engine-defined from the rule text, not parsed from the catalog row's printed
+/// text, so the printed reminder parenthetical never becomes ability text.
+fn jace_token_abilities() -> Vec<AbilityDefinition> {
+    vec![
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Surveil {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Loyalty { amount: -1 }),
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Loyalty { amount: -3 }),
+    ]
+}
+
 /// CR 111.10: Predefined token abilities keyed by subtype.
 /// Returns ability definitions to inject for the given subtype, or empty if none.
 pub fn predefined_token_abilities(subtype: &str) -> Vec<AbilityDefinition> {
@@ -3932,6 +3984,7 @@ pub fn predefined_token_abilities(subtype: &str) -> Vec<AbilityDefinition> {
         "Incubator" => vec![incubator_ability()],
         "Shard" => vec![shard_ability()],
         "Heartwood" => vec![heartwood_ability()],
+        "Jace" => jace_token_abilities(),
         _ => vec![],
     }
 }
@@ -3956,6 +4009,8 @@ fn predefined_token_rules_text(subtype: &str) -> Option<&'static str> {
         ),
         "Incubator" => Some("{2}: Transform this artifact."),
         "Shard" => Some("{2}, Sacrifice this enchantment: Scry 1, then draw a card."),
+        // CR 701.71a
+        "Jace" => Some("[−1]: Surveil 1.\n[−3]: Draw a card."),
         _ => None,
     }
 }
@@ -4238,6 +4293,20 @@ fn predefined_role_token_spec(name: &str) -> Option<RoleSpec> {
     }
 }
 
+/// Recompute `token_art` from the object's current base characteristics.
+/// Called by every token ability injector (which all creation, copy, and
+/// replay flows run once the base is final), so live and replayed tokens
+/// agree without any flow-specific hook.
+fn refresh_token_art_descriptor(
+    state: &mut GameState,
+    obj_id: crate::types::identifiers::ObjectId,
+) {
+    let Some(obj) = state.objects.get_mut(&obj_id) else {
+        return;
+    };
+    obj.restore_token_art_baseline();
+}
+
 /// Inject predefined token abilities based on the token's subtypes and name.
 ///
 /// Two dispatch paths:
@@ -4261,6 +4330,17 @@ pub(super) fn inject_resolved_token_abilities(
     state: &mut GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) {
+    inject_resolved_token_abilities_inner(state, obj_id);
+    // The base is final after injection (or was already final when there was
+    // nothing to inject): refresh the art descriptor on every path, including
+    // the early no-payload returns, so vanilla tokens carry one too.
+    refresh_token_art_descriptor(state, obj_id);
+}
+
+fn inject_resolved_token_abilities_inner(
+    state: &mut GameState,
+    obj_id: crate::types::identifiers::ObjectId,
+) {
     let Some(materialized) = materialize_token_ability_payload_for_object(state, obj_id) else {
         return;
     };
@@ -4274,19 +4354,25 @@ pub(super) fn inject_resolved_token_abilities(
 
 /// CR 111.3 + CR 111.4: Grant catalog `rules_text` when token creation resolved
 /// a `token_image_ref` preset whose abilities are not already covered by the
-/// predefined path (e.g. SOS Pest attack life gain).
+/// predefined path (e.g. SOS Pest attack life gain). CR 111.10: A predefined
+/// token (Treasure, Food, Clue, …) already received its abilities at creation,
+/// so the single authority `materialize_token_ability_payload` short-circuits
+/// on it and nothing catalog-derived is re-granted.
 pub(crate) fn inject_catalog_token_abilities(
     state: &mut GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) {
-    let Some(preset) = state.objects.get(&obj_id).and_then(|obj| {
-        obj.token_image_ref.as_ref().and_then(|image_ref| {
-            crate::game::token_presets::known_token_preset_by_id(&image_ref.preset_id)
-        })
-    }) else {
+    inject_catalog_token_abilities_inner(state, obj_id);
+    refresh_token_art_descriptor(state, obj_id);
+}
+
+fn inject_catalog_token_abilities_inner(
+    state: &mut GameState,
+    obj_id: crate::types::identifiers::ObjectId,
+) {
+    let Some(materialized) = materialize_token_ability_payload_for_object(state, obj_id) else {
         return;
     };
-    let materialized = materialize_catalog_token_payload(preset);
     if materialized.source == TokenAbilitySource::CatalogRulesText
         && materialized.has_functional_payload()
     {
@@ -4439,6 +4525,15 @@ fn catalog_rules_text_abilities(
 }
 
 pub(super) fn inject_predefined_token_abilities(
+    state: &mut GameState,
+    obj_id: crate::types::identifiers::ObjectId,
+) -> bool {
+    let applied = inject_predefined_token_abilities_inner(state, obj_id);
+    refresh_token_art_descriptor(state, obj_id);
+    applied
+}
+
+fn inject_predefined_token_abilities_inner(
     state: &mut GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) -> bool {
@@ -6019,6 +6114,142 @@ mod tests {
         );
     }
 
+    /// CR 111.10a: A Treasure token has exactly one ability. Linking a catalog
+    /// preset after creation (the debug preset-spawn path, which defers
+    /// `token_image_ref` until after `inject_resolved_token_abilities` ran) must
+    /// not re-grant that ability from the preset's catalog `rules_text`.
+    #[test]
+    fn catalog_injection_keeps_single_predefined_treasure_ability() {
+        // M20 Treasure preset: `PredefinedArtifact { kind: Treasure }` whose
+        // catalog rules_text is the CR 111.10a ability.
+        let preset = crate::game::token_presets::known_token_preset_by_id(
+            "0060ce13-67e2-5607-a29b-721c743e6770",
+        )
+        .expect("M20 Treasure preset");
+        // Reach-guard: the catalog text on its own yields a functional payload,
+        // so a single ability below is the predefined short-circuit, not a parse gap.
+        assert!(
+            materialize_catalog_token_payload(preset).has_functional_payload(),
+            "Treasure catalog rules_text must parse to a functional payload"
+        );
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Treasure".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.is_token = true;
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Treasure".to_string());
+        }
+        // Every functional object channel `apply_token_ability_payload` can write
+        // (`modifications` land in the static pair; the catalog path never writes
+        // `back_face`).
+        let channels = |obj: &GameObject| {
+            (
+                obj.abilities.len(),
+                obj.base_abilities.len(),
+                obj.static_definitions.len(),
+                obj.base_static_definitions.len(),
+                obj.trigger_definitions.len(),
+                obj.base_trigger_definitions.len(),
+                obj.keywords.len(),
+                obj.base_keywords.len(),
+            )
+        };
+
+        // Creation-time injection, before the preset image ref is linked.
+        inject_resolved_token_abilities(&mut state, obj_id);
+        assert_eq!(
+            state.objects[&obj_id].abilities.len(),
+            1,
+            "creation must install the predefined Treasure ability"
+        );
+        let before = channels(&state.objects[&obj_id]);
+        let rules_text_before = state.objects[&obj_id].token_rules_text.clone();
+
+        state.objects.get_mut(&obj_id).unwrap().token_image_ref = preset.token_image_ref.clone();
+        inject_catalog_token_abilities(&mut state, obj_id);
+
+        let obj = &state.objects[&obj_id];
+        assert_eq!(
+            channels(obj),
+            before,
+            "catalog injection must not grow any functional channel"
+        );
+        assert_eq!(
+            obj.abilities.len(),
+            1,
+            "catalog injection must not duplicate the predefined Treasure ability"
+        );
+        assert_eq!(obj.base_abilities.len(), 1);
+        // Parity with the normal creation path: a predefined token keeps the
+        // predefined display text (none for Treasure), not the catalog text.
+        assert_eq!(obj.token_rules_text, rules_text_before);
+    }
+
+    /// FRA Jace planeswalker token (MTGJSON uuid).
+    const JACE_TOKEN_PRESET_ID: &str = "635f825d-d6fb-59ac-a807-af08713a3794";
+
+    /// CR 701.71a: through `materialize_token_ability_payload`,
+    /// the Jace token's abilities come from the subtype-keyed registry, so its catalog
+    /// rules-text fallback is not taken. (What the debug-preset creation path leaves on
+    /// the created object is asserted by the planeswalker-token integration test.)
+    #[test]
+    fn jace_token_abilities_come_from_the_predefined_registry() {
+        let preset = crate::game::token_presets::known_token_preset_by_id(JACE_TOKEN_PRESET_ID)
+            .expect("FRA Jace token preset");
+        let materialized = materialize_token_ability_payload(
+            &preset.body.display_name,
+            &preset.body.subtypes,
+            Some(preset),
+        );
+        // Red as `CatalogRulesText` if the registry route was not taken; red as
+        // `None` if the registry wiring silently missed. The two are distinguished.
+        assert_eq!(materialized.source, TokenAbilitySource::Predefined);
+        assert_eq!(materialized.abilities.len(), 2);
+        assert!(materialized.unparsed_rules_text_lines.is_empty());
+        // Each effect is paired with its loyalty cost, so swapping the effects
+        // between the two costs goes red.
+        let effect_for_loyalty_cost = |amount: i32| {
+            let matching: Vec<_> = materialized
+                .abilities
+                .iter()
+                .filter(|ability| {
+                    matches!(ability.cost, Some(AbilityCost::Loyalty { amount: a }) if a == amount)
+                })
+                .collect();
+            assert_eq!(
+                matching.len(),
+                1,
+                "exactly one ability costs loyalty {amount}"
+            );
+            &*matching[0].effect
+        };
+        assert!(matches!(
+            effect_for_loyalty_cost(-1),
+            Effect::Surveil {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ));
+        assert!(matches!(
+            effect_for_loyalty_cost(-3),
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ));
+        // The registry arm is keyed to the Jace subtype, not to planeswalker
+        // subtypes in general.
+        assert!(predefined_token_abilities("Chandra").is_empty());
+    }
+
     #[test]
     fn catalog_pest_dies_trigger_uses_battlefield_lki_zone() {
         let preset = crate::game::token_presets::known_token_preset_by_id(
@@ -6310,6 +6541,7 @@ mod tests {
                 display_name: "Pest".to_string(),
                 power: Some(1),
                 toughness: Some(1),
+                loyalty: None,
                 core_types: vec![CoreType::Creature],
                 subtypes: vec!["Pest".to_string()],
                 supertypes: vec![],
@@ -6389,6 +6621,7 @@ mod tests {
                 display_name: "Treasure".to_string(),
                 power: None,
                 toughness: None,
+                loyalty: None,
                 core_types: vec![CoreType::Artifact],
                 subtypes: vec!["Treasure".to_string()],
                 supertypes: vec![],
@@ -6458,6 +6691,7 @@ mod tests {
                 display_name: "Royal".to_string(),
                 power: None,
                 toughness: None,
+                loyalty: None,
                 core_types: vec![CoreType::Enchantment],
                 subtypes: vec!["Aura".to_string(), "Role".to_string()],
                 supertypes: vec![],
@@ -6536,6 +6770,7 @@ mod tests {
                 display_name: "Monster Role".to_string(),
                 power: None,
                 toughness: None,
+                loyalty: None,
                 core_types: vec![CoreType::Enchantment],
                 subtypes: vec!["Aura".to_string(), "Role".to_string()],
                 supertypes: vec![],
@@ -6726,6 +6961,7 @@ mod tests {
                 display_name: "Monster Role".to_string(),
                 power: None,
                 toughness: None,
+                loyalty: None,
                 core_types: vec![CoreType::Enchantment],
                 subtypes: vec!["Aura".to_string(), "Role".to_string()],
                 supertypes: vec![],
@@ -7287,6 +7523,7 @@ mod tests {
                 display_name: "Construct".to_string(),
                 power: Some(0),
                 toughness: Some(0),
+                loyalty: None,
                 core_types: vec![CoreType::Artifact, CoreType::Creature],
                 subtypes: vec!["Construct".to_string()],
                 supertypes: vec![],
@@ -7352,6 +7589,7 @@ mod tests {
                 display_name: "Stoneforged Blade".to_string(),
                 power: Some(0),
                 toughness: Some(0),
+                loyalty: None,
                 core_types: vec![CoreType::Artifact],
                 subtypes: vec!["Equipment".to_string()],
                 supertypes: vec![],
@@ -7420,6 +7658,7 @@ mod tests {
                 display_name: "Conditional Blade".to_string(),
                 power: Some(0),
                 toughness: Some(0),
+                loyalty: None,
                 core_types: vec![CoreType::Artifact],
                 subtypes: vec!["Equipment".to_string()],
                 supertypes: vec![],
@@ -7495,6 +7734,7 @@ mod tests {
                 display_name: "Meteorite".to_string(),
                 power: Some(0),
                 toughness: Some(0),
+                loyalty: None,
                 core_types: vec![CoreType::Artifact],
                 subtypes: vec![],
                 supertypes: vec![],
@@ -7549,6 +7789,7 @@ mod tests {
                 display_name: "Hero".to_string(),
                 power: Some(1),
                 toughness: Some(1),
+                loyalty: None,
                 core_types: vec![CoreType::Creature],
                 subtypes: vec!["Hero".to_string()],
                 supertypes: vec![],
@@ -8022,6 +8263,7 @@ mod tests {
                     display_source: DisplaySource::Token,
                     printed_ref: None,
                     token_image_ref: None,
+                    token_art: None,
                     extra_keywords: Vec::new(),
                     additional_modifications: Vec::new(),
                     tapped: false,
@@ -9551,5 +9793,125 @@ mod attach_host_authority_tests {
             ),
             "a composite naming an exile-linked object has no host authority here"
         );
+    }
+
+    // ─── TokenArtDescriptor derivation ────────────────────────────────────
+
+    use crate::types::ability::{ReplacementDefinition, StaticDefinition};
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::statics::StaticMode;
+
+    fn art_fixture() -> GameObject {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        obj.is_token = true;
+        obj.base_power = Some(1);
+        obj.base_toughness = Some(1);
+        obj.base_color = vec![crate::types::mana::ManaColor::Red];
+        obj.base_card_types.subtypes = vec!["Goblin".to_string()];
+        obj
+    }
+
+    #[test]
+    fn art_descriptor_reports_the_printed_body() {
+        let descriptor = art_fixture().intrinsic_token_art();
+        assert_eq!(descriptor.power, Some(1));
+        assert_eq!(descriptor.toughness, Some(1));
+        assert_eq!(descriptor.colors, vec![crate::types::mana::ManaColor::Red]);
+        assert_eq!(descriptor.subtypes, vec!["Goblin".to_string()]);
+        assert!(descriptor.keywords.is_empty());
+        assert!(!descriptor.has_abilities);
+    }
+
+    #[test]
+    fn art_descriptor_ignores_live_grants_and_modifications() {
+        let mut obj = art_fixture();
+        // Pumped P/T, a color setter, an anthem keyword grant, and a granted
+        // activated ability: all live-layer, none of it printed.
+        obj.power = Some(4);
+        obj.toughness = Some(4);
+        obj.color = vec![crate::types::mana::ManaColor::Blue];
+        obj.keywords = vec![Keyword::Flying];
+        obj.abilities = Arc::new(vec![treasure_ability()]);
+        let descriptor = obj.intrinsic_token_art();
+        assert_eq!(descriptor.power, Some(1));
+        assert_eq!(descriptor.toughness, Some(1));
+        assert_eq!(descriptor.colors, vec![crate::types::mana::ManaColor::Red]);
+        assert!(descriptor.keywords.is_empty());
+        assert!(
+            !descriptor.has_abilities,
+            "live grants must not flip the printed ability summary"
+        );
+    }
+
+    #[test]
+    fn art_descriptor_names_keyword_families_and_passes_unknown_payloads_through() {
+        let mut obj = art_fixture();
+        obj.base_keywords = vec![
+            Keyword::Flying,
+            Keyword::FirstStrike,
+            Keyword::Ward(WardCost::Mana(crate::types::mana::ManaCost::generic(2))),
+            Keyword::Flying,
+            // `kind()` collapses Toxic to the catch-all `Unknown`; the art
+            // mapping must still name its own family.
+            Keyword::Toxic(1),
+            Keyword::Unknown("some-future-keyword".to_string()),
+        ];
+        let descriptor = obj.intrinsic_token_art();
+        assert_eq!(
+            descriptor.keywords,
+            vec![
+                "Flying".to_string(),
+                "FirstStrike".to_string(),
+                "Ward".to_string(),
+                "Toxic".to_string(),
+                "some-future-keyword".to_string(),
+            ]
+        );
+        assert!(descriptor.has_abilities);
+    }
+
+    #[test]
+    fn art_descriptor_has_abilities_covers_every_base_ability_store() {
+        // Each arm independently flips the summary; vanilla stays false.
+        assert!(!art_fixture().intrinsic_token_art().has_abilities);
+
+        let mut keyworded = art_fixture();
+        keyworded.base_keywords = vec![Keyword::Trample];
+        assert!(keyworded.intrinsic_token_art().has_abilities);
+
+        let mut activated = art_fixture();
+        activated.base_abilities = Arc::new(vec![treasure_ability()]);
+        assert!(activated.intrinsic_token_art().has_abilities);
+
+        let mut triggered = art_fixture();
+        triggered.base_trigger_definitions =
+            Arc::new(vec![TriggerDefinition::new(TriggerMode::ChangesZone)]);
+        assert!(triggered.intrinsic_token_art().has_abilities);
+
+        let mut staticed = art_fixture();
+        staticed.base_static_definitions =
+            Arc::new(vec![StaticDefinition::new(StaticMode::Continuous)]);
+        assert!(staticed.intrinsic_token_art().has_abilities);
+
+        let mut replaced = art_fixture();
+        replaced.base_replacement_definitions =
+            Arc::new(vec![ReplacementDefinition::new(ReplacementEvent::Untap)]);
+        assert!(replaced.intrinsic_token_art().has_abilities);
+    }
+
+    #[test]
+    fn art_descriptor_ignores_display_mirror_rules_text() {
+        // `token_rules_text` can mirror catalog text for abilities that were
+        // suppressed from functional injection; it must not flip the summary
+        // on a functionally vanilla token.
+        let mut obj = art_fixture();
+        obj.token_rules_text = Some("Flying".to_string());
+        assert!(!obj.intrinsic_token_art().has_abilities);
     }
 }

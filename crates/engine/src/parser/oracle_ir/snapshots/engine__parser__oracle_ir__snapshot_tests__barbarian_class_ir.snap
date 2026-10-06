@@ -22,13 +22,49 @@ expression: "&ir"
         "fragment": "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll."
       },
       "node": {
-        "Unsupported": {
-          "unsupported": {
-            "category": "Unknown",
-            "fragment": "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.",
-            "description": "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll."
+        "Replacement": {
+          "definition": {
+            "event": "RollDice",
+            "execute": {
+              "kind": "Spell",
+              "effect": {
+                "type": "RollDie",
+                "count": {
+                  "type": "Offset",
+                  "inner": {
+                    "type": "Ref",
+                    "qty": {
+                      "type": "EventContextAmount"
+                    }
+                  },
+                  "offset": 1
+                },
+                "sides": 0,
+                "results": []
+              },
+              "cost": null,
+              "sub_ability": null,
+              "duration": null,
+              "description": null,
+              "target_prompt": null,
+              "condition": null,
+              "optional_targeting": false,
+              "optional": false,
+              "forward_result": false
+            },
+            "mode": {
+              "type": "Mandatory"
+            },
+            "valid_card": null,
+            "description": "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.",
+            "condition": null,
+            "die_ignore_rule": {
+              "type": "Lowest"
+            },
+            "valid_player": "You"
           },
-          "min_x_value": 0
+          "source_text": "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.",
+          "execute_ir": null
         }
       }
     },

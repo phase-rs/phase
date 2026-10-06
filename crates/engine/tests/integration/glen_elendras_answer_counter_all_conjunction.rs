@@ -23,8 +23,9 @@
 //!
 //! Test of Talents is verified UNAFFECTED: its
 //! `FilteredTrackedSetSize { caused_by: Exiled }` excludes Counter members
-//! because `this_way_cause_for_effect(Counter) => None`, so a Counter never
-//! stamps an `Exiled` cause.
+//! because Test of Talents' counter carries no CR 614.1a exile rider, so
+//! `this_way_cause_for_resolved` leaves its members unstamped (a counter WITH
+//! that rider does stamp `Exiled` — issue #8762).
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::create_object;

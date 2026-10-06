@@ -1,6 +1,7 @@
 pub mod ability_rw;
 pub mod ability_scan;
 pub mod ability_utils;
+pub(crate) mod ante;
 pub mod arithmetic;
 pub mod attractions;
 pub mod augment;
@@ -79,12 +80,14 @@ mod haunt_tests;
 pub mod keywords;
 pub mod layers;
 pub mod ledger;
+pub(crate) mod legend_scope;
 pub mod library;
 pub mod life_costs;
 pub mod life_safety;
 mod lifecycle;
 pub mod log;
 pub mod mana_abilities;
+pub(crate) mod mana_burn;
 pub mod mana_payment;
 pub mod mana_sources;
 pub mod match_flow;
@@ -139,6 +142,16 @@ pub mod players;
 pub(crate) mod precast_copy_shortcut;
 pub use precast_copy_shortcut::normalize_untrusted_restore;
 pub use precast_copy_shortcut::rekey_after_trusted_restore;
+pub(crate) mod payment_transaction;
+/// Test-support accessor for the materialized shadow contract. Production
+/// consumers continue to use viewer-filtered projections and never receive the
+/// authoritative replay helper directly.
+#[cfg(feature = "test-support")]
+pub fn staged_payment_shadow_for_test(
+    state: &crate::types::game_state::GameState,
+) -> crate::types::game_state::GameState {
+    payment_transaction::project(state)
+}
 pub mod preview;
 pub mod printed_cards;
 pub mod priority;
@@ -183,6 +196,7 @@ pub mod triggers;
 pub mod turn_control;
 pub mod turns;
 pub mod visibility;
+pub(crate) mod wish_scope;
 pub mod zone_pipeline;
 // Zone-mutation primitives. Production code outside the engine crate must go
 // through zone_pipeline::move_object — the module is only public to test
@@ -195,27 +209,30 @@ pub(crate) mod zones;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
 
+pub use ante::face_uses_ante;
 pub use bracket_estimate::{
     estimate_bracket, BracketAxis, BracketAxisCounts, BracketContributingCards, BracketEstimate,
     BracketViolation, CommanderBracketTier,
 };
 // Plumbing: read-only re-export of the X-affordability authority
-// (`max_x_value`) so the `phase-ai` consumer crate can price "the only legal X
-// is 0" without duplicating the cost machinery. `casting_costs` is otherwise
+// (`max_x_value`) and the cost-leg extractor that feeds it
+// (`extract_x_mana_cost`) so the `phase-ai` consumer crate can price "the only
+// legal X is 0" without duplicating the cost machinery. `casting_costs` is otherwise
 // `pub(crate)`; this exposes exactly that one function from it. The governing
 // rule annotation lives on the function definition in `casting_costs.rs`, not
 // on this visibility re-export.
-pub use casting_costs::max_x_value;
+pub use casting_costs::{extract_x_mana_cost, max_x_value};
 pub use deck_loading::{
     create_commander_from_card_face, load_and_hydrate_decks, load_deck_into_state,
     resolve_deck_list, resolve_player_deck_list, DeckEntry, DeckList, DeckPayload, PlayerDeckList,
 };
 pub use deck_validation::{
     can_pair_commanders, companion_candidates, deck_copy_limit_for, evaluate_deck_compatibility,
-    is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible, max_deck_copies,
-    signature_spell_selection_policy, validate_deck_for_format, validate_name_deck_for_format,
-    validate_name_deck_for_format_full, CompatibilityCheck, DeckCompatibilityRequest,
-    DeckCompatibilityResult, DeckCoverage, SignatureSpellSelectionPolicy, UnsupportedCard,
+    is_brawl_commander_eligible, is_commander_eligible, is_freeform_commander_eligible,
+    is_tiny_leader_eligible, max_deck_copies, signature_spell_selection_policy,
+    validate_deck_for_format, validate_name_deck_for_format, validate_name_deck_for_format_full,
+    CompatibilityCheck, DeckCompatibilityRequest, DeckCompatibilityResult, DeckCoverage,
+    SignatureSpellSelectionPolicy, UnsupportedCard,
 };
 pub use engine::{
     apply, apply_as_current, apply_with_rejection, new_game, preflight_debug_action,
@@ -234,7 +251,7 @@ pub use game_object::{BackFaceData, GameObject, PhaseOutCause, PhaseStatus};
 pub use keywords::parse_keywords;
 pub use mana_payment::{can_pay, pay_from_pool, produce_mana, PaymentError};
 pub use printed_cards::{
-    rehydrate_game_from_card_db, rehydrate_game_from_card_db_with_finalization,
+    install_card_db, rehydrate_game_from_card_db, rehydrate_game_from_card_db_with_finalization,
     CardDbRehydrationFinalization,
 };
 pub use public_state::finalize_public_state;

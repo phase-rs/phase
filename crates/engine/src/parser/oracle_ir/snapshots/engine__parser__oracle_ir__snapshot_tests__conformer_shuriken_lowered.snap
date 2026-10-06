@@ -15,6 +15,9 @@ expression: "&lowered"
           ],
           "controller": "You",
           "properties": []
+        },
+        "selection": {
+          "at_resolution": {}
         }
       },
       "cost": {
@@ -87,9 +90,32 @@ expression: "&lowered"
               "sub_ability": {
                 "kind": "Spell",
                 "effect": {
-                  "type": "Unimplemented",
-                  "name": "put",
-                  "description": "counters equal to the difference"
+                  "type": "PutCounter",
+                  "counter_type": "P1P1",
+                  "count": {
+                    "type": "Difference",
+                    "left": {
+                      "type": "Ref",
+                      "qty": {
+                        "type": "Power",
+                        "scope": {
+                          "type": "Target"
+                        }
+                      }
+                    },
+                    "right": {
+                      "type": "Ref",
+                      "qty": {
+                        "type": "Power",
+                        "scope": {
+                          "type": "Source"
+                        }
+                      }
+                    }
+                  },
+                  "target": {
+                    "type": "SelfRef"
+                  }
                 },
                 "cost": null,
                 "sub_ability": null,
@@ -97,14 +123,32 @@ expression: "&lowered"
                 "description": null,
                 "target_prompt": null,
                 "condition": {
-                  "type": "TargetHasKeywordInstead",
-                  "keyword": {
-                    "Unknown": "greater power than ~"
+                  "type": "QuantityCheck",
+                  "lhs": {
+                    "type": "Ref",
+                    "qty": {
+                      "type": "Power",
+                      "scope": {
+                        "type": "Target"
+                      }
+                    }
+                  },
+                  "comparator": "GT",
+                  "rhs": {
+                    "type": "Ref",
+                    "qty": {
+                      "type": "Power",
+                      "scope": {
+                        "type": "Source"
+                      }
+                    }
                   }
                 },
                 "optional_targeting": false,
                 "optional": false,
-                "forward_result": false
+                "forward_result": false,
+                "sub_link": "SequentialSibling",
+                "target_reads": "ParentAnnouncement"
               },
               "duration": null,
               "description": null,

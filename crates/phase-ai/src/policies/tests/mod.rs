@@ -1,6 +1,7 @@
 //! Architectural lint scaffolding for `policies/`.
 
 pub mod activation_marker_lint;
+pub mod activation_patience_repro;
 pub mod artifact_synergy;
 pub mod blink_payoff;
 pub mod cost_reduction;
@@ -15,6 +16,7 @@ pub mod graveyard_types;
 pub mod lifegain_payoff;
 pub mod mill_payoff;
 pub mod mulligan_input_lint;
+pub mod own_board_only_activation_repro;
 pub mod poison;
 pub mod reanimator_payoff;
 pub mod removal_lethality;

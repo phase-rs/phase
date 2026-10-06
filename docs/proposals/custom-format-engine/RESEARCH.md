@@ -33,6 +33,28 @@ during the match.
   Jeweled Bird, Rebirth, Tempest Efreet.
 - **Reprint policy:** non-foil reprints with original frame + art, any language;
   no proxies.
+- **Named legal promos (ADDED 2026-09-09, Phase 2a implementation):** the
+  source also declares three promotional cards legal — **Arena**, **Sewers of
+  Estark**, and **Nalathni Dragon** (1994) — which the "Legal sets" line above
+  does not cover. This was missed in the original 2026-07-07 capture and is
+  recorded here because it is a real legality difference, not a detail.
+  - Their sets, verified against Scryfall 2026-09-09: Arena and Sewers of
+    Estark are in `PHPR` (HarperPrism Book Promos, **5 cards**); Nalathni
+    Dragon is in `PDRC` (Dragon Con, **1 card**).
+  - **Not expressible for 93-94 at set-code granularity.** The other three
+    PHPR cards — Giant Badger, Windseeker Centaur, Mana Crypt — are Old School
+    *95* promos, not 93-94 legal, and Mana Crypt is restricted even there. So
+    adding `PHPR` to 93-94's `legal_sets` would admit three cards the format
+    forbids, while omitting it rejects two the format allows. `PDRC` has no
+    such problem (one card).
+  - **RESOLVED (2026-09-11).** The preset originally omitted both promo sets
+    and was **under-permissive by these three cards**, because fixing it
+    properly needed card-level pool entries that `LegalityRules` did not have.
+    It has them now: `LegalityRules.legal_cards` names cards legal
+    individually, unioned with the set check, and both Old School presets list
+    their promos there. Set codes remain an approximation for the *reprint*
+    axis, so the `SetCodeApproximation` disclosure stays — but it no longer
+    covers the promo gap, which is closed.
 - **Legacy rules:** mana burn only. (Plus Chaos Orb / Falling Star flip Oracle,
   and a "no draws" 50-minute Chaos-Orb tiebreaker — tournament-ops, not engine.)
 
@@ -42,7 +64,17 @@ during the match.
 - **Legal sets:** all of 93-94 **plus** Fourth Edition, Ice Age, Chronicles,
   Renaissance, Homelands.
 - **Restricted:** 93-94's list **plus** Demonic Consultation, Mana Crypt.
-- **Banned:** 93-94's list **plus** Amulet of Quoz, Timmerian Fiends.
+- **Banned:** 93-94's list **plus** Amulet of Quoz, Timmerian Fiends. (Both
+  additions are CR 407.3 ante cards, which this era's pool newly contains —
+  `game::ante` bars them from every deck independently of this list.)
+- **Named legal promos (ADDED 2026-09-09, as above):** 93-94's three **plus**
+  Giant Badger, Windseeker Centaur and Mana Crypt. Unlike 93-94, this IS
+  expressible at set-code granularity — all five `PHPR` cards are 95-legal, so
+  `PHPR` + `PDRC` would be exactly correct here. **RESOLVED (2026-09-11)
+  alongside 93-94's carve-out**, and by naming the six cards rather than adding
+  the two sets: the same mechanism serves both presets, so their pools stay
+  legible side by side, and neither depends on a set's membership happening to
+  match a format's promo list.
 - **Legacy rules:** mana burn only.
 
 ### Middle School
@@ -214,12 +246,12 @@ but not fully in the *mechanism*); round 2's fix itself was then found
 incomplete (round 3). Both rounds' findings, current state only:
 
 - **It's life loss, not damage** (round 2, still correct). Modern CR: **mana
-  burn is obsolete.** `docs/MagicCompRules.txt:8277-8278` glossary "Mana Burn
-  (Obsolete)": "Older versions of the rules stated that unspent mana caused a
-  player to **lose life**… That rule no longer exists." (Removed by the 2010
-  "M10" rules update.) Life loss and damage are behaviorally distinct in this
-  engine (damage can be prevented/redirected and fires "dealt damage"
-  triggers; life loss does neither).
+  burn is obsolete.** Glossary "Mana Burn (Obsolete)": "Older versions of the
+  rules stated that unspent mana caused a player to **lose life**… That rule
+  no longer exists." (Removed by the 2010 "M10" rules update.) Life loss and
+  damage are behaviorally distinct in this engine (damage can be
+  prevented/redirected and fires "dealt damage" triggers; life loss does
+  neither).
 - **It's per real MTG phase, not per engine `Phase` transition — and this
   requires the mana POOL to persist across intra-phase-group steps, not just
   the burn CHECK to skip them (round 2 only did the latter; round 3 caught
@@ -285,9 +317,9 @@ gating a side-effect on an unconditionally-firing event:**
 ## 6. "Damage uses the stack" — LARGE / deep; honest assessment
 
 - Modern combat damage is **simultaneous and explicitly does NOT use the
-  stack**: `docs/MagicCompRules.txt:2406` "CR 510.2 … This turn-based action
-  doesn't use the stack. No player has the chance to cast spells or activate
-  abilities between the time combat damage is assigned and the time it's dealt."
+  stack**: "CR 510.2 … This turn-based action doesn't use the stack. No player
+  has the chance to cast spells or activate abilities between the time combat
+  damage is assigned and the time it's dealt."
 - The engine implements exactly this modern model in
   `game/combat_damage.rs` (**3,658 lines**) as a simultaneous batch
   (`resolve_combat_damage`, `combat_damage.rs:102`; batch/replacement machinery
@@ -383,14 +415,12 @@ made exile a *defined in-game zone*. Sources:
   a card from the sideboard **or** a card that had been "removed from the game";
   after M10, only the sideboard qualifies.
 - Current CR confirms the *modern* boundary this flag reverts:
-  - `docs/MagicCompRules.txt:1982` — **CR 400.11**: "An object is outside the
-    game if it isn't in any of the game's zones. **Outside the game is not a
-    zone.**"
-  - `docs/MagicCompRules.txt:1984` — **CR 400.11a**: "Cards in a player's
-    sideboard are outside the game."
-  - `docs/MagicCompRules.txt:3486` — **CR 701.23j**: "If an effect instructs a
-    player to search outside the game for a card, that player may choose an
-    appropriate card they own from outside the game."
+  - **CR 400.11**: "An object is outside the game if it isn't in any of the
+    game's zones. **Outside the game is not a zone.**"
+  - **CR 400.11a**: "Cards in a player's sideboard are outside the game."
+  - **CR 701.23j**: "If an effect instructs a player to search outside the
+    game for a card, that player may choose an appropriate card they own from
+    outside the game."
   - Exile (CR 406) is a normal in-game zone, so exiled cards are *not* "outside
     the game" and are ineligible for a modern Wish.
 
@@ -488,6 +518,26 @@ the format anyway — the flag is a *runtime resolution* concern, not a parse
 concern), no new effect, no new state, no new WaitingFor variant, and full reuse
 of the tested face-up-exile collector and mover.
 
+**SCOPE DECIDED 2026-09-14 (Phase 2cd review): the widening applies to EVERY
+outside-the-game search, not only Wish-class ones** — superseding the
+"Wish-class" framing above. Two narrower designs were tried in review and both
+failed on a proxy. Inferring eligibility from the declared pool widened Learn
+(CR 701.48a, 2021), which declares the same `Sideboard` pool. Inferring it from
+Oracle wording then widened *Wish* itself — a 2021 (AFR) card with the same "a
+card you own from outside the game" text as the 2002 Judgment wishes, because
+Oracle text is errata'd to modern templating for every card and cannot date
+one. A per-card era authority (first-printing date) would make one rule depend
+on print date while the engine plays current Oracle text everywhere else. So the
+flag is a whole-game zone-model choice — "removed from the game counts as
+outside it" — for all effects. Two separate questions, not to be conflated:
+**card-era inference** is unnecessary for the bundled presets (their pools end
+by 2003, so no post-M10 outside-the-game card is legal in them and the uniform
+and per-era readings pick the same cards), but the **runtime zone model**
+still changes legal choices in those presets — under the flag, a Burning Wish
+in Middle School or Classic Magic can choose an owned face-up exiled card that
+the modern rules would not offer. The per-era reading would only diverge for
+lobby-saved formats with arbitrary pools.
+
 **Size: SMALL — and materially smaller than PLAN §4's current "Medium"
 estimate.** The Medium framing predated discovering that
 `SideboardAndFaceUpExile` + `collect_face_up_exile_candidates` already implement
@@ -534,13 +584,24 @@ rules-tips "M14 Rules changes! Legendary permanents"
 
 - **Legends (1994) → pre-M14 (through 2013): NOT per-controller — global.** If
   two or more legendary permanents with the *same name* were on the battlefield,
-  they were affected **regardless of which player(s) controlled them**. The exact
-  mechanic shifted across eras (early "first legend in play trumps / newest is
-  denied"; Sixth Edition 1999 unified it across all legendary permanent types
-  with the "both go to the graveyard" form; *Champions of Kamigawa* 2004 changed
-  it to a "nullification" variant), but the invariant across every pre-M14 form
-  is that **same-named legends interacted across controllers** — two different
-  players could not each keep their own copy of the same legendary permanent.
+  they were affected **regardless of which player(s) controlled them**. The
+  invariant across every pre-M14 form is that **same-named legends interacted
+  across controllers** — two different players could not each keep their own
+  copy of the same legendary permanent.
+  - **CORRECTED 2026-09-12 (this bullet previously had the eras wrong, and the
+    error reached shipped code before review caught it).** An earlier revision
+    claimed three pre-M14 forms, with Sixth Edition (1999) introducing the
+    "both go to the graveyard" form and *Champions of Kamigawa* (2004) changing
+    it to a "nullification" variant. WotC's own announcement of the M14 change
+    ("The Legendary Rule Change", magic.wizards.com, 2013-05-23) names only
+    **two**, and maps them the other way: under the original rule "the first
+    legend to come into play trumped all others", and "this was changed in
+    Champions of Kamigawa to the **nullification** rule that we have played with
+    since" — i.e. the CoK rule IS the all-die form (hence that article's
+    complaint about players who "'legend rule' each other turn after turn"), and
+    it held until M14. Sixth Edition does not feature in WotC's account.
+  - So the two pre-M14 forms are: **first-in-trumps** (Legends 1994 → CoK 2004)
+    and **all-die / "nullification"** (CoK 2004 → M14 2013).
 - **Magic 2014 (effective 2013-07-13, the M14 prerelease): today's
   per-controller rule.** Rewritten so that only when *a single player* controls
   two or more legendary permanents with the same name does that player choose one
@@ -562,24 +623,23 @@ rules-tips "M14 Rules changes! Legendary permanents"
 The legend rule is a **state-based action**, CR **704.5j** (verified by grep;
 the number is not guessed):
 
-- `docs/MagicCompRules.txt:5510` — **CR 704.5j**: "If two or more legendary
-  permanents with the same name are controlled by the same player, that player
-  chooses one of them, and the rest are put into their owners' graveyards. This
-  is called the 'legend rule.'" (Note "**by the same player**" — the modern
-  per-controller scope, in the rule text itself.)
-- `docs/MagicCompRules.txt:8187-8188` — glossary "Legend Rule": "…causes a
-  player who controls two or more legendary permanents with the same name to put
-  all but one into their owners' graveyards."
-- `docs/MagicCompRules.txt:1459` — **CR 205.4d** cross-references 704.5j.
+- **CR 704.5j**: "If two or more legendary permanents with the same name are
+  controlled by the same player, that player chooses one of them, and the rest
+  are put into their owners' graveyards. This is called the 'legend rule.'"
+  (Note "**by the same player**" — the modern per-controller scope, in the rule
+  text itself.)
+- Glossary "Legend Rule": "…causes a player who controls two or more legendary
+  permanents with the same name to put all but one into their owners'
+  graveyards."
+- **CR 205.4d** cross-references 704.5j.
 - **Planeswalker uniqueness is confirmed obsolete in the current CR:**
-  `docs/MagicCompRules.txt:1721` — **CR 306.4**: "Previously, planeswalkers were
-  subject to a 'planeswalker uniqueness rule'… This rule has been removed and
-  planeswalker cards printed before this change have received errata… to have the
-  legendary supertype… they are subject to the 'legend rule' (see rule 704.5j)."
-  And `docs/MagicCompRules.txt:8580-8581` — glossary "Planeswalker Uniqueness
-  Rule (Obsolete)".
-- (Contrast: the world rule, CR 704.5k, `docs/MagicCompRules.txt:5512`, is a
-  distinct global/choiceless SBA — a useful structural precedent, see §10d.)
+  **CR 306.4**: "Previously, planeswalkers were subject to a 'planeswalker
+  uniqueness rule'… This rule has been removed and planeswalker cards printed
+  before this change have received errata… to have the legendary supertype… they
+  are subject to the 'legend rule' (see rule 704.5j)." And the glossary entry
+  "Planeswalker Uniqueness Rule (Obsolete)".
+- (Contrast: the world rule, CR 704.5k, is a distinct global/choiceless SBA —
+  a useful structural precedent, see §10d.)
 
 ### 10c. Is it a REAL functional difference? — YES
 
@@ -657,11 +717,12 @@ world-rule choiceless-global precedent and the shared SBA departure pipeline.
 **Size: SMALL** — comparable to mana burn (§5) and pre-M10 Wish (§9); materially
 smaller than damage-on-stack (§6). The only design nuance is scoping the enum:
 model just `Modern` vs a single consolidated `PreM14AnyController` "all
-same-named copies across all controllers go to the graveyard" form (the Sixth-
-Edition "both die" version, which is the one that changes cross-controller legal
-board states); do **not** attempt to reproduce the era-specific "first-in
-trumps" / Kamigawa "nullification" micro-variants — they are out of scope and a
-future enum variant can carry them if a format ever needs one. Because the flag
+same-named copies across all controllers go to the graveyard" form — the
+**Champions of Kamigawa (2004) "nullification" rule**, in force until M14, which
+is the one that changes cross-controller legal board states (era attribution
+corrected 2026-09-12, see 10a); do **not** attempt to reproduce the earlier
+Legends-era "first legend in play trumps" rule — it is out of scope and a future
+enum variant can carry it if a format ever needs one. Because the flag
 re-enables a rule the current CR replaced (M14), annotate it as a *legacy rule
 reverting the M14 change* and cite CR 704.5j (the modern boundary being relaxed),
 exactly as mana burn cites the obsolete-glossary entry and the Wish flag cites

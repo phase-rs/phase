@@ -1,10 +1,9 @@
 //! `AristocratsKeepablesMulligan` — feature-driven mulligan policy for
 //! aristocrats decks.
 //!
-//! CR 103.5: deciding to keep after the
-//! mulligan process. When a deck's aristocrats commitment is meaningful,
-//! opening hands combining a sacrifice outlet with cheap creatures and lands
-//! are strongly preferred.
+//! CR 103.5: deciding to keep after the mulligan process. When a deck's
+//! aristocrats commitment is meaningful, opening hands combining a sacrifice
+//! outlet with cheap creatures and lands are strongly preferred.
 //!
 //! Opts out for decks where `features.aristocrats.commitment <= 0.3` — the
 //! baseline `KeepablesByLandCount` policy is the sole voice for those decks.

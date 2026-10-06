@@ -6,6 +6,8 @@ import {
   type ServerInfo,
 } from "../adapter/ws-adapter";
 import { supportsGzipEnvelope, type WireFormat } from "../network/wireEnvelope";
+import { authorizeLanServer, canUseLanBridge, initializeLanCapabilities, isLanEndpoint } from "./lan";
+import { NativeEngineSocket } from "./nativeEngineSocket";
 import { GzipEnvelopeSocket } from "./gzipEnvelopeSocket";
 
 /**
@@ -56,7 +58,8 @@ export interface OpenOptions<T extends PhaseSocketTransport = WebSocket> {
   timeoutMs?: number;
   /**
    * Creates the transport used for the handshake. Omitted callers retain the
-   * browser's direct `new WebSocket(url)` behavior.
+   * default transport: desktop LAN IPC for supported local endpoints, otherwise
+   * the browser WebSocket. Explicit factories always take precedence.
    */
   socketFactory?: PhaseSocketFactory<T>;
   /**
@@ -128,6 +131,34 @@ export function openPhaseSocket(
   wsUrl: string,
   opts: OpenOptions<PhaseSocketTransport> = {},
 ): Promise<PhaseSocket<PhaseSocketTransport>> {
+  if (!opts.socketFactory && isLanEndpoint(wsUrl)) {
+    return new Promise<PhaseSocket<PhaseSocketTransport>>((resolve, reject) => {
+      const { signal } = opts;
+      const onAbort = () => reject(new HandshakeError("aborted", "Handshake aborted"));
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
+      const preflight = async () => {
+        await initializeLanCapabilities();
+        if (signal?.aborted) return;
+        const useLanBridge = canUseLanBridge(wsUrl);
+        if (useLanBridge) await authorizeLanServer(wsUrl);
+        if (signal?.aborted) return;
+        // The handshake installs its own abort listener synchronously.
+        resolve(openPhaseSocket(wsUrl, {
+          ...opts,
+          socketFactory: (url) => useLanBridge
+            ? new NativeEngineSocket({ type: "lan", url, origin: window.location.origin })
+            : new WebSocket(url),
+        }));
+      };
+      void preflight().catch(reject).finally(() => {
+        signal?.removeEventListener("abort", onAbort);
+      });
+    });
+  }
   const { signal, timeoutMs = 5000, surface = "full" } = opts;
 
   return new Promise<PhaseSocket<PhaseSocketTransport>>((resolve, reject) => {

@@ -76,6 +76,12 @@ fn setup_2p_optional_charge_growth(mode: LoopDetectionMode) -> (GameRunner, Obje
     (runner, kickoff, engine_creature)
 }
 
+/// Beats driven before this fixture is taken to be non-marking. The floor is the beat at
+/// which the Interactive sibling marks; the same fixture is driven to this same cap there
+/// and asserted to mark, so that test passing is what holds this bound. Beyond one full
+/// loop period the cascade repeats, so extra beats observe nothing new.
+const MARK_SEARCH_BEATS: usize = 200;
+
 /// Drive `PassPriority`/`OrderTriggers` beats, collecting every emitted event, until
 /// `controller`'s revocable-∞ capability is marked (Path C is a SILENT mark — it never
 /// changes `waiting_for`, so callers poll `unbounded_resources` directly). Returns the
@@ -123,7 +129,7 @@ fn live_optional_charge_growth_marks_counter_advantage_no_gameover() {
         setup_2p_optional_charge_growth(LoopDetectionMode::Interactive);
     let _ = runner.cast(kickoff).resolve();
 
-    let (events, marked) = drive_until_marked_collecting(&mut runner, P0, 500);
+    let (events, marked) = drive_until_marked_collecting(&mut runner, P0, MARK_SEARCH_BEATS);
     assert!(
         marked,
         "the optional charge-growth cascade must reach the Path-C revocable-∞ mark \
@@ -184,7 +190,7 @@ fn live_charge_growth_off_never_marks() {
 
     // Drive a bounded number of beats; Off must never mark, and (being a beneficial
     // no-loss loop) must never reach a GameOver.
-    let (events, marked) = drive_until_marked_collecting(&mut runner, P0, 500);
+    let (events, marked) = drive_until_marked_collecting(&mut runner, P0, MARK_SEARCH_BEATS);
     assert!(
         !marked,
         "Off must never mark a revocable-∞ capability (Interactive-only, #4603)"

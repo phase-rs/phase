@@ -257,13 +257,13 @@ No `cargo ai-gate` run required unless an eval/policy weight changes — this is
 
 | Location | Annotation | Verified |
 |---|---|---|
-| `Keyword::Teamwork(u32)` | `CR 601.2b/f/h: optional additional cost (Marvel mechanic; not in CR)` | `601.2b/f/h` present (lines 2457/2466/2470); `teamwork` absent from CR ✓ |
+| `Keyword::Teamwork(u32)` | `CR 601.2b/f/h: optional additional cost (Marvel mechanic; not in CR)` | `601.2b/f/h` present; `teamwork` absent from CR ✓ |
 | `synthesize_teamwork` | `CR 601.2b: announce optional additional cost` | ✓ |
-| power-sum payment check | `CR 601.2h: pay the announced additional cost` | ✓ (line 2470 "player pays the total cost") |
-| `effective_teamwork_additional_cost` | `CR 601.2f: cost locked in after announcement` | ✓ (line 2466) |
+| power-sum payment check | `CR 601.2h: pay the announced additional cost` | ✓ ("The player pays the total cost") |
+| `effective_teamwork_additional_cost` | `CR 601.2f: cost locked in after announcement` | ✓ |
 | modal cap upgrade | `CR 601.2b + CR 700.2a: mode choice with conditional cap` | `601.2b` ✓; `700.2a` to grep-verify before writing |
 | "cast using teamwork" condition | `CR 601.2f + CR 608.2c: reads additional-cost-paid flag at resolution` | `608.2c` to grep-verify (it is the standard "if it was kicked" annotation already in conditions.rs) |
-| Quantum Reduction flash (if shipped) | `CR 601.3b: cast as though it had flash, considering in-proposal additional-cost choice` | `601.3b` present (line 2480) ✓ |
+| Quantum Reduction flash (if shipped) | `CR 601.3b: cast as though it had flash, considering in-proposal additional-cost choice` | `601.3b` present ✓ |
 
 **Mandatory before writing any annotation:** re-grep `700.2a` and `608.2c` (`grep -n "^700.2a" docs/MagicCompRules.txt`, `grep -n "^608.2c" docs/MagicCompRules.txt`). Do not trust this table's "to grep-verify" rows without the grep.
 

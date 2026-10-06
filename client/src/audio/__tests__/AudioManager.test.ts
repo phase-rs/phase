@@ -230,9 +230,9 @@ describe("AudioManager", () => {
     mockCreateGain.mockClear();
 
     audioManager.playSfxForStep([
-      { event: { type: "CreatureDestroyed", data: { object_id: 1 } }, duration: 400 },
-      { event: { type: "CreatureDestroyed", data: { object_id: 2 } }, duration: 400 },
-      { event: { type: "CreatureDestroyed", data: { object_id: 3 } }, duration: 400 },
+      { event: { type: "CreatureDestroyed", data: { object_id: 1, source_id: null } }, duration: 400 },
+      { event: { type: "CreatureDestroyed", data: { object_id: 2, source_id: null } }, duration: 400 },
+      { event: { type: "CreatureDestroyed", data: { object_id: 3, source_id: null } }, duration: 400 },
     ]);
 
     // Single consolidated sound, not 3 separate ones

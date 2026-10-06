@@ -171,6 +171,20 @@ pub(crate) fn apply_zone_exit_cleanup(
     to: Zone,
     attachments: Vec<crate::types::game_state::AttachmentSnapshot>,
 ) {
+    // CR 608.2h + CR 707.2: record the spell's stack entry and object before
+    // any of this function's own reverts (`cast_occurrence` clear below,
+    // modal/face-down face swap further down) erase what "that spell" looked
+    // like while it was on the stack.
+    if from == Zone::Stack && to != Zone::Stack {
+        let departed_entry = state
+            .stack
+            .iter()
+            .find(|entry| entry.id == object_id)
+            .cloned();
+        if let Some(entry) = departed_entry {
+            super::stack::record_departed_stack_spell(state, &entry);
+        }
+    }
     // CR 400.7: An object that changes zones becomes a new object with no
     // memory of its previous existence. The information authority receives the
     // pre-move occurrence so the future Zone command can apply this same clear
@@ -204,10 +218,22 @@ pub(crate) fn apply_zone_exit_cleanup(
         .activated_abilities_this_game
         .retain(|(id, _), _| *id != object_id);
 
-    // CR 400.7: Snapshot LKI before zone change from battlefield or exile.
-    // Power/toughness reflect layer modifications on battlefield (Layer 7);
-    // from exile they will be None (no layer computation), which is correct.
-    if from == Zone::Battlefield || from == Zone::Exile {
+    // CR 400.7: Snapshot LKI before a zone change out of any zone whose
+    // characteristics are not recomputed on demand. Power/toughness reflect
+    // layer modifications on battlefield (Layer 7); from exile they will be
+    // None (no layer computation), which is correct.
+    //
+    // CR 608.2h + CR 109.4: `Zone::Stack` is included because the CR 109.4
+    // reset below erases `obj.controller` on the way out, and a look-back
+    // effect that needs the at-exit controller of a stack object has nowhere
+    // else to read it. Render Silent ("Counter target spell. Its controller
+    // can't cast spells this turn") is the measured consumer:
+    // `ability_utils::parent_target_controller` already prefers this snapshot
+    // for any off-battlefield object and only falls through to `obj.controller`
+    // when there is none, so widening the capture is the whole fix — no
+    // consumer changes. The stack seed (`layers.rs`) owns a stack object's
+    // controller on the way IN; this owns the record of it on the way OUT.
+    if from == Zone::Battlefield || from == Zone::Exile || from == Zone::Stack {
         let lki_copiable_values =
             crate::game::layers::compute_current_copiable_values(state, object_id);
         if let Some(obj) = state.objects.get(&object_id) {
@@ -362,6 +388,9 @@ pub(crate) fn apply_zone_exit_cleanup(
             // while it remains in exile. Once it changes zones, the new object
             // is no longer a foretold card.
             obj_mut.foretold = false;
+            // CR 400.7 + CR 406.6: which player exiled this card is a fact
+            // about its stay in exile; the new object has no such history.
+            obj_mut.exiled_by = None;
             // CR 708.4: a spell CAST face down (morph/disguise via an exile
             // permission) is turned face down as part of the cast and keeps
             // that status on the stack. Only the exile-zone face-down
@@ -425,8 +454,74 @@ pub(crate) fn apply_zone_exit_cleanup(
             });
         }
 
+        // CR 400.7 + CR 611.2a: the REMAINING exits of the same in-place grant the
+        // block above closes. This IS a hand-kept list, like the Stack block
+        // above it — there is no shared predicate, so a FOURTH in-place zone
+        // added to `grant_lingering_permissions` (`effects/cast_from_zone.rs`:
+        // `Zone::Exile | Zone::Graveyard | Zone::Hand`) would not reach here on
+        // its own. That sibling is named so the next reader can check the two
+        // against each other. Exile already has its own clear far above, so the
+        // two left over are HAND and GRAVEYARD, and both were open:
+        // a discarded card and a milled card each carried their grant onward,
+        // where the readers pick it up again by CURRENT zone and never by origin
+        // (`casting::has_graveyard_timed_alt_cost_permission`,
+        // `casting::has_exile_cast_permission`). Emry, Lurker of the Loch is the
+        // named specimen of the graveyard half in the block above; exiling that
+        // graveyard afterwards left the card castable. A hand-origin permission authorizes casting the
+        // card FROM THE HAND ("Until end of turn, you may cast spells from your
+        // hand …", Chandra, Flame's Catalyst); a card that leaves the hand
+        // without being cast "becomes a new object with no memory of … its
+        // previous existence", so the grant must not travel with it. Without
+        // this, a discarded card lands in the graveyard still carrying the
+        // permission, where `casting::has_graveyard_timed_alt_cost_permission`
+        // and `graveyard_spell_objects_available_to_cast` re-offer it as a free
+        // graveyard cast — the same re-offer the Stack exit above exists to
+        // prevent, reached by the other door.
+        //
+        // `to != Zone::Stack` is load-bearing, not defensive, and that is MEASURED:
+        // dropping it turns `rishkars_expertise_free_cast_completes_during_resolution`
+        // red on "the consumed free-cast permission must remain only as a neutral
+        // stable slot" and
+        // `hand_cast_selection_casts_during_resolution_without_lingering_permission`
+        // red on its hand-cast wording of the same assertion. Casting the card IS a
+        // move to the stack, and it is the one exit these grants authorize
+        // (Sunforger searching a card to hand and casting it from there,
+        // Electrodominance's resolution-time pick, Emry's graveyard cast). The
+        // spent grant is then dropped by the Stack exit above when the spell
+        // leaves the stack.
+        //
+        // Scoped to the three in-place cast/play variants, mirroring that block.
+        // The exile-scoped designations a card can gain as it leaves the hand
+        // (`Plotted` from CR 702.170a, `Foretold` from CR 702.143a) are
+        // deliberately absent: those are granted at the exile side of the same
+        // move and must survive it.
+        clear_hand_or_graveyard_casting_permissions_on_exit(obj_mut, from, to);
+
         if from == Zone::Battlefield {
             obj_mut.reset_for_battlefield_exit();
+        }
+
+        // CR 109.4: "Only objects on the stack or on the battlefield have a
+        // controller. Objects that are neither on the stack nor on the
+        // battlefield aren't controlled by any player." CR 108.4a: "If anything
+        // asks for the controller of a card that doesn't have one … use its
+        // owner instead." So an object arriving in any OTHER zone must carry the
+        // owner fallback, not whatever CR 613.1b layer-2 control change was last
+        // applied to it.
+        //
+        // Keyed on the DESTINATION, which is the CR 109.4 partition itself —
+        // not on `from == Zone::Stack`. The battlefield leg already reached this
+        // answer via `revert_layered_characteristics_to_base` (called below for
+        // `from == Zone::Battlefield`), which writes the same
+        // `base_controller.unwrap_or(owner)` expression, so this write is
+        // idempotent there and the two sites agree by construction. The STACK
+        // exit had no such reset: MEASURED, a stolen spell that Dissipate
+        // counters-and-exiles reached `Zone::Exile` carrying the THIEF, and
+        // `filter::is_owner_scoped_zone` (Hand | Library | Graveyard) does not
+        // shield Exile. The at-exit controller is not lost — the LKI capture
+        // above snapshots it for CR 608.2h consumers.
+        if !matches!(to, Zone::Battlefield | Zone::Stack) {
+            obj_mut.controller = obj_mut.base_controller.unwrap_or(obj_mut.owner);
         }
 
         // CR 702.103b: A bestowed Aura's type-changing effect lasts until the
@@ -533,6 +628,8 @@ pub(crate) fn apply_zone_exit_cleanup(
         super::effects::ring::clear_ring_bearer_if_object(state, object_id);
     }
 
+    prune_object_bound_effects_on_exit(state, object_id, from, to);
+
     // Prune host-bound transient effects and clean up mana-tap tracking
     // when a permanent leaves the battlefield.
     if from == Zone::Battlefield {
@@ -558,7 +655,6 @@ pub(crate) fn apply_zone_exit_cleanup(
         // that card for as long as [this permanent] remains on the battlefield"
         // stays playable after its host is gone.
         super::layers::prune_host_left_casting_permissions(state, object_id);
-        super::layers::prune_affected_object_left_effects(state, object_id);
         // CR 611.2b + CR 400.7: the captured source leaving play, OR the host
         // leaving and re-entering as a new object (same storage ObjectId), ends
         // the "can't become untapped for as long as you control [source]"
@@ -593,6 +689,8 @@ pub(crate) fn apply_zone_exit_cleanup(
         // source self-exiles mid-activation and returns with the same ObjectId,
         // so the material links must survive its battlefield exit for the
         // returned permanent to still read what it was crafted with.
+        // CR 406.3: `HideawayLookable` links are preserved because a look outlives
+        // its source; their live rule stops admitting once the source is gone.
         // CR 607.2a + CR 400.7: `TrackedBySource` links are preserved when the
         // source leaves the battlefield TO EXILE. A source that self-exiles
         // (typically as its own activation cost — Mechtitan Core: "Exile this
@@ -613,6 +711,7 @@ pub(crate) fn apply_zone_exit_cleanup(
                         | crate::types::game_state::ExileLinkKind::UntilOpponentBecomesMonarch { .. }
                         | crate::types::game_state::ExileLinkKind::Haunt
                         | crate::types::game_state::ExileLinkKind::CraftMaterial
+                        | crate::types::game_state::ExileLinkKind::HideawayLookable { .. }
                 )
                 || (source_exits_to_exile
                     && matches!(
@@ -901,6 +1000,65 @@ pub(crate) fn clear_cast_origin_off_provenance_zones(
     }
 }
 
+/// CR 400.7 + CR 118.9: an in-place hand/graveyard cast or play permission
+/// cannot survive a zone change other than the permitted cast to the stack.
+/// Both the live cleanup and resolved-command replay call this authority.
+fn clear_hand_or_graveyard_casting_permissions_on_exit(
+    obj: &mut crate::game::game_object::GameObject,
+    from: Zone,
+    to: Zone,
+) {
+    if matches!(from, Zone::Hand | Zone::Graveyard) && to != Zone::Stack {
+        obj.casting_permissions.retain(|permission| {
+            !matches!(
+                permission,
+                crate::types::ability::CastingPermission::ExileWithAltCost { .. }
+                    | crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. }
+                    | crate::types::ability::CastingPermission::PlayFromExile { .. }
+            )
+        });
+    }
+}
+
+/// CR 400.7: an object that moves to a new zone is a new object, so a
+/// continuous effect a resolved spell or ability bound to THIS object
+/// (`SpecificObject`) ends with it on every zone exit (issue #8795: Delay's
+/// suspend grant on the exiled card followed the storage id into the
+/// graveyard after the card was cast). Two moves are excepted:
+/// - a move TO the stack: CR 400.7g, an ability granted to a card that
+///   allows it to be cast (suspend) "will continue to apply to the new
+///   object that card became after it moved to the stack". The clause is
+///   wider than the rule — every grant, every way onto the stack — because
+///   the engine's cast move is deferred: a mana-spent keyword grant
+///   (`ManaSpellGrant::AddKeywordUntilEndOfTurn`, Hall of the Bandit Lord's
+///   haste; 6 corpus cards) is installed during payment while the object's
+///   zone still reads hand, and by CR 601.2a / CR 601.2h the card is on the
+///   stack by then, so no object change intervenes and that grant must
+///   survive this move (the cast move is the engine's only production move
+///   onto the stack);
+/// - a permanent spell's move from the stack to the battlefield:
+///   CR 400.7a, its grants "continue to apply to the permanent that spell
+///   becomes".
+///
+/// ONE authority shared by the live transition cleanup
+/// (`apply_zone_exit_cleanup`) and the resolved-zone-change replay applier,
+/// so replay equivalence holds by construction — the way
+/// `clear_hand_or_graveyard_casting_permissions_on_exit` and
+/// `clear_cast_origin_off_provenance_zones` are shared. A battlefield exit is
+/// covered here too; the live battlefield branch keeps its host-lifetime
+/// prunes (`prune_host_left_effects`), which replay does not reproduce.
+pub(crate) fn prune_object_bound_effects_on_exit(
+    state: &mut GameState,
+    object_id: ObjectId,
+    from: Zone,
+    to: Zone,
+) {
+    if to == Zone::Stack || (from == Zone::Stack && to == Zone::Battlefield) {
+        return;
+    }
+    super::layers::prune_affected_object_left_effects(state, object_id);
+}
+
 pub fn apply_resolved_zone_change(
     state: &mut GameState,
     command: &ResolvedZoneChangeCommand,
@@ -987,6 +1145,19 @@ pub fn apply_resolved_zone_change(
             command.cause,
         );
     }
+    // CR 704.5m + CR 704.5n + CR 702.26i: the command carries no attachment
+    // payload, so replay re-runs the same severing authority the live
+    // transition used. Idempotent, so the live path's earlier call is not
+    // double-applied; the returned ids are dropped because replay reproduces
+    // state, not events (the live transition already emitted them).
+    let _ = sever_battlefield_attachment_graph_on_exit(state, command.object.object_id);
+    // CR 400.7 + CR 701.20a: replay bypasses `apply_zone_exit_cleanup`, so it
+    // must reproduce that cleanup's stack-bound reveal drop for the departing
+    // occurrence (validated above), or a lease the live move ended survives as a
+    // stale row in replay. A same-zone reorder is not a new object and keeps it.
+    if command.from != command.to {
+        state.drop_stack_bound_reveals_for_occurrence(command.object);
+    }
     remove_from_zone(state, command.object.object_id, command.from, command.owner);
     add_to_zone(state, command.object.object_id, command.to, command.owner);
 
@@ -995,12 +1166,20 @@ pub fn apply_resolved_zone_change(
         .get_mut(&command.object.object_id)
         .expect("validated zone command object remains live");
     object.zone = command.to;
+    clear_hand_or_graveyard_casting_permissions_on_exit(object, command.from, command.to);
     // CR 400.7 + CR 601.2i: replay bypasses `apply_zone_exit_cleanup`, so it
     // must reproduce the live Stack-exit carrier clear from the recorded move.
     if command.from == Zone::Stack && command.to != Zone::Stack {
         object.cast_occurrence = None;
         object.prepared_copy_source = None;
     }
+    // CR 400.7: the same object-bound grant lifetime as the live cleanup
+    // (issue #8795), through the shared authority.
+    prune_object_bound_effects_on_exit(state, command.object.object_id, command.from, command.to);
+    let object = state
+        .objects
+        .get_mut(&command.object.object_id)
+        .expect("validated zone command object remains live");
     if command.to == Zone::Battlefield {
         object.reset_for_battlefield_entry(
             turn_number,
@@ -1071,15 +1250,17 @@ pub fn move_to_zone(
 /// stored/written `GameState` field.
 ///
 /// WHY a parameter rather than a transient `obj.transformed` marker: CR 712.8a
-/// (zones.rs:291-298) reverts a transformed permanent to its front face on any
-/// non-battlefield zone exit, and the post-move transform itself
-/// (zone_pipeline.rs:3670, `transform_permanent`, CR 712.14a) executes the same
+/// (the `obj_mut.transformed && obj_mut.back_face.is_some()` guard in
+/// `zones::apply_zone_exit_cleanup`) reverts a transformed permanent to its front face on any
+/// non-battlefield zone exit, and the post-move transform itself (the CR
+/// 712.14a `transform_permanent` call in
+/// `zone_pipeline::deliver_replaced_zone_change`) executes the same
 /// face swap when the object reaches the battlefield. A pre-move transient
 /// `transformed` flag would survive into that authoritative swap and
 /// double-corrupt the face (CR 712.8a exit revert + post-move transform both
 /// mutating `back_face`/the live face). The parameter carries the intent without
-/// touching object state. (The `modal_back_face` revert at zones.rs:301-310 is
-/// a SEPARATE MDFC mechanism and is not implicated.)
+/// touching object state. (The `modal_back_face` revert, also in
+/// `zones::apply_zone_exit_cleanup`, is a SEPARATE MDFC mechanism and is not implicated.)
 ///
 /// SF1 asymmetry: a single-faced object (`back_face.is_none()`) instructed to
 /// enter transformed can never enter that way — CR 712.14a (2nd sentence)
@@ -1090,8 +1271,8 @@ pub fn move_to_zone(
 /// A3 (no post-move re-assert): unlike the face-down entry profile's
 /// re-assertion authority (`apply_face_down_entry_profile` in zone_pipeline.rs),
 /// a transformed entry needs no analogous re-assert after the move.
-/// `transform_permanent` (zone_pipeline.rs:3687) is the SINGLE authoritative
-/// post-move face swap and already runs on `to == Zone::Battlefield`, so the
+/// The `transform_permanent` call in `zone_pipeline::deliver_replaced_zone_change`
+/// is the SINGLE authoritative post-move face swap and already runs on `to == Zone::Battlefield`, so the
 /// guard here only gates eligibility — it never mutates the face.
 pub(crate) fn move_to_zone_with_entry_flags(
     state: &mut GameState,
@@ -1138,6 +1319,11 @@ pub(crate) fn move_to_zone_with_entry_flags(
                         *attack_target
                     }
                     crate::types::game_state::LiminalEntryKind::Token => None,
+                    // Never reached at delivery: `TransformedEntry` projections
+                    // are released before the caller delivers the move (see
+                    // `replacement::release_transformed_entry_projection`).
+                    // This arm exists for exhaustiveness only.
+                    crate::types::game_state::LiminalEntryKind::TransformedEntry => None,
                 })
         })
         .flatten();
@@ -1292,8 +1478,7 @@ pub(crate) fn move_to_zone_with_entry_flags(
     };
     zone_change_record.sync_trigger_source_context();
 
-    sever_battlefield_attachment_graph_on_exit(state, object_id, &unattached_from);
-
+    let severed_attachments = sever_battlefield_attachment_graph_on_exit(state, object_id);
     // CR 730.2d + CR 111.7: for a merged permanent whose topmost component
     // temporarily changed the survivor's token-ness, the ZoneChanged record above
     // must retain the merged permanent's event-time token-ness. Restore the
@@ -1453,9 +1638,34 @@ pub(crate) fn move_to_zone_with_entry_flags(
         || from == Zone::Battlefield
         || to == Zone::Hand
         || from == Zone::Hand
+        || to == Zone::Stack
         || static_dependency_before
         || static_dependency_after
     {
+        //   - CR 601.2a + CR 611.2f: "a player first moves that card ... to the
+        //     stack. ... Any continuous effects that modify the characteristics of
+        //     the spell as you start casting it BEGIN AS IT IS PUT ON THE STACK."
+        //     The stack pass in `evaluate_layers` is what performs that beginning —
+        //     it resets each stack object to its base and re-applies every
+        //     applicable continuous effect (CR 613.1), including the CR 112.2
+        //     controller seed and the pre-existing CR 613.1 keyword grants the loop
+        //     already serves (Taigam's rebound, Waystone's mobilize, StackSpell-
+        //     filtered statics). Before this term, only a HAND origin marked, via
+        //     `from == Zone::Hand`; Exile -> Stack, Graveyard -> Stack and
+        //     Command -> Stack satisfied no disjunct and ran NO pass at all
+        //     (Exile and Graveyard MEASURED; Command follows the same `else if`
+        //     arm by inspection), so a spell cast from a zone its caster does not own kept
+        //     the OWNER as its controller, contradicting CR 112.2, and a live
+        //     keyword grant naming that spell was never applied.
+        //     COST: `ZoneMoveRequest::casting_to_stack` is the one constructor that
+        //     hardcodes `Zone::Stack`; its production callers are
+        //     `casting_costs::finalize_cast_with_phyrexian_choices_inner` (the real
+        //     cast) and `casting::project_evoke_entry_state` (a read-only projection
+        //     over a cloned state, on the AI search path, whose object is hand-origin
+        //     in practice). So the added work is ONE FULL PASS PER CAST WHOSE ORIGIN
+        //     IS Graveyard / Exile / Command / Library — zero passes today, not a
+        //     cheap pass being upgraded. Hand and Battlefield origins already mark
+        //     via `from == Zone::Hand` / `from == Zone::Battlefield`.
         crate::game::layers::mark_layers_full(state);
     }
 
@@ -1519,6 +1729,17 @@ pub(crate) fn move_to_zone_with_entry_flags(
         });
     }
 
+    // CR 701.3d + CR 704.5n: the other direction of the same relationship — each
+    // attachment this departing permanent hosted has become unattached. Emitted
+    // here, beside the attachment-side event, so both directions share one
+    // ordering relative to the `ZoneChanged` that follows.
+    for attachment_id in severed_attachments {
+        events.push(GameEvent::Unattached {
+            attachment_id,
+            old_target: crate::types::ability::TargetRef::Object(object_id),
+        });
+    }
+
     events.push(GameEvent::ZoneChanged {
         object_id,
         from: Some(from),
@@ -1567,12 +1788,12 @@ pub(crate) fn move_to_zone_with_entry_flags(
 /// those two `.expect(…)` its return.) Measured over this function's four direct callers with
 /// `rg -n 'record_and_emit_entry_from_no_zone\(' crates/engine/src`:
 ///
-/// * `effects/conjure.rs:218` — `.expect("conjured object was just created")`: PANICS on `None`.
-/// * `effects/incubate.rs:123` — `.expect("incubator token was just created")`: PANICS on `None`.
-/// * `effects/token.rs:1881` — `if record.is_some()`, which is how
+/// * `effects::conjure::resolve` — `.expect("conjured object was just created")`: PANICS on `None`.
+/// * `effects::incubate::resolve` — `.expect("incubator token was just created")`: PANICS on `None`.
+/// * `effects::token::push_committed_token_entry_events` — `if record.is_some()`, which is how
 ///   `push_committed_token_entry_events` gates its `GameEvent::TokenCreated` emit. This is the
 ///   object-existence predicate the token-creation ledger triple agrees on.
-/// * `effects/counters.rs:530` — statement position, discards.
+/// * `effects::counters::apply_pending_counter_post_action` — statement position, discards.
 ///
 /// So `None` is inert on exactly ONE of the four routes. The two `.expect` callers keep their
 /// pre-existing "just created" panic deliberately: each creates its object inside the same call, so
@@ -1594,30 +1815,6 @@ pub(crate) fn record_and_emit_entry_from_no_zone(
         record: Box::new(record.clone()),
     });
     Some(record)
-}
-
-/// CR 601.2 + CR 733.1: Restore an object while reversing an incomplete action.
-/// This intentionally uses the raw mover rather than the replacement-consulting
-/// pipeline: an undone action does not apply replacement effects, but preserves
-/// the prior raw move's event and ordering behavior.
-pub(crate) fn restore_after_rollback(
-    state: &mut GameState,
-    object_id: ObjectId,
-    to: Zone,
-    events: &mut Vec<GameEvent>,
-) {
-    move_to_zone(state, object_id, to, events);
-    // CR 601.2 + CR 733.1: reversing an incomplete action needs full
-    // reconciliation regardless of which mark move_to_zone's own
-    // axis-gated internal logic picked — an undone action is rare
-    // (not gameplay-hot) and can leave board state in a shape the
-    // entry-only incremental-flush safety classifier was never designed to
-    // reason about, so there is no perf case for trusting it here. This is
-    // conservatively at-or-above today's marking, not byte-for-byte
-    // identical to it: some rollback transitions `move_to_zone` marks
-    // nothing for today (e.g. Stack->Library) become `Full` here, which is
-    // strictly safe, never a behavior change a test could observe as wrong.
-    crate::game::layers::mark_layers_full(state);
 }
 
 /// CR 603.10a: Record that every member of `group` left the battlefield in the
@@ -1686,21 +1883,131 @@ pub fn mark_simultaneous_departure_records(
     }
 }
 
+/// Marks a settled SearchLibrary move into Exile as face down at event time.
+///
+/// The move's physical destination is already authoritative when this helper
+/// runs. Updating the object, emitted record, and per-turn ledger together
+/// keeps state and event projections on the same event-time privacy fact.
+pub(crate) fn mark_face_down_in_exile(
+    state: &mut GameState,
+    events: &mut [GameEvent],
+    object_id: ObjectId,
+) {
+    if state
+        .objects
+        .get(&object_id)
+        .is_some_and(|object| object.zone == Zone::Exile)
+    {
+        if let Some(object) = state.objects.get_mut(&object_id) {
+            object.face_down = true;
+        }
+    }
+
+    let exact_ledger_entry = events.iter_mut().rev().find_map(|event| {
+        let GameEvent::ZoneChanged {
+            object_id: event_object_id,
+            to: Zone::Exile,
+            record,
+            ..
+        } = event
+        else {
+            return None;
+        };
+        if *event_object_id != object_id || record.object_id != object_id {
+            return None;
+        }
+        if let Some(context) = record.trigger_source_context.as_mut() {
+            context.face_down = true;
+        }
+        Some((record.turn_zone_change_index, record.recorded_turn_number))
+    });
+
+    // The event record carries the exact occurrence assigned by
+    // `record_zone_change`. Never search the ledger by object/destination:
+    // repeated Exile entries for one object are distinct incarnations.
+    if let Some((index, recorded_turn)) = exact_ledger_entry {
+        if recorded_turn == state.turn_number {
+            if let Some(record) = state.zone_changes_this_turn.get_mut(index) {
+                if record.object_id == object_id && record.to_zone == Zone::Exile {
+                    if let Some(context) = record.trigger_source_context.as_mut() {
+                        context.face_down = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// CR 603.10a + CR 704.5d/e: where an object stands relative to the battlefield,
+/// for producers and observers that must decide whether it *left*.
+///
+/// Object-side counterpart of `BattlefieldDepartureSourceContext` (the record-side
+/// authority). Callers pass ids verified on the battlefield immediately before the
+/// move being classified, so `DepartedCeased` is only ever reached via a real
+/// departure.
+///
+/// NOT for forward-looking eligibility gates ("is this permanent on the battlefield
+/// right now, so I may tap / equip / sacrifice it"). Those have no departure event
+/// and no last-known-information fallback: for them an absent id means "no such
+/// object" and must be REJECTED, whereas `has_departed()` would answer `true`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BattlefieldResidency {
+    /// Still on the battlefield: the reachable cause is any destruction
+    /// replacement that leaves the permanent on the battlefield — CR 701.19a/b
+    /// regeneration, CR 702.89a umbra armor, CR 122.1c shield counters — so an
+    /// id its producer had already verified on the battlefield survives the
+    /// move being classified.
+    ///
+    /// CR 704.5n's "becomes unattached ... remains on the battlefield" is named
+    /// here only for contrast; it is NOT a producer this function observes.
+    /// `sba::check_unattached_equipment` clears `attached_to` and emits
+    /// `GameEvent::Unattached` with no zone move, so an unattached Equipment
+    /// gets no battlefield-origin `ZoneChanged`, never enters a producer's
+    /// departure id list, and is therefore never passed to this function.
+    Remained,
+    /// Left the battlefield and still exists in another zone.
+    DepartedPresent,
+    /// Left the battlefield and then ceased to exist — CR 704.5d (token) or
+    /// CR 704.5e (copy of a card). CR 111.7's parenthetical is why this still
+    /// counts as a departure: applicable triggered abilities trigger *before* a
+    /// token ceases to exist, and CR 608.2h keeps the departure record as the
+    /// authority for what it was.
+    DepartedCeased,
+}
+
+impl BattlefieldResidency {
+    /// CR 603.10a: did this object leave the battlefield in the event being classified?
+    pub(crate) fn has_departed(self) -> bool {
+        matches!(self, Self::DepartedPresent | Self::DepartedCeased)
+    }
+}
+
+/// CR 603.10a + CR 704.5d/e: the single authority for "has this object left the
+/// battlefield". `state.objects` no longer holds an object that ceased, so absence
+/// must read as a departure, not as a survival.
+pub(crate) fn battlefield_residency(state: &GameState, id: ObjectId) -> BattlefieldResidency {
+    match state.objects.get(&id) {
+        Some(obj) if obj.zone == Zone::Battlefield => BattlefieldResidency::Remained,
+        Some(_) => BattlefieldResidency::DepartedPresent,
+        None => BattlefieldResidency::DepartedCeased,
+    }
+}
+
 /// CR 603.10a: Filter `ids` to those whose object has actually left the
 /// battlefield (now resides in some other zone). Producers that accumulate a
 /// candidate ID list — bounce, change-zone, sacrifice, destroy — pass that list
 /// through this filter before `mark_simultaneous_departures` so that a member
 /// which never actually departed (regenerated, sacrifice-prevented, bounce
 /// guarded out) is excluded from every survivor's `co_departed` group.
+///
+/// CR 704.5d/e: an id absent from `state.objects` **ceased to exist** after
+/// departing, which is a departure, not a survival — CR 111.7's parenthetical says
+/// applicable triggered abilities trigger before a token ceases. Callers pass ids
+/// verified on the battlefield immediately before the move being classified.
 pub fn departed_subset(state: &GameState, ids: &[ObjectId]) -> Vec<ObjectId> {
     ids.iter()
         .copied()
-        .filter(|id| {
-            state
-                .objects
-                .get(id)
-                .is_some_and(|o| o.zone != Zone::Battlefield)
-        })
+        .filter(|&id| battlefield_residency(state, id).has_departed())
         .collect()
 }
 
@@ -1708,6 +2015,15 @@ pub fn departed_subset(state: &GameState, ids: &[ObjectId]) -> Vec<ObjectId> {
 /// sweep that does not expose an explicit ID list (e.g. `sacrifice_unchosen`
 /// internal loops). Collects every battlefield-origin `ZoneChanged` in `slice`
 /// whose object is now off-battlefield, then groups them as co-departed.
+///
+/// CR 704.3 + CR 704.5d: this runs at the END of an SBA iteration, after the
+/// CR 704.5d sweep has removed ceased tokens, so residency — not raw presence — is
+/// the only correct question. Two consequences, both measured: a 2-member group
+/// containing a ceased token collapses below `mark_simultaneous_departures`'
+/// `len() < 2` floor and is never stamped **at all**; and because that function
+/// *assigns* `co_departed` rather than merging, under-counting here *overwrites*
+/// correct groups stamped by earlier sub-sweeps, breaking the mutual-record
+/// relation the CR 603.10a observer arm requires.
 pub fn stamp_simultaneous_from_slice(state: &GameState, slice: &mut [GameEvent]) {
     let departed: Vec<ObjectId> = slice
         .iter()
@@ -1716,13 +2032,7 @@ pub fn stamp_simultaneous_from_slice(state: &GameState, slice: &mut [GameEvent])
                 object_id,
                 from: Some(Zone::Battlefield),
                 ..
-            } if state
-                .objects
-                .get(object_id)
-                .is_some_and(|o| o.zone != Zone::Battlefield) =>
-            {
-                Some(*object_id)
-            }
+            } if battlefield_residency(state, *object_id).has_departed() => Some(*object_id),
             _ => None,
         })
         .collect();
@@ -1735,7 +2045,8 @@ pub fn stamp_simultaneous_from_slice(state: &GameState, slice: &mut [GameEvent])
 /// is_some()` branch). Every `ExileLinkKind` is kind-agnostically readable via
 /// `ExiledBySource` (`HideawayLookable`'s and `CraftMaterial`'s own doc
 /// comments say so explicitly) and the LIVE lookup
-/// (`players::linked_exile_cards_for_source`) does not filter by kind either —
+/// (`players::linked_exile_cards_for_source`) reads the same
+/// `exile_links::live_links_for_source` accessor —
 /// this snapshot must match that surface exactly, or a card whose "play the
 /// exiled card" clause resolves via a TRIGGERED ability (Fight Rigging's
 /// begin-of-combat trigger, as opposed to Windbrisk Heights' activated
@@ -1750,10 +2061,7 @@ pub(crate) fn capture_linked_exile_snapshot(
         return Vec::new();
     }
 
-    state
-        .exile_links
-        .iter()
-        .filter(|link| link.source_id == source_id)
+    crate::game::exile_links::live_links_for_source(state, source_id)
         .filter_map(|link| {
             state.objects.get(&link.exiled_id).and_then(|obj| {
                 (obj.zone == Zone::Exile).then(|| crate::types::game_state::LinkedExileSnapshot {
@@ -1775,12 +2083,65 @@ pub(crate) fn capture_linked_exile_snapshot(
 /// SBAs (CR 704.5m/704.5n). Hosts must not carry a stale `attachments` list
 /// into other zones (commander zone return, blink, etc.), and attachments that
 /// leave the battlefield must not keep a dangling `attached_to` pointer.
+///
+/// The severing is symmetric: the departing host's `attachments` list is
+/// cleared AND each of those attachments has its `attached_to` back-pointer
+/// cleared. Leaving the back-pointer for the SBA pass to clean up is not
+/// sufficient. CR 704.3 checks SBAs only when a player would receive priority,
+/// and CR 704.4 states that SBAs "pay no attention to what happens during the
+/// resolution of a spell or ability" — so a host that leaves and returns within
+/// one resolution is never observed as absent. `ObjectId` is storage identity
+/// in this engine (the same slot is reused across a zone change), so that stale
+/// back-pointer silently re-validates against the *returned* permanent, which
+/// CR 400.7 makes a new object with no memory of, or relation to, the one that
+/// left. Severing at the boundary is the direct implementation of CR 301.5c's
+/// "An Equipment that equips an illegal or *nonexistent* permanent becomes
+/// unattached from that permanent but remains on the battlefield."
+///
+/// The observable damage from the one-sided severing was twofold: the
+/// attachment rendered nowhere (the client drops an attachment whose
+/// `attached_to` is set from the battlefield rows, expecting the host surface
+/// to render it, but the host no longer listed it), and its continuous effects
+/// kept applying to a permanent it was never attached to.
+///
+/// Clearing eagerly does not skip CR 704.5m: `sba::check_unattached_auras`
+/// treats `attached_to == None` as unattached, so a non-bestow Aura still goes
+/// to its owner's graveyard, and a bestow Aura still reverts in place per CR
+/// 702.103f, on the next SBA pass.
+///
+/// CR 701.3d: becoming unattached is a real game event, so the severed
+/// attachments are returned to the caller, which emits a `GameEvent::Unattached`
+/// for each one at the same point it emits the attachment-side event for
+/// `unattached_from`. Both directions of the relationship therefore announce
+/// through one authority. Without that emit, `trigger_matchers::match_unattach`
+/// loses these triggers entirely: its `GameEvent::ZoneChanged` fallback arm
+/// re-derives "my host left" by reading the attachment's live `attached_to`,
+/// and the attachment did not itself move, so `TriggerSourceContext::source_read`
+/// resolves to `ExactLive` and observes the freshly cleared `None`. Emitting the
+/// event cannot double-fire with that fallback arm for the same reason: the arm
+/// requires `attached_to` to still name the departing host.
+///
+/// This is a SHARED live/replay authority, called from `move_to_zone`,
+/// `move_to_library_at_index`, and `apply_resolved_zone_change` — the same
+/// arrangement `prune_object_bound_effects_on_exit` uses, and for the same
+/// reason: a `ResolvedZoneChangeCommand` carries no attachment payload, so a
+/// replay that did not re-run this would rebuild a state whose attachment graph
+/// still held the edges the live transition severed. It derives the departing
+/// object's own attachment edge from live state rather than taking it as a
+/// parameter, so both paths cannot drift, and it is idempotent: a second call
+/// finds an empty `attachments` list and a `None` `attached_to` and returns
+/// `Vec::new()` without touching anything. That matters because the live
+/// `move_to_zone` severs before delegating to `apply_resolved_zone_change`, and
+/// the Command/Stack routes bypass the resolved-command path entirely.
 fn sever_battlefield_attachment_graph_on_exit(
     state: &mut GameState,
     object_id: ObjectId,
-    unattached_from: &Option<crate::types::ability::TargetRef>,
-) {
-    if unattached_from.is_some() {
+) -> Vec<ObjectId> {
+    let is_attached = state
+        .objects
+        .get(&object_id)
+        .is_some_and(|obj| obj.attached_to.is_some());
+    if is_attached {
         if let Some(old_target_id) = state
             .objects
             .get(&object_id)
@@ -1797,12 +2158,47 @@ fn sever_battlefield_attachment_graph_on_exit(
         crate::game::layers::mark_layers_full(state);
     }
 
-    if let Some(host) = state.objects.get_mut(&object_id) {
-        if !host.attachments.is_empty() {
-            host.attachments.clear();
-            crate::game::layers::mark_layers_full(state);
+    let severed_attachments = state
+        .objects
+        .get_mut(&object_id)
+        .map(|host| std::mem::take(&mut host.attachments))
+        .unwrap_or_default();
+    if severed_attachments.is_empty() {
+        return Vec::new();
+    }
+    // The back-pointer is cleared only when it still names THIS host: an
+    // attachment re-pointed elsewhere by a concurrent effect must keep its live
+    // edge, and must not announce an unattach it did not undergo.
+    //
+    // CR 702.26i: a directly phased-out attachment "will phase in attached to
+    // the object ... it was attached to when it phased out, IF that object is
+    // still in the same zone. If not, ... phases in unattached." The host is
+    // leaving that zone right now, and `phasing::phase_in_object` re-validates
+    // only that the named host is on the battlefield — not that it is the same
+    // incarnation — so a host that leaves and returns to the same `ObjectId`
+    // slot would otherwise re-adopt the attachment on phase-in. The pointer is
+    // therefore cleared for phased-out attachments too.
+    //
+    // CR 702.26j: "Abilities that trigger when a permanent becomes attached or
+    // unattached ... don't trigger when that permanent phases in or out", and
+    // CR 702.26b treats a phased-out permanent as though it does not exist. So
+    // a phased-out attachment is severed SILENTLY — only phased-in attachments
+    // are returned for `GameEvent::Unattached` emission.
+    let mut severed_and_announced = Vec::new();
+    for attachment_id in severed_attachments {
+        let Some(attachment) = state.objects.get_mut(&attachment_id) else {
+            continue;
+        };
+        if attachment.attached_to.and_then(|target| target.as_object()) != Some(object_id) {
+            continue;
+        }
+        attachment.attached_to = None;
+        if attachment.is_phased_in() {
+            severed_and_announced.push(attachment_id);
         }
     }
+    crate::game::layers::mark_layers_full(state);
+    severed_and_announced
 }
 
 pub(crate) fn capture_combat_status(
@@ -1936,7 +2332,7 @@ pub fn move_to_library_at_index(
     );
     zone_change_record.sync_trigger_source_context();
 
-    sever_battlefield_attachment_graph_on_exit(state, object_id, &unattached_from);
+    let severed_attachments = sever_battlefield_attachment_graph_on_exit(state, object_id);
 
     // CR 608.2h: hand the LKI the PRE-SEVER attachment set captured above.
     apply_zone_exit_cleanup(
@@ -1993,6 +2389,15 @@ pub fn move_to_library_at_index(
         events.push(GameEvent::Unattached {
             attachment_id: object_id,
             old_target,
+        });
+    }
+
+    // CR 701.3d + CR 704.5n: mirrors the `move_to_zone` emit — the attachments
+    // this departing permanent hosted have become unattached.
+    for attachment_id in severed_attachments {
+        events.push(GameEvent::Unattached {
+            attachment_id,
+            old_target: crate::types::ability::TargetRef::Object(object_id),
         });
     }
 
@@ -3046,6 +3451,39 @@ mod tests {
         assert_eq!(state.objects[&id].zone, Zone::Hand);
     }
 
+    #[test]
+    fn face_down_exile_marks_the_exact_ledger_occurrence() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(0),
+            "Repeated Exile".to_string(),
+            Zone::Hand,
+        );
+        let mut events = Vec::new();
+
+        move_to_zone(&mut state, id, Zone::Exile, &mut events);
+        move_to_zone(&mut state, id, Zone::Hand, &mut events);
+        let second_exile_start = events.len();
+        move_to_zone(&mut state, id, Zone::Exile, &mut events);
+        mark_face_down_in_exile(&mut state, &mut events[second_exile_start..], id);
+
+        assert_eq!(state.zone_changes_this_turn.len(), 3);
+        assert!(
+            !state.zone_changes_this_turn[0]
+                .trigger_source_context()
+                .expect("first Exile record carries source context")
+                .face_down
+        );
+        assert!(
+            state.zone_changes_this_turn[2]
+                .trigger_source_context()
+                .expect("second Exile record carries source context")
+                .face_down
+        );
+    }
+
     /// CR 122.2 + CR 400.7: Counters cease to exist when an object changes
     /// zones. The Personify class ("Exile target creature you control, then
     /// return that card to the battlefield under its owner's control") moves
@@ -3851,6 +4289,7 @@ mod tests {
             obj.base_card_types = obj.card_types.clone();
             obj.back_face = Some(BackFaceData {
                 is_swap_snapshot: false,
+                trigger_printed_origins: Vec::new(),
                 name: "Summon: Esper Maduin".to_string(),
                 power: None,
                 toughness: None,
@@ -3919,6 +4358,7 @@ mod tests {
             obj.base_card_types = obj.card_types.clone();
             obj.back_face = Some(BackFaceData {
                 is_swap_snapshot: false,
+                trigger_printed_origins: Vec::new(),
                 name: "Summon: Esper Maduin".to_string(),
                 power: None,
                 toughness: None,
@@ -4367,6 +4807,7 @@ mod tests {
             // Store back face data (original MDFC back face).
             obj.back_face = Some(BackFaceData {
                 is_swap_snapshot: false,
+                trigger_printed_origins: Vec::new(),
                 name: "Back Face".to_string(),
                 power: Some(6),
                 toughness: Some(6),
@@ -4721,6 +5162,7 @@ mod tests {
             let obj = state.objects.get_mut(&id).unwrap();
             obj.back_face = Some(BackFaceData {
                 is_swap_snapshot: false,
+                trigger_printed_origins: Vec::new(),
                 name: "Back Face".to_string(),
                 power: Some(6),
                 toughness: Some(6),
@@ -4833,6 +5275,309 @@ mod tests {
     }
 
     #[test]
+    fn host_leaving_battlefield_clears_attachment_back_pointers() {
+        use crate::game::effects::attach::attach_to;
+        use crate::types::card_type::CoreType;
+
+        let mut state = setup();
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Host".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&host)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let equipment = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Equipment".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&equipment).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+        }
+        attach_to(&mut state, equipment, host);
+        assert!(state.objects[&host].attachments.contains(&equipment));
+
+        // CR 704.5n's unattach SBA is only checked when a player would receive
+        // priority (CR 704.3), so the back-pointer must already be severed the
+        // moment the host leaves — not left for a later SBA pass.
+        let mut events = Vec::new();
+        move_to_zone(&mut state, host, Zone::Graveyard, &mut events);
+
+        assert!(
+            state.objects[&host].attachments.is_empty(),
+            "departing host must not carry a stale attachments list"
+        );
+        assert!(
+            state.objects[&equipment].attached_to.is_none(),
+            "equipment must be unattached when its host leaves the battlefield"
+        );
+        assert_eq!(
+            state.objects[&equipment].zone,
+            Zone::Battlefield,
+            "CR 704.5n: the equipment itself remains on the battlefield"
+        );
+        // CR 701.3d: becoming unattached is a real event. `match_unattach`'s
+        // `ZoneChanged` fallback arm re-derives this by reading the
+        // attachment's live `attached_to`, which the sever has just cleared —
+        // so without this event, host-exit unattach triggers (Stitcher's Graft,
+        // Captain's Hook) would silently stop firing.
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::Unattached {
+                    attachment_id,
+                    old_target: crate::types::ability::TargetRef::Object(old_host),
+                } if *attachment_id == equipment && *old_host == host
+            )),
+            "host exit must announce the unattach: {events:?}"
+        );
+
+        // CR 400.7: the returning permanent is a new object. Because ObjectId is
+        // storage identity here, a surviving back-pointer would silently
+        // re-attach to it — the Heart-Shaped Herb / blink defect.
+        move_to_zone(&mut state, host, Zone::Battlefield, &mut events);
+        assert!(
+            state.objects[&equipment].attached_to.is_none(),
+            "equipment must not re-attach to the returned permanent"
+        );
+        assert!(
+            !state.objects[&host].attachments.contains(&equipment),
+            "returned permanent must not regain the pre-departure attachment"
+        );
+    }
+
+    #[test]
+    fn host_exit_leaves_reattached_equipment_edge_intact() {
+        use crate::game::effects::attach::attach_to;
+        use crate::types::card_type::CoreType;
+
+        let mut state = setup();
+        let make_creature = |state: &mut GameState, card, name: &str| {
+            let id = create_object(
+                state,
+                card,
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            id
+        };
+        let departing_host = make_creature(&mut state, CardId(1), "Departing Host");
+        let new_host = make_creature(&mut state, CardId(2), "New Host");
+        let equipment = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Equipment".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&equipment).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+        }
+
+        // Stale forward edge only: the equipment has already moved to `new_host`,
+        // but `departing_host` still lists it. Severing must follow the live
+        // `attached_to` edge, not blindly clear whatever the host lists.
+        attach_to(&mut state, equipment, new_host);
+        state
+            .objects
+            .get_mut(&departing_host)
+            .unwrap()
+            .attachments
+            .push(equipment);
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, departing_host, Zone::Graveyard, &mut events);
+
+        assert_eq!(
+            state.objects[&equipment].attached_to,
+            Some(crate::game::game_object::AttachTarget::Object(new_host)),
+            "an attachment pointing at a different host must keep its live edge"
+        );
+        assert!(
+            state.objects[&new_host].attachments.contains(&equipment),
+            "the live host must retain the attachment"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::Unattached { attachment_id, .. } if *attachment_id == equipment
+            )),
+            "an attachment that did not become unattached must not announce one: {events:?}"
+        );
+    }
+
+    #[test]
+    fn host_exit_severing_is_reproduced_by_resolved_command_replay() {
+        // The live transition severs the attachment graph BEFORE delegating to
+        // `resolve_and_apply_zone_change`, and `ResolvedZoneChangeCommand`
+        // carries no attachment payload. If replay did not re-run the same
+        // severing authority, a state rebuilt from the journal would still hold
+        // the edges the live transition cut — a live/replay divergence.
+        use crate::game::effects::attach::attach_to;
+        use crate::types::card_type::CoreType;
+
+        let mut live = setup();
+        let host = create_object(
+            &mut live,
+            CardId(1),
+            PlayerId(0),
+            "Host".to_string(),
+            Zone::Battlefield,
+        );
+        live.objects
+            .get_mut(&host)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let equipment = create_object(
+            &mut live,
+            CardId(2),
+            PlayerId(0),
+            "Equipment".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = live.objects.get_mut(&equipment).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+        }
+        attach_to(&mut live, equipment, host);
+
+        // Clone BEFORE the move: this is the pre-cleanup shape replay starts from.
+        let mut replayed = live.clone();
+
+        move_to_zone(&mut live, host, Zone::Exile, &mut Vec::new());
+        let command = live
+            .resolved_rules_journal
+            .entries()
+            .iter()
+            .filter_map(|entry| entry.command.as_ref())
+            .find_map(|command| match command {
+                crate::types::resolved_commands::ResolvedRulesCommand::ZoneChange(command)
+                    if command.object.object_id == host =>
+                {
+                    Some(command.as_ref().clone())
+                }
+                _ => None,
+            })
+            .expect("the live battlefield exit records its zone command");
+
+        assert_eq!(live.objects[&equipment].attached_to, None);
+        assert!(live.objects[&host].attachments.is_empty());
+
+        apply_resolved_zone_change(&mut replayed, &command)
+            .expect("the recorded exit replays from the pre-cleanup state");
+
+        assert_eq!(
+            replayed.objects[&equipment].attached_to, live.objects[&equipment].attached_to,
+            "replay must reproduce the severed back-pointer"
+        );
+        assert_eq!(
+            replayed.objects[&host].attachments, live.objects[&host].attachments,
+            "replay must reproduce the emptied host attachment list"
+        );
+    }
+
+    #[test]
+    fn phased_out_attachment_does_not_readopt_a_returned_host() {
+        // CR 702.26i: a directly phased-out attachment phases in attached to
+        // its old host only "if that object is still in the same zone". The
+        // host leaves and returns to the SAME `ObjectId` slot, so
+        // `phasing::phase_in_object`'s battlefield check would re-adopt it
+        // unless the pointer was cleared when the host left.
+        //
+        // CR 702.26j: that severing is silent — no unattach trigger fires for a
+        // phased-out attachment.
+        use crate::game::effects::attach::attach_to;
+        use crate::game::game_object::{PhaseOutCause, PhaseStatus};
+        use crate::types::card_type::CoreType;
+
+        let mut state = setup();
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Host".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&host)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let equipment = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Equipment".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&equipment).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+        }
+        attach_to(&mut state, equipment, host);
+        state.objects.get_mut(&equipment).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, host, Zone::Graveyard, &mut events);
+
+        assert_eq!(
+            state.objects[&equipment].attached_to, None,
+            "CR 702.26i: the phased-out attachment must not keep a pointer to a host \
+             that left the zone"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::Unattached { attachment_id, .. } if *attachment_id == equipment
+            )),
+            "CR 702.26j: severing a phased-out attachment is silent: {events:?}"
+        );
+
+        // The host returns to the very same ObjectId slot.
+        move_to_zone(&mut state, host, Zone::Battlefield, &mut events);
+        crate::game::phasing::phase_in_object(&mut state, equipment, &mut events);
+
+        assert_eq!(
+            state.objects[&equipment].attached_to, None,
+            "CR 702.26i: it must phase in UNATTACHED, not re-adopt the returned permanent"
+        );
+        assert!(
+            !state.objects[&host].attachments.contains(&equipment),
+            "the returned permanent must not list the attachment"
+        );
+    }
+
+    #[test]
     fn sba_pipeline_graveyard_clears_attached_to() {
         use crate::game::effects::attach::attach_to;
         use crate::game::zone_pipeline::{ZoneMoveRequest, ZoneMoveResult};
@@ -4890,43 +5635,6 @@ mod tests {
                 )
             }),
             "SBA zone movement must still publish the unattach event for triggers"
-        );
-    }
-
-    /// pod-lab loop-3 Q5, row 5: `restore_after_rollback` targeting the
-    /// battlefield must still force a full layers re-evaluation
-    /// unconditionally — CR 601.2 + CR 733.1, reversing an incomplete action
-    /// is rare (not gameplay-hot) and can leave board state in a shape the
-    /// entry-only incremental-flush safety classifier was never designed to
-    /// reason about, so there is no perf case for trusting `move_to_zone`'s
-    /// own (now axis-gated) internal decision here. Today's only production
-    /// caller targets Graveyard, not Battlefield, so this exercises the
-    /// function's general contract directly rather than replaying an
-    /// existing call site.
-    #[test]
-    fn restore_after_rollback_to_battlefield_marks_full() {
-        let mut state = setup();
-        let id = create_object(
-            &mut state,
-            CardId(1),
-            PlayerId(0),
-            "Rolled Back Spell".to_string(),
-            Zone::Stack,
-        );
-        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
-
-        let mut events = Vec::new();
-        restore_after_rollback(&mut state, id, Zone::Battlefield, &mut events);
-
-        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
-        assert!(
-            matches!(
-                state.layers_dirty,
-                crate::types::game_state::LayersDirty::Full
-            ),
-            "restore_after_rollback targeting the battlefield must \
-             unconditionally force a full re-evaluation, got {:?}",
-            state.layers_dirty
         );
     }
 }

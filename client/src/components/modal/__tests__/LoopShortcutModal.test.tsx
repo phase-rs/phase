@@ -713,6 +713,11 @@ describe("LoopShortcutModal", () => {
     expect(screen.getByText("This loop deals lethal damage.")).toBeInTheDocument();
     expect(screen.getByText("Repeat until the game ends.")).toBeInTheDocument();
 
+    // No published reply spec is the other member of "no range to name a place in": nothing to
+    // name one with is offered, and the Accept dispatch below is that absence's reach guard.
+    expect(screen.queryByRole("spinbutton")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Shorten it" })).toBeNull();
+
     fireEvent.click(screen.getByRole("button", { name: "Accept" }));
     expect(dispatchMock).toHaveBeenCalledWith({
       type: "RespondToShortcut",
@@ -720,22 +725,195 @@ describe("LoopShortcutModal", () => {
     });
   });
 
-  // T5: "Break out" dispatches the Shorten payload shape (placeholder at_iteration).
-  it("dispatches Shorten on break out (T5)", () => {
-    seed(buildRespondToShortcutWaitingFor());
+  /** A responder window over a published range. The proposal's count is 9 and no published end
+   *  below equals it, so a bound this modal derived from the count rather than read off the spec
+   *  moves every window assertion in the rows that follow. */
+  function seedRespondRange(minIteration: number, maxIteration: number) {
+    cleanup();
+    dispatchMock.mockClear();
+    seed(
+      buildRespondToShortcutWaitingFor({ proposal: { count: { Fixed: 9 } } }),
+      {},
+      respondInteraction({ minIteration, maxIteration }),
+    );
     render(<RespondToShortcutModal />);
+  }
 
-    fireEvent.click(screen.getByRole("button", { name: "Break out" }));
+  /** The place picker and the control that sends it. Both throw on absence, which is what makes
+   *  them the reach guards of the negative assertions below. */
+  const placeBox = () => screen.getByRole("spinbutton", { name: "Number of iterations" });
+  const shortenButton = () => screen.getByRole("button", { name: "Shorten it" });
+
+  // T5: CR 732.2b — the responder names a place and the dispatch carries THAT place. 2 is neither
+  // end of the published window nor anything derivable from the count, so a modal dispatching a
+  // constant place — which is what this row asserted before the control existed — fails here.
+  it("dispatches Shorten at the place the responder named (T5)", () => {
+    seedRespondRange(0, 3);
+
+    // The box opens on the published floor; the frontend holds no default of its own.
+    expect(placeBox()).toHaveValue("0");
+    fireEvent.change(placeBox(), { target: { value: "2" } });
+    fireEvent.click(shortenButton());
     expect(dispatchMock).toHaveBeenCalledWith({
       type: "RespondToShortcut",
-      data: { response: { Shorten: { at_iteration: 1 } } },
+      data: { response: { Shorten: { at_iteration: 2 } } },
+    });
+  });
+
+  // R2: both ends of the window are the reply spec's own. 8 is exactly what a `count - 1`
+  // re-derivation would admit; 3 is the published ceiling; then the same proposal, rendered fresh
+  // over a wider published ceiling, admits 6 — which neither the count nor the first render's
+  // window can produce. The last leg pins the other end, where the floor is not zero.
+  it("takes both bounds from the published range, not from the proposal's count (R2)", () => {
+    seedRespondRange(0, 3);
+
+    fireEvent.change(placeBox(), { target: { value: "8" } });
+    expect(shortenButton()).toBeDisabled();
+    fireEvent.keyDown(placeBox(), { key: "Enter" });
+    expect(dispatchMock).not.toHaveBeenCalled();
+
+    fireEvent.change(placeBox(), { target: { value: "3" } });
+    fireEvent.click(shortenButton());
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "RespondToShortcut",
+      data: { response: { Shorten: { at_iteration: 3 } } },
+    });
+
+    seedRespondRange(0, 6);
+    fireEvent.change(placeBox(), { target: { value: "6" } });
+    fireEvent.click(shortenButton());
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "RespondToShortcut",
+      data: { response: { Shorten: { at_iteration: 6 } } },
+    });
+
+    seedRespondRange(2, 6);
+    expect(placeBox()).toHaveValue("2");
+    fireEvent.change(placeBox(), { target: { value: "1" } });
+    expect(shortenButton()).toBeDisabled();
+    fireEvent.keyDown(placeBox(), { key: "Enter" });
+    expect(dispatchMock).not.toHaveBeenCalled();
+
+    // The reach guard for that refusal, and the box's own entry point into the one handler the
+    // footer button also reaches: the same key on the same box sends an in-range place. 6 is a
+    // place no click leg on this window sends, so neither dispatch assertion stands in for the
+    // other, and a modal that ignored Enter entirely would satisfy every refusal above.
+    fireEvent.change(placeBox(), { target: { value: "6" } });
+    fireEvent.keyDown(placeBox(), { key: "Enter" });
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "RespondToShortcut",
+      data: { response: { Shorten: { at_iteration: 6 } } },
+    });
+
+    fireEvent.change(placeBox(), { target: { value: "2" } });
+    fireEvent.click(shortenButton());
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "RespondToShortcut",
+      data: { response: { Shorten: { at_iteration: 2 } } },
+    });
+  });
+
+  // R2, live half: the ends are read on every render rather than latched at mount. The SAME
+  // window is re-published narrower while a legal place is already typed and WITHOUT rotating the
+  // reply's interaction id, so the body is not remounted and the typed place survives — what
+  // refuses it is the re-published ceiling. A modal holding its bounds in state still dispatches 5.
+  it("re-gates an already-typed place against a narrower re-published range (R2 live)", () => {
+    seedRespondRange(0, 6);
+    fireEvent.change(placeBox(), { target: { value: "5" } });
+    expect(shortenButton()).toBeEnabled();
+
+    seed(
+      buildRespondToShortcutWaitingFor({ proposal: { count: { Fixed: 9 } } }),
+      {},
+      respondInteraction({ minIteration: 0, maxIteration: 3 }),
+    );
+
+    // The typed place survived, so the body did not remount and the re-gate below is the
+    // published ceiling's doing.
+    expect(placeBox()).toHaveValue("5");
+    expect(shortenButton()).toBeDisabled();
+    fireEvent.keyDown(placeBox(), { key: "Enter" });
+    expect(dispatchMock).not.toHaveBeenCalled();
+
+    fireEvent.change(placeBox(), { target: { value: "3" } });
+    fireEvent.click(shortenButton());
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "RespondToShortcut",
+      data: { response: { Shorten: { at_iteration: 3 } } },
+    });
+  });
+
+  // The other half of the same pair, and the half with a production consequence: a SECOND
+  // responder window opens at its own published floor rather than carrying the place typed into
+  // the first. Window B is byte-identical to A and differs only in the reply's interaction id, so
+  // a body keyed on the published range — or on any `waitingFor.data` field — keeps the typed
+  // place and fails here while passing the row above. `rerender` rather than `cleanup()` +
+  // `render()`: a fresh tree mounts a fresh body on the unkeyed code too.
+  it("opens a second responder window at its published floor", () => {
+    const seedReply = (interactionId: string) =>
+      seed(
+        buildRespondToShortcutWaitingFor({ proposal: { count: { Fixed: 9 } } }),
+        {},
+        respondInteraction({ minIteration: 2, maxIteration: 6 }, [], interactionId),
+      );
+
+    seedReply("session.0.2");
+    const view = render(<RespondToShortcutModal />);
+    fireEvent.change(placeBox(), { target: { value: "5" } });
+    expect(placeBox()).toHaveValue("5");
+
+    seedReply("session.0.3");
+    view.rerender(<RespondToShortcutModal />);
+
+    // The published floor — neither zero nor the place named in the first window.
+    expect(placeBox()).toHaveValue("2");
+  });
+
+  // R3: CR 732.2b — an empty published range holds no place to name, which is the shape a
+  // zero-count proposal projects: a floor above the ceiling. No control is offered at all and
+  // Accept is the only response. The bounded seed is the reach guard — the same component
+  // renders both controls on it, so the absences are the range's doing.
+  it("offers no shorten control on an empty published range (R3)", () => {
+    seedRespondRange(0, 3);
+    expect(placeBox()).toBeInTheDocument();
+    expect(shortenButton()).toBeInTheDocument();
+
+    seedRespondRange(1, 0);
+    expect(screen.queryByRole("spinbutton")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Shorten it" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Accept" }));
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "RespondToShortcut",
+      data: { response: "Accept" },
+    });
+  });
+
+  // R5: the published ceiling is passed through at its extreme rather than clamped. `u32::MAX` is
+  // the ceiling every UntilLethal proposal publishes; a modal that clamped it, or that special-
+  // cased UntilLethal, cannot dispatch it. The floor entry on the same render is the paired
+  // positive.
+  it("names a place at the published u32 ceiling (R5)", () => {
+    seedRespondRange(0, 4294967295);
+
+    fireEvent.click(shortenButton());
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "RespondToShortcut",
+      data: { response: { Shorten: { at_iteration: 0 } } },
+    });
+
+    fireEvent.change(placeBox(), { target: { value: "4294967295" } });
+    fireEvent.click(shortenButton());
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "RespondToShortcut",
+      data: { response: { Shorten: { at_iteration: 4294967295 } } },
     });
   });
 
   // ── CR 732.2b: what the responding opponent SEES ─────────────────────────────────────────
   //
-  // T4 and T5 above stay UNMODIFIED: they seed `viewerInteraction: null`, which is the degrade
-  // path, and they are the standing instrument that the base three lines are the shipped ones.
+  // T4 above seeds `viewerInteraction: null`, which is the degrade path, and is the standing
+  // instrument that the base three lines are the shipped ones.
 
   /** The allocation rows in render order. `getAllByText` throws on an empty match, which is the
    *  query's own control against an assertion satisfied by rendering nothing. */
@@ -788,7 +966,8 @@ describe("LoopShortcutModal", () => {
   });
 
   // The degrade half: a respond window whose spec carries NO declared sequence renders the base
-  // three lines unchanged and adds nothing. Paired with the row above, the two are a SWITCH.
+  // three lines unchanged and adds no declaration panel. Paired with the row above, the two are
+  // a SWITCH.
   it("renders the base three lines and nothing else without a declared sequence", () => {
     seed(buildRespondToShortcutWaitingFor(), {}, respondInteraction());
     render(<RespondToShortcutModal />);
@@ -1742,10 +1921,12 @@ describe("LoopShortcutModal", () => {
     expect(dispatchMock).not.toHaveBeenCalled();
   });
 
-  // P5-17: a count the offer published no element for renders zeros and refuses Confirm — no
-  // seeded split and no nearest match. Authoring a partition there is what makes it a rendered
-  // state, not a dead end.
-  it("seeds nothing at a count the engine published no element for (P5-17)", () => {
+  // P5-17: the FAIL-CLOSED end of the unsampled count. This transport cannot preview, so there is
+  // no engine answer to seed the rows from and the modal renders zeros and refuses Confirm —
+  // never a nearest match and never a client-computed split. Authoring a partition there is what
+  // makes it a rendered state rather than a dead end. The preview-capable end is the row below
+  // that installs a `previewInteraction` adapter.
+  it("seeds nothing at an unsampled count with no preview capability (P5-17)", () => {
     seed(
       buildLoopShortcutWaitingFor({ schema: { iteration_count: { Fixed: 8 } } }),
       {},
@@ -1760,6 +1941,9 @@ describe("LoopShortcutModal", () => {
         [seatCandidate("k4", 1), seatCandidate("k5", 2)],
       ),
     );
+    // The precondition this row's zeros are about, stated rather than inherited: an adapter with
+    // no `previewInteraction` is what makes the seam resolve `null`.
+    useGameStore.setState({ adapter: bareAdapter() });
     render(<DeclareShortcutModal />);
 
     // leg A — at the published count the rows read the published split and Confirm is enabled, so
@@ -1768,7 +1952,7 @@ describe("LoopShortcutModal", () => {
     expect(allocationRow("P3")).toHaveAttribute("aria-valuenow", "4");
     expect(confirmButton()).toBeEnabled();
 
-    // leg B — the gap. Nothing is seeded from anywhere.
+    // leg B — the gap, with nothing to seed from: the transport cannot answer.
     fireEvent.change(countBox(), { target: { value: "5" } });
     expect(allocationRow("P2")).toHaveAttribute("aria-valuenow", "0");
     expect(allocationRow("P3")).toHaveAttribute("aria-valuenow", "0");
@@ -2180,6 +2364,20 @@ function answerWith(request: InteractionPreviewRequest, amount: number): Interac
   } as unknown as InteractionPreview;
 }
 
+/** An engine answer carrying the split the COMPLETION mints at `count` — the shape the seam
+ *  returns for a count the offer published no element for. */
+function answerAllocating(
+  request: InteractionPreviewRequest,
+  count: number,
+  allocation: AmountAssignment[],
+  amount: number,
+): InteractionPreview {
+  return {
+    ...answerWith(request, amount),
+    shortcutPreview: element(count, allocation, [{ family: "life", player: 2, amount }]),
+  } as InteractionPreview;
+}
+
 /** The pin-route offer rows 9 and 10 author a split on: two announced seats, an even published
  *  split of the count, and one published life line. */
 function seedPreviewOffer(store: StoreOverrides = {}) {
@@ -2529,5 +2727,56 @@ describe("DeclareShortcutModal — authored-split preview", () => {
     expect(useAppNotificationStore.getState().notification?.description).toBe(
       "This game connection does not support interaction responses",
     );
+  });
+
+  // Row 12: at a count the offer's bounded sample published no element for, the modal asks the
+  // engine for the canonical split with a pin naming NOTHING, then reads the answer into its rows
+  // and its dispatch. The two iterations issue the IDENTICAL request and differ only in what the
+  // engine answered, so a client-side recomputation renders and dispatches the same split twice.
+  it("completes an unsampled count from the engine's own answer", async () => {
+    for (const [amount, allocation] of [
+      [-8, [amt("k4", 2), amt("k5", 2)]],
+      [-6, [amt("k4", 3), amt("k5", 1)]],
+    ] as const) {
+      cleanup();
+      vi.mocked(dispatchInteraction).mockClear();
+      const previewInteraction = vi.fn((request: InteractionPreviewRequest) =>
+        Promise.resolve(answerAllocating(request, 4, [...allocation], amount)),
+      );
+      seedPreviewOffer({ adapter: { ...bareAdapter(), previewInteraction } as EngineAdapter });
+      render(<DeclareShortcutModal />);
+
+      // NEGATIVE SIBLING: at the offer's OWN published count, with nothing authored, the widened
+      // gate asks nothing and the rows read the published split.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(previewInteraction).not.toHaveBeenCalled();
+      expect(allocationRow("P2")).toHaveAttribute("aria-valuenow", "3");
+      expect(allocationRow("P3")).toHaveAttribute("aria-valuenow", "2");
+
+      fireEvent.change(countBox(), { target: { value: "4" } });
+      expect(await screen.findByText(`${amount} life — P3`)).toBeInTheDocument();
+
+      // ONE request per settled state, naming nothing over the announced point.
+      expect(previewInteraction).toHaveBeenCalledOnce();
+      expect(previewInteraction.mock.calls[0][0].response).toEqual({
+        type: "shortcut",
+        data: {
+          decision: { type: "fixed", data: { iterations: 4 } },
+          pins: [{ group: 2, choiceIds: [], amounts: [] }],
+        },
+      });
+
+      expect(allocationRow("P2")).toHaveAttribute("aria-valuenow", String(allocation[0].amount));
+      expect(allocationRow("P3")).toHaveAttribute("aria-valuenow", String(allocation[1].amount));
+      expect(confirmButton()).toBeEnabled();
+      fireEvent.click(confirmButton());
+      expect(vi.mocked(dispatchInteraction).mock.calls[0][0].response).toEqual({
+        type: "shortcut",
+        data: {
+          decision: { type: "fixed", data: { iterations: 4 } },
+          pins: [{ group: 2, choiceIds: ["k4", "k5"], amounts: [...allocation] }],
+        },
+      });
+    }
   });
 });

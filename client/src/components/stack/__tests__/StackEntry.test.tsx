@@ -1,8 +1,10 @@
 import { act } from "react";
+import { AnimatePresence } from "framer-motion";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import { StackEntry } from "../StackEntry.tsx";
+import { useAnimationStore } from "../../../stores/animationStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
 import type { GameState, StackEntry as StackEntryType } from "../../../adapter/types.ts";
@@ -239,6 +241,46 @@ describe("StackEntry", () => {
     // way — the `CardArtFallback` branch feeds it the identical string.
     expect(screen.getByAltText("Start your engines!")).toBeInTheDocument();
     expect(screen.queryByAltText("Unknown")).not.toBeInTheDocument();
+  });
+
+  it("shows the engine-authored revealed card names for its own entry only", () => {
+    // CR 701.20a: the card stays revealed while this trigger is on the stack.
+    // The engine publishes its name keyed by stack entry; the chip renders it.
+    const entry: StackEntryType = buildStackEntry({
+      id: 93,
+      source_id: 0,
+      controller: 0,
+      kind: {
+        type: "TriggeredAbility",
+        data: { source_id: 0, ability: { targets: [] }, source_name: "Calibrated Blast" },
+      },
+    });
+    const other: StackEntryType = buildStackEntry({
+      id: 94,
+      source_id: 0,
+      controller: 0,
+      kind: {
+        type: "TriggeredAbility",
+        data: { source_id: 0, ability: { targets: [] }, source_name: "Calibrated Blast" },
+      },
+    });
+    const gameState = createGameState({
+      objects: {},
+      stack: [entry, other],
+      derived: { stack_revealed_cards: { "93": ["Three Drop"] } },
+    });
+
+    act(() => {
+      useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    });
+
+    const { rerender } = render(
+      <StackEntry entry={entry} index={0} isTop cardSize={{ width: 120, height: 168 }} />,
+    );
+    expect(screen.getByTestId("stack-revealed-cards")).toHaveTextContent("Revealed: Three Drop");
+
+    rerender(<StackEntry entry={other} index={1} isTop={false} cardSize={{ width: 120, height: 168 }} />);
+    expect(screen.queryByTestId("stack-revealed-cards")).not.toBeInTheDocument();
   });
 
   it("invents no name when the wire carries none", () => {
@@ -496,6 +538,80 @@ describe("StackEntry", () => {
     render(<StackEntry entry={entry} index={0} isTop cardSize={{ width: 120, height: 168 }} />);
 
     expect(screen.queryByTestId("unimplemented-mechanics-badge")).not.toBeInTheDocument();
+  });
+
+  // V11 (plan-r6 §Verification Matrix): the display must show the LIVE
+  // controller (CR 112.2 + CR 613.1b), not the by-default `entry.controller`,
+  // and it must do so per entry — `group_key` is not extended to carry it.
+  describe("live controller chrome", () => {
+    it("follows details.controller rather than the by-default entry.controller", () => {
+      // entry.controller stays the CR 112.2 by-default caster (self, seat 0);
+      // details.controller is the engine's LIVE answer (the opponent, after a
+      // steal) — the two are deliberately made to disagree so the assertion
+      // below can only pass if the chrome reads `details`.
+      const entry: StackEntryType = buildStackEntry({
+        id: 77,
+        source_id: 42,
+        controller: 0,
+        kind: { type: "Spell", data: { card_id: 1, actual_mana_spent: 0 } },
+      });
+      const gameState = createGameState({
+        objects: buildObjectMap(
+          buildGameObject({ id: 42, card_id: 1, name: "Stolen Spell", zone: "Stack" }),
+        ),
+        stack: [entry],
+      });
+
+      act(() => {
+        useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+      });
+
+      render(
+        <StackEntry
+          entry={entry}
+          index={0}
+          isTop
+          cardSize={{ width: 120, height: 168 }}
+          details={{
+            source_name: "Stolen Spell",
+            kind_label: "Spell",
+            controller: 1,
+          }}
+        />,
+      );
+
+      // REVERT-FAILING: reverting the `details?.controller ?? entry.controller`
+      // fallback to a bare `entry.controller` read makes this badge show "You"/"Y".
+      expect(screen.getByTitle("Opp")).toBeInTheDocument();
+      expect(screen.getByText("P1")).toBeInTheDocument();
+      expect(screen.queryByTitle("You")).not.toBeInTheDocument();
+    });
+
+    it("falls back to entry.controller when details is absent, never to seat 0", () => {
+      // HOSTILE: `details` absent must not crash and must not silently
+      // default to PlayerId(0) — this is exactly why the TS field is optional.
+      const entry: StackEntryType = buildStackEntry({
+        id: 78,
+        source_id: 43,
+        controller: 1,
+        kind: { type: "Spell", data: { card_id: 2, actual_mana_spent: 0 } },
+      });
+      const gameState = createGameState({
+        objects: buildObjectMap(
+          buildGameObject({ id: 43, card_id: 2, name: "Opponent Spell", zone: "Stack" }),
+        ),
+        stack: [entry],
+      });
+
+      act(() => {
+        useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+      });
+
+      render(<StackEntry entry={entry} index={0} isTop cardSize={{ width: 120, height: 168 }} />);
+
+      expect(screen.getByTitle("Opp")).toBeInTheDocument();
+      expect(screen.getByText("P1")).toBeInTheDocument();
+    });
   });
 
   // The stack must be a click surface for EVERY engine prompt whose legal set can
@@ -772,6 +888,88 @@ describe("StackEntry", () => {
       // Non-vacuity: the snapshot deliberately still holds the old prompt, so
       // the two fields have genuinely diverged and the glow followed the live one.
       expect(useGameStore.getState().gameState?.waiting_for?.type).toBe("TargetSelection");
+    });
+  });
+
+  describe("flight veil", () => {
+    const ENTRY_ID = 77;
+    const entry = buildStackEntry({ id: ENTRY_ID, source_id: ENTRY_ID });
+    const cardSize = { width: 120, height: 168 };
+
+    function entryNode() {
+      return document.querySelector<HTMLElement>(`[data-stack-entry="${ENTRY_ID}"]`);
+    }
+
+    beforeEach(() => {
+      useAnimationStore.getState().clearQueue();
+    });
+
+    afterEach(() => {
+      useAnimationStore.getState().clearQueue();
+    });
+
+    it("mounts hidden with no entrance, keeping its positioning, when already flight-veiled", () => {
+      useAnimationStore.getState().veilFlight(ENTRY_ID);
+
+      render(<StackEntry entry={entry} index={0} isTop cardSize={cardSize} style={{ zIndex: 3 }} />);
+
+      expect(entryNode()!.style.visibility).toBe("hidden");
+      expect(entryNode()!.style.opacity).toBe("1");
+      expect(entryNode()!.style.zIndex).toBe("3");
+    });
+
+    it("keeps today's entrance when it mounts unveiled", () => {
+      render(<StackEntry entry={entry} index={0} isTop cardSize={cardSize} />);
+
+      expect(entryNode()!.style.opacity).toBe("0");
+      expect(entryNode()!.style.transform).toBe("translateX(30px) scale(0.9)");
+      expect(entryNode()!.style.visibility).toBe("");
+    });
+
+    it("shows without replaying the entrance once the flight releases it", () => {
+      useAnimationStore.getState().veilFlight(ENTRY_ID);
+      render(<StackEntry entry={entry} index={0} isTop cardSize={cardSize} />);
+
+      act(() => useAnimationStore.getState().unveilFlight(ENTRY_ID));
+
+      expect(entryNode()!.style.visibility).toBe("");
+      expect(entryNode()!.style.opacity).toBe("1");
+    });
+
+    it("stays hidden through an exit that began while veiled", () => {
+      function Host({ show }: { show: boolean }) {
+        return (
+          <AnimatePresence>
+            {show && <StackEntry key={ENTRY_ID} entry={entry} index={0} isTop cardSize={cardSize} />}
+          </AnimatePresence>
+        );
+      }
+      useAnimationStore.getState().veilFlight(ENTRY_ID);
+      const { rerender } = render(<Host show />);
+
+      rerender(<Host show={false} />);
+      act(() => useAnimationStore.getState().unveilFlight(ENTRY_ID));
+
+      // Still mounted: the exit animation is running.
+      expect(entryNode()).not.toBeNull();
+      expect(entryNode()!.style.visibility).toBe("hidden");
+    });
+
+    it("keeps a coalesced representative visible while a covered member flies", () => {
+      useAnimationStore.getState().veilFlight(78);
+
+      render(
+        <StackEntry
+          entry={entry}
+          groupedObjectIds={[ENTRY_ID, 78]}
+          index={0}
+          isTop
+          cardSize={cardSize}
+        />,
+      );
+
+      expect(entryNode()).toHaveAttribute("data-grouped-ids", "77 78");
+      expect(entryNode()!.style.visibility).toBe("");
     });
   });
 });

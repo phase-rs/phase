@@ -7,10 +7,13 @@
 use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir, ParsedAbilities};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::doc::{OracleDocIr, OracleNodeIr};
+use crate::parser::oracle_ir::trace::OuterRoute;
 use crate::parser::oracle_ir::trigger::TriggerNodeIr;
+use crate::parser::{parse_oracle_text, parse_oracle_text_traced};
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
-    AbilityCost, ActivationRestriction, Effect, TargetChoiceTiming, TriggerCondition,
+    AbilityCost, ActivationRestriction, ControllerRef, Effect, FilterProp, TargetChoiceTiming,
+    TargetFilter, TriggerCondition, TypedFilter,
 };
 use crate::types::game_state::DistributionUnit;
 
@@ -49,6 +52,197 @@ fn parse_two_layer_with_keywords(
     let mut ir = parse_oracle_ir(oracle_text, card_name, &keywords, &types, &subtypes);
     let lowered = lower_oracle_ir(&mut ir);
     (ir, lowered)
+}
+
+#[test]
+fn parser_trace_uses_production_output_and_records_real_item_routes() {
+    let text = "Exploit (When this creature enters, you may sacrifice a creature.)\nWhenever a creature you control exploits a nontoken creature, create a 2/2 black Zombie creature token.";
+    let keywords = vec!["Exploit".to_string()];
+    let types = vec!["Creature".to_string()];
+    let subtypes = vec!["Zombie".to_string()];
+    let traced = parse_oracle_text_traced(text, "Skull Skaab", &keywords, &types, &subtypes);
+    let ordinary = parse_oracle_text(text, "Skull Skaab", &keywords, &types, &subtypes);
+
+    assert_eq!(
+        serde_json::to_value(&traced.production_output).expect("serialize traced output"),
+        serde_json::to_value(&ordinary).expect("serialize ordinary output")
+    );
+    assert!(traced
+        .events
+        .iter()
+        .any(|event| event.route == OuterRoute::Trigger));
+    assert!(traced
+        .events
+        .iter()
+        .all(|event| event.span.first_line <= event.span.last_line));
+    let unique_items = traced
+        .events
+        .iter()
+        .map(|event| event.item_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        unique_items.len(),
+        traced.events.len(),
+        "one outer event per emitted item"
+    );
+    let exploit = ordinary
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == crate::types::triggers::TriggerMode::Exploited)
+        .expect("Skull Skaab exploit payoff trigger");
+    assert_eq!(
+        exploit.valid_source,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You)
+        ))
+    );
+    assert!(matches!(
+        exploit.valid_card.as_ref(),
+        Some(TargetFilter::Typed(filter)) if filter.properties.contains(&FilterProp::NonToken)
+    ));
+    assert!(!ability_has_unimplemented(
+        exploit.execute.as_deref().expect("Skull Skaab payoff")
+    ));
+}
+
+#[test]
+fn elenda_life_threshold_static_preserves_ir_and_lowered_shape() {
+    let text = "As long as your life total is greater than your starting life total, Elenda gets +1/+1 and has menace. Elenda gets an additional +5/+5 as long as your life total is at least 10 greater than your starting life total.";
+    let (ir, lowered) = parse_two_layer(
+        text,
+        "Elenda, Saint of Dusk",
+        &["Legendary", "Creature"],
+        &["Vampire", "Knight"],
+    );
+
+    assert_eq!(
+        lowered.statics.len(),
+        2,
+        "both printed conditional statics must survive lowering: {lowered:#?}"
+    );
+    assert!(
+        lowered
+            .statics
+            .iter()
+            .all(|static_def| static_def.condition.is_some()),
+        "both printed Elenda statics must carry their life conditions: {lowered:#?}"
+    );
+    insta::assert_json_snapshot!("elenda_life_threshold_ir", &ir);
+    insta::assert_json_snapshot!("elenda_life_threshold_lowered", &lowered);
+}
+
+#[test]
+fn parser_trace_skull_skaab_pair_preserves_input_difference_and_omits_trigger_carrier() {
+    let left_text = "Exploit (When this creature enters, you may sacrifice a creature.)\nWhenever a creature you control exploits a nontoken creature, create a 2/2 black Zombie creature token.";
+    let right_text = "Exploit (When this creature enters, you may sacrifice a creature.)\nWhenever a creature you control exploits a creature, create a 2/2 black Zombie creature token.";
+    let keywords = vec!["Exploit".to_string()];
+    let types = vec!["Creature".to_string()];
+    let subtypes = vec!["Zombie".to_string()];
+    let left = parse_oracle_text_traced(left_text, "Skull Skaab", &keywords, &types, &subtypes);
+    let right = parse_oracle_text_traced(right_text, "A-Skull Skaab", &keywords, &types, &subtypes);
+    let (left_ir, left_lowered) = parse_two_layer_with_keywords(
+        left_text,
+        "Skull Skaab",
+        &["Exploit"],
+        &["Creature"],
+        &["Zombie"],
+    );
+    let (right_ir, right_lowered) = parse_two_layer_with_keywords(
+        right_text,
+        "A-Skull Skaab",
+        &["Exploit"],
+        &["Creature"],
+        &["Zombie"],
+    );
+
+    for (ir, expects_nontoken) in [(&left_ir, true), (&right_ir, false)] {
+        let parsed = ir
+            .items
+            .iter()
+            .find_map(|item| match &item.node {
+                OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger))
+                    if trigger.partial_def.mode
+                        == crate::types::triggers::TriggerMode::Exploited =>
+                {
+                    Some(trigger)
+                }
+                _ => None,
+            })
+            .expect("typed Exploited TriggerIr");
+        assert_eq!(
+            parsed.partial_def.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You)
+            ))
+        );
+        assert_eq!(
+            matches!(
+                parsed.partial_def.valid_card.as_ref(),
+                Some(TargetFilter::Typed(filter))
+                    if filter.properties.contains(&FilterProp::NonToken)
+            ),
+            expects_nontoken
+        );
+    }
+
+    assert_eq!(
+        serde_json::to_value(&left.production_output).unwrap(),
+        serde_json::to_value(&left_lowered).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&right.production_output).unwrap(),
+        serde_json::to_value(&right_lowered).unwrap()
+    );
+    let mut left_projection = serde_json::to_value(&left_lowered).unwrap();
+    let mut right_projection = serde_json::to_value(&right_lowered).unwrap();
+    crate::parser::audit_projection::omit_definition_descriptions(&mut left_projection);
+    crate::parser::audit_projection::omit_definition_descriptions(&mut right_projection);
+    assert_ne!(left_projection, right_projection);
+
+    assert_ne!(left.normalized_source, right.normalized_source);
+    assert!(left
+        .events
+        .iter()
+        .any(|event| event.route == OuterRoute::Trigger));
+    assert!(right
+        .events
+        .iter()
+        .any(|event| event.route == OuterRoute::Trigger));
+    assert!(left
+        .omitted_evidence
+        .iter()
+        .any(|evidence| evidence.identity_sensitive_omission));
+    assert!(right
+        .omitted_evidence
+        .iter()
+        .any(|evidence| evidence.identity_sensitive_omission));
+}
+
+#[test]
+fn parser_trace_distinguishes_routes_that_emit_spell_ir() {
+    let activated = parse_oracle_text_traced(
+        "{T}: Add {G}.",
+        "Test Druid",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let imperative = parse_oracle_text_traced(
+        "Draw a card.",
+        "Test Spell",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+
+    assert!(activated
+        .events
+        .iter()
+        .any(|event| event.route == OuterRoute::Activated));
+    assert!(imperative
+        .events
+        .iter()
+        .any(|event| event.route == OuterRoute::ImperativeEffect));
 }
 
 /// CR 707.9a + CR 602.1a: generic activated abilities are emitted as native
@@ -1201,12 +1395,15 @@ fn student_of_warfare() {
 /// Leveler *body* static (Plan 05b, T2 witness).
 ///
 /// `student_of_warfare` above reaches only the block-SUMMARY static
-/// (`oracle_level.rs:194`), synthesized from P/T and keyword lines. Kabira
+/// (the `summary_text` / `StaticIr::from_definition` push in
+/// `oracle_level::parse_level_blocks`), synthesized from P/T and keyword lines. Kabira
 /// Vindicator prints a full sentence inside each LEVEL block, so it is the
-/// witness for the body arm (`oracle_level.rs:154`, via `parse_static_line`)
+/// witness for the body arm (the `parse_static_line` call in
+/// `oracle_level::parse_level_blocks`)
 /// — twice, once per block — while still carrying two block summaries.
 ///
-/// The sibling multi arm (`:146`, `parse_static_line_multi`) has no pool
+/// The sibling multi arm (the `parse_static_line_multi` call in
+/// `oracle_level::parse_level_blocks`) has no pool
 /// witness: no printed LEVEL body line lowers to more than one static.
 #[test]
 fn kabira_vindicator() {
@@ -1254,8 +1451,9 @@ fn lighthouse_chronologist() {
 /// Both Spacecraft static arms on one card (CR 702.184a / CR 721.2).
 ///
 /// `2+ | Other creatures you control get +1/+1.` takes the
-/// `parse_static_line` arm (`oracle_spacecraft.rs:256`); `12+ | Flying,
-/// lifelink` takes the keyword-only arm (`:178`). Nothing else in the two-layer
+/// `parse_static_line` arm of `oracle_spacecraft`'s `parse_body`; `12+ | Flying,
+/// lifelink` takes that same method's keyword-only (`parse_keyword_only_body`)
+/// arm. Nothing else in the two-layer
 /// corpus reaches either — Chalice of the Void carries `charge` counters but
 /// prints no threshold line — so without this fixture T2's Spacecraft
 /// conversion would be snapshot-invisible.
@@ -1855,7 +2053,11 @@ fn laezels_acrobatics_inline_die_table_is_owned_by_nonterminal_roll() {
         "Exile all nontoken creatures you control, then roll a d20.\n1—9 | Return those cards to the battlefield under their owner's control at the beginning of the next end step.\n10—20 | Return those cards to the battlefield under their owner's control, then exile them again. Return those cards to the battlefield under their owner's control at the beginning of the next end step.",
         "Lae'zel's Acrobatics",
         &["Instant"],
-        1,
+        // CR 706.3b: BOTH printed rows. This pin read 1 while the card prints 2,
+        // because the spell-resolution continuation loop swallowed the `1—9` row
+        // before the attach pass could collect it. The continuation guard
+        // restores the collector's precondition, so the whole table now attaches.
+        2,
     );
 }
 
@@ -1865,7 +2067,11 @@ fn overwhelming_encounter_inline_die_table_is_owned_by_nonterminal_roll() {
         "Creatures you control gain vigilance and trample until end of turn. Roll a d20.\n1—9 | Creatures you control get +2/+2 until end of turn.\n10—19 | Put two +1/+1 counters on each creature you control.\n20 | Put four +1/+1 counters on each creature you control.",
         "Overwhelming Encounter",
         &["Sorcery"],
-        2,
+        // CR 706.3b: ALL THREE printed rows. Same cause as Lae'zel's above — the
+        // swallowed `1—9` row now attaches, and it lowers to the mass
+        // `PumpAll{Typed{Creature, controller: You}}` the print states, not the
+        // single-target `Pump{Any}` the swallowed sibling used to produce.
+        3,
     );
 }
 
@@ -1979,9 +2185,10 @@ fn evils_thrall() {
     insta::assert_json_snapshot!("evils_thrall_lowered", &lowered);
 }
 
-// CR 608.2c: KeywordOverride — a "TargetHasKeywordInstead"-conditioned clause
-// builds its def from the parsed effect + condition and attaches as the prior
-// def's `sub_ability` (Conformer Shuriken's granted attack trigger).
+// CR 208.1 + CR 608.2c: a typed "if that creature has greater power than ~"
+// gate (QuantityCheck) on the tap's chained clause, linked to the tap's target
+// through `TargetReadOrigin::ParentAnnouncement`, with "the difference" bound
+// to the gate's operands (Conformer Shuriken's granted attack trigger).
 #[test]
 fn conformer_shuriken() {
     let (ir, lowered) = parse_two_layer(
@@ -2668,12 +2875,18 @@ fn aerial_formation() {
 //     `static_def` *before* the push in both branches, so the conversion site is
 //     identical either way; the unwrapped half is covered by row 204's Wizard L1.
 //
-// Non-witness worth knowing about: Barbarian Class L1 ("If you would roll one or
-// more dice, instead roll that many dice plus one and ignore the lowest roll")
-// does NOT reach the replacement arm — it falls through to the generic path and
-// lands as `PreLoweredSpell` with an `Unimplemented` effect. That is a pre-existing
-// parser gap, not something T1 introduces; it is baselined here so that if T1
-// changes it, the churn is visible and must be explained.
+// Formerly-baselined gap, now CLOSED: Barbarian Class L1 ("If you would roll one
+// or more dice, instead roll that many dice plus one and ignore the lowest roll")
+// used to fall through the replacement arm to the generic path, landing as
+// `PreLoweredSpell` with an `Unimplemented` effect. It now reaches the
+// replacement arm and lowers to a real `ReplacementEvent::RollDice` definition
+// (CR 706.1 + CR 706.6 + CR 614.1a): the `execute` raises the instruction's die
+// count by one (`Offset { EventContextAmount, +1 }`) and `die_ignore_rule`
+// carries `Lowest`, with `valid_player: You` for the "if YOU would roll" scope.
+// Both `barbarian_class_ir` and `barbarian_class_lowered` were regenerated
+// together for that change — the IR node moved from `Unsupported`/`Unknown` to
+// `Replacement`, and the lowered ability moved out of `abilities` into
+// `replacements`.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -2967,4 +3180,129 @@ mod diagnostic_snapshots {
     // for cascade-diff detection in swallow_check.rs but no current Oracle text
     // triggers it. A test will be added when a card that produces this diagnostic
     // is identified.
+}
+
+/// Row 1.C — restored result rows must carry the CONCRETE effect the print
+/// states, not merely "something that is not a failure marker".
+///
+/// `assert_inline_die_table` above checks only `results.len()`, so it cannot
+/// distinguish the mass `PumpAll` the card prints from the single-target
+/// `Pump { target: Any }` the swallowed sibling used to produce. That exact
+/// wrong shape is what the row loss emitted before the continuation guard
+/// landed, so a regression to it would restore the row COUNT and still be wrong.
+/// These assertions are what fail in that case.
+fn die_branches(
+    def: &crate::types::ability::AbilityDefinition,
+) -> Option<&[crate::types::ability::DieResultBranch]> {
+    match def.effect.as_ref() {
+        Effect::RollDie { results, .. } => Some(results.as_slice()),
+        _ => def
+            .sub_ability
+            .as_deref()
+            .and_then(die_branches)
+            .or_else(|| def.else_ability.as_deref().and_then(die_branches)),
+    }
+}
+
+#[test]
+fn overwhelming_encounter_restored_row_is_a_mass_pump_not_a_single_target_pump() {
+    use crate::types::ability::{ControllerRef, PtValue, TargetFilter, TypeFilter};
+
+    let (_, lowered) = parse_two_layer(
+        "Creatures you control gain vigilance and trample until end of turn. Roll a d20.\n1—9 | Creatures you control get +2/+2 until end of turn.\n10—19 | Put two +1/+1 counters on each creature you control.\n20 | Put four +1/+1 counters on each creature you control.",
+        "Overwhelming Encounter",
+        &["Sorcery"],
+        &[],
+    );
+    let branches = die_branches(&lowered.abilities[0]).expect("the roll must own its table");
+    assert_eq!(branches.len(), 3);
+    assert_eq!((branches[0].min, branches[0].max), (1, 9));
+
+    // THE DISCRIMINATOR. `Pump { target: Any }` — the swallowed sibling's shape —
+    // would satisfy any "not Unimplemented" check and fails here.
+    match branches[0].effect.effect.as_ref() {
+        Effect::PumpAll {
+            power,
+            toughness,
+            target,
+            ..
+        } => {
+            assert_eq!(*power, PtValue::Fixed(2));
+            assert_eq!(*toughness, PtValue::Fixed(2));
+            match target {
+                TargetFilter::Typed(typed) => {
+                    assert_eq!(typed.type_filters, vec![TypeFilter::Creature]);
+                    assert_eq!(typed.controller, Some(ControllerRef::You));
+                }
+                other => panic!("the restored row must pump a TYPED creature set, got {other:?}"),
+            }
+        }
+        other => panic!(
+            "the restored 1—9 row must be a MASS pump (PumpAll), not a single-target \
+             Pump — got {other:?}"
+        ),
+    }
+}
+
+#[test]
+fn farideh_fireball_restored_rows_carry_distinct_damage_scopes() {
+    use crate::types::ability::PlayerFilter;
+
+    let (_, lowered) = parse_two_layer(
+        "Farideh's Fireball deals 5 damage to target creature or planeswalker. Roll a d20.\n1—9 | Farideh's Fireball deals 2 damage to each player.\n10—20 | Farideh's Fireball deals 2 damage to each opponent.",
+        "Farideh's Fireball",
+        &["Sorcery"],
+        &[],
+    );
+    let branches = die_branches(&lowered.abilities[0]).expect("the roll must own its table");
+    assert_eq!(branches.len(), 2);
+    assert_eq!((branches[0].min, branches[0].max), (1, 9));
+    assert_eq!((branches[1].min, branches[1].max), (10, 20));
+
+    // The two rows must have DIFFERENT player scopes — that difference is the
+    // whole rules content of the card, and the runtime branch-selection test
+    // depends on it.
+    let scope = |b: &crate::types::ability::DieResultBranch| match b.effect.effect.as_ref() {
+        Effect::DamageEachPlayer { player_filter, .. } => player_filter.clone(),
+        other => panic!("expected DamageEachPlayer, got {other:?}"),
+    };
+    assert_eq!(scope(&branches[0]), PlayerFilter::All);
+    assert_eq!(scope(&branches[1]), PlayerFilter::Opponent);
+}
+
+/// Druid of the Emerald Grove reaches the P-D **trigger** attach path
+/// (`attach_trigger_die_result_branches`), which the seam tests in `oracle.rs`
+/// deliberately do NOT cover — those reconstruct the P-B spell path. This is the
+/// only end-to-end pin that the `"N or less"` row arm and the trigger attach path
+/// compose correctly for a real card.
+#[test]
+fn druid_of_the_emerald_grove_trigger_owns_all_three_printed_rows() {
+    let (_, lowered) = parse_two_layer(
+        "When this creature enters, search your library for up to two basic land cards and reveal them, then roll a d20.\n9 or less | Put those cards into your hand, then shuffle.\n10—19 | Put one of those cards onto the battlefield tapped and the other into your hand, then shuffle.\n20+ | Put those cards onto the battlefield tapped, then shuffle.",
+        "Druid of the Emerald Grove",
+        &["Creature"],
+        &["Druid"],
+    );
+    assert_eq!(
+        lowered.triggers.len(),
+        1,
+        "the printed line is one ETB trigger"
+    );
+    let branches = die_branches(
+        lowered.triggers[0]
+            .execute
+            .as_deref()
+            .expect("the ETB trigger must carry an execute body"),
+    )
+    .expect("the trigger's terminal roll must own the table");
+    assert_eq!(
+        branches
+            .iter()
+            .map(|b| (b.min, b.max))
+            .collect::<Vec<(u8, u8)>>(),
+        vec![(0, 9), (10, 19), (20, u8::MAX)],
+        "all three printed rows, including the \"9 or less\" wording (resolvable \
+         lower bound 0, because CR 706.2 selects on the post-modifier result and \
+         `apply_modifier` clamps it to 0) and the open-ended \"20+\" (u8::MAX)"
+    );
 }

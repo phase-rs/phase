@@ -33,8 +33,9 @@ import type {
   TournamentFormat,
   PodPolicy,
   DraftKind,
+  SharedStackPileDecision,
 } from "./draft-adapter";
-import type { ServerInfo } from "./ws-adapter";
+import type { FullSessionKey, ServerInfo } from "./ws-adapter";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -95,12 +96,26 @@ export type ServerDraftAdapterEvent =
   | { type: "draftActionRejected"; reason: string }
   | { type: "gameStateUpdated"; state: GameState; events: GameEvent[]; legalResult: LegalActionsResult; logEntries?: GameLogEntry[] }
   | { type: "gameOver"; winner: PlayerId | null; reason: string }
+  | { type: "opponentDisconnected"; graceSeconds: number }
+  | { type: "opponentReconnected" }
   | { type: "actionPendingChanged"; pending: boolean }
   | { type: "disconnected" }
   | { type: "reconnected" }
   | { type: "error"; message: string };
 
 type ServerDraftAdapterEventListener = (event: ServerDraftAdapterEvent) => void;
+
+function fullSessionKeysEqual(
+  left: FullSessionKey | null | undefined,
+  right: FullSessionKey | null | undefined,
+): boolean {
+  return left !== null
+    && left !== undefined
+    && right !== null
+    && right !== undefined
+    && left.game_code === right.game_code
+    && left.generation === right.generation;
+}
 
 // ── ServerDraftAdapter ──────────────────────────────────────────────────
 
@@ -137,6 +152,10 @@ export class ServerDraftAdapter implements EngineAdapter {
   private _playerId: PlayerId | null = null;
   private activeMatchId: string | null = null;
   private _gameCode: string | null = null;
+  /** Full match lifetime announced by DraftMatchStart. */
+  private activeFullKey: FullSessionKey | null = null;
+  /** Full match lifetime whose matching GameStarted has been accepted. */
+  private acceptedFullKey: FullSessionKey | null = null;
 
   // ── Infrastructure ─────────────────────────────────────────────────
   private ws: PhaseSocketTransport | null = null;
@@ -369,14 +388,53 @@ export class ServerDraftAdapter implements EngineAdapter {
     });
   }
 
+  /**
+   * Claim the single `draftResolve`/`draftReject` pair for one action.
+   *
+   * THE PAIR IS ONE SLOT, AND EVERY ACTION WANTED IT. `joinDraft`, `submitPick`,
+   * `submitSharedStackDecision` and `submitDeck` each assigned straight into it.
+   * A second action overwrote the first's callbacks, and the next
+   * `DraftStateUpdate` resolved only the survivor and nulled both -- so the
+   * first caller's promise never settled at all. Not a lost result: a
+   * permanently pending `await`, with whatever UI awaited it stuck behind it.
+   *
+   * Single-flight rather than request correlation, because the wire carries no
+   * correlation id: `DraftAction` frames are unlabelled and the server answers
+   * with a bare `DraftStateUpdate`. Adding an id is a protocol change; refusing
+   * to have two in flight is not, and these actions are user-initiated and
+   * mutually exclusive by phase anyway. The refusal is explicit and immediate,
+   * which is the part that matters -- the caller learns now instead of awaiting
+   * forever.
+   *
+   * "In flight" is read off the pair itself rather than a parallel flag, so the
+   * two cannot drift: all sixteen settle sites already null both together, and
+   * each is therefore a release.
+   */
+  private claimDraftAction(
+    action: string,
+    resolve: (view: DraftPlayerView) => void,
+    reject: (error: Error) => void,
+  ): boolean {
+    if (this.draftResolve !== null || this.draftReject !== null) {
+      reject(new AdapterError(
+        "PHASE_ERROR",
+        `Another draft action is still in flight; ${action} was not sent`,
+        false,
+      ));
+      return false;
+    }
+    this.draftResolve = resolve;
+    this.draftReject = reject;
+    return true;
+  }
+
   async joinDraft(
     draftCode: string,
     displayName: string,
     password?: string,
   ): Promise<DraftPlayerView> {
     return new Promise<DraftPlayerView>((resolve, reject) => {
-      this.draftResolve = resolve;
-      this.draftReject = reject;
+      if (!this.claimDraftAction("JoinDraft", resolve, reject)) return;
 
       if (!isValidWebSocketUrl(this.serverUrl)) {
         reject(new AdapterError("WS_ERROR", "Invalid WebSocket URL", false));
@@ -403,8 +461,7 @@ export class ServerDraftAdapter implements EngineAdapter {
       throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
     }
     return new Promise<DraftPlayerView>((resolve, reject) => {
-      this.draftResolve = resolve;
-      this.draftReject = reject;
+      if (!this.claimDraftAction("Pick", resolve, reject)) return;
       const sent = this.send({
         type: "DraftAction",
         data: {
@@ -423,13 +480,51 @@ export class ServerDraftAdapter implements EngineAdapter {
     });
   }
 
+  /**
+   * One whole shared-stack turn decision on the server-authoritative path.
+   *
+   * This exists because `CreateDraftSettings.kind` is
+   * `Exclude<DraftKind, "Quick">`, which admits `"Winston"` the moment the
+   * union widens — a creatable kind with no way to send its only action would
+   * be a half-extension. No shipped UI drives this path today (a P2P pod is
+   * where Winston is played), but a wire client and any future UI use it.
+   *
+   * `pile` is the optimistic-concurrency check against the engine's cursor;
+   * legality is `shared_stack::refusal_for`'s, server-side.
+   */
+  async submitSharedStackDecision(
+    pile: number,
+    decision: SharedStackPileDecision,
+  ): Promise<DraftPlayerView> {
+    if (this.seatIndex === null || this.draftCode === null) {
+      throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
+    }
+    return new Promise<DraftPlayerView>((resolve, reject) => {
+      if (!this.claimDraftAction("SharedStackDecision", resolve, reject)) return;
+      const sent = this.send({
+        type: "DraftAction",
+        data: {
+          draft_code: this.draftCode,
+          action: {
+            type: "SharedStackDecision",
+            data: { seat: this.seatIndex, pile, decision },
+          },
+        },
+      });
+      if (!sent) {
+        this.draftResolve = null;
+        this.draftReject = null;
+        reject(new AdapterError("WS_CLOSED", "Failed to send draft action", true));
+      }
+    });
+  }
+
   async submitDeck(mainDeck: string[], commanders: string[]): Promise<DraftPlayerView> {
     if (this.seatIndex === null || this.draftCode === null) {
       throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
     }
     return new Promise<DraftPlayerView>((resolve, reject) => {
-      this.draftResolve = resolve;
-      this.draftReject = reject;
+      if (!this.claimDraftAction("SubmitDeck", resolve, reject)) return;
       const sent = this.send({
         type: "DraftAction",
         data: {
@@ -638,21 +733,60 @@ export class ServerDraftAdapter implements EngineAdapter {
           match_id: string;
           round: number;
           game_code: string;
+          full_key?: FullSessionKey;
           player_token: string;
           your_player: PlayerId;
           opponent_name: string;
         };
+        if (
+          !data.full_key
+          || data.full_key.game_code !== data.game_code
+          || data.full_key.generation < 1
+        ) {
+          this.emit({
+            type: "error",
+            message: "Server omitted a valid Full session identity for the draft match.",
+          });
+          break;
+        }
+        const sameMatch =
+          this.activeMatchId === data.match_id
+          && this._gameCode === data.game_code
+          && this._playerId === data.your_player
+          && fullSessionKeysEqual(this.activeFullKey, data.full_key);
+        if (!sameMatch) {
+          this.snapshot = null;
+          this.acceptedFullKey = null;
+        }
         this.phase = "match";
         this.activeMatchId = data.match_id;
         this._playerId = data.your_player;
         this._gameCode = data.game_code;
-        this.emit({
-          type: "matchStarting",
-          matchId: data.match_id,
-          round: data.round,
-          opponentName: data.opponent_name,
-          gameCode: data.game_code,
-        });
+        this.draftToken = data.player_token;
+        this.activeFullKey = data.full_key;
+        if (!sameMatch) {
+          if (this.draftCode && this.draftToken) {
+            this.send({
+              type: "ReconnectDraft",
+              data: {
+                draft_code: this.draftCode,
+                player_token: this.draftToken,
+              },
+            });
+          } else {
+            this.emit({
+              type: "error",
+              message: "Cannot attach draft match without draft credentials.",
+            });
+          }
+          this.emit({
+            type: "matchStarting",
+            matchId: data.match_id,
+            round: data.round,
+            opponentName: data.opponent_name,
+            gameCode: data.game_code,
+          });
+        }
         break;
       }
 
@@ -696,7 +830,17 @@ export class ServerDraftAdapter implements EngineAdapter {
           activation_block_reasons?: Record<string, AbilityBlockEntry[]>;
           viewer_interaction?: LegalActionsResult["viewerInteraction"];
           derived?: GameState["derived"];
+          full_key?: FullSessionKey;
         };
+        if (
+          this.activeMatchId === null
+          || this._gameCode === null
+          || this._playerId !== data.your_player
+          || !fullSessionKeysEqual(data.full_key, this.activeFullKey)
+        ) {
+          break;
+        }
+        this.acceptedFullKey = data.full_key ?? null;
         const startedSnapshot = this.cacheSnapshot(
           { ...data.state, derived: data.derived ?? data.state.derived },
           {
@@ -734,7 +878,11 @@ export class ServerDraftAdapter implements EngineAdapter {
           viewer_interaction?: LegalActionsResult["viewerInteraction"];
           log_entries?: GameLogEntry[];
           derived?: GameState["derived"];
+          full_key?: FullSessionKey;
         };
+        if (!fullSessionKeysEqual(data.full_key, this.acceptedFullKey)) {
+          break;
+        }
         const updateSnapshot = this.cacheSnapshot(
           { ...data.state, derived: data.derived ?? data.state.derived },
           {
@@ -872,6 +1020,8 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.phase = "between_rounds";
         this.activeMatchId = null;
         this._gameCode = null;
+        this.activeFullKey = null;
+        this.acceptedFullKey = null;
         this.snapshot = null;
         this.emit({ type: "actionPendingChanged", pending: false });
         this.emit({
@@ -879,6 +1029,29 @@ export class ServerDraftAdapter implements EngineAdapter {
           winner: data.winner,
           reason: data.reason,
         });
+        break;
+      }
+
+      case "OpponentDisconnected": {
+        const data = msg.data as {
+          grace_seconds: number;
+          full_key?: FullSessionKey;
+        };
+        if (!fullSessionKeysEqual(data.full_key, this.acceptedFullKey)) {
+          break;
+        }
+        this.emit({
+          type: "opponentDisconnected",
+          graceSeconds: data.grace_seconds,
+        });
+        break;
+      }
+
+      case "OpponentReconnected": {
+        const data = (msg.data ?? {}) as { full_key?: FullSessionKey };
+        if (fullSessionKeysEqual(data.full_key, this.acceptedFullKey)) {
+          this.emit({ type: "opponentReconnected" });
+        }
         break;
       }
 
@@ -1018,6 +1191,8 @@ export class ServerDraftAdapter implements EngineAdapter {
     this.draftView = null;
     this.seatIndex = null;
     this.activeMatchId = null;
+    this.activeFullKey = null;
+    this.acceptedFullKey = null;
     if (this.pendingReject) {
       this.pendingReject(
         new AdapterError("WS_CLOSED", "Adapter disposed during action", true),

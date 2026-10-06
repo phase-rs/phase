@@ -182,10 +182,7 @@ fn amassed_army_snapshot(state: &GameState, object_id: ObjectId) -> Option<CostP
     state
         .objects
         .get(&object_id)
-        .map(|obj| CostPaidObjectSnapshot {
-            object_id,
-            lki: obj.snapshot_public_characteristics(),
-        })
+        .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_public_characteristics()))
 }
 
 /// Create a 0/0 black [subtype] Army creature token on the battlefield.
@@ -203,6 +200,7 @@ fn create_army_token(
             display_name: name.clone(),
             power: Some(0),
             toughness: Some(0),
+            loyalty: None,
             core_types: vec![CoreType::Creature],
             subtypes: vec!["Army".to_string(), subtype.to_string()],
             supertypes: vec![],
@@ -383,6 +381,7 @@ mod tests {
                     display_name: "Squirrel".to_string(),
                     power: Some(1),
                     toughness: Some(1),
+                    loyalty: None,
                     core_types: vec![CoreType::Creature],
                     subtypes: vec!["Squirrel".to_string()],
                     supertypes: Vec::new(),

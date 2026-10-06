@@ -425,6 +425,7 @@ fn synthesize_prepared_copy_object(
             enters_with_counter: None,
             enters_with_modifications: Vec::new(),
             mana_spend_permission: None,
+            cast_cost_modifier: None,
         });
     state.objects.insert(copy_id, copy_obj);
     // allow-raw-zone: registers CR 722.3c copy birth in exile; there is no source-zone move.
@@ -1282,6 +1283,7 @@ mod tests {
                     enters_with_counter: None,
                     enters_with_modifications: Vec::new(),
                     mana_spend_permission: None,
+                    cast_cost_modifier: None,
                 });
             source.back_face = Some(BackFaceForTest::prepare_with_cost(ManaCost::Cost {
                 shards: vec![ManaCostShard::Red],
@@ -1497,6 +1499,7 @@ mod tests {
             card_types.core_types.push(CoreType::Sorcery);
             crate::game::game_object::BackFaceData {
                 is_swap_snapshot: false,
+                trigger_printed_origins: Vec::new(),
                 name: "Test Prepare Face".to_string(),
                 power: None,
                 toughness: None,

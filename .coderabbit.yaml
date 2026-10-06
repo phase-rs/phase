@@ -2,7 +2,7 @@
 # CodeRabbit config for phase.rs — the free external review pass on this public repo.
 # See .claude/skills/pr-contribution-handler/SKILL.md "Independent review pass".
 #
-# Rules distilled from CLAUDE.md, .gemini/styleguide.md, and the /review-impl
+# Rules distilled from CLAUDE.md, .gemini/styleguide.md, and the /review-engine-impl
 # skill lenses. Path instructions are ADDITIVE: a file receives every instruction
 # whose glob matches it, so these layer broad -> narrow, each adding only its
 # increment. This repo's .coderabbit.yaml overrides the web UI, so keep the UI
@@ -85,7 +85,7 @@ reviews:
         range/subpart `CR 702.45a/b` — these are the documented convention, not
         format violations. Player-scoped queries on NON-battlefield zones
         (graveyard/library/hand/exile) must filter by `obj.owner`, not `controller`
-        (CR 404.2). Zone changes must route through the replacement-aware pipeline
+        (CR 108.4a). Zone changes must route through the replacement-aware pipeline
         (`ProposedEvent::ZoneChange`), not a direct `zones::move_to_zone`, so
         replacements can apply. Ability costs resolve through one authoritative
         resolver — flag any call site that destructures or branches on an ability's

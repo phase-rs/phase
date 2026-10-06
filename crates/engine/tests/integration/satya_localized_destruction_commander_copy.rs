@@ -5,6 +5,7 @@
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::move_to_zone;
 use engine::types::actions::GameAction;
+use engine::types::format::FormatConfig;
 use engine::types::game_state::{PersistedGameState, WaitingFor};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -16,7 +17,7 @@ use engine::types::zones::Zone;
 /// second unreachable choice.
 #[test]
 fn localized_destruction_does_not_deadlock_on_a_copied_commander_spell() {
-    let mut scenario = GameScenario::new();
+    let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 2, 42);
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_creature_from_oracle(
         P0,
@@ -34,7 +35,6 @@ fn localized_destruction_does_not_deadlock_on_a_copied_commander_spell() {
         .id();
 
     let mut runner = scenario.build();
-    runner.state_mut().format_config.command_zone = true;
 
     // CR 702.144a: accept Demonstrate's self-copy. The opponent copy is also
     // produced by the keyword, but all copies must shed the source's commander
@@ -105,14 +105,13 @@ fn localized_destruction_does_not_deadlock_on_a_copied_commander_spell() {
 /// shape, then restores it through the production persistence chokepoint.
 #[test]
 fn restored_token_commander_choice_resumes_sba_cleanup() {
-    let mut scenario = GameScenario::new();
+    let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 2, 42);
     scenario.at_phase(Phase::PreCombatMain);
     let copied_commander = scenario
         .add_creature(P0, "Copied Commander", 3, 4)
         .commander()
         .id();
     let mut runner = scenario.build();
-    runner.state_mut().format_config.command_zone = true;
 
     let mut events = Vec::new();
     move_to_zone(
@@ -167,14 +166,13 @@ fn restored_token_commander_choice_resumes_sba_cleanup() {
 /// holder while assigning action authority to the turn controller.
 #[test]
 fn restored_token_commander_choice_respects_turn_control_priority_authority() {
-    let mut scenario = GameScenario::new();
+    let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 2, 42);
     scenario.at_phase(Phase::PreCombatMain);
     let copied_commander = scenario
         .add_creature(P0, "Controlled Copied Commander", 3, 4)
         .commander()
         .id();
     let mut runner = scenario.build();
-    runner.state_mut().format_config.command_zone = true;
 
     let mut events = Vec::new();
     move_to_zone(
@@ -229,14 +227,13 @@ fn restored_token_commander_choice_respects_turn_control_priority_authority() {
 /// command-zone choice; only the impossible token-backed shape is normalized.
 #[test]
 fn restored_genuine_commander_choice_remains_actionable() {
-    let mut scenario = GameScenario::new();
+    let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 2, 42);
     scenario.at_phase(Phase::PreCombatMain);
     let commander = scenario
         .add_creature(P0, "Genuine Commander", 3, 4)
         .commander()
         .id();
     let mut runner = scenario.build();
-    runner.state_mut().format_config.command_zone = true;
 
     let mut events = Vec::new();
     move_to_zone(runner.state_mut(), commander, Zone::Graveyard, &mut events);

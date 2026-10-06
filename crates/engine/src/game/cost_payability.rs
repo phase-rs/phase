@@ -20,9 +20,9 @@
 //! the enumerations.
 
 use crate::types::ability::{
-    is_variable_remove_counter_cost_count, AbilityCost, Comparator, CounterCostSelection,
-    FilterProp, PlayerFilter, QuantityExpr, QuantityRef, TapCreaturesAggregateStat,
-    TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_X,
+    is_variable_remove_counter_cost_count, AbilityCost, CardSelectionMode, Comparator,
+    CounterCostSelection, DiscardSelfScope, FilterProp, PlayerFilter, QuantityExpr, QuantityRef,
+    TapCreaturesAggregateStat, TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_X,
 };
 use crate::types::card_type::CoreType;
 use crate::types::identifiers::ObjectId;
@@ -89,6 +89,7 @@ pub(crate) fn target_filter_has_x_mana_value_constraint(filter: &TargetFilter) -
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::EventTarget
@@ -270,6 +271,7 @@ pub(crate) fn relax_x_mana_value_constraint(filter: &TargetFilter) -> TargetFilt
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::EventTarget
@@ -311,6 +313,110 @@ pub(crate) fn cost_filter_before_x_announcement(
     })
 }
 
+/// CR 118.3 + CR 601.2h + CR 701.9a: Joint payability of a cost's chosen
+/// hand-discard legs ("discard an Island card and another card"). A per-leg
+/// "enough eligible cards" check lets one physical card satisfy two legs, so
+/// the cost is offered and then dead-ends mid-payment.
+///
+/// The engine pays legs in printed order (CR 601.2h permits any order), and the
+/// player freely chooses which eligible cards each leg discards. The cost is
+/// therefore jointly payable only when EVERY possible sequence of choices leaves
+/// every later leg payable, so this fails closed for an order that lets an early,
+/// less-restrictive leg take a card a later, more-restrictive leg needs
+/// (`[Any, Island]` over hand `[Island, Forest]` is not payable;
+/// `[Island, Any]` is). Only `Fixed` positive-count `Chosen` `FromHand` legs are
+/// modeled; every other leg kind is ignored here and keeps its own per-leg gate.
+pub(crate) fn discard_legs_jointly_payable(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    costs: &[AbilityCost],
+) -> bool {
+    let Some(player_state) = state.players.get(player.0 as usize) else {
+        return true;
+    };
+    let ctx = FilterContext::from_source(state, source);
+    let legs: Vec<(usize, Vec<ObjectId>)> = costs
+        .iter()
+        .filter_map(|cost| match cost {
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value },
+                filter,
+                selection: CardSelectionMode::Chosen,
+                self_scope: DiscardSelfScope::FromHand,
+            } if *value > 0 => {
+                let effective_filter = cost_filter_before_x_announcement(filter.as_ref());
+                let eligible = player_state
+                    .hand
+                    .iter()
+                    .copied()
+                    .filter(|&id| {
+                        id != source
+                            && effective_filter
+                                .as_ref()
+                                .is_none_or(|f| matches_target_filter(state, id, f, &ctx))
+                    })
+                    .collect();
+                Some((*value as usize, eligible))
+            }
+            _ => None,
+        })
+        .collect();
+    discard_legs_payable_for_every_choice(&legs, &[])
+}
+
+/// Every choice of `count` cards for the first leg (from those not already
+/// `used`) must leave the remaining legs payable.
+fn discard_legs_payable_for_every_choice(
+    legs: &[(usize, Vec<ObjectId>)],
+    used: &[ObjectId],
+) -> bool {
+    let Some(((count, eligible), later)) = legs.split_first() else {
+        return true;
+    };
+    let available: Vec<ObjectId> = eligible
+        .iter()
+        .copied()
+        .filter(|id| !used.contains(id))
+        .collect();
+    if available.len() < *count {
+        return false;
+    }
+    let mut picked = Vec::with_capacity(*count);
+    every_combination_leaves_later_payable(&available, *count, 0, &mut picked, later, used)
+}
+
+fn every_combination_leaves_later_payable(
+    available: &[ObjectId],
+    count: usize,
+    from: usize,
+    picked: &mut Vec<ObjectId>,
+    later: &[(usize, Vec<ObjectId>)],
+    used: &[ObjectId],
+) -> bool {
+    if picked.len() == count {
+        let mut now_used = used.to_vec();
+        now_used.extend_from_slice(picked);
+        return discard_legs_payable_for_every_choice(later, &now_used);
+    }
+    for index in from..available.len() {
+        picked.push(available[index]);
+        let ok = every_combination_leaves_later_payable(
+            available,
+            count,
+            index + 1,
+            picked,
+            later,
+            used,
+        );
+        picked.pop();
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
 impl AbilityCost {
     /// CR 605.3a + CR 602.2b + CR 601.2g-h: Payability gate for ACTIVATED
     /// MANA ABILITIES specifically. Unlike [`is_payable`] (which defers mana
@@ -328,6 +434,53 @@ impl AbilityCost {
         ability_index: usize,
     ) -> bool {
         match self {
+            AbilityCost::Discard {
+                count,
+                filter,
+                self_scope,
+                ..
+            } => {
+                let reserved = state
+                    .pending_cast
+                    .as_ref()
+                    .filter(|pending| pending.ability.controller == player)
+                    .and_then(|pending| {
+                        pending
+                            .deferred_random_discard_cost
+                            .as_ref()
+                            .map(|cost| (pending.object_id, cost.count))
+                    });
+                if reserved.is_none() {
+                    return self.is_payable(state, player, source);
+                }
+                let (pending_spell, reserved_count) = reserved.expect("checked reservation");
+                let Some(p) = state.players.get(player.0 as usize) else {
+                    return false;
+                };
+                if self_scope.is_source_card() {
+                    return p.hand.contains(&source)
+                        && p.hand
+                            .iter()
+                            .filter(|&&id| id != source && id != pending_spell)
+                            .count()
+                            >= reserved_count;
+                }
+                let resolved =
+                    super::quantity::resolve_quantity(state, count, player, source).max(0) as usize;
+                let effective_filter = cost_filter_before_x_announcement(filter.as_ref());
+                let ctx = FilterContext::from_source(state, source);
+                p.hand
+                    .iter()
+                    .filter(|&&id| {
+                        id != source
+                            && id != pending_spell
+                            && effective_filter
+                                .as_ref()
+                                .is_none_or(|f| matches_target_filter(state, id, f, &ctx))
+                    })
+                    .count()
+                    >= resolved + reserved_count
+            }
             AbilityCost::Mana { cost } => {
                 let excluded_sources = std::collections::HashSet::from([source]);
                 super::casting::can_pay_ability_mana_cost_after_auto_tap_excluding(
@@ -341,6 +494,31 @@ impl AbilityCost {
             }
             // Same {T}+TapCreatures source-exclusion logic as `is_payable`'s
             // Composite arm, but Mana sub-costs use the mana-specific check.
+            //
+            // EXCLUSION (fail closed): the mana-ability payment path resolves a
+            // chosen hand-discard through `find_non_self_discard`, which returns
+            // only the FIRST such leg, so a composite holding two or more of them
+            // would pay one discard and silently drop the rest (CR 601.2h forbids
+            // partial payment). Such a mana ability is therefore never offered;
+            // supporting it needs a multi-leg discard prompt in `mana_abilities`.
+            AbilityCost::Composite { costs }
+                if costs
+                    .iter()
+                    .filter(|c| {
+                        matches!(
+                            c,
+                            AbilityCost::Discard {
+                                selection: CardSelectionMode::Chosen,
+                                self_scope: DiscardSelfScope::FromHand,
+                                ..
+                            }
+                        )
+                    })
+                    .count()
+                    >= 2 =>
+            {
+                false
+            }
             AbilityCost::Composite { costs } => {
                 let has_tap = costs.iter().any(|c| matches!(c, AbilityCost::Tap));
                 costs.iter().all(|c| match c {
@@ -698,9 +876,16 @@ impl AbilityCost {
                 .len()
                     >= *count as usize
             }
-            // CR 701.13b: A player can mill fewer than N cards if their library
-            // has fewer than N; the cost is always payable.
-            AbilityCost::Mill { .. } => true,
+            // CR 701.17b: "the player can't pay a cost that includes milling a
+            // number of cards greater than the number of cards in their
+            // library." The same rule's "if instructed to do so, they mill as
+            // many as possible" allowance governs milling as an *effect* and
+            // must not be read onto a cost. `count` is a plain `u32`, so no
+            // quantity resolution is needed.
+            AbilityCost::Mill { count } => state
+                .players
+                .get(player.0 as usize)
+                .is_some_and(|p| p.library.len() >= *count as usize),
             // CR 701.43b: A permanent can be exerted even if it's not tapped
             // or has already been exerted; the cost itself is always payable.
             // CR 701.43c (off-battlefield) is enforced at payment time.
@@ -716,22 +901,13 @@ impl AbilityCost {
             // CR 601.2b: Reveal N matching cards requires them to exist in hand.
             // Filter-less reveal (self-reveal) is always payable — you can always
             // reveal the source spell you're casting.
-            AbilityCost::Reveal { count, filter } => {
-                let Some(p) = state.players.get(player.0 as usize) else {
-                    return false;
-                };
-                match filter {
-                    None => true,
-                    Some(f) => {
-                        let ctx = FilterContext::from_source(state, source);
-                        p.hand
-                            .iter()
-                            .filter(|&&id| matches_target_filter(state, id, f, &ctx))
-                            .count()
-                            >= *count as usize
-                    }
+            AbilityCost::Reveal { count, filter } => match filter {
+                None => true,
+                Some(f) => {
+                    super::casting::find_eligible_reveal_targets(state, player, source, f).len()
+                        >= *count as usize
                 }
-            }
+            },
             AbilityCost::Behold {
                 count,
                 filter,
@@ -765,7 +941,7 @@ impl AbilityCost {
                         has_enough_tap_creatures(state, player, source, requirement, filter, true)
                     }
                     other => other.is_payable_for_activation(state, player, source, ability_index),
-                })
+                }) && discard_legs_jointly_payable(state, player, source, costs)
             }
             // CR 118.12a: Disjunctive — payable if **any** sub-cost is
             // payable. The interactive choice is surfaced at resolution via
@@ -905,7 +1081,7 @@ fn has_enough_tap_creatures(
 /// battlefield, otherwise hand.
 pub(super) fn exile_cost_effective_zone(zone: Option<Zone>, filter: Option<&TargetFilter>) -> Zone {
     zone.unwrap_or_else(|| {
-        if filter.is_some_and(filter_implies_battlefield_permanent) {
+        if filter.is_some_and(crate::game::filter::filter_implies_battlefield_permanent) {
             Zone::Battlefield
         } else {
             Zone::Hand
@@ -1045,39 +1221,6 @@ pub(crate) fn eligible_craft_materials(
 }
 
 /// Count counters of the given kind on an object.
-/// CR 117.1 + CR 400.6: Decide whether a `TargetFilter` for an `AbilityCost::Exile`
-/// without an explicit `zone` implies the battlefield. True when the filter has
-/// any `CoreType` typed predicate that names a permanent type (Creature, Artifact,
-/// Enchantment, Planeswalker, Land, Battle, Tribal). False for plain "card",
-/// "spell", or zone-explicit filters — those keep the legacy hand default.
-///
-/// Used by Food Chain's "Exile a creature you control: ..." (`zone: None`,
-/// `filter: Typed{Creature, You}`) and the broader exile-permanent-cost class.
-fn filter_implies_battlefield_permanent(filter: &TargetFilter) -> bool {
-    use crate::types::ability::TypeFilter;
-    fn type_implies_battlefield(t: &TypeFilter) -> bool {
-        match t {
-            TypeFilter::Creature
-            | TypeFilter::Artifact
-            | TypeFilter::Enchantment
-            | TypeFilter::Planeswalker
-            | TypeFilter::Land
-            | TypeFilter::Battle
-            | TypeFilter::Permanent => true,
-            TypeFilter::Non(inner) => type_implies_battlefield(inner),
-            TypeFilter::AnyOf(inners) => inners.iter().any(type_implies_battlefield),
-            _ => false,
-        }
-    }
-    match filter {
-        TargetFilter::Typed(tf) => tf.type_filters.iter().any(type_implies_battlefield),
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().any(filter_implies_battlefield_permanent)
-        }
-        _ => false,
-    }
-}
-
 /// CR 122.1 + CR 118.3: Count counters on `id` matching `kind`. `Any` sums
 /// across every counter type currently on the object (Loch Mare's untyped
 /// "remove a counter" cost — CR 118.3: the ability is payable iff the object
@@ -1092,7 +1235,11 @@ fn counter_on_object(
         return 0;
     };
     match kind {
-        crate::types::counter::CounterMatch::Any => obj.counters.values().copied().sum(),
+        // CR 122.1: exact total clamped to u32. The count feeds only "can remove
+        // at least N" availability checks, so clamping preserves every such answer.
+        crate::types::counter::CounterMatch::Any => {
+            u32::try_from(kind.count_in(&obj.counters)).unwrap_or(u32::MAX)
+        }
         crate::types::counter::CounterMatch::OfType(t) => obj.counters.get(t).copied().unwrap_or(0),
     }
 }
@@ -1124,6 +1271,85 @@ mod tests {
     use crate::types::mana::ManaCost;
 
     const P0: PlayerId = PlayerId(0);
+
+    /// CR 109.2 + CR 118.3: the zone a zone-less exile cost reads from is
+    /// decided by whether its filter describes a permanent. A description
+    /// that only SOMETIMES names a permanent does not: "creature or instant"
+    /// (`AnyOf` / `Or`) and "nonland" (`Non`) keep the hand default, while
+    /// "artifact or creature" and "creature" mean the battlefield. Pinned at
+    /// this seam (issue #8795 review): with existential aggregation over a
+    /// disjunction, or `Non` read through to its inner type, the first three
+    /// rows answered `Battlefield`.
+    #[test]
+    fn exile_cost_zone_default_treats_only_an_unambiguous_permanent_description_as_battlefield() {
+        fn typed(types: Vec<TypeFilter>) -> TargetFilter {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: types,
+                ..Default::default()
+            })
+        }
+        let rows: [(&str, TargetFilter, Zone); 6] = [
+            (
+                "creature or instant (AnyOf)",
+                typed(vec![TypeFilter::AnyOf(vec![
+                    TypeFilter::Creature,
+                    TypeFilter::Instant,
+                ])]),
+                Zone::Hand,
+            ),
+            (
+                "creature or instant (Or)",
+                TargetFilter::Or {
+                    filters: vec![
+                        typed(vec![TypeFilter::Creature]),
+                        typed(vec![TypeFilter::Instant]),
+                    ],
+                },
+                Zone::Hand,
+            ),
+            (
+                "nonland card",
+                typed(vec![
+                    TypeFilter::Card,
+                    TypeFilter::Non(Box::new(TypeFilter::Land)),
+                ]),
+                Zone::Hand,
+            ),
+            (
+                "artifact or creature (AnyOf)",
+                typed(vec![TypeFilter::AnyOf(vec![
+                    TypeFilter::Artifact,
+                    TypeFilter::Creature,
+                ])]),
+                Zone::Battlefield,
+            ),
+            (
+                "artifact creature (conjunctive terms)",
+                typed(vec![TypeFilter::Artifact, TypeFilter::Creature]),
+                Zone::Battlefield,
+            ),
+            (
+                "creature",
+                typed(vec![TypeFilter::Creature]),
+                Zone::Battlefield,
+            ),
+        ];
+        for (label, filter, expected) in rows {
+            assert_eq!(
+                exile_cost_effective_zone(None, Some(&filter)),
+                expected,
+                "{label}"
+            );
+        }
+        assert_eq!(
+            exile_cost_effective_zone(
+                Some(Zone::Graveyard),
+                Some(&typed(vec![TypeFilter::Creature]))
+            ),
+            Zone::Graveyard,
+            "an explicit zone is authoritative"
+        );
+    }
 
     /// `TargetFilter::PlayerMatching` is a recursive carrier. Each of
     /// the three nested-object-population payloads must be reached by BOTH the
@@ -1401,6 +1627,132 @@ mod tests {
         assert!(AbilityCost::Blight { count: 3 }.is_payable(&scenario.state, P0, ObjectId(0)));
     }
 
+    fn chosen_hand_discard(filter: Option<TargetFilter>) -> AbilityCost {
+        AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter,
+            selection: CardSelectionMode::Chosen,
+            self_scope: DiscardSelfScope::FromHand,
+        }
+    }
+
+    fn island_filter() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::default().subtype("Island".to_string()))
+    }
+
+    /// Hand of (name, is_island) cards for `P0`, plus the source card id.
+    fn joint_discard_state(hand: &[bool]) -> (GameState, ObjectId) {
+        let mut scenario = GameScenario::new();
+        let source = scenario.add_card_to_hand(P0, "Source Spell");
+        for (i, &is_island) in hand.iter().enumerate() {
+            let id = scenario.add_card_to_hand(P0, &format!("Hand Card {i}"));
+            if is_island {
+                scenario
+                    .state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .card_types
+                    .subtypes
+                    .push("Island".to_string());
+            }
+        }
+        (scenario.state, source)
+    }
+
+    /// CR 118.3 + CR 601.2h: one physical card cannot satisfy two discard legs.
+    #[test]
+    fn joint_discard_legs_need_distinct_cards() {
+        let legs = [
+            chosen_hand_discard(Some(island_filter())),
+            chosen_hand_discard(None),
+        ];
+        // Reach guard: an Island plus any other card pays both legs.
+        let (state, source) = joint_discard_state(&[true, false]);
+        assert!(discard_legs_jointly_payable(&state, P0, source, &legs));
+        // Hostile: the lone Island would have to serve both legs.
+        let (state, source) = joint_discard_state(&[true]);
+        assert!(!discard_legs_jointly_payable(&state, P0, source, &legs));
+        // Hostile: no Island at all.
+        let (state, source) = joint_discard_state(&[false, false]);
+        assert!(!discard_legs_jointly_payable(&state, P0, source, &legs));
+        // The source spell never counts as a card to discard.
+        let (state, source) = joint_discard_state(&[]);
+        assert!(!discard_legs_jointly_payable(&state, P0, source, &legs));
+    }
+
+    /// Payment is in printed order with free choice, so a less-restrictive leg
+    /// before a more-restrictive one fails closed (B3).
+    #[test]
+    fn joint_discard_legs_fail_closed_for_unsafe_order() {
+        let (state, source) = joint_discard_state(&[true, false]);
+        let typed_first = [
+            chosen_hand_discard(Some(island_filter())),
+            chosen_hand_discard(None),
+        ];
+        let any_first = [
+            chosen_hand_discard(None),
+            chosen_hand_discard(Some(island_filter())),
+        ];
+        assert!(discard_legs_jointly_payable(
+            &state,
+            P0,
+            source,
+            &typed_first
+        ));
+        assert!(!discard_legs_jointly_payable(
+            &state, P0, source, &any_first
+        ));
+        // With two Islands every choice sequence works in either order.
+        let (state, source) = joint_discard_state(&[true, true]);
+        assert!(discard_legs_jointly_payable(&state, P0, source, &any_first));
+    }
+
+    /// Legs the helper does not model (and a lone leg) keep their per-leg gate.
+    #[test]
+    fn joint_discard_helper_ignores_unmodeled_legs() {
+        let (state, source) = joint_discard_state(&[false]);
+        let random = AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            selection: CardSelectionMode::Random,
+            self_scope: DiscardSelfScope::FromHand,
+        };
+        let legs = [random, chosen_hand_discard(None)];
+        assert!(discard_legs_jointly_payable(&state, P0, source, &legs));
+        assert!(discard_legs_jointly_payable(
+            &state,
+            P0,
+            source,
+            &[chosen_hand_discard(None)]
+        ));
+    }
+
+    /// Mana-ability exclusion (fail closed): the mana-ability payment path pays
+    /// only the first chosen hand-discard leg, so a composite with two such legs
+    /// is never offered, even when the hand could cover both.
+    ///
+    /// Reverting the exclusion arm flips the two-leg assertion to `true`.
+    #[test]
+    fn mana_ability_composite_with_two_discard_legs_is_not_offered() {
+        // Hand of three cards: every per-leg and joint check would pass.
+        let (state, source) = joint_discard_state(&[true, false, false]);
+        let two_legs = AbilityCost::Composite {
+            costs: vec![
+                chosen_hand_discard(Some(island_filter())),
+                chosen_hand_discard(None),
+            ],
+        };
+        let one_leg = AbilityCost::Composite {
+            costs: vec![chosen_hand_discard(Some(island_filter()))],
+        };
+        // Positive reach guard: a single chosen-discard leg is still offered.
+        assert!(one_leg.is_payable_for_mana_ability(&state, P0, source, 0));
+        assert!(!two_legs.is_payable_for_mana_ability(&state, P0, source, 0));
+        // The ordinary gate is unaffected by the mana-ability exclusion.
+        assert!(two_legs.is_payable(&state, P0, source));
+    }
+
     #[test]
     fn discard_requires_cards_in_hand() {
         let mut state = new_state();
@@ -1531,10 +1883,45 @@ mod tests {
         assert!(!unpayable.is_payable(&state, P0, ObjectId(0)));
     }
 
+    /// CR 701.17b: a Mill cost is payable iff the library holds at least
+    /// `count` cards. The predicate is swept across its whole input range
+    /// against one fixed 4-card library so the boundary is pinned from both
+    /// sides: below it, at it, and above it. The previous behaviour returned
+    /// `true` unconditionally and is falsified by every `count > 4` row.
+    ///
+    /// The empty-library row is the case the old comment got backwards — it
+    /// claimed a short library still pays "as many as possible", which is the
+    /// rule for milling as an *effect*, not as a cost.
     #[test]
-    fn mill_exert_always_payable() {
+    fn mill_payable_iff_library_holds_count() {
+        let mut scenario = GameScenario::new();
+        scenario.with_library_top(P0, &["Top A", "Top B", "Top C", "Top D"]);
+        let state = &scenario.state;
+
+        for count in 0..=4 {
+            assert!(
+                AbilityCost::Mill { count }.is_payable(state, P0, ObjectId(0)),
+                "mill {count} must be payable from a 4-card library"
+            );
+        }
+        for count in 5..=8 {
+            assert!(
+                !AbilityCost::Mill { count }.is_payable(state, P0, ObjectId(0)),
+                "mill {count} exceeds a 4-card library and must be unpayable"
+            );
+        }
+
+        // Empty library: only the degenerate zero-card mill remains payable.
+        let empty = new_state();
+        assert!(AbilityCost::Mill { count: 0 }.is_payable(&empty, P0, ObjectId(0)));
+        assert!(!AbilityCost::Mill { count: 1 }.is_payable(&empty, P0, ObjectId(0)));
+    }
+
+    /// CR 701.43b: exert is payable regardless of the source's tapped state,
+    /// so an empty library (which now blocks a Mill cost) leaves it untouched.
+    #[test]
+    fn exert_always_payable() {
         let state = new_state();
-        assert!(AbilityCost::Mill { count: 5 }.is_payable(&state, P0, ObjectId(0)));
         assert!(AbilityCost::Exert.is_payable(&state, P0, ObjectId(0)));
     }
 

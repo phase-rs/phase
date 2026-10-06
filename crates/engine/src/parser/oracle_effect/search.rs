@@ -14,7 +14,7 @@ use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity;
 use super::super::oracle_target::{
     distribute_properties_to_or, parse_mana_value_suffix, parse_shared_quality_clause,
-    parse_target, parse_type_phrase, parse_zone_word,
+    parse_target, parse_target_disjunction, parse_type_phrase_folding, parse_zone_word,
 };
 use super::super::oracle_util::{
     contains_possessive, infer_core_type_for_subtype, split_around, strip_after,
@@ -799,7 +799,7 @@ pub(crate) fn parse_search_filter(text: &str, ctx: &mut ParseContext) -> TargetF
         return filter;
     }
 
-    let (parsed_filter, remainder) = parse_type_phrase(type_text);
+    let (parsed_filter, remainder) = parse_type_phrase_folding(type_text);
     if search_filter_has_meaningful_content(&parsed_filter) {
         let mut suffix = SearchSuffixConstraints::default();
         let linked_reference = last_shared_quality_reference_in_filter(&parsed_filter);
@@ -1579,7 +1579,7 @@ fn parse_search_specialized_type_word(type_word: &str, ctx: &mut ParseContext) -
         return TargetFilter::Typed(TypedFilter::default().subtype(capitalize(type_word)));
     }
 
-    let (filter, _) = parse_type_phrase(type_word);
+    let (filter, _) = parse_type_phrase_folding(type_word);
     if !matches!(filter, TargetFilter::Any) {
         return filter;
     }
@@ -1812,7 +1812,7 @@ fn parse_search_type_negation_suffix(
         tag("that are not "),
     ))
     .parse(input)?;
-    let (filter, rest) = parse_type_phrase(rest);
+    let (filter, rest) = parse_type_phrase_folding(rest);
     let Some(negated_type) = single_search_type_filter(filter) else {
         return Err(nom::Err::Error(OracleError::new(
             input,
@@ -1838,34 +1838,55 @@ fn single_search_type_filter(filter: TargetFilter) -> Option<TypeFilter> {
     }
 }
 
+/// CR 201.2a + CR 201.2c: the verb-and-negation core of a same-name comparison,
+/// with any leading determiner already consumed by the caller.
+///
+/// Composed as two independent axes rather than enumerated as whole phrases, so
+/// every combination falls out of two `alt()` calls instead of a cross-product of
+/// `tag()` arms:
+///
+/// * negation — "doesn't " / "does not " / "don't " / "do not ", or absent;
+/// * verb phrase — "have/has the same name as" or "share(s) a name with".
+///
+/// Both verb spellings ask the same CR 201.2a question ("at least one name in
+/// common"); only the preposition differs. The negated forms are the CR 201.2a
+/// negation, which is what `SharedQualityRelation::DoesNotShare` encodes.
+fn parse_name_relation_body(
+    input: &str,
+) -> Result<(&str, SharedQualityRelation), nom::Err<OracleError<'_>>> {
+    let (rest, negated) = opt(alt((
+        tag::<_, _, OracleError<'_>>("doesn't "),
+        tag("does not "),
+        tag("don't "),
+        tag("do not "),
+    )))
+    .parse(input)?;
+    let (rest, _) = alt((
+        preceded(alt((tag("have "), tag("has "))), tag("the same name as ")),
+        preceded(alt((tag("share "), tag("shares "))), tag("a name with ")),
+    ))
+    .parse(rest)?;
+    Ok((
+        rest,
+        if negated.is_some() {
+            SharedQualityRelation::DoesNotShare
+        } else {
+            SharedQualityRelation::Shares
+        },
+    ))
+}
+
 pub(crate) fn parse_search_name_reference_suffix(
     input: &str,
 ) -> Result<(&str, FilterProp), nom::Err<OracleError<'_>>> {
     let (rest, relation) = alt((
-        value(
-            SharedQualityRelation::DoesNotShare,
-            tag("that doesn't have the same name as "),
-        ),
-        value(
-            SharedQualityRelation::DoesNotShare,
-            tag("that does not have the same name as "),
-        ),
-        value(
-            SharedQualityRelation::DoesNotShare,
-            tag("that doesn't share a name with "),
-        ),
-        value(
-            SharedQualityRelation::DoesNotShare,
-            tag("that does not share a name with "),
-        ),
-        value(
-            SharedQualityRelation::Shares,
-            tag("that has the same name as "),
-        ),
-        value(
-            SharedQualityRelation::Shares,
-            tag("that have the same name as "),
-        ),
+        // Relative-clause frame: "<noun> that (doesn't) have/share ...".
+        preceded(tag("that "), parse_name_relation_body),
+        // Bare predicate frame: "if it (doesn't) have/share ..." — the subject is
+        // supplied by the caller's anaphor rather than a relativizer.
+        parse_name_relation_body,
+        // Prepositional frame. It carries no verb, so it is not a cell of the
+        // negation x verb product above and stays an explicit arm.
         value(SharedQualityRelation::Shares, tag("with the same name as ")),
     ))
     .parse(input)?;
@@ -1877,7 +1898,7 @@ pub(crate) fn parse_search_name_reference_suffix(
         )));
     }
 
-    let (reference, after_reference) = parse_target(rest);
+    let (reference, after_reference) = parse_target_disjunction(rest);
     if !matches!(reference, TargetFilter::Any) {
         return Ok((
             after_reference,
@@ -1889,7 +1910,7 @@ pub(crate) fn parse_search_name_reference_suffix(
         ));
     }
 
-    let (reference, rest) = parse_type_phrase(rest);
+    let (reference, rest) = parse_type_phrase_folding(rest);
     if !search_filter_has_meaningful_content(&reference) {
         return Err(nom::Err::Error(OracleError::new(
             input,
@@ -2275,8 +2296,8 @@ fn parse_search_filter_suffixes(
     while !remaining.is_empty() {
         remaining = remaining.trim_start();
 
-        // Consume redundant "card(s)" re-declaration left by parse_type_phrase.
-        // parse_type_phrase extracts only the type word (e.g. "creature"), so the
+        // Consume redundant "card(s)" re-declaration left by parse_type_phrase_folding.
+        // parse_type_phrase_folding extracts only the type word (e.g. "creature"), so the
         // literal " card" / " cards" token remains and carries no filter meaning.
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("cards").parse(remaining) {
             remaining = rest.trim_start();
@@ -2622,7 +2643,7 @@ fn parse_search_enchant_keyword_suffix(
     let (target, remainder) = {
         let (target, remainder) = parse_target(target_text.trim());
         if matches!(target, TargetFilter::Any) {
-            parse_type_phrase(target_text.trim())
+            parse_type_phrase_folding(target_text.trim())
         } else {
             (target, remainder)
         }
@@ -3230,7 +3251,7 @@ mod tests {
     fn action_chain_continuation_does_not_warn() {
         // Regression: filter parser must not emit "search-filter-suffix unmatched"
         // for legitimate action-chain continuations. The filter is already
-        // extracted by parse_type_phrase; what follows the filter clause
+        // extracted by parse_type_phrase_folding; what follows the filter clause
         // (", put it onto the battlefield, then shuffle") is handled by the
         // downstream sequence parser — not a filter-suffix gap.
         for text in [

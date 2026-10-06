@@ -123,3 +123,157 @@ fn mirror_universe_swaps_controller_with_target_opponent() {
         "opponent's life should become the controller's former total"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Round-6 plan — per-node target ownership for paired-subject effects.
+// The `Effect::ExchangeLifeTotals` re-validation pruning delta (§5.9): all
+// seven `ExchangeLifeTotals` cards are now routed through the paired
+// `validate_targets_in_chain` arm and can PRUNE an eliminated declared
+// target, where BASE kept every player target unconditionally via the
+// terminal generic `None` arm's `TargetRef::Player(_) => true`.
+// ---------------------------------------------------------------------------
+
+/// V6a's HOSTILE sub-case — Mirror Universe's `(Controller, Typed{Opponent})`
+/// shape: with the target opponent eliminated, the node's declared slot is
+/// PRUNED to empty (CR 608.2b), instead of surviving unconditionally.
+///
+/// REVERT-FAILING (G2): at BASE, `ExchangeLifeTotals` falls through to
+/// `validate_targets_in_chain`'s terminal generic arm, whose
+/// `TargetRef::Player(_) => true` keeps every player target with no filter
+/// consulted — including an eliminated one.
+#[test]
+fn mirror_universe_hostile_target_opponent_eliminated_prunes_the_declared_slot() {
+    use engine::game::ability_utils::{build_resolved_from_def, validate_targets_in_chain};
+    use engine::parser::oracle::parse_oracle_text;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Upkeep);
+    let mirror = scenario.add_creature(P0, "Mirror Universe", 0, 0).id();
+    let mut runner = scenario.build();
+
+    let parsed = parse_oracle_text(MIRROR_UNIVERSE_ORACLE, "Mirror Universe", &[], &[], &[]);
+    let def = parsed
+        .abilities
+        .first()
+        .expect("Mirror Universe has an activated ability")
+        .clone();
+    let mut resolved = build_resolved_from_def(&def, mirror, P0);
+    resolved.targets = vec![TargetRef::Player(P1)];
+
+    // REACH GUARD (paired positive): un-eliminated, the declared slot
+    // survives validation untouched — matching
+    // `mirror_universe_swaps_controller_with_target_opponent` staying green.
+    assert_eq!(
+        validate_targets_in_chain(runner.state(), &resolved).targets,
+        vec![TargetRef::Player(P1)],
+        "reach guard: an un-eliminated target opponent must survive validation"
+    );
+
+    runner.state_mut().players[P1.0 as usize].is_eliminated = true;
+    let validated = validate_targets_in_chain(runner.state(), &resolved);
+    assert!(
+        validated.targets.is_empty(),
+        "with the target opponent eliminated, the node's declared slot must be pruned \
+         to empty, got {:?}",
+        validated.targets
+    );
+}
+
+/// V6b — Soul Conduit's `(Player, Player)` shape: ONE eliminated target
+/// player is PRUNED, and CR 701.12a's all-or-nothing rule is what turns a
+/// short declared-players list into a total no-op at resolution (the
+/// resolver's own `emit_noop` dry-slot exit, unchanged by this row).
+///
+/// REVERT-FAILING (MEASURED, G2): `[Player(0), Player(1)]` before this
+/// change, `[Player(0)]` after.
+#[test]
+fn soul_conduit_eliminated_target_player_is_pruned_and_the_exchange_no_ops() {
+    use engine::game::ability_utils::{build_resolved_from_def, validate_targets_in_chain};
+    use engine::parser::oracle::parse_oracle_text;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let conduit = scenario.add_creature(P0, "Soul Conduit", 0, 0).id();
+    let mut runner = scenario.build();
+
+    let parsed = parse_oracle_text(SOUL_CONDUIT_ORACLE, "Soul Conduit", &[], &[], &[]);
+    let def = parsed
+        .abilities
+        .first()
+        .expect("Soul Conduit has an activated ability")
+        .clone();
+    let mut resolved = build_resolved_from_def(&def, conduit, P0);
+    resolved.targets = vec![TargetRef::Player(P0), TargetRef::Player(P1)];
+
+    // REACH GUARD (paired positive): the existing
+    // `soul_conduit_swaps_two_target_players_life_totals` row above proves
+    // the un-eliminated pipeline swaps both life totals end to end.
+    assert_eq!(
+        validate_targets_in_chain(runner.state(), &resolved).targets,
+        vec![TargetRef::Player(P0), TargetRef::Player(P1)],
+        "reach guard: with neither player eliminated, both declared targets survive"
+    );
+
+    runner.state_mut().players[P1.0 as usize].is_eliminated = true;
+    let validated = validate_targets_in_chain(runner.state(), &resolved);
+    assert_eq!(
+        validated.targets,
+        vec![TargetRef::Player(P0)],
+        "BASE (G2): [Player(0), Player(1)] unconditionally kept via the terminal \
+         generic None arm's TargetRef::Player(_) => true — no filter consulted. \
+         AFTER: the eliminated player is pruned, leaving only the survivor"
+    );
+}
+
+/// V6c-ii — Cliffside Market's `(Controller, Player)` shape: with the
+/// declared player eliminated, the node's SINGLE declared slot (the
+/// context-ref `Controller` half claims nothing — V6c-i pins that at the
+/// unit level) is pruned to empty, which is what makes the exchange a total
+/// no-op via CR 701.12a. Driven directly against the pub re-validation seam
+/// (`validate_targets_in_chain`) with real parsed Oracle text.
+#[test]
+fn cliffside_market_controller_and_target_player_prunes_its_single_declared_slot() {
+    use engine::game::ability_utils::{build_resolved_from_def, validate_targets_in_chain};
+    use engine::parser::oracle::parse_oracle_text;
+    use engine::types::ability::Effect;
+
+    const CLIFFSIDE_MARKET_ORACLE: &str = "When you planeswalk to Cliffside Market and at the \
+        beginning of your upkeep, you may exchange life totals with target player.\nWhenever \
+        chaos ensues, exchange control of two target permanents that share a card type.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let market = scenario
+        .add_creature(P0, "Cliffside Market Host", 0, 0)
+        .id();
+    let mut runner = scenario.build();
+
+    let parsed = parse_oracle_text(CLIFFSIDE_MARKET_ORACLE, "Cliffside Market", &[], &[], &[]);
+    let elt_def = parsed
+        .triggers
+        .iter()
+        .find_map(|t| {
+            let def = t.execute.clone()?;
+            matches!(*def.effect, Effect::ExchangeLifeTotals { .. }).then_some(def)
+        })
+        .expect("Cliffside Market has an ExchangeLifeTotals trigger");
+    let mut resolved = build_resolved_from_def(&elt_def, market, P0);
+    resolved.targets = vec![TargetRef::Player(P1)];
+
+    // REACH GUARD (paired positive): un-eliminated, the sole declared slot
+    // survives validation untouched.
+    assert_eq!(
+        validate_targets_in_chain(runner.state(), &resolved).targets,
+        vec![TargetRef::Player(P1)],
+        "reach guard: an un-eliminated target player must survive validation"
+    );
+
+    runner.state_mut().players[P1.0 as usize].is_eliminated = true;
+    let validated = validate_targets_in_chain(runner.state(), &resolved);
+    assert!(
+        validated.targets.is_empty(),
+        "the single declared (Player) slot must be pruned when its target is \
+         eliminated, got {:?}",
+        validated.targets
+    );
+}

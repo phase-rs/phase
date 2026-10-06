@@ -5,7 +5,8 @@
 //!   - Curse of Thirst (deals damage equal to number of Curses attached)
 //!   - Curse of the Bloody Tome (mill two cards)
 //!   - Curse of Oblivion (exile two cards from graveyard)
-//!   - Curse of Surveillance (reveal top — land → token, nonland → draw)
+//!   - Curse of Surveillance (target players other than the enchanted player
+//!     each draw cards equal to the number of Curses attached to them)
 //!   - Curse of Misfortunes (search library for a Curse)
 //!   - Curse of Unbinding (exile from hand, may cast)
 //!   - Cruel Reality (sacrifice creature/planeswalker or lose 5 life)
@@ -41,8 +42,20 @@ const CURSE_OF_THE_BLOODY_TOME: &str =
 const CURSE_OF_OBLIVION: &str =
     "At the beginning of enchanted player's upkeep, that player exiles two cards from their graveyard.";
 
+// Oracle text verified against Scryfall (Curse of Surveillance, MID). The
+// constant previously held text that matches no printed card, so the test below
+// asserted a trigger shape this card does not have.
+//
+// KNOWN GAP (issue #8581): the "other than that player" exclusion in the
+// target phrase has no player-scoped counterpart to `FilterProp::Another`
+// yet, so the parser fails closed instead of fabricating a wrong filter --
+// the Draw ability lowers to `Effect::Unimplemented` (see
+// `curse_of_surveillance_target_exclusion_fails_closed` in
+// curse_of_thirst_attached_count.rs). The trigger SHAPE asserted here (an
+// upkeep trigger on the enchanted player's upkeep, CR 503.1) is unaffected
+// by that gap.
 const CURSE_OF_SURVEILLANCE: &str =
-    "At the beginning of enchanted player's upkeep, reveal the top card of that player's library. If it's a land card, you create a 2/2 white and blue Surveillance creature token with flying. Otherwise, you draw a card.";
+    "At the beginning of enchanted player's upkeep, any number of target players other than that player each draw cards equal to the number of Curses attached to that player.";
 
 const CURSE_OF_MISFORTUNES: &str =
     "At the beginning of enchanted player's upkeep, you may search your library for a Curse card that doesn't have the same name as a Curse attached to enchanted player, put it onto the battlefield attached to that player, then shuffle.";

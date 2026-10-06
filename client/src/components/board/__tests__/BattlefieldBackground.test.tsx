@@ -1,5 +1,6 @@
 import { StrictMode } from "react";
-import { act, cleanup, render } from "@testing-library/react";
+import type { ManaColor } from "../../../adapter/types.ts";
+import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useGameStore } from "../../../stores/gameStore";
@@ -9,8 +10,23 @@ import { buildGameObject, buildObjectMap } from "../../../test/factories/gameObj
 import { buildGameState, buildPlayer } from "../../../test/factories/gameStateFactory";
 import { BattlefieldBackground, resolveBackground } from "../BattlefieldBackground";
 
+const scene = vi.hoisted(() => ({ create: vi.fn(() => vi.fn()) }));
+vi.mock("../arenaBackgroundScene.ts", () => ({ createArenaBackgroundScene: scene.create }));
+
+const initialPreferences = usePreferencesStore.getInitialState();
+
 describe("resolveBackground", () => {
   afterEach(() => vi.restoreAllMocks());
+
+  it.each([
+    ["air_angelic_sky", "White"],
+    ["water_moonlit_ocean_temple", "Blue"],
+    ["shadow_moon_coven_sanctum", "Black"],
+    ["fire_molten", "Red"],
+    ["earth_snowy_forest", "Green"],
+  ])("resolves %s to its animated arena", (id, color) => {
+    expect(resolveBackground(id, "", undefined, { current: null })).toEqual({ kind: "arena", color });
+  });
 
   it("selects a random playmat for colorless decks in auto-wubrg mode", () => {
     vi.spyOn(Math, "random").mockReturnValue(0);
@@ -18,7 +34,7 @@ describe("resolveBackground", () => {
 
     const background = resolveBackground("auto-wubrg" as BoardBackground, "", null, lock);
 
-    expect(background).toEqual({ kind: "image", src: "/battlefield/air_angelic_sky.webp" });
+    expect(background).toEqual({ kind: "arena", color: "White" });
   });
 
   it("waits for deck data before locking a colored playmat", () => {
@@ -28,8 +44,8 @@ describe("resolveBackground", () => {
     expect(resolveBackground("auto-wubrg" as BoardBackground, "", undefined, lock)).toBeNull();
 
     expect(resolveBackground("auto-wubrg" as BoardBackground, "", "Blue", lock)).toEqual({
-      kind: "image",
-      src: "/battlefield/water_moonlit_ocean_temple.webp",
+      kind: "arena",
+      color: "Blue",
     });
   });
 
@@ -39,11 +55,11 @@ describe("resolveBackground", () => {
     // lock here renders a transparent layer — black board — on the next
     // render after any gameState change, the exact regression the component
     // test below reproduces.
-    const lock = { current: "/battlefield/water_moonlit_ocean_temple.webp" };
+    const lock = { current: "Blue" as ManaColor };
 
     expect(resolveBackground("auto-wubrg" as BoardBackground, "", undefined, lock)).toEqual({
-      kind: "image",
-      src: "/battlefield/water_moonlit_ocean_temple.webp",
+      kind: "arena",
+      color: "Blue",
     });
   });
 });
@@ -52,6 +68,24 @@ describe("BattlefieldBackground", () => {
   afterEach(() => {
     cleanup();
     useGameStore.setState({ gameMode: null, gameState: null });
+    usePreferencesStore.setState(initialPreferences);
+    vi.clearAllMocks();
+    vi.restoreAllMocks();
+  });
+
+  it("honors the VFX quality preference and keeps static art at minimal quality", async () => {
+    usePreferencesStore.setState({ boardBackground: "fire_molten", vfxQuality: "full" });
+    const { container } = render(<BattlefieldBackground />);
+    await waitFor(() => expect(scene.create).toHaveBeenCalledTimes(1));
+    expect(scene.create.mock.calls[0].slice(1)).toEqual(["Red", "full", 1, 1]);
+
+    act(() => usePreferencesStore.getState().setVfxQuality("reduced"));
+    await waitFor(() => expect(scene.create).toHaveBeenCalledTimes(2));
+    expect(scene.create.mock.calls[1].slice(1)).toEqual(["Red", "reduced", 1, 1]);
+
+    act(() => usePreferencesStore.getState().setVfxQuality("minimal"));
+    expect(scene.create).toHaveBeenCalledTimes(2);
+    expect(container.querySelector("img")?.getAttribute("src")).toContain("molten-topdown.webp");
   });
 
   it("keeps the locked playmat across later game-state renders under StrictMode", () => {
@@ -78,9 +112,8 @@ describe("BattlefieldBackground", () => {
       </StrictMode>,
     );
 
-    const layer = container.firstChild as HTMLElement;
-    expect(layer.style.backgroundImage).toContain(
-      "/battlefield/water_moonlit_ocean_temple.webp",
+    expect(container.querySelector("img")?.getAttribute("src")).toContain(
+      "/battlefield/arenas/ocean-temple-topdown.webp",
     );
 
     // A later game-state change (any action: tap, phase tick) re-runs the
@@ -97,8 +130,8 @@ describe("BattlefieldBackground", () => {
       });
     });
 
-    expect(layer.style.backgroundImage).toContain(
-      "/battlefield/water_moonlit_ocean_temple.webp",
+    expect(container.querySelector("img")?.getAttribute("src")).toContain(
+      "/battlefield/arenas/ocean-temple-topdown.webp",
     );
   });
 });

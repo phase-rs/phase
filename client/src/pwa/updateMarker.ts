@@ -19,6 +19,19 @@ export function consumeRecentAutoUpdateMarker(): boolean {
 
 const SW_RELOAD_COUNT_KEY = "phase:sw-reload-count";
 
+function serviceWorkerReloadCount(): number {
+  return Number(sessionStorage.getItem(SW_RELOAD_COUNT_KEY)) || 0;
+}
+
+/**
+ * Whether this PWA session's single service-worker-driven reload is still
+ * unclaimed. A read only: unlike `claimServiceWorkerReload`, it does not spend
+ * the budget, so a caller can decide whether an automatic reload is possible.
+ */
+export function hasServiceWorkerReloadBudget(): boolean {
+  return serviceWorkerReloadCount() === 0;
+}
+
 /**
  * Claim the single service-worker-driven reload allowed per PWA session.
  *
@@ -33,7 +46,7 @@ const SW_RELOAD_COUNT_KEY = "phase:sw-reload-count";
  * be a loop). The count resets when the PWA window is closed and reopened.
  */
 export function claimServiceWorkerReload(): boolean {
-  const prior = Number(sessionStorage.getItem(SW_RELOAD_COUNT_KEY)) || 0;
+  const prior = serviceWorkerReloadCount();
   sessionStorage.setItem(SW_RELOAD_COUNT_KEY, String(prior + 1));
   return prior === 0;
 }

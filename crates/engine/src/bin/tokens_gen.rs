@@ -3,7 +3,13 @@
 //! Usage:
 //!     cargo run --bin tokens-gen -- \
 //!         --input data/mtgjson/sets \
+//!         --overlay crates/engine/data/known-tokens.overlay.toml \
 //!         --output crates/engine/data/known-tokens.toml
+//!
+//! `--overlay` names the hand-authored catalog rows this tool merges but never
+//! rewrites — MTGJSON has no source for them yet. A missing, malformed or
+//! row-invalid overlay is a hard failure: an overlay that silently reads as
+//! empty is the bug this input exists to fix.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -13,20 +19,14 @@ use std::str::FromStr;
 
 use engine::database::mtgjson::{SetFile, SetToken};
 use engine::game::token_presets::{
-    PredefinedTokenKind, PresetFidelity, TokenCategory, TokenPreset, TokenPtProvenance,
-    TokenSourceRef,
+    merge_overlay, parse_overlay, serialize_catalog, OverlayRowOutcome, PredefinedTokenKind,
+    PresetFidelity, TokenCategory, TokenPreset, TokenPtProvenance, TokenSourceRef,
 };
-use engine::types::card::TokenImageRef;
+use engine::types::card::{PrintedLoyalty, TokenImageRef};
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaColor;
 use engine::types::proposed_event::TokenCharacteristics;
-use serde::Serialize;
-
-#[derive(Serialize)]
-struct CatalogFile {
-    token: Vec<TokenPreset>,
-}
 
 #[derive(Default, Clone)]
 struct SourceCardIndex {
@@ -36,6 +36,7 @@ struct SourceCardIndex {
 
 fn main() -> ExitCode {
     let mut input = PathBuf::from("data/mtgjson/sets");
+    let mut overlay = PathBuf::from("crates/engine/data/known-tokens.overlay.toml");
     let mut output = PathBuf::from("crates/engine/data/known-tokens.toml");
 
     let mut args = std::env::args().skip(1);
@@ -47,6 +48,13 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 };
                 input = PathBuf::from(value);
+            }
+            "--overlay" => {
+                let Some(value) = args.next() else {
+                    eprintln!("--overlay requires a path");
+                    return ExitCode::FAILURE;
+                };
+                overlay = PathBuf::from(value);
             }
             "--output" => {
                 let Some(value) = args.next() else {
@@ -62,7 +70,7 @@ fn main() -> ExitCode {
         }
     }
 
-    match generate(&input, &output) {
+    match generate(&input, &overlay, &output) {
         Ok(count) => {
             eprintln!("Generated {} token presets at {}", count, output.display());
             ExitCode::SUCCESS
@@ -74,7 +82,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn generate(input: &PathBuf, output: &PathBuf) -> Result<usize, String> {
+fn generate(input: &PathBuf, overlay: &PathBuf, output: &PathBuf) -> Result<usize, String> {
     let mut set_files = Vec::new();
     for entry in fs::read_dir(input).map_err(|e| format!("read {}: {e}", input.display()))? {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -103,16 +111,56 @@ fn generate(input: &PathBuf, output: &PathBuf) -> Result<usize, String> {
         }
     }
 
-    presets.sort_by(|a, b| a.id.cmp(&b.id));
-    let toml = toml::to_string_pretty(&CatalogFile {
-        token: presets.clone(),
-    })
-    .map_err(|e| format!("serialize toml: {e}"))?;
+    let overlay_raw = fs::read_to_string(overlay)
+        .map_err(|e| format!("read overlay {}: {e}", overlay.display()))?;
+    let overlay_rows = parse_overlay(&overlay_raw)
+        .map_err(|e| format!("parse overlay {}: {e}", overlay.display()))?;
+    let generated_count = presets.len();
+    let (presets, reports) = merge_overlay(presets, overlay_rows)?;
+
+    let mut applied = 0usize;
+    let mut shadowed = 0usize;
+    let mut superseded = 0usize;
+    for report in &reports {
+        let row = format!(
+            "overlay row `{}` (`{}` / `{}`)",
+            report.overlay_id, report.set_code, report.display_name
+        );
+        match &report.outcome {
+            OverlayRowOutcome::Applied => applied += 1,
+            OverlayRowOutcome::AppliedShadowed { by_id } => {
+                applied += 1;
+                shadowed += 1;
+                eprintln!(
+                    "{row} kept, but catalog row `{by_id}` shares its token name and one half \
+                     of the key that would retire it — its set, or its source card, not both. \
+                     Either MTGJSON now ships this token, or {} names it twice; delete the \
+                     stale row",
+                    overlay.display()
+                );
+            }
+            OverlayRowOutcome::Superseded { by_id } => {
+                superseded += 1;
+                eprintln!(
+                    "{row} superseded by catalog row `{by_id}`; if that row is a generated \
+                     preset, MTGJSON now ships this token — delete the row from {}",
+                    overlay.display()
+                );
+            }
+        }
+    }
+    eprintln!(
+        "{generated_count} generated presets; {applied} overlay rows applied ({shadowed} \
+         shadowed), {superseded} superseded"
+    );
+
+    let count = presets.len();
+    let toml = serialize_catalog(presets).map_err(|e| format!("serialize toml: {e}"))?;
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
     fs::write(output, toml).map_err(|e| format!("write {}: {e}", output.display()))?;
-    Ok(presets.len())
+    Ok(count)
 }
 
 fn build_source_index(set_files: &[SetFile]) -> SourceCardIndex {
@@ -163,6 +211,8 @@ fn build_preset(
             .unwrap_or_else(|| token.name.clone()),
         power: parse_pt(token.power.as_deref()),
         toughness: parse_pt(token.toughness.as_deref()),
+        loyalty: PrintedLoyalty::from_raw(token.loyalty.as_deref())
+            .map(PrintedLoyalty::off_stack_value),
         core_types: token
             .types
             .iter()
@@ -180,6 +230,24 @@ fn build_preset(
             .filter_map(|s| supported_token_keyword(s))
             .collect(),
     };
+
+    // CR 306.5b: a printed loyalty > 0 must become that many loyalty counters on
+    // entry. The printed value is recorded on the object, but entry counters are not
+    // yet seeded from it through the CR 614.1c replacement pipeline, so admitting
+    // such a row would produce a walker that dies to CR 704.5i the instant it
+    // enters. Drop it with a message rather than emit a row the runtime mishandles.
+    if body.core_types.contains(&CoreType::Planeswalker)
+        && body.loyalty.is_some_and(|value| value > 0)
+    {
+        eprintln!(
+            "tokens-gen: skipping planeswalker token {} ({}) — printed loyalty {} > 0 needs \
+             CR 306.5b entry-counter seeding, which is not implemented",
+            token.uuid,
+            token.name,
+            body.loyalty.unwrap_or(0),
+        );
+        return Ok(None);
+    }
 
     if !is_catalog_token_body(&body) {
         return Ok(None);
@@ -245,7 +313,11 @@ fn is_catalog_token_body(body: &TokenCharacteristics) -> bool {
     body.core_types.iter().any(|card_type| {
         matches!(
             card_type,
-            CoreType::Artifact | CoreType::Creature | CoreType::Enchantment | CoreType::Land
+            CoreType::Artifact
+                | CoreType::Creature
+                | CoreType::Enchantment
+                | CoreType::Land
+                | CoreType::Planeswalker
         )
     })
 }
@@ -369,6 +441,12 @@ fn classify_token(body: &TokenCharacteristics) -> Result<TokenCategory, String> 
     }
     if body.core_types.contains(&CoreType::Land) {
         return Ok(TokenCategory::Land);
+    }
+    // CR 306.5 + CR 306.3: planeswalker bodies — loyalty is a characteristic only
+    // planeswalkers have, and their loyalty abilities come from the subtype-keyed
+    // registry (keyed by planeswalker subtype), not from the catalog's rules text.
+    if body.core_types.contains(&CoreType::Planeswalker) {
+        return Ok(TokenCategory::Planeswalker);
     }
     if body.core_types.contains(&CoreType::Artifact) {
         return Ok(TokenCategory::Artifact);

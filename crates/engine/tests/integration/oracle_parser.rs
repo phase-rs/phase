@@ -1,10 +1,11 @@
 use engine::parser::oracle::{keyword_display_name, parse_oracle_text};
+use engine::parser::oracle_ir::diagnostic::ClauseGapKind;
 use engine::types::ability::{
-    ChosenSubtypeKind, ContinuousModification, ControllerRef, DamageModification,
-    DamageTargetFilter, DamageTargetPlayerScope, Effect, FilterProp, SourceExclusion,
-    StaticCondition, TargetFilter, TypeFilter,
+    ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef, DamageModification,
+    DamageTargetFilter, DamageTargetPlayerScope, Effect, FilterProp, PlayerScope, QuantityExpr,
+    QuantityRef, SourceExclusion, StaticCondition, TargetFilter, TypeFilter,
 };
-use engine::types::keywords::Keyword;
+use engine::types::keywords::{HexproofFilter, Keyword};
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
@@ -1271,28 +1272,62 @@ fn ice_cauldron_note_type_and_amount_stays_unimplemented() {
         .sub_ability
         .as_deref()
         .unwrap_or_else(|| panic!("counter has no note sub-ability: {counter_sub:#?}"));
-    assert!(
-        matches!(&*note_sub.effect, Effect::Unimplemented { name, .. } if name == "note"),
-        "Ice Cauldron's 'type AND amount' noted-mana subject must stay \
-         Unimplemented, not be swallowed by parse_note_mana_spent_clause's \
-         singular-type grammar; got {:#?}",
-        note_sub.effect
+    // The gap is identified by the clause it RECORDS plus the parser's verdict on that
+    // clause, not by the clause's first word. `note` is a known clause head, so the
+    // refusal is `VerbArguments`. This venue is a separate crate, so it asserts the
+    // wire-name half (`ClauseGapKind`, `pub`) and the fragment half through the `pub`
+    // accessor; the phrase half of the verdict is covered in-crate by the
+    // `gap_diagnosis` table, which tests the same function over its input range.
+    const NOTE_CLAUSE: &str = "note the type and amount of mana spent to pay this activation cost";
+    let Effect::Unimplemented { name, .. } = &*note_sub.effect else {
+        panic!(
+            "Ice Cauldron's 'type AND amount' noted-mana subject must stay \
+             Unimplemented, not be swallowed by parse_note_mana_spent_clause's \
+             singular-type grammar; got {:#?}",
+            note_sub.effect
+        );
+    };
+    assert_eq!(
+        ClauseGapKind::from_unimplemented_name(name),
+        Some(ClauseGapKind::VerbArguments),
+        "the recorded name must decode to the verdict this clause earns, got {name}"
+    );
+    assert_eq!(
+        note_sub.effect.unimplemented_description(),
+        Some(NOTE_CLAUSE),
+        "the recorded fragment names the exact clause that gapped"
     );
 
     // Second ability: the mana-producing "add ... last noted type and amount
     // of mana" must not be matched by `ManaProduction::NotedType`'s
-    // singular-type pattern.
+    // singular-type pattern. Same identification: the recorded clause, not its
+    // first word.
+    // The recorded fragment is the clause as printed (self-reference normalized to
+    // `~`), measured from the parser rather than assumed.
+    const ADD_CLAUSE: &str = "Add ~'s last noted type and amount of mana";
     let mana_ability = result
         .abilities
         .iter()
-        .find(|a| matches!(&*a.effect, Effect::Unimplemented { name, .. } if name == "add"))
-        .unwrap_or_else(|| panic!("no 'add' mana ability parsed: {:#?}", result.abilities));
-    assert!(
-        matches!(&*mana_ability.effect, Effect::Unimplemented { .. }),
-        "Ice Cauldron's 'last noted type and amount of mana' must stay \
-         Unimplemented, not be matched by ManaProduction::NotedType's \
-         singular-type pattern; got {:#?}",
-        mana_ability.effect
+        .find(|a| a.effect.unimplemented_description() == Some(ADD_CLAUSE))
+        .unwrap_or_else(|| {
+            panic!(
+                "Ice Cauldron's 'last noted type and amount of mana' must stay \
+                 Unimplemented, not be matched by ManaProduction::NotedType's \
+                 singular-type pattern; got {:#?}",
+                result.abilities
+            )
+        });
+    // `unimplemented_description` is `None` for every other effect shape, so matching
+    // `ADD_CLAUSE` above already established both the variant and the recorded
+    // fragment — the selector IS the "names the exact clause that gapped" assertion,
+    // and it is order-independent where a "first Unimplemented" scan was not.
+    let Effect::Unimplemented { name, .. } = &*mana_ability.effect else {
+        unreachable!("only Effect::Unimplemented has an unimplemented_description")
+    };
+    assert_eq!(
+        ClauseGapKind::from_unimplemented_name(name),
+        Some(ClauseGapKind::VerbArguments),
+        "the recorded name must decode to the verdict this clause earns, got {name}"
     );
 }
 
@@ -1332,4 +1367,67 @@ fn havi_the_all_father_full_card_parser_snapshot() {
         "Sage Project's supported return must remain a ChangeZone effect: {parsed:#?}"
     );
     insta::assert_json_snapshot!("havi_the_all_father_full_card", &parsed);
+}
+
+/// Elenda's full printed text must route both continuous abilities through the
+/// public parser and preserve their distinct starting-life thresholds.
+#[test]
+fn elenda_saint_of_dusk_full_card_parser() {
+    let parsed = parse(
+        "Lifelink, hexproof from instants\nAs long as your life total is greater than your starting life total, Elenda gets +1/+1 and has menace. Elenda gets an additional +5/+5 as long as your life total is at least 10 greater than your starting life total.",
+        "Elenda, Saint of Dusk",
+        &[
+            Keyword::Lifelink,
+            Keyword::HexproofFrom(HexproofFilter::CardType("instants".to_string())),
+        ],
+        &["Legendary", "Creature"],
+        &["Vampire", "Knight"],
+    );
+    assert_eq!(
+        parsed.statics.len(),
+        2,
+        "both printed continuous abilities must parse: {parsed:#?}"
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "the full Elenda card must not leave parse warnings: {parsed:#?}"
+    );
+    assert!(
+        parsed.statics.iter().any(|static_def| {
+            static_def.condition
+                == Some(StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::LifeTotal {
+                            player: PlayerScope::Controller,
+                        },
+                    },
+                    comparator: Comparator::GT,
+                    rhs: QuantityExpr::Ref {
+                        qty: QuantityRef::StartingLifeTotal {
+                            player: PlayerScope::Controller,
+                        },
+                    },
+                })
+        }),
+        "the first static must gate on life above starting: {parsed:#?}"
+    );
+    assert!(
+        parsed.statics.iter().any(|static_def| {
+            static_def.condition
+                == Some(StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::LifeAboveStarting,
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 10 },
+                })
+                && static_def
+                    .modifications
+                    .contains(&ContinuousModification::AddPower { value: 5 })
+                && static_def
+                    .modifications
+                    .contains(&ContinuousModification::AddToughness { value: 5 })
+        }),
+        "the additional +5/+5 must use LifeAboveStarting >= 10: {parsed:#?}"
+    );
 }

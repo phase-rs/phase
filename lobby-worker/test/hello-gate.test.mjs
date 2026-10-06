@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { classifyHelloGate } from "../src/hello-gate.ts";
+import { classifyHelloGate, lobbyFrameFor } from "../src/hello-gate.ts";
 
 /** A broker speaking full-game protocol 11 and lobby protocol 1. */
 const POLICY = {
@@ -94,4 +94,33 @@ test("non-hello frames before the handshake are rejected", () => {
 test("a redundant hello is ignored and regular frames pass through", () => {
   assert.deepEqual(classifyHelloGate(true, hello({}), POLICY), { kind: "ignore" });
   assert.deepEqual(classifyHelloGate(true, { type: "SubscribeLobby" }, POLICY), { kind: "pass" });
+});
+
+// ── Lobby fan-out recipient choice ─────────────────────────────────────────
+
+const conn = (subscribed, build) => ({
+  subscribed,
+  client_hello: build === null ? null : { client_version: "v", build_commit: build },
+});
+
+test("an unsubscribed socket receives nothing and the projection is not consulted", () => {
+  const forViewer = () => assert.fail("projection consulted");
+  assert.equal(lobbyFrameFor(null, "F", forViewer), null);
+  assert.equal(lobbyFrameFor(conn(false, "abc"), "F", forViewer), null);
+});
+
+test("a subscribed socket receives the projection for its hello build", () => {
+  const seen = [];
+  const forViewer = (frame, viewer) => {
+    seen.push([frame, viewer]);
+    return viewer === "xyz" ? undefined : `P:${viewer}`;
+  };
+  assert.equal(lobbyFrameFor(conn(true, "abc"), "F", forViewer), "P:abc");
+  assert.equal(lobbyFrameFor(conn(true, null), "F", forViewer), "P:");
+  assert.equal(lobbyFrameFor(conn(true, "xyz"), "F", forViewer), null);
+  assert.deepEqual(seen, [
+    ["F", "abc"],
+    ["F", ""],
+    ["F", "xyz"],
+  ]);
 });

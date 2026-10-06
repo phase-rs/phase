@@ -21,11 +21,14 @@ ARG PHASE_CHANNEL
 
 # zig is the C cross-compiler/linker for the musl targets (ring, bundled
 # SQLite, mimalloc). It runs on any build host, unlike per-target gcc tarballs.
+# The pins arrive on their own because the source tree is copied further down.
+COPY scripts/requirements-zigbuild.txt /tmp/requirements-zigbuild.txt
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     python3-pip \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --break-system-packages --no-cache-dir cargo-zigbuild==0.23.0 ziglang==0.16.0
+    && pip install --break-system-packages --no-cache-dir --require-hashes \
+    -r /tmp/requirements-zigbuild.txt
 
 WORKDIR /app
 

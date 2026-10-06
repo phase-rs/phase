@@ -28,6 +28,7 @@ export function GameCardPreview() {
   usePreviewDismiss();
 
   const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
+  const inspectedCardName = useUiStore((s) => s.inspectedCardName);
   const inspectedFaceIndex = useUiStore((s) => s.inspectedFaceIndex);
   const previewPlacement = useUiStore((s) => s.previewPlacement);
   const isDragging = useUiStore((s) => s.isDragging);
@@ -57,7 +58,7 @@ export function GameCardPreview() {
     inspectedObj && !shouldRenderCardBack(inspectedObj) && inspectedObj.face_down
       ? (inspectedObj.back_face ?? null)
       : null;
-  const inspectedCardName = inspectedObj && !shouldRenderCardBack(inspectedObj)
+  const resolvedCardName = inspectedObj && !shouldRenderCardBack(inspectedObj)
     ? inspectedPeekedFace
       ? inspectedPeekedFace.name
       : inspectedFaceIndex === 1 && inspectedObj.back_face
@@ -76,7 +77,7 @@ export function GameCardPreview() {
       (inspectedObj
         ? faceDownMarkerName(true, inspectedObj.face_down_cause)
           ?? (inspectedObj.zone === "Battlefield" ? t("card.faceDownName") : null)
-        : null);
+        : inspectedCardName);
   // The "other" face: when viewing front, this is back_face; when viewing back,
   // this is the front. A face-down permanent has no OTHER printed face — its
   // `back_face` is the stored real face already shown by the peek.
@@ -91,7 +92,7 @@ export function GameCardPreview() {
 
   return (
     <CardPreview
-      cardName={previewSuppressed ? null : inspectedCardName}
+      cardName={previewSuppressed ? null : resolvedCardName}
       objectId={inspectedObj?.id ?? null}
       backFaceName={previewSuppressed ? null : inspectedOtherFaceName}
       dockSide={cardPreviewMode === "side" || previewPlacement === "side"}

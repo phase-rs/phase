@@ -270,7 +270,7 @@ fn jeweled_amulet_bounced_mid_stack_does_not_note_on_new_incarnation() {
         "reach-guard: the zone change must have bumped the object's incarnation"
     );
 
-    // (3) CR 112.7a: the ability is independent of its departed source and
+    // (3) CR 113.7a: the ability is independent of its departed source and
     // still resolves.
     runner.resolve_top();
     assert!(

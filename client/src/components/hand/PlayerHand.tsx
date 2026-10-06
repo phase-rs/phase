@@ -1,4 +1,4 @@
-import { memo, useState, useCallback, useMemo, useRef } from "react";
+import { memo, useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { AnimatePresence, motion, useMotionValue, useSpring, useTransform, useReducedMotion } from "framer-motion";
 import type { MotionValue, PanInfo } from "framer-motion";
 import { useTranslation } from "react-i18next";
@@ -16,7 +16,7 @@ import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { getPlayerId, useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { previewAutomaticManaPayment } from "../../game/manaPaymentPreview.ts";
-import type { GameObject, ManaCost, ObjectId } from "../../adapter/types.ts";
+import type { GameObject, ManaCost, ObjectId, Zone } from "../../adapter/types.ts";
 import {
   collectObjectActions,
   resolveDirectPlayOrCastAction,
@@ -37,6 +37,7 @@ import {
   HAND_REORDER_SELECTOR,
 } from "./handInsertionSlot.ts";
 import { useCastableZoneObjects } from "../../hooks/useCastableZoneObjects.ts";
+import { useFlightVeil } from "../../hooks/useFlightVeil.ts";
 import { ZONE_THEME, type ZoneTheme } from "../../viewmodel/zoneAffordance.ts";
 import { useCardOrganizer } from "../modal/cardChoice/useCardOrganizer.ts";
 import { CardOrganizerToolbar } from "../modal/cardChoice/CardOrganizerToolbar.tsx";
@@ -76,7 +77,11 @@ const DROP_ARROW_PX = 28;
 // stays on the gap center for any fan tilt.
 const ARROW_TIP_FRAC = 20 / 24;
 
-export function PlayerHand() {
+interface PlayerHandProps {
+  interactionDisabled?: boolean;
+}
+
+export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
   const { t } = useTranslation("game");
   const playerId = usePerspectivePlayerId();
   const handContainerRef = useRef<HTMLDivElement | null>(null);
@@ -99,6 +104,7 @@ export function PlayerHand() {
   const [expanded, setExpanded] = useState(false);
   const [selectedCardId, setSelectedCardId] = useState<number | null>(null);
   const [draggingCardId, setDraggingCardId] = useState<number | null>(null);
+  const interactionWasDisabledRef = useRef(false);
 
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const manaPaymentPreviewRequestId = useRef(0);
@@ -132,6 +138,16 @@ export function PlayerHand() {
     () => (player?.hand ?? []).filter((id) => objects?.[id] && id !== pendingObjectId),
     [player?.hand, objects, pendingObjectId],
   );
+
+  useEffect(() => {
+    const interactionBegan = interactionDisabled && !interactionWasDisabledRef.current;
+    interactionWasDisabledRef.current = interactionDisabled;
+    if (!interactionBegan) return;
+
+    if (useUiStore.getState().previewSource === "playerHand") {
+      useUiStore.getState().dismissPreview();
+    }
+  }, [interactionDisabled]);
   const organizer = useCardOrganizer({
     cards: handCardIds,
     objects: objects ?? EMPTY_OBJECTS,
@@ -381,6 +397,11 @@ export function PlayerHand() {
       arrowRotateRaw.set(0);
       insertionSlotMV.set(-1);
       draggingIndexMV.set(-1);
+      // A choice overlay can appear after the pointer-down that began this
+      // gesture. The container's pointer-events guard prevents new gestures,
+      // but Framer still completes an already-active drag, so reject the stale
+      // drop before it can reorder or play a card behind the overlay.
+      if (interactionDisabled) return false;
       const bounds = handContainerRef.current?.getBoundingClientRect();
       const releasedInsideHand =
         bounds != null
@@ -433,7 +454,7 @@ export function PlayerHand() {
       playCard(objectId);
       return true;
     },
-    [hasPriority, playCard, hand, playerId, pendingObjectId, organizeActive, arrowOpacity, arrowRotateRaw, insertionSlotMV, draggingIndexMV],
+    [hasPriority, playCard, hand, playerId, pendingObjectId, organizeActive, interactionDisabled, arrowOpacity, arrowRotateRaw, insertionSlotMV, draggingIndexMV],
   );
 
   const handleCardClick = useCallback(
@@ -455,7 +476,7 @@ export function PlayerHand() {
       if (!hasPriority) return;
 
       setSelectedCardId(objectId);
-      inspectObject(objectId);
+      inspectObject(objectId, undefined, "hover", "cursor", "playerHand");
     },
     [isMobile, hasPriority, inspectObject, setMobileHandOpen],
   );
@@ -531,8 +552,12 @@ export function PlayerHand() {
     insertionSlotMV.set(-1);
     draggingIndexMV.set(-1);
   }, [arrowOpacity, arrowRotateRaw, insertionSlotMV, draggingIndexMV]);
-  const handleMouseEnter = useCallback((id: number) => inspectObject(id), [inspectObject]);
-  const handleMouseLeave = useCallback(() => inspectObject(null), [inspectObject]);
+  const handleMouseEnter = useCallback((id: number) => {
+    inspectObject(id, undefined, "hover", "cursor", "playerHand");
+  }, [inspectObject]);
+  const handleMouseLeave = useCallback(() => {
+    inspectObject(null);
+  }, [inspectObject]);
 
   if (!player || !objects) return null;
 
@@ -560,9 +585,10 @@ export function PlayerHand() {
     <>
       <div
       ref={handContainerRef}
+      data-player-hand
       className={`relative flex items-end justify-center overflow-visible px-4 py-1 ${
         isCompactHeight ? "min-h-[40px]" : "min-h-[calc(var(--card-h)*0.7)]"
-      } ${isMobile ? "touch-none" : ""}`}
+      } ${isMobile ? "touch-none" : ""} ${interactionDisabled ? "pointer-events-none" : ""}`}
       style={{
         perspective: "800px",
         ...playerHandFanSizingStyle(totalFanCards),
@@ -634,6 +660,7 @@ export function PlayerHand() {
               <ZoneFanCard
                 key={obj.id}
                 objectId={obj.id}
+                zone="Exile"
                 cardName={obj.name}
                 manaCost={obj.mana_cost}
                 backFaceManaCost={obj.back_face?.mana_cost}
@@ -707,6 +734,7 @@ export function PlayerHand() {
               <ZoneFanCard
                 key={obj.id}
                 objectId={obj.id}
+                zone="Graveyard"
                 cardName={obj.name}
                 manaCost={obj.mana_cost}
                 backFaceManaCost={obj.back_face?.mana_cost}
@@ -893,6 +921,7 @@ const HandCard = memo(function HandCard({
       s.mobileHandGesture?.phase === "drag"
       && s.mobileHandGesture.objectId === objectId,
   );
+  const flightHidden = useFlightVeil(objectId);
 
   // Slide-apart displacement: derive this card's signed x offset from the shared
   // insertion signal. useTransform updates imperatively when the MotionValues
@@ -939,7 +968,7 @@ const HandCard = memo(function HandCard({
 
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
   const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(() => {
-    inspectObject(objectId);
+    inspectObject(objectId, undefined, "hover", "cursor", "playerHand");
     setPreviewSticky(true);
   });
 
@@ -960,7 +989,7 @@ const HandCard = memo(function HandCard({
       data-hand-rotation={rotation}
       data-object-id={objectId}
       layout
-      initial={{ opacity: 0, y: restingY + 10 }}
+      initial={flightHidden ? false : { opacity: 0, y: restingY + 10 }}
       animate={{
         opacity: 1,
         y: restingY + arcOffset,
@@ -1017,6 +1046,7 @@ const HandCard = memo(function HandCard({
         // handSize (not a fixed 20) so it still wins in a Commander-sized hand
         // whose plain indices can exceed 20.
         zIndex: isDragging ? 9999 : isSelected ? handSize + 20 : index,
+        visibility: flightHidden ? "hidden" : undefined,
       }}
       {...longPressHandlers}
     >
@@ -1062,6 +1092,9 @@ const HandCard = memo(function HandCard({
 
 interface ZoneFanCardProps {
   objectId: number;
+  /** The zone whose wing shows the card, so an anchor can tell a graveyard
+   *  card from an exiled one. */
+  zone: Zone;
   cardName: string;
   manaCost: ManaCost;
   backFaceManaCost?: ManaCost;
@@ -1093,6 +1126,7 @@ interface ZoneFanCardProps {
 // be flung up to cast but can never be dropped into the middle of the hand.
 const ZoneFanCard = memo(function ZoneFanCard({
   objectId,
+  zone,
   cardName,
   manaCost,
   backFaceManaCost,
@@ -1118,9 +1152,10 @@ const ZoneFanCard = memo(function ZoneFanCard({
   const setDragging = useUiStore((s) => s.setDragging);
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
   const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(() => {
-    inspectObject(objectId);
+    inspectObject(objectId, undefined, "hover", "cursor", "playerHand");
     setPreviewSticky(true);
   });
+  const flightHidden = useFlightVeil(objectId);
 
   const effectiveCost = useGameStore((s) => s.spellCosts[String(objectId)]);
   const { displayCost, isReduced } = spellCostDisplay(effectiveCost, manaCost);
@@ -1131,7 +1166,7 @@ const ZoneFanCard = memo(function ZoneFanCard({
 
   return (
     <motion.div
-      data-zone-fan-card
+      data-zone-fan-card={zone}
       data-object-id={objectId}
       // Marks the card as inspectable, which is what usePreviewDismiss's 300ms
       // `[data-card-hover]:hover` poll (and uiStore's 50ms deferred clear) test
@@ -1142,7 +1177,7 @@ const ZoneFanCard = memo(function ZoneFanCard({
       // reorder sweeps select `[data-hand-card]`.
       data-card-hover
       layout
-      initial={{ opacity: 0, y: restingY + 10 }}
+      initial={flightHidden ? false : { opacity: 0, y: restingY + 10 }}
       animate={{ opacity: 1, y: restingY + arcOffset, rotate: rotation }}
       exit={{ opacity: 0, scale: 0.8 }}
       whileHover={{ y: hoverY + arcOffset, scale: 1.08, zIndex: 30 }}
@@ -1180,7 +1215,7 @@ const ZoneFanCard = memo(function ZoneFanCard({
       onMouseEnter={() => onMouseEnter(objectId)}
       onMouseLeave={onMouseLeave}
       className="relative cursor-grab active:cursor-grabbing leading-[0] select-none"
-      style={{ marginLeft, zIndex }}
+      style={{ marginLeft, zIndex, visibility: flightHidden ? "hidden" : undefined }}
       {...longPressHandlers}
     >
       <div

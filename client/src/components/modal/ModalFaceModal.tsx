@@ -9,18 +9,43 @@ import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { DialogShell } from "./DialogShell.tsx";
 
 type ModalFaceChoice = Extract<WaitingFor, { type: "ModalFaceChoice" }>;
+type ChooseModalFaceAction = Extract<GameAction, { type: "ChooseModalFace" }>;
+type CancelCastAction = Extract<GameAction, { type: "CancelCast" }>;
 
 export function ModalFaceModal() {
   const canActForWaitingState = useCanActForWaitingState();
   const waitingFor = useGameStore((s) => s.waitingFor);
+  const legalActions = useGameStore((s) => s.legalActions);
   const dispatch = useGameStore((s) => s.dispatch);
 
   if (waitingFor?.type !== "ModalFaceChoice") return null;
   if (!canActForWaitingState) return null;
 
   const data = waitingFor.data as ModalFaceChoice["data"];
+  // Resolution-owned face choices may authorize only one side.  The UI must
+  // render and dispatch the action issued by the engine rather than rebuilding
+  // a front/back action from the legacy prompt shape.
+  const frontAction = legalActions.find(
+    (action): action is ChooseModalFaceAction =>
+      action.type === "ChooseModalFace" && !action.data.back_face,
+  );
+  const backAction = legalActions.find(
+    (action): action is ChooseModalFaceAction =>
+      action.type === "ChooseModalFace" && action.data.back_face,
+  );
+  const cancelAction = legalActions.find(
+    (action): action is CancelCastAction => action.type === "CancelCast",
+  );
 
-  return <ModalFaceContent objectId={data.object_id} dispatch={dispatch} />;
+  return (
+    <ModalFaceContent
+      objectId={data.object_id}
+      frontAction={frontAction}
+      backAction={backAction}
+      cancelAction={cancelAction}
+      dispatch={dispatch}
+    />
+  );
 }
 
 /** A land face is put onto the battlefield (CR 712.12 play-land special action);
@@ -37,9 +62,15 @@ function faceLabel(
 
 function ModalFaceContent({
   objectId,
+  frontAction,
+  backAction,
+  cancelAction,
   dispatch,
 }: {
   objectId: number;
+  frontAction: ChooseModalFaceAction | undefined;
+  backAction: ChooseModalFaceAction | undefined;
+  cancelAction: CancelCastAction | undefined;
   dispatch: (action: GameAction) => Promise<unknown>;
 }) {
   const { t } = useTranslation("game");
@@ -64,20 +95,25 @@ function ModalFaceContent({
       title={t("modalFace.title")}
       subtitle={t("modalFace.subtitle")}
       previewObjectId={objectId}
+      onClose={cancelAction ? () => dispatch(cancelAction) : undefined}
     >
       <div className="flex flex-col gap-2 px-3 py-3 lg:px-5 lg:py-5">
-        <FaceButton
-          face={front}
-          label={t("modalFace.labelFront")}
-          accent="hover:ring-cyan-400/30"
-          onClick={() => dispatch({ type: "ChooseModalFace", data: { back_face: false } })}
-        />
-        <FaceButton
-          face={back}
-          label={t("modalFace.labelBack")}
-          accent="hover:ring-amber-400/30"
-          onClick={() => dispatch({ type: "ChooseModalFace", data: { back_face: true } })}
-        />
+        {frontAction && (
+          <FaceButton
+            face={front}
+            label={t("modalFace.labelFront")}
+            accent="hover:ring-cyan-400/30"
+            onClick={() => dispatch(frontAction)}
+          />
+        )}
+        {backAction && (
+          <FaceButton
+            face={back}
+            label={t("modalFace.labelBack")}
+            accent="hover:ring-amber-400/30"
+            onClick={() => dispatch(backAction)}
+          />
+        )}
       </div>
     </DialogShell>
   );

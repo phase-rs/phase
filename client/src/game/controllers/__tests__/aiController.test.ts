@@ -35,7 +35,10 @@ vi.mock("../../debugLog", () => ({ debugLog: vi.fn() }));
 let storeState: {
   gameState: GameState | null;
   waitingFor: WaitingFor | null;
-  adapter: { getAiActionProposal?: (difficulty: string, playerId: number) => Promise<AiActionProposal | null> } | null;
+  adapter: {
+    getAiActionProposal?: (difficulty: string, playerId: number) => Promise<AiActionProposal | null>;
+    getAiTacticalActionProposal?: (difficulty: string, playerId: number) => Promise<AiActionProposal | null>;
+  } | null;
   gameSessionGeneration: number;
 };
 let storeSubscriber: (() => void) | null = null;
@@ -127,6 +130,22 @@ describe("AI proposal controller", () => {
     controller.dispose();
   });
 
+  it("retries after a synchronous proposal lookup error instead of stranding the controller pending", async () => {
+    const getAiActionProposal = vi.fn(() => {
+      throw new Error("synchronous adapter failure");
+    });
+    storeState.adapter = { getAiActionProposal };
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    await runOnce();
+    await runOnce();
+
+    expect(getAiActionProposal.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(dispatchAiActionProposal).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
   it("re-queries after the dispatch layer returns the engine's tagged stale outcome without fabricating an action", async () => {
     const issued = proposal(PASS);
     const getAiActionProposal = vi
@@ -149,11 +168,17 @@ describe("AI proposal controller", () => {
     controller.dispose();
   });
 
-  it("halts after rejected proposals without dispatching fabricated pass or cancel actions", async () => {
-    const issued = proposal({ type: "ActivateAbility", data: { source_id: 44, ability_index: 0 } } as GameAction);
-    const getAiActionProposal = vi.fn(async () => issued);
-    dispatchAiActionProposal.mockRejectedValue(new Error("proposal rejected"));
-    storeState.adapter = { getAiActionProposal };
+  it("recovers rejected proposals with an engine-issued tactical fallback", async () => {
+    const rejected = proposal({ type: "ActivateAbility", data: { source_id: 44, ability_index: 0 } } as GameAction);
+    const fallback = proposal(PASS);
+    const getAiActionProposal = vi.fn(async () => rejected);
+    const getAiTacticalActionProposal = vi.fn(async () => fallback);
+    dispatchAiActionProposal
+      .mockRejectedValueOnce(new Error("proposal rejected"))
+      .mockRejectedValueOnce(new Error("proposal rejected"))
+      .mockRejectedValueOnce(new Error("proposal rejected"))
+      .mockResolvedValue({ status: "applied" });
+    storeState.adapter = { getAiActionProposal, getAiTacticalActionProposal };
 
     const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
     controller.start();
@@ -162,8 +187,15 @@ describe("AI proposal controller", () => {
     await runOnce();
     await runOnce();
 
-    expect(notifyEngineLost).toHaveBeenCalledWith("ai-controller-stuck:Priority");
-    expect(dispatchAiActionProposal.mock.calls.every(([sent]) => sent.action.type === "ActivateAbility")).toBe(true);
+    expect(getAiActionProposal).toHaveBeenCalledTimes(3);
+    expect(getAiTacticalActionProposal).toHaveBeenCalledWith("Medium", 1);
+    expect(dispatchAiActionProposal.mock.calls.map(([sent]) => sent.action)).toEqual([
+      rejected.action,
+      rejected.action,
+      rejected.action,
+      fallback.action,
+    ]);
+    expect(notifyEngineLost).not.toHaveBeenCalled();
     controller.dispose();
   });
 

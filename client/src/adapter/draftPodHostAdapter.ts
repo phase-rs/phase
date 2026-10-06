@@ -11,11 +11,11 @@
  */
 
 import { DraftAdapter } from "./draft-adapter";
-import type { DraftKind, DraftPlayerView, PairingView, PodPolicy, PoolInput, SeatPublicView, TournamentFormat } from "./draft-adapter";
-import type { MatchScore } from "./types";
+import type { DraftKind, DraftPlayerView, PairingView, PodPolicy, PoolInput, SeatPublicView, SharedStackPileDecision, TournamentFormat } from "./draft-adapter";
+import type { DraftLobbyMetadata, MatchScore } from "./types";
 import { P2PDraftHost, type DraftHostEvent } from "./p2p-draft-host";
 import { hostRoom, type HostResult } from "../network/connection";
-import type { DraftMatchDeckPayload, DraftMatchLaunch, DraftMatchSettlement, DraftPauseReason } from "../network/draftProtocol";
+import type { CommanderSeatDecks, DraftCommanderLaunch, DraftMatchDeckPayload, DraftMatchLaunch, DraftMatchSettlement, DraftPauseReason } from "../network/draftProtocol";
 import type { BrokerClient, RegisterHostRequest } from "../services/brokerClient";
 import { loadDraftHostSession } from "../services/draftPersistence";
 import type { DraftIntergameCommand, DraftIntergameCommandAck } from "../services/intergameCommandLedger";
@@ -57,9 +57,20 @@ export type DraftPodHostEvent =
   | { type: "seatKicked"; seatIndex: number; reason: DraftPauseReason | string }
   | { type: "pairingsGenerated"; round: number; pairings: PairingView[] }
   | { type: "matchStart"; launch: DraftMatchLaunch }
+  /**
+   * CR 903.13a: the completed Commander pod's launch into ONE shared N-seat
+   * game. `handleHostEvent` in the store is typed on THIS union, not on
+   * `DraftHostEvent`, so the member has to exist here for the host's own launch
+   * to reach the store at all.
+   */
+  | { type: "commanderLaunch"; launch: DraftCommanderLaunch }
   | { type: "matchResultReceived"; matchId: string; winnerSeat: number | null }
   | { type: "roundAdvanced" }
   | { type: "timerExpired" }
+  /** The pick clock's current reading, forwarded so the HOST'S OWN store can
+   *  show it. Guests receive the same number over `draft_timer_sync`; the host
+   *  holds no guest session, so this is the only path to it. */
+  | { type: "timerTick"; remainingMs: number }
   | {
       type: "bo3SideboardPrompt";
       matchId: string;
@@ -106,6 +117,12 @@ function hostStatusForView(view: DraftPlayerView): DraftPodHostStatus {
   }
 }
 
+/** A lobby broker client paired with the request to register a draft pod on it. */
+export interface DraftPodListing {
+  broker: BrokerClient;
+  request: Omit<RegisterHostRequest, "hostPeerId" | "draftMetadata"> & { draftMetadata: DraftLobbyMetadata };
+}
+
 export interface DraftPodHostConfig {
   poolInput: PoolInput;
   kind: Exclude<DraftKind, "Quick">;
@@ -115,10 +132,13 @@ export interface DraftPodHostConfig {
   tournamentFormat: TournamentFormat;
   /** Competitive (timed) or Casual (untimed, host-controlled). */
   podPolicy: PodPolicy;
-  /** Broker client for lobby registration. Optional: P2P works without broker. */
-  broker?: BrokerClient;
-  /** Broker request for lobby registration. Required if broker is set. */
-  brokerRequest?: RegisterHostRequest;
+  /**
+   * When set, the adapter owns the broker client from `initialize` on: it
+   * registers under the host peer, withdraws the listing and closes the
+   * client when the draft starts, when the adapter is disposed, and when
+   * initialization fails. A refused registration fails initialization.
+   */
+  listing?: DraftPodListing;
   /** Persistence ID for host crash recovery. */
   persistenceId?: string;
   /** Resume from a specific room code (re-hosts on the same PeerJS ID). */
@@ -143,6 +163,8 @@ export class DraftPodHostAdapter {
   private _status: DraftPodHostStatus = "idle";
   private _roomCode: string | null = null;
   private disposed = false;
+  private listingBroker: BrokerClient | null = null;
+  private listingGameCode: string | null = null;
 
   onEvent(listener: DraftPodHostEventListener): () => void {
     this.listeners.push(listener);
@@ -160,6 +182,20 @@ export class DraftPodHostAdapter {
   private setStatus(status: DraftPodHostStatus): void {
     this._status = status;
     this.emit({ type: "statusChanged", status });
+  }
+
+  /** Withdraws a held lobby listing, if any. Safe to call more than once. */
+  private releaseListing(): void {
+    const broker = this.listingBroker;
+    const gameCode = this.listingGameCode;
+    this.listingBroker = null;
+    this.listingGameCode = null;
+    if (broker) {
+      if (gameCode) {
+        void broker.unregister(gameCode).catch(() => {});
+      }
+      broker.close();
+    }
   }
 
   get status(): DraftPodHostStatus {
@@ -195,6 +231,7 @@ export class DraftPodHostAdapter {
       }
     };
     const disposePending = async () => {
+      this.releaseListing();
       if (this.hostEventUnsub) {
         this.hostEventUnsub();
         this.hostEventUnsub = null;
@@ -216,6 +253,10 @@ export class DraftPodHostAdapter {
     this.pendingDispose = disposePending;
 
     try {
+      if (config.listing) {
+        this.listingBroker = config.listing.broker;
+      }
+
       // 1. Create PeerJS host peer
       const hostResult = await hostRoom(config.signal, {
         preferredRoomCode: config.preferredRoomCode,
@@ -230,23 +271,12 @@ export class DraftPodHostAdapter {
       this.emit({ type: "roomCreated", roomCode: hostResult.roomCode });
 
       // 2. Register with lobby broker if provided.
-      //
-      // Note: no in-tree caller currently builds a brokerRequest for draft
-      // pods. When a future caller does, it should populate
-      // `draftMetadata.cubeName` from `config.poolInput.data.cube_name` for
-      // Cube pods and leave it `undefined` for Set pods. The lobby protocol
-      // schema is already forward-ready (see DraftLobbyMetadata, #1253).
-      if (config.broker && config.brokerRequest) {
-        try {
-          await config.broker.registerHost({
-            ...config.brokerRequest,
-            hostPeerId: hostResult.peerId,
-          });
-        } catch (err) {
-          if (config.signal?.aborted || this.disposed) throw err;
-          console.warn("[DraftPodHostAdapter] broker registration failed:", err);
-          // Non-fatal: direct room code still works
-        }
+      if (config.listing) {
+        const registered = await config.listing.broker.registerHost({
+          ...config.listing.request,
+          hostPeerId: hostResult.peerId,
+        });
+        this.listingGameCode = registered.gameCode;
         abortIfRequested();
       }
 
@@ -376,11 +406,15 @@ export class DraftPodHostAdapter {
           joined: event.joined,
           total: event.total,
         });
+        if (this.listingBroker && this.listingGameCode) {
+          this.listingBroker.updateMetadata(this.listingGameCode, event.joined, event.total);
+        }
         break;
       case "lobbyFull":
         this.emit({ type: "lobbyFull" });
         break;
       case "draftStarted":
+        this.releaseListing();
         this.setStatus(hostStatusForView(event.view));
         this.emit({ type: "draftStarted", view: event.view });
         break;
@@ -422,7 +456,7 @@ export class DraftPodHostAdapter {
         break;
       case "viewUpdated":
         // The engine-published view is the single status authority, matching
-        // the restore path (:249-250) and `draftStarted` (:306-307).
+        // the restore path and `draftStarted`.
         // `setStatus` goes BEFORE the emit, so the store sees `statusChanged`
         // first (writing `phase` and a no-view `saveDraftPodProgress`) and
         // `viewUpdated` second (writing `phase` again and the VIEW-CARRYING
@@ -442,12 +476,24 @@ export class DraftPodHostAdapter {
         this.setStatus("matchInProgress");
         this.emit({ type: "matchStart", launch: event.launch });
         break;
+      case "commanderLaunch":
+        // Shape B, deliberately UNLIKE `matchStart` above: no status is written
+        // here. A Commander launch does not change pod phase — the pod stays
+        // `complete`, and the host must stay on `CompleteView` so its
+        // launch-in-flight state and Cancel control can render. Writing
+        // "matchInProgress" here would be the same overwrite of the reducer's
+        // own answer that `allDecksSubmitted` documents above.
+        this.emit({ type: "commanderLaunch", launch: event.launch });
+        break;
       case "matchResultReceived":
         this.emit({ type: "matchResultReceived", matchId: event.matchId, winnerSeat: event.winnerSeat });
         break;
       case "roundAdvanced":
         this.setStatus("pairing");
         this.emit({ type: "roundAdvanced" });
+        break;
+      case "timerTick":
+        this.emit({ type: "timerTick", remainingMs: event.remainingMs });
         break;
       case "timerExpired":
         this.emit({ type: "timerExpired" });
@@ -514,6 +560,19 @@ export class DraftPodHostAdapter {
     return this.host.submitHostPickWithDraftEffect(effectCardInstanceId, cardInstanceIds);
   }
 
+  /**
+   * One whole shared-stack turn decision for this pod's local seat. Seat-free
+   * at this layer for the same reason `submitPick` is: the adapter owns the
+   * local seat, and the caller states only the pile and the decision.
+   */
+  async submitSharedStackDecision(
+    pile: number,
+    decision: SharedStackPileDecision,
+  ): Promise<DraftPlayerView> {
+    if (!this.host) throw new Error("Host not initialized");
+    return this.host.submitHostSharedStackDecision(pile, decision);
+  }
+
   async submitDeck(mainDeck: string[], commanders: string[]): Promise<DraftPlayerView> {
     if (!this.host) throw new Error("Host not initialized");
     return this.host.submitHostDeck(mainDeck, commanders);
@@ -522,6 +581,11 @@ export class DraftPodHostAdapter {
   async updateWorkspace(state: DraftWorkspaceState): Promise<void> {
     if (!this.host) throw new Error("Host not initialized");
     await this.host.updateHostWorkspace(state);
+  }
+
+  async suggestLands(): Promise<Record<string, number>> {
+    if (!this.host) throw new Error("Host not initialized");
+    return this.host.suggestLandsForSeat(0);
   }
 
   async getHostView(): Promise<DraftPlayerView> {
@@ -552,9 +616,10 @@ export class DraftPodHostAdapter {
   }
 
   /**
-   * CR 903.13a: the N-seat deck payload a completed Commander pod launches its
-   * multiplayer game from. The store holds this wrapper, not the underlying
-   * `P2PDraftHost`, so every host call goes through a delegate like this one.
+   * CR 903.13a: the N-seat deck payload a completed Commander pod launches a
+   * LOCAL multiplayer game from, used above the P2P seat ceiling. The store
+   * holds this wrapper, not the underlying `P2PDraftHost`, so every host call
+   * goes through a delegate like this one.
    */
   async podCommanderDeckPayload(
     view: DraftPlayerView,
@@ -562,6 +627,36 @@ export class DraftPodHostAdapter {
   ): Promise<DraftMatchDeckPayload> {
     if (!this.host) throw new Error("Host not initialized");
     return this.host.podCommanderDeckPayload(view, localSeat);
+  }
+
+  /** Host-only cube source for the <=6-seat Commander game constructor. */
+  async boosterPackPoolForGame(): Promise<string[] | null> {
+    if (!this.host) throw new Error("Host not initialized");
+    return this.host.boosterPackPoolForGame();
+  }
+
+  /**
+   * CR 903.13a: every deck the completed Commander pod's launch needs. Sends
+   * nothing — pair it with `sendCommanderLaunches` once the game is up. `view`
+   * must be read at call time — see `P2PDraftHost.commanderSeatDecks`.
+   */
+  async commanderSeatDecks(view: DraftPlayerView, localSeat: number): Promise<CommanderSeatDecks> {
+    if (!this.host) throw new Error("Host not initialized");
+    return this.host.commanderSeatDecks(view, localSeat);
+  }
+
+  /**
+   * CR 903.13a: put the pod's launch on every live human seat, the host's own
+   * included, from decks `commanderSeatDecks` already computed.
+   */
+  sendCommanderLaunches(
+    view: DraftPlayerView,
+    gameId: string,
+    roomCode: string,
+    decks: CommanderSeatDecks,
+  ): void {
+    if (!this.host) throw new Error("Host not initialized");
+    this.host.sendCommanderLaunches(view, gameId, roomCode, decks);
   }
 
   async replaceSeatWithBot(seat: number): Promise<void> {
@@ -620,6 +715,7 @@ export class DraftPodHostAdapter {
   // ── Cleanup ────────────────────────────────────────────────────────
 
   async dispose(options: { preserveSession?: boolean } = {}): Promise<void> {
+    this.releaseListing();
     this.disposed = true;
     const pendingDispose = this.pendingDispose;
     const pendingInitialization = this.pendingInitialization;

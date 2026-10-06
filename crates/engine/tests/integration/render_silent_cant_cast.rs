@@ -158,11 +158,16 @@ fn put_spell_on_stack_owner_controller(
 /// - Binding to the countered spell's controller (P1) → only P1 restricted → pass.
 ///
 /// This exercises the exact path called out as unverified: after the counter the
-/// spell has left the stack with NO LKI snapshot (LKI is captured only on
-/// battlefield/exile exit, not stack exit), so `parent_target_controller` reads
-/// the graveyard object's RETAINED controller — which must still be P1 because a
-/// stack→graveyard move does not run `reset_for_battlefield_exit`. If a later
-/// stack-exit reset or lookup change collapsed that to the owner, this fails.
+/// spell has left the stack. As of PR #8332 round 1 (U2), the stack exit is
+/// ALSO an LKI-capture site (`zones::apply_zone_exit_cleanup`, widened to
+/// `from == Zone::Stack`), so `ability_utils::parent_target_controller`
+/// (which already preferred `state.lki_cache` for any off-battlefield object)
+/// now reads the at-exit controller from that snapshot, not a retained live
+/// value — the reset alongside it overwrites `obj.controller` to the owner
+/// fallback (CR 109.4/CR 108.4a) on the same move, so the snapshot is the
+/// ONLY surviving record of P1. Either half missing collapses this to the
+/// owner: this row's own docstring predicted that outcome verbatim before U2
+/// closed it, and the prediction is kept below as the row's stated purpose.
 #[test]
 fn render_silent_binds_to_controller_not_owner_when_they_differ() {
     let mut scenario = GameScenario::new();

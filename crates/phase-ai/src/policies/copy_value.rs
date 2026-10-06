@@ -447,7 +447,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::BecomeCopy {
                     target: TargetFilter::Any,
-                    recipient: TargetFilter::SelfRef,
+                    recipient: engine::types::ability::CopyRecipient::Source,
                     duration: None,
                     mana_value_limit: Some(CopyManaValueLimit::AmountSpentToCastSource),
                     additional_modifications: vec![

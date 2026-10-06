@@ -32,7 +32,7 @@ fn recorded_installs_since(
 
 fn copy_ability(
     source: ObjectId,
-    recipient: TargetFilter,
+    recipient: engine::types::ability::CopyRecipient,
     targets: Vec<TargetRef>,
 ) -> ResolvedAbility {
     ResolvedAbility::new(
@@ -91,7 +91,7 @@ fn self_copy_journals_its_recipient_and_cannot_copy_after_reentry() {
     let expected_recipient = ObjectIncarnationRef::from_object(&state.objects[&source]);
     let ability = copy_ability(
         source,
-        TargetFilter::SelfRef,
+        engine::types::ability::CopyRecipient::Source,
         vec![TargetRef::Object(donor)],
     );
 
@@ -153,7 +153,7 @@ fn parent_target_copy_journals_a_distinct_pin_for_each_recipient() {
     ];
     let ability = copy_ability(
         source,
-        TargetFilter::ParentTarget,
+        engine::types::ability::CopyRecipient::Untargeted(TargetFilter::ParentTarget),
         vec![TargetRef::Object(donor), TargetRef::Object(recipient)],
     );
 
@@ -186,7 +186,11 @@ fn mass_copy_journals_a_distinct_pin_for_every_resolved_recipient() {
         .iter()
         .map(|id| ObjectIncarnationRef::from_object(&state.objects[id]))
         .collect();
-    let ability = copy_ability(source, TargetFilter::Any, vec![TargetRef::Object(donor)]);
+    let ability = copy_ability(
+        source,
+        engine::types::ability::CopyRecipient::Untargeted(TargetFilter::Any),
+        vec![TargetRef::Object(donor)],
+    );
 
     engine::game::effects::become_copy::resolve(&mut state, &ability, &mut Vec::new())
         .expect("the actual mass-copy resolver must install every copy");
@@ -255,7 +259,7 @@ fn zygon_duration_subject_replay_cannot_follow_a_reentered_tapped_target() {
 
     let ability = ResolvedAbility::new(
         Effect::BecomeCopy {
-            recipient: TargetFilter::SelfRef,
+            recipient: engine::types::ability::CopyRecipient::Source,
             target: TargetFilter::Any,
             duration: Some(Duration::ForAsLongAs {
                 condition: StaticCondition::IsTapped {

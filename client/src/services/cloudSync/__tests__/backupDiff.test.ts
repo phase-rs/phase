@@ -39,6 +39,79 @@ describe("computeBackupDigest", () => {
       await computeBackupDigest(omitted),
     );
   });
+
+  it("ignores regenerated feed deck bodies, origins, and added-at metadata", async () => {
+    const a = makeBackup({
+      decks: { Personal: "same", "Feed A": "old" },
+      deckMetadata: JSON.stringify({
+        Personal: { addedAt: 10 },
+        "Feed A": { addedAt: 20 },
+      }),
+      feedDeckOrigins: JSON.stringify({ "Feed A": "bundled-a" }),
+    });
+    const b = makeBackup({
+      decks: { Personal: "same", "Feed B": "new" },
+      deckMetadata: JSON.stringify({
+        Personal: { addedAt: 10 },
+        "Feed B": { addedAt: 30 },
+      }),
+      feedDeckOrigins: JSON.stringify({ "Feed B": "bundled-b" }),
+    });
+
+    expect(await computeBackupDigest(a)).toBe(await computeBackupDigest(b));
+    expect(summarizeBackupDiff(a, b)).toEqual({
+      decksAdded: 0,
+      decksRemoved: 0,
+      decksModified: 0,
+      prefsChanged: false,
+      feedsChanged: false,
+      otherChanged: false,
+    });
+  });
+
+  it("ignores all metadata attached to regenerated feed decks", async () => {
+    const a = makeBackup({
+      decks: { "Feed A": "same" },
+      deckMetadata: JSON.stringify({ "Feed A": { addedAt: 20, starred: true } }),
+      feedDeckOrigins: JSON.stringify({ "Feed A": "bundled-a" }),
+    });
+    const b = makeBackup({
+      decks: { "Feed A": "changed upstream" },
+      deckMetadata: JSON.stringify({ "Feed A": { addedAt: 30 } }),
+      feedDeckOrigins: JSON.stringify({ "Feed A": "bundled-a" }),
+    });
+
+    expect(await computeBackupDigest(a)).toBe(await computeBackupDigest(b));
+    expect(summarizeBackupDiff(a, b).otherChanged).toBe(false);
+  });
+
+  it("ignores per-device subscription timestamps and cache versions", async () => {
+    const subscription = {
+      sourceId: "feed-a",
+      url: "/feeds/a.json",
+      type: "bundled",
+    };
+    const a = makeBackup({
+      feedSubscriptions: JSON.stringify([{
+        ...subscription,
+        subscribedAt: 1,
+        lastRefreshedAt: 2,
+        lastVersion: 1,
+      }]),
+    });
+    const b = makeBackup({
+      feedSubscriptions: JSON.stringify([{
+        ...subscription,
+        subscribedAt: 10,
+        lastRefreshedAt: 20,
+        lastVersion: 99,
+        error: "local failure",
+      }]),
+    });
+
+    expect(await computeBackupDigest(a)).toBe(await computeBackupDigest(b));
+    expect(summarizeBackupDiff(a, b).feedsChanged).toBe(false);
+  });
 });
 
 describe("summarizeBackupDiff", () => {

@@ -5,11 +5,12 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use engine::database::card_db::CardDatabase;
-use engine::game::engine::apply;
+use engine::game::engine::{apply, apply_as_current};
 use engine::game::game_object::GameObject;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::{add_to_zone, create_object, remove_from_zone};
+use engine::game::EngineError;
 use engine::game::{filter_state_for_viewer, normalize_untrusted_restore};
 use engine::types::ability::{
     CardSelectionMode, ContinuousModification, CopyRetargetPermission, Effect, QuantityExpr,
@@ -387,6 +388,114 @@ fn precast_controlled_caster_uses_authorized_submitter_for_protocol_actions() {
         WaitingFor::Priority { player } if player == P0
     ));
     assert_eq!(declined.state().priority_player, P1);
+}
+
+/// A controlled board at the pre-cast offer, with `turn_decision_controller`
+/// latched onto P1 and P0 the offer's proposer.
+fn controlled_offer(controller: Option<PlayerId>) -> (GameRunner, u64) {
+    let (mut runner, chain, _) = setup_shortcut(2);
+    {
+        let state = runner.state_mut();
+        state.turn_decision_controller = controller;
+        engine::game::public_state::sync_waiting_for(state, &WaitingFor::Priority { player: P0 });
+    }
+    let epoch = cast_to_offer(&mut runner, chain);
+    (runner, epoch)
+}
+
+fn protocol_action(epoch: u64, response: PrecastCopyShortcutResponse) -> GameAction {
+    GameAction::PrecastCopyShortcut { epoch, response }
+}
+
+/// CR 723.5: submitter authorization is settled at the action boundary, so the
+/// protocol handler resolves the response against the prompt it answers and the
+/// owner-derived boundary form reaches it under control.
+#[test]
+fn a_controlled_offer_is_proposed_and_declined_through_the_owner_derived_boundary() {
+    for controller in [Some(P1), None] {
+        let (mut proposed, epoch) = controlled_offer(controller);
+        apply_as_current(
+            proposed.state_mut(),
+            protocol_action(
+                epoch,
+                PrecastCopyShortcutResponse::Propose { route_id: epoch },
+            ),
+        )
+        .expect("the proposal reaches the handler through the owner-derived boundary");
+        assert!(
+            matches!(
+                proposed.state().waiting_for,
+                WaitingFor::RespondToPrecastCopyShortcut { .. }
+            ),
+            "controller={controller:?} must advance to the responder wait, got {:?}",
+            proposed.state().waiting_for
+        );
+
+        let (mut declined, epoch) = controlled_offer(controller);
+        apply_as_current(
+            declined.state_mut(),
+            protocol_action(epoch, PrecastCopyShortcutResponse::Decline),
+        )
+        .expect("the decline reaches the handler through the owner-derived boundary");
+        assert!(
+            matches!(
+                declined.state().waiting_for,
+                WaitingFor::Priority { player } if player == P0
+            ),
+            "controller={controller:?} must return priority to the caster, got {:?}",
+            declined.state().waiting_for
+        );
+    }
+}
+
+/// The deletion moved no authorization: the controlled proposer still cannot
+/// submit its own response, and a proposal that does not name the live offer's
+/// route is still refused by the conjunct that survives.
+#[test]
+fn a_controlled_offer_still_refuses_an_unauthorized_submitter_and_a_stale_route() {
+    let (mut runner, epoch) = controlled_offer(Some(P1));
+    assert!(
+        matches!(
+            apply(
+                runner.state_mut(),
+                P0,
+                protocol_action(epoch, PrecastCopyShortcutResponse::Decline)
+            ),
+            Err(EngineError::WrongPlayer)
+        ),
+        "the controlled semantic owner is not an authorized submitter"
+    );
+    assert!(
+        apply(
+            runner.state_mut(),
+            P1,
+            protocol_action(
+                epoch,
+                PrecastCopyShortcutResponse::Propose {
+                    route_id: epoch ^ 1
+                }
+            )
+        )
+        .is_err(),
+        "a proposal must still name the live offer's route"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::PrecastCopyShortcutOffer { .. }
+        ),
+        "both refusals leave the offer standing"
+    );
+
+    apply(
+        runner.state_mut(),
+        P1,
+        protocol_action(
+            epoch,
+            PrecastCopyShortcutResponse::Propose { route_id: epoch },
+        ),
+    )
+    .expect("the same board accepts the authorized submitter's live-route proposal");
 }
 
 /// CR 732.2b-c: every responder answers after a shorten and the selected

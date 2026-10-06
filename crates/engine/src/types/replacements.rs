@@ -70,6 +70,13 @@ pub enum ReplacementEvent {
     Scry,
     /// CR 614.1a + CR 705.1: Replaces an individual coin flip.
     CoinFlip,
+    /// CR 706.1 + CR 614.1a: Replaces a die-roll instruction. Count-modifying
+    /// effects ("if you would roll one or more dice, instead roll that many
+    /// dice plus one and ignore the lowest roll" — Barbarian Class, Pixie
+    /// Guide, Wyll) raise the instruction's die count before the RNG runs; the
+    /// paired [`crate::types::ability::DieRollIgnoreRule`] then removes the
+    /// extra rolls under CR 706.6.
+    RollDice,
     /// CR 614.1a: Replaces a transform event.
     Transform,
     /// CR 614.1a: Replaces an explore event.
@@ -139,6 +146,7 @@ impl fmt::Display for ReplacementEvent {
             ReplacementEvent::ProduceMana => write!(f, "ProduceMana"),
             ReplacementEvent::Scry => write!(f, "Scry"),
             ReplacementEvent::CoinFlip => write!(f, "CoinFlip"),
+            ReplacementEvent::RollDice => write!(f, "RollDice"),
             ReplacementEvent::Transform => write!(f, "Transform"),
             ReplacementEvent::Explore => write!(f, "Explore"),
             ReplacementEvent::Connive => write!(f, "Connive"),
@@ -190,6 +198,7 @@ impl FromStr for ReplacementEvent {
             "ProduceMana" => ReplacementEvent::ProduceMana,
             "Scry" => ReplacementEvent::Scry,
             "CoinFlip" => ReplacementEvent::CoinFlip,
+            "RollDice" => ReplacementEvent::RollDice,
             "Transform" => ReplacementEvent::Transform,
             "Explore" => ReplacementEvent::Explore,
             "Connive" => ReplacementEvent::Connive,
@@ -273,6 +282,7 @@ mod tests {
             ReplacementEvent::CreateToken,
             ReplacementEvent::DealtDamage,
             ReplacementEvent::CoinFlip,
+            ReplacementEvent::RollDice,
             ReplacementEvent::Other("Custom".to_string()),
         ];
         for event in events {

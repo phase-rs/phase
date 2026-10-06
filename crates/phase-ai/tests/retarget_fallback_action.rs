@@ -25,7 +25,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{
-    CastingVariant, RetargetScope, StackEntry, StackEntryKind, WaitingFor,
+    CastingVariant, RetargetScope, RetargetSlotAddress, StackEntry, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::CardId;
 use engine::types::phase::Phase;
@@ -100,6 +100,26 @@ fn fallback_retarget_action_is_legal() {
         },
     });
 
+    // phase-rs/phase#8355 round-8 review finding H2 (second pass):
+    // production-shaped `slots`/`slot_pools`, not the outer-empty compat
+    // shorthand this row used before (paired with a board-state Shroud
+    // keyword to keep `victim` excluded from re-derivation under H3). That
+    // pairing was the bug: an outer-empty `slot_pools` re-derives per-
+    // position pools from the LIVE board (H3), so the row's exclusion of
+    // `victim` depended on the keyword surviving unrelated board setup — and
+    // without it, re-derivation reads `victim` back as a genuine, likely
+    // FIRST, "any target" candidate. Measured (`Keyword::Shroud` removed,
+    // shape otherwise unchanged): the generator proposes five candidates
+    // including `victim`, the reducer accepts it, and `fallback_action`
+    // proposes it too — the discriminating assertion below never fires
+    // because the scenario the row claims to test ("current target dropped
+    // out of the pool") no longer held. A production `Single` prompt is
+    // never built with an empty `slot_pools` (INVARIANT SC) — pin the
+    // fixture to that shape so the exclusion is guaranteed BY THE PAYLOAD,
+    // not by a keyword surviving whatever re-derivation happens to read off
+    // the board.
+    let slot_pool = vec![TargetRef::Object(alternative)];
+
     // A directly parked prompt: no pending cast, so `fallback_action`'s
     // cancel-cast escape cannot fire before the `RetargetChoice` arm.
     runner.state_mut().waiting_for = WaitingFor::RetargetChoice {
@@ -107,7 +127,12 @@ fn fallback_retarget_action_is_legal() {
         stack_entry_index: 0,
         scope: RetargetScope::Single,
         current_targets: vec![TargetRef::Object(victim)],
-        legal_new_targets: vec![TargetRef::Object(alternative)],
+        slots: vec![RetargetSlotAddress {
+            path: vec![],
+            slot: 0,
+        }],
+        slot_pools: vec![slot_pool.clone()],
+        legal_new_targets: slot_pool,
     };
 
     let action = fallback_for_prompt(&runner);
@@ -120,8 +145,22 @@ fn fallback_retarget_action_is_legal() {
         "reach guard: the RetargetChoice arm must be the one that answered, got {action:?}"
     );
 
-    // Discriminating: at base the action is `RetargetSpell { [victim] }`, which
-    // the reducer rejects with "chosen target not in legal alternatives".
+    // Discriminating: the action must propose a target OTHER than victim
+    // (CR 115.7a: "another legal target") — at base the action is
+    // `RetargetSpell { [victim] }`, which the reducer rejects with "chosen
+    // target not in legal alternatives". `victim` is not a member of the
+    // declared `slot_pool`, so this asserts the CLAIM ("not the excluded
+    // current target") against the exact pool both `fallback_action` and
+    // `apply_retarget` read, rather than pinning one arbitrary enumeration-
+    // order winner.
+    assert_ne!(
+        action,
+        Some(GameAction::RetargetSpell {
+            new_targets: vec![TargetRef::Object(victim)],
+        }),
+        "CR 115.7a: the fallback must propose ANOTHER legal target, not the \
+         shrouded current target, got {action:?}"
+    );
     runner
         .act(action.unwrap())
         .expect("the fallback's action must be accepted by the reducer");
@@ -138,18 +177,28 @@ fn fallback_retarget_action_is_legal() {
 ///
 /// This fixture is the same shape as `retarget_prompt_softlock.rs` row 2e:
 /// `current_targets` has LENGTH 2 while the accepted submission has LENGTH 1,
-/// because the reducer's `Single` arm hard-requires exactly one target. Applying
-/// it assigns `ability.targets = [P1]` and TRUNCATES the count-source slot.
-/// Neither subrule that reaches this arm permits dropping an undisturbed slot:
-/// CR 115.7b changes one target and leaves every other declared target in place,
-/// and CR 115.7a is all-or-none. Because the two prescribe DIFFERENT remedies and
-/// `RetargetScope::Single` is produced by both oracle templates, the deferred fix
-/// must dispatch on the template; row 2e's SCOPE note carries the full
-/// two-template analysis. The length-1 acceptance asserted below is recorded as
-/// OBSERVED CURRENT BEHAVIOUR, deliberately NOT endorsed:
+/// because the reducer's `Single` arm hard-requires exactly one target.
+/// (phase-rs/phase#8355 round-8 review LOW finding, correcting this note: with
+/// `slots` populated — as this fixture does below — `apply_retarget`'s write is
+/// PER-ADDRESS, not the compat branch's blanket `ability.targets = new_targets`.
+/// Applying `[P1]` writes ONLY slot 0; `ability.targets` stays LENGTH 2 and slot
+/// 1 keeps its prior value untouched. It is the outer-empty `slots` compat
+/// branch alone that would truncate — not this fixture's write, and not any
+/// LIVE production `Single` prompt, which is never built with an empty `slots`
+/// under Invariant SC.) CR 115.7b's remedy (one slot changes, every other
+/// declared target stays in place) is exactly what this per-address write does;
+/// only CR 115.7a's all-or-none remedy would make a single-slot write WRONG for
+/// a multi-target entry, and `RetargetScope::Single` is produced by both oracle
+/// templates, so a correctness fix must dispatch on the template — row 2e's
+/// SCOPE note carries the full two-template analysis, including why no printed
+/// card reaches this arm under the CR-115.7a template. The length-1 acceptance
+/// asserted below is recorded as OBSERVED CURRENT BEHAVIOUR rather than a
+/// blanket endorsement, because `RetargetScope::Single` itself cannot tell the
+/// two templates apart at this seam:
 ///
-///   DEFERRED(out-of-run): interactive Single-scope retarget collapses
-///   multi-target lists (CR 115.7a / CR 115.7b) — upstream cause filter.rs
+///   DEFERRED(out-of-run): interactive Single-scope retarget cannot honor CR
+///   115.7a's all-or-none remedy for a synthetic multi-target entry reached
+///   through the "change the target of" template — upstream cause filter.rs
 ///   FilterProp::HasSingleTarget is permissive with no resolution-time
 ///   validation; fix needs filter.rs + interaction.rs, both outside phase 1's
 ///   frozen scope.
@@ -205,9 +254,16 @@ fn fallback_multi_role_retarget_action_is_slot_legal() {
         },
     });
 
-    // Both structural reach-guards: without the entry, `retarget_actions`'
-    // `is_none_or` passes every candidate unfiltered and `apply_retarget` skips
-    // its per-slot stage, so this row would be vacuous in both directions.
+    // Both structural reach-guards. (phase-rs/phase#8355 round-8 review LOW
+    // finding: corrects a justification naming `retarget_actions`' `is_none_or`
+    // — no such call exists in that function.) Without the first,
+    // `retarget_actions`' own `entry.ability()` lookup fails and it returns NO
+    // candidates, so the contract `fallback_action` consults offers nothing for
+    // this prompt and the row's own `action.is_some()` reach-guard fails for the
+    // wrong reason. Without the second, `chain_retarget_slots` no longer
+    // produces the per-role-pair bindings this fixture's `slots` address, so
+    // `retarget_slots_aligned` rejects the mismatch and `retarget_actions`
+    // again returns nothing. Either degradation makes this row vacuous.
     assert!(
         runner.state().stack[0].ability().is_some(),
         "reach guard: stack index 0 must carry the ability under test"
@@ -217,11 +273,32 @@ fn fallback_multi_role_retarget_action_is_slot_legal() {
         "reach guard: the node must be inside the per-slot admitted class"
     );
 
+    // CR 115.7a / phase-rs/phase#8355 round 8 (H1): a production `Single`
+    // prompt is never built with an empty `slot_pools` — every exposed
+    // position gets its pool from `change_targets::slot_pool`. Populate the
+    // same per-slot pools a real prompt would store, matching
+    // `retarget_prompt_softlock.rs`'s `multi_role_mana_single_retarget_
+    // candidates_are_slot_legal` fixture: slot 0 (recipient, opponent-only)
+    // admits only P1; slot 1 (count source, any player) admits both.
     runner.state_mut().waiting_for = WaitingFor::RetargetChoice {
         player: P0,
         stack_entry_index: 0,
         scope: RetargetScope::Single,
         current_targets,
+        slots: vec![
+            RetargetSlotAddress {
+                path: vec![],
+                slot: 0,
+            },
+            RetargetSlotAddress {
+                path: vec![],
+                slot: 1,
+            },
+        ],
+        slot_pools: vec![
+            vec![TargetRef::Player(P1)],
+            vec![TargetRef::Player(P0), TargetRef::Player(P1)],
+        ],
         legal_new_targets: vec![TargetRef::Player(P0), TargetRef::Player(P1)],
     };
 
@@ -248,12 +325,18 @@ fn fallback_multi_role_retarget_action_is_slot_legal() {
     // `Single` arm rejects outright.
     //
     // "Accepted by the reducer" is the WHOLE claim here — acceptance, not
-    // rules-correctness. Applying this length-1 submission to the length-2
-    // target list truncates the count-source slot, contrary to CR 115.7a /
-    // CR 115.7b alike. See this row's SCOPE note and the DEFERRED(out-of-run)
-    // entry it carries; that truncation is why this row deliberately asserts
+    // rules-correctness. (phase-rs/phase#8355 round-8 review LOW finding,
+    // correcting this note: with `slots` populated, as this fixture's payload
+    // above does, `apply_retarget`'s write is PER-ADDRESS and does NOT
+    // truncate — slot 1 keeps its prior value untouched; only the outer-empty
+    // `slots` compat branch overwrites the whole vector.) This length-1
+    // submission is CR-115.7b-correct; it is only a possible CR-115.7a
+    // all-or-none concern under the unreachable-by-printed-card "change the
+    // target of" template. See this row's SCOPE note and the
+    // DEFERRED(out-of-run) entry it carries; this row deliberately asserts
     // only that the submission is accepted, and never asserts the resulting
-    // `ability.targets`.
+    // `ability.targets`, because that template-dependent legality question is
+    // exactly what `RetargetScope::Single` cannot answer at this seam.
     runner.act(action.unwrap()).expect(
         "the fallback's action must be ACCEPTED by the reducer — acceptance only, not a \
          claim of CR-115.7a / CR-115.7b legality; see this row's SCOPE note",
@@ -319,10 +402,13 @@ fn park_multi_role_retarget(
         },
     });
 
-    // The same two structural reach-guards row 2f carries: without the entry,
-    // `retarget_actions`' `is_none_or` passes every candidate unfiltered and
-    // `apply_retarget` skips its per-slot stage, so any row built here would be
-    // vacuous in both directions.
+    // The same two structural reach-guards row 2f carries (see its corrected
+    // justification above, phase-rs/phase#8355 round-8 review LOW finding):
+    // without the entry, `retarget_actions` returns NO candidates
+    // (`entry.ability()` fails); without the per-slot admitted class,
+    // `retarget_slots_aligned` rejects the resulting binding mismatch and
+    // `retarget_actions` again returns nothing. Either way any row built here
+    // would be vacuous.
     assert!(
         runner.state().stack[0].ability().is_some(),
         "reach guard: stack index 0 must carry the ability under test"
@@ -332,11 +418,38 @@ fn park_multi_role_retarget(
         "reach guard: the node must be inside the per-slot admitted class"
     );
 
+    // CR 115.7a / phase-rs/phase#8355 round 8 (H1): a production `Single`
+    // prompt is never built with an empty `slot_pools` — every exposed
+    // position gets its pool from `change_targets::slot_pool`. Derive slot
+    // 0's real pool from the caller's flat candidate list by the SAME filter
+    // the role declares (`ControllerRef::Opponent`): P0 is never its own
+    // opponent, so a caller-supplied candidate equal to P0 is honestly
+    // ABSENT from slot 0's stored pool rather than merely rejected after
+    // being offered. Slot 1 (count source, any player) has no such
+    // restriction, so its pool is the caller's flat list unfiltered — and is
+    // never consulted by a `Single` submission anyway (`apply_retarget`'s
+    // `Single` arm only ever writes/admits position 0).
+    let slot0_pool: Vec<TargetRef> = legal_new_targets
+        .iter()
+        .filter(|t| **t != TargetRef::Player(P0))
+        .cloned()
+        .collect();
     runner.state_mut().waiting_for = WaitingFor::RetargetChoice {
         player: P0,
         stack_entry_index: 0,
         scope: RetargetScope::Single,
         current_targets,
+        slots: vec![
+            RetargetSlotAddress {
+                path: vec![],
+                slot: 0,
+            },
+            RetargetSlotAddress {
+                path: vec![],
+                slot: 1,
+            },
+        ],
+        slot_pools: vec![slot0_pool, legal_new_targets.clone()],
         legal_new_targets,
     };
     runner

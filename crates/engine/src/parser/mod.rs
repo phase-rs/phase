@@ -1,3 +1,4 @@
+pub mod audit_projection;
 pub(crate) mod clause_shell;
 pub mod oracle;
 pub(crate) mod oracle_attraction;
@@ -31,6 +32,7 @@ pub(crate) mod swallow_evidence;
 pub(crate) mod test_support;
 
 pub use oracle::parse_oracle_text;
+pub use oracle::parse_oracle_text_traced;
 
 use thiserror::Error;
 

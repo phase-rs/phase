@@ -17,6 +17,7 @@ import {
   PACING_MAX,
   PACING_MIN,
   defaultPacingMultipliers,
+  type CardAnimationStyle,
   type PacingCategory,
   type VfxQuality,
 } from "../animation/types";
@@ -108,7 +109,7 @@ export type OpponentHudDensity = "comfortable" | "compact";
 export type MultiplayerBoardLayout = "auto" | "focused" | "split";
 /** A layout after viewport/table-size resolution, suitable for board chrome. */
 export type ResolvedMultiplayerBoardLayout = Exclude<MultiplayerBoardLayout, "auto">;
-/** "auto-wubrg" picks a random battlefield matching the dominant mana color.
+/** "auto-wubrg" picks the arena matching the dominant mana color.
  *  "random" picks a random battlefield each game regardless of color.
  *  "none" disables the background image.
  *  "custom" uses the URL stored in `customBackgroundUrl`.
@@ -282,10 +283,12 @@ function buildDefaultPreferences(): PreferencesState {
     boardBackground: "auto-wubrg",
     customBackgroundUrl: "",
     vfxQuality: "full",
+    cardAnimationStyle: "webgl",
     animationSpeedMultiplier: ANIMATION_SPEED_DEFAULT,
     pacingMultipliers: defaultPacingMultipliers(),
     phaseStops: [],
     priorityPassingMode: "Standard",
+    experimentalTournamentsEnabled: false,
     masterVolume: 100,
     sfxVolume: 70,
     musicVolume: 40,
@@ -347,6 +350,8 @@ interface PreferencesState {
   boardBackground: BoardBackground;
   customBackgroundUrl: string;
   vfxQuality: VfxQuality;
+  /** New (`"webgl"`) or Classic card animations. Independent of `vfxQuality`. */
+  cardAnimationStyle: CardAnimationStyle;
   /** Continuous global animation-speed multiplier. `0` = instant (skip waits).
    *  `1` = neutral. Higher = slower playback. Multiplies every per-category
    *  duration after pacingMultipliers is applied. */
@@ -357,6 +362,8 @@ interface PreferencesState {
   pacingMultipliers: Record<PacingCategory, number>;
   phaseStops: PhaseStop[];
   priorityPassingMode: PriorityPassingMode;
+  /** Whether the in-progress tournament UI appears in app navigation. */
+  experimentalTournamentsEnabled: boolean;
   masterVolume: number;
   sfxVolume: number;
   musicVolume: number;
@@ -462,6 +469,7 @@ interface PreferencesActions {
   setBoardBackground: (bg: BoardBackground) => void;
   setCustomBackgroundUrl: (url: string) => void;
   setVfxQuality: (quality: VfxQuality) => void;
+  setCardAnimationStyle: (style: CardAnimationStyle) => void;
   setAnimationSpeedMultiplier: (multiplier: number) => void;
   setPacingMultiplier: (category: PacingCategory, multiplier: number) => void;
   /** Reset every pacing slider (animation speed + per-category) back to 1.0×. */
@@ -472,6 +480,7 @@ interface PreferencesActions {
   resetAllPreferences: () => void;
   setPhaseStops: (stops: PhaseStop[]) => void;
   setPriorityPassingMode: (mode: PriorityPassingMode) => void;
+  setExperimentalTournamentsEnabled: (enabled: boolean) => void;
   setMasterVolume: (vol: number) => void;
   setSfxVolume: (vol: number) => void;
   setMusicVolume: (vol: number) => void;
@@ -608,6 +617,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setBoardBackground: (bg) => set({ boardBackground: bg }),
       setCustomBackgroundUrl: (url) => set({ customBackgroundUrl: url.trim() }),
       setVfxQuality: (quality) => set({ vfxQuality: quality }),
+      setCardAnimationStyle: (style) => set({ cardAnimationStyle: style }),
       setAnimationSpeedMultiplier: (multiplier) =>
         set({ animationSpeedMultiplier: clamp(multiplier, ANIMATION_SPEED_MIN, ANIMATION_SPEED_MAX) }),
       setPacingMultiplier: (category, multiplier) =>
@@ -625,6 +635,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       resetAllPreferences: () => set(buildDefaultPreferences()),
       setPhaseStops: (stops) => set({ phaseStops: stops }),
       setPriorityPassingMode: (mode) => set({ priorityPassingMode: mode }),
+      setExperimentalTournamentsEnabled: (enabled) => set({ experimentalTournamentsEnabled: enabled }),
       setMasterVolume: (vol) => set({ masterVolume: vol }),
       setSfxVolume: (vol) => set({ sfxVolume: vol }),
       setMusicVolume: (vol) => set({ musicVolume: vol }),
@@ -820,7 +831,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 34,
+      version: 37,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -903,6 +914,13 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       //          once is now remembered. The legacy key is dropped so it cannot
       //          linger in the persisted blob. Mobile never auto-opens regardless,
       //          so this is a desktop-only behavior change.
+      // v34 → v35: Add experimentalTournamentsEnabled. Existing users retain
+      //          the hidden-by-default navigation because the shallow merge
+      //          supplies false.
+      // v35 → v36: Add cardAnimationStyle. Existing users get "webgl" (the New
+      //          card animations) through the shallow merge, the same as fresh
+      //          stores, so no migrate block is needed.
+      // v36 → v37: Consolidate battlefield art to one animated arena per color.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;
@@ -1100,6 +1118,21 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           const { logDefaultState: _legacyLogDefault, ...rest } = migrated;
           void _legacyLogDefault;
           migrated = { ...rest, logPanelLastChoice: "open" };
+        }
+
+        if (version < 37) {
+          switch (migrated.boardBackground) {
+            case "water_frozen_aurora":
+              migrated = { ...migrated, boardBackground: "water_moonlit_ocean_temple" };
+              break;
+            case "shadow_haunted_graveyard":
+            case "shadow_ruined_archway":
+              migrated = { ...migrated, boardBackground: "shadow_moon_coven_sanctum" };
+              break;
+            case "earth_jurassic":
+              migrated = { ...migrated, boardBackground: "earth_snowy_forest" };
+              break;
+          }
         }
 
         return {
