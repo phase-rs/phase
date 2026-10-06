@@ -334,25 +334,65 @@ fn entering_artifact_animated_in_layer_four_updates_existing_marvin() {
         })
         .id();
     let mut runner = scenario.build();
-    move_to_zone(runner.state_mut(), ring, Zone::Hand, &mut Vec::new());
+    assert!(runner.state().objects[&marvin]
+        .base_static_definitions
+        .iter()
+        .flat_map(|definition| &definition.modifications)
+        .any(|modification| matches!(
+            modification,
+            ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        )));
+    move_to_zone(runner.state_mut(), ring, Zone::Graveyard, &mut Vec::new());
     mark_layers_full(runner.state_mut());
     flush_layers(runner.state_mut());
     assert!(activated_ability_definitions(runner.state(), marvin).is_empty());
-    assert_eq!(activated_ability_definitions(runner.state(), ring).len(), 1);
+    assert!(runner.state().objects[&ring]
+        .card_types
+        .core_types
+        .contains(&CoreType::Artifact));
+    assert!(!runner.state().objects[&ring]
+        .card_types
+        .core_types
+        .contains(&CoreType::Creature));
+    let donor_abilities = activated_ability_definitions(runner.state(), ring);
+    assert_eq!(donor_abilities.len(), 1);
+    let donor = &donor_abilities[0].1;
+    assert_eq!(donor.kind, AbilityKind::Activated);
+    assert_eq!(donor.cost, Some(AbilityCost::Tap));
+    assert!(matches!(donor.effect.as_ref(), Effect::Mana { .. }));
 
     // CR 611.3a + CR 613.1d: The entrant is a noncreature artifact at the
     // incremental gate, then becomes a creature before Marvin reads providers.
     // Marvin is pre-existing and must be re-derived with the new provider.
     move_to_zone(runner.state_mut(), ring, Zone::Battlefield, &mut Vec::new());
+    assert!(runner.state().objects[&ring]
+        .card_types
+        .core_types
+        .contains(&CoreType::Artifact));
+    assert!(!runner.state().objects[&ring]
+        .card_types
+        .core_types
+        .contains(&CoreType::Creature));
+    let pre_flush_donor = activated_ability_definitions(runner.state(), ring);
+    assert_eq!(pre_flush_donor.len(), 1);
+    assert_eq!(pre_flush_donor[0].1, *donor);
+    assert!(activated_ability_definitions(runner.state(), marvin).is_empty());
+    assert_eq!(
+        runner.state().layers_dirty,
+        LayersDirty::EnteredObjects([ring].into())
+    );
+    engine::game::perf_counters::reset();
     flush_layers(runner.state_mut());
+    let counters = engine::game::perf_counters::snapshot();
+    assert_eq!(counters.layers_escalated, 1);
+    assert_eq!(counters.layers_incremental, 0);
     assert!(runner.state().objects[&ring]
         .card_types
         .core_types
         .contains(&CoreType::Creature));
-    assert_eq!(
-        activated_ability_definitions(runner.state(), marvin).len(),
-        1
-    );
+    let granted = activated_ability_definitions(runner.state(), marvin);
+    assert_eq!(granted.len(), 1);
+    assert_eq!(granted[0].1, *donor);
 
     move_to_zone(runner.state_mut(), ring, Zone::Graveyard, &mut Vec::new());
     flush_layers(runner.state_mut());
