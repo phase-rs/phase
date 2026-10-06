@@ -606,7 +606,7 @@ fn nested_meta_grants_read_original_static_granter_suppression() {
         // and that recipient reads both exact definitions from the provider.
         assert!(runner.state().objects[&recipient]
             .static_definitions
-            .iter_all()
+            .iter_unchecked()
             .any(
                 |definition| definition.modifications.iter().any(|modification| matches!(
                     modification,
