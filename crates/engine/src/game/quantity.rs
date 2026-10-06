@@ -3514,8 +3514,8 @@ pub fn detection_trigger_event() -> Option<crate::types::events::GameEvent> {
 // construction (`build_target_slots`) and subject-count freezing
 // (`freeze_reflexive_event_count`) in one shot, regardless of which of the
 // ~7 `resolve_quantity*` entry points either path happens to use, because the
-// gate lives in `resolve_ref`'s `EventContextAmount` arm — the single shared
-// consumption point all of them funnel into.
+// gate lives in the `EventContextAmount` cascade (`event_context_amount`) — the
+// single shared consumption point all of them funnel into.
 std::thread_local! {
     static SUPPRESS_ENCLOSING_TRIGGER_EVENT_AMOUNT: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
@@ -3746,16 +3746,7 @@ pub fn resolve_quantity_with_targets(
             state,
             qty,
             controller,
-            QuantityContext {
-                entering: None,
-                source: ability.source_id,
-                trigger_source: ability.trigger_source.clone(),
-                recipient: None,
-                scoped_player: ability.scoped_player,
-                damage_source: None,
-                event_amount: None,
-                spell: None,
-            },
+            ability_quantity_context(ability),
             &ability.targets,
             ability.chosen_x,
             Some(ability),
@@ -3764,6 +3755,38 @@ pub fn resolve_quantity_with_targets(
             resolve_quantity_with_targets(state, inner, ability)
         }),
     }
+}
+
+/// The quantity context `resolve_quantity_with_targets` resolves `ability`'s
+/// quantities in.
+fn ability_quantity_context(ability: &ResolvedAbility) -> QuantityContext {
+    QuantityContext {
+        entering: None,
+        source: ability.source_id,
+        trigger_source: ability.trigger_source.clone(),
+        recipient: None,
+        scoped_player: ability.scoped_player,
+        damage_source: None,
+        event_amount: None,
+        spell: None,
+    }
+}
+
+/// CR 603.7a + CR 608.2h: The amount "that many" / "that much"
+/// (`QuantityRef::EventContextAmount`) names in `ability`'s resolution, read
+/// exactly as `resolve_quantity_with_targets` reads it but without the 0 default:
+/// `Some` when the resolution determined an amount (zero included), `None` when
+/// it determined none.
+pub(crate) fn determined_event_context_amount(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<i32> {
+    event_context_amount(
+        state,
+        &ability_quantity_context(ability),
+        ability.chosen_x,
+        Some(ability),
+    )
 }
 
 /// CR 608.2c: Resolve a condition quantity from the printed ability controller's
@@ -5596,94 +5619,11 @@ fn resolve_ref(
         QuantityRef::ExiledFromHandThisResolution => {
             u32_to_i32_saturating(state.exiled_from_hand_this_resolution)
         }
-        // CR 603.2c: Numeric value carried by the triggering event,
-        // resolution-precedence ordered:
-        //
-        //   1. `current_trigger_match_count` — the filtered subject count of a
-        // batched trigger ("one or more <FILTER> <verb>"), set by
-        // `stack::resolve_top` for the resolution. This is the canonical
-        // "that many" for Ur-Dragon-style batched triggers; without it
-        // the `extract_amount_from_event` cascade below falls through to
-        // 0 on `AttackersDeclared` and similar batched events.
-        //   2. CR 706.4: `die_result_this_resolution` — die results recorded
-        // earlier in THIS resolution (no results table) outrank the
-        // triggering event's own amount, so "roll one or more dice.
-        // <effect> equal to the result(s)" consumes the roll total, not
-        // the combat damage / life change that triggered it.
-        //   3. `last_effect_counts_by_player` — APNAP per-player counts from
-        // the preceding effect in the same resolution.
-        //   4. `extract_amount_from_event(current_trigger_event)` — scalar
-        // events with an inherent amount (damage dealt, life changed,
-        // cards drawn, counters added/removed, die rolls).
-        //   5. `last_effect_count` / `last_effect_amount` — sub_ability
-        // continuation fallbacks (e.g. "discard up to N, then draw that
-        // many"; "dealt excess damage this way, add that much {R}").
-        //   6. `0` — undefined.
-        QuantityRef::EventContextAmount => ctx
-            // CR 121.2a + CR 614.1a: a replacement condition evaluated against a
-            // proposed event reads that event's own amount ("would draw two or
-            // more cards" compares the pending draw's count). `Some` only in the
-            // replacement-condition context, so every other caller falls through
-            // to the cascade below unchanged.
-            .event_amount
-            // CR 614.1a: Moonlit-scoped "that many" copy count — highest priority
-            // after the proposed event's own amount, which is never set while a
-            // substitution continuation resolves. `Some` only while a
-            // `CopyTokenOf` substitution continuation resolves (Moonlit
-            // Meditation); `None` otherwise, so it falls straight through to the
-            // existing trigger/effect cascade.
-            .or(state.post_replacement_token_substitution_count)
-            .or_else(|| enclosing_trigger_match_count(state))
-            // CR 706.4: Die results recorded earlier in THIS resolution
-            // outrank the triggering event's own amount, so "roll one or more
-            // dice. <effect> equal to the result(s)" consumes the roll total,
-            // not the combat damage / life change that triggered it.
-            .or(state.die_result_this_resolution)
-            // CR 608.2c + CR 109.5: A scoped continuation's per-player
-            // accounting binds "that many" to its current recipient before a
-            // scalar enclosing trigger/event can shadow the recipient's own
-            // result. A present map deliberately returns 0 for a player with
-            // no counted events.
-            .or_else(|| {
-                ctx.scoped_player.and_then(|player| {
-                    (!state.last_effect_counts_by_player.is_empty()).then(|| {
-                        state
-                            .last_effect_counts_by_player
-                            .get(&player)
-                            .copied()
-                            .unwrap_or(0)
-                    })
-                })
-            })
-            // CR 603.2c: The triggering event's own scalar amount (damage,
-            // life change, cards drawn, counters, die results), plus the CR
-            // 603.4 detection-time fallback for intervening-`if` re-checks
-            // where `current_trigger_event` is still `None`. Both tiers are
-            // suppressed inside `with_reflexive_resolution_scope` (CR 603.12) so
-            // a reflexive ability's "that many" never reads the enclosing
-            // trigger's event while that trigger's resolution is paused.
-            .or_else(|| enclosing_trigger_event_amount(state))
-            .or(state.last_effect_count)
-            .or(state.last_effect_amount)
-            // CR 107.3a + CR 601.2b + CR 602.2b: If "that many" has no live
-            // trigger/effect context, it may refer to the variable count chosen
-            // for the spell or activated ability's cost (for example, "Remove
-            // any number of counters: Create that many tokens.").
-            .or_else(|| chosen_x.map(u32_to_i32_saturating))
-            // CR 603.10 + CR 608.2h + CR 122.2: A "leaves the battlefield / dies,
-            // if it had one or more <X> counters on it, put that many <X> counters
-            // on …" look-back (Reyhan, Last of the Abzan) resolves "that many" to
-            // the count of `<X>` counters the triggering object had as it left
-            // (kind taken from the resolving counter effect). Counters cease to
-            // exist on the zone change (CR 122.2), so the live object's map is
-            // empty — the count comes from the leaving object's last-known
-            // information. Sits LAST and fires only for counter-placing effects:
-            // a dies/leaves trigger whose "that many" is produced by a preceding
-            // effect (Whirlpool Drake: "shuffle the cards from your hand into your
-            // library, then draw that many cards") is a non-counter effect, so it
-            // resolves via `last_effect_count`/`last_effect_amount` above.
-            .or_else(|| event_context_counter_count_from_lki(state, ability))
-            .unwrap_or(0),
+        // CR 603.2c: Numeric value carried by the triggering event (see
+        // `event_context_amount`); an undetermined amount reads as 0.
+        QuantityRef::EventContextAmount => {
+            event_context_amount(state, &ctx, chosen_x, ability).unwrap_or(0)
+        }
         // CR 608.2c: If an earlier effect in this same resolution captured an
         // explicit object context, use that object before the original trigger
         // event. This covers "sacrifice another creature. ... that creature's
@@ -7401,6 +7341,105 @@ fn battlefield_departure_counter_context(
             BattlefieldDepartureCounterContext::Malformed
         }
     }
+}
+
+/// CR 603.2c + CR 608.2c: The `EventContextAmount` ("that many" / "that much")
+/// cascade — the single authority for which amount it names, or `None` when no
+/// tier determined one. `resolve_ref` reads `None` as 0; callers that must tell an
+/// undetermined amount from a determined zero (a delayed trigger freezing its
+/// creation-time amount, CR 603.7a) use `determined_event_context_amount`.
+/// Resolution-precedence ordered:
+///
+///   1. `current_trigger_match_count` — the filtered subject count of a
+///      batched trigger ("one or more <FILTER> <verb>"), set by
+///      `stack::resolve_top` for the resolution. This is the canonical
+///      "that many" for Ur-Dragon-style batched triggers; without it
+///      the `extract_amount_from_event` cascade below falls through to
+///      0 on `AttackersDeclared` and similar batched events.
+///   2. CR 706.4: `die_result_this_resolution` — die results recorded
+///      earlier in THIS resolution (no results table) outrank the
+///      triggering event's own amount, so "roll one or more dice.
+///      <effect> equal to the result(s)" consumes the roll total, not
+///      the combat damage / life change that triggered it.
+///   3. `last_effect_counts_by_player` — APNAP per-player counts from
+///      the preceding effect in the same resolution.
+///   4. `extract_amount_from_event(current_trigger_event)` — scalar
+///      events with an inherent amount (damage dealt, life changed,
+///      cards drawn, counters added/removed, die rolls).
+///   5. `last_effect_count` / `last_effect_amount` — sub_ability
+///      continuation fallbacks (e.g. "discard up to N, then draw that
+///      many"; "dealt excess damage this way, add that much {R}").
+///   6. `None` — undetermined.
+fn event_context_amount(
+    state: &GameState,
+    ctx: &QuantityContext,
+    chosen_x: Option<u32>,
+    ability: Option<&ResolvedAbility>,
+) -> Option<i32> {
+    ctx
+        // CR 121.2a + CR 614.1a: a replacement condition evaluated against a
+        // proposed event reads that event's own amount ("would draw two or
+        // more cards" compares the pending draw's count). `Some` only in the
+        // replacement-condition context, so every other caller falls through
+        // to the cascade below unchanged.
+        .event_amount
+        // CR 614.1a: Moonlit-scoped "that many" copy count — highest priority
+        // after the proposed event's own amount, which is never set while a
+        // substitution continuation resolves. `Some` only while a
+        // `CopyTokenOf` substitution continuation resolves (Moonlit
+        // Meditation); `None` otherwise, so it falls straight through to the
+        // existing trigger/effect cascade.
+        .or(state.post_replacement_token_substitution_count)
+        .or_else(|| enclosing_trigger_match_count(state))
+        // CR 706.4: Die results recorded earlier in THIS resolution
+        // outrank the triggering event's own amount, so "roll one or more
+        // dice. <effect> equal to the result(s)" consumes the roll total,
+        // not the combat damage / life change that triggered it.
+        .or(state.die_result_this_resolution)
+        // CR 608.2c + CR 109.5: A scoped continuation's per-player
+        // accounting binds "that many" to its current recipient before a
+        // scalar enclosing trigger/event can shadow the recipient's own
+        // result. A present map deliberately returns 0 for a player with
+        // no counted events.
+        .or_else(|| {
+            ctx.scoped_player.and_then(|player| {
+                (!state.last_effect_counts_by_player.is_empty()).then(|| {
+                    state
+                        .last_effect_counts_by_player
+                        .get(&player)
+                        .copied()
+                        .unwrap_or(0)
+                })
+            })
+        })
+        // CR 603.2c: The triggering event's own scalar amount (damage,
+        // life change, cards drawn, counters, die results), plus the CR
+        // 603.4 detection-time fallback for intervening-`if` re-checks
+        // where `current_trigger_event` is still `None`. Both tiers are
+        // suppressed inside `with_reflexive_resolution_scope` (CR 603.12) so
+        // a reflexive ability's "that many" never reads the enclosing
+        // trigger's event while that trigger's resolution is paused.
+        .or_else(|| enclosing_trigger_event_amount(state))
+        .or(state.last_effect_count)
+        .or(state.last_effect_amount)
+        // CR 107.3a + CR 601.2b + CR 602.2b: If "that many" has no live
+        // trigger/effect context, it may refer to the variable count chosen
+        // for the spell or activated ability's cost (for example, "Remove
+        // any number of counters: Create that many tokens.").
+        .or_else(|| chosen_x.map(u32_to_i32_saturating))
+        // CR 603.10 + CR 608.2h + CR 122.2: A "leaves the battlefield / dies,
+        // if it had one or more <X> counters on it, put that many <X> counters
+        // on …" look-back (Reyhan, Last of the Abzan) resolves "that many" to
+        // the count of `<X>` counters the triggering object had as it left
+        // (kind taken from the resolving counter effect). Counters cease to
+        // exist on the zone change (CR 122.2), so the live object's map is
+        // empty — the count comes from the leaving object's last-known
+        // information. Sits LAST and fires only for counter-placing effects:
+        // a dies/leaves trigger whose "that many" is produced by a preceding
+        // effect (Whirlpool Drake: "shuffle the cards from your hand into your
+        // library, then draw that many cards") is a non-counter effect, so it
+        // resolves via `last_effect_count`/`last_effect_amount` above.
+        .or_else(|| event_context_counter_count_from_lki(state, ability))
 }
 
 /// CR 603.10 + CR 608.2h + CR 122.2: For a battlefield-departure look-back
@@ -19909,6 +19948,48 @@ mod tests {
             qty: QuantityRef::EventContextAmount,
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
+    }
+
+    /// CR 603.7a + CR 608.2h: `determined_event_context_amount` tells an amount
+    /// the resolution did not determine (`None`) from a determined zero
+    /// (`Some(0)`), while `EventContextAmount` resolved as a quantity still reads
+    /// both as 0.
+    #[test]
+    fn determined_event_context_amount_distinguishes_undetermined_from_zero() {
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        let ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut state = GameState::new_two_player(42);
+        for (last_effect_count, determined, resolved) in [
+            (None, None, 0),
+            (Some(0), Some(0), 0),
+            (Some(3), Some(3), 3),
+        ] {
+            state.last_effect_count = last_effect_count;
+            assert_eq!(
+                determined_event_context_amount(&state, &ability),
+                determined,
+                "determined amount for last_effect_count {last_effect_count:?}"
+            );
+            assert_eq!(
+                resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)),
+                resolved,
+                "resolve_quantity for last_effect_count {last_effect_count:?}"
+            );
+            assert_eq!(
+                resolve_quantity_with_targets(&state, &expr, &ability),
+                resolved,
+                "resolve_quantity_with_targets for last_effect_count {last_effect_count:?}"
+            );
+        }
     }
 
     /// CR 603.2c: When the batched-trigger subject count is set,

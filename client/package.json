@@ -1,7 +1,7 @@
 {
   "name": "phase-rs-client",
   "private": true,
-  "version": "0.100.0",
+  "version": "0.103.0",
   "type": "module",
   "packageManager": "pnpm@9.15.9",
   "scripts": {

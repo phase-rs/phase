@@ -637,7 +637,8 @@ mod tests {
         PreviewRequestId, MAX_INTERACTION_LIST_LEN,
     };
     use engine::types::mana::{
-        ManaRestriction, ManaSourcePenalty, ManaSourceSelection, ManaType, TapsForManaSelection,
+        ManaRestriction, ManaSourceOutput, ManaSourcePenalty, ManaSourceQuantity,
+        ManaSourceSelection, ManaType, TapsForManaSelection,
     };
     use engine::types::{GameAction, ObjectId};
     use lobby_broker::validation::MAX_CONSUMED_TOKENS;
@@ -797,6 +798,27 @@ mod tests {
 
         let err = guard_client_message_before_dispatch(&msg, ServerMode::Full).unwrap_err();
         assert!(err.contains("TapLandForMana.selection.restrictions.OnlyForAny"));
+    }
+
+    #[test]
+    fn dispatch_guard_accepts_deferred_mana_quantity_at_action_boundary() {
+        let msg = ClientMessage::Action {
+            action: GameAction::ActivateManaSource {
+                selection: ManaSourceSelection {
+                    source: ObjectIncarnationRef::of(ObjectId(1), 1),
+                    ability_index: Some(0),
+                    mana_type: ManaType::Colorless,
+                    output: ManaSourceOutput::DeferredColorChoice {
+                        quantity: ManaSourceQuantity::Fixed(3),
+                    },
+                    atomic_combination: None,
+                    restrictions: Vec::new(),
+                    penalty: ManaSourcePenalty::Sacrifices,
+                    taps_for_mana: Vec::new(),
+                },
+            },
+        };
+        assert!(guard_client_message_before_dispatch(&msg, ServerMode::Full).is_ok());
     }
 
     #[test]

@@ -42,6 +42,7 @@ use crate::types::card_type::{
 use crate::types::counter::{has_positive_counters, CounterType};
 use crate::types::game_state::{
     DayNight, GameState, LayersDirty, StaticGateKey, TransientContinuousEffect,
+    TransientContinuousEffectBindings,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
@@ -1144,77 +1145,39 @@ pub(crate) fn prune_lapsed_host_bound_casting_permissions(state: &mut GameState)
 /// spell or ability's resolution, the effect does nothing"), so it is cited
 /// here as the rule that ends the duration, not as a quotation about revival.
 ///
-/// Runs at the same seam as `prune_lapsed_host_bound_casting_permissions`,
-/// inside `evaluate_layers` after the Layer-2 control board is finalized. Like
-/// `prune_lapsed_controller_controls_source` it does NOT mark layers dirty: it
-/// is already inside the pass, and marking would re-enter it.
-pub(crate) fn prune_lapsed_host_bound_effects(state: &mut GameState) {
-    if !state.transient_continuous_effects.iter().any(|e| {
-        matches!(
-            e.duration,
-            Duration::WhileControllingHost | Duration::WhileHostOnBattlefield
-        )
-    }) {
-        return;
-    }
-    // CR 611.2b: an effect is ENDED here, not suppressed. Both legs below are
-    // lapses that no zone change reports, so nothing else would remove the
+/// Runs on every settled board inside the derive-then-end fixed point of
+/// `evaluate_layers` (and after an incremental derivation): a removal returns
+/// `true` so the caller re-derives without the ended effect. Removing it after
+/// the board was already derived WITH it would publish that board — Master
+/// Thief's artifact would stay stolen after its controller lost the Thief.
+///
+/// The ending is retired through `retire_ended_effects`, exactly like a lapsed
+/// `ForAsLongAs`: replay of the command that caused the lapse (a control
+/// install, a phase-out) does not re-derive the board, so without the journaled
+/// receipt a replay would keep the effect and let a later return of control
+/// revive it.
+fn prune_lapsed_host_bound_effects(
+    state: &mut GameState,
+    retirement_owner: StateDurationRetirementOwner,
+) -> bool {
+    // CR 611.2b: an effect is ENDED here, not suppressed. Both readings lapse
+    // without any zone change reporting it, so nothing else would remove the
     // entry: `WhileControllingHost` lapses on a control change with the host
     // still on the battlefield, `WhileHostOnBattlefield` lapses on the host's
-    // phase-out (CR 702.26f). The event deadline is NOT ended here — see the
-    // match arm below for why.
+    // phase-out (CR 702.26f).
     //
     // Suppressing instead (declining to apply while the gate is false) is
     // wrong twice over: CR 611.2b ends the duration rather than pausing it, so
     // a later re-gain of control must not revive the effect, and the consumers
     // that walk `transient_continuous_effects` without
     // `transient_effect_is_live` would keep applying it meanwhile.
-    let lapsed: Vec<u64> = state
+    let lapsed: Vec<_> = state
         .transient_continuous_effects
         .iter()
-        .filter(|e| match e.duration {
-            Duration::WhileControllingHost => {
-                !crate::game::replacement::controller_controls_source_gate(
-                    state,
-                    e.source_id,
-                    e.controller,
-                )
-            }
-            // CR 611.2b + CR 702.26f: the presence reading ends when its host
-            // is phased out — "effects with 'for as long as' durations that
-            // track that permanent (see rule 611.2b) end when that permanent
-            // phases out because they can no longer see it." The battlefield
-            // check keeps the arm honest if the exit event was missed; the
-            // phase-out is the leg only this pass can see.
-            Duration::WhileHostOnBattlefield => !state.objects.get(&e.source_id).is_some_and(|o| {
-                o.zone == crate::types::zones::Zone::Battlefield && o.is_phased_in()
-            }),
-            // CR 611.2a + CR 702.26d: the EVENT deadline ("until ~ leaves the
-            // battlefield") is NOT ended here. A phase-out is not the host
-            // leaving the battlefield, so it keeps running across one;
-            // `prune_host_left_effects` ends it on the exit event itself.
-            Duration::UntilHostLeavesPlay
-            | Duration::UntilEndOfTurn
-            | Duration::UntilEndOfCombat
-            | Duration::UntilNextTurnOf { .. }
-            | Duration::UntilEndOfNextTurnOf { .. }
-            | Duration::UntilNextStepOf { .. }
-            | Duration::ForAsLongAs { .. }
-            | Duration::UntilSourceExilesAnotherCard
-            | Duration::UntilOpponentBecomesMonarch
-            // CR 611.2a + CR 601.2i: ended by the spell-cast expiry in
-            // `casting_costs`, not by a host lapse.
-            | Duration::UntilEvent { .. }
-            | Duration::Permanent => false,
-        })
-        .map(|e| e.id)
+        .filter(|e| !host_bound_duration_holds(state, &e.duration, e.source_id, e.controller))
+        .cloned()
         .collect();
-    if lapsed.is_empty() {
-        return;
-    }
-    state
-        .transient_continuous_effects
-        .retain(|e| !lapsed.contains(&e.id));
+    retire_ended_effects(state, lapsed, retirement_owner)
 }
 
 /// Remove transient effects bound to a specific affected object that has left the battlefield.
@@ -2960,42 +2923,22 @@ fn reset_remote_type_layer_recipients(
 /// `mark_layers_full` then `flush_layers`. Direct calls are reserved for
 /// tests that deliberately force a full evaluation regardless of dirty state.
 pub fn evaluate_layers(state: &mut GameState) {
+    evaluate_layers_with_retirement_owner(state, StateDurationRetirementOwner::LayerSettlement);
+}
+
+/// Call-local journal ownership only; both owners perform the complete settle.
+#[derive(Clone, Copy)]
+enum StateDurationRetirementOwner {
+    LayerSettlement,
+    AttachmentCommand,
+}
+
+fn evaluate_layers_with_retirement_owner(
+    state: &mut GameState,
+    retirement_owner: StateDurationRetirementOwner,
+) {
     #[cfg(test)]
     FULL_EVALUATE_LAYERS_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    // CR 611.2b + CR 301.5: an attachment-bound effect expires permanently
-    // when its source leaves the recipient. Merely suppressing it while the
-    // Equipment is unattached would illegally revive the old effect if that
-    // Equipment were later reattached to the same creature.
-    let lapsed_attachment_effects: Vec<u64> = state
-        .transient_continuous_effects
-        .iter()
-        .filter(|effect| {
-            let Duration::ForAsLongAs {
-                condition:
-                    StaticCondition::RecipientMatchesFilter {
-                        filter: TargetFilter::AttachedTo,
-                    },
-            } = &effect.duration
-            else {
-                return false;
-            };
-            let TargetFilter::SpecificObject { id: recipient } = &effect.affected else {
-                return false;
-            };
-            state
-                .objects
-                .get(&effect.source_id)
-                .and_then(|source| source.attached_to)
-                .and_then(|host| host.as_object())
-                != Some(*recipient)
-        })
-        .map(|effect| effect.id)
-        .collect();
-    if !lapsed_attachment_effects.is_empty() {
-        state
-            .transient_continuous_effects
-            .retain(|effect| !lapsed_attachment_effects.contains(&effect.id));
-    }
     // CR 302.6 + CR 613.1b + CR 702.26b: Snapshot effective controllers for
     // phased-in permanents BEFORE the Step 1 reset below wipes them. The
     // post-pass diff at the end of this function compares against this
@@ -3010,6 +2953,19 @@ pub fn evaluate_layers(state: &mut GameState) {
         .filter_map(|id| state.objects.get(&id).map(|o| (id, o.controller)))
         .collect();
 
+    // CR 611.2b + CR 613.1: derive before ending durations. Every repeat
+    // removes at least one stored effect, so convergence is monotone. Keep the
+    // original controller snapshot until the final board is ready.
+    let bf_ids = loop {
+        let bf_ids = derive_layer_characteristics(state);
+        if !prune_lapsed_durations(state, retirement_owner) {
+            break bf_ids;
+        }
+    };
+    finish_layer_evaluation(state, bf_ids, prev_controllers, retirement_owner);
+}
+
+fn derive_layer_characteristics(state: &mut GameState) -> Vec<ObjectId> {
     // Step 1: Reset computed characteristics to base values.
     // Only reset fields where base values were explicitly set; objects without
     // base values (e.g., from older test helpers) retain their current values.
@@ -3425,6 +3381,15 @@ pub fn evaluate_layers(state: &mut GameState) {
         }
     }
 
+    bf_ids
+}
+
+fn finish_layer_evaluation(
+    state: &mut GameState,
+    bf_ids: Vec<ObjectId>,
+    prev_controllers: Vec<(ObjectId, PlayerId)>,
+    retirement_owner: StateDurationRetirementOwner,
+) {
     // CR 613.11: Rule-changing continuous effects are applied after object
     // characteristics are determined. These flags feed CR 510.1 combat damage
     // assignment and must observe final post-layer characteristics.
@@ -3453,7 +3418,7 @@ pub fn evaluate_layers(state: &mut GameState) {
 
     super::pairing::cleanup_invalid_pairs(state);
     if super::effects::ring::normalize_ring_bearers(state) {
-        evaluate_layers(state);
+        evaluate_layers_with_retirement_owner(state, retirement_owner);
         return;
     }
 
@@ -3465,12 +3430,11 @@ pub fn evaluate_layers(state: &mut GameState) {
     // `layers_dirty = Clean` is set unconditionally below, so a mark would be
     // dead code — consistency relies on the in-pass live+base mutation.
     prune_lapsed_controller_controls_source(state);
-    // CR 611.2b: the transient-effect half of the same question, then the
-    // casting-permission half. Both run at the same seam and against the same
-    // finalized Layer-2 control board, so a control change — or a phase-out,
-    // CR 702.26f — ends an effect, a permission and a replacement condition at
-    // the same moment rather than at three different ones.
-    prune_lapsed_host_bound_effects(state);
+    // CR 611.2b: the casting-permission half of the same question, against the
+    // same finalized Layer-2 control board. The transient-effect half already
+    // ended inside the derive loop (`prune_lapsed_durations`), so a control
+    // change — or a phase-out, CR 702.26f — ends an effect, a permission and a
+    // replacement condition on the same settled board.
     prune_lapsed_host_bound_casting_permissions(state);
 
     // CR 611.3a + CR 611.3b: refresh the source-level enabling-condition truth
@@ -4638,20 +4602,35 @@ pub fn mark_layers_entered(state: &mut GameState, id: ObjectId) {
 /// per-entered precondition scan AND a board-wide escalation scan prove that
 /// re-deriving just the entered objects yields a board identical to a full pass.
 pub fn flush_layers(state: &mut GameState) {
+    flush_layers_with_retirement_owner(state, StateDurationRetirementOwner::LayerSettlement);
+}
+
+/// Complete settlement owned by an actual Attachment command. Only command-
+/// bearing attachment transitions may use this entry point; a same-host no-op
+/// must use `flush_layers`, since it has no enclosing command to own retirement.
+pub(crate) fn flush_layers_for_attachment_command(state: &mut GameState) {
+    flush_layers_with_retirement_owner(state, StateDurationRetirementOwner::AttachmentCommand);
+}
+
+fn flush_layers_with_retirement_owner(
+    state: &mut GameState,
+    retirement_owner: StateDurationRetirementOwner,
+) {
     match std::mem::replace(&mut state.layers_dirty, LayersDirty::Clean) {
-        LayersDirty::Clean => {}
+        LayersDirty::Clean => flush_lapsed_durations(state, retirement_owner),
         LayersDirty::Full => {
             super::perf_counters::record_layers_full_eval();
-            evaluate_layers(state);
+            evaluate_layers_with_retirement_owner(state, retirement_owner);
             super::public_state::mark_public_state_all_dirty(state);
         }
         LayersDirty::EnteredObjects(ids) => {
             if ids.is_empty() {
+                flush_lapsed_durations(state, retirement_owner);
                 return;
             }
             if let Some(prepared) = prepare_incremental_flush(state, &ids) {
                 super::perf_counters::record_layers_incremental();
-                apply_layers_incremental(state, prepared);
+                apply_layers_incremental(state, prepared, retirement_owner);
                 // Rebuild the presence index so the incremental arm leaves a PRECISE index
                 // (not a conservative superset). The incremental path is already
                 // O(battlefield): `prepare_incremental_flush` unconditionally calls
@@ -4665,7 +4644,7 @@ pub fn flush_layers(state: &mut GameState) {
             } else {
                 super::perf_counters::record_layers_escalated();
                 super::perf_counters::record_layers_full_eval();
-                evaluate_layers(state);
+                evaluate_layers_with_retirement_owner(state, retirement_owner);
                 super::public_state::mark_public_state_all_dirty(state);
             }
         }
@@ -4764,7 +4743,7 @@ fn prepare_incremental_flush(
     }
     crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
 
-    let active_effects = collect_shared_active_continuous_effects(state);
+    let active_effects = collect_derivation_continuous_effects(state);
     if active_effects.iter().any(|effect| {
         recipient_ids.contains(&effect.source_id)
             && !effect_is_restricted_to_incremental_recipients(effect, &recipient_ids)
@@ -6139,7 +6118,11 @@ fn apply_room_names_then_stickers(state: &mut GameState, ids: &[ObjectId]) -> bo
     crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, ids)
 }
 
-fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncrementalFlush) {
+fn apply_layers_incremental(
+    state: &mut GameState,
+    prepared: PreparedIncrementalFlush,
+    retirement_owner: StateDurationRetirementOwner,
+) {
     let PreparedIncrementalFlush {
         recipient_ids,
         active_effects,
@@ -6215,11 +6198,11 @@ fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncremental
         // gather. If a sticker grants a continuous static ability, refresh the
         // generator index so the recipient can source that effect in this pass.
         crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
-        collect_shared_active_continuous_effects(state)
+        collect_derivation_continuous_effects(state)
     } else if copy_effects.is_empty() {
         active_effects
     } else {
-        collect_shared_active_continuous_effects(state)
+        collect_derivation_continuous_effects(state)
     };
 
     // Step 3-4: Remaining layers in order, restricted to recipient objects.
@@ -6317,6 +6300,16 @@ fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncremental
     // incremental denial hook above.
     apply_cant_have_keyword_denials(state, Some(&recipient_ids));
 
+    // CR 611.2b: incremental derivation is settled now. An ended duration
+    // can affect old recipients too, so rederive the full board before caches
+    // or the trigger index can publish the incremental candidate.
+    if prune_lapsed_durations(state, retirement_owner) {
+        super::perf_counters::record_layers_full_eval();
+        evaluate_layers_with_retirement_owner(state, retirement_owner);
+        super::public_state::mark_public_state_all_dirty(state);
+        return;
+    }
+
     // CR 613.11: Combat-assignment rule effects, restricted to recipient objects.
     apply_combat_assignment_rule_effects_filtered(state, Some(&recipient_ids));
 
@@ -6342,7 +6335,7 @@ fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncremental
 }
 
 fn gather_active_effects_for_layer(state: &GameState, layer: Layer) -> Vec<ActiveContinuousEffect> {
-    collect_shared_active_continuous_effects(state)
+    collect_derivation_continuous_effects(state)
         .into_iter()
         .filter(|effect| effect.layer == layer)
         .collect()
@@ -6417,7 +6410,7 @@ fn apply_pt_counter_modifications(state: &mut GameState, ids: impl IntoIterator<
 fn gather_active_continuous_effects(
     state: &GameState,
 ) -> Vec<(Layer, Vec<ActiveContinuousEffect>)> {
-    bucket_effects_by_layer(collect_shared_active_continuous_effects(state))
+    bucket_effects_by_layer(collect_derivation_continuous_effects(state))
 }
 
 fn bucket_effects_by_layer(
@@ -6438,6 +6431,26 @@ fn bucket_effects_by_layer(
 pub(crate) fn collect_shared_active_continuous_effects(
     state: &GameState,
 ) -> Vec<ActiveContinuousEffect> {
+    collect_continuous_effects(state, gather_transient_continuous_effects)
+}
+
+/// CR 611.2b + CR 613.1: installed state durations participate while deriving
+/// the candidate board. Their irreversible end is checked only after every
+/// layer has settled, never against a temporarily reset controller or P/T.
+fn collect_derivation_continuous_effects(state: &GameState) -> Vec<ActiveContinuousEffect> {
+    collect_continuous_effects(state, |state, effects| {
+        gather_transient_continuous_effects_with(
+            state,
+            effects,
+            transient_effect_passes_other_gates,
+        );
+    })
+}
+
+fn collect_continuous_effects(
+    state: &GameState,
+    gather_transients: fn(&GameState, &mut Vec<ActiveContinuousEffect>),
+) -> Vec<ActiveContinuousEffect> {
     #[cfg(test)]
     record_active_effect_collection();
 
@@ -6446,7 +6459,7 @@ pub(crate) fn collect_shared_active_continuous_effects(
     for_each_static_effect_source(state, |state, obj| {
         effects.extend(active_continuous_effects_from_static_source(state, obj));
     });
-    gather_transient_continuous_effects(state, &mut effects);
+    gather_transients(state, &mut effects);
     gather_ring_emblem_continuous_effects(state, &mut effects);
     effects
 }
@@ -6489,7 +6502,7 @@ fn gather_ring_emblem_continuous_effects(
     }
 }
 
-fn for_each_static_effect_source(
+pub(crate) fn for_each_static_effect_source(
     state: &GameState,
     mut visit: impl FnMut(&GameState, &crate::game::game_object::GameObject),
 ) {
@@ -6776,7 +6789,16 @@ fn active_continuous_effects_from_static_definitions(
 
         let affected_filter = def.affected.clone().unwrap_or(TargetFilter::Any);
         for (mod_index, modification) in def.modifications.iter().enumerate() {
-            if is_combat_assignment_rule_modification(modification) {
+            // CR 701.15b: Goaded is a designation, not an ability granted
+            // to the affected permanent. Combat reads this functioning source.
+            if is_combat_assignment_rule_modification(modification)
+                || matches!(
+                    modification,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded
+                    }
+                )
+            {
                 continue;
             }
             let trigger_producer_origin =
@@ -6939,7 +6961,14 @@ fn expand_granted_static_effects(
         // preceding layers have established that controller.
         let retained_inner_condition = inner.condition.clone();
         for (mod_index, modification) in inner.modifications.iter().enumerate() {
-            if is_combat_assignment_rule_modification(modification) {
+            if is_combat_assignment_rule_modification(modification)
+                || matches!(
+                    modification,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded
+                    }
+                )
+            {
                 continue;
             }
             out.push(ActiveContinuousEffect {
@@ -7223,6 +7252,12 @@ fn expand_granted_triggered_abilities(
 /// consults it too, so a display projection can never claim an effect is live
 /// after the layer engine has stopped applying it.
 pub(crate) fn transient_effect_is_live(state: &GameState, tce: &TransientContinuousEffect) -> bool {
+    transient_effect_passes_other_gates(state, tce)
+        && transient_duration_holds(state, tce)
+        && host_bound_duration_holds(state, &tce.duration, tce.source_id, tce.controller)
+}
+
+fn transient_effect_passes_other_gates(state: &GameState, tce: &TransientContinuousEffect) -> bool {
     // CR 400.7: a recipient that has changed zones is a new object, so a
     // continuous effect tied to its prior incarnation cannot keep applying.
     if let Some(recipient) = tce.affected_recipient {
@@ -7240,50 +7275,6 @@ pub(crate) fn transient_effect_is_live(state: &GameState, tce: &TransientContinu
     {
         return false;
     }
-    // CR 611.2b + CR 702.26f: the presence-bound state reading ("for as long
-    // as ~ remains on the battlefield") additionally ends when its host phases
-    // out — "effects with 'for as long as' durations that track that permanent
-    // (see rule 611.2b) end when that permanent phases out because they can no
-    // longer see it." The event deadline (`UntilHostLeavesPlay`, "until ~
-    // leaves the battlefield") is deliberately NOT asked this question: a
-    // phase-out is not the host leaving the battlefield (CR 702.26d), so that
-    // reading keeps running across one, and ending it here would be wrong for
-    // every event-bound card. The wording now lives on the variant itself, so
-    // this filter no longer has to conflate the two.
-    //
-    // This check only declines to APPLY the effect; the ENDING that CR 702.26f
-    // demands — a later phase-in must not revive it — is
-    // `prune_lapsed_host_bound_effects`' presence arm, the same
-    // filter-plus-removal split the control reading below uses.
-    if tce.duration == Duration::WhileHostOnBattlefield
-        && !state
-            .objects
-            .get(&tce.source_id)
-            .is_some_and(|obj| obj.is_phased_in())
-    {
-        return false;
-    }
-
-    // CR 611.2b: the control-bound reading additionally ends when another
-    // player gains control of the source, or when it phases out (CR 702.26f).
-    // `controller_controls_source_gate` is the single authority for all three
-    // legs and is already shared with the `ControllerControlsSource`
-    // replacement condition, so the duration and the condition can never
-    // disagree about when this window closed.
-    if tce.duration == Duration::WhileControllingHost
-        && !crate::game::replacement::controller_controls_source_gate(
-            state,
-            tce.source_id,
-            tce.controller,
-        )
-    {
-        return false;
-    }
-
-    if !transient_duration_holds(state, tce) {
-        return false;
-    }
-
     if let Some(condition) = &tce.condition {
         if !source_condition_gate_passes(state, condition, tce.controller, tce.source_id) {
             return false;
@@ -7297,8 +7288,16 @@ pub(crate) fn gather_transient_continuous_effects(
     state: &GameState,
     effects: &mut Vec<ActiveContinuousEffect>,
 ) {
+    gather_transient_continuous_effects_with(state, effects, transient_effect_is_live);
+}
+
+fn gather_transient_continuous_effects_with(
+    state: &GameState,
+    effects: &mut Vec<ActiveContinuousEffect>,
+    participates: fn(&GameState, &TransientContinuousEffect) -> bool,
+) {
     for tce in &state.transient_continuous_effects {
-        if !transient_effect_is_live(state, tce) {
+        if !participates(state, tce) {
             continue;
         }
 
@@ -7340,13 +7339,15 @@ pub(crate) fn gather_transient_continuous_effects(
             // `casting::unlimited_hand_cast_free_source` — and grafting it onto
             // every affected object would additionally expose it to
             // `iter_cast_free_permission_source_ids`, giving one grant two
-            // sources.
+            // sources. CR 701.15b: `Goaded` is likewise a designation, not
+            // an ability on the recipient; combat reads the live TCE directly.
             if matches!(
                 modification,
                 ContinuousModification::AddStaticMode {
                     mode: StaticMode::MayLookAtFaceDown
                         | StaticMode::ReduceAbilityCost { .. }
-                        | StaticMode::CastFromHandFree { .. },
+                        | StaticMode::CastFromHandFree { .. }
+                        | StaticMode::Goaded,
                 }
             ) {
                 continue;
@@ -7427,11 +7428,12 @@ fn transient_duration_condition(tce: &TransientContinuousEffect) -> Option<&Stat
 /// phased-in check — because a zone, identity or phasing change is not
 /// something layers 1-7 can write. The fourth, the CR 611.2b
 /// `WhileControllingHost` control gate, does read one (the source's
-/// controller, layer 2) and is still not registered here: the effect it gates
-/// is REMOVED by `prune_lapsed_host_bound_effects` inside `evaluate_layers`,
-/// the same seam and the same treatment as the pre-existing sibling question
-/// `prune_lapsed_controller_controls_source`, which is likewise absent from
-/// [`live_characteristic_reads`].
+/// controller, layer 2) and is still not registered here: it is answered only
+/// on the settled board, where `prune_lapsed_host_bound_effects` REMOVES the
+/// effect it gates and the pass re-derives without it — the same treatment as
+/// the sibling question `prune_lapsed_controller_controls_source`, which is
+/// likewise absent from [`live_characteristic_reads`]. The last two gates live
+/// in `host_bound_duration_holds`.
 ///
 /// Every consumer that EVALUATES whether this effect is live walks the pair
 /// through here: [`transient_effect_is_live`] (via
@@ -7469,11 +7471,8 @@ fn transient_duration_condition(tce: &TransientContinuousEffect) -> Option<&Stat
 /// iteration site that decides liveness by hand instead of calling this is the
 /// regression to look for.
 ///
-/// One deliberate non-consumer inside this file: the lapsed-attachment sweep in
-/// [`evaluate_layers`] destructures the exact `ForAsLongAs {
-/// RecipientMatchesFilter { AttachedTo } }` shape (CR 301.5) to decide
-/// permanent EXPIRY, not liveness. It needs the structural match, not the
-/// condition list, so routing it through here would lose the thing it matches on.
+/// Permanent expiry uses the same duration predicate after layer derivation;
+/// the separate retained condition may become true again without ending it.
 pub(crate) fn transient_gate_conditions(
     tce: &TransientContinuousEffect,
 ) -> impl Iterator<Item = &StaticCondition> {
@@ -7482,41 +7481,225 @@ pub(crate) fn transient_gate_conditions(
         .chain(tce.condition.as_ref())
 }
 
+/// CR 611.2b: whether a host-bound STATE duration still holds — the single
+/// authority for both readings, shared by liveness, the settled-board prune
+/// (`prune_lapsed_host_bound_effects`) and the resolution-time start test
+/// (`resolved_duration_begins`). Like `ForAsLongAs`, these are not derivation
+/// gates: the control reading asks a layer-2 question, so it is only answered
+/// on the settled board, never against a mid-pass reset controller.
+fn host_bound_duration_holds(
+    state: &GameState,
+    duration: &Duration,
+    source_id: ObjectId,
+    controller: PlayerId,
+) -> bool {
+    match duration {
+        // CR 611.2b: the control-bound reading ends when another player gains
+        // control of the source, or when it leaves or phases out (CR 702.26f).
+        // `controller_controls_source_gate` is the single authority for all
+        // three legs and is already shared with the `ControllerControlsSource`
+        // replacement condition, so the duration and the condition can never
+        // disagree about when this window closed.
+        Duration::WhileControllingHost => {
+            crate::game::replacement::controller_controls_source_gate(state, source_id, controller)
+        }
+        // CR 611.2b + CR 702.26f: the presence-bound reading ("for as long as ~
+        // remains on the battlefield") ends when its host leaves or phases out —
+        // "effects with 'for as long as' durations that track that permanent
+        // (see rule 611.2b) end when that permanent phases out because they can
+        // no longer see it."
+        Duration::WhileHostOnBattlefield => state.objects.get(&source_id).is_some_and(|o| {
+            o.zone == crate::types::zones::Zone::Battlefield && o.is_phased_in()
+        }),
+        // CR 611.2a + CR 702.26d: the EVENT deadline ("until ~ leaves the
+        // battlefield") is not a state reading. A phase-out is not the host
+        // leaving the battlefield, so it keeps running across one;
+        // `prune_host_left_effects` ends it on the exit event itself.
+        Duration::UntilHostLeavesPlay
+        | Duration::UntilEndOfTurn
+        | Duration::UntilEndOfCombat
+        | Duration::UntilNextTurnOf { .. }
+        | Duration::UntilEndOfNextTurnOf { .. }
+        | Duration::UntilNextStepOf { .. }
+        // CR 611.2b: `transient_duration_holds` owns this reading.
+        | Duration::ForAsLongAs { .. }
+        | Duration::UntilSourceExilesAnotherCard
+        | Duration::UntilOpponentBecomesMonarch
+        // CR 611.2a + CR 601.2i: ended by the spell-cast expiry in
+        // `casting_costs`, not by a host lapse.
+        | Duration::UntilEvent { .. }
+        | Duration::Permanent => true,
+    }
+}
+
 fn transient_duration_holds(state: &GameState, tce: &TransientContinuousEffect) -> bool {
     let Some(condition) = transient_duration_condition(tce) else {
         return true;
     };
 
-    // CR 611.2b: A recipient-referential condition ("for as long as IT has a
-    // shield counter" — Shield Broker's gain-control) refers to the object the
-    // effect applies to, not the source. For a single-object effect that object
-    // is the affected `SpecificObject`; evaluate against it so the duration
-    // tracks the controlled/granted creature's counters rather than the source.
-    match (&tce.affected, condition_uses_recipient_context(condition)) {
-        (TargetFilter::SpecificObject { id }, true) => {
-            // CR 611.2b: a target-relative duration tracks the captured
-            // `duration_subject` (the copy target for BecomeCopy — Zygon
-            // Infiltrator) when it diverges from `affected`; otherwise the
-            // affected object (Shield Broker's recipient-relative control
-            // duration, where the recipient IS the tracked object).
-            let recipient = match tce.duration_subject {
-                // CR 400.7 + CR 611.2b: an explicit duration subject is an
-                // exact object binding, not a rediscoverable storage id. A
-                // zone change makes the old target a new object, so its
-                // duration cannot be sustained by a later incarnation.
-                Some(subject) if subject.is_current(state) => subject.object_id,
-                Some(_) => return false,
-                None => *id,
+    let subject = state_duration_subject(
+        state,
+        TransientContinuousEffectBindings {
+            affected_recipient: tce.affected_recipient,
+            duration_subject: tce.duration_subject,
+        },
+        &tce.affected,
+    );
+    bound_state_duration_holds(state, condition, tce.controller, tce.source_id, subject)
+}
+
+/// CR 611.2b: the object a recipient-relative state duration tracks. An
+/// explicit subject can differ from the affected object (a copy duration
+/// tracking its copy target), so that binding is preserved first; otherwise the
+/// captured recipient, otherwise the single affected object as it is now.
+fn state_duration_subject(
+    state: &GameState,
+    bindings: TransientContinuousEffectBindings,
+    affected: &TargetFilter,
+) -> Option<ObjectIncarnationRef> {
+    bindings
+        .duration_subject
+        .or(bindings.affected_recipient)
+        .or_else(|| {
+            let TargetFilter::SpecificObject { id } = affected else {
+                return None;
             };
-            evaluate_condition_with_recipient(
-                state,
-                condition,
-                tce.controller,
-                tce.source_id,
-                recipient,
-            )
+            state.objects.get(id).map(ObjectIncarnationRef::from_object)
+        })
+}
+
+/// CR 611.2b: whether a resolution-created duration begins at all. "If the
+/// 'for as long as' duration never starts, the effect does nothing" — so the
+/// installation authority (`GameState::add_transient_continuous_effect*`) asks
+/// this of the candidate on the settled board BEFORE drawing an id, journaling
+/// or installing it. Once installed, a started duration is only ended by the
+/// settled-board prunes; asking only there would let an effect whose own
+/// application makes its duration true (a control change of the source it is
+/// bound to, a P/T change its condition reads) sustain a duration that never
+/// started. Uses the same subject binding and predicates as liveness.
+pub(crate) fn resolved_duration_begins(
+    state: &GameState,
+    duration: &Duration,
+    controller: PlayerId,
+    source_id: ObjectId,
+    affected: &TargetFilter,
+    bindings: TransientContinuousEffectBindings,
+) -> bool {
+    match duration {
+        Duration::ForAsLongAs { condition } => bound_state_duration_holds(
+            state,
+            condition,
+            controller,
+            source_id,
+            state_duration_subject(state, bindings, affected),
+        ),
+        other => host_bound_duration_holds(state, other, source_id, controller),
+    }
+}
+
+/// CR 611.2b: the shared initial and settled-board test for a state duration.
+/// Recipient-only predicates do not require the granting source to remain in
+/// play (CR 113.7a). The captured subject, when required, is never rediscovered.
+pub(crate) fn bound_state_duration_holds(
+    state: &GameState,
+    condition: &StaticCondition,
+    controller: PlayerId,
+    source_id: ObjectId,
+    subject: Option<ObjectIncarnationRef>,
+) -> bool {
+    if !condition_uses_recipient_context(condition) {
+        return evaluate_condition(state, condition, controller, source_id);
+    }
+    let Some(subject) = subject else {
+        return false;
+    };
+    // CR 400.7 + CR 702.26f: the tracked incarnation must still exist and
+    // be phased in. Phase-in or a later zone incarnation cannot restart it.
+    if !subject.is_current(state)
+        || !state
+            .objects
+            .get(&subject.object_id)
+            .is_some_and(|obj| obj.is_phased_in())
+    {
+        return false;
+    }
+    evaluate_condition_with_recipient(state, condition, controller, source_id, subject.object_id)
+}
+
+/// CR 611.2b: remove each ended state-duration record exactly once. Event
+/// deadlines are deliberately excluded: a stale UntilEvent subject is not an
+/// event, and its departure must not shorten the promised deadline.
+fn prune_lapsed_state_durations(
+    state: &mut GameState,
+    retirement_owner: StateDurationRetirementOwner,
+) -> bool {
+    let ended: Vec<_> = state
+        .transient_continuous_effects
+        .iter()
+        .filter(|tce| {
+            matches!(tce.duration, Duration::ForAsLongAs { .. })
+                && (tce
+                    .affected_recipient
+                    .is_some_and(|recipient| !recipient.is_current(state))
+                    || !transient_duration_holds(state, tce))
+        })
+        .cloned()
+        .collect();
+    retire_ended_effects(state, ended, retirement_owner)
+}
+
+/// CR 611.2b: retire a settled selection of ended state durations exactly once.
+/// A settlement-owned retirement journals the exact records so replay removes
+/// them verbatim; an attachment-owned one is re-derived by replaying that
+/// attachment command, which owns the receipt. Returns whether anything ended.
+fn retire_ended_effects(
+    state: &mut GameState,
+    ended: Vec<TransientContinuousEffect>,
+    retirement_owner: StateDurationRetirementOwner,
+) -> bool {
+    if ended.is_empty() {
+        return false;
+    }
+    match retirement_owner {
+        StateDurationRetirementOwner::LayerSettlement => {
+            let command =
+                crate::types::resolved_commands::ResolvedContinuousEffectRetirementCommand {
+                    effects: ended,
+                    cause: state.current_or_begin_rules_execution_node(),
+                };
+            state
+                .retire_exact_continuous_effects(&command.effects)
+                .expect("the settled selection must match its stored continuous effects");
+            state
+                .resolved_rules_journal
+                .record_continuous_effect_retirement(command)
+                .expect("state-duration retirement must have a live journal cause");
         }
-        _ => evaluate_condition(state, condition, tce.controller, tce.source_id),
+        StateDurationRetirementOwner::AttachmentCommand => {
+            state
+                .retire_exact_continuous_effects(&ended)
+                .expect("the attachment-owned selection must match its stored continuous effects");
+        }
+    }
+    true
+}
+
+/// CR 611.2b: end every duration the settled board shows has ended, one family
+/// per derivation. Host-bound durations end first, so a state duration is
+/// never judged against a board still carrying an effect that already ended.
+fn prune_lapsed_durations(
+    state: &mut GameState,
+    retirement_owner: StateDurationRetirementOwner,
+) -> bool {
+    prune_lapsed_host_bound_effects(state, retirement_owner)
+        || prune_lapsed_state_durations(state, retirement_owner)
+}
+
+fn flush_lapsed_durations(state: &mut GameState, retirement_owner: StateDurationRetirementOwner) {
+    if prune_lapsed_durations(state, retirement_owner) {
+        super::perf_counters::record_layers_full_eval();
+        evaluate_layers_with_retirement_owner(state, retirement_owner);
+        super::public_state::mark_public_state_all_dirty(state);
     }
 }
 
@@ -11319,14 +11502,16 @@ mod tests {
         host: ObjectId,
         modification: ContinuousModification,
     ) -> u64 {
-        state.add_transient_continuous_effect(
-            host,
-            PlayerId(0),
-            Duration::UntilEndOfTurn,
-            TargetFilter::SpecificObject { id: host },
-            vec![modification],
-            None,
-        )
+        state
+            .add_transient_continuous_effect(
+                host,
+                PlayerId(0),
+                Duration::UntilEndOfTurn,
+                TargetFilter::SpecificObject { id: host },
+                vec![modification],
+                None,
+            )
+            .expect("the fixture's duration begins")
     }
 
     fn relayer(state: &mut GameState) {
@@ -18702,7 +18887,7 @@ mod tests {
             "reach-guard: the production phase-out must actually phase the host out"
         );
 
-        prune_lapsed_host_bound_effects(&mut state);
+        prune_lapsed_host_bound_effects(&mut state, StateDurationRetirementOwner::LayerSettlement);
         let survivors: Vec<u64> = state
             .transient_continuous_effects
             .iter()
@@ -22269,14 +22454,16 @@ mod tests {
         new_controller: PlayerId,
         duration: Duration,
     ) -> u64 {
-        state.add_transient_continuous_effect(
-            source_id,
-            new_controller,
-            duration,
-            TargetFilter::SpecificObject { id: target_id },
-            vec![ContinuousModification::ChangeController],
-            None,
-        )
+        state
+            .add_transient_continuous_effect(
+                source_id,
+                new_controller,
+                duration,
+                TargetFilter::SpecificObject { id: target_id },
+                vec![ContinuousModification::ChangeController],
+                None,
+            )
+            .expect("the fixture's duration begins")
     }
 
     /// CR 302.6 + CR 613.1b: Act-of-Treason-style mid-game control change.
@@ -23506,14 +23693,16 @@ mod tests {
         let granter = make_creature(&mut state, "Giant Growth Caster", 0, 0, PlayerId(0));
         let target = make_creature(&mut state, "Goblin", 1, 1, PlayerId(0));
 
-        let id = state.add_transient_continuous_effect(
-            granter,
-            PlayerId(0),
-            Duration::UntilEndOfTurn,
-            TargetFilter::SpecificObject { id: target },
-            vec![ContinuousModification::AddPower { value: 3 }],
-            None,
-        );
+        let id = state
+            .add_transient_continuous_effect(
+                granter,
+                PlayerId(0),
+                Duration::UntilEndOfTurn,
+                TargetFilter::SpecificObject { id: target },
+                vec![ContinuousModification::AddPower { value: 3 }],
+                None,
+            )
+            .expect("the fixture's duration begins");
 
         evaluate_layers(&mut state);
 
@@ -23537,14 +23726,16 @@ mod tests {
         let granter = make_creature(&mut state, "Giant Growth", 0, 0, PlayerId(0));
         let target = make_creature(&mut state, "Goblin", 1, 1, PlayerId(0));
 
-        let id = state.add_transient_continuous_effect(
-            granter,
-            PlayerId(0),
-            Duration::UntilEndOfTurn,
-            TargetFilter::SpecificObject { id: target },
-            vec![ContinuousModification::AddPower { value: 3 }],
-            None,
-        );
+        let id = state
+            .add_transient_continuous_effect(
+                granter,
+                PlayerId(0),
+                Duration::UntilEndOfTurn,
+                TargetFilter::SpecificObject { id: target },
+                vec![ContinuousModification::AddPower { value: 3 }],
+                None,
+            )
+            .expect("the fixture's duration begins");
 
         let tce = state
             .transient_continuous_effects
@@ -23595,14 +23786,16 @@ mod tests {
             },
         );
 
-        let id = state.add_transient_continuous_effect(
-            dead_source,
-            PlayerId(0),
-            Duration::UntilEndOfTurn,
-            TargetFilter::SpecificObject { id: target },
-            vec![ContinuousModification::AddPower { value: 1 }],
-            None,
-        );
+        let id = state
+            .add_transient_continuous_effect(
+                dead_source,
+                PlayerId(0),
+                Duration::UntilEndOfTurn,
+                TargetFilter::SpecificObject { id: target },
+                vec![ContinuousModification::AddPower { value: 1 }],
+                None,
+            )
+            .expect("the fixture's duration begins");
 
         let tce = state
             .transient_continuous_effects
@@ -23846,20 +24039,22 @@ mod tests {
             room_halves: None,
             name_origin: Default::default(),
         };
-        let _ = state.add_transient_continuous_effect(
-            source,
-            PlayerId(0),
-            Duration::UntilEndOfTurn,
-            TargetFilter::SpecificObject { id: target },
-            vec![ContinuousModification::CopyValues {
-                values: Box::new(copy_values),
-                display_source: crate::game::game_object::DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
-            }],
-            None,
-        );
+        let _ = state
+            .add_transient_continuous_effect(
+                source,
+                PlayerId(0),
+                Duration::UntilEndOfTurn,
+                TargetFilter::SpecificObject { id: target },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(copy_values),
+                    display_source: crate::game::game_object::DisplaySource::Card,
+                    printed_ref: None,
+                    token_image_ref: None,
+                    token_art: None,
+                }],
+                None,
+            )
+            .expect("the fixture's duration begins");
 
         evaluate_layers(&mut state);
 
@@ -26808,6 +27003,173 @@ mod tests {
                 writes.contains(implied),
                 "{m:?} is applied in {layer:?} but its write kinds {writes:?} do not \
                  include the characteristic that layer exists to rewrite ({implied:?})"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod state_duration_retirement_recording_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::TransientContinuousEffectBindings;
+    use crate::types::identifiers::{CardId, ObjectIncarnationRef};
+    use crate::types::phase::Phase;
+    use crate::types::resolved_commands::{ResolvedContinuousEffectEdit, ResolvedRulesCommand};
+
+    /// CR 611.2b + CR 702.26f: both state-duration families — a `ForAsLongAs`
+    /// condition and a host-bound reading — journal their exact retirement at
+    /// every ordinary flush arm.
+    #[test]
+    fn every_ordinary_flush_arm_records_its_exact_retirement() {
+        for host_bound in [false, true] {
+            for boundary in ["full", "clean", "empty_entered", "incremental", "escalated"] {
+                assert_flush_arm_records_exact_retirement(host_bound, boundary);
+            }
+        }
+    }
+
+    fn assert_flush_arm_records_exact_retirement(host_bound: bool, boundary: &str) {
+        {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let source = scenario.add_vanilla(P0, 2, 2);
+            let recipient = scenario.add_vanilla(P0, 2, 2);
+            let mut runner = scenario.build();
+            runner.state_mut().objects.get_mut(&source).unwrap().tapped = true;
+            let subject = ObjectIncarnationRef::from_object(&runner.state().objects[&source]);
+            let affected = ObjectIncarnationRef::from_object(&runner.state().objects[&recipient]);
+            let duration = if host_bound {
+                Duration::WhileHostOnBattlefield
+            } else {
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::IsTapped {
+                        scope: crate::types::ability::ObjectScope::Recipient,
+                    },
+                }
+            };
+            let id = runner
+                .state_mut()
+                .add_transient_continuous_effect_with_bindings(
+                    source,
+                    P0,
+                    duration,
+                    TargetFilter::SpecificObject { id: recipient },
+                    vec![ContinuousModification::AddPower { value: 1 }],
+                    None,
+                    TransientContinuousEffectBindings {
+                        affected_recipient: Some(affected),
+                        duration_subject: Some(subject),
+                    },
+                )
+                .expect("the fixture's duration begins");
+            flush_layers(runner.state_mut());
+            assert_eq!(runner.state().objects[&recipient].power, Some(3));
+            let installed = runner
+                .state()
+                .transient_continuous_effects
+                .iter()
+                .find(|e| e.id == id)
+                .unwrap()
+                .clone();
+            let entrant = crate::game::zones::create_object(
+                runner.state_mut(),
+                CardId(9001),
+                P0,
+                "Typed entrant".into(),
+                Zone::Battlefield,
+            );
+            // Typed boundary fixture: mutate only the sustaining state before
+            // submitting a real action that owns the corresponding flush.
+            if host_bound {
+                crate::game::phasing::phase_out_object(
+                    runner.state_mut(),
+                    source,
+                    crate::game::game_object::PhaseOutCause::Directly,
+                    &mut Vec::new(),
+                );
+            } else {
+                runner.state_mut().objects.get_mut(&source).unwrap().tapped = false;
+            }
+            runner.state_mut().layers_dirty = match boundary {
+                "full" => LayersDirty::Full,
+                "clean" => LayersDirty::Clean,
+                "empty_entered" => LayersDirty::EnteredObjects(BTreeSet::new()),
+                "incremental" => {
+                    let ids = [entrant].into_iter().collect();
+                    assert!(!incremental_flush_must_escalate(runner.state(), &ids));
+                    LayersDirty::EnteredObjects(ids)
+                }
+                "escalated" => {
+                    let ids = [source].into_iter().collect();
+                    assert!(incremental_flush_must_escalate(runner.state(), &ids));
+                    LayersDirty::EnteredObjects(ids)
+                }
+                _ => unreachable!(),
+            };
+            let start = runner.state().resolved_rules_journal.entries().len();
+            runner.act(GameAction::PassPriority).unwrap();
+            assert_eq!(
+                runner.state().objects[&recipient].power,
+                Some(2),
+                "{boundary}, host-bound: {host_bound}"
+            );
+            assert_eq!(runner.state().layers_dirty, LayersDirty::Clean);
+            assert!(!runner
+                .state()
+                .transient_continuous_effects
+                .iter()
+                .any(|e| e.id == id));
+            let batches: Vec<_> = runner
+                .state()
+                .resolved_rules_journal
+                .entries()
+                .iter()
+                .skip(start)
+                .filter_map(|entry| match entry.command.as_ref()? {
+                    ResolvedRulesCommand::ContinuousEffect(edit) => match edit.as_ref() {
+                        ResolvedContinuousEffectEdit::Retire(command) => Some(&command.effects),
+                        ResolvedContinuousEffectEdit::Install(_) => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                batches,
+                vec![&vec![installed]],
+                "{boundary}, host-bound: {host_bound}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_state_duration_selection_creates_no_journal_node_or_command() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_vanilla(P0, 2, 2);
+        let mut runner = scenario.build();
+        for dirty in [
+            LayersDirty::Clean,
+            LayersDirty::Full,
+            LayersDirty::EnteredObjects(BTreeSet::new()),
+        ] {
+            runner.state_mut().layers_dirty = dirty;
+            let before = runner.state().resolved_rules_journal.clone();
+            let allocators = (
+                runner.state().next_continuous_effect_id,
+                runner.state().next_timestamp,
+                runner.state().next_end_effect_group_id,
+            );
+            flush_layers(runner.state_mut());
+            assert_eq!(runner.state().resolved_rules_journal, before);
+            assert_eq!(
+                allocators,
+                (
+                    runner.state().next_continuous_effect_id,
+                    runner.state().next_timestamp,
+                    runner.state().next_end_effect_group_id
+                )
             );
         }
     }

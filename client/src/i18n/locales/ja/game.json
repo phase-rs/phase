@@ -15,6 +15,9 @@
   "manaSourceSelection": {
     "title": "マナ源を選択",
     "description": "このマナ能力にはパーマネントの生け贄が必要です。",
+    "baseOutput_one": "基本生成量：{{count}}マナ",
+    "baseOutput_other": "基本生成量：{{count}}マナ",
+    "baseOutputVariable": "基本量は起動時に決定",
     "sacrifice": "生け贄",
     "back": "マナの支払いに戻る",
     "unknownSource": "マナ源"
@@ -2312,7 +2315,9 @@
     "accept": "はい",
     "decline": "いいえ",
     "sourceFallback": "効果",
-    "entryLabel": "{{source}} — {{decision}}"
+    "entryLabel": "{{source}} — {{decision}}",
+    "optionalTriggers": "任意の誘発型能力（{{count, number}}）",
+    "replacementChoices": "置換効果の選択（{{count, number}}）"
   },
   "optionalEffect": {
     "sourceFallback": "効果",
@@ -2392,6 +2397,8 @@
     "confirm": "確認"
   },
   "replacement": {
+    "remember": "このゲーム中はこの選択を記憶する",
+    "savedChoice": "置換：{{choice}}",
     "eyebrow": "解決順",
     "title": "置換効果",
     "orderSubtitle": "これらの効果はすべてこのイベントの起こり方を変更します。適用順をドラッグで設定してください — 最後に適用されたものが結果になります（CR 616.1）。",

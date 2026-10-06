@@ -1,3 +1,4 @@
+use crate::game::combat::goading_players_for_creature;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
@@ -12,14 +13,19 @@ use crate::types::zones::Zone;
 /// CR 701.15c: A creature can be goaded by multiple players, creating additional
 /// combat requirements.
 ///
-/// CR 701.15d: The same player goading a creature again has no effect (HashSet
-/// insert is idempotent).
+/// CR 701.15d: The same player goading a creature again has no effect,
+/// including when an earlier cause came from a live transient or printed static.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     for obj_id in goad_targets(state, ability) {
+        // CR 701.15d: An existing cause from this player keeps its original
+        // lifetime; a direct goad must not install a fresh next-turn deadline.
+        if goading_players_for_creature(state, obj_id).contains(&ability.controller) {
+            continue;
+        }
         let Some(obj) = state.objects.get_mut(&obj_id) else {
             continue;
         };
@@ -30,7 +36,7 @@ pub fn resolve(
         }
 
         // CR 701.15a: Mark the creature as goaded by the controller of this effect.
-        // CR 701.15d: Re-goading by the same player is a no-op (HashSet semantics).
+        // CR 701.15c: A different player contributes an independent cause.
         obj.goaded_by.insert(ability.controller);
     }
 
@@ -77,10 +83,15 @@ pub(crate) fn goad_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{ControllerRef, Effect, TargetFilter, TargetRef, TypedFilter};
+    use crate::types::ability::{
+        ContinuousModification, ControllerRef, Duration, Effect, TargetFilter, TargetRef,
+        TypedFilter,
+    };
     use crate::types::card_type::CoreType;
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::game_state::TransientContinuousEffectBindings;
+    use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use crate::types::player::PlayerId;
+    use crate::types::statics::StaticMode;
 
     fn make_goad_ability(target: ObjectId, controller: PlayerId) -> ResolvedAbility {
         ResolvedAbility::new(
@@ -144,6 +155,80 @@ mod tests {
 
         let obj = state.objects.get(&target_id).unwrap();
         assert_eq!(obj.goaded_by.len(), 1);
+    }
+
+    #[test]
+    fn resolved_designation_prevents_same_player_direct_regoad() {
+        let mut state = GameState::new_two_player(42);
+        let target = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        mark_creature(&mut state, target);
+        let recipient = ObjectIncarnationRef::from_object(&state.objects[&target]);
+        state.add_transient_continuous_effect_with_bindings(
+            target,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: target },
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::Goaded,
+            }],
+            None,
+            TransientContinuousEffectBindings {
+                affected_recipient: Some(recipient),
+                duration_subject: None,
+            },
+        );
+        assert!(
+            crate::game::combat::goading_players_for_creature_gated(&state, target, false)
+                .contains(&PlayerId(0))
+        );
+        assert!(state.objects[&target].goaded_by.is_empty());
+
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &make_goad_ability(target, PlayerId(0)),
+            &mut events,
+        )
+        .unwrap();
+        assert!(matches!(
+            events.last(),
+            Some(GameEvent::EffectResolved { .. })
+        ));
+        assert!(
+            state.objects[&target].goaded_by.is_empty(),
+            "the same player's already-live designation must not gain a new direct deadline"
+        );
+
+        resolve(
+            &mut state,
+            &make_goad_ability(target, PlayerId(1)),
+            &mut events,
+        )
+        .unwrap();
+        let goaders =
+            crate::game::combat::goading_players_for_creature_gated(&state, target, false);
+        assert_eq!(goaders.len(), 2);
+        assert!(goaders.contains(&PlayerId(0)) && goaders.contains(&PlayerId(1)));
+        assert_eq!(state.objects[&target].goaded_by.len(), 1);
+
+        crate::game::layers::prune_end_of_turn_effects(&mut state);
+        assert!(state.transient_continuous_effects.is_empty());
+        let goaders =
+            crate::game::combat::goading_players_for_creature_gated(&state, target, false);
+        assert_eq!(goaders.len(), 1);
+        assert!(goaders.contains(&PlayerId(1)));
+        assert!(!goaders.contains(&PlayerId(0)));
+        crate::game::layers::prune_until_next_turn_effects(&mut state, PlayerId(1));
+        assert!(
+            crate::game::combat::goading_players_for_creature_gated(&state, target, false)
+                .is_empty()
+        );
     }
 
     #[test]

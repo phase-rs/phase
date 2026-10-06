@@ -4204,36 +4204,38 @@ mod tests {
         let values = crate::game::printed_cards::intrinsic_copiable_values(
             state.objects.get(&target).unwrap(),
         );
-        let tce_id = state.add_transient_continuous_effect_with_bindings(
-            source,
-            PlayerId(0),
-            Duration::ForAsLongAs {
-                condition: StaticCondition::IsTapped {
-                    scope: ObjectScope::Target,
+        let tce_id = state
+            .add_transient_continuous_effect_with_bindings(
+                source,
+                PlayerId(0),
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::IsTapped {
+                        scope: ObjectScope::Target,
+                    },
                 },
-            },
-            TargetFilter::SpecificObject { id: source },
-            vec![ContinuousModification::CopyValues {
-                values: Box::new(values),
-                display_source: DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
-            }],
-            None,
-            crate::types::game_state::TransientContinuousEffectBindings {
-                affected_recipient: Some(
-                    crate::types::identifiers::ObjectIncarnationRef::from_object(
-                        &state.objects[&source],
+                TargetFilter::SpecificObject { id: source },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(values),
+                    display_source: DisplaySource::Card,
+                    printed_ref: None,
+                    token_image_ref: None,
+                    token_art: None,
+                }],
+                None,
+                crate::types::game_state::TransientContinuousEffectBindings {
+                    affected_recipient: Some(
+                        crate::types::identifiers::ObjectIncarnationRef::from_object(
+                            &state.objects[&source],
+                        ),
                     ),
-                ),
-                duration_subject: Some(
-                    crate::types::identifiers::ObjectIncarnationRef::from_object(
-                        &state.objects[&target],
+                    duration_subject: Some(
+                        crate::types::identifiers::ObjectIncarnationRef::from_object(
+                            &state.objects[&target],
+                        ),
                     ),
-                ),
-            },
-        );
+                },
+            )
+            .expect("the fixture's duration begins");
 
         assert_eq!(
             derive_views(&state, None).copied_permanents,
@@ -4306,20 +4308,22 @@ mod tests {
         let values = crate::game::printed_cards::intrinsic_copiable_values(
             state.objects.get(&host).unwrap(),
         );
-        let independent_copy_effect_id = state.add_transient_continuous_effect(
-            host,
-            PlayerId(0),
-            Duration::Permanent,
-            TargetFilter::SpecificObject { id: host },
-            vec![ContinuousModification::CopyValues {
-                values: Box::new(values),
-                display_source: DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
-            }],
-            None,
-        );
+        let independent_copy_effect_id = state
+            .add_transient_continuous_effect(
+                host,
+                PlayerId(0),
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id: host },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(values),
+                    display_source: DisplaySource::Card,
+                    printed_ref: None,
+                    token_image_ref: None,
+                    token_art: None,
+                }],
+                None,
+            )
+            .expect("the fixture's duration begins");
         assert_ne!(
             Some(independent_copy_effect_id),
             merge_effect_id,

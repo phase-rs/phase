@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{is_not, tag, tag_no_case, take_till, take_until};
 use nom::character::complete::multispace1;
-use nom::combinator::{all_consuming, eof, map, map_opt, opt, recognize, rest, value};
+use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, recognize, rest, value, verify};
 use nom::multi::separated_list1;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -434,6 +434,17 @@ pub(super) fn parse_rest_cards_reference(
     .parse(input)
 }
 
+/// CR 701.20a: "onto the battlefield" / "into your <zone>" / "into <zone>" kept-zone phrase.
+fn parse_reveal_until_kept_zone_phrase(i: &str) -> OracleResult<'_, Zone> {
+    let (i, zone) = preceded(
+        alt((tag("onto the "), tag("into your "), tag("into "))),
+        crate::parser::oracle_target::parse_zone_word,
+    )
+    .parse(i)?;
+    let (i, _) = crate::parser::oracle_target::peek_zone_boundary(i)?;
+    Ok((i, zone))
+}
+
 /// CR 202.3 + CR 608.2c: "if its mana value is <comparator> <dynamic
 /// quantity>, put it onto <zone>[. otherwise, put it into <zone>]." — a
 /// card-property branch on the RevealUntil hit card's own mana value,
@@ -450,23 +461,16 @@ pub(super) fn parse_rest_cards_reference(
 /// bare "put it" absorption, which harmlessly refines `kept_destination` to
 /// the same "otherwise" zone).
 fn parse_reveal_until_conditional_kept(input: &str) -> OracleResult<'_, ContinuationAst> {
-    fn kept_zone_phrase(i: &str) -> OracleResult<'_, Zone> {
-        let (i, zone) = preceded(
-            alt((tag("onto the "), tag("into your "), tag("into "))),
-            crate::parser::oracle_target::parse_zone_word,
-        )
-        .parse(i)?;
-        let (i, _) = crate::parser::oracle_target::peek_zone_boundary(i)?;
-        Ok((i, zone))
-    }
-
     let (i, _) = tag("if its mana value is ").parse(input)?;
     let (i, comparator) = crate::parser::oracle_nom::condition::parse_life_total_comparator(i)?;
     let (i, rhs) = crate::parser::oracle_nom::quantity::parse_quantity(i)?;
     let (i, _) = tag(", put it ").parse(i)?;
-    let (i, if_true_destination) = kept_zone_phrase(i)?;
-    let (i, otherwise_destination) =
-        opt(preceded(tag(". otherwise, put it "), kept_zone_phrase)).parse(i)?;
+    let (i, if_true_destination) = parse_reveal_until_kept_zone_phrase(i)?;
+    let (i, otherwise_destination) = opt(preceded(
+        tag(". otherwise, put it "),
+        parse_reveal_until_kept_zone_phrase,
+    ))
+    .parse(i)?;
 
     let filter = TargetFilter::Typed(TypedFilter {
         type_filters: Vec::new(),
@@ -483,6 +487,60 @@ fn parse_reveal_until_conditional_kept(input: &str) -> OracleResult<'_, Continua
             filter: Box::new(filter),
             if_true_destination,
             otherwise_destination,
+        },
+    ))
+}
+
+/// CR 701.20a + CR 608.2c: "put all <filter> cards revealed this way <zone>" after a
+/// RevealUntil whose until-filter is that same <filter> names exactly the matched set (the
+/// loop stops at the Nth match, so every <filter> card revealed is a hit) — the KeepEach
+/// disposition to <zone> (Mass Polymorph, Synthetic Destiny, Old Stickfingers). A different
+/// filter is a different set and is refused (falls through to the existing arms). A phrase
+/// whose built filter is `TargetFilter::Any` is unparsed and cannot establish set identity
+/// (it would alias any other degenerate until-filter), so it is refused too;
+/// "all cards revealed this way" (empty filter) is the whole pile, owned by
+/// `parse_reveal_until_all_to_zone_continuation`; "all other cards revealed this way" is the
+/// rest pile (Dance, Pathetic Marionette; Sharp Eraser), owned by the PutRest arm, and is
+/// refused by grammar before the filter is built.
+fn parse_reveal_until_matched_set_to_zone<'a>(
+    input: &'a str,
+    reveal_filter: &TargetFilter,
+) -> OracleResult<'a, ContinuationAst> {
+    let (i, _) = opt(alt((tag("then "), tag("and ")))).parse(input)?;
+    let (i, _) = alt((tag("puts "), tag("put "))).parse(i)?;
+    let (i, _) = tag("all ").parse(i)?;
+    // CR 608.2c: "all other cards revealed this way" names the non-matched rest, not the
+    // matched set — refuse the rest-subject head by grammar. Defence in depth: the
+    // `TargetFilter::Any` refusal below also stops it aliasing a degenerate until-filter.
+    let (i, _) = not(tag("other ")).parse(i)?;
+    // CR 608.2c: the phrase must build to a typed filter equal to the until-filter. An
+    // unparsed phrase degrades to `Any` and cannot establish set identity.
+    let (i, _) = verify(take_until(" cards revealed this way"), |text: &str| {
+        if text.is_empty() {
+            return false;
+        }
+        let filter = super::build_reveal_until_filter(text);
+        filter != TargetFilter::Any && filter == *reveal_filter
+    })
+    .parse(i)?;
+    let (i, _) = tag(" cards revealed this way ").parse(i)?;
+    let (i, destination) = parse_reveal_until_kept_zone_phrase(i)?;
+    let (i, _) = (opt(tag(".")), eof).parse(i)?;
+    Ok((
+        i,
+        ContinuationAst::RevealUntilKept {
+            destination,
+            enter_tapped: false,
+            enters_attacking: false,
+            any_number: false,
+            // eof-anchored: this chunk carries no rest clause; mirrors
+            // `parse_reveal_until_rest_zone_and_order`'s no-rest-subject result (None, Preserve),
+            // exactly as the Kindred Summons "put those cards" chunk does. A following
+            // "then shuffle the rest…"/"then put the rest…" clause refines the rest pile.
+            rest_destination: None,
+            rest_order: DigRestOrder::Preserve,
+            enters_under: None,
+            optional_decline: None,
         },
     ))
 }
@@ -1843,6 +1901,19 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
     // here is a NOUN, recognized by its type/subtype head plus a following
     // continuous predicate verb.
     if starts_typed_group_continuous_continuation(trimmed_lower.as_str()) {
+        return true;
+    }
+
+    // CR 602.2b + CR 601.2f: a "This ability costs {N} less/more to activate …"
+    // sentence after a closed quote modifies the OUTER activated ability's total
+    // cost — "this ability" names the ability whose text holds the sentence, never
+    // the quoted grant (Llanowar Greenwidow: `It gains "If this permanent would
+    // leave the battlefield, exile it instead …" This ability costs {1} less to
+    // activate for each basic land type among lands you control.`). Splitting here
+    // lets the sentence reach `extract_cost_reduction_from_chain` as its own chain
+    // node; otherwise the quoted grant's static text swallows it and the reduction
+    // is lost.
+    if crate::parser::oracle_cost::is_self_cost_reduction_prefix(trimmed_lower.as_str()) {
         return true;
     }
 
@@ -3976,6 +4047,17 @@ fn next_token_is_player_action_count(s: &str) -> bool {
 /// Used by `starts_bare_and_clause` to split patterns like
 /// "sacrifice ~ and it deals 3 damage to target player".
 fn starts_with_damage_clause(lower: &str) -> bool {
+    // CR 608.2c: a source-pronoun damage instruction follows the earlier effect in order.
+    if (
+        alt((tag::<_, _, OracleError<'_>>("he"), tag("she"))),
+        multispace1,
+        alt((tag("deals "), tag("deal "))),
+    )
+        .parse(lower)
+        .is_ok()
+    {
+        return true;
+    }
     if let Ok((_, before)) = take_until::<_, _, OracleError<'_>>("deals ")
         .parse(lower)
         .or_else(|_| take_until::<_, _, OracleError<'_>>("deal ").parse(lower))
@@ -5059,7 +5141,8 @@ pub(super) fn apply_clause_continuation(
             ));
         }
         ContinuationAst::GoadLastCreated { duration } => {
-            // CR 701.15b: Goaded is a static ability on the just-created tokens.
+            // CR 701.15b: Goaded is a designation on the created tokens. The
+            // static-mode modification is an intermediate resolution encoding.
             defs.push(AbilityDefinition::new(
                 kind,
                 Effect::GenericEffect {
@@ -6148,6 +6231,52 @@ pub(super) fn apply_clause_continuation(
                 )
                 .or_else(|| defs.len().checked_sub(1));
             if let Some(target_idx) = target_idx {
+                // CR 608.2c: instructions are followed in the order written. When
+                // another instruction sits between the reveal and this pile
+                // placement (Goblin Charbelcher's damage), folding the placement
+                // into the reveal would move the pile BEFORE that instruction.
+                // Leave the cards where the reveal found them and emit the
+                // placement as a later chain instruction over the revealed set.
+                // Scoped to an intervening damage instruction: damage is the
+                // replaceable event whose replacement effects (CR 615.5) act on the
+                // revealed cards before the placement.
+                let intervening_damage = defs[target_idx + 1..]
+                    .iter()
+                    .any(super::def_is_damage_dealer);
+                if intervening_damage && defs[target_idx].sub_ability.is_none() {
+                    if let Effect::RevealUntil {
+                        matched_disposition,
+                        ..
+                    } = &mut *defs[target_idx].effect
+                    {
+                        *matched_disposition = RevealUntilDisposition::RevealOnly;
+                        let mut placement = AbilityDefinition::new(
+                            kind,
+                            Effect::ChangeZoneAll {
+                                origin: Some(Zone::Library),
+                                destination,
+                                // The cards this reveal revealed — those still in the
+                                // library: a card an intervening replacement moved
+                                // elsewhere (Swans's draw) is no longer part of the pile.
+                                target: TargetFilter::LastRevealed,
+                                enters_under: None,
+                                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                                enters_attacking: false,
+                                enter_with_counters: vec![],
+                                face_down_profile: None,
+                                library_position: (destination == Zone::Library)
+                                    .then_some(LibraryPosition::Bottom),
+                                library_shuffle: Default::default(),
+                                random_order: matches!(rest_order, DigRestOrder::Random),
+                            },
+                        );
+                        // An independent following instruction, performed on every
+                        // branch of an intervening "instead" override.
+                        placement.sub_link = SubAbilityLink::SequentialSibling;
+                        defs.push(placement);
+                        return;
+                    }
+                }
                 patch_reveal_until_all_to_zone_recursively(
                     &mut defs[target_idx],
                     destination,
@@ -8496,6 +8625,15 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                 .ok()
                 .map(|(_, continuation)| continuation)
         }
+        // CR 701.20a + CR 608.2c: matched-set disposition "put all <until-filter> cards revealed
+        // this way <zone>" (Mass Polymorph, Synthetic Destiny, Old Stickfingers).
+        Effect::RevealUntil { filter, .. }
+            if parse_reveal_until_matched_set_to_zone(lower.trim(), filter).is_ok() =>
+        {
+            parse_reveal_until_matched_set_to_zone(lower.trim(), filter)
+                .ok()
+                .map(|(_, continuation)| continuation)
+        }
         // CR 701.20a + CR 608.2c: "Put any number of those [filter] cards onto the
         // battlefield, then put the rest … on the bottom … in a random order"
         // (Aurora Awakener). This is the multi-match disposition over the *set* of
@@ -9800,6 +9938,64 @@ mod tests {
     use super::*;
     use crate::types::ability::{QuantityExpr, SearchSelectionConstraint, ZoneChoiceChooser};
 
+    #[test]
+    fn source_pronoun_damage_boundaries_compose_pronoun_verb_and_connector() {
+        for pronoun in ["he", "she"] {
+            for verb in ["deal", "deals"] {
+                for connector in [", and ", " and "] {
+                    let tail = format!("{pronoun} {verb} 4 damage to each opponent");
+                    assert!(starts_with_damage_clause(&tail), "{tail}");
+                    let text = format!("put four +1/+1 counters on ~{connector}{tail}");
+                    let chunks = split_clause_sequence(&text);
+                    assert_eq!(chunks.len(), 2, "{text}: {chunks:?}");
+                    assert_eq!(chunks[0].text, "put four +1/+1 counters on ~");
+                    let raw_tail = if connector == ", and " {
+                        format!("and {tail}")
+                    } else {
+                        tail.clone()
+                    };
+                    assert_eq!(chunks[1].text, raw_tail, "{text}");
+                    assert_eq!(
+                        super::super::lower::strip_leading_sequence_connector(&chunks[1].text)
+                            .trim(),
+                        tail,
+                        "{text}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn source_pronoun_damage_boundary_requires_an_immediate_whole_verb() {
+        assert!(starts_with_damage_clause(
+            "she deals 4 damage to each opponent"
+        ));
+        for tail in [
+            "shell deals 4 damage to each opponent",
+            "he dealing 4 damage to each opponent",
+            "she eventually deals 4 damage to each opponent",
+            "they deal 4 damage to each opponent",
+        ] {
+            assert!(!starts_with_damage_clause(tail), "{tail}");
+            let text = format!("put four +1/+1 counters on ~ and {tail}");
+            assert_eq!(split_clause_sequence(&text).len(), 1, "{text}");
+        }
+    }
+
+    #[test]
+    fn source_pronoun_damage_boundaries_do_not_escape_quoted_abilities() {
+        let text = "target creature gains \"{T}: Put a +1/+1 counter on this creature and he deals 1 damage to each opponent.\" until end of turn";
+        assert_eq!(split_clause_sequence(text).len(), 1);
+        assert_eq!(
+            split_clause_sequence(
+                "put a +1/+1 counter on ~ and he deals 1 damage to each opponent"
+            )
+            .len(),
+            2,
+        );
+    }
+
     // CR 401.4: unspecified library placement preserves the owner's choice;
     // explicit randomization and non-library destinations retain their modes.
     #[test]
@@ -9834,6 +10030,112 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    fn creature_until_filter() -> TargetFilter {
+        super::super::build_reveal_until_filter("creature")
+    }
+
+    /// CR 701.20a + CR 608.2c (T-C1): the until-filter's own phrase names the
+    /// matched set; the zone phrase becomes the kept destination.
+    #[test]
+    fn matched_set_to_zone_accepts_the_until_filter() {
+        for (text, zone) in [
+            (
+                "put all creature cards revealed this way onto the battlefield",
+                Zone::Battlefield,
+            ),
+            (
+                "then put all creature cards revealed this way into your graveyard.",
+                Zone::Graveyard,
+            ),
+        ] {
+            let (_, continuation) =
+                parse_reveal_until_matched_set_to_zone(text, &creature_until_filter())
+                    .unwrap_or_else(|err| panic!("{text}: {err:?}"));
+            let ContinuationAst::RevealUntilKept {
+                destination,
+                any_number,
+                rest_destination,
+                rest_order,
+                ..
+            } = continuation
+            else {
+                panic!("{text}: expected RevealUntilKept, got {continuation:?}");
+            };
+            assert_eq!(destination, zone, "{text}");
+            assert!(!any_number, "{text}: the matched set is kept whole");
+            assert_eq!(rest_destination, None, "{text}");
+            assert_eq!(rest_order, DigRestOrder::Preserve, "{text}");
+        }
+    }
+
+    /// CR 701.20a (T-C2): a different filter is a different set.
+    #[test]
+    fn matched_set_to_zone_refuses_a_different_filter() {
+        assert!(parse_reveal_until_matched_set_to_zone(
+            "put all land cards revealed this way onto the battlefield",
+            &creature_until_filter(),
+        )
+        .is_err());
+    }
+
+    /// CR 701.20a (T-C3): "all cards revealed this way" is the whole pile, owned
+    /// by the all-to-zone continuation, not the matched set.
+    #[test]
+    fn matched_set_to_zone_leaves_the_whole_pile_to_all_to_zone() {
+        let text = "put all cards revealed this way into your hand";
+        assert!(parse_reveal_until_matched_set_to_zone(text, &creature_until_filter()).is_err());
+        assert!(
+            parse_reveal_until_all_to_zone_continuation(text).is_ok(),
+            "reach guard: the whole-pile continuation owns this text"
+        );
+    }
+
+    /// CR 701.20a: a phrase that builds to `TargetFilter::Any` is unparsed and
+    /// cannot establish set identity — refused even against an until-filter that
+    /// is itself `Any`. Paired positive: the same call shape with a typed phrase.
+    #[test]
+    fn matched_set_to_zone_refuses_a_phrase_building_to_any() {
+        assert_eq!(
+            super::super::build_reveal_until_filter("green"),
+            TargetFilter::Any,
+            "fixture precondition: the phrase builds to Any"
+        );
+        assert!(parse_reveal_until_matched_set_to_zone(
+            "put all green cards revealed this way onto the battlefield",
+            &TargetFilter::Any,
+        )
+        .is_err());
+        assert!(
+            parse_reveal_until_matched_set_to_zone(
+                "put all creature cards revealed this way onto the battlefield",
+                &creature_until_filter(),
+            )
+            .is_ok(),
+            "reach guard: the same call shape accepts a typed matched-set phrase"
+        );
+    }
+
+    /// CR 608.2c (T-C4): "all other cards revealed this way" is the rest pile —
+    /// refused even against the until-filter "other" itself would build.
+    /// Paired positive: the same call shape with the matched-set phrase.
+    #[test]
+    fn matched_set_to_zone_refuses_the_rest_subject() {
+        let other_filter = super::super::build_reveal_until_filter("other");
+        assert!(parse_reveal_until_matched_set_to_zone(
+            "put all other cards revealed this way into your graveyard",
+            &other_filter,
+        )
+        .is_err());
+        assert!(
+            parse_reveal_until_matched_set_to_zone(
+                "put all creature cards revealed this way into your graveyard",
+                &creature_until_filter(),
+            )
+            .is_ok(),
+            "reach guard: the same call shape accepts the matched-set phrase"
+        );
     }
 
     #[test]
@@ -14697,10 +14999,14 @@ mod tests {
         assert!(starts_bare_and_clause(
             "she doesn't untap during her next untap step"
         ));
+        // CR 608.2c: a source-pronoun damage instruction is its own clause
+        // (Aang, Master of Elements: "... counters on him, and he deals 4
+        // damage to each opponent").
+        assert!(starts_bare_and_clause("she deals 2 damage to any target"));
         // Guard: a gendered pronoun WITHOUT a recognized continuous/restriction
-        // verb must NOT split (no false clause boundary).
+        // or damage verb must NOT split (no false clause boundary).
         assert!(!starts_bare_and_clause("he attacks this turn"));
-        assert!(!starts_bare_and_clause("she deals 2 damage to any target"));
+        assert!(!starts_bare_and_clause("she eventually deals 2 damage"));
     }
 
     /// CR 104.2b + CR 104.3e + CR 119.7 + CR 119.8: plural-player subject +

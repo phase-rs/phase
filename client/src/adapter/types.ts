@@ -1795,7 +1795,10 @@ export type ManaSourcePenalty =
 
 export type ManaSourceOutput =
   | { type: "Concrete"; data: ManaType }
-  | { type: "DeferredColorChoice" };
+  | {
+      type: "DeferredColorChoice";
+      data: { quantity: { type: "Fixed"; data: number } | { type: "Variable" } };
+    };
 
 export type ProductionOverride =
   | { type: "SingleColor"; data: ManaType }
@@ -2378,6 +2381,24 @@ export type ReplacementChoiceKind =
   | { type: "OptionalBranch" }
   | { type: "SearchFoundDestination" };
 
+export type ReplacementAutoChoice =
+  | { type: "Order"; data: { order: number[] } }
+  | { type: "Optional"; data: { index: number } };
+
+export interface ReplacementAutoChoiceKey {
+  player: PlayerId;
+  event: string;
+  kind: ReplacementChoiceKind;
+  candidates: unknown[];
+}
+
+export interface ReplacementAutoChoiceRecord {
+  id: string;
+  key: ReplacementAutoChoiceKey;
+  choice: ReplacementAutoChoice;
+  descriptions: string[];
+}
+
 export type EmergeSacrificeQuality =
   | { type: "Artifact" }
   | { type: "Battle" }
@@ -2503,7 +2524,7 @@ export type WaitingFor =
   | { type: "DeclareAttackers"; data: { player: PlayerId; valid_attacker_ids: ObjectId[]; valid_attack_targets?: AttackTarget[]; valid_attack_targets_by_attacker?: Record<string, AttackTarget[]>; attacker_constraints?: Record<string, CombatRequirement> } }
   | { type: "DeclareBlockers"; data: { player: PlayerId; valid_blocker_ids: ObjectId[]; valid_block_targets: Record<string, ObjectId[]>; block_requirements?: Record<string, BlockRequirementInfo>; blocker_constraints?: Record<string, CombatRequirement>; must_be_blocked_targets?: Record<string, ObjectId[]>; block_capacities?: Record<string, number | null> } }
   | { type: "GameOver"; data: { winner: PlayerId | null } }
-  | { type: "ReplacementChoice"; data: { player: PlayerId; candidate_count: number; candidates?: ReplacementCandidateSummary[]; kind?: ReplacementChoiceKind; last_applied_decides?: boolean } }
+  | { type: "ReplacementChoice"; data: { player: PlayerId; candidate_count: number; candidates?: ReplacementCandidateSummary[]; kind?: ReplacementChoiceKind; last_applied_decides?: boolean; remember_identity?: ReplacementAutoChoiceRecord["key"] } }
   | { type: "EntryControllerChoice"; data: { player: PlayerId; candidates: PlayerId[] } }
   | { type: "OrderTriggers"; data: { player: PlayerId; triggers: PendingTriggerSummary[] } }
   | { type: "CopyTargetChoice"; data: { player: PlayerId; source_id: ObjectId; valid_targets: ObjectId[]; max_mana_value?: number | null; purpose?: { type: "BecomeCopy" | "PersistChosenAttribute" | "CopyTokenSource" } } }
@@ -3100,6 +3121,8 @@ export type GameAction =
   | { type: "ChooseTarget"; data: { target: TargetRef | null } }
   | { type: "ChoosePair"; data: { partner: ObjectId | null } }
   | { type: "ChooseReplacement"; data: { index: number } }
+  | { type: "ChooseReplacementAndRemember"; data: { choice: ReplacementAutoChoice } }
+  | { type: "SetReplacementAutoChoice"; data: { selector: string | null } }
   | { type: "ChooseEntryController"; data: { opponent: PlayerId } }
   | { type: "OrderTriggers"; data: { order: number[] } }
   // CR 601.2f: the caster's elected cost-reduction order — a permutation of
@@ -4289,6 +4312,7 @@ export interface GameState {
   priority_yields?: PriorityYield[];
   /** CR 603.5: the viewer's stored "don't ask again" auto-choices for optional ("may") triggers. */
   may_trigger_auto_choices?: MayTriggerAutoChoiceRecord[];
+  replacement_auto_choices?: ReplacementAutoChoiceRecord[];
   lands_tapped_for_mana?: Record<number, number[]>;
   scheduled_turn_controls?: Array<{
     target_player: PlayerId;

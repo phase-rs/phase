@@ -723,7 +723,17 @@ pub enum ManaSourcePenalty {
     Sacrifices,
 }
 
-/// CR 106.1a: The output choice captured for a mana-source activation.
+/// CR 106.3 + CR 107.1b: The nominal nonnegative base amount of a manually
+/// selected flexible mana source.
+/// A dynamic amount is resolved after activation costs have been paid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ManaSourceQuantity {
+    Fixed(u32),
+    Variable,
+}
+
+/// CR 106.1a + CR 106.1b: The output choice captured for a mana-source activation.
 ///
 /// `Concrete` is the planner-selected output used by automatic payment. A
 /// manually selected flexible producer instead retains `DeferredColorChoice`,
@@ -733,7 +743,7 @@ pub enum ManaSourcePenalty {
 #[serde(tag = "type", content = "data")]
 pub enum ManaSourceOutput {
     Concrete(ManaType),
-    DeferredColorChoice,
+    DeferredColorChoice { quantity: ManaSourceQuantity },
 }
 
 /// Exact identity of one triggered mana ability that augments a land's own
@@ -821,13 +831,14 @@ impl ManaSourceSelection {
 fn cmp_mana_source_output(left: ManaSourceOutput, right: ManaSourceOutput) -> std::cmp::Ordering {
     match (left, right) {
         (ManaSourceOutput::Concrete(a), ManaSourceOutput::Concrete(b)) => a.cmp(&b),
-        (ManaSourceOutput::DeferredColorChoice, ManaSourceOutput::DeferredColorChoice) => {
-            std::cmp::Ordering::Equal
-        }
-        (ManaSourceOutput::Concrete(_), ManaSourceOutput::DeferredColorChoice) => {
+        (
+            ManaSourceOutput::DeferredColorChoice { quantity: a },
+            ManaSourceOutput::DeferredColorChoice { quantity: b },
+        ) => a.cmp(&b),
+        (ManaSourceOutput::Concrete(_), ManaSourceOutput::DeferredColorChoice { .. }) => {
             std::cmp::Ordering::Less
         }
-        (ManaSourceOutput::DeferredColorChoice, ManaSourceOutput::Concrete(_)) => {
+        (ManaSourceOutput::DeferredColorChoice { .. }, ManaSourceOutput::Concrete(_)) => {
             std::cmp::Ordering::Greater
         }
     }
@@ -3010,6 +3021,33 @@ mod tests {
         let color = ManaColor::White;
         let json = serde_json::to_value(color).unwrap();
         assert_eq!(json, "White");
+    }
+
+    #[test]
+    fn deferred_mana_source_quantities_round_trip_with_distinct_wire_shapes() {
+        for (quantity, wire) in [
+            (
+                ManaSourceQuantity::Fixed(3),
+                serde_json::json!({
+                    "type": "DeferredColorChoice",
+                    "data": { "quantity": { "type": "Fixed", "data": 3 } },
+                }),
+            ),
+            (
+                ManaSourceQuantity::Variable,
+                serde_json::json!({
+                    "type": "DeferredColorChoice",
+                    "data": { "quantity": { "type": "Variable" } },
+                }),
+            ),
+        ] {
+            let output = ManaSourceOutput::DeferredColorChoice { quantity };
+            assert_eq!(serde_json::to_value(output).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_value::<ManaSourceOutput>(wire).unwrap(),
+                output
+            );
+        }
     }
 
     #[test]

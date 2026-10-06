@@ -38,6 +38,30 @@ use super::mana_sources::{mana_color_to_type, mana_type_to_color};
 use super::sacrifice;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
+/// CR 605.3a + CR 601.2h: Distinguishes whether the cost-payability check
+/// inside [`mana_ability_ready_without_simulation_gated`] should treat the
+/// current game state as authoritative (`Current`) or as a planning estimate
+/// (`Planning`).
+///
+/// * `Current` — used by the activation legality gate and the readiness
+///   display. Delegates to [`AbilityCost::is_payable_for_mana_ability`], which
+///   checks mana affordability through the full auto-tap witness (CR 601.2g)
+///   and honors tag-scoped mana via the correct ability index (CR 106.6).
+/// * `Planning` — used by auto-tap source scanning. Delegates to
+///   [`AbilityCost::is_payable_for_activation`] with the known `ability_index`.
+///   That function already returns `true` for `AbilityCost::Mana` sub-costs
+///   (CR 601.2g defers them to the mana payment step), so filter-land / Signet
+///   costs are treated as payable during planning without duplicating the
+///   traversal. All other components (sacrifice, pay life, discard, tap) are
+///   still checked against the current game state through the same authority.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ManaPayabilityMode {
+    /// Full current-state payability: mana affordability is checked now.
+    Current,
+    /// Planning mode: mana sub-costs are deferred; other costs checked now.
+    Planning,
+}
+
 /// CR 605.1a, criteria (1)-(3) ONLY — no target (CR 115.6), the root effect adds
 /// mana, and it's not a loyalty ability (CR 606.2). Deliberately EXCLUDES the
 /// fourth criterion ("its cost and effect don't move any card to or from a
@@ -606,6 +630,17 @@ pub(super) fn resolve_mana_ability_excluding(
     parent: Option<&ManaAbilityCostParent>,
 ) -> Result<(), EngineError> {
     let waiting_before = state.waiting_for.clone();
+    // CR 602.5: Defense-in-depth: enforce activation prohibitions at resolution time.
+    if super::casting::is_blocked_by_cant_be_activated(state, player, source_id, ability_def) {
+        return Err(EngineError::ActionNotAllowed(
+            "Activated abilities of this permanent can't be activated (CR 602.5)".to_string(),
+        ));
+    }
+    if super::casting::is_blocked_by_cant_activate_during(state, player, ability_def) {
+        return Err(EngineError::ActionNotAllowed(
+            "Activated abilities can't be activated at this time (CR 602.5)".to_string(),
+        ));
+    }
     let ability_index = state.objects.get(&source_id).and_then(|object| {
         object
             .abilities
@@ -987,6 +1022,12 @@ pub fn activate_mana_ability(
         ability_index,
         &ability_def.activation_restrictions,
     )?;
+
+    // CR 302.6: Direct mana activations obey the same {T}/{Q} creature gate
+    // as non-mana activations, before any journal or cost-payment mutation.
+    if let Some(cost) = &ability_def.cost {
+        super::restrictions::check_summoning_sickness_for_cost(state, source, cost)?;
+    }
 
     let rules_execution_node = Some(state.begin_activated_mana_journal_node(source_id));
     advance_mana_ability_activation(
@@ -1750,6 +1791,7 @@ pub(crate) fn intrinsic_land_mana_ability_blocked(
             object_id,
             0,
             &ability_def,
+            ManaPayabilityMode::Current,
             gates,
         ),
         None => {
@@ -1776,16 +1818,18 @@ fn mana_ability_ready_without_simulation(
         source_id,
         ability_index,
         ability_def,
+        ManaPayabilityMode::Current,
         &gates,
     )
 }
 
-fn mana_ability_ready_without_simulation_gated(
+pub(crate) fn mana_ability_ready_without_simulation_gated(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
     ability_index: usize,
     ability_def: &AbilityDefinition,
+    payability_mode: ManaPayabilityMode,
     gates: &ManaActivationGates,
 ) -> bool {
     let Some(obj) = state.objects.get(&source_id) else {
@@ -1876,12 +1920,31 @@ fn mana_ability_ready_without_simulation_gated(
     {
         return false;
     }
-    // CR 605.3a + CR 601.2h: The mana sub-cost (pool + choice-of-object) must be
-    // currently payable. is_payable_for_mana_ability's Mana arm uses auto_tap with
-    // require_current_payability=false, so it does not recurse here.
+    // CR 605.3a + CR 601.2h: Gate on cost payability, using the shared authority
+    // from cost_payability.rs.
+    //
+    // `Current` — delegates to `is_payable_for_mana_ability`, which checks mana
+    // affordability via the auto-tap witness (CR 601.2g) and honors tag-scoped mana
+    // via the correct ability index (CR 106.6).
+    //
+    // `Planning` — delegates to `is_payable_for_activation(…, Some(ability_index))`. That function
+    // already returns `true` for `AbilityCost::Mana` sub-costs (CR 601.2g defers
+    // them to the mana payment step), so filter-land / Signet costs are treated as
+    // payable during planning. All other components (sacrifice, pay life, discard,
+    // tap) are still checked through the same existing cost-payability authority,
+    // preventing them from drifting from the full-legality path.
     if let Some(cost) = &ability_def.cost {
-        if !cost.is_payable_for_mana_ability(state, player, source_id, ability_index) {
-            return false;
+        match payability_mode {
+            ManaPayabilityMode::Current => {
+                if !cost.is_payable_for_mana_ability(state, player, source_id, ability_index) {
+                    return false;
+                }
+            }
+            ManaPayabilityMode::Planning => {
+                if !cost.is_payable_for_activation(state, player, source_id, Some(ability_index)) {
+                    return false;
+                }
+            }
         }
     }
     true
@@ -1990,6 +2053,7 @@ pub fn can_activate_mana_ability_now_gated(
         source_id,
         ability_index,
         ability_def,
+        ManaPayabilityMode::Current,
         gates,
     ) {
         return false;
@@ -4744,7 +4808,12 @@ fn pay_mana_sub_cost(
         .map_err(|_| {
             EngineError::ActionNotAllowed("Mana pool changed before payment applied".to_string())
         })?;
-    state.layers_dirty.mark_full();
+    // CR 106.4 + CR 613.1: Spending pool mana only changes continuous effects
+    // that read unspent mana (Omnath's "+1/+1 for each unspent green mana");
+    // re-evaluate layers only when one exists, like every other pool spend.
+    if mana_payment::has_unspent_mana_continuous_effects(state) {
+        state.layers_dirty.mark_full();
+    }
     // CR 605.3b: The player's mana pool mutation is the public signal; no
     // dedicated event exists for ability mana payments. The pool-diff is
     // surfaced via the standard state-update machinery.
@@ -12439,6 +12508,77 @@ mod tests {
 
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 1);
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Black), 0);
+    }
+
+    /// Pay Sunken Ruins' `{U/B}` sub-cost with floating black mana and report
+    /// whether the pool spend forced a full layer re-evaluation.
+    fn filter_land_pool_payment_dirties_layers(with_unspent_mana_static: bool) -> bool {
+        let mut state = GameState::new_two_player(42);
+        if with_unspent_mana_static {
+            // Omnath class: "+1/+1 for each unspent green mana you have".
+            let omnath_static = StaticDefinition::continuous().modifications(vec![
+                ContinuousModification::AddDynamicPower {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::UnspentMana {
+                            color: Some(ManaColor::Green),
+                        },
+                    },
+                },
+            ]);
+            let omnath = create_object(
+                &mut state,
+                CardId(9_901),
+                PlayerId(0),
+                "Unspent Mana Static".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&omnath).unwrap();
+            obj.static_definitions.push(omnath_static.clone());
+            obj.base_static_definitions = Arc::new(vec![omnath_static]);
+        }
+        let (ruins, ability) = setup_sunken_ruins(&mut state);
+        seed_pool_with(&mut state, PlayerId(0), ManaType::Blue, 1);
+        seed_pool_with(&mut state, PlayerId(0), ManaType::Black, 1);
+
+        let mut events = Vec::new();
+        let WaitingFor::PayManaAbilityMana {
+            options,
+            pending_mana_ability,
+            ..
+        } = activate_mana_ability(
+            &mut state,
+            ruins,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .unwrap()
+        else {
+            panic!("ambiguous {{U/B}} payment must prompt");
+        };
+        crate::game::layers::flush_layers(&mut state);
+        crate::game::perf_counters::reset();
+        handle_pay_mana_ability_mana(
+            &mut state,
+            &options,
+            &pending_mana_ability,
+            &[ManaType::Black],
+            &mut events,
+        )
+        .unwrap();
+        crate::game::perf_counters::snapshot().layers_full_eval > 0
+    }
+
+    #[test]
+    fn filter_land_pool_payment_dirties_layers_only_for_unspent_mana_effects() {
+        // CR 106.4 + CR 613.1: Spending floating mana changes characteristics
+        // only through effects that read unspent mana, so a full layer
+        // re-evaluation is owed exactly when one is on the battlefield.
+        assert!(filter_land_pool_payment_dirties_layers(true));
+        assert!(!filter_land_pool_payment_dirties_layers(false));
     }
 
     #[test]

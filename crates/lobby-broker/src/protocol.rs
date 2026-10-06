@@ -60,6 +60,29 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 107 — `UntilCondition::NextMatches` gains `count` ("until you exile two
+///      nonland cards …" — Invasion of Alara, CR 608.2c), the paused loop
+///      (`PendingExileFromTopUntil`) keeps its `hits`,
+///      `ZoneChoiceCandidateSource` gains `ParentTargets`, and `SpellContext`
+///      gains `exile_until_batch` (the loop's cards, carried by a paused
+///      continuation). A v106 peer reads a counted loop as a one-card loop and
+///      cannot parse the new candidate source. P2P moves in lockstep
+///      (wire 89).
+/// 106 — Full-game replacement-choice preferences, exact source/definition
+///       identities, remembered ordering/optional actions, and prompt
+///       eligibility metadata. P2P moves in lockstep (wire 88); lobby-only
+///       messages are unchanged.
+/// 105 — Deferred mana-source selections carry a nominal base quantity.
+///      Older peers cannot decode the new tagged output payload; the full-game
+///      handshake rejects the mismatch. P2P moves in lockstep (wire 87).
+///      Lobby-only messages are unchanged.
+/// 104 — `PendingCast` gains `delved_cards` (serde default, skipped when
+///      empty), `PendingCostMoveResume::DelveManaPayment` is removed and
+///      `PendingCostMoveCompletion::FinalizeDelvedCast` is added: delve fuel
+///      is exiled when the total cost is paid (#9400). A PARSE bump: a v103
+///      peer cannot decode a parked delve commit, and a v104 peer cannot
+///      decode the removed variant. Full-game peers and P2P move in lockstep
+///      (wire 86); lobby carriers hold no `GameState` and are unchanged.
 /// 103 — `FormatConfig` loses `allow_experimental_dungeons`: the per-session
 ///      capability flag behind the experimental dungeon pool is gone, and
 ///      the pool is now format-derived — Baldur's Gate Wilderness joins the
@@ -861,7 +884,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 103;
+pub const PROTOCOL_VERSION: u32 = 107;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2116,12 +2139,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 103);
+        assert_eq!(PROTOCOL_VERSION, 107);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 102);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 106);
     }
 
     #[test]

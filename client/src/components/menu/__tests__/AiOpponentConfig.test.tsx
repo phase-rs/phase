@@ -1,3 +1,5 @@
+import "../../../test/helpers/persistedStorage";
+
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { act } from "react";
@@ -6,6 +8,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AiOpponentConfig } from "../AiOpponentConfig";
 import { usePreferencesStore } from "../../../stores/preferencesStore";
 import type { AiDeckCandidate } from "../../../services/aiDeckCatalog";
+import { useLlmStore } from "../../../stores/llmStore";
+import type { LlmProviderCatalogEntry } from "../../../services/llm/types";
+
+const catalogMock = vi.hoisted(() => ({ loadProviderCatalog: vi.fn() }));
+vi.mock("../../../services/llm/catalog", () => catalogMock);
 
 vi.mock("../../../services/aiDeckCatalog", async () => {
   const actual = await vi.importActual<typeof import("../../../services/aiDeckCatalog")>(
@@ -32,6 +39,11 @@ function candidate(id: string, bracket: AiDeckCandidate["bracket"]): AiDeckCandi
 }
 
 beforeEach(() => {
+  catalogMock.loadProviderCatalog.mockResolvedValue([]);
+  useLlmStore.setState({
+    profiles: [], seatBindings: {}, defaultOpponentProfileId: null,
+    draftEnabled: false, draftProfileId: null,
+  });
   mockCandidates = [
     candidate("Bracket1", 1),
     candidate("Bracket2", 2),
@@ -51,6 +63,49 @@ beforeEach(() => {
 });
 
 afterEach(cleanup);
+
+it("waits for catalog rows before offering a provider and keeps an explicit engine choice", async () => {
+  const user = userEvent.setup();
+  let resolveCatalog!: (rows: LlmProviderCatalogEntry[]) => void;
+  catalogMock.loadProviderCatalog.mockReturnValue(new Promise<LlmProviderCatalogEntry[]>((resolve) => {
+    resolveCatalog = resolve;
+  }));
+  const id = useLlmStore.getState().addProfile({
+    name: "Test provider", provider: "OpenAi", model: "gpt-5", apiKey: "key", enabled: true,
+  });
+  useLlmStore.getState().setDefaultOpponentProfileId(id);
+
+  render(<AiOpponentConfig selectedFormat="Standard" opponentCount={1} />);
+  expect(screen.queryByRole("button", { name: /^Driven by$/i })).not.toBeInTheDocument();
+
+  await act(async () => {
+    resolveCatalog([{
+      provider: "OpenAi", value: "OpenAi", displayName: "OpenAI", defaultBaseUrl: null,
+      defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [],
+    }]);
+  });
+  const picker = await screen.findByRole("button", { name: /^Driven by$/i });
+  expect(picker).toHaveTextContent("Test provider");
+  await user.click(picker);
+  await user.click(screen.getByRole("option", { name: /Engine AI/i }));
+  expect(useLlmStore.getState().seatBindings[0]).toBeNull();
+  expect(picker).toHaveTextContent(/Engine AI/i);
+});
+
+it("does not offer a profile absent from the loaded catalog", async () => {
+  catalogMock.loadProviderCatalog.mockResolvedValue([{
+    provider: "Gemini", value: "Gemini", displayName: "Gemini", defaultBaseUrl: null,
+    defaultModel: "gemini", requiresApiKey: true, apiKeyUrl: "", models: [],
+  }]);
+  useLlmStore.getState().addProfile({
+    provider: "OpenAi", model: "gpt-5", apiKey: "key", enabled: true,
+  });
+
+  render(<AiOpponentConfig selectedFormat="Standard" opponentCount={1} />);
+  await act(async () => { await Promise.resolve(); });
+  expect(catalogMock.loadProviderCatalog).toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: /^Driven by$/i })).not.toBeInTheDocument();
+});
 
 describe("AiOpponentConfig — cEDH toggle", () => {
   it("enabling cEDH mode sets the table flag without touching per-seat difficulties", async () => {

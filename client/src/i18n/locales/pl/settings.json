@@ -127,7 +127,9 @@
     "cardAnimationStyleOptions": {
       "webgl": "Nowe",
       "classic": "Klasyczne"
-    }
+    },
+    "cardAnimationPreviewHintHover": "Najedź, aby zobaczyć podgląd",
+    "cardAnimationPreviewHintTap": "Dotknij, aby zobaczyć podgląd"
   },
   "flexLayout": {
     "title": "Elastyczny układ",
@@ -506,11 +508,23 @@
     "apiKey": "Klucz API",
     "apiKeyPlaceholder": "Wklej swój klucz API",
     "apiKeyOptional": "Opcjonalny dla serwerów lokalnych",
+    "apiKeyMissing": "Wpisz klucz API ponownie. Klucze nie są zachowywane po przeładowaniu, a ten dostawca nie jest używany dla miejsc AI ani botów w draftcie, dopóki tego nie zrobisz.",
     "apiKeyStorage": "Przechowywany w pamięci tylko na czas tej sesji przeglądarki. Klucze API nigdy nie trafiają na dysk i są wyłączone z eksportu kopii zapasowej oraz synchronizacji w chmurze, więc po przeładowaniu trzeba go wpisać ponownie. Klucz API wymaga też endpointu https://, chyba że serwer działa na localhost.",
     "apiKeyGet": "Zdobądź klucz",
     "test": "Testuj połączenie",
     "testing": "Testowanie…",
     "testOk": "Połączono.",
+    "defaultPrompt": {
+      "connected": "Połączono. Użyć jako domyślnego przeciwnika?",
+      "ready": "Użyć tego dostawcy jako domyślnego przeciwnika?",
+      "action": "Użyj jako domyślnego",
+      "badge": "Domyślny przeciwnik"
+    },
+    "defaultOpponent": {
+      "label": "Domyślny przeciwnik",
+      "hint": "Przeciwnicy AI używają tego dostawcy, chyba że przy konfiguracji meczu wybierzesz innego dla danego miejsca. Dotyczy to także przeciwnika w meczach po drafcie.",
+      "engine": "Wbudowane AI silnika"
+    },
     "draftToggle": {
       "label": "Użyj do botów w drafcie",
       "hint": "Boty w drafcie wybierają kartę modelem, z kontekstem dodatków danego formatu.",

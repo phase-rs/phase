@@ -80,8 +80,8 @@ use super::{
     def_is_keyword_counter_placement, def_is_perpetual_keyword_grant,
     demote_unbindable_batch_aggregate, draw_object_count_filter, fold_cast_copy_of_card_defs,
     has_explicit_player_target, inject_chosen_color_choice_grant,
-    inject_printed_color_choice_filter, mark_uses_tracked_set, nearest_publisher_is_self_move,
-    parse_spell_graveyard_replacement_rider,
+    inject_printed_color_choice_filter, intrinsic_continuation_effect, mark_uses_tracked_set,
+    nearest_publisher_is_self_move, parse_spell_graveyard_replacement_rider,
     parse_spells_cast_this_way_graveyard_replacement_rider, plural_library_shuffle_recall,
     publishes_aggregate_set_from_resolution, publishes_exiled_cause_at_resolution,
     publishes_tracked_set_from_resolution, rebind_tracked_aggregate_to_chain_set,
@@ -365,10 +365,11 @@ impl Arena {
         self.order.get(index).copied()
     }
 
-    /// Every top-level id EXCEPT the first. `Instead` nests defs `1..N` into the root
-    /// (`defs[0]`) and must name it as their parent, so it needs exactly this set.
-    fn tail_ids(&self) -> Vec<NodeId> {
-        self.order.iter().skip(1).copied().collect()
+    /// Every top-level id AFTER position `index`. `Instead` nests the defs that follow
+    /// its base (`defs[index]`) into that base and must name it as their parent, so
+    /// it needs exactly this set.
+    fn ids_after(&self, index: usize) -> Vec<NodeId> {
+        self.order.iter().skip(index + 1).copied().collect()
     }
 
     /// Provenance of the node currently at top-level `index` — the SINGLE store.
@@ -2475,20 +2476,33 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             OnMiss::Ignore,
                         );
                         if bound.is_some() {
-                            // Identity: the root is MOVED out of `defs` and back in —
+                            // CR 614.15 + CR 608.2c: an override whose body restates the
+                            // preceding damage ("deals double that damage instead") replaces
+                            // THAT damage instruction, not the chain's first one — the
+                            // instructions before it (Goblin Charbelcher's reveal) are
+                            // performed regardless and supply the quantity it reads.
+                            let base_index =
+                                instead_damage_antecedent_index(&env, &defs, instead_def);
+                            // Identity: the base is MOVED out of `defs` and back in —
                             // it keeps its NodeId (U6-C2 ruling). Capture before the take.
-                            // The TAIL defs (1..N) are nested into the root below, so
-                            // capture their ids too and name the root as their parent —
+                            // The TAIL defs (after the base) are nested into it below, so
+                            // capture their ids too and name the base as their parent —
                             // `settle` no longer infers one.
-                            let root_id = env.arena.id_at(0);
-                            let tail_ids = env.arena.tail_ids();
-                            let mut chain_defs = std::mem::take(&mut defs);
+                            let root_id = env.arena.id_at(base_index);
+                            let tail_ids = env.arena.ids_after(base_index);
+                            let mut chain_defs = defs.split_off(base_index);
                             env.observe(&defs, None, NodeRole::Unknown);
                             let mut root = chain_defs.remove(0);
                             for next in chain_defs {
                                 append_to_deepest_sub_ability(&mut root, Some(Box::new(next)));
                             }
                             let mut instead = *instead_def.clone();
+                            if base_index > 0 {
+                                rebind_damage_anaphor_to_antecedent(
+                                    &mut instead.effect,
+                                    intrinsic_continuation_effect(&root),
+                                );
+                            }
                             if instead_replaces_optional_payment_continuation(&root) {
                                 // CR 608.2c: after "you may pay ... If you do, X",
                                 // a later "Y instead" modifies X, not the preceding
@@ -4568,6 +4582,70 @@ fn rebind_condition_instead_damage_anaphor(
 /// CR 608.2c: identify the structural "you may pay ... If you do, X" form
 /// whose immediate paid continuation, rather than the payment itself, can be
 /// modified by a following "Y instead" clause.
+/// The `defs` index an "instead" override binds to as the instruction it replaces.
+///
+/// Default is the first emitted def (`FirstEmitted` — CR 608.2c: the override
+/// replaces the first printed instruction). An override whose body is the
+/// "that damage" anaphor — `DealDamage` over a multiple of the event-context
+/// amount ("deals double that damage instead") — names the DAMAGE instruction
+/// it restates, so it binds to the nearest preceding `DamageDealer` instead.
+/// Falls back to the first def when no later damage instruction exists.
+fn instead_damage_antecedent_index(
+    env: &AssemblyEnv,
+    defs: &[AbilityDefinition],
+    instead_def: &AbilityDefinition,
+) -> usize {
+    let restates_damage = matches!(
+        instead_def.effect.as_ref(),
+        Effect::DealDamage {
+            amount: QuantityExpr::Multiply { inner, .. },
+            ..
+        } if matches!(
+            inner.as_ref(),
+            QuantityExpr::Ref { qty: QuantityRef::EventContextAmount }
+        )
+    );
+    if !restates_damage {
+        return 0;
+    }
+    env.resolve(
+        defs,
+        AntecedentSelector::LastWithRole(AntecedentRole::DamageDealer),
+        None,
+        OnMiss::Ignore,
+    )
+    .unwrap_or(0)
+}
+
+/// CR 608.2c + CR 614.6: resolve the "that damage" anaphor of an "instead"
+/// override against the damage instruction it replaces. The replaced
+/// instruction never runs when the override applies, so the event-context
+/// amount has no value to read; the override's multiple is taken over the
+/// replaced instruction's own amount expression instead.
+fn rebind_damage_anaphor_to_antecedent(instead: &mut Effect, antecedent: &Effect) {
+    let (
+        Effect::DealDamage {
+            amount: QuantityExpr::Multiply { inner, .. },
+            ..
+        },
+        Effect::DealDamage {
+            amount: antecedent_amount,
+            ..
+        },
+    ) = (instead, antecedent)
+    else {
+        return;
+    };
+    if matches!(
+        inner.as_ref(),
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount
+        }
+    ) {
+        **inner = antecedent_amount.clone();
+    }
+}
+
 fn instead_replaces_optional_payment_continuation(root: &AbilityDefinition) -> bool {
     matches!(root.effect.as_ref(), Effect::PayCost { .. })
         && root.sub_ability.as_ref().is_some_and(|continuation| {

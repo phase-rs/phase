@@ -2474,11 +2474,10 @@ pub(super) fn resolve_defined_or_targets(
                 })
                 .collect();
         }
-        if ability.target_choice_timing == TargetChoiceTiming::Resolution
-            && ability.targets.is_empty()
-            && filter.contains_source_attachment_host()
+        if let Some(hosts) =
+            crate::game::targeting::resolution_bound_attachment_hosts(state, ability, filter)
         {
-            return crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter);
+            return hosts;
         }
     }
 
@@ -3462,24 +3461,26 @@ mod tests {
         application_condition: Option<StaticCondition>,
     ) -> u64 {
         let affected_ref = ObjectIncarnationRef::from_object(&state.objects[&affected]);
-        state.add_transient_continuous_effect_with_bindings(
-            affected,
-            PlayerId(0),
-            Duration::ForAsLongAs {
-                condition: StaticCondition::RecipientHasCounters {
-                    counters,
-                    minimum,
-                    maximum,
+        state
+            .add_transient_continuous_effect_with_bindings(
+                affected,
+                PlayerId(0),
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::RecipientHasCounters {
+                        counters,
+                        minimum,
+                        maximum,
+                    },
                 },
-            },
-            TargetFilter::SpecificObject { id: affected },
-            vec![ContinuousModification::AddPower { value: 1 }],
-            application_condition,
-            TransientContinuousEffectBindings {
-                affected_recipient: Some(affected_ref),
-                duration_subject: Some(subject),
-            },
-        )
+                TargetFilter::SpecificObject { id: affected },
+                vec![ContinuousModification::AddPower { value: 1 }],
+                application_condition,
+                TransientContinuousEffectBindings {
+                    affected_recipient: Some(affected_ref),
+                    duration_subject: Some(subject),
+                },
+            )
+            .expect("the fixture's duration begins")
     }
 
     #[test]
@@ -3726,20 +3727,22 @@ mod tests {
                 maximum: None,
             }),
         );
-        let source_gate_id = state.add_transient_continuous_effect(
-            subject,
-            PlayerId(0),
-            Duration::ForAsLongAs {
-                condition: StaticCondition::HasCounters {
-                    counters: CounterMatch::OfType(CounterType::Shield),
-                    minimum: 1,
-                    maximum: None,
+        let source_gate_id = state
+            .add_transient_continuous_effect(
+                subject,
+                PlayerId(0),
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::HasCounters {
+                        counters: CounterMatch::OfType(CounterType::Shield),
+                        minimum: 1,
+                        maximum: None,
+                    },
                 },
-            },
-            TargetFilter::SpecificObject { id: subject },
-            vec![ContinuousModification::AddPower { value: 1 }],
-            None,
-        );
+                TargetFilter::SpecificObject { id: subject },
+                vec![ContinuousModification::AddPower { value: 1 }],
+                None,
+            )
+            .expect("the fixture's duration begins");
         let mut events = Vec::new();
         assert_eq!(
             apply_counter_removal(&mut state, subject, CounterType::Shield, 0, &mut events),
@@ -3846,8 +3849,24 @@ mod tests {
         );
         crate::game::layers::evaluate_layers(&mut state);
         assert_eq!(state.objects[&affected].power, Some(3));
+        assert!(state
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| effect.id == id));
         state.objects.get_mut(&subject).unwrap().bump_incarnation();
+        // Keep a separate pre-flush fixture so the counter-edit identity check
+        // cannot pass merely because layer evaluation already retired the id.
+        let mut counter_edit_state = state.clone();
         crate::game::layers::evaluate_layers(&mut state);
+        // CR 611.2a + CR 400.7: the old subject's duration has ended; a new
+        // occurrence cannot sustain the effect.
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .all(|effect| effect.id != id),
+            "layer evaluation must immediately retire the stale subject's effect"
+        );
         assert_eq!(
             state.objects[&affected].power,
             Some(2),
@@ -3869,12 +3888,22 @@ mod tests {
             Some(&1)
         );
         let mut events = Vec::new();
+        assert!(counter_edit_state
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| effect.id == id));
         assert_eq!(
-            apply_counter_removal(&mut state, subject, CounterType::Shield, 1, &mut events),
+            apply_counter_removal(
+                &mut counter_edit_state,
+                subject,
+                CounterType::Shield,
+                1,
+                &mut events,
+            ),
             1
         );
         assert!(
-            state
+            counter_edit_state
                 .transient_continuous_effects
                 .iter()
                 .any(|effect| effect.id == id),

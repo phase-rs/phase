@@ -1436,6 +1436,7 @@ pub(crate) fn bind_resolving_ability_referents(
             .or(state.current_trigger_event.as_ref());
         super::triggers::seed_batched_attack_parent_targets(ability, event_ref);
         super::triggers::seed_event_context_parent_targets(
+            state,
             ability,
             event_ref,
             super::triggers::EventContextSeedTiming::ResolutionFallback,
@@ -1497,6 +1498,15 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // republished below for an `ActivatedAbility` entry (and only for that kind).
     state.announced_source_x = None;
     state.turn_up_paid_cost_source = None;
+    // CR 608.2c + CR 608.2h: the "that many" counts an instruction stamps are
+    // resolution-local — a later instruction of THIS resolution reads them, and no
+    // other stack object may. One player action can resolve several stack objects
+    // in a row, so clear them here, before this object begins resolving, rather
+    // than only once per action in `apply()`. A CR 615.5 prevention/replacement
+    // rider reads its stamped amount synchronously, inside the event or resolution
+    // that stamped it, and never passes through here.
+    state.last_effect_count = None;
+    state.last_effect_counts_by_player.clear();
 
     // CR 405.5: When all players pass in succession, the top object on the stack resolves.
     let Some(PoppedStackEntry {
@@ -14266,11 +14276,14 @@ mod tests {
         /// the (3.3)/(3.4) boards.
         const OVERRIDDEN_NAME: &str = "Cloned Bear";
 
-        /// "Three or more permanents named `OVERRIDDEN_NAME`", counted
+        /// "`comparator` `count` permanents named `OVERRIDDEN_NAME`", counted
         /// board-wide. Same shape as (3.1)'s gate minus the recipient context:
         /// no `FilterProp::Another`, so `condition_uses_recipient_context` is
         /// false and every gather strips it off the effect it pushes.
-        fn overridden_name_count_at_least(count: i32) -> crate::types::ability::StaticCondition {
+        fn overridden_name_count(
+            comparator: Comparator,
+            count: i32,
+        ) -> crate::types::ability::StaticCondition {
             crate::types::ability::StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::ObjectCount {
@@ -14279,7 +14292,7 @@ mod tests {
                         },
                     },
                 },
-                comparator: Comparator::GE,
+                comparator,
                 rhs: QuantityExpr::Fixed { value: count },
             }
         }
@@ -14289,19 +14302,21 @@ mod tests {
         /// `install_gate`.
         ///
         /// WHY LAYER 1 and not the layer-4 rewrite (3.1) uses: a source-level
-        /// condition and a `ForAsLongAs` duration are both evaluated inside
-        /// `gather_transient_continuous_effects`, and `evaluate_layers` gathers
-        /// at Step 3 — after layer 1 has been applied and before layers 2-7.
-        /// Layer 1 is therefore the ONLY layer whose writes such a gate can see
-        /// within one pass. (A retained recipient-context condition is instead
-        /// re-checked at APPLY time, which is why (3.1) can use layer 4.)
-        /// `prepare_incremental_flush` gathers with NO layer applied at all, so
-        /// the entrant is still printed-named there — that divergence is exactly
-        /// the staleness these boards catch.
+        /// condition is evaluated inside `gather_transient_continuous_effects`,
+        /// and `evaluate_layers` gathers at Step 3 — after layer 1 has been
+        /// applied and before layers 2-7. Layer 1 is therefore the ONLY layer
+        /// whose writes such a gate can see within one pass. (A retained
+        /// recipient-context condition is instead re-checked at APPLY time,
+        /// which is why (3.1) can use layer 4; a `ForAsLongAs` duration is
+        /// checked on the settled board, CR 611.2b.) `prepare_incremental_flush`
+        /// gathers with NO layer applied at all, so the entrant is still
+        /// printed-named there — that divergence is exactly the staleness these
+        /// boards catch.
         ///
         /// Nothing else on the board is a creature, so the overridden-name
         /// population is exactly the creature count: 2 before the entry, 3
-        /// after, which moves a `GE 3` gate from OFF to ON.
+        /// after, which moves a `GE 3` gate from OFF to ON (and ends a `LT 3`
+        /// duration).
         fn transient_name_count_gate_board(
             install_gate: impl Fn(&mut GameState, ObjectId, &[ObjectId]),
         ) -> GameState {
@@ -14358,7 +14373,7 @@ mod tests {
                         ContinuousModification::AddToughness { value: 1 },
                     ],
                     Duration::UntilEndOfTurn,
-                    Some(overridden_name_count_at_least(3)),
+                    Some(overridden_name_count(Comparator::GE, 3)),
                 )
             })
         }
@@ -14382,7 +14397,8 @@ mod tests {
                 !forced.transient_continuous_effects.is_empty()
                     && forced.transient_continuous_effects.iter().all(|tce| {
                         matches!(tce.affected, TargetFilter::SpecificObject { .. })
-                            && tce.condition.as_ref() == Some(&overridden_name_count_at_least(3))
+                            && tce.condition.as_ref()
+                                == Some(&overridden_name_count(Comparator::GE, 3))
                     }),
                 "the fixture must install SpecificObject-bound transients whose gate is \
                  source-level, or the `e.condition` channel would cover this board"
@@ -14419,17 +14435,20 @@ mod tests {
             assert_pt_identical(&normal, &forced, "transient source-level condition reads");
         }
 
-        /// (3.4) `ForAsLongAs` DURATION, READ CHANNEL. Identical board to (3.3)
-        /// with the gate moved from `tce.condition` into
-        /// `Duration::ForAsLongAs` (CR 611.2b — the effect lasts exactly as
-        /// long as its stated condition holds). `transient_effect_is_live`
-        /// evaluates it in the same gather, and no gather ever copies a
-        /// duration's condition onto an `ActiveContinuousEffect`, so this gate
-        /// is invisible to every channel except the transient walk.
+        /// (3.4) `ForAsLongAs` DURATION, READ CHANNEL. The (3.3) board with the
+        /// gate moved from `tce.condition` into `Duration::ForAsLongAs` and its
+        /// comparator inverted to "fewer than three". CR 611.2b: a duration that
+        /// is false when the effect begins never starts, and one that ends
+        /// never restarts — so the only flip an entry can cause is an END. Pre-
+        /// entry two permanents carry the overridden name (duration holds,
+        /// 3/3); the renamed entrant makes three and ends it for good (2/2). No
+        /// gather ever copies a duration's condition onto an
+        /// `ActiveContinuousEffect`, so this gate is invisible to every channel
+        /// except the transient walk.
         ///
         /// DISCRIMINATING: drop `transient_duration_condition` from
         /// `transient_gate_conditions` and `ReadKinds` loses NameText exactly
-        /// as in (3.3) — recipients keep a stale 2/2.
+        /// as in (3.3), so the entry no longer escalates.
         fn transient_duration_gate_read_board() -> GameState {
             use crate::types::ability::ContinuousModification;
             transient_name_count_gate_board(|state, source, bears| {
@@ -14442,7 +14461,7 @@ mod tests {
                         ContinuousModification::AddToughness { value: 1 },
                     ],
                     Duration::ForAsLongAs {
-                        condition: overridden_name_count_at_least(3),
+                        condition: overridden_name_count(Comparator::LT, 3),
                     },
                     None,
                 )
@@ -14459,30 +14478,36 @@ mod tests {
                 escalated,
                 "CR 611.2b makes a `for as long as` duration a live gate, so the kinds \
                  it reads are live reads — a layer-1 name override reaching the entrant \
-                 must escalate"
+                 can end it and must escalate"
             );
+            let mut pre = transient_duration_gate_read_board();
+            flush_layers(&mut pre);
             // Non-vacuity: the gate lives in the DURATION, not in `condition`,
             // so no `tce.condition` channel could have covered this board.
             assert!(
-                !forced.transient_continuous_effects.is_empty()
-                    && forced.transient_continuous_effects.iter().all(|tce| {
+                pre.transient_continuous_effects.len() == 2
+                    && pre.transient_continuous_effects.iter().all(|tce| {
                         tce.condition.is_none()
                             && matches!(tce.duration, Duration::ForAsLongAs { .. })
                     }),
                 "the fixture must gate purely through `Duration::ForAsLongAs`"
             );
-            let mut pre = transient_duration_gate_read_board();
-            flush_layers(&mut pre);
             assert_eq!(
                 pts_base_named(&pre, "NameBear"),
-                vec![(Some(2), Some(2)); 2],
+                vec![(Some(3), Some(3)); 2],
                 "pre-entry only 2 permanents carry the overridden name, so the \
-                 duration has not started"
+                 duration holds"
             );
             assert_eq!(
                 pts_base_named(&forced, "NameBear"),
-                vec![(Some(3), Some(3)); 2],
-                "layer 1 renames the entrant too, making it the third — the duration holds"
+                vec![(Some(2), Some(2)); 2],
+                "layer 1 renames the entrant too, making it the third — the duration ends"
+            );
+            // CR 611.2b: an ended duration is retired, never merely suppressed.
+            assert!(
+                normal.transient_continuous_effects.is_empty()
+                    && forced.transient_continuous_effects.is_empty(),
+                "the ended duration's effects must be retired on both paths"
             );
             assert_eq!(
                 pts_base_named(&normal, "NameBear"),
@@ -14494,18 +14519,17 @@ mod tests {
 
         /// (3.5) `ForAsLongAs` DURATION, PERTURBATION-PROBE CHANNEL. The twin
         /// of (3.2) with the gate moved into the duration: Master Thief's "for
-        /// as long as you control this creature" shape, inverted to an
-        /// opponent-presence check so an entry can start it. NOTHING on this
+        /// as long as you control this creature" shape, recast as an
+        /// opponent-ABSENCE check so an entry can end it. CR 611.2b: the
+        /// duration holds when the effect begins (no opponent creature, 5/5);
+        /// the opponent's entrant ends it permanently (2/2). NOTHING on this
         /// board writes the kinds the gate reads, so the read union cannot see
-        /// the flip — while the duration is unmet the effect is not gathered at
-        /// all and `all_writes` is empty, which exits the kind relation at
-        /// stage 1.
+        /// the flip.
         ///
         /// DISCRIMINATING: drop `transient_duration_condition` from
         /// `transient_gate_conditions` and the probe's transient arm sees only
-        /// `tce.condition`, which is `None` here — no disjunct fires, the entry
-        /// stays incremental, and the frozen recipients keep a stale 2/2 while
-        /// a full pass says 5/5.
+        /// `tce.condition`, which is `None` here — no disjunct fires and the
+        /// entry no longer escalates.
         fn transient_duration_gate_probe_board() -> GameState {
             use crate::types::ability::{ContinuousModification, StaticCondition};
             use crate::types::ControllerRef;
@@ -14532,12 +14556,14 @@ mod tests {
                 // CR 611.2b + CR 109.5: the duration is re-read every pass and
                 // "an opponent" stays bound to the resolver, P0.
                 Duration::ForAsLongAs {
-                    condition: StaticCondition::IsPresent {
-                        filter: Some(TargetFilter::Typed(TypedFilter {
-                            type_filters: vec![TypeFilter::Creature],
-                            controller: Some(ControllerRef::Opponent),
-                            ..Default::default()
-                        })),
+                    condition: StaticCondition::Not {
+                        condition: Box::new(StaticCondition::IsPresent {
+                            filter: Some(TargetFilter::Typed(TypedFilter {
+                                type_filters: vec![TypeFilter::Creature],
+                                controller: Some(ControllerRef::Opponent),
+                                ..Default::default()
+                            })),
+                        }),
                     },
                 },
                 None,
@@ -14555,29 +14581,35 @@ mod tests {
             assert!(
                 escalated,
                 "CR 611.2c freezes a resolved effect's affected SET, not its duration — \
-                 an entry that starts a `for as long as` duration must escalate or every \
+                 an entry that ends a `for as long as` duration must escalate or every \
                  frozen recipient keeps a stale board"
             );
+            let mut pre = transient_duration_gate_probe_board();
+            flush_layers(&mut pre);
             // Non-vacuity: the gate lives in the DURATION only.
             assert!(
-                !forced.transient_continuous_effects.is_empty()
-                    && forced.transient_continuous_effects.iter().all(|tce| {
+                pre.transient_continuous_effects.len() == 2
+                    && pre.transient_continuous_effects.iter().all(|tce| {
                         tce.condition.is_none()
                             && matches!(tce.duration, Duration::ForAsLongAs { .. })
                     }),
                 "the fixture must gate purely through `Duration::ForAsLongAs`"
             );
-            let mut pre = transient_duration_gate_probe_board();
-            flush_layers(&mut pre);
             assert_eq!(
                 pts_named(&pre, "DurationBear"),
-                vec![(Some(2), Some(2)); 2],
-                "pre-entry no opponent controls a creature, so the duration never started"
+                vec![(Some(5), Some(5)); 2],
+                "pre-entry no opponent controls a creature, so the duration holds"
             );
             assert_eq!(
                 pts_named(&forced, "DurationBear"),
-                vec![(Some(5), Some(5)); 2],
-                "the opponent's entrant starts the duration for every frozen recipient"
+                vec![(Some(2), Some(2)); 2],
+                "the opponent's entrant ends the duration for every frozen recipient"
+            );
+            // CR 611.2b: an ended duration is retired, never merely suppressed.
+            assert!(
+                normal.transient_continuous_effects.is_empty()
+                    && forced.transient_continuous_effects.is_empty(),
+                "the ended duration's effects must be retired on both paths"
             );
             assert_eq!(
                 pts_named(&normal, "DurationBear"),

@@ -8,7 +8,8 @@ use super::players;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::functioning_abilities::static_kind_present;
 use crate::types::ability::{
-    AttackerBlockStatus, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
+    AttackerBlockStatus, ContinuousModification, StaticCondition, StaticDefinition, TargetFilter,
+    TargetRef,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
@@ -91,11 +92,10 @@ struct CombatStaticGates {
 }
 
 impl CombatStaticGates {
-    /// Reads all five presence flags from the O(1) `StaticModePresence` index
-    /// (Unit 1) instead of sweeping `game_functioning_statics`. Each flag mirrors
-    /// the discriminant its consumers gate `check_static_ability` behind; the
-    /// index is a post-flush-precise superset of the sweep, so a spurious `true`
-    /// merely falls through to the exact per-permanent scan.
+    /// Reads the presence flags from the O(1) `StaticModePresence` index
+    /// (Unit 1) instead of sweeping `game_functioning_statics`. Goad also
+    /// admits Continuous definitions, which can contain a printed Goaded
+    /// designation; the exact source scan discards unrelated definitions.
     ///
     /// `has_attack_only_neighbor` (CR 508.1c) is read from the SAME index; the
     /// enforcement loop still sweeps `game_functioning_statics`, and the index is
@@ -109,7 +109,8 @@ impl CombatStaticGates {
             has_cant_attack: static_kind_present(state, StaticModeKind::CantAttack),
             has_cant_attack_or_block: static_kind_present(state, StaticModeKind::CantAttackOrBlock),
             has_must_attack: static_kind_present(state, StaticModeKind::MustAttack),
-            has_goad: static_kind_present(state, StaticModeKind::Goaded),
+            has_goad: static_kind_present(state, StaticModeKind::Goaded)
+                || static_kind_present(state, StaticModeKind::Continuous),
             has_attack_only_neighbor: static_kind_present(
                 state,
                 StaticModeKind::AttackOnlyNeighbor,
@@ -4231,7 +4232,8 @@ fn permanent_attack_target(
 /// `attackable_must_player_carriers` is precomputed by the producer (n6: the
 /// single directives scan feeds both `players` and this) — one entry per
 /// attackable `MustAttackDefender` directive, resolved to its directing object.
-/// Direct `goaded_by` designations contribute NO source (CR 701.15b, player-level).
+/// Direct and resolution-created designations contribute NO object source
+/// (CR 701.15b, player-level).
 fn must_attack_sources_gated(
     state: &GameState,
     obj_id: ObjectId,
@@ -4253,7 +4255,7 @@ fn must_attack_sources_gated(
             &static_target_ctx(obj_id),
         ));
     }
-    // CR 701.15c: Goaded-static carriers. Direct player-goad contributes none.
+    // CR 701.15b: Only functioning printed statics carry an object source.
     if gates.has_goad {
         crate::game::perf_counters::record_static_full_scan();
         sources.extend(goad_static_hits_for_creature(state, obj_id).map(|(_, src)| src));
@@ -6639,30 +6641,39 @@ pub fn declare_attackers(
     declare_attackers_with_bands(state, attacks, &[], events)
 }
 
-/// CR 701.15b: The set of players that have goaded `creature_id` — both the
-/// per-object `goaded_by` designations and any active `StaticMode::Goaded`
-/// effects affecting it. This is the single authority for "who goaded this
-/// creature"; the AI candidate generator reuses it to build a legal forced
-/// attack assignment that avoids each goaded creature's goader.
-///
-/// Loop-invariant-gated: with no functioning `Goaded` static, only the
-/// directly-goaded `goaded_by` set applies, so combat loops that have already
-/// hoisted the existence gate pass `has_goad_static = false` to skip the O(N)
-/// sweep. When `true`, the exact existing sweep runs unchanged. The gate is
-/// computed over `game_functioning_statics` (a superset of
-/// `battlefield_active_statics` for `Goaded`), so it never produces a false
-/// negative. Callers that lack a hoisted gate compute it with
-/// `static_kind_present(state, StaticModeKind::Goaded)`.
+/// CR 701.15b/c: The players who goaded this permanent. Direct goad, live
+/// resolution-created designations, and functioning printed statics are three
+/// independent causes. The printed-static scan is gated by the presence of a
+/// Goaded or Continuous definition; transient designations are read regardless.
 pub(crate) fn goading_players_for_creature_gated(
     state: &GameState,
     creature_id: ObjectId,
     has_goad_static: bool,
 ) -> HashSet<PlayerId> {
-    let mut players = state
-        .objects
-        .get(&creature_id)
-        .map(|obj| obj.goaded_by.clone())
-        .unwrap_or_default();
+    let Some(obj) = state.objects.get(&creature_id) else {
+        return HashSet::new();
+    };
+    if obj.zone != Zone::Battlefield || obj.is_phased_out() {
+        return HashSet::new();
+    }
+    let mut players = obj.goaded_by.clone();
+
+    // CR 701.15b + CR 611.2a/b: A resolving effect designates the exact
+    // registered object for its stated lifetime. Its controller is the goader;
+    // removing abilities from the recipient does not remove that designation.
+    players.extend(state.transient_continuous_effects.iter().filter_map(|tce| {
+        (matches!(tce.affected, TargetFilter::SpecificObject { id } if id == creature_id)
+            && tce.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded
+                    }
+                )
+            })
+            && super::layers::transient_effect_is_live(state, tce))
+        .then_some(tce.controller)
+    }));
 
     if has_goad_static {
         crate::game::perf_counters::record_static_full_scan();
@@ -6672,11 +6683,20 @@ pub(crate) fn goading_players_for_creature_gated(
     players
 }
 
+pub(crate) fn goading_players_for_creature(
+    state: &GameState,
+    creature_id: ObjectId,
+) -> HashSet<PlayerId> {
+    let has_goad_static = static_kind_present(state, StaticModeKind::Goaded)
+        || static_kind_present(state, StaticModeKind::Continuous);
+    goading_players_for_creature_gated(state, creature_id, has_goad_static)
+}
+
 /// CR 508.1d + CR 701.15b: the players `creature_id` must attack AWAY from —
 /// the single authority for the "attacks a player other than X if able"
 /// requirement. Three contributors, all producing the same requirement:
 ///  1. `obj.goaded_by` — the goad designation (CR 701.15a/b);
-///  2. `StaticMode::Goaded` statics — a continuous designation (CR 701.15b);
+///  2. live registered and printed goad designations (CR 701.15b);
 ///  3. `StaticMode::MustAttackAwayFromSource` — the requirement WITHOUT any
 ///     designation (CR 701.15a: only a spell/ability that *goads* makes a
 ///     creature goaded; Kardur, Doomscourge / Maximum Carnage chapter I).
@@ -6745,19 +6765,27 @@ pub(crate) fn players_to_attack_away_from_gated(
     players
 }
 
-/// CR 701.15c: `(goading player, goad-static carrier id)` for each functioning
-/// `StaticMode::Goaded` static affecting `creature_id`. The single authority
-/// both the player-set query (`goading_players_for_creature_gated`) and the
-/// source-attribution collector (`must_attack_sources_gated`) consume — no
-/// parallel `battlefield_active_statics` re-scan. Direct `goaded_by`
-/// designations are NOT included: they carry no object source (CR 701.15b).
+/// CR 701.15b: `(goading player, source id)` for each functioning printed
+/// static designating `creature_id`. Both the player-set query and source-badge
+/// collector consume these hits. Direct and resolution-created designations
+/// carry a player cause without a functioning object source.
 fn goad_static_hits_for_creature<'a>(
     state: &'a GameState,
     creature_id: ObjectId,
 ) -> impl Iterator<Item = (PlayerId, ObjectId)> + 'a {
     super::functioning_abilities::battlefield_active_statics(state).filter_map(
         move |(source, def)| {
-            if def.mode != StaticMode::Goaded {
+            if def.mode != StaticMode::Goaded
+                && !(def.mode == StaticMode::Continuous
+                    && def.modifications.iter().any(|modification| {
+                        matches!(
+                            modification,
+                            ContinuousModification::AddStaticMode {
+                                mode: StaticMode::Goaded
+                            }
+                        )
+                    }))
+            {
                 return None;
             }
             let affected = def.affected.as_ref()?;

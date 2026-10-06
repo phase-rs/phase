@@ -23,7 +23,9 @@ use super::oracle_cost::parse_oracle_cost;
 #[cfg(test)]
 use super::oracle_effect::lower_ability_ir;
 use super::oracle_effect::{
-    conditions::{split_leading_conditional, strip_leading_general_conditional},
+    conditions::{
+        split_leading_conditional, strip_routed_leading_general_conditional, LeadingConditionRoute,
+    },
     parse_ability_ir_with_context, try_parse_named_choice,
 };
 use super::oracle_ir::context::ParseContext;
@@ -1032,12 +1034,24 @@ fn reflexive_modal_connector(
     header: &ModalHeaderAst,
     ctx: &mut ParseContext,
 ) -> Result<AbilityCondition, Box<Effect>> {
-    let (guard, _) = strip_leading_general_conditional(&header.raw, ctx);
-    if let Some(guard) = guard {
-        return Ok(AbilityCondition::when_you_do_with_guard(guard));
+    match strip_routed_leading_general_conditional(&header.raw, ctx) {
+        // CR 115.1 + CR 608.2c: a target P/T threshold guard's
+        // `TargetMatchesFilter { subject_slot: None }` reads the gated node's own
+        // first object target, and a mode may announce its own target, so the
+        // guard cannot bind the antecedent "that creature" here; refuse it.
+        (Some((_, LeadingConditionRoute::TargetPtThreshold)), _) => {
+            return Err(Box::new(Effect::unimplemented(
+                "modal_reflexive_condition",
+                &header.raw,
+            )));
+        }
+        (Some((guard, LeadingConditionRoute::General)), _) => {
+            return Ok(AbilityCondition::when_you_do_with_guard(guard));
+        }
+        (None, _) => {}
     }
 
-    // `strip_leading_general_conditional` returns `None` both for a header
+    // `strip_routed_leading_general_conditional` returns `None` both for a header
     // with no guard and for an unmodeled leading conditional. Only the first
     // may become a bare `WhenYouDo`: lowering the second that way would make
     // an unsupported intervening-if condition silently permissive.

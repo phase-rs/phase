@@ -14,8 +14,8 @@ use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CollectEvidenceResume, CostResume, DeferredLifeCostResume, GameState, ManaAbilityCostCursor,
-    ManaAbilityResume, ManaChoiceContext, PendingCast, PendingCostMoveResume, PendingManaAbility,
-    StackEntryKind, WaitingFor,
+    ManaAbilityResume, ManaChoiceContext, PendingCast, PendingCostMoveCompletion,
+    PendingCostMoveResume, PendingManaAbility, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::player::PlayerId;
@@ -679,9 +679,13 @@ fn classify_parked_cost_move_root(state: &GameState) -> PaymentContinuationState
                 PaymentContinuationState::NotAffiliated
             }
         },
-        PendingCostMoveResume::DelveManaPayment { player, .. } => {
-            classify_global_root(state, *player)
-        }
+        // CR 601.2h: a Delve commit parked mid-exile still owns the cast's payment root.
+        PendingCostMoveResume::Cast {
+            pending: Some(pending),
+            player,
+            completion: PendingCostMoveCompletion::FinalizeDelvedCast { .. },
+            ..
+        } => PaymentContinuationState::Affiliated(root_from_pending_cast(pending, *player)),
         // CR 602.2b: The parked mill leg retains the announced activation's
         // serialized payment root until the replacement choice completes.
         PendingCostMoveResume::ActivationMillPayment { player, pending } => {
@@ -953,7 +957,6 @@ fn pending_cost_move_contains_root(
         | Some(PendingCostMoveResume::WardSacrificePayment { .. })
         | Some(PendingCostMoveResume::ReplacementMayCost { .. })
         | Some(PendingCostMoveResume::Foretell { .. })
-        | Some(PendingCostMoveResume::DelveManaPayment { .. })
         | Some(PendingCostMoveResume::UnlessBouncePayment { .. })
         | Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
         // CR 701.9b: holds no pending cast, so it can contain no root.

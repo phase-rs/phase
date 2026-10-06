@@ -3,8 +3,8 @@ import type { ChangeEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { GameState } from "../../adapter/types";
-import { supportsServerRewind } from "../../adapter/types";
+import type { PersistedGameState } from "../../adapter/types";
+import { persistedGameStateView, supportsServerRewind } from "../../adapter/types";
 import { audioManager } from "../../audio/AudioManager";
 import { restoreGameState } from "../../game/dispatch";
 import { usePlayerId } from "../../hooks/usePlayerId";
@@ -110,7 +110,7 @@ export function DebugPanel({
   // wire-authoritative sessions is a separate piece of work.
   const canRestoreCheckpoints = gameMode === "ai" || gameMode === "local";
 
-  const handleRestore = useCallback(async (state: GameState) => {
+  const handleRestore = useCallback(async (state: PersistedGameState) => {
     setStatus(null);
     const err = await restoreGameState(state, { preserveCheckpoints: true });
     if (err) {
@@ -468,10 +468,11 @@ export function DebugPanel({
           ) : (
             <div className="flex flex-col gap-1">
               {turnCheckpoints.map((cp, i) => {
-                const activePlayerName = getPlayerDisplayName(cp.active_player, localPlayerId);
+                const view = persistedGameStateView(cp);
+                const activePlayerName = getPlayerDisplayName(view.active_player, localPlayerId);
                 const activePlayerColor = getSeatColor(
-                  cp.active_player,
-                  cp.seat_order ?? gameState?.seat_order,
+                  view.active_player,
+                  view.seat_order ?? gameState?.seat_order,
                 );
                 return (
                   <button
@@ -479,7 +480,7 @@ export function DebugPanel({
                     onClick={() => handleRestore(cp)}
                     className="flex items-center justify-between gap-2 rounded bg-gray-800 px-2 py-1 text-left text-xs transition-colors hover:bg-gray-700"
                   >
-                    <span>Turn {cp.turn_number}</span>
+                    <span>Turn {view.turn_number}</span>
                     <span
                       className="max-w-36 truncate rounded px-1.5 py-0.5 font-semibold"
                       style={{

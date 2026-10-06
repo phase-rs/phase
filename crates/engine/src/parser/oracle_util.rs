@@ -154,6 +154,42 @@ impl<'a> TextPair<'a> {
         }
     }
 
+    /// Map a lowercase remainder slice back to its original-case counterpart.
+    ///
+    /// `lower_rest` must be a suffix of `self.lower` (typically a nom remainder
+    /// from a lowercase-only parse, e.g. `parse_perpetual_self_subject`'s
+    /// return). Walks original-case chars and sums each char's lowercase byte
+    /// length until the consumed prefix is accounted for, so the boundary stays
+    /// correct even when Unicode lowercasing changed byte length (e.g. U+0130
+    /// `İ`, 2 bytes, lowercases to 3-byte `i̇`) — the case the naive
+    /// `original[lower.len() - rest.len()..]` slice gets wrong.
+    ///
+    /// Returns `None` when `lower_rest` is not a suffix of `self.lower`, or
+    /// when the boundary falls mid-expansion of a single original char (no
+    /// original boundary corresponds) — callers fail the arm closed.
+    pub fn original_remainder(&self, lower_rest: &str) -> Option<&'a str> {
+        let lower_start = self.lower.as_ptr() as usize;
+        let rest_start = lower_rest.as_ptr() as usize;
+        let lower_end = lower_start + self.lower.len();
+        if rest_start < lower_start || rest_start + lower_rest.len() != lower_end {
+            return None;
+        }
+        let consumed_lower = rest_start - lower_start;
+        let mut accounted = 0;
+        for (idx, c) in self.original.char_indices() {
+            if accounted == consumed_lower {
+                return Some(&self.original[idx..]);
+            }
+            accounted += c.to_lowercase().map(|lc| lc.len_utf8()).sum::<usize>();
+            if accounted > consumed_lower {
+                // The lower-side boundary splits one original char's
+                // lowercased expansion — no original boundary corresponds.
+                return None;
+            }
+        }
+        (accounted == consumed_lower).then_some(&self.original[self.original.len()..])
+    }
+
     /// Find `needle` in the lowered text and return both slices advanced past it.
     ///
     /// Equivalent to `self.find(needle)` + `self.split_at(pos + needle.len()).1`
@@ -2834,6 +2870,40 @@ mod tests {
 
     fn tp(text: &str) -> (String, String) {
         (text.to_string(), text.to_lowercase())
+    }
+
+    #[test]
+    fn original_remainder_maps_lower_suffix_to_original_case() {
+        // ASCII: the boundary is a plain byte offset.
+        let (o, l) = tp("Ab \"Quoted\"");
+        let pair = TextPair::new(&o, &l);
+        assert_eq!(pair.original_remainder(&l[3..]), Some("\"Quoted\""));
+        assert_eq!(pair.original_remainder(&l[..]), Some(&o[..]));
+        assert_eq!(pair.original_remainder(&l[l.len()..]), Some(""));
+        // A non-suffix (even an empty one from another allocation) fails closed.
+        assert_eq!(pair.original_remainder(""), None);
+        assert_eq!(pair.original_remainder("quoted"), None);
+    }
+
+    #[test]
+    fn original_remainder_survives_unicode_lowercase_expansion() {
+        // U+0130 `İ` (2 bytes) lowercases to 3-byte `i̇`, so the lower/upper
+        // byte lengths differ and a naive lower-derived offset lands mid-word
+        // (`original[5..]` is "est", not "rest"). `TextPair::new`'s
+        // equal-length debug assert cannot construct this pair, so build it
+        // literally — the mapper (unlike the struct's other slicers) makes no
+        // equal-length assumption.
+        let original = "Aİ rest";
+        let lower = original.to_lowercase();
+        assert_eq!(lower, "ai̇ rest");
+        let pair = TextPair {
+            original,
+            lower: &lower,
+        };
+        assert_eq!(pair.original_remainder(&lower[5..]), Some("rest"));
+        // A lower-side boundary mid-expansion of one original char (between
+        // the `i` and its combining dot) has no original counterpart.
+        assert_eq!(pair.original_remainder(&lower[2..]), None);
     }
 
     /// CR 604.1: the building block, exercised across its documented contract

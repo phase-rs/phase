@@ -804,31 +804,43 @@ pub(crate) fn record_descend_on_graveyard_arrival(
 /// the all-zone bump advanced its epoch. Chains across multiple self-moves in one
 /// resolution: the first self-move sets `original_stamp` (bound to the ability's
 /// captured incarnation); a chained self-move keeps `original_stamp` fixed and only
-/// advances `current_incarnation`. A foreign object, or a move whose pre-move
-/// incarnation matches neither the captured stamp nor the record's current value,
-/// never writes. Call AFTER the bump, passing the pre-bump and post-bump values.
+/// advances `current_incarnation`. A first self-move may also start from the CR
+/// 400.7e successor a zone-change trigger already found in `from` (a dies
+/// trigger returning "this card" from the graveyard). A foreign object, or any
+/// other pre-move incarnation, never writes. Call AFTER the bump but BEFORE the
+/// move is recorded in `zone_changes_this_turn`, passing the pre-bump and
+/// post-bump values and the zone the object left.
 pub(crate) fn record_resolution_source_relatch(
     state: &mut GameState,
     object_id: ObjectId,
+    from: Zone,
     pre_move_incarnation: u64,
     new_incarnation: u64,
 ) {
     // A faithful READ of the resolving ability's captured source identity. The
     // clone is disconnected from the local resolving borrow, so it cannot be the
     // carrier — the record on `state` is (consumed inside `source_is_current`).
-    let Some((source_id, Some(captured))) = state
+    let Some((source_id, Some(captured), successor_start)) = state
         .resolving_stack_entry
         .as_ref()
         .and_then(StackEntry::ability)
-        .map(|a| (a.source_id, a.trigger_source_incarnation()))
+        .map(|a| {
+            (
+                a.source_id,
+                a.trigger_source_incarnation().or(a.source_incarnation),
+                a.is_own_departure_successor_in(state, from, Some(pre_move_incarnation)),
+            )
+        })
     else {
         return;
     };
     if object_id != source_id {
         return;
     }
-    // First self-move: pre-move value must equal the ability's captured stamp.
-    let matches_first = pre_move_incarnation == captured;
+    // First self-move: pre-move value must equal the ability's captured stamp,
+    // or the source must be the successor its own triggering move created.
+    // CR 400.7j: other parts of that effect can find the object it moved.
+    let matches_first = pre_move_incarnation == captured || successor_start;
     // Chained self-move: pre-move value must equal the record's current value.
     let chained = state
         .resolution_source_relatch
@@ -1562,7 +1574,13 @@ pub(crate) fn move_to_zone_with_entry_flags(
     }
 
     if new_incarnation != pre_bump_incarnation {
-        record_resolution_source_relatch(state, object_id, pre_bump_incarnation, new_incarnation);
+        record_resolution_source_relatch(
+            state,
+            object_id,
+            from,
+            pre_bump_incarnation,
+            new_incarnation,
+        );
     }
 
     // CR 700.11: a permanent card was put into its owner's graveyard.
@@ -1815,30 +1833,6 @@ pub(crate) fn record_and_emit_entry_from_no_zone(
         record: Box::new(record.clone()),
     });
     Some(record)
-}
-
-/// CR 601.2 + CR 733.1: Restore an object while reversing an incomplete action.
-/// This intentionally uses the raw mover rather than the replacement-consulting
-/// pipeline: an undone action does not apply replacement effects, but preserves
-/// the prior raw move's event and ordering behavior.
-pub(crate) fn restore_after_rollback(
-    state: &mut GameState,
-    object_id: ObjectId,
-    to: Zone,
-    events: &mut Vec<GameEvent>,
-) {
-    move_to_zone(state, object_id, to, events);
-    // CR 601.2 + CR 733.1: reversing an incomplete action needs full
-    // reconciliation regardless of which mark move_to_zone's own
-    // axis-gated internal logic picked — an undone action is rare
-    // (not gameplay-hot) and can leave board state in a shape the
-    // entry-only incremental-flush safety classifier was never designed to
-    // reason about, so there is no perf case for trusting it here. This is
-    // conservatively at-or-above today's marking, not byte-for-byte
-    // identical to it: some rollback transitions `move_to_zone` marks
-    // nothing for today (e.g. Stack->Library) become `Full` here, which is
-    // strictly safe, never a behavior change a test could observe as wrong.
-    crate::game::layers::mark_layers_full(state);
 }
 
 /// CR 603.10a: Record that every member of `group` left the battlefield in the
@@ -2404,7 +2398,7 @@ pub fn move_to_library_at_index(
         }
     }
     if let Some((pre, new)) = bump {
-        record_resolution_source_relatch(state, object_id, pre, new);
+        record_resolution_source_relatch(state, object_id, from, pre, new);
     }
 
     super::restrictions::record_zone_change(state, &mut zone_change_record);
@@ -2998,6 +2992,224 @@ mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    #[test]
+    fn resolution_source_relatch_uses_activated_source_stamp() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Graveyard,
+        );
+        let foreign = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Foreign".into(),
+            Zone::Graveyard,
+        );
+        let captured = state.objects[&source].incarnation;
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::NoOp,
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.source_incarnation = Some(captured);
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(900),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(ability.clone()),
+            },
+        });
+        record_resolution_source_relatch(
+            &mut state,
+            foreign,
+            Zone::Battlefield,
+            captured,
+            captured + 1,
+        );
+        record_resolution_source_relatch(
+            &mut state,
+            source,
+            Zone::Battlefield,
+            captured + 99,
+            captured + 100,
+        );
+        assert!(state.resolution_source_relatch.is_none());
+        move_to_zone(&mut state, source, Zone::Battlefield, &mut Vec::new());
+        let current = state.objects[&source].incarnation;
+        assert_eq!(
+            state.resolution_source_relatch,
+            Some(ResolutionSourceRelatch {
+                object_id: source,
+                original_stamp: captured,
+                current_incarnation: current
+            })
+        );
+        assert!(ability.source_is_current(&state));
+        state.resolution_source_relatch = None;
+        state.resolving_stack_entry = None;
+        record_resolution_source_relatch(&mut state, source, Zone::Battlefield, captured, current);
+        assert!(state.resolution_source_relatch.is_none());
+        assert!(!ability.source_is_current(&state));
+    }
+
+    #[test]
+    fn resolution_source_relatch_starts_only_from_immediate_departure_successor() {
+        // CR 400.7e + CR 400.7j: a dies trigger that returns the card it found
+        // in the graveyard relatches; a card that left and came back before
+        // resolution is a different object and must not, and a trigger cannot
+        // find the card it moved into a hidden zone.
+        for (departure, left_and_returned, relatches) in [
+            (Zone::Graveyard, false, true),
+            (Zone::Graveyard, true, false),
+            (Zone::Hand, false, false),
+        ] {
+            let mut state = setup();
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Source".into(),
+                Zone::Battlefield,
+            );
+            let mut dies_events = Vec::new();
+            move_to_zone(&mut state, source, departure, &mut dies_events);
+            let dies_event = dies_events
+                .into_iter()
+                .find(|event| {
+                    matches!(event, GameEvent::ZoneChanged { object_id, to, .. }
+                        if *object_id == source && *to == departure)
+                })
+                .expect("dies event");
+            let GameEvent::ZoneChanged { record, .. } = &dies_event else {
+                unreachable!("filtered to ZoneChanged");
+            };
+            let mut ability = crate::types::ability::ResolvedAbility::new(
+                crate::types::ability::Effect::NoOp,
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            ability.set_trigger_source_recursive(
+                record
+                    .trigger_source_context()
+                    .cloned()
+                    .expect("dies record carries its source identity"),
+            );
+            if left_and_returned {
+                move_to_zone(&mut state, source, Zone::Exile, &mut Vec::new());
+                move_to_zone(&mut state, source, Zone::Graveyard, &mut Vec::new());
+            }
+            state.current_trigger_event = Some(dies_event);
+            state.resolving_stack_entry = Some(StackEntry {
+                id: ObjectId(900),
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: source,
+                    ability: Box::new(ability),
+                },
+            });
+
+            move_to_zone(&mut state, source, Zone::Battlefield, &mut Vec::new());
+
+            assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+            assert_eq!(
+                state.resolution_source_relatch.is_some(),
+                relatches,
+                "departure={departure:?} left_and_returned={left_and_returned}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolution_source_relatch_preserves_trigger_stamp_and_rejects_foreign_or_stale_moves() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Graveyard,
+        );
+        let foreign = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Foreign".into(),
+            Zone::Graveyard,
+        );
+        let captured = state.objects[&source].incarnation;
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::NoOp,
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.set_test_trigger_source_recursive(captured, CardId(1));
+        ability.source_incarnation = Some(captured + 50);
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(900),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(ability),
+            },
+        });
+        record_resolution_source_relatch(
+            &mut state,
+            source,
+            Zone::Battlefield,
+            captured + 50,
+            captured + 51,
+        );
+        assert!(
+            state.resolution_source_relatch.is_none(),
+            "trigger authority must win over conflicting activated fallback"
+        );
+        move_to_zone(&mut state, source, Zone::Battlefield, &mut Vec::new());
+        let first = state
+            .resolution_source_relatch
+            .expect("trigger-stamped own move must latch");
+        assert_eq!(first.original_stamp, captured);
+        assert_eq!(
+            first.current_incarnation,
+            state.objects[&source].incarnation
+        );
+        move_to_zone(&mut state, source, Zone::Exile, &mut Vec::new());
+        let second = state
+            .resolution_source_relatch
+            .expect("chained own move must advance");
+        assert_eq!(second.original_stamp, captured);
+        assert_eq!(
+            second.current_incarnation,
+            state.objects[&source].incarnation
+        );
+        assert_ne!(second.current_incarnation, first.current_incarnation);
+        record_resolution_source_relatch(
+            &mut state,
+            foreign,
+            Zone::Battlefield,
+            second.current_incarnation,
+            second.current_incarnation + 1,
+        );
+        record_resolution_source_relatch(
+            &mut state,
+            source,
+            Zone::Battlefield,
+            first.current_incarnation,
+            second.current_incarnation + 1,
+        );
+        assert_eq!(state.resolution_source_relatch, Some(second));
     }
 
     #[test]
@@ -5659,43 +5871,6 @@ mod tests {
                 )
             }),
             "SBA zone movement must still publish the unattach event for triggers"
-        );
-    }
-
-    /// pod-lab loop-3 Q5, row 5: `restore_after_rollback` targeting the
-    /// battlefield must still force a full layers re-evaluation
-    /// unconditionally — CR 601.2 + CR 733.1, reversing an incomplete action
-    /// is rare (not gameplay-hot) and can leave board state in a shape the
-    /// entry-only incremental-flush safety classifier was never designed to
-    /// reason about, so there is no perf case for trusting `move_to_zone`'s
-    /// own (now axis-gated) internal decision here. Today's only production
-    /// caller targets Graveyard, not Battlefield, so this exercises the
-    /// function's general contract directly rather than replaying an
-    /// existing call site.
-    #[test]
-    fn restore_after_rollback_to_battlefield_marks_full() {
-        let mut state = setup();
-        let id = create_object(
-            &mut state,
-            CardId(1),
-            PlayerId(0),
-            "Rolled Back Spell".to_string(),
-            Zone::Stack,
-        );
-        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
-
-        let mut events = Vec::new();
-        restore_after_rollback(&mut state, id, Zone::Battlefield, &mut events);
-
-        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
-        assert!(
-            matches!(
-                state.layers_dirty,
-                crate::types::game_state::LayersDirty::Full
-            ),
-            "restore_after_rollback targeting the battlefield must \
-             unconditionally force a full re-evaluation, got {:?}",
-            state.layers_dirty
         );
     }
 }

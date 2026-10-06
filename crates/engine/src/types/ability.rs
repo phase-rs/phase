@@ -187,6 +187,15 @@ pub enum ZoneChoiceCandidateSource {
     /// cost-paid object that has since left that zone is simply not offered and an
     /// unrelated object that happens to sit in the zone can never be.
     CostPaidObjects,
+    /// Read only the objects the preceding instruction handed this one as its
+    /// targets, filtered to the declared zone(s).
+    ///
+    /// CR 608.2c + CR 608.2d: "Put one of them into your hand" after "exile
+    /// cards … until you exile two nonland cards …" (Invasion of Alara) names
+    /// the batch that instruction found, not every card it exiled and not a
+    /// tracked set an earlier clause published. A member of the batch that has
+    /// since left the zone (cast from exile onto the stack) is not offered.
+    ParentTargets,
 }
 
 impl ZoneChoiceCandidateSource {
@@ -1935,19 +1944,22 @@ pub enum PreventionAmount {
 
 /// CR 614.9: Recipient of a damage-redirection effect — the
 /// battle/creature/planeswalker/player the replaced damage is dealt to instead.
-/// Each variant is a distinct IDENTITY SOURCE for that recipient, resolved
-/// against live game state at damage-apply time by
+/// Each variant identifies the authority for that recipient. Resolution-created
+/// effects materialize `Controller` into `ChosenTarget` plus a concrete player;
+/// the remaining live identities are resolved at damage-apply time by
 /// `effects::create_damage_replacement::resolve_redirect_recipient`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DamageRedirectTarget {
-    /// "...to you instead" — the replacement source's controller (Jade Monolith,
-    /// Goblin Psychopath).
+    /// CR 109.5 + CR 113.8: "...to you instead" in a resolving instruction is
+    /// the creating ability's controller (Jade Monolith, Goblin Psychopath),
+    /// captured at resolution. Outside that normalization, the live recipient
+    /// resolver reads the replacement host's current controller.
     Controller,
     /// "...to its/that source's/that spell's controller instead" — the
     /// prospective damage source's controller, read when the damage event is
     /// replaced (Mirror Strike, Reverberation, Reflect Damage). This is distinct
-    /// from [`Self::Controller`], which is the replacement host's controller.
+    /// from the creating ability's controller and the replacement host's controller.
     ///
     /// CR 614.9: a redirection effect may redirect damage to another player.
     DamageSourceController,
@@ -1959,6 +1971,8 @@ pub enum DamageRedirectTarget {
     /// or ability (spell: CR 115.1a + CR 601.2c; activated ability: CR 115.1c +
     /// CR 602.2b; "any target" domain CR 115.4); latched into the shield's
     /// `redirect_target` at resolution (Soltari Guerrillas, Harm's Way).
+    /// Runtime shields also use this concrete-destination carrier for an implicit
+    /// player captured from `Controller`; that use declares no additional target.
     #[serde(alias = "ChosenObjectTarget")]
     ChosenTarget,
     /// CR 303.4b + CR 301.5a: "...to enchanted creature instead" / "...to
@@ -4182,6 +4196,31 @@ impl Duration {
             | Self::UntilEndOfNextTurnOf { .. }
             | Self::UntilNextStepOf { .. }
             | Self::ForAsLongAs { .. }
+            | Self::UntilSourceExilesAnotherCard
+            | Self::UntilOpponentBecomesMonarch
+            | Self::UntilEvent { .. }
+            | Self::Permanent => false,
+        }
+    }
+
+    /// CR 611.2b: true for every "for as long as" STATE reading — the
+    /// durations that may already be over when the effect would begin, and
+    /// then never start. A resolver must test them on a settled board before
+    /// installing anything (`layers::resolved_duration_begins`).
+    pub const fn is_for_as_long_as(&self) -> bool {
+        match self {
+            Self::ForAsLongAs { .. }
+            | Self::WhileControllingHost
+            | Self::WhileHostOnBattlefield => true,
+            // Event deadlines and turn boundaries cannot be over before the
+            // effect begins; listed rather than swept into `_` so a new
+            // duration has to choose a side here.
+            Self::UntilHostLeavesPlay
+            | Self::UntilEndOfTurn
+            | Self::UntilEndOfCombat
+            | Self::UntilNextTurnOf { .. }
+            | Self::UntilEndOfNextTurnOf { .. }
+            | Self::UntilNextStepOf { .. }
             | Self::UntilSourceExilesAnotherCard
             | Self::UntilOpponentBecomesMonarch
             | Self::UntilEvent { .. }
@@ -10112,9 +10151,22 @@ pub enum ObjectProperty {
 #[serde(tag = "type")]
 pub enum UntilCondition {
     /// CR 702.85a / CR 701.57a: Loop terminates when the just-exiled card
-    /// satisfies the filter. The matching card is exposed to the sub_ability
-    /// chain as an injected target.
-    NextMatches { filter: TargetFilter },
+    /// satisfies the filter and `count` cards have matched so far. The
+    /// matching cards are exposed to the sub_ability chain as injected
+    /// targets.
+    NextMatches {
+        filter: TargetFilter,
+        /// CR 608.2c: How many matching cards end the loop — "until you exile
+        /// two nonland cards with mana value 4 or less" (Invasion of Alara).
+        /// Defaults to one ("until you exile a nonland card"), so every
+        /// single-hit form and on-disk record keeps its meaning. When the
+        /// library runs out first, the loop ends with the matches found so far.
+        #[serde(
+            default = "default_quantity_one",
+            skip_serializing_if = "is_default_quantity_one"
+        )]
+        count: QuantityExpr,
+    },
     /// CR 202.3 + CR 107.3e: Loop terminates when the cumulative `property`
     /// summed over every card exiled this resolution satisfies
     /// `comparator(sum, threshold)`.
@@ -16100,7 +16152,7 @@ impl FaceDownProfile {
 /// can install onto a persistent baseline.
 ///
 /// `ContinuousModification` is the engine-wide 57-variant layer vocabulary; only
-/// three of its kinds have a persistent-baseline installer. Carrying that subset
+/// four of its kinds have a persistent-baseline installer. Carrying that subset
 /// as its OWN type (rather than a `Vec<ContinuousModification>` guarded by a
 /// separate predicate) makes the acceptance gate and the installer the same
 /// authority: [`PerpetualModification::GrantAbility`] cannot be constructed
@@ -16135,6 +16187,11 @@ pub enum PerpetualGrantModification {
     /// closed rather than install a board-wide mana concession under a "this
     /// spell only" card.
     GrantAbility { definition: Box<AbilityDefinition> },
+    /// A quoted triggered ability (Jessie Zane's "When this creature enters,
+    /// draw a card.") — installed onto `trigger_definitions` +
+    /// `base_trigger_definitions` as a Printed slot via the
+    /// `push_printed_trigger` single authority.
+    GrantTrigger { trigger: Box<TriggerDefinition> },
 }
 
 impl TryFrom<ContinuousModification> for PerpetualGrantModification {
@@ -16249,6 +16306,39 @@ impl TryFrom<ContinuousModification> for PerpetualGrantModification {
             ContinuousModification::GrantAbility { definition } => {
                 Ok(Self::GrantAbility { definition })
             }
+            // Fail-closed: a `GrantTrigger` whose `execute` is missing or whose
+            // nested tree still carries `Effect::Unimplemented` did not actually
+            // parse (Racketeer Boss's "... and this spell perpetually loses this
+            // ability." — the loses class has no model, so the inner effect is
+            // the parser's honest "couldn't classify this" stub). Accepting it
+            // would install a trigger that does nothing (or half of a
+            // multi-quote grant) while the top-level effect stays
+            // `Effect::ApplyPerpetual`, so coverage would keep reporting the
+            // card as fully supported. Reuse
+            // `game::coverage::ability_tree_any` — the single walker authority
+            // — over the `AbilityDefinition`-shaped `execute`. Rejecting here
+            // propagates through the `Result` collect in
+            // `try_parse_perpetual_grant_ability`, which fails the whole clause
+            // closed rather than installing a partial grant.
+            //
+            // The `GrantAbility` resolution-time `GenericEffect` gate above is
+            // explicitly NOT mirrored: a trigger's `execute` runs through
+            // normal trigger resolution (CR 608.2c: the controller follows
+            // the ability's instructions in the order written), so a
+            // resolution-time grant nested inside it resolves like any other
+            // trigger body — that gate's rationale (the installer cannot route
+            // nested statics at
+            // grant time) does not apply.
+            ContinuousModification::GrantTrigger { trigger }
+                if trigger.execute.as_deref().is_none_or(|execute| {
+                    crate::game::coverage::ability_tree_any(execute, &|d| {
+                        matches!(&*d.effect, Effect::Unimplemented { .. })
+                    })
+                }) =>
+            {
+                Err(ContinuousModification::GrantTrigger { trigger })
+            }
+            ContinuousModification::GrantTrigger { trigger } => Ok(Self::GrantTrigger { trigger }),
             other => Err(other),
         }
     }
@@ -18998,8 +19088,10 @@ pub enum Effect {
     /// Guerrillas; "to any target" — Harm's Way), `redirect_object_filter`
     /// carries the recipient's `TargetFilter` so the targeting layer surfaces a
     /// standard target slot (`ability_utils::collect_target_slots`); the
-    /// resolver captures the chosen object or player into the shield. All other redirect forms host on the
-    /// controller / source with no declared target.
+    /// resolver captures the chosen object or player into the shield. `Controller`
+    /// instead captures the creating ability's controller without declaring a
+    /// redirect target. Either form can independently declare an original-recipient
+    /// target through `recipient_object_filter` (Jade Monolith).
     CreateDamageReplacement {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_filter: Option<TargetFilter>,
@@ -19021,7 +19113,7 @@ pub enum Effect {
         /// `ChosenTarget` form ("...deals that damage to target creature
         /// instead" — Soltari Guerrillas; "...is dealt to any target instead" —
         /// Harm's Way). `None` for the `Controller` /
-        /// `SourceObject` redirect forms, which need no target slot.
+        /// `SourceObject` redirect forms, which need no redirect-recipient slot.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         redirect_object_filter: Option<TargetFilter>,
         /// CR 115.1 + CR 614.9: The *original-recipient* target filter when the
@@ -23524,7 +23616,7 @@ impl Effect {
             // resolved up-front when the until-loop starts
             // (`game/effects/exile_from_top_until.rs`).
             Effect::ExileFromTopUntil { until, .. } => match until {
-                UntilCondition::NextMatches { .. } => {}
+                UntilCondition::NextMatches { count, .. } => f(count),
                 UntilCondition::CumulativeThreshold { threshold, .. } => f(threshold),
             },
             // A proposition guess resolves both comparison sides live
@@ -27452,8 +27544,10 @@ pub enum AbilityCondition {
         /// CR 608.2c: When `Some(n)`, the anaphoric subject tests the object in
         /// declared chain slot `n` (resolved from the flattened root chain via
         /// `resolve_live_parent_slot_from_root`) rather than this node's local
-        /// most-recent target. `None` (default) preserves the legacy
-        /// first-object / `TriggeringSource` behavior. Set by the two-target
+        /// most-recent target. `None` (default) tests the gated node's
+        /// resolution-bound attachment-host recipient
+        /// (`targeting::resolution_bound_attachment_hosts`), else its first
+        /// object target, else `TriggeringSource`. Set by the two-target
         /// counter-chain rewrite in `lower_effect_chain_ir` so a condition on the
         /// first-declared fighter (Malamet: "if the creature you control entered
         /// this turn") reads slot 0 under most-recent-only chain propagation.
@@ -28229,6 +28323,12 @@ pub struct SpellContext {
     pub forwarded_result_context: Option<Box<ForwardedResultContext>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_forwarded_zone_result: Option<PendingForwardedZoneResult>,
+    /// CR 400.7j + CR 608.2c: every card an "exile cards … until …" loop moved
+    /// to exile in this resolution, handed down the rest of its chain. "The
+    /// other cards exiled this way" (Invasion of Alara) are found among exactly
+    /// these cards. Empty outside such a chain.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exile_until_batch: Vec<crate::types::identifiers::ObjectIncarnationRef>,
     /// CR 610.3b: specified duration events observed after a triggered ability
     /// triggered but before this initial zone-change effect occurred.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -34682,8 +34782,31 @@ impl ResolvedAbility {
         &self,
         state: &crate::types::game_state::GameState,
     ) -> bool {
-        let Some(source) = self.trigger_source.as_ref() else {
+        if self.trigger_source.is_none() {
             return true;
+        }
+        state
+            .objects
+            .get(&self.source_id)
+            .is_some_and(|object| self.is_own_departure_successor_in(state, object.zone, None))
+    }
+
+    /// CR 400.7e: True when the source, sitting in public `zone`, is the
+    /// immediate successor of its own triggering zone change: the triggering
+    /// event moved this exact captured identity into `zone`, and no later zone
+    /// change of the same storage id has been recorded. A trigger cannot find
+    /// the new object in a hidden zone. Callers pass the zone the source
+    /// occupies, or, for a move still being applied, the zone it is leaving
+    /// plus that move's departing incarnation: an incarnation departs only
+    /// once, so a record carrying it is that in-flight move, not an earlier one.
+    pub(crate) fn is_own_departure_successor_in(
+        &self,
+        state: &crate::types::game_state::GameState,
+        zone: Zone,
+        in_flight_departure: Option<u64>,
+    ) -> bool {
+        let Some(source) = self.trigger_source.as_ref() else {
+            return false;
         };
         let Some(crate::types::GameEvent::ZoneChanged {
             object_id,
@@ -34698,10 +34821,8 @@ impl ResolvedAbility {
             || record.trigger_source_context().is_none_or(|event_source| {
                 event_source.identity.reference != source.identity.reference
             })
-            || state
-                .objects
-                .get(object_id)
-                .is_none_or(|object| object.zone != *to)
+            || zone != *to
+            || !zone.is_public()
         {
             return false;
         }
@@ -34721,7 +34842,14 @@ impl ResolvedAbility {
                 .zone_changes_this_turn
                 .iter()
                 .skip(record.turn_zone_change_index + 1)
-                .all(|later| later.object_id != self.source_id)
+                .all(|later| {
+                    later.object_id != self.source_id
+                        || in_flight_departure.is_some_and(|departing| {
+                            later.trigger_source_context().is_some_and(|context| {
+                                context.identity.reference.incarnation == departing
+                            })
+                        })
+                })
     }
 
     /// CR 400.7e: True when an off-battlefield zone-match would mis-latch SelfRef
@@ -38700,6 +38828,77 @@ mod tests {
             result,
             Err(modification),
             "a granted ability with an unparsed COST must fail the whole perpetual grant closed, not install an ability that silently ignores its own printed cost"
+        );
+    }
+
+    /// SHAPE: a quoted trigger whose `execute` fully parsed (Jessie Zane's
+    /// "When this creature enters, draw a card.") is installable — the
+    /// `GrantTrigger` accept arm. Paired positive for the two rejection pins
+    /// below: removing the gate must not change this arm's verdict.
+    #[test]
+    fn perpetual_grant_trigger_try_from_accepts_clean_trigger() {
+        let granted =
+            TriggerDefinition::new(TriggerMode::ChangesZone).execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: default_quantity_one(),
+                    target: default_target_filter_controller(),
+                },
+            ));
+        let modification = ContinuousModification::GrantTrigger {
+            trigger: Box::new(granted),
+        };
+        assert!(
+            matches!(
+                PerpetualGrantModification::try_from(modification),
+                Ok(PerpetualGrantModification::GrantTrigger { .. })
+            ),
+            "a fully-parsed quoted trigger must be accepted as installable"
+        );
+    }
+
+    /// SHAPE (V2N gate pin): a quoted trigger with NO `execute` body never
+    /// parsed its effect half, so the whole grant fails closed rather than
+    /// install a trigger that does nothing.
+    #[test]
+    fn perpetual_grant_trigger_try_from_rejects_missing_execute() {
+        let granted = TriggerDefinition::new(TriggerMode::ChangesZone);
+        let modification = ContinuousModification::GrantTrigger {
+            trigger: Box::new(granted.clone()),
+        };
+        assert_eq!(
+            PerpetualGrantModification::try_from(modification),
+            Err(ContinuousModification::GrantTrigger {
+                trigger: Box::new(granted),
+            }),
+            "a quoted trigger with no execute body must fail the whole perpetual grant closed"
+        );
+    }
+
+    /// SHAPE (V2N gate pin): a quoted trigger whose nested `execute` tree still
+    /// carries `Effect::Unimplemented` (Racketeer Boss's "... and this spell
+    /// perpetually loses this ability." — the loses class has no model) fails
+    /// the WHOLE grant closed rather than install half a multi-quote grant
+    /// while reporting the card supported.
+    #[test]
+    fn perpetual_grant_trigger_try_from_rejects_unimplemented_content() {
+        let granted =
+            TriggerDefinition::new(TriggerMode::ChangesZone).execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "loses".to_string(),
+                    description: Some("this spell perpetually loses this ability".to_string()),
+                },
+            ));
+        let modification = ContinuousModification::GrantTrigger {
+            trigger: Box::new(granted.clone()),
+        };
+        assert_eq!(
+            PerpetualGrantModification::try_from(modification),
+            Err(ContinuousModification::GrantTrigger {
+                trigger: Box::new(granted),
+            }),
+            "a quoted trigger with unparsed inner content must fail the whole perpetual grant closed"
         );
     }
 

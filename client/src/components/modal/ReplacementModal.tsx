@@ -58,6 +58,8 @@ export function ReplacementModal() {
   // Local UI state: the chosen permutation (indices into `candidates`).
   // Identity to start; reset on every new prompt because successive CR 616.1f
   // rounds can carry the same candidate count.
+  const rememberAvailable = isReplacementChoice && waitingFor.data.remember_identity !== undefined;
+  const [remember, setRemember] = useState(false);
   const [order, setOrder] = useState<number[]>(() =>
     Array.from({ length: candidateCount }, (_, i) => i),
   );
@@ -68,10 +70,11 @@ export function ReplacementModal() {
   // mid-drag. Successive CR 616.1f rounds change the candidate set, so the
   // identity key changes and the reset still fires when it should.
   const promptKey = isReplacementChoice
-    ? `${candidateCount}|${candidates.map((c) => `${c.source_id}:${c.description}`).join("|")}`
+    ? `${JSON.stringify(waitingFor.data.remember_identity)}|${kindType}|${rememberAvailable}|${candidateCount}|${candidates.map((c) => `${c.source_id}:${c.description}`).join("|")}`
     : "";
   useEffect(() => {
     setOrder(Array.from({ length: candidateCount }, (_, i) => i));
+    setRemember(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- promptKey encodes
     // candidateCount + candidate content; adding `candidates` would reintroduce
     // the identity-churn reset this key exists to avoid.
@@ -89,9 +92,13 @@ export function ReplacementModal() {
 
   const handleChoose = useCallback(
     (index: number) => {
-      dispatch({ type: "ChooseReplacement", data: { index } });
+      dispatch(remember && rememberAvailable
+        ? { type: "ChooseReplacementAndRemember", data: { choice: kindType === "Order"
+          ? { type: "Order", data: { order: [index] } }
+          : { type: "Optional", data: { index } } } }
+        : { type: "ChooseReplacement", data: { index } });
     },
-    [dispatch],
+    [dispatch, kindType, remember, rememberAvailable],
   );
 
   // CR 616.1f: submit only the first entry. The engine applies it and re-prompts
@@ -101,8 +108,18 @@ export function ReplacementModal() {
   // permutation blind would be wrong for those classes.
   const handleConfirmOrder = useCallback(() => {
     const first = order[0];
-    if (first !== undefined) handleChoose(first);
-  }, [handleChoose, order]);
+    if (first === undefined) return;
+    dispatch(remember && rememberAvailable
+      ? { type: "ChooseReplacementAndRemember", data: { choice: { type: "Order", data: { order } } } }
+      : { type: "ChooseReplacement", data: { index: first } });
+  }, [dispatch, order, remember, rememberAvailable]);
+
+  const rememberControl = rememberAvailable ? (
+    <label className="mt-3 flex cursor-pointer items-center gap-2 text-sm text-white/80">
+      <input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} />
+      {t("replacement.remember")}
+    </label>
+  ) : null;
 
   if (!isReplacementChoice || candidateCount === 0) return null;
 
@@ -143,6 +160,7 @@ export function ReplacementModal() {
               );
             })}
           </div>
+          {rememberControl}
         </div>
       </DialogShell>
     );
@@ -285,6 +303,7 @@ export function ReplacementModal() {
             {t("replacement.composesNote")}
           </div>
         )}
+        {rememberControl}
         <p className="mt-2 text-center text-xs text-white/40">
           {t("replacement.dragHint")}
         </p>

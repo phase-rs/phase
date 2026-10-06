@@ -2309,7 +2309,7 @@ impl GameObject {
                 // construct a `GrantAbility` holding an uninstallable kind
                 // (`PerpetualGrantModification::try_from` is the single gate, and
                 // rejects `classify_quoted_inner`'s other outputs --
-                // `GrantTrigger`, `GrantReplacement` -- closing the whole parse),
+                // `GrantReplacement` -- closing the whole parse),
                 // and widening that gate is a compile error here until the new
                 // kind is installed. A wildcard would let a widened gate record
                 // the modification in `perpetual_mods` while installing nothing.
@@ -2354,12 +2354,25 @@ impl GameObject {
                             // silent no-op -- Blocker 1 (review round on PR
                             // #8494). Mirrors the sibling
                             // `PerpetualModification::ModifyCost` arm above
-                            // verbatim. Scoped to the `ModifyCost` shape only:
-                            // other `StaticMode` kinds this arm installs (a
-                            // granted "can't block" restriction, CR 509.1b)
-                            // are legitimately battlefield-only and must keep
-                            // the empty (battlefield-default) `active_zones`.
-                            if matches!(mode, StaticMode::ModifyCost { .. }) {
+                            // verbatim. Scoped to the self-spell cost shapes only
+                            // (`ModifyCost`, plus the quoted self alternative-cost
+                            // grant "You may pay {N} rather than pay this spell's
+                            // mana cost" — CR 118.9 + CR 113.6e: an ability that
+                            // modifies how that particular object can be played
+                            // or cast functions in any zone from which it could
+                            // be played or cast and also on the stack, so the
+                            // recipient card carries the offer from hand): other
+                            // `StaticMode` kinds this arm installs (a granted
+                            // "can't block" restriction, CR 509.1b) are
+                            // legitimately battlefield-only and must keep the
+                            // empty (battlefield-default) `active_zones`.
+                            // `affected` is forced to `SelfRef` above, so the
+                            // mode match alone identifies the self-cost shape.
+                            if matches!(
+                                mode,
+                                StaticMode::ModifyCost { .. }
+                                    | StaticMode::CastWithAlternativeCost { .. }
+                            ) {
                                 synthetic = synthetic.active_zones(
                                     crate::types::zones::self_spell_cost_mod_active_zones(),
                                 );
@@ -2405,6 +2418,31 @@ impl GameObject {
                             if !self.base_abilities.iter().any(|a| a == definition.as_ref()) {
                                 Arc::make_mut(&mut self.base_abilities).push(*definition.clone());
                             }
+                        }
+                        // Digital-only Alchemy (no CR entry for "perpetually"):
+                        // the quoted body classified to a triggered ability --
+                        // Jessie Zane's "When this creature enters, draw a
+                        // card." Installed as a PRINTED slot via the single
+                        // authority: perpetual edits are intrinsic, copiable,
+                        // base-set characteristics (CR 707.9a class) that must
+                        // survive the granting source -- not `Granted`, whose
+                        // lifetime ties to the producer. The installed
+                        // trigger's source is the recipient object; the inner
+                        // "~"/"this creature" was normalized card-wide before
+                        // classification, so no pronoun rebinding is needed at
+                        // install. No structural-equality dedup: CR 113.2c (verified:
+                        // "If an object has multiple instances of the same
+                        // ability, each instance functions independently") --
+                        // each `ApplyPerpetual` resolution installs one
+                        // occurrence, so two independent grants of equal bodies
+                        // (Oglor granting the same card twice) yield two
+                        // triggers. `push_printed_trigger` mints a distinct
+                        // `Printed` occurrence ref per call, and layer
+                        // re-materialization rebuilds the live list
+                        // slot-for-slot, so one recorded grant stays exactly
+                        // one occurrence while independent grants stack.
+                        PerpetualGrantModification::GrantTrigger { trigger } => {
+                            self.push_printed_trigger(trigger.as_ref().clone());
                         }
                     }
                 }

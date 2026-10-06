@@ -659,15 +659,11 @@ fn try_parse_multi_type_enchant(line: &str) -> Option<Keyword> {
 
     let filters: Vec<TargetFilter> = legs
         .into_iter()
-        .map(|leg| {
-            let mut f = TypedFilter::new(leg.type_filter);
-            if !leg.properties.is_empty() {
-                f = f.properties(leg.properties);
-            }
+        .map(|mut leg| {
             if let Some(ref c) = controller {
-                f = f.controller(c.clone());
+                leg = leg.controller(c.clone());
             }
-            TargetFilter::Typed(f)
+            TargetFilter::Typed(leg)
         })
         .collect();
 
@@ -3026,9 +3022,100 @@ pub(crate) fn keyword_candidate_ability_word_label(line: &str) -> Option<(&str, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityCost, SacrificeCost};
+    use crate::types::ability::{AbilityCost, Effect, SacrificeCost};
     use crate::types::mana::ManaCost;
     use crate::types::player::PlayerCounterKind;
+
+    // SHAPE: CR 702.5a: public full-card ingestion preserves each printed
+    // Enchant restriction; unrelated sibling abilities are not claimed fixed.
+    #[test]
+    fn enchant_negated_subtype_full_oracle_shape() {
+        let cards = [
+            ("Puppet Crafting", "Enchant artifact or non-Aura enchantment\nEnchanted permanent is a Construct creature with base power and toughness 5/5 in addition to its other types.\n{4}{G}: Return this card from your graveyard to your hand."),
+            ("Aggression", "Enchant non-Wall creature\nEnchanted creature has first strike and trample.\nAt the beginning of the end step of enchanted creature's controller, destroy that creature if it didn't attack this turn."),
+            ("Consuming Ferocity", "Enchant non-Wall creature\nEnchanted creature gets +1/+0.\nAt the beginning of your upkeep, put a +1/+0 counter on enchanted creature. If that creature has three or more +1/+0 counters on it, it deals damage equal to its power to its controller, then destroy that creature and it can't be regenerated."),
+            ("Krovikan Plague", "Enchant non-Wall creature you control\nWhen this Aura enters, draw a card at the beginning of the next turn's upkeep.\nTap enchanted creature: This Aura deals 1 damage to any target. Put a -0/-1 counter on enchanted creature. Activate only if enchanted creature is untapped."),
+        ];
+        for (name, oracle) in cards {
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                oracle,
+                name,
+                &["enchant".into()],
+                &["Enchantment".into()],
+                &["Aura".into()],
+            );
+            let filter = parsed
+                .extracted_keywords
+                .iter()
+                .find_map(|keyword| {
+                    if let Keyword::Enchant(filter) = keyword {
+                        Some(filter)
+                    } else {
+                        None
+                    }
+                })
+                .expect("every printed full-card Enchant must be retained");
+            if name == "Puppet Crafting" {
+                let TargetFilter::Or { filters } = filter else {
+                    panic!("expected union")
+                };
+                assert_eq!(filters.len(), 2);
+                let TargetFilter::Typed(artifact) = &filters[0] else {
+                    panic!("artifact leg")
+                };
+                assert_eq!(artifact.type_filters, vec![TypeFilter::Artifact]);
+                let TargetFilter::Typed(enchantment) = &filters[1] else {
+                    panic!("enchantment leg")
+                };
+                assert_eq!(
+                    enchantment.type_filters,
+                    vec![
+                        TypeFilter::Enchantment,
+                        TypeFilter::Non(Box::new(TypeFilter::Subtype("Aura".into())))
+                    ]
+                );
+                assert!(
+                    parsed.parse_warnings.is_empty(),
+                    "{:?}",
+                    parsed.parse_warnings
+                );
+                assert!(parsed
+                    .abilities
+                    .iter()
+                    .all(|a| !matches!(*a.effect, Effect::Unimplemented { .. })));
+            } else {
+                let TargetFilter::Typed(typed) = filter else {
+                    panic!("single creature leg")
+                };
+                assert_eq!(
+                    typed.type_filters,
+                    vec![
+                        TypeFilter::Creature,
+                        TypeFilter::Non(Box::new(TypeFilter::Subtype("Wall".into())))
+                    ]
+                );
+                assert_eq!(
+                    typed.controller,
+                    if name == "Krovikan Plague" {
+                        Some(ControllerRef::You)
+                    } else {
+                        None
+                    }
+                );
+            }
+        }
+        assert!(try_parse_multi_type_enchant("Enchant artifact or non-Aura enchantment").is_some());
+        for phrase in [
+            "Enchant artifact or non-Aura",
+            "Enchant artifact or non-Aurora enchantment",
+            "Enchant artifact or non-Aura enchantment if you control a creature",
+        ] {
+            assert!(
+                try_parse_multi_type_enchant(phrase).is_none(),
+                "must decline: {phrase}"
+            );
+        }
+    }
 
     #[test]
     fn parse_keyword_line_core_emerge_from_artifact_preserves_quality() {

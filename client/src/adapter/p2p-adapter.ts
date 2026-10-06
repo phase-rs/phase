@@ -1218,6 +1218,16 @@ export class P2PHostAdapter implements EngineAdapter {
         this.aiDecks.set(Number(pidStr), deck);
       }
     }
+    // A returning guest's `reconnect` frame carries no display name, so the
+    // persisted copy is the only source for it after a host refresh.
+    const guestNames = session.guestNames;
+    if (guestNames && typeof guestNames === "object" && !Array.isArray(guestNames)) {
+      for (const [pidStr, name] of Object.entries(guestNames)) {
+        if (typeof name === "string" && name) {
+          this.guestNames.set(Number(pidStr), name);
+        }
+      }
+    }
     for (const token of session.kickedTokens) this.kickedTokens.add(token);
     for (const pid of session.eliminatedSeats) {
       this.eliminatedSeats.add(pid);
@@ -1279,6 +1289,10 @@ export class P2PHostAdapter implements EngineAdapter {
     for (const [pid, deck] of this.aiDecks.entries()) {
       aiDecks[pid] = deck;
     }
+    const guestNames: Record<number, string> = {};
+    for (const [pid, name] of this.guestNames.entries()) {
+      guestNames[pid] = name;
+    }
     return {
       gameId: this.gameId,
       roomCode: this.roomCode,
@@ -1287,6 +1301,7 @@ export class P2PHostAdapter implements EngineAdapter {
       useBroker: this.broker !== undefined,
       playerTokens,
       guestDecks,
+      guestNames,
       aiDecks,
       kickedTokens: [...this.kickedTokens],
       eliminatedSeats: [...this.eliminatedSeats],
@@ -1907,6 +1922,11 @@ export class P2PHostAdapter implements EngineAdapter {
         this.broadcastSeatSnapshot();
         this.syncLobbyMetadata();
       });
+    } else if (this.isResume) {
+      // A refreshed host's store starts with no names, and `initializeGame`
+      // (the fresh-start emitter) never runs on resume. Re-announce the seat
+      // names here so the host's own UI labels its guests again.
+      this.emit({ type: "playerIdentity", playerId: 0, playerNames: this.playerNamesForSeats() });
     }
     traceAdapter("Host", "initialize-complete", {});
     this.initialized = true;

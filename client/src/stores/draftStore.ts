@@ -21,6 +21,7 @@ import {
   reportLlmDraftOutcomes,
   resetLlmDraftBreaker,
 } from "../services/llm/draftLlm";
+import { loadProviderCatalog } from "../services/llm/catalog";
 import { draftProfile, useLlmStore } from "./llmStore";
 import {
   MAX_MATERIALIZED_VIRTUAL_BASICS,
@@ -801,7 +802,15 @@ async function performPick(request: PickRequest): Promise<DraftPickOutcome> {
     // fingerprint it was built from and the engine re-validates it against the
     // live pack below, so a pack that moved on during the gap is refused per
     // seat rather than mis-picked.
-    const llmProfile = request.kind === "pick" ? draftProfile(useLlmStore.getState()) : undefined;
+    const catalog = request.kind === "pick" && useLlmStore.getState().draftEnabled
+      ? await loadProviderCatalog()
+      : [];
+    if (!isFresh()) {
+      return { status: "ignored", reason: "stale" };
+    }
+    const llmProfile = request.kind === "pick"
+      ? draftProfile(useLlmStore.getState(), catalog)
+      : undefined;
     const llmResponses = llmProfile
       ? await collectLlmDraftResponses(llmProfile, isFresh)
       : [];

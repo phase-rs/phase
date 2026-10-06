@@ -154,7 +154,7 @@ fn type_filter_can_name_attacker(filter: &TypeFilter) -> bool {
 }
 
 /// Parse a "non" prefix: "non" or "non-" followed by implicit word boundary.
-fn parse_non_prefix(input: &str) -> OracleResult<'_, &str> {
+pub(crate) fn parse_non_prefix(input: &str) -> OracleResult<'_, &str> {
     alt((tag("non-"), tag("non"))).parse(input)
 }
 

@@ -62,13 +62,15 @@ use super::resolution::{
     ResolutionStack, ResolutionStackError, ResolutionStateWire,
 };
 use super::resolved_commands::{
-    ManaPaymentRecipient, ResolvedContinuousEffectCommand,
-    ResolvedContinuousEffectReplayInvariantError, ResolvedFrameTransition,
-    ResolvedFrameTransitionCommand, ResolvedFrameTransitionReplayInvariantError,
-    ResolvedInformationAudience, ResolvedInformationCommand, ResolvedInformationEdit,
-    ResolvedInformationLifetime, ResolvedInformationReplayInvariantError,
-    ResolvedManaInsertCommand, ResolvedManaReplayInvariantError, ResolvedManaSpendCommand,
-    ResolvedPlayerEdit, ResolvedPlayerEditCommand, ResolvedPlayerEditReplayInvariantError,
+    ManaPaymentRecipient, ResolvedContinuousEffectCommand, ResolvedContinuousEffectEdit,
+    ResolvedContinuousEffectEditReplayInvariantError, ResolvedContinuousEffectReplayInvariantError,
+    ResolvedContinuousEffectRetirementCommand, ResolvedContinuousEffectRetirementInvariantError,
+    ResolvedFrameTransition, ResolvedFrameTransitionCommand,
+    ResolvedFrameTransitionReplayInvariantError, ResolvedInformationAudience,
+    ResolvedInformationCommand, ResolvedInformationEdit, ResolvedInformationLifetime,
+    ResolvedInformationReplayInvariantError, ResolvedManaInsertCommand,
+    ResolvedManaReplayInvariantError, ResolvedManaSpendCommand, ResolvedPlayerEdit,
+    ResolvedPlayerEditCommand, ResolvedPlayerEditReplayInvariantError,
     ResolvedRngReplayInvariantError, ResolvedRulesCommand, ResolvedRulesJournal,
     RulesExecutionNodeRef,
 };
@@ -2677,6 +2679,9 @@ pub struct PendingExileFromTopUntil {
     pub linked_batch: Vec<ObjectIncarnationRef>,
     /// Cumulative property total completed before the pause.
     pub cumulative: i32,
+    /// `NextMatches` hits completed before the pause, in exile order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hits: Vec<ObjectId>,
 }
 
 impl PendingContinuation {
@@ -7443,6 +7448,10 @@ pub struct PendingCast {
     /// quantities can resolve later.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub convoked_creatures: Vec<ObjectId>,
+    /// CR 702.66a + CR 601.2h: Graveyard cards selected to pay generic mana.
+    /// They stay in the graveyard until the total cost is paid at commit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delved_cards: Vec<ObjectId>,
     /// CR 601.2g + CR 601.2h: Non-mana spell additional-cost permanents selected
     /// for sacrifice, but whose actual zone move is deferred until the final
     /// payment commit so mana abilities can be activated first.
@@ -7611,6 +7620,25 @@ pub enum PendingCostMoveCompletion {
         resolution_success_waiting_for: Option<Box<WaitingFor>>,
         prepaid_actual_mana_spent: Option<u32>,
     },
+    /// CR 601.2h + CR 702.66a: The cast's mana is already paid and `pending`
+    /// carries that payment; once the Delve exiles settle, re-enter the inner
+    /// finalizer with what the first pass already decided.
+    FinalizeDelvedCast {
+        phyrexian_choices: Option<Vec<ShardChoice>>,
+        /// `None` when the first pass had not reached the pre-payment checks.
+        pre_payment_checks: Option<Box<FinalizePrePaymentChecks>>,
+    },
+}
+
+/// CR 601.2a-b + CR 614.1c: Pre-payment determinations of one cast finalization,
+/// made once; a re-entry after a parked cost move carries them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinalizePrePaymentChecks {
+    pub early_waiting_for: Option<WaitingFor>,
+    pub cascade_cast_transformed: bool,
+    pub resolution_success_waiting_for: Option<WaitingFor>,
+    pub cast_this_way_etb_counter: Option<CounterType>,
+    pub cast_this_way_enters_mods: Vec<ContinuousModification>,
 }
 
 /// CR 605.3b: Selects whether completing a mana-ability cost payment may ask
@@ -7778,8 +7806,6 @@ pub enum WardSacrificePaymentResume {
 /// `Foretell` records the special action until its replacement-aware exile move
 /// has been delivered or prevented. `ManaAbilityPayment` owns the exact
 /// activation and unpaid payment cursor until the move has settled.
-/// `DelveManaPayment` owns the single Delve fuel's post-move payment state;
-/// the zone pipeline's delivery tail owns its delivered-only exile link.
 /// `SacrificeForCost` owns a full selected sacrifice component across one or
 /// more replacement-choice action boundaries, including its event span and
 /// LKI record identities. `CollectEvidencePayment` and `UnlessBouncePayment`
@@ -7844,10 +7870,6 @@ pub enum PendingCostMoveResume {
         object_id: ObjectId,
         cost: ManaCost,
         turn_foretold: u32,
-    },
-    DelveManaPayment {
-        player: PlayerId,
-        fuel_id: ObjectId,
     },
     /// CR 701.59a + CR 614.1 + CR 616.1: The selected evidence cards are
     /// exiled one at a time as a cost. A replacement choice settles the card
@@ -7950,7 +7972,6 @@ impl PendingCostMoveResume {
     pub fn withholds_priority(&self) -> bool {
         match self {
             PendingCostMoveResume::Cast { .. }
-            | PendingCostMoveResume::DelveManaPayment { .. }
             | PendingCostMoveResume::ManaAbilityPayment { .. }
             | PendingCostMoveResume::ActivationMillPayment { .. }
             | PendingCostMoveResume::LoyaltyActivation { .. } => true,
@@ -8080,6 +8101,7 @@ impl PendingCast {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
@@ -9445,6 +9467,53 @@ pub enum ReplacementChoiceKind {
     /// this is an engine presentation shape: the options are mutually exclusive
     /// alternatives rather than a sequence, so it renders as plain options.
     SearchFoundDestination,
+}
+
+/// CR 400.7 + CR 616.1: exact source and definition, independent of scan order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ReplacementAutoChoiceIdentity {
+    Definition {
+        source: ObjectIncarnationRef,
+        index: usize,
+        definition: Box<crate::types::ability::ReplacementDefinition>,
+    },
+    Mana {
+        source: ObjectIncarnationRef,
+        controller: PlayerId,
+        filter: Option<ManaColor>,
+        action: crate::types::mana::StepEndManaAction,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplacementAutoChoiceKey {
+    pub player: PlayerId,
+    pub event: crate::types::replacements::ReplacementEvent,
+    pub kind: ReplacementChoiceKind,
+    pub candidates: Vec<ReplacementAutoChoiceIdentity>,
+}
+
+/// Stable opaque selector for an exact replacement preference key.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ReplacementAutoChoiceId(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplacementAutoChoiceRecord {
+    pub id: ReplacementAutoChoiceId,
+    pub key: ReplacementAutoChoiceKey,
+    pub choice: crate::types::actions::ReplacementAutoChoice,
+    /// Engine-provided descriptions in the chosen order (one for an optional branch).
+    pub descriptions: Vec<String>,
+}
+
+/// CR 616.1f: expected remaining identities for this event only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplacementAutoChoiceTail {
+    pub player: PlayerId,
+    pub event: crate::types::replacements::ReplacementEvent,
+    pub remaining: Vec<ReplacementAutoChoiceIdentity>,
 }
 
 /// CR 603.3b + CR 603.7: One completed normal-plus-delayed trigger collection
@@ -13146,13 +13215,20 @@ impl GameState {
             return;
         }
         let rederived = crate::game::replacement::replacement_choice_waiting_for(player, self);
-        if let WaitingFor::ReplacementChoice { kind, .. } = rederived {
+        if let WaitingFor::ReplacementChoice {
+            kind,
+            remember_identity,
+            ..
+        } = rederived
+        {
             if let WaitingFor::ReplacementChoice {
                 kind: restored_kind,
+                remember_identity: restored_identity,
                 ..
             } = &mut self.waiting_for
             {
                 *restored_kind = kind;
+                *restored_identity = remember_identity;
             }
         }
     }
@@ -14063,6 +14139,9 @@ pub enum WaitingFor {
         /// layer must not assume last-write-wins; this is the engine's answer.
         #[serde(default)]
         last_applied_decides: bool,
+        /// Engine-owned conservative eligibility and identity; absent for payment/search prompts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remember_identity: Option<ReplacementAutoChoiceKey>,
     },
     /// CR 614.12a: choose the opponent that a permanent enters under before
     /// the zone change is delivered. `candidates` is captured at replacement
@@ -21461,6 +21540,10 @@ declare_game_state! {
     pub pending_die_roll_instruction: Option<Box<PendingDieRollInstruction>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub may_trigger_auto_choices: Vec<MayTriggerAutoChoiceRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replacement_auto_choices: Vec<ReplacementAutoChoiceRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement_auto_choice_tail: Option<ReplacementAutoChoiceTail>,
 
     /// CR 603.3b (TriggerOrdering) / CR 732.2a (LoopChoice): captured recurring
     /// decisions (PR-7). Two lifetimes share this Vec, distinguished by their
@@ -21726,7 +21809,10 @@ declare_game_state! {
     /// Count from the most recent interactive effect resolution (e.g., number of cards
     /// actually discarded in a DiscardChoice). Used as fallback for EventContextAmount
     /// in sub_ability continuations where current_trigger_event has no amount.
-    /// Cleared at the top of apply() (once per player action).
+    /// Scoped to one stack-object resolution (CR 608.2c + CR 608.2h): cleared as
+    /// each stack object begins resolving (`stack::resolve_top`) and at the top of
+    /// apply(). A CR 615.5 rider reads the amount its replacement pipeline stamped
+    /// synchronously, without crossing either boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_effect_count: Option<i32>,
 
@@ -25716,6 +25802,14 @@ impl GameState {
             {
                 self.remove_empty_active_post_replacement_frame();
             }
+            // CR 608.2c + CR 615.5: a nested replacement dispatch retired while
+            // the outer dispatch is still paused beneath it. The outer dispatch's
+            // own later instructions (an outer chain's tail parked outside the
+            // pair) now resume with that outer event context readable, so promote
+            // them out from under its frame; their completion retires it.
+            let _ = self
+                .resolution_stack
+                .promote_ability_continuation_after_post_replacement_draw();
             // CR 614.12a + CR 614.13a: a Devour-only ChangeZone snapshot stays
             // resident while its exact post-replacement child resolves. Once that
             // child is retired, the snapshot is again the active owner and its
@@ -26368,6 +26462,37 @@ impl GameState {
         let id = self.next_pip_id;
         self.next_pip_id += 1;
         ManaPipId(id)
+    }
+
+    /// CR 702.66a: A graveyard card that may be exiled to pay for `spell`.
+    /// CR 601.2a: the spell being cast has moved to the stack, so it is never
+    /// its own delve fuel even when it was cast from the graveyard.
+    pub fn is_delve_fuel_for(
+        &self,
+        player: PlayerId,
+        spell: ObjectId,
+        object_id: ObjectId,
+    ) -> bool {
+        object_id != spell
+            && self
+                .objects
+                .get(&object_id)
+                .is_some_and(|object| object.is_delve_eligible(player))
+    }
+
+    /// CR 702.66a: A graveyard card the caster may still select to pay generic
+    /// mana: fuel for the pending spell and not already selected.
+    pub fn is_delve_selectable(&self, player: PlayerId, object_id: ObjectId) -> bool {
+        match self.pending_cast.as_ref() {
+            Some(pending) => {
+                self.is_delve_fuel_for(player, pending.object_id, object_id)
+                    && !pending.delved_cards.contains(&object_id)
+            }
+            None => self
+                .objects
+                .get(&object_id)
+                .is_some_and(|object| object.is_delve_eligible(player)),
+        }
     }
 
     /// CR 106.4 + CR 118.3a: Resolve and apply one real-pool mana insertion.
@@ -27554,6 +27679,8 @@ impl GameState {
             pending_search_found_batch: None,
             pending_die_roll_instruction: None,
             may_trigger_auto_choices: Vec::new(),
+            replacement_auto_choices: Vec::new(),
+            replacement_auto_choice_tail: None,
             decision_templates: Vec::new(),
             priority_yields: Vec::new(),
             pending_begin_game_abilities: Vec::new(),
@@ -28175,6 +28302,10 @@ impl GameState {
     /// SINGLE AUTHORITY for adding to `transient_continuous_effects`. Resolves
     /// the CR 613.7b timestamp and the effect id, installs the effect, and
     /// journals the settled CR 611.2a creation through its owning family.
+    ///
+    /// Returns `None` when a CR 611.2b "for as long as" duration never starts:
+    /// the effect does nothing, so nothing is allocated, installed or journaled
+    /// and callers must not emit the effect's side effects.
     pub fn add_transient_continuous_effect(
         &mut self,
         source_id: ObjectId,
@@ -28183,7 +28314,7 @@ impl GameState {
         affected: TargetFilter,
         modifications: Vec<ContinuousModification>,
         condition: Option<StaticCondition>,
-    ) -> u64 {
+    ) -> Option<u64> {
         self.add_transient_continuous_effect_inner(
             source_id,
             controller,
@@ -28208,7 +28339,7 @@ impl GameState {
         modifications: Vec<ContinuousModification>,
         condition: Option<StaticCondition>,
         bindings: TransientContinuousEffectBindings,
-    ) -> u64 {
+    ) -> Option<u64> {
         self.add_transient_continuous_effect_inner(
             source_id,
             controller,
@@ -28240,7 +28371,7 @@ impl GameState {
         modifications: Vec<ContinuousModification>,
         condition: Option<StaticCondition>,
         end_permission: EndEffectPermission,
-    ) -> u64 {
+    ) -> Option<u64> {
         self.add_transient_continuous_effect_inner(
             source_id,
             controller,
@@ -28255,6 +28386,88 @@ impl GameState {
 
     #[allow(clippy::too_many_arguments)]
     fn add_transient_continuous_effect_inner(
+        &mut self,
+        source_id: ObjectId,
+        controller: PlayerId,
+        duration: Duration,
+        affected: TargetFilter,
+        modifications: Vec<ContinuousModification>,
+        condition: Option<StaticCondition>,
+        end_permission: Option<EndEffectPermission>,
+        bindings: TransientContinuousEffectBindings,
+    ) -> Option<u64> {
+        self.transient_duration_begins(source_id, controller, &duration, &affected, bindings)
+            .then(|| {
+                self.install_started_transient_continuous_effect(
+                    source_id,
+                    controller,
+                    duration,
+                    affected,
+                    modifications,
+                    condition,
+                    end_permission,
+                    bindings,
+                )
+            })
+    }
+
+    /// CR 701.12a + CR 701.12b + CR 611.2b: register the effects one instruction
+    /// creates simultaneously, such as each player gaining control of the
+    /// other's permanent in an exchange. Every member's duration is tested on
+    /// the same settled board before any member is installed, and if any never
+    /// starts, none is installed. Returns whether the members were installed.
+    pub fn add_simultaneous_transient_continuous_effects(
+        &mut self,
+        source_id: ObjectId,
+        duration: Duration,
+        members: Vec<(PlayerId, TargetFilter, Vec<ContinuousModification>)>,
+    ) -> bool {
+        let bindings = TransientContinuousEffectBindings::default();
+        let all_begin = members.iter().all(|(controller, affected, _)| {
+            self.transient_duration_begins(source_id, *controller, &duration, affected, bindings)
+        });
+        if all_begin {
+            for (controller, affected, modifications) in members {
+                self.install_started_transient_continuous_effect(
+                    source_id,
+                    controller,
+                    duration.clone(),
+                    affected,
+                    modifications,
+                    None,
+                    None,
+                    bindings,
+                );
+            }
+        }
+        all_begin
+    }
+
+    /// CR 611.2b: "If the 'for as long as' duration never starts, the effect
+    /// does nothing." Tests a candidate on the settled board before any
+    /// allocation, journaling or installation; replay installs verbatim
+    /// through `apply_resolved_continuous_effect` and never reaches here.
+    fn transient_duration_begins(
+        &mut self,
+        source_id: ObjectId,
+        controller: PlayerId,
+        duration: &Duration,
+        affected: &TargetFilter,
+        bindings: TransientContinuousEffectBindings,
+    ) -> bool {
+        if !duration.is_for_as_long_as() {
+            return true;
+        }
+        crate::game::layers::flush_layers(self);
+        crate::game::layers::resolved_duration_begins(
+            self, duration, controller, source_id, affected, bindings,
+        )
+    }
+
+    /// Installs and journals an effect whose duration has already been found to
+    /// start; reached only through the checked registration entry points above.
+    #[allow(clippy::too_many_arguments)]
+    fn install_started_transient_continuous_effect(
         &mut self,
         source_id: ObjectId,
         controller: PlayerId,
@@ -28351,6 +28564,56 @@ impl GameState {
             .record_continuous_effect_install(command)
             .expect("resolved continuous-effect install must have a live journal cause");
         id
+    }
+
+    /// Applies one already-resolved continuous-effect storage operation.
+    /// Neither arm derives characteristics or appends a journal entry.
+    pub fn apply_resolved_continuous_effect_edit(
+        &mut self,
+        edit: &ResolvedContinuousEffectEdit,
+    ) -> Result<(), ResolvedContinuousEffectEditReplayInvariantError> {
+        match edit {
+            ResolvedContinuousEffectEdit::Install(command) => {
+                self.apply_resolved_continuous_effect(command)?;
+            }
+            ResolvedContinuousEffectEdit::Retire(command) => {
+                self.retire_exact_continuous_effects(&command.effects)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes a complete settled CR 611.2b selection atomically. The expired
+    /// subject need not still be current: the stored record is the operand.
+    pub(crate) fn retire_exact_continuous_effects(
+        &mut self,
+        effects: &[TransientContinuousEffect],
+    ) -> Result<(), ResolvedContinuousEffectRetirementInvariantError> {
+        ResolvedContinuousEffectRetirementCommand::validate_effects(effects)?;
+        for effect in effects {
+            let mut matching = self
+                .transient_continuous_effects
+                .iter()
+                .filter(|stored| stored.id == effect.id);
+            let stored = matching.next().ok_or(
+                ResolvedContinuousEffectRetirementInvariantError::MissingEffect(effect.id),
+            )?;
+            if matching.next().is_some() {
+                return Err(
+                    ResolvedContinuousEffectRetirementInvariantError::AmbiguousStoredId(effect.id),
+                );
+            }
+            if stored != effect {
+                return Err(
+                    ResolvedContinuousEffectRetirementInvariantError::EffectMismatch(effect.id),
+                );
+            }
+        }
+        let ids: std::collections::HashSet<_> = effects.iter().map(|effect| effect.id).collect();
+        self.transient_continuous_effects
+            .retain(|effect| !ids.contains(&effect.id));
+        self.layers_dirty.mark_full();
+        Ok(())
     }
 
     /// Installs one already-resolved CR 611.2a continuous effect verbatim.
@@ -29945,6 +30208,8 @@ fn _gamestate_partition_is_total(s: &GameState) {
         merged_card_component_route: _,
         resolution_coin_flip: _,
         may_trigger_auto_choices: _,
+        replacement_auto_choices: _,
+        replacement_auto_choice_tail: _,
         decision_templates: _,
         priority_yields: _,
         pending_begin_game_abilities: _,
@@ -30319,6 +30584,8 @@ impl PartialEq for GameState {
             && self.pending_triggered_mana_resume == other.pending_triggered_mana_resume
             && self.pending_trigger_construction_priority_recipient
                 == other.pending_trigger_construction_priority_recipient
+            && self.replacement_auto_choices == other.replacement_auto_choices
+            && self.replacement_auto_choice_tail == other.replacement_auto_choice_tail
             && self.may_trigger_auto_choices == other.may_trigger_auto_choices
             && self.decision_templates == other.decision_templates
             && self.priority_yields == other.priority_yields
@@ -33727,6 +33994,7 @@ mod tests {
             candidates: Vec::new(),
             kind: Default::default(),
             last_applied_decides: false,
+            remember_identity: None,
         };
         assert!(
             !matches!(state.waiting_for, WaitingFor::Priority { .. }),
@@ -33896,6 +34164,7 @@ mod tests {
             candidates: Vec::new(),
             kind: Default::default(),
             last_applied_decides: false,
+            remember_identity: None,
         };
         assert!(
             !matches!(state.waiting_for, WaitingFor::Priority { .. }),
@@ -39909,6 +40178,7 @@ mod tests {
                 declared_kickers_to_pay: Vec::new(),
                 declined_kickers: Vec::new(),
                 convoked_creatures: Vec::new(),
+                delved_cards: Vec::new(),
                 deferred_sacrificed_permanents: Vec::new(),
                 pinned_pool_units: Vec::new(),
                 cancel_restore_prepared_source: None,
@@ -40024,6 +40294,7 @@ mod tests {
             candidates: vec![],
             kind: Default::default(),
             last_applied_decides: false,
+            remember_identity: None,
         }));
         variants.push(Box::new(WaitingFor::ExploreChoice {
             player: PlayerId(0),
@@ -40366,6 +40637,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
@@ -41763,24 +42035,26 @@ mod tests {
         state.objects.insert(ObjectId(12), layer_copy);
         let recipient = ObjectIncarnationRef::from_object(&state.objects[&ObjectId(12)]);
         let copy_source = ObjectIncarnationRef::from_object(&state.objects[&ObjectId(10)]);
-        let copy_effect_id = state.add_transient_continuous_effect_with_bindings(
-            ObjectId(12),
-            PlayerId(0),
-            Duration::Permanent,
-            TargetFilter::SpecificObject { id: ObjectId(12) },
-            vec![ContinuousModification::CopyValues {
-                values: Box::new(copied_values.clone()),
-                display_source: crate::game::game_object::DisplaySource::Card,
-                printed_ref: Some(printed_ref.clone()),
-                token_image_ref: None,
-                token_art: None,
-            }],
-            None,
-            TransientContinuousEffectBindings {
-                affected_recipient: Some(recipient),
-                duration_subject: Some(copy_source),
-            },
-        );
+        let copy_effect_id = state
+            .add_transient_continuous_effect_with_bindings(
+                ObjectId(12),
+                PlayerId(0),
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id: ObjectId(12) },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(copied_values.clone()),
+                    display_source: crate::game::game_object::DisplaySource::Card,
+                    printed_ref: Some(printed_ref.clone()),
+                    token_image_ref: None,
+                    token_art: None,
+                }],
+                None,
+                TransientContinuousEffectBindings {
+                    affected_recipient: Some(recipient),
+                    duration_subject: Some(copy_source),
+                },
+            )
+            .expect("the fixture's duration begins");
         crate::game::printed_cards::apply_copiable_values(
             state
                 .objects
@@ -41857,24 +42131,26 @@ mod tests {
         state.objects.insert(ObjectId(12), recipient);
         let recipient_ref = ObjectIncarnationRef::from_object(&state.objects[&ObjectId(12)]);
         let source_ref = ObjectIncarnationRef::from_object(&state.objects[&ObjectId(10)]);
-        let copy_effect_id = state.add_transient_continuous_effect_with_bindings(
-            ObjectId(12),
-            PlayerId(0),
-            Duration::Permanent,
-            TargetFilter::SpecificObject { id: ObjectId(12) },
-            vec![ContinuousModification::CopyValues {
-                values: Box::new(copied_values),
-                display_source: crate::game::game_object::DisplaySource::Card,
-                printed_ref: Some(top_printed_ref),
-                token_image_ref: None,
-                token_art: None,
-            }],
-            None,
-            TransientContinuousEffectBindings {
-                affected_recipient: Some(recipient_ref),
-                duration_subject: Some(source_ref),
-            },
-        );
+        let copy_effect_id = state
+            .add_transient_continuous_effect_with_bindings(
+                ObjectId(12),
+                PlayerId(0),
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id: ObjectId(12) },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(copied_values),
+                    display_source: crate::game::game_object::DisplaySource::Card,
+                    printed_ref: Some(top_printed_ref),
+                    token_image_ref: None,
+                    token_art: None,
+                }],
+                None,
+                TransientContinuousEffectBindings {
+                    affected_recipient: Some(recipient_ref),
+                    duration_subject: Some(source_ref),
+                },
+            )
+            .expect("the fixture's duration begins");
         crate::game::printed_cards::apply_copiable_values(
             state
                 .objects

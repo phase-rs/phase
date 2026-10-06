@@ -172,6 +172,17 @@ pub(crate) fn parse_quantity_ref_with_context(
         }
     }
 
+    // CR 608.2c + CR 701.20b: "the number of [type] cards revealed this way" —
+    // the same revealed-set count the "for each [type] card revealed this way"
+    // form resolves, reached through the "the number of" lead-in (Goblin
+    // Charbelcher: "damage equal to the number of nonland cards revealed this
+    // way").
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("the number of ").parse(trimmed) {
+        if let Some(qty) = parse_filtered_revealed_this_way(&rest.to_lowercase()) {
+            return Some(qty);
+        }
+    }
+
     if let Some(qty) = parse_milled_this_way_count(trimmed) {
         return Some(qty);
     }
@@ -3755,15 +3766,17 @@ fn parse_for_each_kicker_count(clause: &str) -> Option<QuantityRef> {
 }
 
 fn parse_for_each_target_controlled_type(clause: &str) -> Option<QuantityRef> {
-    let (rest, type_text) = alt((
+    let (rest, (type_text, controller)) = alt((
         terminated(
             take_until::<_, _, OracleError<'_>>(" target opponent controls"),
             tag(" target opponent controls"),
-        ),
+        )
+        .map(|text| (text, ControllerRef::TargetOpponent)),
         terminated(
             take_until::<_, _, OracleError<'_>>(" target player controls"),
             tag(" target player controls"),
-        ),
+        )
+        .map(|text| (text, ControllerRef::TargetPlayer)),
     ))
     .parse(clause)
     .ok()?;
@@ -3773,21 +3786,21 @@ fn parse_for_each_target_controlled_type(clause: &str) -> Option<QuantityRef> {
 
     let (filter, remainder) = parse_type_phrase_folding(type_text);
     if remainder.trim().is_empty() {
-        with_target_player_controller(filter).map(|filter| QuantityRef::ObjectCount { filter })
+        with_target_controller(filter, controller).map(|filter| QuantityRef::ObjectCount { filter })
     } else {
         None
     }
 }
 
-fn with_target_player_controller(filter: TargetFilter) -> Option<TargetFilter> {
+fn with_target_controller(filter: TargetFilter, controller: ControllerRef) -> Option<TargetFilter> {
     match filter {
         TargetFilter::Typed(mut typed) => {
-            typed.controller = Some(ControllerRef::TargetPlayer);
+            typed.controller = Some(controller);
             Some(TargetFilter::Typed(typed))
         }
         TargetFilter::Or { filters } => filters
             .into_iter()
-            .map(with_target_player_controller)
+            .map(|filter| with_target_controller(filter, controller.clone()))
             .collect::<Option<Vec<_>>>()
             .map(|filters| TargetFilter::Or { filters }),
         _ => None,
@@ -6937,7 +6950,7 @@ mod tests {
             QuantityRef::ObjectCount {
                 filter: TargetFilter::Typed(typed),
             } => {
-                assert_eq!(typed.controller, Some(ControllerRef::TargetPlayer));
+                assert_eq!(typed.controller, Some(ControllerRef::TargetOpponent));
                 assert!(
                     typed
                         .type_filters
@@ -9150,5 +9163,52 @@ mod tests {
                 "combinator must decline {phrase:?}"
             );
         }
+    }
+    #[test]
+    fn targeted_population_preserves_controller_domain_shape() {
+        for (text, expected) in [
+            (
+                "black and/or red creature target opponent controls",
+                ControllerRef::TargetOpponent,
+            ),
+            (
+                "black and/or red permanent target opponent controls",
+                ControllerRef::TargetOpponent,
+            ),
+            (
+                "Mountain target opponent controls",
+                ControllerRef::TargetOpponent,
+            ),
+            (
+                "black creature target opponent controls",
+                ControllerRef::TargetOpponent,
+            ),
+            (
+                "creature target player controls",
+                ControllerRef::TargetPlayer,
+            ),
+        ] {
+            let QuantityRef::ObjectCount { filter } =
+                parse_for_each_target_controlled_type(&text.to_lowercase())
+                    .expect("accepted population")
+            else {
+                panic!("expected ObjectCount")
+            };
+            let filters = match &filter {
+                TargetFilter::Or { filters } => filters.as_slice(),
+                filter => std::slice::from_ref(filter),
+            };
+            assert!(!filters.is_empty());
+            for leaf in filters {
+                assert!(
+                    matches!(leaf, TargetFilter::Typed(typed) if typed.controller.as_ref() == Some(&expected))
+                );
+            }
+        }
+        assert!(parse_for_each_target_controlled_type(
+            "creature target opponent controls trailing"
+        )
+        .is_none());
+        assert!(parse_for_each_target_controlled_type("creature you control").is_none());
     }
 }

@@ -37,7 +37,7 @@ use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::{Keyword, ProtectionTarget};
-use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
+use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaSpellGrant};
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CostModifyMode, CostReductionReach, StaticMode};
@@ -3968,8 +3968,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::ExileFromTopUntil { player, until } => {
             d.push(("player".into(), fmt_target(player)));
             match until {
-                crate::types::ability::UntilCondition::NextMatches { filter } => {
+                crate::types::ability::UntilCondition::NextMatches { filter, count } => {
                     d.push(("until".into(), fmt_target(filter)));
+                    // Mirrors the serde default: a one-card loop shows no count.
+                    if *count != (crate::types::ability::QuantityExpr::Fixed { value: 1 }) {
+                        d.push(("count".into(), fmt_quantity(count)));
+                    }
                 }
                 crate::types::ability::UntilCondition::CumulativeThreshold {
                     property,
@@ -10424,6 +10428,31 @@ fn ability_places_counter(def: &AbilityDefinition, counter_type: &CounterType) -
     }
 }
 
+/// Whether this single ability node carries a duration, for the per-line
+/// `DroppedDuration` audit. Tree walking stays with `ability_tree_any`.
+///
+/// Most durations live on `AbilityDefinition.duration`, but a mana ability's
+/// "it gains haste until end of turn" rider lives on the produced mana's
+/// keyword grant instead: the mana ability itself has no duration, and casting
+/// applies the grant's duration when the mana is spent. A `Permanent` grant
+/// (Hall of the Bandit Lord) expresses no duration, so it never satisfies
+/// duration text on the line.
+fn ability_carries_duration(def: &AbilityDefinition) -> bool {
+    if def.duration.is_some() {
+        return true;
+    }
+    let Effect::Mana { grants, .. } = &*def.effect else {
+        return false;
+    };
+    grants.iter().any(|grant| {
+        matches!(
+            grant,
+            ManaSpellGrant::AddKeywordUntilEndOfTurn { duration, .. }
+                if **duration != Duration::Permanent
+        )
+    })
+}
+
 fn oracle_line_mentions_counter_type(lower: &str, counter_type: &CounterType) -> bool {
     match counter_type {
         CounterType::Plus1Plus1 => lower.contains("+1/+1 counter"),
@@ -10993,11 +11022,11 @@ impl<'a> ParsedElement<'a> {
     /// Check if this element (or any nested ability) has a duration set.
     fn has_duration(&self) -> bool {
         match self {
-            ParsedElement::Ability(a) => ability_tree_any(a, &|d| d.duration.is_some()),
+            ParsedElement::Ability(a) => ability_tree_any(a, &ability_carries_duration),
             ParsedElement::Trigger(t) => t
                 .execute
                 .as_ref()
-                .is_some_and(|e| ability_tree_any(e, &|d| d.duration.is_some())),
+                .is_some_and(|e| ability_tree_any(e, &ability_carries_duration)),
             ParsedElement::Static(s) => s.condition.is_some(), // ForAsLongAs uses condition
             ParsedElement::Replacement(_) => false,
         }
@@ -12081,16 +12110,14 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 matched.iter().all(|e| e.has_duration())
             } else {
                 matched.iter().any(|e| e.has_duration())
-                    || modal_any(&|d: &AbilityDefinition| d.duration.is_some())
-                    || covered_ability_effect_type_any(&|d: &AbilityDefinition| {
-                        d.duration.is_some()
-                    })
+                    || modal_any(&ability_carries_duration)
+                    || covered_ability_effect_type_any(&ability_carries_duration)
                     // Fallback: for saga chapter lines, the matched element may be a static
                     // but the duration lives on the trigger's execute ability. Check all triggers.
                     || face.triggers.iter().any(|t| {
                         t.execute
                             .as_ref()
-                            .is_some_and(|e| ability_tree_any(e, &|d| d.duration.is_some()))
+                            .is_some_and(|e| ability_tree_any(e, &ability_carries_duration))
                     })
             };
             if !any_has_duration {
@@ -19012,6 +19039,70 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 .iter()
                 .any(|f| matches!(f, SemanticFinding::DroppedDuration { duration_text, .. } if duration_text == "until end of turn")),
             "Should detect dropped duration: {findings:?}"
+        );
+    }
+
+    /// A mana ability's "it gains haste until end of turn" rider stores its
+    /// duration on the produced mana's keyword grant, not on the ability. The
+    /// audit must credit that grant, and must still flag the line when the
+    /// grant's duration is `Permanent` (the "until end of turn" was dropped).
+    #[test]
+    fn test_audit_per_line_credits_mana_grant_duration() {
+        const NAME: &str = "Carnelian Orb of Dragonkind";
+        const ORACLE: &str = "{T}: Add {R}. If that mana is spent on a Dragon creature spell, \
+                              it gains haste until end of turn.";
+        let parsed =
+            crate::parser::parse_oracle_text(ORACLE, NAME, &[], &["Artifact".to_string()], &[]);
+        let mut face = make_face();
+        face.name = NAME.to_string();
+        face.oracle_text = Some(ORACLE.to_string());
+        face.abilities = parsed.abilities;
+
+        let grant_durations = |face: &CardFace| -> Vec<Duration> {
+            let mut durations = Vec::new();
+            for ability in &face.abilities {
+                assert!(
+                    ability.duration.is_none(),
+                    "the rider's duration must live only on the grant: {ability:?}",
+                );
+                let Effect::Mana { grants, .. } = &*ability.effect else {
+                    continue;
+                };
+                for grant in grants {
+                    if let ManaSpellGrant::AddKeywordUntilEndOfTurn { duration, .. } = grant {
+                        durations.push((**duration).clone());
+                    }
+                }
+            }
+            durations
+        };
+        let has_dropped_duration = |face: &CardFace| {
+            audit_card_lines(ORACLE, face)
+                .iter()
+                .any(|finding| matches!(finding, SemanticFinding::DroppedDuration { .. }))
+        };
+
+        // Reach guard: the line parses to a mana ability whose only duration is
+        // the grant's, so the audit can only pass by reading the grant.
+        assert_eq!(grant_durations(&face), vec![Duration::UntilEndOfTurn]);
+        assert!(
+            !has_dropped_duration(&face),
+            "an until-end-of-turn mana grant must satisfy the line's duration text",
+        );
+
+        for ability in &mut face.abilities {
+            if let Effect::Mana { grants, .. } = &mut *ability.effect {
+                for grant in grants {
+                    if let ManaSpellGrant::AddKeywordUntilEndOfTurn { duration, .. } = grant {
+                        **duration = Duration::Permanent;
+                    }
+                }
+            }
+        }
+        assert_eq!(grant_durations(&face), vec![Duration::Permanent]);
+        assert!(
+            has_dropped_duration(&face),
+            "a Permanent grant drops the line's \"until end of turn\" and must be flagged",
         );
     }
 

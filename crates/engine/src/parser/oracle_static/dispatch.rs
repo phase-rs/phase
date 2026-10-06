@@ -940,6 +940,15 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 510.1c + CR 609.4 + CR 611.3a: "[As long as <cond>, ]for each <creature class>
+    // you control, you may have that creature assign its combat damage as though it
+    // weren't blocked" (Siege Behemoth, Zilortha, Ruxa). Must run before the inverted
+    // "As long as" split below, which would otherwise cut the line at the first
+    // effect-subject comma and leave an `Unrecognized` gate.
+    if let Some(def) = parse_for_each_assign_damage_as_though_unblocked(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 611.3a: An inverted static of the form "As long as <condition>, <effect>"
     // is semantically equivalent to the canonical "<effect> as long as <condition>".
     // Rewrite to canonical form and re-dispatch so the existing conditional-continuous
@@ -950,6 +959,16 @@ pub(crate) fn parse_static_line_inner(
     if matches!(inverted, InvertedAsLongAs::Allow) {
         if let Some(split) = try_split_inverted_as_long_as(&tp) {
             if let Some(def) = try_parse_inverted_attached_subject_grant(&split, &text) {
+                return Some(def);
+            }
+            // CR 611.3a + CR 607.2a: the persistent exile-cast permission reads
+            // its own leading gate (`strip_leading_permission_condition`) — "As
+            // long as <condition>, you may cast the exiled card, and mana of any
+            // type can be spent to cast that spell" (Null Summoner). The canonical
+            // rewrite below would put the gate after the concession conjunct,
+            // where no permission grammar reads it, and the generic fallback
+            // would keep only the gate.
+            if let Some(def) = try_parse_persistent_exile_play_permission(&text, &lower) {
                 return Some(def);
             }
             // CR 400.2 + CR 701.20a: "As long as <condition>, all players

@@ -13,6 +13,8 @@ This skill produces the plan only. The plan-review loop belongs to the caller â€
 
 A task description: parser enhancement/fix, or engine mechanic enhancement/fix. May reference cards, Oracle text patterns, CR rules, or coverage gaps.
 
+A **scout fact pack** may accompany the task (the [engine-implementer scout](../engine-implementer/scout.md) produces it; standalone, you may run it yourself). Its facts are located, quoted lines, and its unknowns are things the scout looked for and did not find. Use both as leads for Steps 2 and 3. The pack may be incomplete or misleading: verify what you rely on, explore beyond it, and never treat a missing fact as evidence of absence. It discharges no step: you still verify the premise, trace the analogous feature, read every file you will touch, and probe.
+
 On a revision, prior reviewer findings arrive as constraints. Apply a finding's supplied replacement text verbatim and add no sentence beyond it; anything else you believe is wrong goes in your report, not into the plan.
 
 ## Modes

@@ -59,6 +59,10 @@ Activated when the spawn inputs include a phase charter and the **run-span diff 
 
 The universal-lens full sweep is NOT re-run over the cumulative diff — each phase's review already ran it phase-scoped, and re-running it over the whole span would recreate the oversized-review non-convergence this machinery exists to eliminate. Chain integrity is NOT this review's job — the orchestrator verifies it mechanically at run-level acceptance. This mode is findings-only.
 
+## Scout fact pack
+
+A scout fact pack may accompany the diff. Treat it as unverified leads: check anything you rely on, and look beyond it. A missing fact is not evidence of absence, and the pack never bounds a sweep: the new-field-threading and sibling-coverage greps are yours to run in full.
+
 ## Universal Lenses
 
 Two gates lead every review; apply them before the rest.

@@ -69,6 +69,17 @@ fn perpetual_target_object_ids(
         }
     }
 
+    // Digital-only Alchemy (no CR entry for "perpetually"): the typed
+    // `LastCreated` authority beats inherited chain-target propagation — an
+    // unrelated object target declared at cast time must never capture a
+    // rider that names the just-created set (`effect_object_targets`'s
+    // raw-inherited fallback arm would otherwise win). An empty ledger means
+    // the antecedent never existed, so the rider applies to nothing (CR 609.3 —
+    // same no-referent outcome as the anaphor arm below).
+    if matches!(target, TargetFilter::LastCreated) {
+        return state.last_created_token_ids.clone();
+    }
+
     if !ability.targets.is_empty() {
         let propagated = super::effect_object_targets(target, &ability.targets);
         if !propagated.is_empty()
@@ -89,6 +100,13 @@ fn perpetual_target_object_ids(
         return Vec::new();
     }
 
+    // Digital-only Alchemy (no CR entry for "perpetually"): the `LastCreated`
+    // fan-out arm lives ABOVE the inherited-propagation block (the typed
+    // ledger authority beats the raw-inherited fallback). The shared
+    // `resolved_targets` path below stays singular by design (first-only via
+    // `resolve_event_context_target`), which is correct for every other
+    // consumer — only the perpetual rider needs the plural set, so that arm
+    // lives here at the perpetual seam, not in `targeting.rs`.
     let mut ids = super::resolved_effect_object_ids(state, ability, target);
 
     if matches!(target, TargetFilter::ParentTarget) && ids == [ability.source_id] {
@@ -118,22 +136,18 @@ fn perpetual_target_object_ids(
     // referent, so the perpetual edit applies to nothing — it must NOT fall back
     // to the ability source, which is a different object entirely.
     //
-    // `ParentTarget` ("it", the parent instruction's target) and `LastCreated`
-    // ("it", the object the previous clause just made — `state.last_created_token_ids`,
-    // see `publishes_chain_created_referent` in `oracle_effect/lower.rs`) are both
-    // anaphors: they NAME an antecedent rather than describing a set. When the
-    // antecedent does not exist — a `Conjure` that conjured zero cards, a token
-    // producer that made none — the clause has no subject and does nothing.
+    // `ParentTarget` ("it", the parent instruction's target) is an anaphor:
+    // it NAMES an antecedent rather than describing a set. (`LastCreated` is
+    // the other anaphor but never reaches this arm — the typed ledger read
+    // above returns first, including the empty-ledger no-referent case.) When
+    // the antecedent does not exist — a `Conjure` that conjured zero cards, a
+    // token producer that made none — the clause has no subject and does
+    // nothing.
     //
     // The source fallback below is for `TargetFilter::Any` and friends, where a
     // perpetual rider with no declared target genuinely means "this object"
     // (Mutable Pupa's self-grant).
-    if ids.is_empty()
-        && matches!(
-            target,
-            TargetFilter::ParentTarget | TargetFilter::LastCreated
-        )
-    {
+    if ids.is_empty() && matches!(target, TargetFilter::ParentTarget) {
         return ids;
     }
 
@@ -583,12 +597,12 @@ mod tests {
             }],
         };
         // `targets` is deliberately EMPTY here (not `vec![TargetRef::Object(conjured_id)]`):
-        // `perpetual_target_object_ids` short-circuits on a non-empty `ability.targets`
-        // and returns it directly WITHOUT ever calling `resolved_targets` — the
-        // actual `TargetFilter::LastCreated => state.last_created_token_ids` lookup
-        // this test exists to exercise. A real "It perpetually gains ..." clause
-        // reaches this resolver with empty targets (Conjure declares none), so an
-        // empty vec here is the production-faithful fixture, not a shortcut.
+        // a real "It perpetually gains ..." clause reaches this resolver with empty
+        // targets (Conjure declares none), so an empty vec here is the
+        // production-faithful fixture, not a shortcut. The `LastCreated`
+        // ledger read takes precedence over inherited targets either way (see
+        // `perpetual_target_object_ids`); non-empty-target shapes are pinned by
+        // the `last_created_rider_*` chain regressions in `perpetual_gains.rs`.
         let grant_ability = ResolvedAbility::new(
             Effect::ApplyPerpetual {
                 target: TargetFilter::LastCreated,

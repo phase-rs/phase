@@ -210,6 +210,24 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 107 — UntilCondition NextMatches gains count ("until you exile two nonland
+ *      cards …" — Invasion of Alara, CR 608.2c), the paused exile loop keeps
+ *      its hits, ZoneChoiceCandidateSource gains ParentTargets, and
+ *      SpellContext gains exile_until_batch. A v106 peer would run a counted
+ *      loop as a one-card loop; the exact-match handshake refuses the
+ *      pairing. P2P moves in lockstep (wire 89); lobby messages are unchanged.
+ * 106 — Full-game replacement-choice preferences, exact source/definition
+ *       identities, remembered ordering/optional actions, and prompt
+ *       eligibility metadata. P2P moves in lockstep (wire 88); lobby-only
+ *       messages are unchanged.
+ * 105 — Deferred mana-source selections carry a nominal base quantity.
+ *      Full-game peers must agree on the tagged output shape; P2P moves in
+ *      lockstep (wire 87). Lobby-only messages are unchanged.
+ * 104 — PendingCast gains `delved_cards` and the pending cost-move resume
+ *      swaps DelveManaPayment for the FinalizeDelvedCast completion: delve
+ *      fuel is exiled when the total cost is paid (#9400). A v103 peer
+ *      cannot parse the new state; the exact-match handshake refuses the
+ *      pairing. P2P moves in lockstep (wire 86); lobby is unchanged.
  * 103 — FormatConfig loses `allow_experimental_dungeons`: the per-session
  *      flag is gone and the Baldur's Gate Wilderness pool is format-derived
  *      (Freeform and Freeform Commander only). A v102 peer would parse the
@@ -682,7 +700,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 103;
+export const PROTOCOL_VERSION = 107;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

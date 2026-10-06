@@ -45,7 +45,7 @@
 //! is called out as "LOAD BEARING, NOT DECORATIVE" for the same reason.
 //!
 //! A `ChangeZoneAll` consumer takes the working re-derivation branch, which is
-//! why Mass Polymorph, Synthetic Destiny and Worlds Within Worlds are fine.
+//! why Worlds Within Worlds is fine.
 //!
 //! **Isolating probe (reproduces with NO die table anywhere in the card).** A
 //! card whose entire text is

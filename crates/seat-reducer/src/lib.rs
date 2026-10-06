@@ -4,8 +4,9 @@ use types::{ReducerCtx, SeatDelta, SeatError, SeatKind, SeatMutation, SeatState}
 
 /// Apply a seat mutation to the current state.
 ///
-/// Phase 1 implements only the `Start` arm. `SetKind` and `Remove` return
-/// `SeatError::InvalidTransition` as placeholders until Phase 2.
+/// Supports starting a full room, changing a non-host seat's kind, and removing
+/// an unclaimed non-host seat while respecting the format's minimum player count.
+/// All mutations are rejected once the game has started.
 pub fn apply(
     state: &mut SeatState,
     mutation: SeatMutation,
