@@ -634,10 +634,22 @@ fn legal_new_targets_for_entry(state: &GameState, entry: &StackEntry) -> Vec<Tar
     // authority the cast path uses so retargeting offers a real alternative
     // instead of collapsing to the current target.
     // The entry's own triggering events, not whichever trigger is constructing.
-    let entry_trigger_events = state
-        .stack_trigger_event_batches
-        .get(&entry.id)
-        .map_or(&[][..], Vec::as_slice);
+    // Multi-event batches are stored per entry; a single event stays on the
+    // entry, the same fallback resolution uses when binding its scope.
+    let entry_trigger_events = match (
+        state.stack_trigger_event_batches.get(&entry.id),
+        &entry.kind,
+    ) {
+        (Some(batch), _) => batch.as_slice(),
+        (
+            None,
+            StackEntryKind::TriggeredAbility {
+                trigger_event: Some(event),
+                ..
+            },
+        ) => std::slice::from_ref(event),
+        (None, _) => &[],
+    };
     if let Some(players) = crate::game::ability_utils::companion_target_player_retarget_options(
         state,
         stack_ability,

@@ -2,6 +2,7 @@
 
 use engine::game::ability_utils::{build_target_slots, validate_targets_in_chain};
 use engine::game::effects::attach::attach_to;
+use engine::game::effects::change_targets::legal_new_targets_for_stack_entry;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::static_abilities::player_has_hexproof;
@@ -15,6 +16,8 @@ use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
+
+use super::rules::run_combat;
 
 const P2: PlayerId = PlayerId(2);
 // Verbatim MTGJSON AtomicCards 5.3.0+20261004 Oracle text.
@@ -36,6 +39,7 @@ const XENAGOS: &str = "Indestructible\nAs long as your devotion to red and green
 const TEMPEST_CALLER: &str =
     "When this creature enters, tap all creatures target opponent controls.";
 const PRODIGAL_PYROMANCER: &str = "{T}: This creature deals 1 damage to any target.";
+const NATURES_WILL: &str = "Whenever one or more creatures you control deal combat damage to a player, tap all lands that player controls and untap all lands you control.";
 const SIGIL_OF_SLEEP: &str = "Enchant creature\nWhenever enchanted creature deals damage to a player, return target creature that player controls to its owner's hand.";
 
 fn cast_announce(runner: &mut GameRunner, card: ObjectId) {
@@ -889,4 +893,40 @@ fn companion_player_recheck_ignores_a_later_triggers_damage_batch() {
             "Tempest Caller must tap every creature P2 controls"
         );
     }
+}
+
+#[test]
+fn retarget_keeps_damaged_player_binding_from_entry_trigger_event() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Nature's Will", NATURES_WILL);
+    let attacker = scenario.add_creature(P0, "Attacker", 2, 2).id();
+    for player in [P0, P1] {
+        scenario.add_basic_land(player, ManaColor::Green);
+    }
+    let mut runner = scenario.build();
+    run_combat(&mut runner, vec![attacker], vec![]);
+    choose(&mut runner, TargetRef::Player(P1));
+
+    let index = runner.state().stack.len() - 1;
+    let entry = &runner.state().stack[index];
+    assert_eq!(
+        entry.ability().map(|ability| ability.targets.clone()),
+        Some(vec![TargetRef::Player(P1)]),
+        "reach guard: Nature's Will is on the stack bound to P1"
+    );
+    assert!(
+        !runner
+            .state()
+            .stack_trigger_event_batches
+            .contains_key(&entry.id),
+        "reach guard: a single triggering event stays on the entry"
+    );
+
+    // CR 115.7a: "that player" is the damaged player, so retargeting the
+    // trigger offers only P1, read from the entry's own triggering event.
+    assert_eq!(
+        legal_new_targets_for_stack_entry(runner.state(), index),
+        vec![TargetRef::Player(P1)]
+    );
 }
