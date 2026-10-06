@@ -5103,7 +5103,9 @@ mod difference_binding_tests {
 /// `strip_for_each_prefix` nor a verb's for-each suffix can consume it.
 /// Anchored nom strips at word boundaries — never a substring dispatch.
 pub(crate) fn strip_redundant_flip_win_quantifier(text: &str) -> Option<String> {
-    let lower = text.to_lowercase();
+    // ASCII folding keeps `lower` byte-aligned with `text`, so the trailing
+    // form's `cut` offset is a valid boundary in the original casing.
+    let lower = text.to_ascii_lowercase();
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| {
         value((), terminated(parse_flip_win_quantifier, tag(", "))).parse(i)
     }) {
@@ -13095,6 +13097,14 @@ mod tests {
                 );
             }
         }
+        // The cut is computed on the folded text, so a character whose
+        // full-Unicode lowercase changes byte length must not shift it.
+        assert_eq!(
+            strip_redundant_flip_win_quantifier(
+                "Put a +1/+1 counter on İstanbul Ward for each flip you won."
+            ),
+            Some("Put a +1/+1 counter on İstanbul Ward.".to_string())
+        );
         // Only a quantifier that ends the clause is redundant; a countable
         // for-each or a quantifier with following text is left alone.
         for text in [
