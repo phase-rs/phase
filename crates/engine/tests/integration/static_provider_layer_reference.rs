@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use engine::game::casting::{activated_ability_definitions, can_activate_ability_now};
-use engine::game::layers::{flush_layers, mark_layers_entered, mark_layers_full};
+use engine::game::layers::{flush_layers, mark_layers_full};
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::move_to_zone;
 use engine::types::ability::{
@@ -15,6 +15,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
+use engine::types::game_state::LayersDirty;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -1000,8 +1001,10 @@ fn outside_slice_granted_static_carrier_escalates_only_for_reachable_entrant() {
     let mut scenario = GameScenario::new();
     let granter = scenario.add_creature(P0, "Granter", 1, 1).id();
     let carrier = scenario.add_creature(P0, "Carrier", 1, 1).id();
-    let target = scenario.add_creature(P0, "Target", 1, 1).id();
-    let irrelevant = scenario.add_creature(P0, "Irrelevant", 1, 1).id();
+    let target = scenario.add_creature_to_graveyard(P0, "Target", 1, 1).id();
+    let irrelevant = scenario
+        .add_creature_to_graveyard(P0, "Irrelevant", 1, 1)
+        .id();
     let ability =
         AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp).cost(AbilityCost::Tap);
     let donor = scenario
@@ -1024,8 +1027,6 @@ fn outside_slice_granted_static_carrier_escalates_only_for_reachable_entrant() {
                 definition: Box::new(inner.clone()),
             }]),
     );
-    move_to_zone(runner.state_mut(), target, Zone::Hand, &mut Vec::new());
-    move_to_zone(runner.state_mut(), irrelevant, Zone::Hand, &mut Vec::new());
     mark_layers_full(runner.state_mut());
     flush_layers(runner.state_mut());
     assert!(runner.state().objects[&granter]
@@ -1050,6 +1051,10 @@ fn outside_slice_granted_static_carrier_escalates_only_for_reachable_entrant() {
         Zone::Battlefield,
         &mut Vec::new(),
     );
+    assert_eq!(
+        runner.state().layers_dirty,
+        LayersDirty::EnteredObjects([irrelevant].into())
+    );
     engine::game::perf_counters::reset();
     flush_layers(runner.state_mut());
     let counters = engine::game::perf_counters::snapshot();
@@ -1066,6 +1071,10 @@ fn outside_slice_granted_static_carrier_escalates_only_for_reachable_entrant() {
         Zone::Battlefield,
         &mut Vec::new(),
     );
+    assert_eq!(
+        runner.state().layers_dirty,
+        LayersDirty::EnteredObjects([target].into())
+    );
     engine::game::perf_counters::reset();
     flush_layers(runner.state_mut());
     let counters = engine::game::perf_counters::snapshot();
@@ -1081,7 +1090,9 @@ fn outside_slice_granted_static_carrier_escalates_only_for_reachable_entrant() {
 fn freshly_entering_carrier_uses_restricted_parent_qualification() {
     let mut scenario = GameScenario::new();
     let granter = scenario.add_creature(P0, "Granter", 1, 1).id();
-    let carrier = scenario.add_creature(P0, "Fresh Carrier", 1, 1).id();
+    let carrier = scenario
+        .add_creature_to_graveyard(P0, "Fresh Carrier", 1, 1)
+        .id();
     let ability =
         AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp).cost(AbilityCost::Tap);
     let donor = scenario
@@ -1104,7 +1115,6 @@ fn freshly_entering_carrier_uses_restricted_parent_qualification() {
                 definition: Box::new(inner.clone()),
             }]),
     );
-    move_to_zone(runner.state_mut(), carrier, Zone::Hand, &mut Vec::new());
     mark_layers_full(runner.state_mut());
     flush_layers(runner.state_mut());
     assert_eq!(
@@ -1117,7 +1127,10 @@ fn freshly_entering_carrier_uses_restricted_parent_qualification() {
         Zone::Battlefield,
         &mut Vec::new(),
     );
-    mark_layers_entered(runner.state_mut(), carrier);
+    assert_eq!(
+        runner.state().layers_dirty,
+        LayersDirty::EnteredObjects([carrier].into())
+    );
     engine::game::perf_counters::reset();
     flush_layers(runner.state_mut());
     let counters = engine::game::perf_counters::snapshot();
@@ -1334,11 +1347,11 @@ fn ordinary_granted_static_keeps_keyword_filter_dependency_in_referenced_bucket(
     // CR 613.8a-c + CR 611.3a: the later Flying grant changes which object
     // the ordinary static grant affects, even when another grant reads a donor.
     assert!(runner.state().objects[&recipient].has_keyword(&Keyword::Flying));
+    let granted_abilities = activated_ability_definitions(runner.state(), meta_host);
+    assert_eq!(granted_abilities.len(), 1);
+    assert_eq!(granted_abilities[0].1, donor_ability);
     assert!(runner.state().objects[&recipient]
         .static_definitions
         .iter_unchecked()
         .any(|definition| definition == &ordinary_inner));
-    let granted_abilities = activated_ability_definitions(runner.state(), meta_host);
-    assert_eq!(granted_abilities.len(), 1);
-    assert_eq!(granted_abilities[0].1, donor_ability);
 }
