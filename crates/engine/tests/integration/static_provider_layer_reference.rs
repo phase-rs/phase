@@ -15,6 +15,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
+use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::triggers::TriggerMode;
@@ -1248,4 +1249,96 @@ fn remote_mana_ability_writer_enables_exact_original_grant_before_nested_reader(
             assert!(activated_ability_definitions(runner.state(), carrier).is_empty());
         }
     }
+}
+
+#[test]
+fn ordinary_granted_static_keeps_keyword_filter_dependency_in_referenced_bucket() {
+    let mut scenario = GameScenario::new();
+    let granter = scenario.add_creature(P0, "Ordinary Granter", 1, 1).id();
+    let recipient = scenario.add_creature(P0, "Recipient", 1, 1).id();
+    let writer = scenario.add_creature(P0, "Flying Writer", 1, 1).id();
+    let meta_host = scenario.add_creature(P0, "Referenced Host", 1, 1).id();
+    let donor_ability =
+        AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp).cost(AbilityCost::Tap);
+    let donor = scenario
+        .add_creature(P0, "Distinct Donor", 1, 1)
+        .with_ability_definition(donor_ability.clone())
+        .id();
+    let mut runner = scenario.build();
+    let ordinary_inner = StaticDefinition::continuous()
+        .affected(TargetFilter::SelfRef)
+        .modifications(vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Vigilance,
+        }]);
+    attach_synthetic_static(
+        &mut runner,
+        granter,
+        StaticDefinition::continuous()
+            .affected(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::SpecificObject { id: recipient },
+                    TargetFilter::Typed(TypedFilter::default().properties(vec![
+                        FilterProp::WithKeyword {
+                            value: Keyword::Flying,
+                        },
+                    ])),
+                ],
+            })
+            .modifications(vec![ContinuousModification::GrantStaticAbility {
+                definition: Box::new(ordinary_inner.clone()),
+            }]),
+    );
+    let flying_writer = StaticDefinition::continuous()
+        .affected(TargetFilter::SpecificObject { id: recipient })
+        .modifications(vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Flying,
+        }]);
+    attach_synthetic_static(&mut runner, writer, flying_writer.clone());
+    attach_synthetic_static(
+        &mut runner,
+        meta_host,
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+                source: TargetFilter::SpecificObject { id: donor },
+                cap: None,
+            }]),
+    );
+    assert!(runner.state().objects[&granter].timestamp < runner.state().objects[&writer].timestamp);
+    assert!(!runner.state().objects[&recipient].has_keyword(&Keyword::Flying));
+    assert!(!runner.state().objects[&recipient]
+        .static_definitions
+        .iter_unchecked()
+        .any(|definition| definition == &ordinary_inner));
+    assert!(runner.state().objects[&granter]
+        .static_definitions
+        .iter_unchecked()
+        .any(
+            |definition| definition.modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::GrantStaticAbility { definition }
+                    if definition.as_ref() == &ordinary_inner
+            ))
+        ));
+    assert!(runner.state().objects[&writer]
+        .static_definitions
+        .iter_unchecked()
+        .any(|definition| definition == &flying_writer));
+    let donor_abilities = activated_ability_definitions(runner.state(), donor);
+    assert_eq!(donor_abilities.len(), 1);
+    assert_eq!(donor_abilities[0].1, donor_ability);
+
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+
+    // CR 613.8a-c + CR 611.3a: the later Flying grant changes which object
+    // the ordinary static grant affects, even when another grant reads a donor.
+    assert!(runner.state().objects[&recipient].has_keyword(&Keyword::Flying));
+    assert!(runner.state().objects[&recipient]
+        .static_definitions
+        .iter_unchecked()
+        .any(|definition| definition == &ordinary_inner));
+    let granted_abilities = activated_ability_definitions(runner.state(), meta_host);
+    assert_eq!(granted_abilities.len(), 1);
+    assert_eq!(granted_abilities[0].1, donor_ability);
 }

@@ -8189,8 +8189,9 @@ fn apply_ability_effects_with_referenced_grants(
                         )
                     }
                 } else if matches!(
-                    pending[i].modification,
-                    ContinuousModification::GrantStaticAbility { .. }
+                    &pending[i].modification,
+                    ContinuousModification::GrantStaticAbility { definition }
+                        if definition.modifications.iter().any(is_referenced_grant_modification)
                 ) {
                     // CR 613.8a: A witness writer can enable the original
                     // grant before its nested reader has any donor output.
@@ -8198,17 +8199,11 @@ fn apply_ability_effects_with_referenced_grants(
                     // the reader's donated-definition comparison.
                     let parent = &pending[i];
                     let writer = &pending[j];
-                    let parent_has_referenced_reader = matches!(
-                        &parent.modification,
-                        ContinuousModification::GrantStaticAbility { definition }
-                            if definition.modifications.iter().any(is_referenced_grant_modification)
-                    );
                     if parent.characteristic_defining != writer.characteristic_defining
                         || continuous_effect_group_key(state, parent)
                             == continuous_effect_group_key(state, writer)
                         || !modification_characteristic_writes(&writer.modification)
                             .intersects(CharacteristicKinds::ABILITIES)
-                        || !parent_has_referenced_reader
                     {
                         false
                     } else {
