@@ -35,6 +35,7 @@
 pub mod catalog;
 pub mod error;
 pub mod fingerprint;
+pub mod format_guidance;
 pub mod game_decision;
 pub mod probe;
 pub mod prompt;
@@ -46,6 +47,7 @@ pub mod wire;
 pub mod draft_decision;
 
 pub use error::{LlmError, LlmResult};
+pub use format_guidance::game_format_brief;
 pub use game_decision::{
     build_game_decision_prompt, decision_fingerprint, select_action, GameDecisionRequest,
     LlmActionSelection,
@@ -57,6 +59,9 @@ pub use provider::{
     ACCEPTED_PROVIDER_LABELS,
 };
 pub use wire::{build_chat_request, completion_from_response, extract_completion_text};
+
+#[cfg(feature = "draft")]
+pub use format_guidance::draft_format_brief;
 
 #[cfg(feature = "draft")]
 pub use draft_decision::{

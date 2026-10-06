@@ -1938,19 +1938,22 @@ pub enum PreventionAmount {
 
 /// CR 614.9: Recipient of a damage-redirection effect — the
 /// battle/creature/planeswalker/player the replaced damage is dealt to instead.
-/// Each variant is a distinct IDENTITY SOURCE for that recipient, resolved
-/// against live game state at damage-apply time by
+/// Each variant identifies the authority for that recipient. Resolution-created
+/// effects materialize `Controller` into `ChosenTarget` plus a concrete player;
+/// the remaining live identities are resolved at damage-apply time by
 /// `effects::create_damage_replacement::resolve_redirect_recipient`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DamageRedirectTarget {
-    /// "...to you instead" — the replacement source's controller (Jade Monolith,
-    /// Goblin Psychopath).
+    /// CR 109.5 + CR 113.8: "...to you instead" in a resolving instruction is
+    /// the creating ability's controller (Jade Monolith, Goblin Psychopath),
+    /// captured at resolution. Outside that normalization, the live recipient
+    /// resolver reads the replacement host's current controller.
     Controller,
     /// "...to its/that source's/that spell's controller instead" — the
     /// prospective damage source's controller, read when the damage event is
     /// replaced (Mirror Strike, Reverberation, Reflect Damage). This is distinct
-    /// from [`Self::Controller`], which is the replacement host's controller.
+    /// from the creating ability's controller and the replacement host's controller.
     ///
     /// CR 614.9: a redirection effect may redirect damage to another player.
     DamageSourceController,
@@ -1962,6 +1965,8 @@ pub enum DamageRedirectTarget {
     /// or ability (spell: CR 115.1a + CR 601.2c; activated ability: CR 115.1c +
     /// CR 602.2b; "any target" domain CR 115.4); latched into the shield's
     /// `redirect_target` at resolution (Soltari Guerrillas, Harm's Way).
+    /// Runtime shields also use this concrete-destination carrier for an implicit
+    /// player captured from `Controller`; that use declares no additional target.
     #[serde(alias = "ChosenObjectTarget")]
     ChosenTarget,
     /// CR 303.4b + CR 301.5a: "...to enchanted creature instead" / "...to
@@ -19039,8 +19044,10 @@ pub enum Effect {
     /// Guerrillas; "to any target" — Harm's Way), `redirect_object_filter`
     /// carries the recipient's `TargetFilter` so the targeting layer surfaces a
     /// standard target slot (`ability_utils::collect_target_slots`); the
-    /// resolver captures the chosen object or player into the shield. All other redirect forms host on the
-    /// controller / source with no declared target.
+    /// resolver captures the chosen object or player into the shield. `Controller`
+    /// instead captures the creating ability's controller without declaring a
+    /// redirect target. Either form can independently declare an original-recipient
+    /// target through `recipient_object_filter` (Jade Monolith).
     CreateDamageReplacement {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_filter: Option<TargetFilter>,
@@ -19062,7 +19069,7 @@ pub enum Effect {
         /// `ChosenTarget` form ("...deals that damage to target creature
         /// instead" — Soltari Guerrillas; "...is dealt to any target instead" —
         /// Harm's Way). `None` for the `Controller` /
-        /// `SourceObject` redirect forms, which need no target slot.
+        /// `SourceObject` redirect forms, which need no redirect-recipient slot.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         redirect_object_filter: Option<TargetFilter>,
         /// CR 115.1 + CR 614.9: The *original-recipient* target filter when the
@@ -34725,8 +34732,31 @@ impl ResolvedAbility {
         &self,
         state: &crate::types::game_state::GameState,
     ) -> bool {
-        let Some(source) = self.trigger_source.as_ref() else {
+        if self.trigger_source.is_none() {
             return true;
+        }
+        state
+            .objects
+            .get(&self.source_id)
+            .is_some_and(|object| self.is_own_departure_successor_in(state, object.zone, None))
+    }
+
+    /// CR 400.7e: True when the source, sitting in public `zone`, is the
+    /// immediate successor of its own triggering zone change: the triggering
+    /// event moved this exact captured identity into `zone`, and no later zone
+    /// change of the same storage id has been recorded. A trigger cannot find
+    /// the new object in a hidden zone. Callers pass the zone the source
+    /// occupies, or, for a move still being applied, the zone it is leaving
+    /// plus that move's departing incarnation: an incarnation departs only
+    /// once, so a record carrying it is that in-flight move, not an earlier one.
+    pub(crate) fn is_own_departure_successor_in(
+        &self,
+        state: &crate::types::game_state::GameState,
+        zone: Zone,
+        in_flight_departure: Option<u64>,
+    ) -> bool {
+        let Some(source) = self.trigger_source.as_ref() else {
+            return false;
         };
         let Some(crate::types::GameEvent::ZoneChanged {
             object_id,
@@ -34741,10 +34771,8 @@ impl ResolvedAbility {
             || record.trigger_source_context().is_none_or(|event_source| {
                 event_source.identity.reference != source.identity.reference
             })
-            || state
-                .objects
-                .get(object_id)
-                .is_none_or(|object| object.zone != *to)
+            || zone != *to
+            || !zone.is_public()
         {
             return false;
         }
@@ -34764,7 +34792,14 @@ impl ResolvedAbility {
                 .zone_changes_this_turn
                 .iter()
                 .skip(record.turn_zone_change_index + 1)
-                .all(|later| later.object_id != self.source_id)
+                .all(|later| {
+                    later.object_id != self.source_id
+                        || in_flight_departure.is_some_and(|departing| {
+                            later.trigger_source_context().is_some_and(|context| {
+                                context.identity.reference.incarnation == departing
+                            })
+                        })
+                })
     }
 
     /// CR 400.7e: True when an off-battlefield zone-match would mis-latch SelfRef
