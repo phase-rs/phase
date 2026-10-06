@@ -4252,14 +4252,43 @@ fn try_parse_inline_delayed_trigger(
 /// "it"/"this creature"/"this permanent"/"this artifact" → SelfRef (source object).
 /// "target creature" → ParentTarget (named target in the condition).
 fn parse_delayed_subject_filter(condition_text: &str, ctx: &mut ParseContext) -> TargetFilter {
-    scan_delayed_subject(condition_text).unwrap_or_else(|| {
+    let subject = scan_delayed_subject(condition_text).unwrap_or_else(|| {
         ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
             context: "unrecognized delayed subject".into(),
             text: condition_text.trim().into(),
             line_index: 0,
         });
         TargetFilter::Any
-    })
+    });
+
+    // CR 109.5 + CR 603.7e: "your" names the delayed ability's controller,
+    // fixed when its creating ability resolves. Keep that predicate alongside
+    // the subject so the tracked-set binder can still bind the latter.
+    if matches!(subject, TargetFilter::ParentTarget)
+        && (nom_primitives::scan_at_word_boundaries(condition_text, |input| {
+            verify(parse_control_clause, |possessor| {
+                *possessor == ControlClausePossessor::You
+            })
+            .parse(input)
+        })
+        .is_some()
+            || nom_primitives::scan_at_word_boundaries(condition_text, |input| {
+                verify(nom_filter::parse_zone_controller, |controller| {
+                    *controller == ControllerRef::You
+                })
+                .parse(input)
+            })
+            .is_some())
+    {
+        TargetFilter::And {
+            filters: vec![
+                subject,
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+            ],
+        }
+    } else {
+        subject
+    }
 }
 
 /// CR 601.2f: Parse "the next spell you cast this turn costs {N} less to cast".

@@ -6776,7 +6776,16 @@ fn active_continuous_effects_from_static_definitions(
 
         let affected_filter = def.affected.clone().unwrap_or(TargetFilter::Any);
         for (mod_index, modification) in def.modifications.iter().enumerate() {
-            if is_combat_assignment_rule_modification(modification) {
+            // CR 701.15b: Goaded is a designation, not an ability granted
+            // to the affected permanent. Combat reads this functioning source.
+            if is_combat_assignment_rule_modification(modification)
+                || matches!(
+                    modification,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded
+                    }
+                )
+            {
                 continue;
             }
             let trigger_producer_origin =
@@ -6939,7 +6948,14 @@ fn expand_granted_static_effects(
         // preceding layers have established that controller.
         let retained_inner_condition = inner.condition.clone();
         for (mod_index, modification) in inner.modifications.iter().enumerate() {
-            if is_combat_assignment_rule_modification(modification) {
+            if is_combat_assignment_rule_modification(modification)
+                || matches!(
+                    modification,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded
+                    }
+                )
+            {
                 continue;
             }
             out.push(ActiveContinuousEffect {
@@ -7340,13 +7356,15 @@ pub(crate) fn gather_transient_continuous_effects(
             // `casting::unlimited_hand_cast_free_source` — and grafting it onto
             // every affected object would additionally expose it to
             // `iter_cast_free_permission_source_ids`, giving one grant two
-            // sources.
+            // sources. CR 701.15b: `Goaded` is likewise a designation, not
+            // an ability on the recipient; combat reads the live TCE directly.
             if matches!(
                 modification,
                 ContinuousModification::AddStaticMode {
                     mode: StaticMode::MayLookAtFaceDown
                         | StaticMode::ReduceAbilityCost { .. }
-                        | StaticMode::CastFromHandFree { .. },
+                        | StaticMode::CastFromHandFree { .. }
+                        | StaticMode::Goaded,
                 }
             ) {
                 continue;

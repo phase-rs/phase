@@ -55,7 +55,10 @@ describe("PopoverMenu", () => {
     });
 
     it.each(["Enter", " "])("blocks the active game shortcut for %j inside a dialog", (key) => {
-      const { dispatch } = setGameStoreForTest({ gameState: gameStateFactory.priority().build() });
+      const { dispatch } = setGameStoreForTest({
+        gameMode: "ai",
+        gameState: gameStateFactory.priority().build(),
+      });
       render(<KeyboardPopoverHarness />);
 
       // Paired control proves the real hook and both dispatch paths are active.
@@ -66,8 +69,9 @@ describe("PopoverMenu", () => {
           data: { mode: { type: "UntilTurnBoundary", until: "EndOfCurrentTurn" } },
         });
       } else {
-        expect(dispatch).toHaveBeenCalledWith({ type: "PassPriority" });
+        expect(dispatchActionMock).toHaveBeenCalledWith({ type: "PassPriority" });
       }
+      expect(dispatch).not.toHaveBeenCalled();
       dispatchActionMock.mockClear();
       vi.mocked(dispatch).mockClear();
 
@@ -123,7 +127,10 @@ describe("PopoverMenu", () => {
     });
 
     it("preserves game shortcut bubbling from the default menu variant", () => {
-      const { dispatch } = setGameStoreForTest({ gameState: gameStateFactory.priority().build() });
+      const { dispatch } = setGameStoreForTest({
+        gameMode: "ai",
+        gameState: gameStateFactory.priority().build(),
+      });
       render(<KeyboardPopoverHarness variant="menu" />);
       fireEvent.click(screen.getByRole("button", { name: "Keyboard controls" }));
       const button = screen.getByRole("button", { name: "Close panel" });
@@ -135,7 +142,8 @@ describe("PopoverMenu", () => {
         type: "SetAutoPass",
         data: { mode: { type: "UntilTurnBoundary", until: "EndOfCurrentTurn" } },
       });
-      expect(dispatch).toHaveBeenCalledWith({ type: "PassPriority" });
+      expect(dispatchActionMock).toHaveBeenCalledWith({ type: "PassPriority" });
+      expect(dispatch).not.toHaveBeenCalled();
       expect(screen.getByRole("menu", { name: "Keyboard controls" })).toBeInTheDocument();
     });
   });

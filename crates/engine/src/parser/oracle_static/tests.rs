@@ -10501,7 +10501,7 @@ fn locus_cap_via_standard_oracle_dispatch() {
     );
 }
 
-/// CR 613.1f + CR 607.2a + CR 205.3: "all creature cards exiled with it/~" narrows
+/// CR 613.1f + CR 607.2a + CR 205.2a: "all creature cards exiled with it/~" narrows
 /// the granted set to creature cards only (Agatha's Soul Cauldron) — the source
 /// filter intersects `ExiledBySource` with the Creature type filter.
 #[test]
@@ -10527,6 +10527,120 @@ fn parse_continuous_modifications_grants_creature_cards_exiled() {
             "predicate: {predicate}"
         );
     }
+}
+
+/// CR 613.1f + CR 607.2a + CR 205.2a: "all land cards exiled with it/~" narrows
+/// the granted set to land cards (Steward of the Harvest) — same qualifier axis
+/// as the creature form, intersected with `ExiledBySource`.
+#[test]
+fn parse_continuous_modifications_grants_land_cards_exiled() {
+    use crate::types::ability::{TargetFilter, TypedFilter};
+    let expected = ContinuousModification::GrantAllActivatedAbilitiesOf {
+        source: TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::land()),
+                TargetFilter::ExiledBySource,
+            ],
+        },
+        cap: None,
+    };
+    for predicate in [
+        "all activated abilities of all land cards exiled with it",
+        "all activated abilities of all land cards exiled with ~",
+        "have all activated abilities of all land cards exiled with ~",
+    ] {
+        assert_eq!(
+            parse_continuous_modifications(predicate),
+            vec![expected.clone()],
+            "predicate: {predicate}"
+        );
+    }
+
+    // The full static line scopes the grant to creatures you control.
+    let defs = parse_static_line_multi(
+        "Creatures you control have all activated abilities of all land cards exiled with ~.",
+    );
+    assert_eq!(defs.len(), 1, "got {defs:?}");
+    assert_eq!(defs[0].modifications, vec![expected]);
+    let Some(TargetFilter::Typed(ref tf)) = defs[0].affected else {
+        panic!("expected a Typed filter, got {:?}", defs[0].affected);
+    };
+    assert_eq!(
+        *tf,
+        TypedFilter::creature().controller(crate::types::ability::ControllerRef::You)
+    );
+}
+
+/// Hostile siblings of the land-qualifier arm. Each decline is paired with the
+/// positive reach-guard (the accepted land form) so the negatives cannot pass
+/// because the predicate never reached the grant parser.
+#[test]
+fn land_cards_exiled_grant_declines_mis_scoped_sets() {
+    use crate::types::ability::{TargetFilter, TypedFilter};
+    // Positive reach-guard.
+    assert_eq!(
+        parse_continuous_modifications(
+            "have all activated abilities of all land cards exiled with ~"
+        ),
+        vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+            source: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::land()),
+                    TargetFilter::ExiledBySource,
+                ],
+            },
+            cap: None,
+        }]
+    );
+    let grants_exiled = |mods: &[ContinuousModification]| {
+        mods.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+                    | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+            )
+        })
+    };
+    for predicate in [
+        "have all activated abilities of all nonland cards exiled with ~",
+        "have all activated abilities of all artifact cards exiled with ~",
+        "have all activated abilities of all land cards exiled with ~ this turn",
+        "have all activated abilities of all lands exiled with ~",
+        "have all activated abilities of all land creature cards exiled with ~",
+        "have all activated abilities of all land land cards exiled with ~",
+    ] {
+        let mods = parse_continuous_modifications(predicate);
+        assert!(
+            !grants_exiled(&mods),
+            "predicate must decline, got {mods:?}: {predicate}"
+        );
+    }
+    // Full-line declines never yield a partial static carrying the grant.
+    for line in [
+        "Creatures you control have all activated abilities of all nonland cards exiled with ~.",
+        "Creatures you control have all activated abilities of all land cards exiled with ~ this turn.",
+    ] {
+        let defs = parse_static_line_multi(line);
+        assert!(
+            defs.iter().all(|d| !grants_exiled(&d.modifications)),
+            "line must not produce a grant static: {line}: {defs:?}"
+        );
+    }
+
+    // Triggered kind: exactly the single Triggered grant, never an Activated one.
+    assert_eq!(
+        parse_continuous_modifications(
+            "have all triggered abilities of all land cards exiled with ~"
+        ),
+        vec![ContinuousModification::GrantAllTriggeredAbilitiesOf {
+            source: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::land()),
+                    TargetFilter::ExiledBySource,
+                ],
+            },
+        }]
+    );
 }
 
 /// CR 613.1f + CR 201.2: "all activated abilities of creatures you control that

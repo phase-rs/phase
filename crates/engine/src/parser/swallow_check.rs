@@ -6035,10 +6035,11 @@ mod tests {
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, CardSelectionMode, ChooseFromZoneConstraint, Chooser,
-        ContinuousModification, CopyRetargetPermission, DamageModification, Effect, ManaProduction,
-        OutsideGameSourcePool, PlayerFilter, QuantityExpr, SpellStackToGraveyardReplacement,
-        StaticCondition, StaticDefinition, TargetFilter, TriggerCondition,
-        ZoneChoiceCandidateSource, ZoneOwner,
+        Comparator, ContinuousModification, CopyRetargetPermission, DamageModification, Effect,
+        FilterProp, ManaProduction, OutsideGameSourcePool, ParsedCondition, PlayerFilter,
+        QuantityExpr, QuantityRef, SpellStackToGraveyardReplacement, StaticCondition,
+        StaticDefinition, TargetFilter, TriggerCondition, TypedFilter, ZoneChoiceCandidateSource,
+        ZoneOwner,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::TrackedSetId;
@@ -9580,6 +9581,71 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         assert!(
             parsed.casting_options[0].condition.is_some(),
             "alt-cost must carry the attacking-creature count gate"
+        );
+    }
+
+    /// CR 508.1k + CR 118.9 + CR 701.8a: Pitfall Trap — the "exactly one
+    /// creature is attacking" gate binds the {W} alternative cost to
+    /// `casting_options`, so the spell line is the Destroy alone (no on-resolution
+    /// `PayCost` chain) and no Condition_If is reported.
+    #[test]
+    fn condition_if_accepts_pitfall_trap_alt_cost_gate() {
+        let parsed = parse_named(
+            "If exactly one creature is attacking, you may pay {W} rather than pay \
+this spell's mana cost.\nDestroy target attacking creature without flying.",
+            "Pitfall Trap",
+            &["Instant"],
+        );
+        assert_eq!(
+            parsed.casting_options.len(),
+            1,
+            "expected one alternative casting option, got {:?}",
+            parsed.casting_options
+        );
+        assert_eq!(
+            parsed.casting_options[0].condition,
+            Some(ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .properties(vec![FilterProp::Attacking { defender: None }]),
+                        ),
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            })
+        );
+        assert_eq!(
+            parsed.abilities.len(),
+            1,
+            "expected only the Destroy spell ability, got {:?}",
+            parsed.abilities
+        );
+        let spell = &parsed.abilities[0];
+        assert!(
+            spell.sub_ability.is_none(),
+            "the alt-cost line must not chain onto the spell, got {spell:?}"
+        );
+        let Effect::Destroy {
+            target: TargetFilter::Typed(typed),
+            ..
+        } = spell.effect.as_ref()
+        else {
+            panic!("expected Destroy of a typed target, got {:?}", spell.effect);
+        };
+        assert!(typed
+            .properties
+            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(typed.properties.contains(&FilterProp::WithoutKeyword {
+            value: Keyword::Flying
+        }));
+        assert!(!any_ability_has_unimplemented(&parsed));
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "alt-cost exactly-one gate must bind to casting_options: {:?}",
+            parsed.parse_warnings
         );
     }
 

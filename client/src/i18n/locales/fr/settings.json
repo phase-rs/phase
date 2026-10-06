@@ -506,11 +506,23 @@
     "apiKey": "Clé d'API",
     "apiKeyPlaceholder": "Collez votre clé d'API",
     "apiKeyOptional": "Facultative pour un serveur local",
+    "apiKeyMissing": "Saisissez à nouveau votre clé d'API. Les clés ne sont pas conservées après un rechargement, et ce fournisseur n'est utilisé ni pour les sièges IA ni pour les bots de draft tant que vous ne l'avez pas fait.",
     "apiKeyStorage": "Conservée en mémoire pour cette session de navigation uniquement. Les clés d'API ne sont jamais écrites sur le disque et sont exclues de l'export de sauvegarde et de la synchronisation cloud : vous la ressaisirez après un rechargement. Une clé d'API impose aussi un point de terminaison https://, sauf si le serveur est sur localhost.",
     "apiKeyGet": "Obtenir une clé",
     "test": "Tester la connexion",
     "testing": "Test en cours…",
     "testOk": "Connecté.",
+    "defaultPrompt": {
+      "connected": "Connecté. L'utiliser comme adversaire par défaut ?",
+      "ready": "Utiliser ce fournisseur comme adversaire par défaut ?",
+      "action": "Utiliser par défaut",
+      "badge": "Adversaire par défaut"
+    },
+    "defaultOpponent": {
+      "label": "Adversaire par défaut",
+      "hint": "Les adversaires IA utilisent ce fournisseur, sauf si vous en choisissez un autre pour un siège en préparant une partie. Cela inclut l'adversaire des parties de draft.",
+      "engine": "IA intégrée du moteur"
+    },
     "draftToggle": {
       "label": "Utiliser pour les bots de draft",
       "hint": "Les sièges bots d'un draft choisissent avec le modèle, avec le contexte des éditions du format.",

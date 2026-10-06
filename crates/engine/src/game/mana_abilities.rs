@@ -1023,6 +1023,12 @@ pub fn activate_mana_ability(
         &ability_def.activation_restrictions,
     )?;
 
+    // CR 302.6: Direct mana activations obey the same {T}/{Q} creature gate
+    // as non-mana activations, before any journal or cost-payment mutation.
+    if let Some(cost) = &ability_def.cost {
+        super::restrictions::check_summoning_sickness_for_cost(state, source, cost)?;
+    }
+
     let rules_execution_node = Some(state.begin_activated_mana_journal_node(source_id));
     advance_mana_ability_activation(
         state,

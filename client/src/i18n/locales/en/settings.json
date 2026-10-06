@@ -506,11 +506,23 @@
     "apiKey": "API key",
     "apiKeyPlaceholder": "Paste your API key",
     "apiKeyOptional": "Optional for local servers",
+    "apiKeyMissing": "Enter your API key again. Keys are not saved across reloads, and this provider is not used for AI seats or draft bots until you do.",
     "apiKeyStorage": "Kept in memory for this browser session only. API keys are never written to disk and are excluded from backup export and cloud sync, so you will re-enter yours after a reload. An API key also requires an https:// endpoint unless the server is on localhost.",
     "apiKeyGet": "Get a key",
     "test": "Test connection",
     "testing": "Testing…",
     "testOk": "Connected.",
+    "defaultPrompt": {
+      "connected": "Connected. Use this as your default opponent?",
+      "ready": "Use this provider as your default opponent?",
+      "action": "Use as default",
+      "badge": "Default opponent"
+    },
+    "defaultOpponent": {
+      "label": "Default opponent",
+      "hint": "AI opponents use this provider unless you pick a different one for a seat when setting up a match. This includes the opponent in draft matches.",
+      "engine": "Built-in engine AI"
+    },
     "draftToggle": {
       "label": "Use for draft bots",
       "hint": "Bot seats in a draft pod pick with the model, using the format’s set context.",

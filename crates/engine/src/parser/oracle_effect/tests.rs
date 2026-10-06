@@ -25959,22 +25959,173 @@ fn inline_delayed_trigger_an_exiled_card_enters_uses_tracked_set() {
     );
     match e {
         Effect::CreateDelayedTrigger {
-            condition:
-                DelayedTriggerCondition::WhenEntersBattlefield {
-                    filter: TargetFilter::ParentTarget,
-                },
+            condition: DelayedTriggerCondition::WhenEntersBattlefield { filter },
             effect,
             uses_tracked_set: true,
-        } => match &*effect.effect {
-            Effect::PutCounter { target, .. } => assert_eq!(
-                target,
-                &TargetFilter::TriggeringSource,
-                "delayed trigger body 'it' must bind to the entering card"
-            ),
-            other => panic!("expected PutCounter delayed effect, got {other:?}"),
-        },
+        } => {
+            assert_eq!(
+                filter,
+                TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::ParentTarget,
+                        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+                    ],
+                },
+                "the tracked entry must also require the creating controller's control"
+            );
+            match &*effect.effect {
+                Effect::PutCounter { target, .. } => assert_eq!(
+                    target,
+                    &TargetFilter::TriggeringSource,
+                    "delayed trigger body 'it' must bind to the entering card"
+                ),
+                other => panic!("expected PutCounter delayed effect, got {other:?}"),
+            }
+        }
         other => panic!("Expected tracked-set enters delayed trigger, got {other:?}"),
     }
+}
+
+#[test]
+fn inline_delayed_tracked_subject_controller_qualifies_each_zone_event() {
+    for (text, event) in [
+        ("When that creature you control dies, draw a card", "dies"),
+        (
+            "When that creature you control leaves the battlefield, draw a card",
+            "leaves",
+        ),
+        (
+            "When an exiled card enters under your control this way, draw a card",
+            "enters",
+        ),
+    ] {
+        let effect = parse_effect(text);
+        let Effect::CreateDelayedTrigger {
+            condition,
+            uses_tracked_set: true,
+            ..
+        } = effect
+        else {
+            panic!("expected tracked delayed {event} condition, got {effect:?}");
+        };
+        let filter = match condition {
+            DelayedTriggerCondition::WhenDies { filter } if event == "dies" => filter,
+            DelayedTriggerCondition::WhenLeavesPlayFiltered { filter } if event == "leaves" => {
+                filter
+            }
+            DelayedTriggerCondition::WhenEntersBattlefield { filter } if event == "enters" => {
+                filter
+            }
+            other => panic!("expected delayed {event} event, got {other:?}"),
+        };
+        assert_eq!(
+            filter,
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::ParentTarget,
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+                ],
+            },
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn inline_delayed_self_subject_control_keeps_bare_self_ref() {
+    let effect = parse_effect("When it dies under your control this turn, draw two cards");
+    assert!(
+        matches!(
+            effect,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WhenDies {
+                    filter: TargetFilter::SelfRef,
+                },
+                uses_tracked_set: false,
+                ..
+            }
+        ),
+        "expected a bare SelfRef death condition, got {effect:?}"
+    );
+}
+
+#[test]
+fn inline_delayed_owner_and_another_subjects_do_not_acquire_you_controller() {
+    let owner =
+        parse_effect("When an exiled card enters under its owner's control this way, draw a card");
+    let Effect::CreateDelayedTrigger {
+        condition: DelayedTriggerCondition::WhenEntersBattlefield { filter },
+        uses_tracked_set: true,
+        ..
+    } = owner
+    else {
+        panic!("expected tracked owner-control entry condition, got {owner:?}");
+    };
+    assert_eq!(
+        filter,
+        TargetFilter::ParentTarget,
+        "owner control must not be misread as the delayed creator's control"
+    );
+
+    let another = parse_effect("When another creature you control dies, draw a card");
+    assert!(matches!(another, Effect::Unimplemented { .. }));
+}
+
+#[test]
+fn lagrella_full_oracle_keeps_exile_tracking_entry_controller_and_counter_payload() {
+    const ORACLE: &str = "When Lagrella enters, exile any number of other target creatures controlled by different players until Lagrella leaves the battlefield. When an exiled card enters under your control this way, put two +1/+1 counters on it.";
+    let parsed = parse_named_face(ORACLE, "Lagrella, the Magpie", &["Creature"]);
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "{:?}",
+        parsed.parse_warnings
+    );
+    assert_eq!(parsed.triggers.len(), 1);
+    let etb = parsed.triggers[0].execute.as_deref().expect("Lagrella ETB");
+    let nodes = chain_nodes(etb);
+    assert!(nodes
+        .iter()
+        .all(|node| !matches!(node.effect.as_ref(), Effect::Unimplemented { .. })));
+    assert!(nodes.iter().any(|node| matches!(
+        node.effect.as_ref(),
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            ..
+        } if node.duration == Some(Duration::UntilHostLeavesPlay)
+    )));
+
+    let delayed = nodes
+        .iter()
+        .find_map(|node| match node.effect.as_ref() {
+            Effect::CreateDelayedTrigger {
+                condition,
+                effect,
+                uses_tracked_set,
+            } => Some((condition, effect, uses_tracked_set)),
+            _ => None,
+        })
+        .expect("inline delayed entry trigger");
+    assert!(*delayed.2);
+    assert_eq!(
+        delayed.0,
+        &DelayedTriggerCondition::WhenEntersBattlefield {
+            filter: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::ParentTarget,
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+                ],
+            },
+        }
+    );
+    assert!(matches!(
+        delayed.1.effect.as_ref(),
+        Effect::PutCounter {
+            counter_type: crate::types::counter::CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    ));
 }
 
 // -----------------------------------------------------------------------
