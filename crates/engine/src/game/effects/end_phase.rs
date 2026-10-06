@@ -36,9 +36,7 @@ pub(super) fn clear_preexisting_unstacked_triggers(state: &mut GameState) {
             .map(|context| context.firing()),
     );
 
-    state.pending_trigger = None;
-    state.pending_trigger_entry = None;
-    state.pending_trigger_event_batch.clear();
+    crate::game::triggers::release_pending_trigger_construction(state);
 
     for firing in terminal_firings {
         crate::game::lifecycle::record_delayed_terminal(

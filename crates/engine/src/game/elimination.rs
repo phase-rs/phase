@@ -447,9 +447,7 @@ pub fn eliminate_players_simultaneously(
                 .map(|context| context.firing()),
         );
         terminal_firings.extend(state.pending_trigger_firing.take());
-        state.pending_trigger = None;
-        state.pending_trigger_entry = None;
-        state.pending_trigger_event_batch.clear();
+        crate::game::triggers::release_pending_trigger_construction(state);
         // CR 117.3c: The construction priority recipient is scheduling state for
         // a batch that no longer exists. Leaving it installed would durably
         // serialize a departed player into a terminal `GameOver` snapshot — the
@@ -1082,9 +1080,7 @@ fn remove_stack_objects_controlled_by_leaving_players(
                 crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
             );
         }
-        state.pending_trigger_entry = None;
-        state.pending_trigger = None;
-        state.pending_trigger_event_batch.clear();
+        crate::game::triggers::release_pending_trigger_construction(state);
         // CR 117.3c: The batch this recipient was scheduled for has ceased with
         // its tracked entry. Clear it with the cursors — unconditionally, not
         // only when the departing player happens to be the recipient — so the

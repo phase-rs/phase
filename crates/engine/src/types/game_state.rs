@@ -20298,7 +20298,9 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) pending_trigger_firing: Option<TriggerFiring>,
     /// Sidecar for `pending_trigger`: full simultaneous event set for batched
-    /// trigger context, consumed when the pending trigger is put on the stack.
+    /// trigger context; construction carrier for `pending_trigger`; released with
+    /// every other construction cursor when construction ends
+    /// (`triggers::release_pending_trigger_construction`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_trigger_event_batch: Vec<GameEvent>,
     /// CR 603.3c + CR 603.3d: ObjectId of the stack entry currently being

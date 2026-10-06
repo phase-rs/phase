@@ -335,8 +335,8 @@ struct TriggeredModeChoice {
 /// `dispatch_pending_trigger_context`): `state.pending_trigger` is set and its
 /// stack entry is already pushed and tracked by `state.pending_trigger_entry`.
 ///
-/// Returns `Ok(None)` when no mode can be chosen (CR 603.3c) so the caller drops
-/// the trigger exactly as the all-modes-unavailable branch does.
+/// Returns `Ok(None)` when no mode can be chosen (CR 603.3c); the caller drops
+/// the pushed entry through `drop_mid_construction_pending_trigger`.
 pub(super) fn resolve_random_modal_trigger(
     state: &mut GameState,
     player: crate::types::player::PlayerId,
@@ -349,15 +349,8 @@ pub(super) fn resolve_random_modal_trigger(
     let Some(indices) =
         super::ability_utils::random_select_modal_indices(state, &modal, unavailable_modes)
     else {
-        // CR 603.3c: No legal mode — drop the trigger. The interactive branches
-        // already removed the in-flight stack entry before this point, so just
-        // clear the cursor here.
-        super::stack::pop_uncommitted_pending_trigger_entry(
-            state,
-            super::lifecycle::DelayedTerminalDisposition::NoLegalChoice,
-        );
-        state.pending_trigger = None;
-        state.pending_trigger_firing = None;
+        // CR 603.3c: No mode can be chosen. The caller drops the pushed entry
+        // through `drop_mid_construction_pending_trigger`.
         return Ok(None);
     };
 

@@ -1468,9 +1468,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     "stale pending trigger must transfer its firing to the live stack entry"
                 );
             }
-            state.pending_trigger_entry = None;
-            state.pending_trigger = None;
-            state.pending_trigger_event_batch.clear();
+            super::triggers::release_pending_trigger_construction(state);
         }
     }
 

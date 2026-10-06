@@ -15545,8 +15545,8 @@ fn apply_non_priority_pass_action(
                 // while being put on the stack. The chosen per-target amounts
                 // are resolution data on the resolved ability. The entry is
                 // already on the stack (pushed at distribute-among pause time);
-                // mutate its ability with the distribution and clear
-                // `pending_trigger_entry` so the resolver may now fire it.
+                // mutate its ability with the distribution and release the
+                // construction cursors so the resolver may now fire it.
                 pending_trigger.ability.distribution =
                     Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
                 let produced = if !triggers::finalize_pending_trigger_entry(
@@ -16376,17 +16376,16 @@ fn apply_retarget(
 /// drop that clears the trigger but leaks the batch therefore leaves a dead
 /// event latched in state, where it (a) poisons the event context of every
 /// later trigger that pauses for a choice, and (b) permanently fails the
-/// `inert_trigger_batch_state_is_settled` gate that lets contiguous inert
-/// trigger runs skip priority. Mirrors `triggers::abandon_ceased_pending_trigger`,
-/// which already releases all four cursors on the error-recovery path.
+/// `stack::priority_checkpoint_is_settled` gate that lets contiguous inert
+/// trigger runs skip priority. Releases every cursor through
+/// `triggers::release_pending_trigger_construction`, the same authority
+/// `triggers::abandon_ceased_pending_trigger` uses on the error-recovery path.
 pub(super) fn drop_mid_construction_pending_trigger(state: &mut GameState) {
     super::stack::pop_uncommitted_pending_trigger_entry(
         state,
         super::lifecycle::DelayedTerminalDisposition::NoLegalChoice,
     );
-    state.pending_trigger = None;
-    state.pending_trigger_firing = None;
-    state.pending_trigger_event_batch.clear();
+    super::triggers::release_pending_trigger_construction(state);
 }
 
 /// Clear optionality after the controller accepts a "you may choose N" gate so

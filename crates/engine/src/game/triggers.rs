@@ -8734,6 +8734,20 @@ pub(crate) fn is_pending_trigger_construction_active(state: &GameState) -> bool 
     state.pending_trigger_entry.is_some()
 }
 
+/// CR 603.3c + CR 603.3d: A triggered ability's mode, target and division
+/// choices are made while it is put on the stack. When construction ends —
+/// completed, dropped, or abandoned — every construction cursor is released
+/// together; from then on the live stack entry's own event row
+/// (`trigger_event` + `stack_trigger_event_batches`) is the event authority.
+/// Callers settle `pending_trigger_firing` (transfer or terminal record)
+/// before calling this.
+pub(crate) fn release_pending_trigger_construction(state: &mut GameState) {
+    state.pending_trigger = None;
+    state.pending_trigger_firing = None;
+    state.pending_trigger_entry = None;
+    state.pending_trigger_event_batch.clear();
+}
+
 /// Abandon a push-first triggered ability whose in-construction stack entry
 /// vanished before mode/target/division selection completed — the construction
 /// cursor `pending_trigger_entry` is left dangling.
@@ -8741,8 +8755,9 @@ pub(crate) fn is_pending_trigger_construction_active(state: &GameState) -> bool 
 /// This should be UNREACHABLE: mode/target/division are chosen while the ability
 /// is put on the stack (CR 603.3c + CR 603.3d), before any player has priority, so it cannot
 /// be countered/removed mid-construction; and a controller leaving the game is
-/// already handled upstream (`elimination::do_eliminate` clears all three
-/// pending-trigger fields when the tracked entry is retained off the stack). If
+/// already handled upstream (`elimination::do_eliminate` releases every
+/// construction cursor through `release_pending_trigger_construction` when the
+/// tracked entry is retained off the stack). If
 /// this fires, the entry left the stack via an UNEXPECTED / UNIDENTIFIED
 /// state-coherence defect, not a known rules-legal cause. The CR below is cited
 /// only as the rules basis for the RECOVERY SEMANTICS, not the cause:
@@ -8799,10 +8814,7 @@ pub(crate) fn abandon_ceased_pending_trigger(
             }
         }
     }
-    state.pending_trigger = None;
-    state.pending_trigger_firing = None;
-    state.pending_trigger_entry = None;
-    state.pending_trigger_event_batch.clear();
+    release_pending_trigger_construction(state);
 }
 
 /// CR 603.3c + CR 603.3d: Overwrite the in-construction stack entry's resolved
@@ -8828,8 +8840,9 @@ pub(crate) fn mutate_pending_trigger_entry(
 }
 
 /// CR 603.3c + CR 603.3d: Overwrite the in-construction stack entry's resolved
-/// ability with `source_ability` AND clear `pending_trigger_entry` —
-/// construction is complete, so the resolver is now free to fire this entry.
+/// ability with `source_ability` AND release every construction cursor
+/// (`release_pending_trigger_construction`) — construction is complete, so the
+/// resolver is now free to fire this entry.
 ///
 /// Returns `false` if the entry is no longer on the stack — an unexpected
 /// dangling-cursor state (see [`abandon_ceased_pending_trigger`]); callers must
@@ -8865,7 +8878,7 @@ pub(crate) fn finalize_pending_trigger_entry(
             pending_firing, stack_firing,
             "pending trigger transfer must preserve its exact firing"
         );
-        state.pending_trigger_entry = None;
+        release_pending_trigger_construction(state);
         true
     } else {
         // Leave the cursor set; `abandon_ceased_pending_trigger` reads it.
@@ -9528,10 +9541,18 @@ fn dispatch_pending_trigger_context_core(
                         state.waiting_for = waiting_for;
                         return TriggerDispatchDisposition::Paused;
                     }
-                    // CR 603.3c: No mode could be chosen — trigger already
-                    // dropped and stack entry removed inside the resolver.
-                    Ok(None) => return TriggerDispatchDisposition::DroppedNoLegalMode,
-                    Err(_) => return TriggerDispatchDisposition::DroppedNoLegalMode,
+                    Ok(None) | Err(_) => {
+                        // CR 603.3c: `Ok(None)` — no mode can be chosen, so the
+                        // ability is removed from the stack.
+                        // `Err(_)`: construction cannot complete. CR 603.3d (an
+                        // ability with no legal choice is removed from the stack)
+                        // is cited only as the basis for the recovery semantics:
+                        // the pushed entry is removed rather than left suspended.
+                        // The entry was pushed above, so the drop must actually
+                        // remove it and release every construction cursor.
+                        super::engine::drop_mid_construction_pending_trigger(state);
+                        return TriggerDispatchDisposition::DroppedNoLegalMode;
+                    }
                 }
             }
 
@@ -27191,6 +27212,102 @@ pub mod tests {
             !matches!(disposition, TriggerDispatchDisposition::DroppedNoLegalMode),
             "a legal target makes a mode choosable — must not drop, got {disposition:?}"
         );
+    }
+
+    /// CR 603.3c + CR 603.3d: a random-modal trigger whose construction fails
+    /// AFTER its entry was pushed (the dispatch `Err(_)` arm) must leave no
+    /// suspended entry and no construction cursor behind — it drops through
+    /// `engine::drop_mid_construction_pending_trigger`, the same authority as
+    /// the no-mode (`Ok(None)`) arm.
+    ///
+    /// Structural/synthetic row: no card in card-data has `mode_count >
+    /// mode_abilities.len()`. Here `mode_count: 2` with one mode definition
+    /// ("destroy target creature") on a board with no creature makes mode 0
+    /// unavailable, so the random draw must take mode 1, which has no
+    /// definition, and `build_chained_resolved` returns `Err` after the push.
+    /// The modal has no target constraints, so the pre-push assignment limit
+    /// cannot short-circuit before the `StackPushed` reach guard.
+    #[test]
+    fn random_modal_dispatch_error_after_push_drops_through_the_authority() {
+        let mut state = setup();
+        let controller = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(0x0603_3C03),
+            controller,
+            "Malformed Random Modal".to_string(),
+            Zone::Battlefield,
+        );
+        let pending = PendingTrigger {
+            source_id: source,
+            controller,
+            condition: None,
+            ability: Box::new(ResolvedAbility::new(
+                Effect::unimplemented("modal_placeholder", "synthetic random modal"),
+                vec![],
+                source,
+                controller,
+            )),
+            timestamp: 1,
+            target_constraints: Vec::new(),
+            distribute: None,
+            trigger_event: Some(GameEvent::SpellCast {
+                controller,
+                object_id: source,
+                card_id: CardId(0x98),
+                cast_mana_value: None,
+            }),
+            modal: Some(ModalChoice {
+                min_choices: 1,
+                max_choices: 1,
+                mode_count: 2,
+                selection: TargetSelectionMode::Random,
+                ..Default::default()
+            }),
+            mode_abilities: vec![AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(
+                        TypedFilter::default().with_type(TypeFilter::Creature),
+                    ),
+                    cant_regenerate: false,
+                },
+            )],
+            description: None,
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: None,
+            provenance: None,
+        };
+        let stack_before = state.stack.len();
+        let mut events_out = Vec::new();
+
+        let disposition = dispatch_pending_trigger_context(
+            &mut state,
+            PendingTriggerContext::single(pending),
+            &mut events_out,
+        );
+
+        // Reach guard: the entry was pushed before construction failed.
+        assert!(
+            events_out
+                .iter()
+                .any(|event| matches!(event, GameEvent::StackPushed { .. })),
+            "the random-modal arm is reached only after the entry is pushed"
+        );
+        assert!(
+            matches!(disposition, TriggerDispatchDisposition::DroppedNoLegalMode),
+            "construction failure after the push must drop, got {disposition:?}"
+        );
+        assert_eq!(
+            state.stack.len(),
+            stack_before,
+            "the pushed entry must be removed, not left suspended"
+        );
+        assert!(state.pending_trigger_entry.is_none());
+        assert!(state.pending_trigger.is_none());
+        assert!(state.pending_trigger_firing.is_none());
+        assert!(state.pending_trigger_event_batch.is_empty());
     }
 
     #[test]
