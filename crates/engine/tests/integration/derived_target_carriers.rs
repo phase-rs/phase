@@ -1,6 +1,8 @@
 //! Exact public-Oracle regressions for targets carried by populations and quantities.
 
 use engine::game::ability_utils::{build_target_slots, validate_targets_in_chain};
+use engine::game::effects::attach::attach_to;
+use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::static_abilities::player_has_hexproof;
 use engine::types::ability::{Effect, ResolvedAbility, TargetRef};
@@ -31,6 +33,10 @@ const EPHEMERATE: &str = "Exile target creature you control, then return it to t
 const AGGRESSION: &str = "({R/P} can be paid with either {R} or 2 life.)\nGain control of target creature an opponent controls until end of turn. Untap that creature. It gains haste until end of turn.";
 const MOON_GIRL: &str = "Whenever you draw your second card each turn, until end of turn, Moon Girl and Devil Dinosaur's base power and toughness become 6/6 and they gain trample.\nWhenever an artifact you control enters, draw a card. This ability triggers only once each turn.";
 const XENAGOS: &str = "Indestructible\nAs long as your devotion to red and green is less than seven, Xenagos isn't a creature.\nAt the beginning of combat on your turn, another target creature you control gains haste and gets +X/+X until end of turn, where X is that creature's power.";
+const TEMPEST_CALLER: &str =
+    "When this creature enters, tap all creatures target opponent controls.";
+const PRODIGAL_PYROMANCER: &str = "{T}: This creature deals 1 damage to any target.";
+const SIGIL_OF_SLEEP: &str = "Enchant creature\nWhenever enchanted creature deals damage to a player, return target creature that player controls to its owner's hand.";
 
 fn cast_announce(runner: &mut GameRunner, card: ObjectId) {
     runner
@@ -808,5 +814,79 @@ fn derived_player_target_is_invalid_after_production_concession() {
             .objects
             .values()
             .any(|o| o.is_token && o.controller == P0));
+    }
+}
+
+#[test]
+fn companion_player_recheck_ignores_a_later_triggers_damage_batch() {
+    let mut scenario = population_scenario();
+    let caller = add_life_card(&mut scenario, "Tempest Caller", TEMPEST_CALLER, true);
+    let pyromancer = scenario
+        .add_creature_from_oracle(P0, "Prodigal Pyromancer", 1, 1, PRODIGAL_PYROMANCER)
+        .id();
+    let sigil = scenario
+        .add_creature(P0, "Sigil of Sleep", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text(SIGIL_OF_SLEEP)
+        .id();
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), sigil, pyromancer);
+    evaluate_layers(runner.state_mut());
+    let p2_creatures: Vec<ObjectId> = runner
+        .state()
+        .objects
+        .values()
+        .filter(|o| o.controller == P2 && o.power.is_some() && o.zone == Zone::Battlefield)
+        .map(|o| o.id)
+        .collect();
+    assert_eq!(
+        p2_creatures.len(),
+        3,
+        "reach guard: P2 controls three creatures"
+    );
+
+    cast_announce(&mut runner, caller);
+    resolve_one(&mut runner);
+    choose(&mut runner, TargetRef::Player(P2));
+    stack_carrier(&runner, caller, TargetRef::Player(P2));
+
+    // Respond: the Sigil-enchanted Pyromancer damages P1, whose Sigil trigger
+    // pauses for its creature choice while Tempest Caller's trigger waits below.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: pyromancer,
+            ability_index: 0,
+        })
+        .expect("activate Pyromancer");
+    choose(&mut runner, TargetRef::Player(P1));
+    resolve_one(&mut runner);
+    match &runner.state().waiting_for {
+        WaitingFor::TriggerTargetSelection { target_slots, .. } => {
+            let chosen = target_slots[0].legal_targets[0].clone();
+            runner
+                .act(GameAction::SelectTargets {
+                    targets: vec![chosen],
+                })
+                .expect("choose Sigil target");
+        }
+        other => panic!("Sigil trigger must pause for its target, got {other:?}"),
+    }
+    assert_eq!(runner.state().stack.len(), 2, "Sigil above Tempest Caller");
+    resolve_one(&mut runner);
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "Tempest Caller still pending"
+    );
+
+    // CR 608.2b: P2 is still a legal opponent; another trigger's damage to P1
+    // is not this trigger's event and must not narrow its declared target.
+    resolve_one(&mut runner);
+    for creature in p2_creatures {
+        assert!(
+            runner.state().objects[&creature].tapped,
+            "Tempest Caller must tap every creature P2 controls"
+        );
     }
 }

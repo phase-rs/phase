@@ -2553,7 +2553,13 @@ fn validate_single_derived_role(
         && !one_sided_fight_source_supplies_quantity_creature(&ability.effect);
     match (companion, quantity) {
         (true, false) => {
-            let legal = companion_target_player_legal_targets(state, ability);
+            // CR 608.2b: recheck against this ability's own bound triggering
+            // events, never another trigger's construction batch.
+            let legal = companion_target_player_legal_targets(
+                state,
+                ability,
+                &state.current_trigger_events,
+            );
             Some(
                 ability
                     .targets
@@ -3010,8 +3016,12 @@ fn validate_targets_in_chain_inner(
                 let mut kept = Vec::new();
                 let primary_targets = match validated.targets.split_first() {
                     Some((companion, rest))
-                        if companion_target_player_legal_targets(state, &validated)
-                            .contains(companion) =>
+                        if companion_target_player_legal_targets(
+                            state,
+                            &validated,
+                            &state.current_trigger_events,
+                        )
+                        .contains(companion) =>
                     {
                         kept.push(companion.clone());
                         rest
@@ -3337,22 +3347,25 @@ pub(crate) fn damage_replacement_target_role_legality(
 ///
 /// "Whenever … deals combat damage to a player, [destroy/goad] target creature
 /// that player controls" binds "that player" to the player the event damaged,
-/// not to a free choice. While the trigger declares its targets on the stack,
-/// `current_trigger_event` is not yet set (it is populated at resolution), so
-/// the damaged player is read from `pending_trigger_event_batch`.
+/// not to a free choice. `trigger_events` must be the triggering events of the
+/// ability being checked: the construction batch while it announces targets,
+/// and its own bound events at resolution. Any other trigger's batch belongs to
+/// a different event and must never narrow this ability's targets.
 ///
 /// Returns `None` — preserving the unconstrained all-players slot — unless every
 /// event in the batch is damage dealt to a player. That keeps genuine
 /// free-choice "target player" filters (the `PutCounterAll` "each creature
 /// target player controls" spell shape, ETB triggers that target a player)
 /// unconstrained: those carry no damage-to-player event here.
-fn damaged_player_targets_for_companion_slot(state: &GameState) -> Option<Vec<TargetRef>> {
-    let batch = &state.pending_trigger_event_batch;
-    if batch.is_empty() {
+fn damaged_player_targets_for_companion_slot(
+    state: &GameState,
+    trigger_events: &[crate::types::events::GameEvent],
+) -> Option<Vec<TargetRef>> {
+    if trigger_events.is_empty() {
         return None;
     }
     let mut players: Vec<TargetRef> = Vec::new();
-    for event in batch {
+    for event in trigger_events {
         let is_damage_to_player = matches!(
             event,
             crate::types::events::GameEvent::CombatDamageDealtToPlayer { .. }
@@ -3531,6 +3544,7 @@ pub(crate) fn become_copy_copy_source_target_index(effect: &Effect) -> usize {
 fn companion_target_player_legal_targets(
     state: &GameState,
     ability: &ResolvedAbility,
+    trigger_events: &[crate::types::events::GameEvent],
 ) -> Vec<TargetRef> {
     // CR 115.1 + CR 118.12a: a payer declared as a target inside the unless clause
     // ("unless target opponent/target player pays") drives this slot directly — the
@@ -3548,7 +3562,7 @@ fn companion_target_player_legal_targets(
     ability
         .trigger_source
         .as_ref()
-        .and_then(|_| damaged_player_targets_for_companion_slot(state))
+        .and_then(|_| damaged_player_targets_for_companion_slot(state, trigger_events))
         .unwrap_or_else(|| {
             // CR 109.4 + CR 102.2 / CR 102.3: "target opponent controls" offers only
             // opponents (self excluded; any one opponent in >2p). Reuses the
@@ -3583,9 +3597,10 @@ fn companion_target_player_legal_targets(
 pub(crate) fn companion_target_player_retarget_options(
     state: &GameState,
     ability: &ResolvedAbility,
+    trigger_events: &[crate::types::events::GameEvent],
 ) -> Option<Vec<TargetRef>> {
     ability_needs_companion_target_player_slot(ability)
-        .then(|| companion_target_player_legal_targets(state, ability))
+        .then(|| companion_target_player_legal_targets(state, ability, trigger_events))
 }
 
 /// CR 601.2c + CR 115.1: Collect the target slots contributed by `ability` (and
@@ -4039,7 +4054,11 @@ fn collect_target_slots_inner(
             // hanging the controller. Bind the companion slot to the damaged
             // player(s) when this is a damage-to-player trigger. Shared with the
             // selection-time recompute so both paths agree.
-            let player_targets = companion_target_player_legal_targets(state, ability);
+            let player_targets = companion_target_player_legal_targets(
+                state,
+                ability,
+                &state.pending_trigger_event_batch,
+            );
             if player_targets.is_empty() && !ability.optional_targeting {
                 return Err(no_legal_target_slots());
             }
@@ -7627,7 +7646,11 @@ fn legal_targets_for_selected_slot(
     if matches!(spec.filter, TargetFilter::Player)
         && ability_needs_companion_target_player_slot(ability)
     {
-        return companion_target_player_legal_targets(state, ability);
+        return companion_target_player_legal_targets(
+            state,
+            ability,
+            &state.pending_trigger_event_batch,
+        );
     }
     // Each branch computes the raw legal set into `legal`; the per-instance
     // distinctness filter (CR 601.2c + CR 115.3) is then applied ONCE at the
@@ -12428,7 +12451,8 @@ mod tests {
             mana_multi_role(&single.effect).is_none(),
             "reach guard: this is the SINGLE-role path"
         );
-        let companion_legal = companion_target_player_legal_targets(&state, &single);
+        let companion_legal =
+            companion_target_player_legal_targets(&state, &single, &state.current_trigger_events);
         assert!(
             companion_legal.contains(&TargetRef::Player(PlayerId(0))),
             "reach guard: P0 must be a legal companion payer, got {companion_legal:?}"
@@ -13662,7 +13686,11 @@ mod tests {
             payer: TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
         });
 
-        let targets = companion_target_player_legal_targets(&state, &ability);
+        let targets = companion_target_player_legal_targets(
+            &state,
+            &ability,
+            &state.pending_trigger_event_batch,
+        );
         assert_eq!(
             targets.len(),
             2,

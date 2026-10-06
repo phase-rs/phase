@@ -804,19 +804,23 @@ pub(crate) fn record_descend_on_graveyard_arrival(
 /// the all-zone bump advanced its epoch. Chains across multiple self-moves in one
 /// resolution: the first self-move sets `original_stamp` (bound to the ability's
 /// captured incarnation); a chained self-move keeps `original_stamp` fixed and only
-/// advances `current_incarnation`. A foreign object, or a move whose pre-move
-/// incarnation matches neither the captured stamp nor the record's current value,
-/// never writes. Call AFTER the bump, passing the pre-bump and post-bump values.
+/// advances `current_incarnation`. A first self-move may also start from the CR
+/// 400.7e successor a zone-change trigger already found in `from` (a dies
+/// trigger returning "this card" from the graveyard). A foreign object, or any
+/// other pre-move incarnation, never writes. Call AFTER the bump but BEFORE the
+/// move is recorded in `zone_changes_this_turn`, passing the pre-bump and
+/// post-bump values and the zone the object left.
 pub(crate) fn record_resolution_source_relatch(
     state: &mut GameState,
     object_id: ObjectId,
+    from: Zone,
     pre_move_incarnation: u64,
     new_incarnation: u64,
 ) {
     // A faithful READ of the resolving ability's captured source identity. The
     // clone is disconnected from the local resolving borrow, so it cannot be the
     // carrier — the record on `state` is (consumed inside `source_is_current`).
-    let Some((source_id, Some(captured))) = state
+    let Some((source_id, Some(captured), successor_start)) = state
         .resolving_stack_entry
         .as_ref()
         .and_then(StackEntry::ability)
@@ -824,6 +828,7 @@ pub(crate) fn record_resolution_source_relatch(
             (
                 a.source_id,
                 a.trigger_source_incarnation().or(a.source_incarnation),
+                a.is_own_departure_successor_in(state, from, Some(pre_move_incarnation)),
             )
         })
     else {
@@ -832,8 +837,10 @@ pub(crate) fn record_resolution_source_relatch(
     if object_id != source_id {
         return;
     }
-    // First self-move: pre-move value must equal the ability's captured stamp.
-    let matches_first = pre_move_incarnation == captured;
+    // First self-move: pre-move value must equal the ability's captured stamp,
+    // or the source must be the successor its own triggering move created.
+    // CR 400.7j: other parts of that effect can find the object it moved.
+    let matches_first = pre_move_incarnation == captured || successor_start;
     // Chained self-move: pre-move value must equal the record's current value.
     let chained = state
         .resolution_source_relatch
@@ -1567,7 +1574,13 @@ pub(crate) fn move_to_zone_with_entry_flags(
     }
 
     if new_incarnation != pre_bump_incarnation {
-        record_resolution_source_relatch(state, object_id, pre_bump_incarnation, new_incarnation);
+        record_resolution_source_relatch(
+            state,
+            object_id,
+            from,
+            pre_bump_incarnation,
+            new_incarnation,
+        );
     }
 
     // CR 700.11: a permanent card was put into its owner's graveyard.
@@ -2385,7 +2398,7 @@ pub fn move_to_library_at_index(
         }
     }
     if let Some((pre, new)) = bump {
-        record_resolution_source_relatch(state, object_id, pre, new);
+        record_resolution_source_relatch(state, object_id, from, pre, new);
     }
 
     super::restrictions::record_zone_change(state, &mut zone_change_record);
@@ -3015,8 +3028,20 @@ mod tests {
                 ability: Box::new(ability.clone()),
             },
         });
-        record_resolution_source_relatch(&mut state, foreign, captured, captured + 1);
-        record_resolution_source_relatch(&mut state, source, captured + 99, captured + 100);
+        record_resolution_source_relatch(
+            &mut state,
+            foreign,
+            Zone::Battlefield,
+            captured,
+            captured + 1,
+        );
+        record_resolution_source_relatch(
+            &mut state,
+            source,
+            Zone::Battlefield,
+            captured + 99,
+            captured + 100,
+        );
         assert!(state.resolution_source_relatch.is_none());
         move_to_zone(&mut state, source, Zone::Battlefield, &mut Vec::new());
         let current = state.objects[&source].incarnation;
@@ -3031,7 +3056,7 @@ mod tests {
         assert!(ability.source_is_current(&state));
         state.resolution_source_relatch = None;
         state.resolving_stack_entry = None;
-        record_resolution_source_relatch(&mut state, source, captured, current);
+        record_resolution_source_relatch(&mut state, source, Zone::Battlefield, captured, current);
         assert!(state.resolution_source_relatch.is_none());
         assert!(!ability.source_is_current(&state));
     }
@@ -3071,7 +3096,13 @@ mod tests {
                 ability: Box::new(ability),
             },
         });
-        record_resolution_source_relatch(&mut state, source, captured + 50, captured + 51);
+        record_resolution_source_relatch(
+            &mut state,
+            source,
+            Zone::Battlefield,
+            captured + 50,
+            captured + 51,
+        );
         assert!(
             state.resolution_source_relatch.is_none(),
             "trigger authority must win over conflicting activated fallback"
@@ -3098,12 +3129,14 @@ mod tests {
         record_resolution_source_relatch(
             &mut state,
             foreign,
+            Zone::Battlefield,
             second.current_incarnation,
             second.current_incarnation + 1,
         );
         record_resolution_source_relatch(
             &mut state,
             source,
+            Zone::Battlefield,
             first.current_incarnation,
             second.current_incarnation + 1,
         );

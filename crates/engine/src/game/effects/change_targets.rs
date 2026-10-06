@@ -633,9 +633,16 @@ fn legal_new_targets_for_entry(state: &GameState, entry: &StackEntry) -> Vec<Tar
     // Enumerate the legal replacement *players* via the same companion-slot
     // authority the cast path uses so retargeting offers a real alternative
     // instead of collapsing to the current target.
-    if let Some(players) =
-        crate::game::ability_utils::companion_target_player_retarget_options(state, stack_ability)
-    {
+    // The entry's own triggering events, not whichever trigger is constructing.
+    let entry_trigger_events = state
+        .stack_trigger_event_batches
+        .get(&entry.id)
+        .map_or(&[][..], Vec::as_slice);
+    if let Some(players) = crate::game::ability_utils::companion_target_player_retarget_options(
+        state,
+        stack_ability,
+        entry_trigger_events,
+    ) {
         return players;
     }
 
