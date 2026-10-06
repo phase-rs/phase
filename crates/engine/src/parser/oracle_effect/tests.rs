@@ -60,6 +60,49 @@ fn technomancer_total_mana_value_return_shape() {
     ));
 }
 
+/// SHAPE: explicitly synthetic selection-boundary fixture. CR 608.2c/d
+/// binds the delivery to chosen cards; CR 608.2k keeps the independent
+/// "that creature" instruction bound to the entering event object.
+#[test]
+fn event_source_lift_skips_zone_choice_delivery_but_resumes_at_independent_sibling() {
+    let parsed = parse_oracle_text(
+        "When this creature enters, return any number of artifact creature cards with total mana value 6 or less from your graveyard to the battlefield. Then exile that creature.",
+        "Zone Choice Boundary Fixture", &[], &["Creature".to_string()], &[],
+    );
+    let chosen = parsed.triggers[0].execute.as_ref().unwrap();
+    assert!(matches!(
+        chosen.effect.as_ref(),
+        Effect::ChooseFromZone {
+            candidate_source: ZoneChoiceCandidateSource::Direct,
+            constraint: Some(ChooseFromZoneConstraint::TotalManaValue {
+                comparator: Comparator::LE,
+                value: 6
+            }),
+            ..
+        }
+    ));
+    let delivery = chosen.sub_ability.as_ref().unwrap();
+    assert!(matches!(
+        delivery.effect.as_ref(),
+        Effect::ChangeZone {
+            target: TargetFilter::ParentTarget,
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield,
+            ..
+        }
+    ));
+    let sibling = delivery.sub_ability.as_ref().unwrap();
+    assert_eq!(sibling.sub_link, SubAbilityLink::SequentialSibling);
+    assert!(matches!(
+        sibling.effect.as_ref(),
+        Effect::ChangeZone {
+            target: TargetFilter::TriggeringSource,
+            destination: Zone::Exile,
+            ..
+        }
+    ));
+}
+
 /// SHAPE: Lively Dirge's exact return mode has a separate count limit.
 #[test]
 fn lively_dirge_bounded_total_mana_value_return_shape() {

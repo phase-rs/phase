@@ -250,6 +250,50 @@ fn technomancer_decline_and_empty_pool_finish_without_stale_parent_targets() {
     }
 }
 
+/// Explicitly synthetic continuation-boundary fixture, not a named card's
+/// Oracle. CR 608.2c/d delivers the chosen set; CR 608.2k preserves the
+/// entering creature as the independent final instruction's referent.
+#[test]
+fn zone_choice_delivery_returns_selected_card_then_exiles_entering_source() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Zone Choice Boundary Fixture",
+            1,
+            1,
+            "When this creature enters, return any number of artifact creature cards with total mana value 6 or less from your graveyard to the battlefield. Then exile that creature.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let selected = scenario
+        .add_creature_to_graveyard(P0, "Memnite", 1, 1)
+        .as_artifact_creature()
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner.cast(source).resolve();
+    outcome.assert_zone(&[source], Zone::Battlefield);
+    outcome.assert_zone(&[selected], Zone::Graveyard);
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::ChooseFromZoneChoice { cards, .. } if cards.contains(&selected)
+    ));
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![selected],
+        })
+        .unwrap();
+    assert_eq!(runner.state().objects[&selected].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&source].zone, Zone::Exile);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
 const KARMIC_GUIDE_ORACLE: &str =
     "Flying, echo {3}{W}{W}\nWhen Karmic Guide enters, return target creature card with mana value 3 or less from your graveyard to the battlefield.";
 

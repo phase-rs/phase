@@ -2742,16 +2742,16 @@ fn lift_parent_target_to_triggering_source(effect: &mut Effect, allow_set_tap_li
     }
 }
 
-/// Return the first independent sibling after a search-result continuation.
+/// Return the first independent sibling after an object-selection continuation.
 ///
-/// `SearchLibrary` passes its found cards to continuation links through
+/// `SearchLibrary` and `ChooseFromZone` pass their selected cards through
 /// `ParentTarget`; that dataflow ends at the first `SequentialSibling`, whose
 /// effect is an independent instruction and may again refer to the trigger
 /// event source.
-fn first_independent_sibling_after_search(
-    search: &mut AbilityDefinition,
+fn first_independent_sibling_after_object_selection(
+    selection: &mut AbilityDefinition,
 ) -> Option<&mut AbilityDefinition> {
-    let mut node = search.sub_ability.as_deref_mut();
+    let mut node = selection.sub_ability.as_deref_mut();
     while let Some(link) = node {
         if link.sub_link == SubAbilityLink::SequentialSibling {
             return Some(link);
@@ -2788,18 +2788,21 @@ fn lift_parent_target_to_triggering_source_in_ability(ability: &mut AbilityDefin
     let mut node = Some(ability);
     let mut is_top_level = true;
     while let Some(link) = node {
-        // CR 701.23a: A library search's continuation receives the found cards
-        // as its parent targets. In an event-source-bearing trigger, the
-        // search still belongs to the trigger event, but "those cards" after
-        // the search does not: it denotes the cards chosen from the library.
+        // CR 608.2c + CR 608.2d + CR 701.23a: A zone selection or library
+        // search's continuation receives the chosen cards as parent targets.
+        // In an event-source-bearing trigger, "those cards" after the
+        // selection denotes its results, rather than the trigger event.
         // Skip only that continuation, then resume at a sequential sibling.
         // Otherwise an ETB such as Scholarship Sponsor rewrites its found-card
         // delivery from `ParentTarget` to `TriggeringSource` and can neither
         // deliver the searched cards nor enter the scoped simultaneous-search
         // path. A later independent sibling still needs its ordinary
         // event-source rewrite.
-        if matches!(link.effect.as_ref(), Effect::SearchLibrary { .. }) {
-            node = first_independent_sibling_after_search(link);
+        if matches!(
+            link.effect.as_ref(),
+            Effect::SearchLibrary { .. } | Effect::ChooseFromZone { .. }
+        ) {
+            node = first_independent_sibling_after_object_selection(link);
             continue;
         }
         if introduces_chosen_object_target(link.effect.as_ref()) {
