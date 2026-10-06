@@ -26835,11 +26835,17 @@ fn managorger_phoenix_perpetual_clause_fails_closed_instead_of_pumping() {
     );
 
     let execute = def.execute.as_ref().expect("trigger must execute");
-    // Reach guard: the counter clause still parses, so the gap below is the
-    // conditional sibling and not a wholesale parse failure.
+    // Reach guard: the counter clause is recognized, and its unsupported
+    // "for each {R} in that spell's mana cost" count is an explicit counter-tail
+    // gap rather than a silent one-counter placement (CR 608.2c), so the gap
+    // below is the conditional sibling and not a wholesale parse failure.
     assert!(
-        matches!(&*execute.effect, Effect::PutCounter { .. }),
-        "the flame-counter clause must still lower, got {:?}",
+        matches!(
+            &*execute.effect,
+            Effect::Unimplemented { name, description: Some(fragment) }
+                if name == "put_counter_tail" && fragment.contains("for each {R}")
+        ),
+        "the flame-counter clause must surface its count tail, got {:?}",
         execute.effect
     );
     let perpetual_branch = execute

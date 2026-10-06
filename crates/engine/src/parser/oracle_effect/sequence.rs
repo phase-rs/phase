@@ -14998,10 +14998,14 @@ mod tests {
         assert!(starts_bare_and_clause(
             "she doesn't untap during her next untap step"
         ));
+        // CR 608.2c: a source-pronoun damage instruction is its own clause
+        // (Aang, Master of Elements: "... counters on him, and he deals 4
+        // damage to each opponent").
+        assert!(starts_bare_and_clause("she deals 2 damage to any target"));
         // Guard: a gendered pronoun WITHOUT a recognized continuous/restriction
-        // verb must NOT split (no false clause boundary).
+        // or damage verb must NOT split (no false clause boundary).
         assert!(!starts_bare_and_clause("he attacks this turn"));
-        assert!(!starts_bare_and_clause("she deals 2 damage to any target"));
+        assert!(!starts_bare_and_clause("she eventually deals 2 damage"));
     }
 
     /// CR 104.2b + CR 104.3e + CR 119.7 + CR 119.8: plural-player subject +

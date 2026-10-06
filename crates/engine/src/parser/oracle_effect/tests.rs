@@ -48920,16 +48920,23 @@ fn choose_one_of_detects_from_among_counter_choice() {
     use crate::types::counter::CounterType;
     use crate::types::keywords::KeywordKind;
 
+    // Aragorn, Company Leader after card-name normalization ("on Aragorn" is
+    // "on ~" by the time the effect parser sees it).
     let ability = parse_effect_chain(
-            "Put your choice of a counter from among first strike, vigilance, deathtouch, and lifelink on Aragorn.",
+            "Put your choice of a counter from among first strike, vigilance, deathtouch, and lifelink on ~.",
             AbilityKind::Spell,
         );
 
-    // The shared "on Aragorn" target is lifted to a `TargetOnly` head; the
+    // The shared "on ~" recipient is lifted to a `TargetOnly` head; the
     // counter choice is the chained sub-ability whose branches act on
-    // `ParentTarget` (so the shared target is collected once at cast time).
+    // `ParentTarget` (so the shared recipient is collected once).
     assert!(
-        matches!(&*ability.effect, Effect::TargetOnly { .. }),
+        matches!(
+            &*ability.effect,
+            Effect::TargetOnly {
+                target: TargetFilter::SelfRef
+            }
+        ),
         "expected TargetOnly head, got {:?}",
         ability.effect
     );
