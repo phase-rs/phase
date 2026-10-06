@@ -42,6 +42,7 @@ use crate::types::card_type::{
 use crate::types::counter::{has_positive_counters, CounterType};
 use crate::types::game_state::{
     DayNight, GameState, LayersDirty, StaticGateKey, TransientContinuousEffect,
+    TransientContinuousEffectBindings,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
@@ -7535,35 +7536,62 @@ fn transient_duration_holds(state: &GameState, tce: &TransientContinuousEffect) 
         return true;
     };
 
-    // CR 611.2b: an explicit subject can differ from the affected object
-    // (a copy duration tracking its copy target). Preserve that binding first.
-    let subject = tce.duration_subject.or(tce.affected_recipient).or_else(|| {
-        let TargetFilter::SpecificObject { id } = &tce.affected else {
-            return None;
-        };
-        state.objects.get(id).map(ObjectIncarnationRef::from_object)
-    });
+    let subject = state_duration_subject(
+        state,
+        TransientContinuousEffectBindings {
+            affected_recipient: tce.affected_recipient,
+            duration_subject: tce.duration_subject,
+        },
+        &tce.affected,
+    );
     bound_state_duration_holds(state, condition, tce.controller, tce.source_id, subject)
 }
 
+/// CR 611.2b: the object a recipient-relative state duration tracks. An
+/// explicit subject can differ from the affected object (a copy duration
+/// tracking its copy target), so that binding is preserved first; otherwise the
+/// captured recipient, otherwise the single affected object as it is now.
+fn state_duration_subject(
+    state: &GameState,
+    bindings: TransientContinuousEffectBindings,
+    affected: &TargetFilter,
+) -> Option<ObjectIncarnationRef> {
+    bindings
+        .duration_subject
+        .or(bindings.affected_recipient)
+        .or_else(|| {
+            let TargetFilter::SpecificObject { id } = affected else {
+                return None;
+            };
+            state.objects.get(id).map(ObjectIncarnationRef::from_object)
+        })
+}
+
 /// CR 611.2b: whether a resolution-created duration begins at all. "If the
-/// 'for as long as' duration never starts, the effect does nothing" — so a
-/// resolver asks this on the settled board BEFORE installing the effect or
-/// emitting its side effects. Once installed, a started duration is only ended
-/// by the settled-board prunes; asking only there would let an effect whose
-/// own application makes its duration true (a control change of the source it
-/// is bound to) sustain a duration that never started.
+/// 'for as long as' duration never starts, the effect does nothing" — so the
+/// installation authority (`GameState::add_transient_continuous_effect*`) asks
+/// this of the candidate on the settled board BEFORE drawing an id, journaling
+/// or installing it. Once installed, a started duration is only ended by the
+/// settled-board prunes; asking only there would let an effect whose own
+/// application makes its duration true (a control change of the source it is
+/// bound to, a P/T change its condition reads) sustain a duration that never
+/// started. Uses the same subject binding and predicates as liveness.
 pub(crate) fn resolved_duration_begins(
     state: &GameState,
     duration: &Duration,
     controller: PlayerId,
     source_id: ObjectId,
-    recipient: Option<ObjectIncarnationRef>,
+    affected: &TargetFilter,
+    bindings: TransientContinuousEffectBindings,
 ) -> bool {
     match duration {
-        Duration::ForAsLongAs { condition } => {
-            bound_state_duration_holds(state, condition, controller, source_id, recipient)
-        }
+        Duration::ForAsLongAs { condition } => bound_state_duration_holds(
+            state,
+            condition,
+            controller,
+            source_id,
+            state_duration_subject(state, bindings, affected),
+        ),
         other => host_bound_duration_holds(state, other, source_id, controller),
     }
 }
@@ -11460,14 +11488,16 @@ mod tests {
         host: ObjectId,
         modification: ContinuousModification,
     ) -> u64 {
-        state.add_transient_continuous_effect(
-            host,
-            PlayerId(0),
-            Duration::UntilEndOfTurn,
-            TargetFilter::SpecificObject { id: host },
-            vec![modification],
-            None,
-        )
+        state
+            .add_transient_continuous_effect(
+                host,
+                PlayerId(0),
+                Duration::UntilEndOfTurn,
+                TargetFilter::SpecificObject { id: host },
+                vec![modification],
+                None,
+            )
+            .expect("the fixture's duration begins")
     }
 
     fn relayer(state: &mut GameState) {
@@ -22410,14 +22440,16 @@ mod tests {
         new_controller: PlayerId,
         duration: Duration,
     ) -> u64 {
-        state.add_transient_continuous_effect(
-            source_id,
-            new_controller,
-            duration,
-            TargetFilter::SpecificObject { id: target_id },
-            vec![ContinuousModification::ChangeController],
-            None,
-        )
+        state
+            .add_transient_continuous_effect(
+                source_id,
+                new_controller,
+                duration,
+                TargetFilter::SpecificObject { id: target_id },
+                vec![ContinuousModification::ChangeController],
+                None,
+            )
+            .expect("the fixture's duration begins")
     }
 
     /// CR 302.6 + CR 613.1b: Act-of-Treason-style mid-game control change.
@@ -23647,14 +23679,16 @@ mod tests {
         let granter = make_creature(&mut state, "Giant Growth Caster", 0, 0, PlayerId(0));
         let target = make_creature(&mut state, "Goblin", 1, 1, PlayerId(0));
 
-        let id = state.add_transient_continuous_effect(
-            granter,
-            PlayerId(0),
-            Duration::UntilEndOfTurn,
-            TargetFilter::SpecificObject { id: target },
-            vec![ContinuousModification::AddPower { value: 3 }],
-            None,
-        );
+        let id = state
+            .add_transient_continuous_effect(
+                granter,
+                PlayerId(0),
+                Duration::UntilEndOfTurn,
+                TargetFilter::SpecificObject { id: target },
+                vec![ContinuousModification::AddPower { value: 3 }],
+                None,
+            )
+            .expect("the fixture's duration begins");
 
         evaluate_layers(&mut state);
 
@@ -23678,14 +23712,16 @@ mod tests {
         let granter = make_creature(&mut state, "Giant Growth", 0, 0, PlayerId(0));
         let target = make_creature(&mut state, "Goblin", 1, 1, PlayerId(0));
 
-        let id = state.add_transient_continuous_effect(
-            granter,
-            PlayerId(0),
-            Duration::UntilEndOfTurn,
-            TargetFilter::SpecificObject { id: target },
-            vec![ContinuousModification::AddPower { value: 3 }],
-            None,
-        );
+        let id = state
+            .add_transient_continuous_effect(
+                granter,
+                PlayerId(0),
+                Duration::UntilEndOfTurn,
+                TargetFilter::SpecificObject { id: target },
+                vec![ContinuousModification::AddPower { value: 3 }],
+                None,
+            )
+            .expect("the fixture's duration begins");
 
         let tce = state
             .transient_continuous_effects
@@ -23736,14 +23772,16 @@ mod tests {
             },
         );
 
-        let id = state.add_transient_continuous_effect(
-            dead_source,
-            PlayerId(0),
-            Duration::UntilEndOfTurn,
-            TargetFilter::SpecificObject { id: target },
-            vec![ContinuousModification::AddPower { value: 1 }],
-            None,
-        );
+        let id = state
+            .add_transient_continuous_effect(
+                dead_source,
+                PlayerId(0),
+                Duration::UntilEndOfTurn,
+                TargetFilter::SpecificObject { id: target },
+                vec![ContinuousModification::AddPower { value: 1 }],
+                None,
+            )
+            .expect("the fixture's duration begins");
 
         let tce = state
             .transient_continuous_effects
@@ -23987,20 +24025,22 @@ mod tests {
             room_halves: None,
             name_origin: Default::default(),
         };
-        let _ = state.add_transient_continuous_effect(
-            source,
-            PlayerId(0),
-            Duration::UntilEndOfTurn,
-            TargetFilter::SpecificObject { id: target },
-            vec![ContinuousModification::CopyValues {
-                values: Box::new(copy_values),
-                display_source: crate::game::game_object::DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
-            }],
-            None,
-        );
+        let _ = state
+            .add_transient_continuous_effect(
+                source,
+                PlayerId(0),
+                Duration::UntilEndOfTurn,
+                TargetFilter::SpecificObject { id: target },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(copy_values),
+                    display_source: crate::game::game_object::DisplaySource::Card,
+                    printed_ref: None,
+                    token_image_ref: None,
+                    token_art: None,
+                }],
+                None,
+            )
+            .expect("the fixture's duration begins");
 
         evaluate_layers(&mut state);
 
@@ -26992,7 +27032,8 @@ mod state_duration_retirement_recording_tests {
                         affected_recipient: Some(affected),
                         duration_subject: Some(subject),
                     },
-                );
+                )
+                .expect("the fixture's duration begins");
             flush_layers(runner.state_mut());
             assert_eq!(runner.state().objects[&recipient].power, Some(3));
             let installed = runner

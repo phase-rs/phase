@@ -261,7 +261,7 @@ fn install_transient(
     affected: TargetFilter,
     modifications: Vec<ContinuousModification>,
     condition: Option<StaticCondition>,
-) -> u64 {
+) -> Option<u64> {
     match end_permission {
         Some(permission) => state.add_transient_continuous_effect_with_end_permission(
             source_id,

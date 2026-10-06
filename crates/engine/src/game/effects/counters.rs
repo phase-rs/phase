@@ -3461,24 +3461,26 @@ mod tests {
         application_condition: Option<StaticCondition>,
     ) -> u64 {
         let affected_ref = ObjectIncarnationRef::from_object(&state.objects[&affected]);
-        state.add_transient_continuous_effect_with_bindings(
-            affected,
-            PlayerId(0),
-            Duration::ForAsLongAs {
-                condition: StaticCondition::RecipientHasCounters {
-                    counters,
-                    minimum,
-                    maximum,
+        state
+            .add_transient_continuous_effect_with_bindings(
+                affected,
+                PlayerId(0),
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::RecipientHasCounters {
+                        counters,
+                        minimum,
+                        maximum,
+                    },
                 },
-            },
-            TargetFilter::SpecificObject { id: affected },
-            vec![ContinuousModification::AddPower { value: 1 }],
-            application_condition,
-            TransientContinuousEffectBindings {
-                affected_recipient: Some(affected_ref),
-                duration_subject: Some(subject),
-            },
-        )
+                TargetFilter::SpecificObject { id: affected },
+                vec![ContinuousModification::AddPower { value: 1 }],
+                application_condition,
+                TransientContinuousEffectBindings {
+                    affected_recipient: Some(affected_ref),
+                    duration_subject: Some(subject),
+                },
+            )
+            .expect("the fixture's duration begins")
     }
 
     #[test]
@@ -3725,20 +3727,22 @@ mod tests {
                 maximum: None,
             }),
         );
-        let source_gate_id = state.add_transient_continuous_effect(
-            subject,
-            PlayerId(0),
-            Duration::ForAsLongAs {
-                condition: StaticCondition::HasCounters {
-                    counters: CounterMatch::OfType(CounterType::Shield),
-                    minimum: 1,
-                    maximum: None,
+        let source_gate_id = state
+            .add_transient_continuous_effect(
+                subject,
+                PlayerId(0),
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::HasCounters {
+                        counters: CounterMatch::OfType(CounterType::Shield),
+                        minimum: 1,
+                        maximum: None,
+                    },
                 },
-            },
-            TargetFilter::SpecificObject { id: subject },
-            vec![ContinuousModification::AddPower { value: 1 }],
-            None,
-        );
+                TargetFilter::SpecificObject { id: subject },
+                vec![ContinuousModification::AddPower { value: 1 }],
+                None,
+            )
+            .expect("the fixture's duration begins");
         let mut events = Vec::new();
         assert_eq!(
             apply_counter_removal(&mut state, subject, CounterType::Shield, 0, &mut events),

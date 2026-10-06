@@ -652,26 +652,34 @@ fn compound_attachment_retires_non_tce_tails_without_swap_back_revival() {
         exiled.casting_permissions.push(control_permission.clone());
         exiled.casting_permissions.extend(survivors.clone());
     }
-    let presence_id = board.runner.state_mut().add_transient_continuous_effect(
-        board.thief,
-        P0,
-        Duration::WhileHostOnBattlefield,
-        TargetFilter::SpecificObject {
-            id: board.other_host,
-        },
-        vec![engine::types::ability::ContinuousModification::AddPower { value: 1 }],
-        None,
-    );
-    let deadline_id = board.runner.state_mut().add_transient_continuous_effect(
-        board.thief,
-        P0,
-        Duration::UntilHostLeavesPlay,
-        TargetFilter::SpecificObject {
-            id: board.other_host,
-        },
-        vec![engine::types::ability::ContinuousModification::AddPower { value: 2 }],
-        None,
-    );
+    let presence_id = board
+        .runner
+        .state_mut()
+        .add_transient_continuous_effect(
+            board.thief,
+            P0,
+            Duration::WhileHostOnBattlefield,
+            TargetFilter::SpecificObject {
+                id: board.other_host,
+            },
+            vec![engine::types::ability::ContinuousModification::AddPower { value: 1 }],
+            None,
+        )
+        .expect("the fixture's duration begins");
+    let deadline_id = board
+        .runner
+        .state_mut()
+        .add_transient_continuous_effect(
+            board.thief,
+            P0,
+            Duration::UntilHostLeavesPlay,
+            TargetFilter::SpecificObject {
+                id: board.other_host,
+            },
+            vec![engine::types::ability::ContinuousModification::AddPower { value: 2 }],
+            None,
+        )
+        .expect("the fixture's duration begins");
     engine::game::layers::mark_layers_full(board.runner.state_mut());
     engine::game::layers::flush_layers(board.runner.state_mut());
     assert_eq!(

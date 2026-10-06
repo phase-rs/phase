@@ -5602,22 +5602,24 @@ mod retirement_ownership_tests {
                 assert_eq!(state.objects[&aura].attached_to, Some(expected));
                 state.objects.get_mut(&subject).unwrap().tapped = true;
                 let reference = ObjectIncarnationRef::from_object(&state.objects[&subject]);
-                let id = state.add_transient_continuous_effect_with_bindings(
-                    subject,
-                    P0,
-                    Duration::ForAsLongAs {
-                        condition: StaticCondition::IsTapped {
-                            scope: ObjectScope::Recipient,
+                let id = state
+                    .add_transient_continuous_effect_with_bindings(
+                        subject,
+                        P0,
+                        Duration::ForAsLongAs {
+                            condition: StaticCondition::IsTapped {
+                                scope: ObjectScope::Recipient,
+                            },
                         },
-                    },
-                    TargetFilter::SpecificObject { id: subject },
-                    vec![ContinuousModification::AddPower { value: 1 }],
-                    None,
-                    TransientContinuousEffectBindings {
-                        affected_recipient: Some(reference),
-                        duration_subject: Some(reference),
-                    },
-                );
+                        TargetFilter::SpecificObject { id: subject },
+                        vec![ContinuousModification::AddPower { value: 1 }],
+                        None,
+                        TransientContinuousEffectBindings {
+                            affected_recipient: Some(reference),
+                            duration_subject: Some(reference),
+                        },
+                    )
+                    .expect("the fixture's duration begins");
                 crate::game::layers::flush_layers(state);
                 assert_eq!(state.objects[&subject].power, Some(3));
                 let installed = state
@@ -5713,22 +5715,24 @@ mod retirement_ownership_tests {
         let state = runner.state_mut();
         state.objects.get_mut(&subject).unwrap().tapped = true;
         let reference = ObjectIncarnationRef::from_object(&state.objects[&subject]);
-        let id = state.add_transient_continuous_effect_with_bindings(
-            subject,
-            P0,
-            Duration::ForAsLongAs {
-                condition: StaticCondition::IsTapped {
-                    scope: ObjectScope::Recipient,
+        let id = state
+            .add_transient_continuous_effect_with_bindings(
+                subject,
+                P0,
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::IsTapped {
+                        scope: ObjectScope::Recipient,
+                    },
                 },
-            },
-            TargetFilter::SpecificObject { id: subject },
-            vec![ContinuousModification::AddPower { value: 1 }],
-            None,
-            TransientContinuousEffectBindings {
-                affected_recipient: Some(reference),
-                duration_subject: Some(reference),
-            },
-        );
+                TargetFilter::SpecificObject { id: subject },
+                vec![ContinuousModification::AddPower { value: 1 }],
+                None,
+                TransientContinuousEffectBindings {
+                    affected_recipient: Some(reference),
+                    duration_subject: Some(reference),
+                },
+            )
+            .expect("the fixture's duration begins");
         crate::game::layers::flush_layers(state);
         assert_eq!(state.objects[&subject].power, Some(3));
         state.objects.get_mut(&subject).unwrap().tapped = false;

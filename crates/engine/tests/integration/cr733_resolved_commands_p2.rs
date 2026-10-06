@@ -1067,7 +1067,8 @@ fn settled_compound_and_successive_wave_retirements_replay_exactly() {
                     affected_recipient: Some(affected),
                     duration_subject: Some(subject),
                 },
-            );
+            )
+            .expect("the fixture's duration begins");
         engine::game::layers::flush_layers(runner.state_mut());
         let second = successive_waves.then(|| {
             let id = runner
@@ -1083,7 +1084,8 @@ fn settled_compound_and_successive_wave_retirements_replay_exactly() {
                         affected_recipient: Some(b_ref),
                         duration_subject: Some(b_ref),
                     },
-                );
+                )
+                .expect("the fixture's duration begins");
             engine::game::layers::flush_layers(runner.state_mut());
             id
         });
