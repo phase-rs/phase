@@ -356,9 +356,9 @@ fn entering_artifact_animated_in_layer_four_updates_existing_marvin() {
     assert!(activated_ability_definitions(runner.state(), marvin).is_empty());
 }
 
-// These two fixtures are synthetic typed combinations. They exercise admitted
+// These fixtures are synthetic typed combinations. They exercise admitted
 // layer and trigger building blocks through the ordinary scenario flush/runner;
-// neither represents invented Oracle text for a printed card.
+// none represents invented Oracle text for a printed card.
 fn attach_synthetic_static(
     runner: &mut engine::game::scenario::GameRunner,
     source: engine::types::identifiers::ObjectId,
@@ -539,6 +539,86 @@ fn retained_multilayer_trigger_grant_survives_earlier_ability_removal() {
     runner.advance_until_stack_empty();
     // The provider's printed trigger and the host's granted trigger each gain 2 life.
     assert_eq!(runner.life(P0), life_before + 4);
+}
+
+#[test]
+fn distinct_granted_static_generators_order_a_provider_writer_before_its_reader() {
+    let mut scenario = GameScenario::new();
+    let first_granter = scenario.add_creature(P0, "First Granter", 1, 1).id();
+    let recipient = scenario.add_creature(P0, "Recipient", 1, 1).id();
+    let donor = scenario.add_creature(P0, "Donor", 1, 1).id();
+    let second_granter = scenario.add_creature(P0, "Second Granter", 1, 1).id();
+    let mut runner = scenario.build();
+    let donated_ability =
+        AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp).cost(AbilityCost::Tap);
+    let inner_reader = StaticDefinition::continuous()
+        .affected(TargetFilter::SelfRef)
+        .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+            source: TargetFilter::SpecificObject { id: donor },
+            cap: None,
+        }]);
+    let inner_writer = StaticDefinition::continuous()
+        .affected(TargetFilter::SpecificObject { id: donor })
+        .modifications(vec![ContinuousModification::GrantAbility {
+            definition: Box::new(donated_ability.clone()),
+        }]);
+    attach_synthetic_static(
+        &mut runner,
+        first_granter,
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: recipient })
+            .modifications(vec![ContinuousModification::GrantStaticAbility {
+                definition: Box::new(inner_reader.clone()),
+            }]),
+    );
+    attach_synthetic_static(
+        &mut runner,
+        second_granter,
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: recipient })
+            .modifications(vec![ContinuousModification::GrantStaticAbility {
+                definition: Box::new(inner_writer.clone()),
+            }]),
+    );
+    assert!(
+        runner.state().objects[&first_granter].timestamp
+            < runner.state().objects[&recipient].timestamp
+    );
+    assert!(
+        runner.state().objects[&recipient].timestamp < runner.state().objects[&donor].timestamp
+    );
+    assert!(
+        runner.state().objects[&donor].timestamp
+            < runner.state().objects[&second_granter].timestamp
+    );
+    assert!(activated_ability_definitions(runner.state(), donor).is_empty());
+
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+
+    // CR 613.8a-b: The later writer changes the older reader's donor output,
+    // even though both statics were granted to the same recipient.
+    let granted_statics = &runner.state().objects[&recipient].static_definitions;
+    assert!(granted_statics
+        .iter_unchecked()
+        .any(|definition| definition == &inner_reader));
+    assert!(granted_statics
+        .iter_unchecked()
+        .any(|definition| definition == &inner_writer));
+    let donor_abilities = activated_ability_definitions(runner.state(), donor);
+    assert_eq!(
+        donor_abilities.len(),
+        1,
+        "the second grant must reach the donor"
+    );
+    assert_eq!(donor_abilities[0].1, donated_ability);
+    let recipient_abilities = activated_ability_definitions(runner.state(), recipient);
+    assert_eq!(
+        recipient_abilities.len(),
+        1,
+        "the recipient must copy the donor ability"
+    );
+    assert_eq!(recipient_abilities[0].1, donated_ability);
 }
 
 #[test]

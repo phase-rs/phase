@@ -8072,12 +8072,16 @@ fn apply_ability_effects_with_referenced_grants(
                     let writer = &pending[j];
                     let reader = &pending[i];
                     // CR 613.8a: Only matching CDA classes and distinct
-                    // generators can depend; the writer must reach an ability
-                    // read before a state preview is warranted.
+                    // generators can depend. The group key distinguishes
+                    // separate granted statics on the same recipient; absent
+                    // keys do not prove that two effects share a generator.
+                    // The writer must reach an ability read before preview.
                     if reader.characteristic_defining != writer.characteristic_defining
-                        || (reader.source_id == writer.source_id
-                            && reader.def_index == writer.def_index
-                            && reader.transient_id == writer.transient_id)
+                        || continuous_effect_group_key(state, reader)
+                            .zip(continuous_effect_group_key(state, writer))
+                            .is_some_and(|(reader_group, writer_group)| {
+                                reader_group == writer_group
+                            })
                         || !modification_characteristic_writes(&writer.modification)
                             .intersects(CharacteristicKinds::ABILITIES)
                         || writer_cannot_reach_referenced_read(state, reader, writer)
