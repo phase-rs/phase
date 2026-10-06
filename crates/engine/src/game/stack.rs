@@ -12,8 +12,7 @@ use crate::types::game_state::MayTriggerOrigin;
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, CastingVariant, DepartedStackSpell, ExileLink, ExileLinkKind,
     GameState, MayTriggerAutoChoiceKey, PendingCounterPostAction, PendingSpellResolution,
-    StackEntry, StackEntryKind, StackPaidSnapshot, StackResolutionPolicy, TriggerSourceContext,
-    WaitingFor,
+    StackEntry, StackEntryKind, StackPaidSnapshot, TriggerSourceContext, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TriggerFiring};
 use crate::types::player::PlayerId;
@@ -3391,9 +3390,11 @@ fn resolve_keyword_action(
 
 // ── Session-authorized sequential batch proof ────────────────────────────
 //
-// `resolve_next` normally resolves exactly one stack object. A committed
-// session may authorize a fenced prefix; it is proved by resolving each exact
-// member through `resolve_top` and the normal post-action pipeline on a clone.
+// `resolve_next` normally resolves exactly one stack object. A live
+// stack-resolution session may authorize a fenced prefix through
+// `engine::stack_resolution_session_authorized_limit`; it is proved by
+// resolving each exact member through `resolve_top` and the normal post-action
+// pipeline on a clone.
 
 /// Sentinel object id used only to build Layer C probe events. `keys_from_event`
 /// reads only `record.core_types`/`to` (ETB keys) and the `TokenCreated` variant
@@ -3414,10 +3415,12 @@ pub fn resolve_next_with_limit(
     max_consumed: Option<u32>,
 ) -> u32 {
     // A caller supplied cap is not itself permission to consume several stack
-    // entries.  The only multi-entry authority is a live committed session whose
-    // cursor still fences the actual top entry.  Keeping this check at the
-    // resolver boundary prevents a transport or future caller from turning a
-    // harmless `Some(n)` into an unauthorized shortcut.
+    // entries.  The only multi-entry authority is
+    // `engine::stack_resolution_session_authorized_limit`: a live session whose
+    // fence covers the top and whose every participant authorized the skipped
+    // windows.  Keeping this check at the resolver boundary prevents a
+    // transport or future caller from turning a harmless `Some(n)` into an
+    // unauthorized shortcut.
     let max_consumed = authorized_batch_limit(state, max_consumed);
     // CR 603.3c/d: never collapse while the top entry is mid-construction.
     let pending_top = state
@@ -3490,36 +3493,8 @@ fn authorized_batch_limit(state: &GameState, requested: Option<u32>) -> u32 {
     let Some(requested) = requested.filter(|limit| *limit > 1) else {
         return 1;
     };
-    let Some(session) = state.stack_resolution_session.as_ref() else {
-        return 1;
-    };
-    if session.policy != StackResolutionPolicy::Committed {
-        return 1;
-    }
-    let Some(top_fence) = session.entries.get(session.cursor) else {
-        return 1;
-    };
-    if !state
-        .stack
-        .back()
-        .is_some_and(|entry| top_fence.matches_captured_entry(entry))
-    {
-        return 1;
-    }
-    let budget = session
-        .budget
-        .max_resolutions()
-        .map(|maximum| maximum.saturating_sub(session.cursor.try_into().unwrap_or(u32::MAX)))
-        .unwrap_or(u32::MAX);
-    let fenced_prefix = state
-        .stack
-        .iter()
-        .rev()
-        .zip(session.entries.iter().skip(session.cursor))
-        .take_while(|(entry, fence)| fence.matches_captured_entry(entry))
-        .count()
-        .min(u32::MAX as usize) as u32;
-    requested.min(budget).min(fenced_prefix).max(1)
+    super::engine::stack_resolution_session_authorized_limit(state)
+        .map_or(1, |authorized| requested.min(authorized))
 }
 
 /// Optional post-resolution invariant checked after each `resolve_top` and the
@@ -8453,6 +8428,7 @@ mod tests {
         // Test fixtures from the parent `tests` module.
         use super::{pending_spell_entry, setup};
         use crate::game::triggers;
+        use crate::game::turn_control::authorized_submitter_for_player;
         use crate::game::zones::create_object;
         use crate::types::ability::{
             AbilityCondition, AbilityDefinition, Comparator, Duration, Effect, FilterProp,
@@ -8463,8 +8439,9 @@ mod tests {
         use crate::types::counter::CounterType;
         use crate::types::events::GameEvent;
         use crate::types::game_state::{
-            AutoMayChoice, GameState, MayTriggerAutoChoiceKey, MayTriggerOrigin, MeldSelection,
-            PendingLiminalEntryResume, PendingResolutionCompletion, PendingTokenBattlefieldEntry,
+            ActivePlayerControl, AutoMayChoice, GameState, MayTriggerAutoChoiceKey,
+            MayTriggerOrigin, MeldSelection, PendingLiminalEntryResume,
+            PendingResolutionCompletion, PendingTokenBattlefieldEntry, PriorityPassingMode,
             StackEntry, StackEntryKind, StackPaidSnapshot, StackResolutionAutoPassOverlay,
             StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
             StackResolutionSession,
@@ -9160,7 +9137,7 @@ mod tests {
         }
 
         #[test]
-        fn resolve_next_with_limit_requires_a_committed_session() {
+        fn resolve_next_with_limit_requires_a_session_authority() {
             let mut state = setup();
             add_lands(&mut state, 3);
             let src = add_scute_source(&mut state);
@@ -9194,7 +9171,7 @@ mod tests {
         }
 
         #[test]
-        fn recheck_session_cannot_authorize_a_multi_entry_resolution() {
+        fn unverified_recheck_session_cannot_authorize_a_multi_entry_resolution() {
             let mut state = setup();
             add_lands(&mut state, 3);
             let src = add_scute_source(&mut state);
@@ -9209,6 +9186,95 @@ mod tests {
                 1
             );
             assert_eq!(state.stack.len(), 2);
+        }
+
+        /// CR 117.3b + CR 117.4 + CR 732.2b: once every participant is a
+        /// representative with a verified pass, the Recheck session authorizes
+        /// the whole fenced prefix in one boundary.
+        #[test]
+        fn fully_verified_recheck_session_authorizes_the_fenced_prefix() {
+            let mut state = setup();
+            add_lands(&mut state, 3);
+            let src = add_scute_source(&mut state);
+            push_token_triggers(&mut state, src, insect_token_effect(), None, 3);
+            arm_committed_session(&mut state);
+            {
+                let session = state.stack_resolution_session.as_mut().unwrap();
+                session.policy = StackResolutionPolicy::RecheckNoMeaningfulPriorityAction;
+                session.representatives = BTreeSet::from([PlayerId(0), PlayerId(1)]);
+                session.verified_pass_representatives = BTreeSet::from([PlayerId(0), PlayerId(1)]);
+            }
+
+            let mut events = Vec::new();
+            assert_eq!(
+                resolve_next_with_limit(&mut state, &mut events, Some(u32::MAX)),
+                3
+            );
+            assert!(state.stack.is_empty());
+            assert_eq!(token_ids(&state).len(), 3);
+        }
+
+        /// CR 117.1: a Full Control participant never authorizes a skipped
+        /// window, so a committed session resolves one entry per boundary.
+        #[test]
+        fn full_control_participant_limits_a_committed_session_to_one_entry() {
+            let mut state = setup();
+            add_lands(&mut state, 3);
+            let src = add_scute_source(&mut state);
+            push_token_triggers(&mut state, src, insect_token_effect(), None, 3);
+            state
+                .priority_passing_modes
+                .insert(PlayerId(1), PriorityPassingMode::FullControl);
+
+            let mut events = Vec::new();
+            assert_eq!(resolve_next_committed(&mut state, &mut events), 1);
+            assert_eq!(state.stack.len(), 2);
+            assert_eq!(token_ids(&state).len(), 1);
+        }
+
+        /// CR 723.5: the Full Control preference that refuses a skipped window
+        /// belongs to the player making the seat's decisions, so a
+        /// turn-controlled seat follows its controller's mode, not its own.
+        #[test]
+        fn turn_controlled_seat_full_control_follows_its_controller() {
+            let build = |full_control: PlayerId| {
+                let mut state = setup();
+                add_lands(&mut state, 3);
+                let src = add_scute_source(&mut state);
+                push_token_triggers(&mut state, src, insect_token_effect(), None, 3);
+                state.active_player = PlayerId(0);
+                state.active_full_turn_control = Some(ActivePlayerControl {
+                    controller: PlayerId(1),
+                    timestamp: 1,
+                });
+                state.turn_decision_controller = Some(PlayerId(1));
+                state.turn_decision_control_timestamp = Some(1);
+                state
+                    .priority_passing_modes
+                    .insert(full_control, PriorityPassingMode::FullControl);
+                state
+            };
+
+            let mut controlled_seat_full_control = build(PlayerId(0));
+            assert_eq!(
+                authorized_submitter_for_player(&controlled_seat_full_control, PlayerId(0)),
+                PlayerId(1),
+                "reach guard: the turn-control latch routes P0's decisions to P1"
+            );
+            let mut events = Vec::new();
+            assert_eq!(
+                resolve_next_committed(&mut controlled_seat_full_control, &mut events),
+                3
+            );
+            assert!(controlled_seat_full_control.stack.is_empty());
+
+            let mut controller_full_control = build(PlayerId(1));
+            let mut events = Vec::new();
+            assert_eq!(
+                resolve_next_committed(&mut controller_full_control, &mut events),
+                1
+            );
+            assert_eq!(controller_full_control.stack.len(), 2);
         }
 
         #[test]

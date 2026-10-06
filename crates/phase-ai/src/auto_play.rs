@@ -486,11 +486,12 @@ mod tests {
     use super::*;
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter,
+        AbilityDefinition, AbilityKind, Effect, QuantityExpr, ResolvedAbility, TargetFilter,
     };
     use engine::types::card_type::CoreType;
     use engine::types::game_state::{
-        StackEntry, StackEntryKind, StackResolutionPolicy, WaitingFor,
+        AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin, StackEntry, StackEntryKind,
+        StackResolutionPolicy, WaitingFor,
     };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::phase::Phase;
@@ -555,6 +556,39 @@ mod tests {
                 )),
             },
         });
+    }
+
+    /// An optional "you may" NoOp trigger controlled by P1 whose auto-choice
+    /// is Decline: an inert entry the stack resolver may batch.
+    fn push_declined_no_op_trigger(state: &mut GameState, id: u64) {
+        let origin = MayTriggerOrigin::Printed { trigger_index: 0 };
+        let mut ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), ObjectId(id), PlayerId(1));
+        ability.optional = true;
+        ability.may_trigger_origin = Some(origin.clone());
+        state.stack.push_back(StackEntry {
+            id: ObjectId(id),
+            source_id: ObjectId(id),
+            controller: PlayerId(1),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: ObjectId(id),
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Declined Trigger".to_string(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        state.set_may_trigger_auto_choice(
+            MayTriggerAutoChoiceKey {
+                player: PlayerId(1),
+                source_id: ObjectId(id),
+                origin,
+            },
+            AutoMayChoice::Decline,
+        );
     }
 
     fn dummy_result(state: &GameState) -> AiActionResult {
@@ -706,5 +740,39 @@ mod tests {
             counters.priority_cast_probe_builds, 0,
             "cached verified passes must avoid the recheck probe on every stack entry"
         );
+    }
+
+    /// CR 117.3b + CR 117.4 + CR 732.2b: once both AI seats have verified a
+    /// pass in the cohort, every skipped window is authorized, so the declined
+    /// trigger run resolves as one proven inert batch.
+    #[test]
+    fn verified_pass_cohort_batches_a_declined_trigger_stack() {
+        let mut state = recheck_priority_state();
+        state.objects.clear();
+        for id in 70_003..70_204 {
+            push_declined_no_op_trigger(&mut state, id);
+        }
+        let ai_players = HashSet::from([PlayerId(0), PlayerId(1)]);
+        let ai_configs = HashMap::from([
+            (PlayerId(0), AiConfig::default()),
+            (PlayerId(1), AiConfig::default()),
+        ]);
+        let session = AiSession::arc_from_game(&state);
+        let mut rng = rand::rng();
+
+        engine::game::perf_counters::reset();
+        let run = run_ai_actions(&mut state, &ai_players, &ai_configs, &mut rng, &session);
+        let counters = engine::game::perf_counters::snapshot();
+
+        assert!(
+            matches!(run.stop, AiActionsStop::NoEligibleAiActor),
+            "the drained stack ends the AI run: {:?}",
+            run.stop
+        );
+        assert!(state.stack.is_empty());
+        assert!(state.stack_resolution_session.is_none());
+        assert_eq!(counters.priority_cast_probe_builds, 0);
+        assert_eq!(counters.stack_inert_noop_batches, 1);
+        assert_eq!(counters.stack_inert_noop_entries, 201);
     }
 }

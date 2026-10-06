@@ -1168,7 +1168,8 @@ pub fn apply_verified_ai_priority_pass(
             .insert(representative)
     } else {
         // The shared session is installed before the ordinary action boundary
-        // so its explicit-pass seam can enforce the one-entry limit. A rejected
+        // so its explicit-pass seam applies the session's skipped-window authority
+        // (`stack_resolution_session_authorized_limit`). A rejected
         // action boundary intentionally preserves its ownerless-replacement
         // repair, so roll back only the newly installed private overlay rather
         // than restoring the entire pre-boundary game state.
@@ -9417,10 +9418,10 @@ fn stack_resolution_session_priority_decision(
         // CR 117.1: a Full Control holder is never auto-passed by a session —
         // theirs or anyone else's. Scoped to `Automatic`: an EXPLICIT
         // PassPriority is that player's own deliberate decision and still drives
-        // the session. This is the only gate covering a session REPRESENTATIVE,
-        // whose windows are otherwise passed without even the meaningful-action
-        // check below. (The no-session case is handled one layer out, by
-        // `priority_auto_pass_decision`.)
+        // the session. This gate covers the live window;
+        // `stack_resolution_session_participant_authorizes_pass` gives the same
+        // answer for every window a multi-entry boundary skips. (The no-session
+        // case is handled one layer out, by `priority_auto_pass_decision`.)
         if matches!(pass_kind, StackResolutionSessionPassKind::Automatic)
             && state
                 .priority_passing_mode(turn_control::authorized_submitter_for_player(state, holder))
@@ -9429,83 +9430,28 @@ fn stack_resolution_session_priority_decision(
             return StackResolutionSessionPriorityDecision::Pause;
         }
 
-        let current_representatives = super::topology::canonical_priority_representatives(
-            state,
-            session.representatives.iter().copied(),
-        );
-        let live_representatives = super::topology::priority_pass_participants(state)
-            .into_iter()
-            .collect::<std::collections::BTreeSet<_>>();
-        if current_representatives != session.representatives
-            || !session
-                .representatives
-                .iter()
-                .all(|representative| live_representatives.contains(representative))
-            || session.cursor == session.entries.len()
-            || state.stack.is_empty()
-        {
-            None
-        } else {
-            let remaining_budget = match session.budget.max_resolutions() {
-                Some(maximum) => {
-                    maximum.saturating_sub(session.cursor.try_into().unwrap_or(u32::MAX))
-                }
-                None => u32::MAX,
-            };
-            let top_matches = session
-                .entries
-                .get(session.cursor)
-                .is_some_and(|top_fence| {
-                    state
-                        .stack
-                        .back()
-                        .is_some_and(|entry| top_fence.matches_captured_entry(entry))
-                });
-            if remaining_budget == 0 || !top_matches {
-                None
-            } else {
-                let rechecks =
-                    session.policy == StackResolutionPolicy::RecheckNoMeaningfulPriorityAction;
-                let holder_is_representative = session.representatives.contains(&canonical_holder);
-                if matches!(pass_kind, StackResolutionSessionPassKind::Automatic) {
-                    if rechecks {
-                        return if holder_is_representative
-                            && session
-                                .verified_pass_representatives
-                                .contains(&canonical_holder)
-                        {
-                            StackResolutionSessionPriorityDecision::Resolve { limit: 1 }
-                        } else {
-                            StackResolutionSessionPriorityDecision::PauseRetained
-                        };
+        let limit = stack_resolution_session_authorized_limit(state);
+        if limit.is_some() && matches!(pass_kind, StackResolutionSessionPassKind::Automatic) {
+            match session.policy {
+                StackResolutionPolicy::RecheckNoMeaningfulPriorityAction => {
+                    if !stack_resolution_session_participant_authorizes_pass(
+                        state,
+                        session,
+                        canonical_holder,
+                    ) {
+                        return StackResolutionSessionPriorityDecision::PauseRetained;
                     }
-                    if !holder_is_representative && priority_player_has_meaningful_action(state) {
+                }
+                StackResolutionPolicy::Committed => {
+                    if !session.representatives.contains(&canonical_holder)
+                        && priority_player_has_meaningful_action(state)
+                    {
                         return StackResolutionSessionPriorityDecision::Pause;
                     }
                 }
-                let matching_prefix = state
-                    .stack
-                    .iter()
-                    .rev()
-                    .zip(session.entries.iter().skip(session.cursor))
-                    .take_while(|(entry, fence)| fence.matches_captured_entry(entry))
-                    .count();
-                let limit = matching_prefix
-                    .min(remaining_budget as usize)
-                    .min(u32::MAX as usize) as u32;
-                // A verified representative may reuse its own pass only
-                // inside this exact fenced session. Each all-pass boundary
-                // still resolves one entry so a changed stack topology tears
-                // the session down before a pass can escape its cohort.
-                let limit =
-                    if session.policy == StackResolutionPolicy::RecheckNoMeaningfulPriorityAction {
-                        limit.min(1)
-                    } else {
-                        limit
-                    };
-                (limit != 0).then_some(limit)
             }
         }
+        limit
     };
 
     match decision {
@@ -9515,6 +9461,97 @@ fn stack_resolution_session_priority_decision(
             StackResolutionSessionPriorityDecision::Pause
         }
     }
+}
+
+/// CR 117.3b + CR 117.3d + CR 117.4 + CR 732.2b: whether `participant` has
+/// authorized this stack-resolution session to pass a priority window it would
+/// receive inside the fenced cohort without a fresh decision. The single
+/// per-participant authority for both the live window
+/// (`stack_resolution_session_priority_decision`) and every window a
+/// multi-entry boundary skips (`stack_resolution_session_authorized_limit`).
+fn stack_resolution_session_participant_authorizes_pass(
+    state: &GameState,
+    session: &StackResolutionSession,
+    participant: PlayerId,
+) -> bool {
+    // CR 117.1: Full Control is a standing refusal to give up any window — the
+    // session's own representative's included.
+    if state.priority_passing_mode(turn_control::authorized_submitter_for_player(
+        state,
+        participant,
+    )) == PriorityPassingMode::FullControl
+    {
+        return false;
+    }
+    match session.policy {
+        // A verified AI pass is the policy authorization for later priority
+        // windows in this exact fenced cohort.
+        StackResolutionPolicy::RecheckNoMeaningfulPriorityAction => {
+            session.representatives.contains(&participant)
+                && session.verified_pass_representatives.contains(&participant)
+        }
+        // A representative consented to the session. A non-representative's
+        // skipped windows are not rechecked for a meaningful action (only its
+        // live window is, in `stack_resolution_session_priority_decision`);
+        // Full Control was enforced above.
+        StackResolutionPolicy::Committed => true,
+    }
+}
+
+/// CR 117.3b + CR 117.4 + CR 608.1: how many fenced stack entries one all-pass
+/// boundary may consume. Consuming K > 1 entries skips every participant's
+/// priority window after each of the first K − 1 resolutions, so K > 1 needs
+/// every participant's authorization (CR 117.3d + CR 732.2b); otherwise exactly
+/// one entry resolves. `None` when the session no longer authorizes the current
+/// top: changed or departed representatives, an exhausted cursor or budget, an
+/// empty stack, or a top entry outside the fence.
+pub(crate) fn stack_resolution_session_authorized_limit(state: &GameState) -> Option<u32> {
+    let session = state.stack_resolution_session.as_ref()?;
+    let participants = super::topology::priority_pass_participants(state);
+    let current_representatives = super::topology::canonical_priority_representatives(
+        state,
+        session.representatives.iter().copied(),
+    );
+    if current_representatives != session.representatives
+        || !session
+            .representatives
+            .iter()
+            .all(|representative| participants.contains(representative))
+        || session.cursor == session.entries.len()
+        || state.stack.is_empty()
+    {
+        return None;
+    }
+    let remaining_budget = session
+        .budget
+        .max_resolutions()
+        .map_or(u32::MAX, |maximum| {
+            maximum.saturating_sub(session.cursor.try_into().unwrap_or(u32::MAX))
+        });
+    if remaining_budget == 0 {
+        return None;
+    }
+    // CR 405.5 + CR 608.1: the boundary resolves from the top down, so the
+    // authorized run is the prefix of the stack (top first) still matching the
+    // session's captured entries from the cursor on. K never exceeds that
+    // fenced prefix, and the stack resolver's batch proof refuses any member
+    // whose checkpoint adds a stack entry; the next window's fence check then
+    // tears the session down, so a multi-entry boundary cannot leave its cohort.
+    let mut fenced_prefix = state
+        .stack
+        .iter()
+        .rev()
+        .zip(session.entries.iter().skip(session.cursor))
+        .take_while(|(entry, fence)| fence.matches_captured_entry(entry));
+    // `None` when the top entry is outside the fence.
+    fenced_prefix.next()?;
+    if !participants.iter().all(|&participant| {
+        stack_resolution_session_participant_authorizes_pass(state, session, participant)
+    }) {
+        return Some(1);
+    }
+    let fenced_len = u32::try_from(1 + fenced_prefix.count()).unwrap_or(u32::MAX);
+    Some(fenced_len.min(remaining_budget))
 }
 
 fn advance_stack_resolution_session_after_priority_pass(

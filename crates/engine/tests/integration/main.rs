@@ -1340,6 +1340,7 @@ mod squirrel_mob_dynamic_pump;
 mod stack_ability_kind_axis;
 mod stack_entry_node_reach;
 mod stack_object_keyword_grants;
+mod stack_session_batch_authority;
 mod statecraft_damage_prevention;
 mod std_counters_grammar_axes;
 mod std_dynqty_a_damage_mod_runtime;
