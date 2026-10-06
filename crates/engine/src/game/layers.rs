@@ -8220,8 +8220,8 @@ fn apply_ability_effects_with_referenced_grants(
                                 )
                                 && !writer_cannot_reach_referenced_read(state, reader, writer)
                         });
-                        has_parent_sensitive_reader
-                            && referenced_parent_depends_on(
+                        if has_parent_sensitive_reader {
+                            referenced_parent_depends_on(
                                 state,
                                 parent,
                                 writer,
@@ -8229,6 +8229,9 @@ fn apply_ability_effects_with_referenced_grants(
                                 abilities_suppressed,
                                 started_effect_sets,
                             )
+                        } else {
+                            depends_on(parent, writer, state)
+                        }
                     }
                 } else {
                     depends_on(&pending[i], &pending[j], state)

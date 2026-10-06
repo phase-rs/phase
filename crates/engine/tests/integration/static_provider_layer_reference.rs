@@ -1355,3 +1355,105 @@ fn ordinary_granted_static_keeps_keyword_filter_dependency_in_referenced_bucket(
         .iter_unchecked()
         .any(|definition| definition == &ordinary_inner));
 }
+
+#[test]
+fn participating_granted_static_keeps_keyword_filter_dependency_without_inner_reader() {
+    let mut scenario = GameScenario::new();
+    let granter = scenario.add_creature(P0, "Granter", 1, 1).id();
+    let recipient = scenario.add_creature(P0, "Recipient", 1, 1).id();
+    let writer = scenario.add_creature(P0, "Flying Writer", 1, 1).id();
+    let meta_host = scenario
+        .add_creature(P0, "Independent Meta Host", 1, 1)
+        .id();
+    let mut inner_donor_ability =
+        AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp).cost(AbilityCost::Tap);
+    inner_donor_ability.description = Some("D ability".to_string());
+    let inner_donor = scenario
+        .add_creature(P0, "Inner Donor D", 1, 1)
+        .with_ability_definition(inner_donor_ability.clone())
+        .id();
+    let mut independent_donor_ability =
+        AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp).cost(AbilityCost::Tap);
+    independent_donor_ability.description = Some("E ability".to_string());
+    let independent_donor = scenario
+        .add_creature(P0, "Independent Donor E", 1, 1)
+        .with_ability_definition(independent_donor_ability.clone())
+        .id();
+    let mut runner = scenario.build();
+    let inner = StaticDefinition::continuous()
+        .affected(TargetFilter::SelfRef)
+        .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+            source: TargetFilter::SpecificObject { id: inner_donor },
+            cap: None,
+        }]);
+    let outer = StaticDefinition::continuous()
+        .affected(TargetFilter::And {
+            filters: vec![
+                TargetFilter::SpecificObject { id: recipient },
+                TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::WithKeyword {
+                        value: Keyword::Flying,
+                    },
+                ])),
+            ],
+        })
+        .modifications(vec![ContinuousModification::GrantStaticAbility {
+            definition: Box::new(inner.clone()),
+        }]);
+    attach_synthetic_static(&mut runner, granter, outer.clone());
+    let flying_writer = StaticDefinition::continuous()
+        .affected(TargetFilter::SpecificObject { id: recipient })
+        .modifications(vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Flying,
+        }]);
+    attach_synthetic_static(&mut runner, writer, flying_writer.clone());
+    let independent_meta = StaticDefinition::continuous()
+        .affected(TargetFilter::SelfRef)
+        .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+            source: TargetFilter::SpecificObject {
+                id: independent_donor,
+            },
+            cap: None,
+        }]);
+    attach_synthetic_static(&mut runner, meta_host, independent_meta.clone());
+
+    assert!(runner.state().objects[&granter].timestamp < runner.state().objects[&writer].timestamp);
+    assert!(!runner.state().objects[&recipient].has_keyword(&Keyword::Flying));
+    assert!(!runner.state().objects[&recipient]
+        .static_definitions
+        .iter_unchecked()
+        .any(|definition| definition == &inner));
+    assert!(runner.state().objects[&granter]
+        .static_definitions
+        .iter_unchecked()
+        .any(|definition| definition == &outer));
+    assert!(runner.state().objects[&writer]
+        .static_definitions
+        .iter_unchecked()
+        .any(|definition| definition == &flying_writer));
+    assert!(runner.state().objects[&meta_host]
+        .static_definitions
+        .iter_unchecked()
+        .any(|definition| definition == &independent_meta));
+    let inner_donor_abilities = activated_ability_definitions(runner.state(), inner_donor);
+    assert_eq!(inner_donor_abilities.len(), 1);
+    assert_eq!(inner_donor_abilities[0].1, inner_donor_ability);
+    let independent_donor_abilities =
+        activated_ability_definitions(runner.state(), independent_donor);
+    assert_eq!(independent_donor_abilities.len(), 1);
+    assert_eq!(independent_donor_abilities[0].1, independent_donor_ability);
+
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+
+    // CR 613.8a-c + CR 611.3a: W changes G's carrier set before any inner
+    // reader was gathered; the independent E reader keeps layer 6 dynamic.
+    assert!(runner.state().objects[&recipient].has_keyword(&Keyword::Flying));
+    let independent_grant = activated_ability_definitions(runner.state(), meta_host);
+    assert_eq!(independent_grant.len(), 1);
+    assert_eq!(independent_grant[0].1, independent_donor_ability);
+    assert!(runner.state().objects[&recipient]
+        .static_definitions
+        .iter_unchecked()
+        .any(|definition| definition == &inner));
+}
