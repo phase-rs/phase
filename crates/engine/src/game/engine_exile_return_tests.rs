@@ -2114,8 +2114,9 @@ mod latch_window {
         }
     }
 
-    /// CR 603.8 + CR 610.3b: a held ability with no recorded trigger event is,
-    /// in production, a state trigger (`check_state_triggers` builds it with
+    /// CR 603.8 + CR 610.3b: a held ability that bounds an "until" zone change
+    /// and has no recorded trigger event is, in production, a state trigger
+    /// (`check_state_triggers` builds it with
     /// `trigger_event: None`). The pipeline collects state triggers after
     /// `check_exile_returns`, so such an ability triggered before the buffer a
     /// later latch pass reads began, and every event in that buffer is "after
