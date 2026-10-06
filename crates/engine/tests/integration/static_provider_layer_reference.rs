@@ -5,12 +5,13 @@
 use std::sync::Arc;
 
 use engine::game::casting::{activated_ability_definitions, can_activate_ability_now};
-use engine::game::layers::{flush_layers, mark_layers_full};
+use engine::game::layers::{flush_layers, mark_layers_entered, mark_layers_full};
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::move_to_zone;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, Effect, QuantityExpr,
-    StaticDefinition, TargetFilter, TriggerDefinition, TriggerDefinitionOccurrenceRef,
+    AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, Effect, FilterProp,
+    QuantityExpr, StaticCondition, StaticDefinition, TargetFilter, TriggerDefinition,
+    TriggerDefinitionOccurrenceRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -758,6 +759,493 @@ fn nested_meta_grants_read_original_static_granter_suppression() {
             assert!(runner.state().objects[&recipient]
                 .trigger_definitions
                 .is_empty());
+        }
+    }
+}
+
+#[test]
+fn inactive_original_grant_cannot_start_an_earlier_inner_type_part() {
+    let mut scenario = GameScenario::new();
+    let granter = scenario.add_creature(P0, "Turn Granter", 1, 1).id();
+    let carrier = scenario.add_creature(P0, "Carrier", 1, 1).id();
+    let trigger = TriggerDefinition::new(TriggerMode::Phase)
+        .phase(Phase::Upkeep)
+        .trigger_zones(vec![Zone::Battlefield])
+        .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp));
+    let donor = scenario
+        .add_creature(P0, "Donor", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp).cost(AbilityCost::Tap),
+        )
+        .with_trigger_definition(trigger)
+        .id();
+    let mut runner = scenario.build();
+    let inner = StaticDefinition::continuous()
+        .affected(TargetFilter::SelfRef)
+        .modifications(vec![
+            ContinuousModification::AddType {
+                core_type: CoreType::Artifact,
+            },
+            ContinuousModification::GrantAllActivatedAbilitiesOf {
+                source: TargetFilter::SpecificObject { id: donor },
+                cap: None,
+            },
+            ContinuousModification::GrantAllTriggeredAbilitiesOf {
+                source: TargetFilter::SpecificObject { id: donor },
+            },
+        ]);
+    attach_synthetic_static(
+        &mut runner,
+        granter,
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: carrier })
+            .condition(StaticCondition::DuringYourTurn)
+            .modifications(vec![ContinuousModification::GrantStaticAbility {
+                definition: Box::new(inner.clone()),
+            }]),
+    );
+    assert!(runner.state().objects[&granter]
+        .static_definitions
+        .iter_unchecked()
+        .any(|definition| matches!(
+            definition.modifications.as_slice(),
+            [ContinuousModification::GrantStaticAbility { .. }]
+        )));
+    assert_eq!(
+        activated_ability_definitions(runner.state(), donor).len(),
+        1
+    );
+    assert_eq!(runner.state().objects[&donor].trigger_definitions.len(), 1);
+
+    runner.state_mut().active_player = P1;
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+    assert!(!runner.state().objects[&carrier]
+        .static_definitions
+        .iter_unchecked()
+        .any(|definition| definition == &inner));
+    assert!(!runner.state().objects[&carrier]
+        .card_types
+        .core_types
+        .contains(&CoreType::Artifact));
+    assert!(activated_ability_definitions(runner.state(), carrier).is_empty());
+    assert!(runner.state().objects[&carrier]
+        .trigger_definitions
+        .is_empty());
+
+    runner.state_mut().active_player = P0;
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+    assert!(runner.state().objects[&carrier]
+        .static_definitions
+        .iter_unchecked()
+        .any(|definition| definition == &inner));
+    assert!(runner.state().objects[&carrier]
+        .card_types
+        .core_types
+        .contains(&CoreType::Artifact));
+    assert_eq!(
+        activated_ability_definitions(runner.state(), carrier).len(),
+        1
+    );
+    assert!(matches!(
+        &runner.state().objects[&carrier].trigger_definitions[0].occurrence,
+        TriggerDefinitionOccurrenceRef::ExpandedGrant { provider, .. }
+            if provider.source.object_id == donor
+    ));
+}
+
+#[test]
+fn original_grant_qualifies_carrier_independently_of_inner_target_and_controller() {
+    let mut scenario = GameScenario::new();
+    let first_granter = scenario.add_creature(P0, "First Granter", 1, 1).id();
+    let second_granter = scenario.add_creature(P1, "Second Granter", 1, 1).id();
+    let carrier = scenario.add_creature(P1, "Carrier", 1, 1).id();
+    let target = scenario.add_creature(P1, "Target", 1, 1).id();
+    let first_ability =
+        AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp).cost(AbilityCost::Tap);
+    let second_ability = AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp);
+    let trigger = TriggerDefinition::new(TriggerMode::Phase)
+        .phase(Phase::Upkeep)
+        .trigger_zones(vec![Zone::Battlefield])
+        .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp));
+    let first_donor = scenario
+        .add_creature(P0, "First Donor", 1, 1)
+        .with_ability_definition(first_ability.clone())
+        .with_trigger_definition(trigger.clone())
+        .id();
+    let second_donor = scenario
+        .add_creature(P1, "Second Donor", 1, 1)
+        .with_ability_definition(second_ability.clone())
+        .with_trigger_definition(trigger)
+        .id();
+    let mut runner = scenario.build();
+    let first_inner = StaticDefinition::continuous()
+        .affected(TargetFilter::SpecificObject { id: target })
+        .condition(StaticCondition::Not {
+            condition: Box::new(StaticCondition::DuringYourTurn),
+        })
+        .modifications(vec![
+            ContinuousModification::GrantAllActivatedAbilitiesOf {
+                source: TargetFilter::SpecificObject { id: first_donor },
+                cap: None,
+            },
+            ContinuousModification::GrantAllTriggeredAbilitiesOf {
+                source: TargetFilter::SpecificObject { id: first_donor },
+            },
+        ]);
+    let second_inner = StaticDefinition::continuous()
+        .affected(TargetFilter::SpecificObject { id: target })
+        .condition(StaticCondition::DuringYourTurn)
+        .modifications(vec![
+            ContinuousModification::GrantAllActivatedAbilitiesOf {
+                source: TargetFilter::SpecificObject { id: second_donor },
+                cap: None,
+            },
+            ContinuousModification::GrantAllTriggeredAbilitiesOf {
+                source: TargetFilter::SpecificObject { id: second_donor },
+            },
+        ]);
+    for (granter, inner) in [
+        (first_granter, &first_inner),
+        (second_granter, &second_inner),
+    ] {
+        attach_synthetic_static(
+            &mut runner,
+            granter,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SpecificObject { id: carrier })
+                .condition(StaticCondition::DuringYourTurn)
+                .modifications(vec![ContinuousModification::GrantStaticAbility {
+                    definition: Box::new((*inner).clone()),
+                }]),
+        );
+        assert!(runner.state().objects[&granter]
+            .static_definitions
+            .iter_unchecked()
+            .any(|definition| matches!(
+                definition.modifications.as_slice(),
+                [ContinuousModification::GrantStaticAbility { .. }]
+            )));
+    }
+    assert_eq!(
+        activated_ability_definitions(runner.state(), first_donor)[0].1,
+        first_ability
+    );
+    assert_eq!(
+        activated_ability_definitions(runner.state(), second_donor)[0].1,
+        second_ability
+    );
+    assert_eq!(
+        runner.state().objects[&first_donor]
+            .trigger_definitions
+            .len(),
+        1
+    );
+    assert_eq!(
+        runner.state().objects[&second_donor]
+            .trigger_definitions
+            .len(),
+        1
+    );
+
+    runner.state_mut().active_player = P0;
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+    assert!(runner.state().objects[&carrier]
+        .static_definitions
+        .iter_unchecked()
+        .any(|definition| definition == &first_inner));
+    assert!(!runner.state().objects[&carrier]
+        .static_definitions
+        .iter_unchecked()
+        .any(|definition| definition == &second_inner));
+    assert_eq!(
+        activated_ability_definitions(runner.state(), target)[0].1,
+        first_ability
+    );
+    assert!(activated_ability_definitions(runner.state(), carrier).is_empty());
+    assert!(matches!(
+        &runner.state().objects[&target].trigger_definitions[0].occurrence,
+        TriggerDefinitionOccurrenceRef::ExpandedGrant { provider, .. }
+            if provider.source.object_id == first_donor
+    ));
+
+    runner.state_mut().active_player = P1;
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+    assert!(!runner.state().objects[&carrier]
+        .static_definitions
+        .iter_unchecked()
+        .any(|definition| definition == &first_inner));
+    assert!(runner.state().objects[&carrier]
+        .static_definitions
+        .iter_unchecked()
+        .any(|definition| definition == &second_inner));
+    assert_eq!(
+        activated_ability_definitions(runner.state(), target)[0].1,
+        second_ability
+    );
+    assert!(activated_ability_definitions(runner.state(), carrier).is_empty());
+    assert!(matches!(
+        &runner.state().objects[&target].trigger_definitions[0].occurrence,
+        TriggerDefinitionOccurrenceRef::ExpandedGrant { provider, .. }
+            if provider.source.object_id == second_donor
+    ));
+}
+
+#[test]
+fn outside_slice_granted_static_carrier_escalates_only_for_reachable_entrant() {
+    let mut scenario = GameScenario::new();
+    let granter = scenario.add_creature(P0, "Granter", 1, 1).id();
+    let carrier = scenario.add_creature(P0, "Carrier", 1, 1).id();
+    let target = scenario.add_creature(P0, "Target", 1, 1).id();
+    let irrelevant = scenario.add_creature(P0, "Irrelevant", 1, 1).id();
+    let ability =
+        AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp).cost(AbilityCost::Tap);
+    let donor = scenario
+        .add_creature(P0, "Donor", 1, 1)
+        .with_ability_definition(ability.clone())
+        .id();
+    let mut runner = scenario.build();
+    let inner = StaticDefinition::continuous()
+        .affected(TargetFilter::SpecificObject { id: target })
+        .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+            source: TargetFilter::SpecificObject { id: donor },
+            cap: None,
+        }]);
+    attach_synthetic_static(
+        &mut runner,
+        granter,
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: carrier })
+            .modifications(vec![ContinuousModification::GrantStaticAbility {
+                definition: Box::new(inner.clone()),
+            }]),
+    );
+    move_to_zone(runner.state_mut(), target, Zone::Hand, &mut Vec::new());
+    move_to_zone(runner.state_mut(), irrelevant, Zone::Hand, &mut Vec::new());
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+    assert!(runner.state().objects[&granter]
+        .static_definitions
+        .iter_unchecked()
+        .any(|definition| matches!(
+            definition.modifications.as_slice(),
+            [ContinuousModification::GrantStaticAbility { .. }]
+        )));
+    assert!(runner.state().objects[&carrier]
+        .static_definitions
+        .iter_unchecked()
+        .any(|definition| definition == &inner));
+    assert_eq!(
+        activated_ability_definitions(runner.state(), donor)[0].1,
+        ability
+    );
+
+    move_to_zone(
+        runner.state_mut(),
+        irrelevant,
+        Zone::Battlefield,
+        &mut Vec::new(),
+    );
+    engine::game::perf_counters::reset();
+    flush_layers(runner.state_mut());
+    let counters = engine::game::perf_counters::snapshot();
+    assert_eq!(counters.layers_incremental, 1);
+    assert_eq!(counters.layers_escalated, 0);
+    assert!(runner.state().objects[&carrier]
+        .static_definitions
+        .iter_unchecked()
+        .any(|definition| definition == &inner));
+
+    move_to_zone(
+        runner.state_mut(),
+        target,
+        Zone::Battlefield,
+        &mut Vec::new(),
+    );
+    engine::game::perf_counters::reset();
+    flush_layers(runner.state_mut());
+    let counters = engine::game::perf_counters::snapshot();
+    assert_eq!(counters.layers_escalated, 1);
+    assert_eq!(counters.layers_incremental, 0);
+    assert_eq!(
+        activated_ability_definitions(runner.state(), target)[0].1,
+        ability
+    );
+}
+
+#[test]
+fn freshly_entering_carrier_uses_restricted_parent_qualification() {
+    let mut scenario = GameScenario::new();
+    let granter = scenario.add_creature(P0, "Granter", 1, 1).id();
+    let carrier = scenario.add_creature(P0, "Fresh Carrier", 1, 1).id();
+    let ability =
+        AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp).cost(AbilityCost::Tap);
+    let donor = scenario
+        .add_creature(P0, "Donor", 1, 1)
+        .with_ability_definition(ability.clone())
+        .id();
+    let mut runner = scenario.build();
+    let inner = StaticDefinition::continuous()
+        .affected(TargetFilter::SelfRef)
+        .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+            source: TargetFilter::SpecificObject { id: donor },
+            cap: None,
+        }]);
+    attach_synthetic_static(
+        &mut runner,
+        granter,
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: carrier })
+            .modifications(vec![ContinuousModification::GrantStaticAbility {
+                definition: Box::new(inner.clone()),
+            }]),
+    );
+    move_to_zone(runner.state_mut(), carrier, Zone::Hand, &mut Vec::new());
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+    assert_eq!(
+        activated_ability_definitions(runner.state(), donor)[0].1,
+        ability
+    );
+    move_to_zone(
+        runner.state_mut(),
+        carrier,
+        Zone::Battlefield,
+        &mut Vec::new(),
+    );
+    mark_layers_entered(runner.state_mut(), carrier);
+    engine::game::perf_counters::reset();
+    flush_layers(runner.state_mut());
+    let counters = engine::game::perf_counters::snapshot();
+    assert_eq!(counters.layers_incremental, 1);
+    assert!(runner.state().objects[&carrier]
+        .static_definitions
+        .iter_unchecked()
+        .any(|definition| definition == &inner));
+    assert_eq!(
+        activated_ability_definitions(runner.state(), carrier)[0].1,
+        ability
+    );
+}
+
+#[test]
+fn remote_mana_ability_writer_enables_exact_original_grant_before_nested_reader() {
+    for writer_reaches_witness in [true, false] {
+        let mut scenario = GameScenario::new();
+        let granter = scenario.add_creature(P0, "Granter", 1, 1).id();
+        let carrier = scenario.add_creature(P0, "Carrier", 1, 1).id();
+        let witness = scenario.add_creature(P0, "Witness", 1, 1).id();
+        let writer = scenario.add_creature(P0, "Writer", 1, 1).id();
+        let other = scenario.add_creature(P0, "Other", 1, 1).id();
+        let donor_ability =
+            AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp).cost(AbilityCost::Tap);
+        let donor = scenario
+            .add_creature(P0, "Donor", 1, 1)
+            .with_ability_definition(donor_ability.clone())
+            .id();
+        let mana_template = scenario
+            .add_artifact_from_oracle(P0, "Mana Template", SOL_RING)
+            .id();
+        let mut runner = scenario.build();
+        let mana_ability = activated_ability_definitions(runner.state(), mana_template)[0]
+            .1
+            .clone();
+        let inner = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+                source: TargetFilter::SpecificObject { id: donor },
+                cap: None,
+            }]);
+        attach_synthetic_static(
+            &mut runner,
+            granter,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SpecificObject { id: carrier })
+                .condition(StaticCondition::IsPresent {
+                    filter: Some(TargetFilter::And {
+                        filters: vec![
+                            TargetFilter::SpecificObject { id: witness },
+                            TargetFilter::Typed(
+                                TypedFilter::default().properties(vec![FilterProp::HasManaAbility]),
+                            ),
+                        ],
+                    }),
+                })
+                .modifications(vec![ContinuousModification::GrantStaticAbility {
+                    definition: Box::new(inner.clone()),
+                }]),
+        );
+        attach_synthetic_static(
+            &mut runner,
+            writer,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SpecificObject {
+                    id: if writer_reaches_witness {
+                        witness
+                    } else {
+                        other
+                    },
+                })
+                .modifications(vec![ContinuousModification::GrantAbility {
+                    definition: Box::new(mana_ability.clone()),
+                }]),
+        );
+        assert!(
+            runner.state().objects[&granter].timestamp < runner.state().objects[&carrier].timestamp
+        );
+        assert!(
+            runner.state().objects[&carrier].timestamp < runner.state().objects[&witness].timestamp
+        );
+        assert!(
+            runner.state().objects[&witness].timestamp < runner.state().objects[&writer].timestamp
+        );
+        assert!(activated_ability_definitions(runner.state(), witness).is_empty());
+        assert_eq!(
+            activated_ability_definitions(runner.state(), donor)[0].1,
+            donor_ability
+        );
+        assert!(runner.state().objects[&granter]
+            .static_definitions
+            .iter_unchecked()
+            .any(|definition| matches!(
+                definition.modifications.as_slice(),
+                [ContinuousModification::GrantStaticAbility { .. }]
+            )));
+        assert!(runner.state().objects[&writer]
+            .static_definitions
+            .iter_unchecked()
+            .any(|definition| matches!(
+                definition.modifications.as_slice(),
+                [ContinuousModification::GrantAbility { .. }]
+            )));
+
+        mark_layers_full(runner.state_mut());
+        flush_layers(runner.state_mut());
+        let written = if writer_reaches_witness {
+            witness
+        } else {
+            other
+        };
+        assert_eq!(
+            activated_ability_definitions(runner.state(), written)[0].1,
+            mana_ability
+        );
+        let carrier_has_inner = runner.state().objects[&carrier]
+            .static_definitions
+            .iter_unchecked()
+            .any(|definition| definition == &inner);
+        assert_eq!(carrier_has_inner, writer_reaches_witness);
+        if writer_reaches_witness {
+            assert_eq!(
+                activated_ability_definitions(runner.state(), carrier)[0].1,
+                donor_ability
+            );
+        } else {
+            assert!(activated_ability_definitions(runner.state(), witness).is_empty());
+            assert!(activated_ability_definitions(runner.state(), carrier).is_empty());
         }
     }
 }

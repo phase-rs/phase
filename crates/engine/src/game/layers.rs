@@ -4843,6 +4843,17 @@ fn prepare_incremental_flush(
         return None;
     }
 
+    // CR 613.6: A restricted pass cannot decide whether an outside-slice
+    // carrier received its original static grant. Re-derive both populations
+    // together when any part of that inner static can reach an entrant.
+    if active_effects.iter().any(|effect| {
+        !recipient_ids.contains(&effect.source_id)
+            && effect_can_reach_incremental_recipients(effect, &recipient_ids)
+            && referenced_granted_static_parent(state, effect).is_some()
+    }) {
+        return None;
+    }
+
     Some(PreparedIncrementalFlush {
         recipient_ids,
         active_effects,
@@ -7937,16 +7948,12 @@ fn referenced_grant_output(
 }
 
 fn is_referenced_grant(effect: &ActiveContinuousEffect) -> bool {
-    matches!(
-        effect.modification,
-        ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
-            | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
-    )
+    is_referenced_grant_modification(&effect.modification)
 }
 
-/// A layer-6 ability writer cannot change a provider set whose filter and
-/// gates do not read abilities when it reaches neither a provider, the host,
-/// nor the original granter of a synthesized static effect.
+/// A layer-6 ability writer cannot change a referenced grant when its reader
+/// and exact original grant do not read abilities and it reaches neither a
+/// provider, the carrier, nor the original granter.
 /// Keep this rejection before any `GameState` preview clone.
 fn writer_cannot_reach_referenced_read(
     state: &GameState,
@@ -7958,7 +7965,8 @@ fn writer_cannot_reach_referenced_read(
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => source,
         _ => return false,
     };
-    let reads = target_filter_characteristic_reads(source)
+    let parent = referenced_granted_static_parent(state, reader);
+    let mut reads = target_filter_characteristic_reads(source)
         .union(target_filter_characteristic_reads(&reader.affected_filter))
         .union(
             reader
@@ -7967,6 +7975,17 @@ fn writer_cannot_reach_referenced_read(
                 .map(static_condition_characteristic_reads)
                 .unwrap_or(CharacteristicKinds::EMPTY),
         );
+    if let Some(parent) = &parent {
+        reads = reads
+            .union(target_filter_characteristic_reads(&parent.affected_filter))
+            .union(
+                parent
+                    .condition
+                    .as_ref()
+                    .map(static_condition_characteristic_reads)
+                    .unwrap_or(CharacteristicKinds::EMPTY),
+            );
+    }
     if reads.intersects(CharacteristicKinds::ABILITIES) {
         return false;
     }
@@ -8024,6 +8043,68 @@ fn referenced_grant_depends_on(
         != referenced_grant_output(
             &scratch,
             reader,
+            restrict_to,
+            &scratch_suppressed,
+            &scratch_started,
+        )
+}
+
+fn referenced_parent_affected_set(
+    state: &GameState,
+    parent: &ActiveContinuousEffect,
+    restrict_to: Option<&BTreeSet<ObjectId>>,
+    abilities_suppressed: &HashSet<ObjectId>,
+    started_effect_sets: &StartedContinuousEffectSets,
+) -> Vec<ObjectId> {
+    let Some(key) = continuous_effect_group_key(state, parent) else {
+        return Vec::new();
+    };
+    let mut scratch = state.clone();
+    let mut scratch_suppressed = abilities_suppressed.clone();
+    let mut scratch_started = started_effect_sets.clone();
+    let mut scratch_zones = LayerZoneObjectCache::default();
+    apply_continuous_effect_filtered(
+        &mut scratch,
+        parent,
+        restrict_to,
+        &mut scratch_suppressed,
+        &mut scratch_zones,
+        &mut scratch_started,
+    );
+    scratch_started.get(&key).cloned().unwrap_or_default()
+}
+
+fn referenced_parent_depends_on(
+    state: &GameState,
+    parent: &ActiveContinuousEffect,
+    writer: &ActiveContinuousEffect,
+    restrict_to: Option<&BTreeSet<ObjectId>>,
+    abilities_suppressed: &HashSet<ObjectId>,
+    started_effect_sets: &StartedContinuousEffectSets,
+) -> bool {
+    let before = referenced_parent_affected_set(
+        state,
+        parent,
+        restrict_to,
+        abilities_suppressed,
+        started_effect_sets,
+    );
+    let mut scratch = state.clone();
+    let mut scratch_suppressed = abilities_suppressed.clone();
+    let mut scratch_started = started_effect_sets.clone();
+    let mut scratch_zones = LayerZoneObjectCache::default();
+    apply_continuous_effect_filtered(
+        &mut scratch,
+        writer,
+        restrict_to,
+        &mut scratch_suppressed,
+        &mut scratch_zones,
+        &mut scratch_started,
+    );
+    before
+        != referenced_parent_affected_set(
+            &scratch,
+            parent,
             restrict_to,
             &scratch_suppressed,
             &scratch_started,
@@ -8106,6 +8187,53 @@ fn apply_ability_effects_with_referenced_grants(
                             started_effect_sets,
                             before,
                         )
+                    }
+                } else if matches!(
+                    pending[i].modification,
+                    ContinuousModification::GrantStaticAbility { .. }
+                ) {
+                    // CR 613.8a: A witness writer can enable the original
+                    // grant before its nested reader has any donor output.
+                    // Keep the parent's carrier-set comparison independent of
+                    // the reader's donated-definition comparison.
+                    let parent = &pending[i];
+                    let writer = &pending[j];
+                    let parent_has_referenced_reader = matches!(
+                        &parent.modification,
+                        ContinuousModification::GrantStaticAbility { definition }
+                            if definition.modifications.iter().any(is_referenced_grant_modification)
+                    );
+                    if parent.characteristic_defining != writer.characteristic_defining
+                        || continuous_effect_group_key(state, parent)
+                            == continuous_effect_group_key(state, writer)
+                        || !modification_characteristic_writes(&writer.modification)
+                            .intersects(CharacteristicKinds::ABILITIES)
+                        || !parent_has_referenced_reader
+                    {
+                        false
+                    } else {
+                        let has_parent_sensitive_reader = pending.iter().any(|reader| {
+                            is_referenced_grant(reader)
+                                && referenced_granted_static_parent(state, reader).is_some_and(
+                                    |original| {
+                                        original.source_id == parent.source_id
+                                            && original.def_index == parent.def_index
+                                            && original.transient_id == parent.transient_id
+                                            && original.trigger_producer_origin
+                                                == parent.trigger_producer_origin
+                                    },
+                                )
+                                && !writer_cannot_reach_referenced_read(state, reader, writer)
+                        });
+                        has_parent_sensitive_reader
+                            && referenced_parent_depends_on(
+                                state,
+                                parent,
+                                writer,
+                                restrict_to,
+                                abilities_suppressed,
+                                started_effect_sets,
+                            )
                     }
                 } else {
                     depends_on(&pending[i], &pending[j], state)
@@ -8678,6 +8806,114 @@ fn continuous_effect_group_key(
     })
 }
 
+/// Find the exact functioning grant that produced a synthesized static. The
+/// collector remains the authority for source zone, duration, and occurrence.
+fn original_granted_static_parent(
+    state: &GameState,
+    effect: &ActiveContinuousEffect,
+) -> Option<ActiveContinuousEffect> {
+    if effect.def_index.is_some()
+        || effect.transient_id.is_some()
+        || effect.expanded_trigger_provider.is_some()
+    {
+        return None;
+    }
+    let origin = effect.trigger_producer_origin.as_ref()?;
+    let parents = match origin {
+        TriggerProducerOrigin::Static { source, .. } => {
+            let object = state.objects.get(&source.object_id)?;
+            if ObjectIncarnationRef::from_object(object) != *source {
+                return None;
+            }
+            active_continuous_effects_from_static_source(state, object)
+        }
+        TriggerProducerOrigin::Transient { .. } => {
+            let mut effects = Vec::new();
+            gather_transient_continuous_effects(state, &mut effects);
+            effects
+        }
+    };
+    parents.into_iter().find(|parent| {
+        parent.trigger_producer_origin.as_ref() == Some(origin)
+            && matches!(
+                &parent.modification,
+                ContinuousModification::GrantStaticAbility { .. }
+            )
+            && (parent.def_index.is_some() || parent.transient_id.is_some())
+    })
+}
+
+fn referenced_granted_static_parent(
+    state: &GameState,
+    effect: &ActiveContinuousEffect,
+) -> Option<ActiveContinuousEffect> {
+    original_granted_static_parent(state, effect).filter(|parent| {
+        matches!(
+            &parent.modification,
+            ContinuousModification::GrantStaticAbility { definition }
+                if definition.modifications.iter().any(is_referenced_grant_modification)
+        )
+    })
+}
+
+fn is_referenced_grant_modification(modification: &ContinuousModification) -> bool {
+    matches!(
+        modification,
+        ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+            | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+    )
+}
+
+/// CR 613.6: A granted static can retain its affected set only after its
+/// original grant qualified the carrier. The inner affected population is
+/// independent and is scanned by the ordinary application below.
+fn referenced_granted_static_parent_qualifies(
+    state: &GameState,
+    effect: &ActiveContinuousEffect,
+    restrict_to: Option<&BTreeSet<ObjectId>>,
+    abilities_suppressed: &HashSet<ObjectId>,
+    started_effect_sets: &StartedContinuousEffectSets,
+) -> bool {
+    if effect.def_index.is_some()
+        || effect.transient_id.is_some()
+        || effect.expanded_trigger_provider.is_some()
+        || effect.trigger_producer_origin.is_none()
+    {
+        return true;
+    }
+    let Some(parent) = original_granted_static_parent(state, effect) else {
+        return false;
+    };
+    if !matches!(
+        &parent.modification,
+        ContinuousModification::GrantStaticAbility { definition }
+            if definition.modifications.iter().any(is_referenced_grant_modification)
+    ) {
+        return true;
+    }
+    let Some(parent_key) = continuous_effect_group_key(state, &parent) else {
+        return false;
+    };
+    if let Some(affected) = started_effect_sets.get(&parent_key) {
+        return affected.contains(&effect.source_id);
+    }
+    let mut scratch = state.clone();
+    let mut scratch_suppressed = abilities_suppressed.clone();
+    let mut scratch_started = started_effect_sets.clone();
+    let mut scratch_zones = LayerZoneObjectCache::default();
+    apply_continuous_effect_filtered(
+        &mut scratch,
+        &parent,
+        restrict_to,
+        &mut scratch_suppressed,
+        &mut scratch_zones,
+        &mut scratch_started,
+    );
+    scratch_started
+        .get(&parent_key)
+        .is_some_and(|affected| affected.contains(&effect.source_id))
+}
+
 /// CR 613.1f + CR 613.6: Ability removal prevents an effect that has not begun
 /// applying from starting in a later layer. Synthesized granted statics depend
 /// on both the granting source and the recipient that carries the granted
@@ -8875,6 +9111,21 @@ fn apply_continuous_effect_filtered(
         .as_ref()
         .and_then(|key| started_effect_sets.get(key));
     let retained_affected_set_was_present = retained_affected_ids.is_some();
+
+    // CR 613.6: Qualify the carrier through its exact original grant before
+    // any part of an inner referenced-provider static can start its own set.
+    // A legitimately started inner group keeps that set in later layers.
+    if retained_affected_ids.is_none()
+        && !referenced_granted_static_parent_qualifies(
+            state,
+            effect,
+            restrict_to,
+            abilities_suppressed,
+            started_effect_sets,
+        )
+    {
+        return None;
+    }
 
     // CR 613.1f: A printed static on an object that lost all abilities this
     // pass must not re-apply in later layers (Death's Shadow CDA after
