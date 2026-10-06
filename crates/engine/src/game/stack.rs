@@ -693,10 +693,10 @@ pub fn apply_resolved_stack_removal(
 /// when another path already removed it, and popping unconditionally would then
 /// discard an unrelated stack object.
 ///
-/// Note this deliberately does NOT clear `pending_trigger`; that is a separate
-/// piece of construction state owned by
-/// `engine::drop_mid_construction_pending_trigger`, which calls this and then
-/// clears it.
+/// Note this deliberately does NOT clear `pending_trigger`; the remaining
+/// construction cursors are released by
+/// `triggers::release_pending_trigger_construction`, which
+/// `engine::drop_mid_construction_pending_trigger` calls after this.
 pub(super) fn pop_uncommitted_pending_trigger_entry(
     state: &mut GameState,
     disposition: super::lifecycle::DelayedTerminalDisposition,
