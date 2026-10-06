@@ -6468,6 +6468,71 @@ mod tests {
             .iter()
             .any(|cards| cards.contains(&ids[0]) && cards.contains(&ids[1])));
     }
+    #[test]
+    fn legal_actions_bounded_zero_mana_value_return_count() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::phase::Phase;
+        // Synthetic return-clause harness: verbatim Lively Dirge return mode,
+        // without its separate spree payment machinery.
+        for reject_three in [true, false] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let ids: Vec<_> = (0..3)
+                .map(|index| {
+                    scenario
+                        .add_creature_to_graveyard(P0, &format!("Zero {index}"), 1, 1)
+                        .as_artifact_creature()
+                        .with_mana_cost(ManaCost::zero())
+                        .id()
+                })
+                .collect();
+            let spell = scenario.add_spell_to_hand_from_oracle(P0, "Bounded return clause harness", false,
+                "Return up to two creature cards with total mana value 4 or less from your graveyard to the battlefield.")
+                .with_mana_cost(ManaCost::zero()).id();
+            let mut runner = scenario.build();
+            let outcome = runner.cast(spell).resolve();
+            assert!(
+                matches!(outcome.final_waiting_for(), WaitingFor::ChooseFromZoneChoice { cards, .. }
+                if cards.len() == 3 && ids.iter().all(|id| cards.contains(id)))
+            );
+            outcome.assert_zone(&ids, Zone::Graveyard);
+            let actions = crate::ai_support::legal_actions(runner.state());
+            let selections: Vec<_> = actions
+                .iter()
+                .filter_map(|action| match action {
+                    GameAction::SelectCards { cards } => Some(cards),
+                    _ => None,
+                })
+                .collect();
+            // CR 608.2d: Zero mana value does not remove the independent two-card ceiling.
+            for count in 0..=2 {
+                assert!(selections
+                    .iter()
+                    .any(|cards| cards.as_slice() == &ids[..count]));
+            }
+            assert!(!selections.iter().any(|cards| cards.len() > 2));
+            if reject_three {
+                let prompt = runner.state().waiting_for.clone();
+                assert!(runner
+                    .act(GameAction::SelectCards { cards: ids.clone() })
+                    .is_err());
+                assert_eq!(runner.state().waiting_for, prompt);
+                assert!(ids
+                    .iter()
+                    .all(|id| runner.state().objects[id].zone == Zone::Graveyard));
+            } else {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: ids[..2].to_vec(),
+                    })
+                    .expect("two zero-MV cards are legal");
+                assert!(ids[..2]
+                    .iter()
+                    .all(|id| runner.state().objects[id].zone == Zone::Battlefield));
+                assert_eq!(runner.state().objects[&ids[2]].zone, Zone::Graveyard);
+            }
+        }
+    }
     use crate::game::game_object::RoomDoor;
     use crate::types::game_state::TargetEffectDetail;
     use std::sync::Arc;

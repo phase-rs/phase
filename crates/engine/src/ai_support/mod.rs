@@ -690,11 +690,16 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 player: _,
                 cards,
                 count,
+                up_to,
                 ..
             },
             GameAction::SelectCards { cards: chosen },
-        )
-        | (
+        ) => {
+            // CR 608.2d: "Up to" permits smaller legal selections while retaining the count ceiling.
+            let exact = if *up_to { None } else { Some(*count) };
+            selection_mismatch(chosen, cards, exact) || (*up_to && chosen.len() > *count)
+        }
+        (
             WaitingFor::ConniveDiscard {
                 player: _,
                 cards,
@@ -4226,6 +4231,109 @@ mod tests {
     fn cheap_reject_candidate_preserves_ambiguous_priority_pass() {
         let state = GameState::new_two_player(42);
         assert!(!cheap_reject_candidate(&state, &GameAction::PassPriority));
+    }
+
+    #[test]
+    fn cheap_reject_candidate_zone_choice_count_boundaries() {
+        let mut state = GameState::new_two_player(42);
+        let choices = vec![ObjectId(1), ObjectId(2), ObjectId(3)];
+        // CR 608.2d: Choices must obey both the written count and offered object set.
+        for up_to in [true, false] {
+            for count in [0, 2] {
+                for cards in [choices.clone(), vec![]] {
+                    state.waiting_for = WaitingFor::ChooseFromZoneChoice {
+                        player: PlayerId(0),
+                        cards,
+                        count,
+                        up_to,
+                        constraint: None,
+                        source_id: ObjectId(100),
+                        reciprocal_role: None,
+                    };
+                    for chosen in [
+                        vec![],
+                        vec![choices[0]],
+                        vec![choices[0], choices[1]],
+                        choices.clone(),
+                        vec![choices[0], choices[0]],
+                        vec![choices[0], ObjectId(99)],
+                    ] {
+                        let valid_count = if up_to {
+                            chosen.len() <= count
+                        } else {
+                            chosen.len() == count
+                        };
+                        let offered = matches!(&state.waiting_for, WaitingFor::ChooseFromZoneChoice { cards, .. }
+                            if chosen.iter().all(|id| cards.contains(id)));
+                        let distinct = chosen
+                            .iter()
+                            .enumerate()
+                            .all(|(i, id)| !chosen[..i].contains(id));
+                        assert_eq!(
+                            cheap_reject_candidate(
+                                &state,
+                                &GameAction::SelectCards {
+                                    cards: chosen.clone()
+                                }
+                            ),
+                            !(valid_count && offered && distinct),
+                            "up_to={up_to}, count={count}, chosen={chosen:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cheap_reject_candidate_preserves_exact_discard_counts() {
+        let mut state = GameState::new_two_player(42);
+        let choices = vec![ObjectId(1), ObjectId(2), ObjectId(3)];
+        let conniver = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Conniver".to_string(),
+            Zone::Battlefield,
+        );
+        let subject = state
+            .capture_connive_subject(conniver)
+            .expect("fixture conniver exists");
+        // CR 608.2d: Exact discard instructions require exactly the offered count.
+        for prompt in [
+            WaitingFor::ConniveDiscard {
+                player: PlayerId(0),
+                conniver: subject,
+                source_id: conniver,
+                cards: choices.clone(),
+                count: 2,
+            },
+            WaitingFor::DiscardToHandSize {
+                player: PlayerId(0),
+                cards: choices.clone(),
+                count: 2,
+            },
+        ] {
+            state.waiting_for = prompt;
+            assert!(!cheap_reject_candidate(
+                &state,
+                &GameAction::SelectCards {
+                    cards: vec![choices[0], choices[1]]
+                }
+            ));
+            for chosen in [
+                vec![],
+                vec![choices[0]],
+                choices.clone(),
+                vec![choices[0], choices[0]],
+                vec![choices[0], ObjectId(99)],
+            ] {
+                assert!(cheap_reject_candidate(
+                    &state,
+                    &GameAction::SelectCards { cards: chosen }
+                ));
+            }
+        }
     }
 
     #[test]
