@@ -3065,8 +3065,13 @@ mod tests {
     fn resolution_source_relatch_starts_only_from_immediate_departure_successor() {
         // CR 400.7e + CR 400.7j: a dies trigger that returns the card it found
         // in the graveyard relatches; a card that left and came back before
-        // resolution is a different object and must not.
-        for left_and_returned in [false, true] {
+        // resolution is a different object and must not, and a trigger cannot
+        // find the card it moved into a hidden zone.
+        for (departure, left_and_returned, relatches) in [
+            (Zone::Graveyard, false, true),
+            (Zone::Graveyard, true, false),
+            (Zone::Hand, false, false),
+        ] {
             let mut state = setup();
             let source = create_object(
                 &mut state,
@@ -3076,12 +3081,12 @@ mod tests {
                 Zone::Battlefield,
             );
             let mut dies_events = Vec::new();
-            move_to_zone(&mut state, source, Zone::Graveyard, &mut dies_events);
+            move_to_zone(&mut state, source, departure, &mut dies_events);
             let dies_event = dies_events
                 .into_iter()
                 .find(|event| {
-                    matches!(event, GameEvent::ZoneChanged { object_id, to: Zone::Graveyard, .. }
-                        if *object_id == source)
+                    matches!(event, GameEvent::ZoneChanged { object_id, to, .. }
+                        if *object_id == source && *to == departure)
                 })
                 .expect("dies event");
             let GameEvent::ZoneChanged { record, .. } = &dies_event else {
@@ -3119,8 +3124,8 @@ mod tests {
             assert_eq!(state.objects[&source].zone, Zone::Battlefield);
             assert_eq!(
                 state.resolution_source_relatch.is_some(),
-                !left_and_returned,
-                "left_and_returned={left_and_returned}"
+                relatches,
+                "departure={departure:?} left_and_returned={left_and_returned}"
             );
         }
     }

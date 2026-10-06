@@ -34738,10 +34738,11 @@ impl ResolvedAbility {
             .is_some_and(|object| self.is_own_departure_successor_in(state, object.zone, None))
     }
 
-    /// CR 400.7e: True when the source, sitting in `zone`, is the immediate
-    /// successor of its own triggering zone change: the triggering event moved
-    /// this exact captured identity into `zone`, and no later zone change of the
-    /// same storage id has been recorded. Callers pass the zone the source
+    /// CR 400.7e: True when the source, sitting in public `zone`, is the
+    /// immediate successor of its own triggering zone change: the triggering
+    /// event moved this exact captured identity into `zone`, and no later zone
+    /// change of the same storage id has been recorded. A trigger cannot find
+    /// the new object in a hidden zone. Callers pass the zone the source
     /// occupies, or, for a move still being applied, the zone it is leaving
     /// plus that move's departing incarnation: an incarnation departs only
     /// once, so a record carrying it is that in-flight move, not an earlier one.
@@ -34768,6 +34769,7 @@ impl ResolvedAbility {
                 event_source.identity.reference != source.identity.reference
             })
             || zone != *to
+            || !zone.is_public()
         {
             return false;
         }
