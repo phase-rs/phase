@@ -7951,71 +7951,172 @@ fn is_referenced_grant(effect: &ActiveContinuousEffect) -> bool {
     is_referenced_grant_modification(&effect.modification)
 }
 
-/// A layer-6 ability writer cannot change a referenced grant when its reader
-/// and exact original grant do not read abilities and it reaches neither a
-/// provider, the carrier, nor the original granter.
-/// Keep this rejection before any `GameState` preview clone.
-fn writer_cannot_reach_referenced_read(
-    state: &GameState,
-    reader: &ActiveContinuousEffect,
-    writer: &ActiveContinuousEffect,
-) -> bool {
-    let source = match &reader.modification {
-        ContinuousModification::GrantAllActivatedAbilitiesOf { source, .. }
-        | ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => source,
-        _ => return false,
-    };
-    let parent = referenced_granted_static_parent(state, reader);
-    let mut reads = target_filter_characteristic_reads(source)
-        .union(target_filter_characteristic_reads(&reader.affected_filter))
-        .union(
-            reader
-                .condition
-                .as_ref()
-                .map(static_condition_characteristic_reads)
-                .unwrap_or(CharacteristicKinds::EMPTY),
-        );
-    if let Some(parent) = &parent {
-        reads = reads
-            .union(target_filter_characteristic_reads(&parent.affected_filter))
-            .union(
-                parent
-                    .condition
-                    .as_ref()
-                    .map(static_condition_characteristic_reads)
-                    .unwrap_or(CharacteristicKinds::EMPTY),
-            );
-    }
-    if reads.intersects(CharacteristicKinds::ABILITIES) {
-        return false;
-    }
-    let mut scan_cache = LayerZoneObjectCache::default();
-    let candidate_ids = effect_candidate_ids(
-        state,
-        &writer.affected_filter,
-        writer.source_id,
-        &mut scan_cache,
-    );
-    // CR 613.8a: Removing the original static granter can suppress an
-    // unstarted synthesized reader even when it touches neither its recipient
-    // nor a provider. Transients have no such live granter to consult.
-    let original_static_granter = if reader.def_index.is_none() && reader.transient_id.is_none() {
-        match reader.trigger_producer_origin.as_ref() {
-            Some(TriggerProducerOrigin::Static { source, .. }) => Some(source.object_id),
-            _ => None,
+struct ReferencedReaderSelectionData {
+    parent: Option<ActiveContinuousEffect>,
+    reads: CharacteristicKinds,
+    original_static_granter: Option<ObjectId>,
+}
+
+struct ReferencedGrantSelectionCache {
+    controllers: Option<HashSet<PlayerId>>,
+    zones: LayerZoneObjectCache,
+    writer_candidates: Vec<Option<Vec<ObjectId>>>,
+    readers: Vec<Option<ReferencedReaderSelectionData>>,
+    parent_readers: Vec<Option<Vec<usize>>>,
+    cannot_reach: HashMap<(usize, usize), bool>,
+}
+
+impl ReferencedGrantSelectionCache {
+    fn new(len: usize) -> Self {
+        Self {
+            controllers: None,
+            zones: LayerZoneObjectCache::default(),
+            writer_candidates: std::iter::repeat_with(|| None).take(len).collect(),
+            readers: std::iter::repeat_with(|| None).take(len).collect(),
+            parent_readers: std::iter::repeat_with(|| None).take(len).collect(),
+            cannot_reach: HashMap::new(),
         }
-    } else {
-        None
-    };
-    let controllers: HashSet<_> = state.objects.values().map(|obj| obj.controller).collect();
-    !candidate_ids.iter().any(|&id| {
-        id == reader.source_id
-            || original_static_granter == Some(id)
-            || controllers.iter().any(|&controller| {
-                let ctx = FilterContext::from_source_with_controller(reader.source_id, controller);
-                matches_target_filter(state, id, source, &ctx)
+    }
+
+    fn reader_data(
+        &mut self,
+        state: &GameState,
+        pending: &[ActiveContinuousEffect],
+        reader_index: usize,
+    ) -> &ReferencedReaderSelectionData {
+        self.readers[reader_index].get_or_insert_with(|| {
+            let reader = &pending[reader_index];
+            let source = match &reader.modification {
+                ContinuousModification::GrantAllActivatedAbilitiesOf { source, .. }
+                | ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => source,
+                _ => unreachable!("selection metadata is only requested for referenced grants"),
+            };
+            let parent = referenced_granted_static_parent(state, reader);
+            let mut reads = target_filter_characteristic_reads(source)
+                .union(target_filter_characteristic_reads(&reader.affected_filter))
+                .union(
+                    reader
+                        .condition
+                        .as_ref()
+                        .map(static_condition_characteristic_reads)
+                        .unwrap_or(CharacteristicKinds::EMPTY),
+                );
+            if let Some(parent) = &parent {
+                reads = reads
+                    .union(target_filter_characteristic_reads(&parent.affected_filter))
+                    .union(
+                        parent
+                            .condition
+                            .as_ref()
+                            .map(static_condition_characteristic_reads)
+                            .unwrap_or(CharacteristicKinds::EMPTY),
+                    );
+            }
+            // CR 613.8a: Removing the original static granter can suppress an
+            // unstarted synthesized reader even when it touches neither its
+            // recipient nor a provider. Transients have no live granter here.
+            let original_static_granter = if reader.def_index.is_none()
+                && reader.transient_id.is_none()
+            {
+                match reader.trigger_producer_origin.as_ref() {
+                    Some(TriggerProducerOrigin::Static { source, .. }) => Some(source.object_id),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            ReferencedReaderSelectionData {
+                parent,
+                reads,
+                original_static_granter,
+            }
+        })
+    }
+
+    fn parent_readers(
+        &mut self,
+        state: &GameState,
+        pending: &[ActiveContinuousEffect],
+        parent_index: usize,
+    ) -> &[usize] {
+        if self.parent_readers[parent_index].is_none() {
+            let parent = &pending[parent_index];
+            let readers = pending
+                .iter()
+                .enumerate()
+                .filter_map(|(index, reader)| {
+                    (is_referenced_grant(reader)
+                        && self
+                            .reader_data(state, pending, index)
+                            .parent
+                            .as_ref()
+                            .is_some_and(|original| {
+                                original.source_id == parent.source_id
+                                    && original.def_index == parent.def_index
+                                    && original.transient_id == parent.transient_id
+                                    && original.trigger_producer_origin
+                                        == parent.trigger_producer_origin
+                            }))
+                    .then_some(index)
+                })
+                .collect();
+            self.parent_readers[parent_index] = Some(readers);
+        }
+        self.parent_readers[parent_index].as_deref().unwrap()
+    }
+
+    /// A layer-6 ability writer cannot change this reader when its reader and
+    /// exact original grant do not read abilities and it reaches neither a
+    /// provider, the carrier, nor the original granter. Reject before preview.
+    fn writer_cannot_reach_referenced_read(
+        &mut self,
+        state: &GameState,
+        pending: &[ActiveContinuousEffect],
+        reader_index: usize,
+        writer_index: usize,
+    ) -> bool {
+        if let Some(&answer) = self.cannot_reach.get(&(reader_index, writer_index)) {
+            return answer;
+        }
+        let reader = &pending[reader_index];
+        let writer = &pending[writer_index];
+        let data = self.reader_data(state, pending, reader_index);
+        let answer = if data.reads.intersects(CharacteristicKinds::ABILITIES) {
+            false
+        } else {
+            let original_static_granter = data.original_static_granter;
+            let source = match &reader.modification {
+                ContinuousModification::GrantAllActivatedAbilitiesOf { source, .. }
+                | ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => source,
+                _ => unreachable!("reach is only requested for referenced grants"),
+            };
+            let candidate_ids = self.writer_candidates[writer_index].get_or_insert_with(|| {
+                effect_candidate_ids(
+                    state,
+                    &writer.affected_filter,
+                    writer.source_id,
+                    &mut self.zones,
+                )
+            });
+            let controllers = self
+                .controllers
+                .get_or_insert_with(|| state.objects.values().map(|obj| obj.controller).collect());
+            !candidate_ids.iter().any(|&id| {
+                id == reader.source_id
+                    || original_static_granter == Some(id)
+                    || controllers.iter().any(|&controller| {
+                        let ctx = FilterContext::from_source_with_controller(
+                            reader.source_id,
+                            controller,
+                        );
+                        matches_target_filter(state, id, source, &ctx)
+                    })
             })
-    })
+        };
+        self.cannot_reach
+            .insert((reader_index, writer_index), answer);
+        answer
+    }
 }
 
 fn referenced_grant_depends_on(
@@ -8081,14 +8182,8 @@ fn referenced_parent_depends_on(
     restrict_to: Option<&BTreeSet<ObjectId>>,
     abilities_suppressed: &HashSet<ObjectId>,
     started_effect_sets: &StartedContinuousEffectSets,
+    before: &[ObjectId],
 ) -> bool {
-    let before = referenced_parent_affected_set(
-        state,
-        parent,
-        restrict_to,
-        abilities_suppressed,
-        started_effect_sets,
-    );
     let mut scratch = state.clone();
     let mut scratch_suppressed = abilities_suppressed.clone();
     let mut scratch_started = started_effect_sets.clone();
@@ -8101,14 +8196,14 @@ fn referenced_parent_depends_on(
         &mut scratch_zones,
         &mut scratch_started,
     );
-    before
-        != referenced_parent_affected_set(
-            &scratch,
-            parent,
-            restrict_to,
-            &scratch_suppressed,
-            &scratch_started,
-        )
+    let after = referenced_parent_affected_set(
+        &scratch,
+        parent,
+        restrict_to,
+        &scratch_suppressed,
+        &scratch_started,
+    );
+    before != after.as_slice()
 }
 
 fn dependency_path_exists(edges: &[Vec<usize>], from: usize, target: usize) -> bool {
@@ -8139,123 +8234,137 @@ fn apply_ability_effects_with_referenced_grants(
 ) {
     let mut pending = order_by_timestamp(effects);
     while !pending.is_empty() {
-        let mut edges = vec![Vec::new(); pending.len()];
-        let mut before_outputs: Vec<Option<ReferencedGrantOutput>> = vec![None; pending.len()];
-        for i in 0..pending.len() {
-            for j in 0..pending.len() {
-                if i == j {
-                    continue;
-                }
-                let dependent = if is_referenced_grant(&pending[i]) {
-                    // The cheap reach rejection precedes the first reader
-                    // output clone; one baseline output is reused for every
-                    // candidate writer in this selection.
-                    let writer = &pending[j];
-                    let reader = &pending[i];
-                    // CR 613.8a: Only matching CDA classes and distinct
-                    // generators can depend. The group key distinguishes
-                    // separate granted statics on the same recipient; absent
-                    // keys do not prove that two effects share a generator.
-                    // The writer must reach an ability read before preview.
-                    if reader.characteristic_defining != writer.characteristic_defining
-                        || continuous_effect_group_key(state, reader)
-                            .zip(continuous_effect_group_key(state, writer))
-                            .is_some_and(|(reader_group, writer_group)| {
-                                reader_group == writer_group
-                            })
-                        || !modification_characteristic_writes(&writer.modification)
-                            .intersects(CharacteristicKinds::ABILITIES)
-                        || writer_cannot_reach_referenced_read(state, reader, writer)
-                    {
-                        false
-                    } else {
-                        let before = before_outputs[i].get_or_insert_with(|| {
-                            referenced_grant_output(
+        // Selection-local observations expire before pending changes or the
+        // chosen effect mutates real state; AFTER previews use fresh state.
+        let next = {
+            let mut edges = vec![Vec::new(); pending.len()];
+            let mut before_outputs: Vec<Option<ReferencedGrantOutput>> = vec![None; pending.len()];
+            let mut before_parent_sets: Vec<Option<Vec<ObjectId>>> = vec![None; pending.len()];
+            let mut cache = ReferencedGrantSelectionCache::new(pending.len());
+            for i in 0..pending.len() {
+                for j in 0..pending.len() {
+                    if i == j {
+                        continue;
+                    }
+                    let dependent = if is_referenced_grant(&pending[i]) {
+                        // The cheap reach rejection precedes the first reader
+                        // output clone; one baseline output is reused for every
+                        // candidate writer in this selection.
+                        let writer = &pending[j];
+                        let reader = &pending[i];
+                        // CR 613.8a: Only matching CDA classes and distinct
+                        // generators can depend. The group key distinguishes
+                        // separate granted statics on the same recipient; absent
+                        // keys do not prove that two effects share a generator.
+                        // The writer must reach an ability read before preview.
+                        if reader.characteristic_defining != writer.characteristic_defining
+                            || continuous_effect_group_key(state, reader)
+                                .zip(continuous_effect_group_key(state, writer))
+                                .is_some_and(|(reader_group, writer_group)| {
+                                    reader_group == writer_group
+                                })
+                            || !modification_characteristic_writes(&writer.modification)
+                                .intersects(CharacteristicKinds::ABILITIES)
+                            || cache.writer_cannot_reach_referenced_read(state, &pending, i, j)
+                        {
+                            false
+                        } else {
+                            let before = before_outputs[i].get_or_insert_with(|| {
+                                referenced_grant_output(
+                                    state,
+                                    reader,
+                                    restrict_to,
+                                    abilities_suppressed,
+                                    started_effect_sets,
+                                )
+                            });
+                            referenced_grant_depends_on(
                                 state,
                                 reader,
-                                restrict_to,
-                                abilities_suppressed,
-                                started_effect_sets,
-                            )
-                        });
-                        referenced_grant_depends_on(
-                            state,
-                            reader,
-                            writer,
-                            restrict_to,
-                            abilities_suppressed,
-                            started_effect_sets,
-                            before,
-                        )
-                    }
-                } else if matches!(
-                    &pending[i].modification,
-                    ContinuousModification::GrantStaticAbility { definition }
-                        if definition.modifications.iter().any(is_referenced_grant_modification)
-                ) {
-                    // CR 613.8a: A witness writer can enable the original
-                    // grant before its nested reader has any donor output.
-                    // Keep the parent's carrier-set comparison independent of
-                    // the reader's donated-definition comparison.
-                    let parent = &pending[i];
-                    let writer = &pending[j];
-                    if parent.characteristic_defining != writer.characteristic_defining
-                        || continuous_effect_group_key(state, parent)
-                            == continuous_effect_group_key(state, writer)
-                        || !modification_characteristic_writes(&writer.modification)
-                            .intersects(CharacteristicKinds::ABILITIES)
-                    {
-                        false
-                    } else {
-                        let has_parent_sensitive_reader = pending.iter().any(|reader| {
-                            is_referenced_grant(reader)
-                                && referenced_granted_static_parent(state, reader).is_some_and(
-                                    |original| {
-                                        original.source_id == parent.source_id
-                                            && original.def_index == parent.def_index
-                                            && original.transient_id == parent.transient_id
-                                            && original.trigger_producer_origin
-                                                == parent.trigger_producer_origin
-                                    },
-                                )
-                                && !writer_cannot_reach_referenced_read(state, reader, writer)
-                        });
-                        if has_parent_sensitive_reader {
-                            referenced_parent_depends_on(
-                                state,
-                                parent,
                                 writer,
                                 restrict_to,
                                 abilities_suppressed,
                                 started_effect_sets,
+                                before,
                             )
-                        } else {
-                            depends_on(parent, writer, state)
                         }
+                    } else if matches!(
+                        &pending[i].modification,
+                        ContinuousModification::GrantStaticAbility { definition }
+                            if definition.modifications.iter().any(is_referenced_grant_modification)
+                    ) {
+                        // CR 613.8a: A witness writer can enable the original
+                        // grant before its nested reader has any donor output.
+                        // Keep the parent's carrier-set comparison independent of
+                        // the reader's donated-definition comparison.
+                        let parent = &pending[i];
+                        let writer = &pending[j];
+                        if parent.characteristic_defining != writer.characteristic_defining
+                            || continuous_effect_group_key(state, parent)
+                                == continuous_effect_group_key(state, writer)
+                            || !modification_characteristic_writes(&writer.modification)
+                                .intersects(CharacteristicKinds::ABILITIES)
+                        {
+                            false
+                        } else {
+                            let reader_count = cache.parent_readers(state, &pending, i).len();
+                            let has_parent_sensitive_reader = (0..reader_count).any(|position| {
+                                let reader_index =
+                                    cache.parent_readers(state, &pending, i)[position];
+                                !cache.writer_cannot_reach_referenced_read(
+                                    state,
+                                    &pending,
+                                    reader_index,
+                                    j,
+                                )
+                            });
+                            if has_parent_sensitive_reader {
+                                let before = before_parent_sets[i].get_or_insert_with(|| {
+                                    referenced_parent_affected_set(
+                                        state,
+                                        parent,
+                                        restrict_to,
+                                        abilities_suppressed,
+                                        started_effect_sets,
+                                    )
+                                });
+                                referenced_parent_depends_on(
+                                    state,
+                                    parent,
+                                    writer,
+                                    restrict_to,
+                                    abilities_suppressed,
+                                    started_effect_sets,
+                                    before,
+                                )
+                            } else {
+                                depends_on(parent, writer, state)
+                            }
+                        }
+                    } else {
+                        depends_on(&pending[i], &pending[j], state)
+                    };
+                    if dependent {
+                        edges[i].push(j);
                     }
-                } else {
-                    depends_on(&pending[i], &pending[j], state)
-                };
-                if dependent {
-                    edges[i].push(j);
                 }
             }
-        }
-        // CR 613.8b: Ignore only edges within a dependency loop. An edge
-        // leaving that loop must still be satisfied. `j` is in `i`'s cyclic
-        // component exactly when both can reach each other. Pending is already
-        // timestamp-sorted, so wait for older members of the same loop.
-        let next = (0..pending.len())
-            .find(|&i| {
-                edges[i]
-                    .iter()
-                    .all(|&j| dependency_path_exists(&edges, j, i))
-                    && (0..i).all(|j| {
-                        !dependency_path_exists(&edges, i, j)
-                            || !dependency_path_exists(&edges, j, i)
-                    })
-            })
-            .expect("a finite dependency graph has an independent or cyclic effect");
+            // CR 613.8b: Ignore only edges within a dependency loop. An edge
+            // leaving that loop must still be satisfied. `j` is in `i`'s cyclic
+            // component exactly when both can reach each other. Pending is already
+            // timestamp-sorted, so wait for older members of the same loop.
+            (0..pending.len())
+                .find(|&i| {
+                    edges[i]
+                        .iter()
+                        .all(|&j| dependency_path_exists(&edges, j, i))
+                        && (0..i).all(|j| {
+                            !dependency_path_exists(&edges, i, j)
+                                || !dependency_path_exists(&edges, j, i)
+                        })
+                })
+                .expect("a finite dependency graph has an independent or cyclic effect")
+        };
         let selected = pending.remove(next);
         apply_continuous_effect_filtered(
             state,
