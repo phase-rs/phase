@@ -508,6 +508,12 @@ fn master_thief_aura_graft_compound_replays_before_growth_and_legacy_install() {
             vec![&graft]
         );
         assert_no_retirement_of(board.runner.state(), start, old.id);
+        // The Graft's caster still holds priority after its host choice
+        // resolves; pass it back to Growth's caster, as `park_graft` does.
+        if board.runner.state().priority_player != P0 {
+            board.runner.act(GameAction::PassPriority).unwrap();
+        }
+        assert_eq!(board.runner.state().priority_player, P0);
         board
             .runner
             .cast(board.growth)

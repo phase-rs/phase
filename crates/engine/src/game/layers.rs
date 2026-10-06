@@ -1144,25 +1144,19 @@ pub(crate) fn prune_lapsed_host_bound_casting_permissions(state: &mut GameState)
 /// spell or ability's resolution, the effect does nothing"), so it is cited
 /// here as the rule that ends the duration, not as a quotation about revival.
 ///
-/// Runs at the same seam as `prune_lapsed_host_bound_casting_permissions`,
-/// inside `evaluate_layers` after the Layer-2 control board is finalized. Like
-/// `prune_lapsed_controller_controls_source` it does NOT mark layers dirty: it
-/// is already inside the pass, and marking would re-enter it.
-pub(crate) fn prune_lapsed_host_bound_effects(state: &mut GameState) {
-    if !state.transient_continuous_effects.iter().any(|e| {
-        matches!(
-            e.duration,
-            Duration::WhileControllingHost | Duration::WhileHostOnBattlefield
-        )
-    }) {
-        return;
-    }
-    // CR 611.2b: an effect is ENDED here, not suppressed. Both legs below are
-    // lapses that no zone change reports, so nothing else would remove the
+/// Runs on every settled board inside the derive-then-end fixed point of
+/// `evaluate_layers` (and after an incremental derivation): a removal returns
+/// `true` so the caller re-derives without the ended effect. Removing it after
+/// the board was already derived WITH it would publish that board — Master
+/// Thief's artifact would stay stolen after its controller lost the Thief.
+/// Like `prune_lapsed_controller_controls_source` it does NOT mark layers
+/// dirty: it is already inside the pass, and marking would re-enter it.
+pub(crate) fn prune_lapsed_host_bound_effects(state: &mut GameState) -> bool {
+    // CR 611.2b: an effect is ENDED here, not suppressed. Both readings lapse
+    // without any zone change reporting it, so nothing else would remove the
     // entry: `WhileControllingHost` lapses on a control change with the host
     // still on the battlefield, `WhileHostOnBattlefield` lapses on the host's
-    // phase-out (CR 702.26f). The event deadline is NOT ended here — see the
-    // match arm below for why.
+    // phase-out (CR 702.26f).
     //
     // Suppressing instead (declining to apply while the gate is false) is
     // wrong twice over: CR 611.2b ends the duration rather than pausing it, so
@@ -1172,49 +1166,16 @@ pub(crate) fn prune_lapsed_host_bound_effects(state: &mut GameState) {
     let lapsed: Vec<u64> = state
         .transient_continuous_effects
         .iter()
-        .filter(|e| match e.duration {
-            Duration::WhileControllingHost => {
-                !crate::game::replacement::controller_controls_source_gate(
-                    state,
-                    e.source_id,
-                    e.controller,
-                )
-            }
-            // CR 611.2b + CR 702.26f: the presence reading ends when its host
-            // is phased out — "effects with 'for as long as' durations that
-            // track that permanent (see rule 611.2b) end when that permanent
-            // phases out because they can no longer see it." The battlefield
-            // check keeps the arm honest if the exit event was missed; the
-            // phase-out is the leg only this pass can see.
-            Duration::WhileHostOnBattlefield => !state.objects.get(&e.source_id).is_some_and(|o| {
-                o.zone == crate::types::zones::Zone::Battlefield && o.is_phased_in()
-            }),
-            // CR 611.2a + CR 702.26d: the EVENT deadline ("until ~ leaves the
-            // battlefield") is NOT ended here. A phase-out is not the host
-            // leaving the battlefield, so it keeps running across one;
-            // `prune_host_left_effects` ends it on the exit event itself.
-            Duration::UntilHostLeavesPlay
-            | Duration::UntilEndOfTurn
-            | Duration::UntilEndOfCombat
-            | Duration::UntilNextTurnOf { .. }
-            | Duration::UntilEndOfNextTurnOf { .. }
-            | Duration::UntilNextStepOf { .. }
-            | Duration::ForAsLongAs { .. }
-            | Duration::UntilSourceExilesAnotherCard
-            | Duration::UntilOpponentBecomesMonarch
-            // CR 611.2a + CR 601.2i: ended by the spell-cast expiry in
-            // `casting_costs`, not by a host lapse.
-            | Duration::UntilEvent { .. }
-            | Duration::Permanent => false,
-        })
+        .filter(|e| !host_bound_duration_holds(state, e))
         .map(|e| e.id)
         .collect();
     if lapsed.is_empty() {
-        return;
+        return false;
     }
     state
         .transient_continuous_effects
         .retain(|e| !lapsed.contains(&e.id));
+    true
 }
 
 /// Remove transient effects bound to a specific affected object that has left the battlefield.
@@ -2990,12 +2951,12 @@ fn evaluate_layers_with_retirement_owner(
         .filter_map(|id| state.objects.get(&id).map(|o| (id, o.controller)))
         .collect();
 
-    // CR 611.2b + CR 613.1: derive before ending state durations. Every
-    // repeat removes at least one stored effect, so convergence is monotone.
-    // Keep the original controller snapshot until the final board is ready.
+    // CR 611.2b + CR 613.1: derive before ending durations. Every repeat
+    // removes at least one stored effect, so convergence is monotone. Keep the
+    // original controller snapshot until the final board is ready.
     let bf_ids = loop {
         let bf_ids = derive_layer_characteristics(state);
-        if !prune_lapsed_state_durations(state, retirement_owner) {
+        if !prune_lapsed_durations(state, retirement_owner) {
             break bf_ids;
         }
     };
@@ -3467,12 +3428,11 @@ fn finish_layer_evaluation(
     // `layers_dirty = Clean` is set unconditionally below, so a mark would be
     // dead code — consistency relies on the in-pass live+base mutation.
     prune_lapsed_controller_controls_source(state);
-    // CR 611.2b: the transient-effect half of the same question, then the
-    // casting-permission half. Both run at the same seam and against the same
-    // finalized Layer-2 control board, so a control change — or a phase-out,
-    // CR 702.26f — ends an effect, a permission and a replacement condition at
-    // the same moment rather than at three different ones.
-    prune_lapsed_host_bound_effects(state);
+    // CR 611.2b: the casting-permission half of the same question, against the
+    // same finalized Layer-2 control board. The transient-effect half already
+    // ended inside the derive loop (`prune_lapsed_durations`), so a control
+    // change — or a phase-out, CR 702.26f — ends an effect, a permission and a
+    // replacement condition on the same settled board.
     prune_lapsed_host_bound_casting_permissions(state);
 
     // CR 611.3a + CR 611.3b: refresh the source-level enabling-condition truth
@@ -4655,7 +4615,7 @@ fn flush_layers_with_retirement_owner(
     retirement_owner: StateDurationRetirementOwner,
 ) {
     match std::mem::replace(&mut state.layers_dirty, LayersDirty::Clean) {
-        LayersDirty::Clean => flush_lapsed_state_durations(state, retirement_owner),
+        LayersDirty::Clean => flush_lapsed_durations(state, retirement_owner),
         LayersDirty::Full => {
             super::perf_counters::record_layers_full_eval();
             evaluate_layers_with_retirement_owner(state, retirement_owner);
@@ -4663,7 +4623,7 @@ fn flush_layers_with_retirement_owner(
         }
         LayersDirty::EnteredObjects(ids) => {
             if ids.is_empty() {
-                flush_lapsed_state_durations(state, retirement_owner);
+                flush_lapsed_durations(state, retirement_owner);
                 return;
             }
             if let Some(prepared) = prepare_incremental_flush(state, &ids) {
@@ -6341,7 +6301,7 @@ fn apply_layers_incremental(
     // CR 611.2b: incremental derivation is settled now. An ended duration
     // can affect old recipients too, so rederive the full board before caches
     // or the trigger index can publish the incremental candidate.
-    if prune_lapsed_state_durations(state, retirement_owner) {
+    if prune_lapsed_durations(state, retirement_owner) {
         super::perf_counters::record_layers_full_eval();
         evaluate_layers_with_retirement_owner(state, retirement_owner);
         super::public_state::mark_public_state_all_dirty(state);
@@ -7290,7 +7250,9 @@ fn expand_granted_triggered_abilities(
 /// consults it too, so a display projection can never claim an effect is live
 /// after the layer engine has stopped applying it.
 pub(crate) fn transient_effect_is_live(state: &GameState, tce: &TransientContinuousEffect) -> bool {
-    transient_effect_passes_other_gates(state, tce) && transient_duration_holds(state, tce)
+    transient_effect_passes_other_gates(state, tce)
+        && transient_duration_holds(state, tce)
+        && host_bound_duration_holds(state, tce)
 }
 
 fn transient_effect_passes_other_gates(state: &GameState, tce: &TransientContinuousEffect) -> bool {
@@ -7311,46 +7273,6 @@ fn transient_effect_passes_other_gates(state: &GameState, tce: &TransientContinu
     {
         return false;
     }
-    // CR 611.2b + CR 702.26f: the presence-bound state reading ("for as long
-    // as ~ remains on the battlefield") additionally ends when its host phases
-    // out — "effects with 'for as long as' durations that track that permanent
-    // (see rule 611.2b) end when that permanent phases out because they can no
-    // longer see it." The event deadline (`UntilHostLeavesPlay`, "until ~
-    // leaves the battlefield") is deliberately NOT asked this question: a
-    // phase-out is not the host leaving the battlefield (CR 702.26d), so that
-    // reading keeps running across one, and ending it here would be wrong for
-    // every event-bound card. The wording now lives on the variant itself, so
-    // this filter no longer has to conflate the two.
-    //
-    // This check only declines to APPLY the effect; the ENDING that CR 702.26f
-    // demands — a later phase-in must not revive it — is
-    // `prune_lapsed_host_bound_effects`' presence arm, the same
-    // filter-plus-removal split the control reading below uses.
-    if tce.duration == Duration::WhileHostOnBattlefield
-        && !state
-            .objects
-            .get(&tce.source_id)
-            .is_some_and(|obj| obj.is_phased_in())
-    {
-        return false;
-    }
-
-    // CR 611.2b: the control-bound reading additionally ends when another
-    // player gains control of the source, or when it phases out (CR 702.26f).
-    // `controller_controls_source_gate` is the single authority for all three
-    // legs and is already shared with the `ControllerControlsSource`
-    // replacement condition, so the duration and the condition can never
-    // disagree about when this window closed.
-    if tce.duration == Duration::WhileControllingHost
-        && !crate::game::replacement::controller_controls_source_gate(
-            state,
-            tce.source_id,
-            tce.controller,
-        )
-    {
-        return false;
-    }
-
     if let Some(condition) = &tce.condition {
         if !source_condition_gate_passes(state, condition, tce.controller, tce.source_id) {
             return false;
@@ -7504,11 +7426,12 @@ fn transient_duration_condition(tce: &TransientContinuousEffect) -> Option<&Stat
 /// phased-in check — because a zone, identity or phasing change is not
 /// something layers 1-7 can write. The fourth, the CR 611.2b
 /// `WhileControllingHost` control gate, does read one (the source's
-/// controller, layer 2) and is still not registered here: the effect it gates
-/// is REMOVED by `prune_lapsed_host_bound_effects` inside `evaluate_layers`,
-/// the same seam and the same treatment as the pre-existing sibling question
-/// `prune_lapsed_controller_controls_source`, which is likewise absent from
-/// [`live_characteristic_reads`].
+/// controller, layer 2) and is still not registered here: it is answered only
+/// on the settled board, where `prune_lapsed_host_bound_effects` REMOVES the
+/// effect it gates and the pass re-derives without it — the same treatment as
+/// the sibling question `prune_lapsed_controller_controls_source`, which is
+/// likewise absent from [`live_characteristic_reads`]. The last two gates live
+/// in `host_bound_duration_holds`.
 ///
 /// Every consumer that EVALUATES whether this effect is live walks the pair
 /// through here: [`transient_effect_is_live`] (via
@@ -7554,6 +7477,53 @@ pub(crate) fn transient_gate_conditions(
     transient_duration_condition(tce)
         .into_iter()
         .chain(tce.condition.as_ref())
+}
+
+/// CR 611.2b: whether a host-bound STATE duration still holds — the single
+/// authority for both readings, shared by liveness and the settled-board prune
+/// (`prune_lapsed_host_bound_effects`). Like `ForAsLongAs`, these are not
+/// derivation gates: the control reading asks a layer-2 question, so it is only
+/// answered on the settled board, never against a mid-pass reset controller.
+fn host_bound_duration_holds(state: &GameState, tce: &TransientContinuousEffect) -> bool {
+    match tce.duration {
+        // CR 611.2b: the control-bound reading ends when another player gains
+        // control of the source, or when it leaves or phases out (CR 702.26f).
+        // `controller_controls_source_gate` is the single authority for all
+        // three legs and is already shared with the `ControllerControlsSource`
+        // replacement condition, so the duration and the condition can never
+        // disagree about when this window closed.
+        Duration::WhileControllingHost => crate::game::replacement::controller_controls_source_gate(
+            state,
+            tce.source_id,
+            tce.controller,
+        ),
+        // CR 611.2b + CR 702.26f: the presence-bound reading ("for as long as ~
+        // remains on the battlefield") ends when its host leaves or phases out —
+        // "effects with 'for as long as' durations that track that permanent
+        // (see rule 611.2b) end when that permanent phases out because they can
+        // no longer see it."
+        Duration::WhileHostOnBattlefield => state.objects.get(&tce.source_id).is_some_and(|o| {
+            o.zone == crate::types::zones::Zone::Battlefield && o.is_phased_in()
+        }),
+        // CR 611.2a + CR 702.26d: the EVENT deadline ("until ~ leaves the
+        // battlefield") is not a state reading. A phase-out is not the host
+        // leaving the battlefield, so it keeps running across one;
+        // `prune_host_left_effects` ends it on the exit event itself.
+        Duration::UntilHostLeavesPlay
+        | Duration::UntilEndOfTurn
+        | Duration::UntilEndOfCombat
+        | Duration::UntilNextTurnOf { .. }
+        | Duration::UntilEndOfNextTurnOf { .. }
+        | Duration::UntilNextStepOf { .. }
+        // CR 611.2b: `transient_duration_holds` owns this reading.
+        | Duration::ForAsLongAs { .. }
+        | Duration::UntilSourceExilesAnotherCard
+        | Duration::UntilOpponentBecomesMonarch
+        // CR 611.2a + CR 601.2i: ended by the spell-cast expiry in
+        // `casting_costs`, not by a host lapse.
+        | Duration::UntilEvent { .. }
+        | Duration::Permanent => true,
+    }
 }
 
 fn transient_duration_holds(state: &GameState, tce: &TransientContinuousEffect) -> bool {
@@ -7647,11 +7617,18 @@ fn prune_lapsed_state_durations(
     true
 }
 
-fn flush_lapsed_state_durations(
+/// CR 611.2b: end every duration the settled board shows has ended, one family
+/// per derivation. Host-bound durations end first, so a state duration is
+/// never judged against a board still carrying an effect that already ended.
+fn prune_lapsed_durations(
     state: &mut GameState,
     retirement_owner: StateDurationRetirementOwner,
-) {
-    if prune_lapsed_state_durations(state, retirement_owner) {
+) -> bool {
+    prune_lapsed_host_bound_effects(state) || prune_lapsed_state_durations(state, retirement_owner)
+}
+
+fn flush_lapsed_durations(state: &mut GameState, retirement_owner: StateDurationRetirementOwner) {
+    if prune_lapsed_durations(state, retirement_owner) {
         super::perf_counters::record_layers_full_eval();
         evaluate_layers_with_retirement_owner(state, retirement_owner);
         super::public_state::mark_public_state_all_dirty(state);
