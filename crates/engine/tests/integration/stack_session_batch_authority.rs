@@ -185,6 +185,50 @@ fn verified_ai_cohort_resolves_the_fenced_run_in_one_boundary() {
     assert_eq!(counters.stack_batched_entries, SCUTE_COUNT as u64);
 }
 
+/// A1-A: the cohort also collapses when the round closes on an AUTOMATIC pass
+/// by a seat whose verified pass was recorded in an earlier window of the
+/// same fenced run.
+#[test]
+fn verified_ai_cohort_collapses_on_an_automatic_close() {
+    let mut board = four_seat_scute_board(P0, None, &[]);
+    let state = board.runner.state_mut();
+
+    // P0 passes as an ordinary seat; the cohort installs on P1's verified pass
+    // without P0, so P3's explicit close resolves exactly one entry.
+    apply(state, P0, GameAction::PassPriority).expect("P0 may pass");
+    for player in [P1, P2, P3] {
+        verified_ai_pass(state, player);
+    }
+    // Reach guards: the cohort survived its first close, holds every seat but
+    // P0 as verified, and P0 holds the next window.
+    assert_eq!(state.stack.len(), SCUTE_COUNT - 1);
+    assert_eq!(insects(state), 1);
+    let cohort = session(state);
+    assert_eq!(
+        cohort.policy,
+        StackResolutionPolicy::RecheckNoMeaningfulPriorityAction
+    );
+    assert_eq!(cohort.representatives, all_seats());
+    assert_eq!(
+        cohort.verified_pass_representatives,
+        BTreeSet::from([P1, P2, P3])
+    );
+    assert_eq!((cohort.cursor, cohort.entries.len()), (1, SCUTE_COUNT));
+    assert_eq!(priority_holder(state), P0);
+    perf_counters::reset();
+
+    // P0's verified pass opens the round; P1, P2 and P3 already verified, so
+    // the session passes each of them automatically and P3's automatic pass
+    // closes the round.
+    verified_ai_pass(state, P0);
+
+    assert!(state.stack.is_empty());
+    assert_eq!(insects(state), SCUTE_COUNT);
+    let counters = perf_counters::snapshot();
+    assert_eq!(counters.stack_batch_plans, 1);
+    assert_eq!(counters.stack_batched_entries, (SCUTE_COUNT - 1) as u64);
+}
+
 /// A1-H1: K never exceeds the fenced prefix. A cohort fencing only the top
 /// three entries consumes exactly those three and leaves the rest for a new
 /// cohort.

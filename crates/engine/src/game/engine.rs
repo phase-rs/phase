@@ -8931,6 +8931,15 @@ enum AutoPassDecision {
     Pass,
 }
 
+/// CR 117.1 + CR 723.5: whether `player` has set Full Control, a standing
+/// refusal to have any priority window passed for them. Preference ownership
+/// follows the authorized submitter, as it does in `auto_pass_recommended`, so
+/// a controlled seat answers with its controller's preference.
+fn holds_full_control(state: &GameState, player: PlayerId) -> bool {
+    state.priority_passing_mode(turn_control::authorized_submitter_for_player(state, player))
+        == PriorityPassingMode::FullControl
+}
+
 /// Classify what the auto-pass loop should do for `player` at the current
 /// priority window.
 ///
@@ -8946,11 +8955,8 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
     // including one another player installed, which is what reaches this loop
     // without ever consulting the frontend. Checked BEFORE the no-session `Exit`
     // arm because `Exit` itself falls through to a pass when someone else holds
-    // a live `UntilStackEmpty` session. Preference ownership follows the
-    // authorized submitter, as it does in `auto_pass_recommended`.
-    if state.priority_passing_mode(turn_control::authorized_submitter_for_player(state, player))
-        == PriorityPassingMode::FullControl
-    {
+    // a live `UntilStackEmpty` session.
+    if holds_full_control(state, player) {
         // `Finish` also drops a stale session this player owns; both variants
         // break the loop, so either way the window is theirs.
         return if state.auto_pass.contains_key(&player) {
@@ -9423,9 +9429,7 @@ fn stack_resolution_session_priority_decision(
         // answer for every window a multi-entry boundary skips. (The no-session
         // case is handled one layer out, by `priority_auto_pass_decision`.)
         if matches!(pass_kind, StackResolutionSessionPassKind::Automatic)
-            && state
-                .priority_passing_mode(turn_control::authorized_submitter_for_player(state, holder))
-                == PriorityPassingMode::FullControl
+            && holds_full_control(state, holder)
         {
             return StackResolutionSessionPriorityDecision::Pause;
         }
@@ -9476,11 +9480,7 @@ fn stack_resolution_session_participant_authorizes_pass(
 ) -> bool {
     // CR 117.1: Full Control is a standing refusal to give up any window — the
     // session's own representative's included.
-    if state.priority_passing_mode(turn_control::authorized_submitter_for_player(
-        state,
-        participant,
-    )) == PriorityPassingMode::FullControl
-    {
+    if holds_full_control(state, participant) {
         return false;
     }
     match session.policy {
