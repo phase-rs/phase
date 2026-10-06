@@ -416,7 +416,7 @@ fn coupled_provider_cycles_wait_for_outgoing_dependencies() {
     flush_layers(runner.state_mut());
 
     // CR 613.8b-c: A↔B and C↔D are loops, but A also depends on C.
-    // D's printed definition must reach C before A copies C's live output.
+    // D's printed definition must reach C before A copies C and B copies A.
     let descriptions = |id| {
         activated_ability_definitions(runner.state(), id)
             .into_iter()
@@ -430,6 +430,15 @@ fn coupled_provider_cycles_wait_for_outgoing_dependencies() {
     assert!(
         descriptions(a).contains(&"D".to_string()),
         "A must receive D through C"
+    );
+    let b_descriptions = descriptions(b);
+    assert!(
+        b_descriptions.contains(&"C".to_string()),
+        "B must receive C through A"
+    );
+    assert!(
+        b_descriptions.contains(&"D".to_string()),
+        "B must receive D through A"
     );
 }
 

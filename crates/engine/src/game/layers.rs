@@ -8113,13 +8113,17 @@ fn apply_ability_effects_with_referenced_grants(
         }
         // CR 613.8b: Ignore only edges within a dependency loop. An edge
         // leaving that loop must still be satisfied. `j` is in `i`'s cyclic
-        // component exactly when it can reach `i` again. Pending is already
-        // timestamp-sorted, so the first effect with no surviving edge wins.
+        // component exactly when both can reach each other. Pending is already
+        // timestamp-sorted, so wait for older members of the same loop.
         let next = (0..pending.len())
             .find(|&i| {
                 edges[i]
                     .iter()
                     .all(|&j| dependency_path_exists(&edges, j, i))
+                    && (0..i).all(|j| {
+                        !dependency_path_exists(&edges, i, j)
+                            || !dependency_path_exists(&edges, j, i)
+                    })
             })
             .expect("a finite dependency graph has an independent or cyclic effect");
         let selected = pending.remove(next);
