@@ -1349,3 +1349,111 @@ fn rootwater_retirement_is_per_recipient_and_only_after_the_last_aura() {
         .iter()
         .any(|e| e.id == effects[0].id));
 }
+
+const MASTER_THIEF_ORACLE: &str = "When this creature enters, gain control of target artifact for as long as you control this creature.";
+const SWITCHEROO_ORACLE: &str = "Exchange control of two target creatures.";
+const ACT_OF_TREASON_ORACLE: &str = "Gain control of target creature until end of turn. Untap that creature. It gains haste until end of turn. (It can attack and {T} this turn.)";
+const CLEVER_CONCEALMENT_ORACLE: &str = "Convoke (Your creatures can help cast this spell. Each creature you tap while casting this spell pays for {1} or one mana of that creature's color.)\nAny number of target nonland permanents you control phase out. (Treat them and anything attached to them as though they don't exist until your next turn.)";
+
+/// A zero-cost spell in P0's hand: (name, is_instant, keywords, Oracle text).
+type HandSpell = (&'static str, bool, &'static [&'static str], &'static str);
+
+const SWITCHEROO: HandSpell = ("Switcheroo", false, &[], SWITCHEROO_ORACLE);
+const ACT_OF_TREASON: HandSpell = ("Act of Treason", false, &[], ACT_OF_TREASON_ORACLE);
+const CLEVER_CONCEALMENT: HandSpell = (
+    "Clever Concealment",
+    true,
+    &["Convoke"],
+    CLEVER_CONCEALMENT_ORACLE,
+);
+const GIANT_GROWTH: HandSpell = ("Giant Growth", true, &[], GIANT_GROWTH_ORACLE);
+
+/// Master Thief (P0) has stolen P1's Loot. Returns the runner just after the
+/// steal resolves, `[thief, loot, P1 wolf]` and the given spells in P0's hand.
+fn thief_steals_loot(spells: &[HandSpell]) -> (GameRunner, [ObjectId; 3], Vec<ObjectId>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let wolf = scenario.add_vanilla(P1, 2, 2);
+    let loot = scenario.add_artifact_from_oracle(P1, "Loot", "").id();
+    let thief = scenario
+        .add_creature_to_hand_from_oracle(P0, "Master Thief", 2, 2, MASTER_THIEF_ORACLE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let spells = spells
+        .iter()
+        .map(|&(name, is_instant, keywords, oracle)| {
+            scenario
+                .add_spell_to_hand_from_oracle(P0, name, is_instant, oracle)
+                .from_oracle_text_with_keywords(keywords, oracle)
+                .with_mana_cost(ManaCost::zero())
+                .id()
+        })
+        .collect();
+    let mut runner = scenario.build();
+    runner.cast(thief).target_object(loot).resolve();
+    assert_eq!(runner.state().objects[&loot].controller, P0);
+    assert!(matches!(
+        runner.state().transient_continuous_effects[0].duration,
+        engine::types::ability::Duration::WhileControllingHost
+    ));
+    (runner, [thief, loot, wolf], spells)
+}
+
+/// Replays every command journaled after `prefix`, settles, and requires the
+/// replayed board to match the live one exactly.
+fn assert_suffix_replays_exactly(prefix: GameState, live: &GameState, objects: &[ObjectId]) {
+    let start = prefix.resolved_rules_journal.entries().len();
+    let mut replay = prefix;
+    for command in live
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .skip(start)
+        .filter_map(|entry| entry.command.as_ref())
+    {
+        apply_semantic_command(&mut replay, command);
+    }
+    engine::game::layers::evaluate_layers(&mut replay);
+    for id in objects {
+        assert_eq!(replay.objects[id].controller, live.objects[id].controller);
+        assert_eq!(replay.objects[id].power, live.objects[id].power);
+    }
+    assert_eq!(
+        replay.transient_continuous_effects,
+        live.transient_continuous_effects
+    );
+}
+
+/// CR 611.2b: losing control of Master Thief ends its steal for good, so Loot
+/// stays with its owner after the Thief comes back. The ending is a settled
+/// lapse with no command of its own, so exact replay must carry its receipt.
+#[test]
+fn master_thief_control_loss_replays_before_its_return_and_later_install() {
+    let (mut runner, [thief, loot, wolf], spells) =
+        thief_steals_loot(&[SWITCHEROO, ACT_OF_TREASON, GIANT_GROWTH]);
+    let prefix = runner.state().clone();
+    runner
+        .cast(spells[0])
+        .target_objects(&[thief, wolf])
+        .resolve();
+    assert_eq!(runner.state().objects[&thief].controller, P1);
+    assert_eq!(runner.state().objects[&loot].controller, P1);
+    runner.cast(spells[1]).target_object(thief).resolve();
+    assert_eq!(runner.state().objects[&thief].controller, P0);
+    assert_eq!(runner.state().objects[&loot].controller, P1);
+    runner.cast(spells[2]).target_object(thief).resolve();
+    assert_suffix_replays_exactly(prefix, runner.state(), &[thief, loot, wolf]);
+}
+
+/// CR 702.26f + CR 611.2b: phasing Master Thief out ends its steal, so Loot
+/// returns to its owner and stays there; exact replay must agree.
+#[test]
+fn master_thief_phase_out_replays_before_later_install() {
+    let (mut runner, [thief, loot, wolf], spells) =
+        thief_steals_loot(&[CLEVER_CONCEALMENT, GIANT_GROWTH]);
+    let prefix = runner.state().clone();
+    runner.cast(spells[0]).target_object(thief).resolve();
+    assert_eq!(runner.state().objects[&loot].controller, P1);
+    runner.cast(spells[1]).target_object(wolf).resolve();
+    assert_suffix_replays_exactly(prefix, runner.state(), &[thief, loot, wolf]);
+}

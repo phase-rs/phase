@@ -186,6 +186,18 @@ fn rootwater_effects(runner: &GameRunner, source: ObjectId) -> usize {
         .count()
 }
 
+/// CR 608.2b reach guard: the control ability resolved rather than fizzling,
+/// so the negative assertions that follow it are not vacuous.
+fn assert_gain_control_resolved(events: &[GameEvent], source: ObjectId) {
+    assert!(
+        events.iter().any(|event| matches!(event,
+            GameEvent::EffectResolved { kind: EffectKind::GainControl, source_id, .. }
+                if *source_id == source
+        )),
+        "a legal target resolves rather than fizzling"
+    );
+}
+
 fn enchanted_filter() -> TargetFilter {
     TargetFilter::Typed(
         TypedFilter::default().properties(vec![FilterProp::HasAttachment {
@@ -309,13 +321,7 @@ fn rootwater_initial_false_does_not_install_emit_or_restart_when_enchanted() {
         .resolve();
     assert!(outcome.state().stack.is_empty());
     assert!(outcome.state().objects[&sources[0]].tapped);
-    assert!(
-        outcome.events().iter().any(|event| matches!(event,
-            GameEvent::EffectResolved { kind: EffectKind::GainControl, source_id, .. }
-                if *source_id == sources[0]
-        )),
-        "a legal unenchanted target resolves rather than fizzling"
-    );
+    assert_gain_control_resolved(outcome.events(), sources[0]);
     // CR 611.2b: no effect starts, including its control-change side effects.
     assert_eq!(outcome.state().objects[&recipients[0]].controller, P1);
     assert!(!outcome.state().objects[&recipients[0]].echo_due);
@@ -404,6 +410,7 @@ fn rootwater_equipment_alone_is_false_but_an_aura_is_true() {
         .resolve();
     assert!(outcome.state().objects[&sources[0]].tapped);
     assert!(outcome.state().stack.is_empty());
+    assert_gain_control_resolved(outcome.events(), sources[0]);
     // CR 303.4b: Equipment does not make its host enchanted.
     assert_eq!(outcome.state().objects[&recipients[0]].controller, P1);
     assert_eq!(rootwater_effects(&runner, sources[0]), 0);
@@ -563,6 +570,7 @@ fn rootwater_initially_phased_out_aura_cannot_start_control() {
         .resolve();
     assert!(outcome.state().stack.is_empty());
     assert!(outcome.state().objects[&sources[0]].tapped);
+    assert_gain_control_resolved(outcome.events(), sources[0]);
     assert_eq!(outcome.state().objects[&recipients[0]].controller, P1);
     assert_eq!(rootwater_effects(&runner, sources[0]), 0);
     take_control(&mut runner, sources[1], recipients[1]);
@@ -696,6 +704,7 @@ fn never_started_control_duration_cannot_sustain_itself() {
         let outcome = runner.cast(removal).target_object(control_magic).resolve();
         outcome.assert_zone(&[control_magic], Zone::Graveyard);
         assert!(outcome.state().stack.is_empty());
+        assert_gain_control_resolved(outcome.events(), champion);
         assert_eq!(
             runner.state().objects[&champion].controller,
             P1,

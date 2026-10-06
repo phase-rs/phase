@@ -11,7 +11,7 @@ use crate::game::combat::{AttackTarget, CombatParticipation};
 use crate::game::game_object::AttachTarget;
 use crate::game::triggers::{ConsumedTriggerEventOccurrence, PendingTriggerContext};
 
-use super::ability::{ContinuousModification, Duration, TriggerDefinitionRef};
+use super::ability::{ContinuousModification, TriggerDefinitionRef};
 use super::card::TokenImageRef;
 use super::card_type::CoreType;
 use super::counter::CounterType;
@@ -447,7 +447,7 @@ impl ResolvedContinuousEffectRetirementCommand {
                     ResolvedContinuousEffectRetirementInvariantError::DuplicateOperandId(effect.id),
                 );
             }
-            if !matches!(effect.duration, Duration::ForAsLongAs { .. }) {
+            if !effect.duration.is_for_as_long_as() {
                 return Err(
                     ResolvedContinuousEffectRetirementInvariantError::NotStateDuration(effect.id),
                 );

@@ -1150,9 +1150,16 @@ pub(crate) fn prune_lapsed_host_bound_casting_permissions(state: &mut GameState)
 /// `true` so the caller re-derives without the ended effect. Removing it after
 /// the board was already derived WITH it would publish that board — Master
 /// Thief's artifact would stay stolen after its controller lost the Thief.
-/// Like `prune_lapsed_controller_controls_source` it does NOT mark layers
-/// dirty: it is already inside the pass, and marking would re-enter it.
-pub(crate) fn prune_lapsed_host_bound_effects(state: &mut GameState) -> bool {
+///
+/// The ending is retired through `retire_ended_effects`, exactly like a lapsed
+/// `ForAsLongAs`: replay of the command that caused the lapse (a control
+/// install, a phase-out) does not re-derive the board, so without the journaled
+/// receipt a replay would keep the effect and let a later return of control
+/// revive it.
+fn prune_lapsed_host_bound_effects(
+    state: &mut GameState,
+    retirement_owner: StateDurationRetirementOwner,
+) -> bool {
     // CR 611.2b: an effect is ENDED here, not suppressed. Both readings lapse
     // without any zone change reporting it, so nothing else would remove the
     // entry: `WhileControllingHost` lapses on a control change with the host
@@ -1164,19 +1171,13 @@ pub(crate) fn prune_lapsed_host_bound_effects(state: &mut GameState) -> bool {
     // a later re-gain of control must not revive the effect, and the consumers
     // that walk `transient_continuous_effects` without
     // `transient_effect_is_live` would keep applying it meanwhile.
-    let lapsed: Vec<u64> = state
+    let lapsed: Vec<_> = state
         .transient_continuous_effects
         .iter()
         .filter(|e| !host_bound_duration_holds(state, &e.duration, e.source_id, e.controller))
-        .map(|e| e.id)
+        .cloned()
         .collect();
-    if lapsed.is_empty() {
-        return false;
-    }
-    state
-        .transient_continuous_effects
-        .retain(|e| !lapsed.contains(&e.id));
-    true
+    retire_ended_effects(state, lapsed, retirement_owner)
 }
 
 /// Remove transient effects bound to a specific affected object that has left the battlefield.
@@ -7644,6 +7645,18 @@ fn prune_lapsed_state_durations(
         })
         .cloned()
         .collect();
+    retire_ended_effects(state, ended, retirement_owner)
+}
+
+/// CR 611.2b: retire a settled selection of ended state durations exactly once.
+/// A settlement-owned retirement journals the exact records so replay removes
+/// them verbatim; an attachment-owned one is re-derived by replaying that
+/// attachment command, which owns the receipt. Returns whether anything ended.
+fn retire_ended_effects(
+    state: &mut GameState,
+    ended: Vec<TransientContinuousEffect>,
+    retirement_owner: StateDurationRetirementOwner,
+) -> bool {
     if ended.is_empty() {
         return false;
     }
@@ -7678,7 +7691,8 @@ fn prune_lapsed_durations(
     state: &mut GameState,
     retirement_owner: StateDurationRetirementOwner,
 ) -> bool {
-    prune_lapsed_host_bound_effects(state) || prune_lapsed_state_durations(state, retirement_owner)
+    prune_lapsed_host_bound_effects(state, retirement_owner)
+        || prune_lapsed_state_durations(state, retirement_owner)
 }
 
 fn flush_lapsed_durations(state: &mut GameState, retirement_owner: StateDurationRetirementOwner) {
@@ -18873,7 +18887,7 @@ mod tests {
             "reach-guard: the production phase-out must actually phase the host out"
         );
 
-        prune_lapsed_host_bound_effects(&mut state);
+        prune_lapsed_host_bound_effects(&mut state, StateDurationRetirementOwner::LayerSettlement);
         let survivors: Vec<u64> = state
             .transient_continuous_effects
             .iter()
@@ -27004,9 +27018,20 @@ mod state_duration_retirement_recording_tests {
     use crate::types::phase::Phase;
     use crate::types::resolved_commands::{ResolvedContinuousEffectEdit, ResolvedRulesCommand};
 
+    /// CR 611.2b + CR 702.26f: both state-duration families — a `ForAsLongAs`
+    /// condition and a host-bound reading — journal their exact retirement at
+    /// every ordinary flush arm.
     #[test]
     fn every_ordinary_flush_arm_records_its_exact_retirement() {
-        for boundary in ["full", "clean", "empty_entered", "incremental", "escalated"] {
+        for host_bound in [false, true] {
+            for boundary in ["full", "clean", "empty_entered", "incremental", "escalated"] {
+                assert_flush_arm_records_exact_retirement(host_bound, boundary);
+            }
+        }
+    }
+
+    fn assert_flush_arm_records_exact_retirement(host_bound: bool, boundary: &str) {
+        {
             let mut scenario = GameScenario::new();
             scenario.at_phase(Phase::PreCombatMain);
             let source = scenario.add_vanilla(P0, 2, 2);
@@ -27015,16 +27040,21 @@ mod state_duration_retirement_recording_tests {
             runner.state_mut().objects.get_mut(&source).unwrap().tapped = true;
             let subject = ObjectIncarnationRef::from_object(&runner.state().objects[&source]);
             let affected = ObjectIncarnationRef::from_object(&runner.state().objects[&recipient]);
+            let duration = if host_bound {
+                Duration::WhileHostOnBattlefield
+            } else {
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::IsTapped {
+                        scope: crate::types::ability::ObjectScope::Recipient,
+                    },
+                }
+            };
             let id = runner
                 .state_mut()
                 .add_transient_continuous_effect_with_bindings(
                     source,
                     P0,
-                    Duration::ForAsLongAs {
-                        condition: StaticCondition::IsTapped {
-                            scope: crate::types::ability::ObjectScope::Recipient,
-                        },
-                    },
+                    duration,
                     TargetFilter::SpecificObject { id: recipient },
                     vec![ContinuousModification::AddPower { value: 1 }],
                     None,
@@ -27052,7 +27082,16 @@ mod state_duration_retirement_recording_tests {
             );
             // Typed boundary fixture: mutate only the sustaining state before
             // submitting a real action that owns the corresponding flush.
-            runner.state_mut().objects.get_mut(&source).unwrap().tapped = false;
+            if host_bound {
+                crate::game::phasing::phase_out_object(
+                    runner.state_mut(),
+                    source,
+                    crate::game::game_object::PhaseOutCause::Directly,
+                    &mut Vec::new(),
+                );
+            } else {
+                runner.state_mut().objects.get_mut(&source).unwrap().tapped = false;
+            }
             runner.state_mut().layers_dirty = match boundary {
                 "full" => LayersDirty::Full,
                 "clean" => LayersDirty::Clean,
@@ -27074,7 +27113,7 @@ mod state_duration_retirement_recording_tests {
             assert_eq!(
                 runner.state().objects[&recipient].power,
                 Some(2),
-                "{boundary}"
+                "{boundary}, host-bound: {host_bound}"
             );
             assert_eq!(runner.state().layers_dirty, LayersDirty::Clean);
             assert!(!runner
@@ -27096,7 +27135,11 @@ mod state_duration_retirement_recording_tests {
                     _ => None,
                 })
                 .collect();
-            assert_eq!(batches, vec![&vec![installed]], "{boundary}");
+            assert_eq!(
+                batches,
+                vec![&vec![installed]],
+                "{boundary}, host-bound: {host_bound}"
+            );
         }
     }
 
