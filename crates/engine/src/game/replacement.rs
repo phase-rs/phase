@@ -2271,10 +2271,10 @@ fn shield_rider_reflects_per_event(state: &GameState, rid: ReplacementId) -> boo
         .is_some_and(rider_reflects_per_event_damage_source)
 }
 
-/// CR 614.9: Read back the captured chosen recipient (an object or a player)
+/// CR 614.9: Read back the captured concrete recipient (an object or a player)
 /// stashed in the matched replacement's `redirect_target` field (set at
 /// resolution time for `DamageRedirectTarget::ChosenTarget` — "to target
-/// creature" / "to any target").
+/// creature" / "to any target", or the creating ability's implicit "you").
 fn redirect_chosen_target_for_rid(state: &GameState, rid: ReplacementId) -> Option<TargetRef> {
     let repl = if rid.source == ObjectId(0) {
         state.pending_damage_replacements.get(rid.index)

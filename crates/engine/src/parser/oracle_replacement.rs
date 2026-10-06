@@ -36,7 +36,8 @@ use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target::{parse_type_filter_word, parse_type_phrase};
 use super::oracle_quantity::capitalize_first;
 use super::oracle_target::{
-    parse_declared_damage_source_target, parse_target, parse_type_phrase_folding,
+    parse_declared_damage_source_target, parse_target, parse_target_with_ctx,
+    parse_type_phrase_folding,
 };
 use super::oracle_util::{
     first_sentence, merge_or_filters, normalize_card_name_refs, parse_count_expr, parse_number,
@@ -7454,7 +7455,17 @@ pub(crate) fn parse_oneshot_damage_replacement(
     // Original-recipient scope from the would-deal clause: a typed scope ("to an
     // opponent" / "to a creature") OR a chosen target ("to target creature" —
     // Jade Monolith). The latter becomes a hosted object slot, not a scope.
-    let recipient_object_filter = parse_damage_to_target_filter(would_clause);
+    let recipient_object_filter = match parse_damage_to_target_filter(would_clause) {
+        Some((filter, remainder))
+            if all_consuming(multispace0::<_, OracleError<'_>>)
+                .parse(remainder)
+                .is_ok() =>
+        {
+            Some(filter)
+        }
+        Some(_) => return Some(Effect::unimplemented("damage replacement", norm_lower)),
+        None => None,
+    };
     let target_filter = if recipient_object_filter.is_some() {
         None
     } else {
@@ -7488,7 +7499,26 @@ pub(crate) fn parse_oneshot_damage_replacement(
             return None;
         }
         let redirect_object_filter = match redirect_to {
-            DamageRedirectTarget::ChosenTarget => parse_damage_to_target_filter(result_clause),
+            DamageRedirectTarget::ChosenTarget => {
+                let Some((filter, remainder)) = parse_damage_to_target_filter(result_clause) else {
+                    return Some(Effect::unimplemented("damage replacement", norm_lower));
+                };
+                // CR 115.1c + CR 109.5: retain the whole declared target's
+                // restriction, including whose creature it must be. Only the
+                // replacement's own "instead" tail may remain unconsumed.
+                if all_consuming((
+                    multispace0,
+                    tag::<_, _, OracleError<'_>>("instead"),
+                    opt(char('.')),
+                    multispace0,
+                ))
+                .parse(remainder)
+                .is_err()
+                {
+                    return Some(Effect::unimplemented("damage replacement", norm_lower));
+                }
+                Some(filter)
+            }
             // `redirect_object_filter` carries the filter for a CHOSEN object slot
             // the player must select. `AttachedToSource` joins the `None` arm
             // deliberately, not by default: like `SourceObject`, its recipient is
@@ -8394,24 +8424,18 @@ fn split_would_deal_clause(body: &str) -> (&str, &str) {
 }
 
 /// CR 115.1: Detect a chosen-target recipient ("to target creature" / "to
-/// target permanent") and return its `TargetFilter`. Distinct from
+/// target permanent") and return its full `TargetFilter` and remainder. Distinct from
 /// `parse_damage_target_filter`, which handles typed *scopes* ("to a creature",
 /// "to an opponent"). Returns `None` when the recipient is a scope or implicit.
-fn parse_damage_to_target_filter(clause: &str) -> Option<TargetFilter> {
+fn parse_damage_to_target_filter(clause: &str) -> Option<(TargetFilter, &str)> {
     nom_primitives::scan_at_word_boundaries(clause, |input| {
         let (input, _) = tag("to ").parse(input)?;
-        let (input, filter) = alt((
-            value(
-                TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
-                tag("target creature"),
-            ),
-            value(
-                TargetFilter::Typed(TypedFilter::default()),
-                tag("target permanent"),
-            ),
-        ))
-        .parse(input)?;
-        Ok((input, filter))
+        let (input, _) =
+            peek(alt((tag("target creature"), tag("target permanent")))).parse(input)?;
+        // Keep speculative target parsing local. This filter-only adapter does
+        // not yet publish opponent-announcer metadata; that is a separate seam.
+        let (filter, remainder) = parse_target_with_ctx(input, &mut ParseContext::default());
+        Ok((remainder, (filter, remainder)))
     })
 }
 
@@ -27298,6 +27322,194 @@ mod snapshot_tests {
             "unparseable while-guard must fail closed, not emit an unconditional \
              replacement; got {def:?}"
         );
+    }
+
+    /// SHAPE: the complete target restriction belongs to the redirect role.
+    #[test]
+    fn generals_regalia_full_oracle_redirect_target_shape() {
+        let parsed = parse_oracle_text(
+            "{3}: The next time a source of your choice would deal damage to you this turn, that damage is dealt to target creature you control instead.",
+            "General's Regalia", &[], &["Artifact".to_string()], &[],
+        );
+        assert_eq!(parsed.abilities.len(), 1);
+        let ability = &parsed.abilities[0];
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        assert_eq!(
+            ability.cost,
+            Some(AbilityCost::Mana {
+                cost: ManaCost::generic(3)
+            })
+        );
+        assert_eq!(ability.target_chooser, None);
+        assert!(ability.sub_ability.is_none());
+        let Effect::CreateDamageReplacement {
+            source_filter,
+            target_filter,
+            redirect_to,
+            redirect_object_filter,
+            recipient_object_filter,
+            ..
+        } = ability.effect.as_ref()
+        else {
+            panic!(
+                "expected a supported damage replacement, got {:?}",
+                ability.effect
+            );
+        };
+        assert_eq!(
+            *source_filter,
+            Some(TargetFilter::ChosenDamageSource { filter: None })
+        );
+        assert_eq!(
+            *target_filter,
+            Some(DamageTargetFilter::Player {
+                player: DamageTargetPlayerScope::Controller
+            })
+        );
+        assert_eq!(*redirect_to, Some(DamageRedirectTarget::ChosenTarget));
+        assert_eq!(
+            *redirect_object_filter,
+            Some(TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(TypeFilter::Creature)
+                    .controller(ControllerRef::You)
+            ))
+        );
+        assert_eq!(*recipient_object_filter, None);
+    }
+
+    /// SHAPE: an original-recipient target must not become a redirect target.
+    #[test]
+    fn jade_monolith_full_oracle_original_target_shape() {
+        let parsed = parse_oracle_text(
+            "{1}: The next time a source of your choice would deal damage to target creature this turn, that source deals that damage to you instead.",
+            "Jade Monolith", &[], &["Artifact".to_string()], &[],
+        );
+        assert_eq!(parsed.abilities.len(), 1);
+        let ability = &parsed.abilities[0];
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        assert_eq!(
+            ability.cost,
+            Some(AbilityCost::Mana {
+                cost: ManaCost::generic(1)
+            })
+        );
+        assert!(ability.sub_ability.is_none());
+        assert!(
+            matches!(ability.effect.as_ref(), Effect::CreateDamageReplacement {
+            source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
+            target_filter: None,
+            redirect_to: Some(DamageRedirectTarget::Controller),
+            redirect_object_filter: None,
+            recipient_object_filter: Some(filter), ..
+        } if *filter == TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)))
+        );
+    }
+
+    /// SHAPE: the unqualified combat redirection keeps its source and player scope.
+    #[test]
+    fn soltari_guerrillas_full_oracle_redirect_target_shape() {
+        let parsed = parse_oracle_text(
+            "Shadow (This creature can block or be blocked by only creatures with shadow.)\n{0}: The next time this creature would deal combat damage to an opponent this turn, it deals that damage to target creature instead.",
+            "Soltari Guerrillas", &["Shadow".to_string()], &["Creature".to_string()], &[],
+        );
+        assert_eq!(parsed.abilities.len(), 1);
+        assert!(parsed.abilities[0].sub_ability.is_none());
+        assert!(
+            matches!(parsed.abilities[0].effect.as_ref(), Effect::CreateDamageReplacement {
+            source_filter: Some(TargetFilter::SelfRef),
+            combat_scope: Some(CombatDamageScope::CombatOnly),
+            target_filter: Some(DamageTargetFilter::Player { player: DamageTargetPlayerScope::Opponent }),
+            redirect_to: Some(DamageRedirectTarget::ChosenTarget),
+            redirect_object_filter: Some(filter), recipient_object_filter: None, ..
+        } if *filter == TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)))
+        );
+    }
+
+    /// SHAPE: shared target grammar owns controller qualifiers in either role.
+    #[test]
+    fn oneshot_damage_target_controller_qualifiers_and_owned_remainders() {
+        for (phrase, controller) in [
+            ("you control", ControllerRef::You),
+            ("you don't control", ControllerRef::Opponent),
+        ] {
+            for (would, result, original_role) in [
+                (format!("target creature {phrase}"), "you".to_string(), true),
+                (
+                    "you".to_string(),
+                    format!("target creature {phrase}"),
+                    false,
+                ),
+            ] {
+                let text = format!("the next time a source of your choice would deal damage to {would} this turn, that damage is dealt to {result} instead.");
+                let effect =
+                    parse_oneshot_damage_replacement(&text, &ParseContext::default()).unwrap();
+                let Effect::CreateDamageReplacement {
+                    recipient_object_filter,
+                    redirect_object_filter,
+                    ..
+                } = effect
+                else {
+                    panic!("valid qualified target must parse: {text}");
+                };
+                let (selected, other) = if original_role {
+                    (recipient_object_filter, redirect_object_filter)
+                } else {
+                    (redirect_object_filter, recipient_object_filter)
+                };
+                assert_eq!(
+                    selected,
+                    Some(TargetFilter::Typed(
+                        TypedFilter::default()
+                            .with_type(TypeFilter::Creature)
+                            .controller(controller.clone())
+                    ))
+                );
+                assert_eq!(other, None);
+            }
+        }
+    }
+
+    /// SHAPE: recognized target frames with unrepresented tails stay explicit gaps.
+    #[test]
+    fn oneshot_damage_target_unknown_suffix_is_not_a_bare_target() {
+        for (would, result) in [
+            ("you", "target creature you secretly control"),
+            ("target creature you secretly control", "you"),
+            (
+                "you",
+                "target creature you control instead of drawing a card",
+            ),
+        ] {
+            let text = format!("{{3}}: The next time a source of your choice would deal damage to {would} this turn, that damage is dealt to {result} instead.");
+            let parsed = parse_oracle_text(
+                &text,
+                "Hostile grammar fixture",
+                &[],
+                &["Artifact".to_string()],
+                &[],
+            );
+            assert_eq!(parsed.abilities.len(), 1);
+            assert!(
+                matches!(
+                    parsed.abilities[0].effect.as_ref(),
+                    Effect::Unimplemented { .. }
+                ),
+                "unknown target tail must be a gap, got {:?}",
+                parsed.abilities[0]
+            );
+        }
+        let positive = parse_oneshot_damage_replacement(
+            "the next time a source of your choice would deal damage to you this turn, that damage is dealt to target creature you control instead",
+            &ParseContext::default(),
+        ).unwrap();
+        assert!(matches!(
+            positive,
+            Effect::CreateDamageReplacement {
+                redirect_object_filter: Some(_),
+                ..
+            }
+        ));
     }
 
     // CR 614.1a + CR 614.9: building-block coverage for the one-shot
