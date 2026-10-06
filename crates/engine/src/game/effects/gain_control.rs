@@ -31,7 +31,8 @@ pub fn resolve(
     let new_controller = gain_control_controller(ability, target);
     let object_ids = gain_control_object_targets(state, ability, target);
 
-    if matches!(duration, Duration::ForAsLongAs { .. }) {
+    // CR 611.2b: a "for as long as" duration is tested on the settled board.
+    if duration.is_for_as_long_as() {
         crate::game::layers::flush_layers(state);
     }
 
@@ -43,16 +44,14 @@ pub fn resolve(
         let recipient = ObjectIncarnationRef::from_object(object);
         // CR 611.2b: a duration that is false at resolution never begins.
         // Test before installing a record or emitting control/echo side effects.
-        if let Duration::ForAsLongAs { condition } = &duration {
-            if !crate::game::layers::bound_state_duration_holds(
-                state,
-                condition,
-                new_controller,
-                ability.source_id,
-                Some(recipient),
-            ) {
-                continue;
-            }
+        if !crate::game::layers::resolved_duration_begins(
+            state,
+            &duration,
+            new_controller,
+            ability.source_id,
+            Some(recipient),
+        ) {
+            continue;
         }
 
         // CR 611.2c + CR 400.7: state durations track this exact recipient.
@@ -144,6 +143,12 @@ pub fn resolve_all(
     // "you gain control" — the ability's controller takes control.
     let new_controller = ability.controller;
 
+    // CR 611.2b: a "for as long as" duration is tested on the settled board
+    // (The Wretched: "… for as long as you control this creature").
+    if duration.is_for_as_long_as() {
+        crate::game::layers::flush_layers(state);
+    }
+
     // Ability-context filter evaluation, identical to `destroy::resolve_all`:
     // `resolved_object_filter` binds anaphoric scopes (e.g. `controller:
     // TargetPlayer`) from the ability before matching.
@@ -160,6 +165,20 @@ pub fn resolve_all(
 
     for obj_id in matching {
         let old_controller = state.objects.get(&obj_id).map(|obj| obj.controller);
+        // CR 611.2b: a duration that is false at resolution never begins, so
+        // nothing is installed and no control/echo side effect is emitted.
+        if !crate::game::layers::resolved_duration_begins(
+            state,
+            &duration,
+            new_controller,
+            ability.source_id,
+            state
+                .objects
+                .get(&obj_id)
+                .map(ObjectIncarnationRef::from_object),
+        ) {
+            continue;
+        }
         // CR 613.1b: register a Layer 2 (Control) transient continuous effect.
         state.add_transient_continuous_effect(
             ability.source_id,

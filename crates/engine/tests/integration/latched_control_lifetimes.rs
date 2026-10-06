@@ -637,3 +637,81 @@ fn rootwater_expiry_reaches_full_clean_and_incremental_action_boundaries() {
         assert_eq!(runner.state().layers_dirty, LayersDirty::Clean);
     }
 }
+
+const THRULL_CHAMPION: &str =
+    "Thrull creatures get +1/+1.\n{T}: Gain control of target Thrull for as long as you control this creature.";
+const CONTROL_MAGIC: &str = "Enchant creature\nYou control enchanted creature.";
+
+/// CR 611.2b: "for as long as you control this creature" that is already over
+/// when the ability resolves never starts, so the effect does nothing — even
+/// when the effect would itself hand its controller the source (the Champion
+/// targeting itself), which would otherwise make the duration read true.
+#[test]
+fn never_started_control_duration_cannot_sustain_itself() {
+    for target_self in [true, false] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let champion = scenario
+            .add_creature_from_oracle(P1, "Thrull Champion", 2, 2, THRULL_CHAMPION)
+            .with_subtypes(vec!["Thrull"])
+            .id();
+        let other_thrull = scenario
+            .add_creature(P1, "Thrull", 1, 1)
+            .with_subtypes(vec!["Thrull"])
+            .id();
+        let control_magic = scenario
+            .add_enchantment_from_oracle(P0, "Control Magic", CONTROL_MAGIC)
+            .with_subtypes(vec!["Aura"])
+            .id();
+        let removal = instant(&mut scenario, "Disenchant", DISENCHANT);
+        let mut runner = scenario.build();
+        attach_setup(&mut runner, control_magic, champion);
+        assert_eq!(runner.state().objects[&champion].controller, P0);
+        // CR 302.6: the fixture models control since P0's turn began.
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&champion)
+            .unwrap()
+            .summoning_sick = false;
+
+        let target = if target_self { champion } else { other_thrull };
+        let index = activated_index(&runner, champion);
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: champion,
+                ability_index: index,
+            })
+            .unwrap();
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            })
+            .unwrap();
+        assert_eq!(runner.state().stack.len(), 1, "the activation is pending");
+        assert!(runner.state().objects[&champion].tapped);
+
+        // CR 113.7a: Disenchant resolves first; Control Magic's control ends,
+        // so P0 no longer controls the Champion when its ability resolves.
+        let outcome = runner.cast(removal).target_object(control_magic).resolve();
+        outcome.assert_zone(&[control_magic], Zone::Graveyard);
+        assert!(outcome.state().stack.is_empty());
+        assert_eq!(
+            runner.state().objects[&champion].controller,
+            P1,
+            "target_self={target_self}: the effect must not hand P0 the Champion"
+        );
+        assert_eq!(runner.state().objects[&other_thrull].controller, P1);
+        assert_eq!(
+            rootwater_effects(&runner, champion),
+            0,
+            "target_self={target_self}: nothing is installed"
+        );
+        assert!(
+            !outcome.events().iter().any(|event| matches!(event,
+                GameEvent::ControllerChanged { object_id, new_controller: P0, .. }
+                    if *object_id == target)),
+            "target_self={target_self}: a never-started duration emits no control change"
+        );
+    }
+}

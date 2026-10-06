@@ -1166,7 +1166,7 @@ pub(crate) fn prune_lapsed_host_bound_effects(state: &mut GameState) -> bool {
     let lapsed: Vec<u64> = state
         .transient_continuous_effects
         .iter()
-        .filter(|e| !host_bound_duration_holds(state, e))
+        .filter(|e| !host_bound_duration_holds(state, &e.duration, e.source_id, e.controller))
         .map(|e| e.id)
         .collect();
     if lapsed.is_empty() {
@@ -7252,7 +7252,7 @@ fn expand_granted_triggered_abilities(
 pub(crate) fn transient_effect_is_live(state: &GameState, tce: &TransientContinuousEffect) -> bool {
     transient_effect_passes_other_gates(state, tce)
         && transient_duration_holds(state, tce)
-        && host_bound_duration_holds(state, tce)
+        && host_bound_duration_holds(state, &tce.duration, tce.source_id, tce.controller)
 }
 
 fn transient_effect_passes_other_gates(state: &GameState, tce: &TransientContinuousEffect) -> bool {
@@ -7480,29 +7480,33 @@ pub(crate) fn transient_gate_conditions(
 }
 
 /// CR 611.2b: whether a host-bound STATE duration still holds — the single
-/// authority for both readings, shared by liveness and the settled-board prune
-/// (`prune_lapsed_host_bound_effects`). Like `ForAsLongAs`, these are not
-/// derivation gates: the control reading asks a layer-2 question, so it is only
-/// answered on the settled board, never against a mid-pass reset controller.
-fn host_bound_duration_holds(state: &GameState, tce: &TransientContinuousEffect) -> bool {
-    match tce.duration {
+/// authority for both readings, shared by liveness, the settled-board prune
+/// (`prune_lapsed_host_bound_effects`) and the resolution-time start test
+/// (`resolved_duration_begins`). Like `ForAsLongAs`, these are not derivation
+/// gates: the control reading asks a layer-2 question, so it is only answered
+/// on the settled board, never against a mid-pass reset controller.
+fn host_bound_duration_holds(
+    state: &GameState,
+    duration: &Duration,
+    source_id: ObjectId,
+    controller: PlayerId,
+) -> bool {
+    match duration {
         // CR 611.2b: the control-bound reading ends when another player gains
         // control of the source, or when it leaves or phases out (CR 702.26f).
         // `controller_controls_source_gate` is the single authority for all
         // three legs and is already shared with the `ControllerControlsSource`
         // replacement condition, so the duration and the condition can never
         // disagree about when this window closed.
-        Duration::WhileControllingHost => crate::game::replacement::controller_controls_source_gate(
-            state,
-            tce.source_id,
-            tce.controller,
-        ),
+        Duration::WhileControllingHost => {
+            crate::game::replacement::controller_controls_source_gate(state, source_id, controller)
+        }
         // CR 611.2b + CR 702.26f: the presence-bound reading ("for as long as ~
         // remains on the battlefield") ends when its host leaves or phases out —
         // "effects with 'for as long as' durations that track that permanent
         // (see rule 611.2b) end when that permanent phases out because they can
         // no longer see it."
-        Duration::WhileHostOnBattlefield => state.objects.get(&tce.source_id).is_some_and(|o| {
+        Duration::WhileHostOnBattlefield => state.objects.get(&source_id).is_some_and(|o| {
             o.zone == crate::types::zones::Zone::Battlefield && o.is_phased_in()
         }),
         // CR 611.2a + CR 702.26d: the EVENT deadline ("until ~ leaves the
@@ -7540,6 +7544,28 @@ fn transient_duration_holds(state: &GameState, tce: &TransientContinuousEffect) 
         state.objects.get(id).map(ObjectIncarnationRef::from_object)
     });
     bound_state_duration_holds(state, condition, tce.controller, tce.source_id, subject)
+}
+
+/// CR 611.2b: whether a resolution-created duration begins at all. "If the
+/// 'for as long as' duration never starts, the effect does nothing" — so a
+/// resolver asks this on the settled board BEFORE installing the effect or
+/// emitting its side effects. Once installed, a started duration is only ended
+/// by the settled-board prunes; asking only there would let an effect whose
+/// own application makes its duration true (a control change of the source it
+/// is bound to) sustain a duration that never started.
+pub(crate) fn resolved_duration_begins(
+    state: &GameState,
+    duration: &Duration,
+    controller: PlayerId,
+    source_id: ObjectId,
+    recipient: Option<ObjectIncarnationRef>,
+) -> bool {
+    match duration {
+        Duration::ForAsLongAs { condition } => {
+            bound_state_duration_holds(state, condition, controller, source_id, recipient)
+        }
+        other => host_bound_duration_holds(state, other, source_id, controller),
+    }
 }
 
 /// CR 611.2b: the shared initial and settled-board test for a state duration.
