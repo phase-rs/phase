@@ -11,12 +11,13 @@ use std::sync::Arc;
 use engine::database::card_db::CardDbHandle;
 use engine::database::synthesis::synthesize_all;
 use engine::database::CardDatabase;
+use engine::game::ability_utils::{build_resolved_from_def, build_target_slots};
 use engine::game::printed_cards::{apply_card_face_to_object, back_face_for_card_face};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityCondition, AbilityDefinition, Effect, EffectOutcomeSignal, EffectScope, MultiTargetSpec,
-    PlayerFilter, PtValue, QuantityExpr, TargetFilter, TargetRef,
+    PlayerFilter, PtValue, QuantityExpr, TapStateChange, TargetFilter, TargetRef,
 };
 use engine::types::ability_visit::visit_ability_def;
 use engine::types::actions::GameAction;
@@ -24,7 +25,7 @@ use engine::types::card::{CardFace, LayoutKind, PrintedCardRef};
 use engine::types::card_type::{CardType, CoreType, Supertype};
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{StackEntryKind, WaitingFor};
+use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, KeywordKind};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -135,6 +136,14 @@ fn assert_no_gaps(def: &AbilityDefinition) {
         );
         ControlFlow::Continue(())
     });
+}
+
+fn assert_terminal_resolution(state: &GameState) {
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.stack.is_empty());
+    assert!(state.resolution_stack.is_empty());
+    assert!(state.pending_cast.is_none());
+    assert!(state.pending_resolution_completion.is_none());
 }
 
 fn upkeep(face: &CardFace) -> &AbilityDefinition {
@@ -574,16 +583,76 @@ fn counter_tail_failure_is_visible_in_full_activated_oracle_and_never_executes_a
             .from_oracle_text(&oracle)
             .id();
         let mut runner = scenario.build();
-        runner.activate(source, 0).resolve();
-        assert!(
-            runner
-                .state()
-                .unimplemented_oracle_ids
-                .contains("Counter witness"),
-            "the committed gap really reached resolution"
+        assert!(runner.state().stack.is_empty());
+        // CR 602.2a: observe the actual activated ability after normal commitment.
+        let activation = runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            })
+            .expect("the untargeted zero-cost activation commits");
+        assert!(activation.disposition.is_applied());
+        let mut events = activation.events;
+        assert_eq!(runner.state().stack.len(), 1, "{clause}");
+        let entry = &runner.state().stack[0];
+        assert!(matches!(
+            &entry.kind,
+            StackEntryKind::ActivatedAbility { source_id, .. } if *source_id == source
+        ));
+        assert_eq!(entry.source_id, source);
+        assert_eq!(entry.controller, P0);
+        let entry_id = entry.id;
+        assert_ne!(
+            entry_id, source,
+            "the stack object is distinct from its source"
         );
+        let ability = entry.ability().expect("the committed activated ability");
+        assert_eq!(ability.source_id, source);
+        assert_eq!(ability.controller, P0);
+        assert!(
+            matches!(&ability.effect, Effect::Unimplemented { name, description }
+                if name == "put_counter_tail"
+                    && description.as_deref().map(str::to_lowercase)
+                        == Some(clause.to_lowercase().replace("this creature", "~"))),
+            "{clause}: {ability:?}"
+        );
+        assert!(
+            ability.targets.is_empty(),
+            "the root gap has no chosen targets"
+        );
+        assert!(
+            ability.sub_ability.is_none(),
+            "no counter head survives the root gap"
+        );
+        for _ in 0..6 {
+            if runner.state().stack.is_empty() {
+                break;
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            let result = runner
+                .act(GameAction::PassPriority)
+                .expect("normal gap resolution");
+            assert!(result.disposition.is_applied());
+            events.extend(result.events);
+        }
+        assert!(
+            events.iter().any(|event| matches!(event,
+                GameEvent::StackResolved { object_id } if *object_id == entry_id
+            )),
+            "{clause}: {events:?}"
+        );
+        assert_terminal_resolution(runner.state());
         assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
         assert!(runner.state().objects[&source].counters.is_empty());
+        assert!(
+            !events.iter().any(|event| matches!(event,
+                GameEvent::CounterAdded { object_id, .. } if *object_id == source
+            )),
+            "{clause}: {events:?}"
+        );
     }
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -592,13 +661,18 @@ fn counter_tail_failure_is_visible_in_full_activated_oracle_and_never_executes_a
         .from_oracle_text("{0}: Put a +1/+1 counter on this creature.")
         .id();
     let mut runner = scenario.build();
-    runner.activate(source, 0).resolve();
+    let outcome = runner.activate(source, 0).resolve();
     assert_eq!(
-        runner.state().objects[&source]
+        outcome.state().objects[&source]
             .counters
             .get(&CounterType::Plus1Plus1),
         Some(&1)
     );
+    assert!(outcome.events().iter().any(|event| matches!(event,
+        GameEvent::CounterAdded { object_id, counter_type: CounterType::Plus1Plus1, count: 1, actor }
+            if *object_id == source && *actor == P0
+    )));
+    assert_terminal_resolution(outcome.state());
 }
 
 #[test]
@@ -663,6 +737,202 @@ fn counter_dynamic_suffix_owners_bind_the_complete_production_instruction() {
 }
 
 #[test]
+fn source_counter_lists_keep_all_entries_on_source_without_damage() {
+    // Synthetic grammar/authority witnesses, independent of a damage boundary.
+    for (oracle, kinds) in [
+        (
+            "{0}: Put a flying counter and a vigilance counter on this creature.",
+            vec![KeywordKind::Flying, KeywordKind::Vigilance],
+        ),
+        (
+            "{0}: Put a flying counter, a vigilance counter, and a lifelink counter on this creature.",
+            vec![KeywordKind::Flying, KeywordKind::Vigilance, KeywordKind::Lifelink],
+        ),
+    ] {
+        let parsed = parse_oracle_text(oracle, "Counter witness", &[], &["Creature".to_owned()], &[]);
+        assert_eq!(parsed.abilities.len(), 1, "{oracle}");
+        assert!(parsed.parse_warnings.is_empty(), "{oracle}: {:?}", parsed.parse_warnings);
+        assert_no_gaps(&parsed.abilities[0]);
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario.add_creature(P0, "Counter witness", 3, 3).from_oracle_text(oracle).id();
+        let own_bystander = scenario.add_creature(P0, "Own bystander", 2, 2).id();
+        let opposing_bystander = scenario.add_creature(P1, "Opposing bystander", 2, 2).id();
+        let mut runner = scenario.build();
+        let abilities = &runner.state().objects[&source].abilities;
+        assert_eq!(abilities.len(), 1);
+        assert_eq!(abilities[0], parsed.abilities[0]);
+        let chain: Vec<_> = std::iter::successors(Some(&abilities[0]), |def| def.sub_ability.as_deref()).collect();
+        assert_eq!(chain.len(), kinds.len(), "{oracle}: {chain:?}");
+        for (def, kind) in chain.iter().zip(&kinds) {
+            assert_eq!(def.effect.as_ref(), &Effect::PutCounter {
+                counter_type: CounterType::Keyword(*kind),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            }, "{oracle}");
+        }
+        let resolved = build_resolved_from_def(&abilities[0], source, P0);
+        // CR 115.10a: affecting the source does not announce it as a target.
+        assert!(build_target_slots(runner.state(), &resolved).expect("source list slots").is_empty());
+        let outcome = runner.activate(source, 0).resolve();
+        let state = outcome.state();
+        let counters = &state.objects[&source].counters;
+        assert_eq!(counters.len(), kinds.len(), "{oracle}: {counters:?}");
+        // CR 122.1b + CR 608.2c: every list member places its keyword counter on the source.
+        for kind in kinds {
+            assert_eq!(counters.get(&CounterType::Keyword(kind)), Some(&1), "{oracle}: {kind:?}, {counters:?}, {:?}", outcome.events());
+            assert!(outcome.events().iter().any(|event| matches!(event,
+                GameEvent::CounterAdded { object_id, counter_type, count: 1, actor }
+                    if *object_id == source && *counter_type == CounterType::Keyword(kind) && *actor == P0
+            )), "{oracle}: {kind:?}, {:?}", outcome.events());
+        }
+        for bystander in [own_bystander, opposing_bystander] {
+            assert!(state.objects[&bystander].counters.is_empty(), "{oracle}");
+        }
+        outcome.assert_life_delta(P0, 0);
+        outcome.assert_life_delta(P1, 0);
+        assert_terminal_resolution(state);
+    }
+}
+
+#[test]
+fn source_counter_list_ignores_an_earlier_distinct_chosen_target() {
+    // Synthetic authority witness: the earlier chosen creature is not the source.
+    let oracle =
+        "{0}: Tap target creature. Put a flying counter and a vigilance counter on this creature.";
+    let parsed = parse_oracle_text(
+        oracle,
+        "Counter witness",
+        &[],
+        &["Creature".to_owned()],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "{:?}",
+        parsed.parse_warnings
+    );
+    assert_no_gaps(&parsed.abilities[0]);
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Counter witness", 3, 3)
+        .from_oracle_text(oracle)
+        .id();
+    let chosen = scenario.add_creature(P1, "Chosen creature", 2, 2).id();
+    let bystander = scenario.add_creature(P0, "Bystander", 2, 2).id();
+    let mut runner = scenario.build();
+    let abilities = &runner.state().objects[&source].abilities;
+    assert_eq!(abilities.len(), 1);
+    assert_eq!(abilities[0], parsed.abilities[0]);
+    let chain: Vec<_> =
+        std::iter::successors(Some(&abilities[0]), |def| def.sub_ability.as_deref()).collect();
+    assert_eq!(chain.len(), 3, "{chain:?}");
+    assert!(
+        matches!(
+            chain[0].effect.as_ref(),
+            Effect::SetTapState {
+                target: TargetFilter::Typed(_),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            }
+        ),
+        "{chain:?}"
+    );
+    for (def, kind) in chain
+        .iter()
+        .skip(1)
+        .zip([KeywordKind::Flying, KeywordKind::Vigilance])
+    {
+        assert_eq!(
+            def.effect.as_ref(),
+            &Effect::PutCounter {
+                counter_type: CounterType::Keyword(kind),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            }
+        );
+    }
+    let resolved = build_resolved_from_def(&abilities[0], source, P0);
+    // CR 601.2c + CR 115.10a: only the first instruction announces a creature target.
+    assert_eq!(
+        build_target_slots(runner.state(), &resolved)
+            .expect("tap target slot")
+            .len(),
+        1
+    );
+    let outcome = runner.activate(source, 0).target_object(chosen).resolve();
+    let state = outcome.state();
+    assert!(
+        state.objects[&chosen].tapped,
+        "the earlier chosen target was actually used"
+    );
+    assert!(!state.objects[&source].tapped);
+    let counters = &state.objects[&source].counters;
+    assert_eq!(counters.len(), 2, "{counters:?}");
+    // CR 608.2c: the later explicit-source instruction does not inherit the tap recipient.
+    for kind in [KeywordKind::Flying, KeywordKind::Vigilance] {
+        assert_eq!(
+            counters.get(&CounterType::Keyword(kind)),
+            Some(&1),
+            "{kind:?}: {counters:?}, {:?}",
+            outcome.events()
+        );
+    }
+    for other in [chosen, bystander] {
+        assert!(state.objects[&other].counters.is_empty());
+    }
+    assert_terminal_resolution(state);
+}
+
+#[test]
+fn chosen_counter_list_reuses_one_announced_recipient() {
+    // Unexpected Fangs' complete Oracle body from the pinned MTGJSON export.
+    let oracle = "Put a +1/+1 counter and a lifelink counter on target creature.";
+    let parsed = parse_oracle_text(
+        oracle,
+        "Unexpected Fangs",
+        &[],
+        &["Instant".to_owned()],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "{:?}",
+        parsed.parse_warnings
+    );
+    assert_no_gaps(&parsed.abilities[0]);
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Unexpected Fangs", true, oracle)
+        .id();
+    let chosen = scenario.add_creature(P1, "Chosen creature", 2, 2).id();
+    let bystander = scenario.add_creature(P0, "Bystander", 2, 2).id();
+    let mut runner = scenario.build();
+    let abilities = &runner.state().objects[&spell].abilities;
+    assert_eq!(abilities.len(), 1);
+    assert_eq!(abilities[0], parsed.abilities[0]);
+    let resolved = build_resolved_from_def(&abilities[0], spell, P0);
+    // CR 601.2c: the shared recipient is announced once for the complete list.
+    assert_eq!(
+        build_target_slots(runner.state(), &resolved)
+            .expect("chosen list slot")
+            .len(),
+        1
+    );
+    let outcome = runner.cast(spell).target_object(chosen).resolve();
+    // CR 122.1 + CR 608.2c: both counters belong to that one chosen creature.
+    outcome.assert_counters(chosen, CounterType::Plus1Plus1, 1);
+    outcome.assert_counters(chosen, CounterType::Keyword(KeywordKind::Lifelink), 1);
+    assert_eq!(outcome.state().objects[&chosen].counters.len(), 2);
+    assert!(outcome.state().objects[&bystander].counters.is_empty());
+    assert_terminal_resolution(outcome.state());
+}
+
+#[test]
 fn source_pronoun_damage_executes_after_list_counters_for_each_grammar_axis() {
     for pronoun in ["he", "she"] {
         for verb in ["deal", "deals"] {
@@ -677,6 +947,11 @@ fn source_pronoun_damage_executes_after_list_counters_for_each_grammar_axis() {
                 );
                 assert_eq!(parsed.abilities.len(), 1);
                 assert_no_gaps(&parsed.abilities[0]);
+                assert!(
+                    parsed.parse_warnings.is_empty(),
+                    "{oracle}: {:?}",
+                    parsed.parse_warnings
+                );
                 let mut scenario = GameScenario::new();
                 scenario.at_phase(Phase::PreCombatMain);
                 let source = scenario
@@ -684,18 +959,70 @@ fn source_pronoun_damage_executes_after_list_counters_for_each_grammar_axis() {
                     .from_oracle_text(&oracle)
                     .id();
                 let mut runner = scenario.build();
-                runner.activate(source, 0).resolve();
-                let obj = &runner.state().objects[&source];
+                let abilities = &runner.state().objects[&source].abilities;
+                assert_eq!(abilities.len(), 1);
+                assert_eq!(abilities[0], parsed.abilities[0]);
+                let chain: Vec<_> =
+                    std::iter::successors(Some(&abilities[0]), |def| def.sub_ability.as_deref())
+                        .collect();
+                assert_eq!(chain.len(), 3, "{oracle}: {chain:?}");
+                for (def, kind) in chain
+                    .iter()
+                    .take(2)
+                    .zip([KeywordKind::Flying, KeywordKind::Vigilance])
+                {
+                    assert_eq!(
+                        def.effect.as_ref(),
+                        &Effect::PutCounter {
+                            counter_type: CounterType::Keyword(kind),
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::SelfRef,
+                        },
+                        "{oracle}"
+                    );
+                }
+                assert!(
+                    matches!(
+                        chain[2].effect.as_ref(),
+                        Effect::DamageEachPlayer {
+                            amount: QuantityExpr::Fixed { value: 2 },
+                            player_filter: PlayerFilter::Opponent,
+                        }
+                    ),
+                    "{oracle}: {chain:?}"
+                );
+                let resolved = build_resolved_from_def(&abilities[0], source, P0);
+                assert!(build_target_slots(runner.state(), &resolved)
+                    .expect("source damage slots")
+                    .is_empty());
+                let outcome = runner.activate(source, 0).resolve();
+                let obj = &outcome.state().objects[&source];
+                let events = outcome.events();
+                let damage_index = events.iter().position(|event| matches!(event,
+                    GameEvent::DamageDealt { source_id, target: TargetRef::Player(player), amount: 2, is_combat: false, .. }
+                        if *source_id == source && *player == P1
+                )).expect("the exact source dealt two noncombat damage to P1");
                 // CR 122.1b: both printed keyword counters are placed on this source.
                 for kind in [KeywordKind::Flying, KeywordKind::Vigilance] {
                     assert_eq!(
                         obj.counters.get(&CounterType::Keyword(kind)),
                         Some(&1),
-                        "{oracle}"
+                        "{oracle}: {kind:?}, counters: {:?}, events: {events:?}",
+                        obj.counters
+                    );
+                    let counter_index = events.iter().position(|event| matches!(event,
+                        GameEvent::CounterAdded { object_id, counter_type, count: 1, actor }
+                            if *object_id == source && *counter_type == CounterType::Keyword(kind) && *actor == P0
+                    )).unwrap_or_else(|| panic!("{oracle}: missing {kind:?} placement, counters: {:?}, events: {events:?}", obj.counters));
+                    // CR 608.2c: both actual counter placements precede the damage instruction.
+                    assert!(
+                        counter_index < damage_index,
+                        "{oracle}: {kind:?}, {events:?}"
                     );
                 }
-                assert_eq!(runner.state().players[0].life, 20);
-                assert_eq!(runner.state().players[1].life, 18, "{oracle}");
+                assert_eq!(outcome.state().players[0].life, 20);
+                assert_eq!(outcome.state().players[1].life, 18, "{oracle}");
+                assert_terminal_resolution(outcome.state());
             }
         }
     }

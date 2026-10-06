@@ -9854,17 +9854,20 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
 }
 
 /// CR 122.1 + CR 608.2c: Lower a multi-typed counter list to a ParsedEffectClause
-/// whose primary effect carries the resolved target and whose `sub_ability`
-/// chain re-applies each remaining counter via `TargetFilter::ParentTarget`.
-/// Because `ParentTarget` is a context-ref filter (see
-/// `TargetFilter::is_context_ref`), the sub-ability chain does not surface
-/// additional target-selection slots — the player chooses the target once
-/// on the primary effect and every chained `PutCounter` inherits it.
+/// whose primary effect retains the shared recipient. Later source-bound entries
+/// preserve `SelfRef`; other entries use `ParentTarget` to reuse the chosen or
+/// anaphoric recipient. Both are context-ref filters, so later entries introduce
+/// no additional target-selection slots.
 pub(super) fn lower_put_counter_list(
     entries: Vec<(crate::types::counter::CounterType, QuantityExpr)>,
     target: TargetFilter,
     multi_target: Option<MultiTargetSpec>,
 ) -> ParsedEffectClause {
+    let later_target = if matches!(&target, TargetFilter::SelfRef) {
+        TargetFilter::SelfRef
+    } else {
+        TargetFilter::ParentTarget
+    };
     let mut iter = entries.into_iter();
     let (first_type, first_count) = iter
         .next()
@@ -9878,7 +9881,7 @@ pub(super) fn lower_put_counter_list(
             Effect::PutCounter {
                 counter_type,
                 count,
-                target: TargetFilter::ParentTarget,
+                target: later_target.clone(),
             },
         );
         def.sub_ability = sub_ability;
@@ -17104,7 +17107,125 @@ fn try_parse_bolster(lower: &str) -> Option<Effect> {
 mod tests {
     use super::*;
     use crate::types::ability::{EffectKind, ParitySource, ZoneChoiceChooser};
+    use crate::types::counter::CounterType;
+    use crate::types::keywords::KeywordKind;
     use crate::types::phase::PhaseGroup;
+
+    #[test]
+    fn put_counter_list_preserves_self_ref_for_every_entry_shape() {
+        // SHAPE: CR 122.1 + CR 608.2c preserve every count and the shared source.
+        for entries in [
+            vec![
+                (
+                    CounterType::Keyword(KeywordKind::Flying),
+                    QuantityExpr::Fixed { value: 1 },
+                ),
+                (
+                    CounterType::Keyword(KeywordKind::Vigilance),
+                    QuantityExpr::Fixed { value: 1 },
+                ),
+            ],
+            vec![
+                (
+                    CounterType::Keyword(KeywordKind::Flying),
+                    QuantityExpr::Fixed { value: 1 },
+                ),
+                (
+                    CounterType::Keyword(KeywordKind::Vigilance),
+                    QuantityExpr::Fixed { value: 2 },
+                ),
+                (
+                    CounterType::Keyword(KeywordKind::Lifelink),
+                    QuantityExpr::Fixed { value: 3 },
+                ),
+            ],
+        ] {
+            let clause = lower_put_counter_list(entries.clone(), TargetFilter::SelfRef, None);
+            assert_eq!(
+                clause.effect,
+                Effect::PutCounter {
+                    counter_type: entries[0].0.clone(),
+                    count: entries[0].1.clone(),
+                    target: TargetFilter::SelfRef,
+                }
+            );
+            assert!(clause.multi_target.is_none());
+            assert!(!clause.optional);
+            assert!(clause.condition.is_none());
+            let mut next = clause.sub_ability.as_deref();
+            for (counter_type, count) in entries.iter().skip(1) {
+                let def = next.expect("every remaining list entry is retained");
+                assert_eq!(
+                    def.effect.as_ref(),
+                    &Effect::PutCounter {
+                        counter_type: counter_type.clone(),
+                        count: count.clone(),
+                        target: TargetFilter::SelfRef,
+                    }
+                );
+                assert!(def.multi_target.is_none());
+                assert!(!def.optional);
+                assert!(def.condition.is_none());
+                next = def.sub_ability.as_deref();
+            }
+            assert!(next.is_none(), "the list terminates after its final entry");
+        }
+    }
+
+    #[test]
+    fn put_counter_list_preserves_chosen_and_parent_binding_shape() {
+        // SHAPE: CR 601.2c + CR 608.2c reuse the head's announced recipient set.
+        let entries = vec![
+            (
+                CounterType::Keyword(KeywordKind::Flying),
+                QuantityExpr::Fixed { value: 1 },
+            ),
+            (
+                CounterType::Keyword(KeywordKind::Vigilance),
+                QuantityExpr::Fixed { value: 2 },
+            ),
+            (
+                CounterType::Keyword(KeywordKind::Lifelink),
+                QuantityExpr::Fixed { value: 3 },
+            ),
+        ];
+        let chosen = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            ..Default::default()
+        });
+        let root_spec = Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 2 }));
+        for target in [chosen, TargetFilter::ParentTarget] {
+            let clause = lower_put_counter_list(entries.clone(), target.clone(), root_spec.clone());
+            assert_eq!(
+                clause.effect,
+                Effect::PutCounter {
+                    counter_type: entries[0].0.clone(),
+                    count: entries[0].1.clone(),
+                    target,
+                }
+            );
+            assert_eq!(clause.multi_target, root_spec);
+            assert!(!clause.optional);
+            assert!(clause.condition.is_none());
+            let mut next = clause.sub_ability.as_deref();
+            for (counter_type, count) in entries.iter().skip(1) {
+                let def = next.expect("every remaining list entry is retained");
+                assert_eq!(
+                    def.effect.as_ref(),
+                    &Effect::PutCounter {
+                        counter_type: counter_type.clone(),
+                        count: count.clone(),
+                        target: TargetFilter::ParentTarget,
+                    }
+                );
+                assert!(def.multi_target.is_none());
+                assert!(!def.optional);
+                assert!(def.condition.is_none());
+                next = def.sub_ability.as_deref();
+            }
+            assert!(next.is_none(), "the list terminates after its final entry");
+        }
+    }
 
     #[test]
     fn counter_tail_failure_commits_instead_of_falling_back_to_put() {

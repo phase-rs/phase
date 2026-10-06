@@ -9948,7 +9948,18 @@ mod tests {
                     let chunks = split_clause_sequence(&text);
                     assert_eq!(chunks.len(), 2, "{text}: {chunks:?}");
                     assert_eq!(chunks[0].text, "put four +1/+1 counters on ~");
-                    assert_eq!(chunks[1].text, tail);
+                    let raw_tail = if connector == ", and " {
+                        format!("and {tail}")
+                    } else {
+                        tail.clone()
+                    };
+                    assert_eq!(chunks[1].text, raw_tail, "{text}");
+                    assert_eq!(
+                        super::super::lower::strip_leading_sequence_connector(&chunks[1].text)
+                            .trim(),
+                        tail,
+                        "{text}"
+                    );
                 }
             }
         }
