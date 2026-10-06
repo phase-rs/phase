@@ -352,6 +352,11 @@ pub struct ResolvedContinuousEffectRetirementCommand {
 
 /// Installation and irreversible retirement of resolution-created effects
 /// (CR 611.2a / CR 611.2b), owned by the continuous-effect storage authority.
+// clippy::large_enum_variant: `Install` dwarfs `Retire`, but this enum is only
+// ever stored behind the `Box` in `ResolvedRulesCommand::ContinuousEffect`;
+// elsewhere it is a borrowed replay operand. Boxing `Install` as well would add
+// a second indirection without shrinking any stored value.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum ResolvedContinuousEffectEdit {
     Install(ResolvedContinuousEffectCommand),
