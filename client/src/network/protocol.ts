@@ -106,6 +106,12 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  89 — game_setup and state_update carry GameState, whose exile-until
+ *       loops now carry a match count, whose paused loop keeps its hits,
+ *       whose zone choices can read ParentTargets, and whose spell context
+ *       carries the loop's exile batch. A v88 peer would run a counted loop
+ *       as a one-card loop, so first contact rejects the skew. Bumped in
+ *       lockstep with full-game protocol 107.
  *  88 — GameState and game actions carry exact replacement-choice preferences,
  *       remembered responses, and prompt eligibility metadata. Bumped with
  *       full-game protocol 106.
@@ -541,7 +547,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 88 as const;
+export const WIRE_PROTOCOL_VERSION = 89 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

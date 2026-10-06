@@ -22,10 +22,10 @@ use engine::types::card::CardFace;
 use engine::types::counter::{CounterMatch, CounterType};
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{
-    AlternativeCastKeyword, AutoPassMode, CastPaymentMode, GameState, MulliganBottomEntry,
-    MulliganDecisionEntry, MulliganDecisionPhase, OpeningHandBottomReason, PendingTriggerSummary,
-    PlayerDeckPool, ResolutionOptionalPaymentOption, TurnBoundary, WaitingFor,
-    ZoneOpponentChooserPurpose,
+    AlternativeCastKeyword, AutoPassMode, CastPaymentMode, GameState, ManaChoice, ManaChoicePrompt,
+    MulliganBottomEntry, MulliganDecisionEntry, MulliganDecisionPhase, OpeningHandBottomReason,
+    PendingTriggerSummary, PlayerDeckPool, ResolutionOptionalPaymentOption, TurnBoundary,
+    WaitingFor, ZoneOpponentChooserPurpose,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::interaction::{
@@ -7314,6 +7314,166 @@ fn tap_land_for_mana_labels_a_commander_color_identity_land() {
         ["R"],
         "the label follows the commander's color identity"
     );
+}
+
+/// CR 106.7 + CR 109.5 + CR 903.4: Fellwar Stone surveys what the opponent's
+/// Command Tower could produce using that opponent's commander color identity.
+#[test]
+fn fellwar_stone_activation_uses_opponents_command_tower_colors() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let stone = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Fellwar Stone",
+            "{T}: Add one mana of any color that a land an opponent controls could produce.",
+        )
+        .id();
+    scenario.add_land_from_oracle(
+        P1,
+        "Command Tower",
+        "{T}: Add one mana of any color in your commander's color identity.",
+    );
+    let rakdos = scenario
+        .add_creature(P0, "Rakdos, Lord of Riots", 6, 6)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+                ManaCostShard::Red,
+                ManaCostShard::Red,
+            ],
+        })
+        .id();
+    scenario.with_commander(rakdos);
+    let brago = scenario
+        .add_creature(P1, "Brago, King Eternal", 2, 4)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::White, ManaCostShard::Blue],
+        })
+        .id();
+    scenario.with_commander(brago);
+    let mut runner = scenario.build();
+    assert_eq!(runner.state().players[P0.0 as usize].mana_pool.total(), 0);
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: stone,
+            ability_index: 0,
+        })
+        .expect("activate parsed Fellwar Stone mana ability");
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseManaColor {
+            choice: ManaChoicePrompt::SingleColor { options },
+            ..
+        } => {
+            let mut offered = options.clone();
+            offered.sort();
+            assert_eq!(
+                offered,
+                vec![ManaType::White, ManaType::Blue],
+                "Command Tower must offer P1's white/blue, not P0's black/red"
+            );
+        }
+        other => panic!("expected Fellwar Stone's SingleColor prompt, got {other:?}"),
+    }
+    // CR 602.2b: the source's tap cost is paid before its mana choice.
+    assert!(runner.state().objects[&stone].tapped);
+
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Blue),
+            count: 1,
+        })
+        .expect("choose blue from Fellwar Stone's offered colors");
+    let pool = &runner.state().players[P0.0 as usize].mana_pool;
+    assert_eq!(pool.count_color(ManaType::Blue), 1);
+    assert_eq!(pool.count_color(ManaType::Black), 0);
+    assert_eq!(pool.count_color(ManaType::Red), 0);
+    assert_eq!(pool.total(), 1);
+    assert!(runner.state().objects[&stone].tapped);
+}
+
+/// CR 106.7 + CR 109.5 + CR 903.4: Exotic Orchard's parsed land ability
+/// surveys the opponent's Command Tower through the same mana rule.
+#[test]
+fn exotic_orchard_activation_uses_opponents_command_tower_colors() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let orchard = scenario
+        .add_land_from_oracle(
+            P0,
+            "Exotic Orchard",
+            "{T}: Add one mana of any color that a land an opponent controls could produce.",
+        )
+        .id();
+    scenario.add_land_from_oracle(
+        P1,
+        "Command Tower",
+        "{T}: Add one mana of any color in your commander's color identity.",
+    );
+    let rakdos = scenario
+        .add_creature(P0, "Rakdos, Lord of Riots", 6, 6)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+                ManaCostShard::Red,
+                ManaCostShard::Red,
+            ],
+        })
+        .id();
+    scenario.with_commander(rakdos);
+    let brago = scenario
+        .add_creature(P1, "Brago, King Eternal", 2, 4)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::White, ManaCostShard::Blue],
+        })
+        .id();
+    scenario.with_commander(brago);
+    let mut runner = scenario.build();
+    assert_eq!(runner.state().players[P0.0 as usize].mana_pool.total(), 0);
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: orchard,
+            ability_index: 0,
+        })
+        .expect("activate parsed Exotic Orchard mana ability");
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseManaColor {
+            choice: ManaChoicePrompt::SingleColor { options },
+            ..
+        } => {
+            let mut offered = options.clone();
+            offered.sort();
+            assert_eq!(
+                offered,
+                vec![ManaType::White, ManaType::Blue],
+                "Command Tower must offer P1's white/blue, not P0's black/red"
+            );
+        }
+        other => panic!("expected Exotic Orchard's SingleColor prompt, got {other:?}"),
+    }
+    // CR 602.2b: the source's tap cost is paid before its mana choice.
+    assert!(runner.state().objects[&orchard].tapped);
+
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Blue),
+            count: 1,
+        })
+        .expect("choose blue from Exotic Orchard's offered colors");
+    let pool = &runner.state().players[P0.0 as usize].mana_pool;
+    assert_eq!(pool.count_color(ManaType::Blue), 1);
+    assert_eq!(pool.count_color(ManaType::Black), 0);
+    assert_eq!(pool.count_color(ManaType::Red), 0);
+    assert_eq!(pool.total(), 1);
+    assert!(runner.state().objects[&orchard].tapped);
 }
 
 #[test]

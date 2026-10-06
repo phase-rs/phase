@@ -475,6 +475,19 @@ fn register_transient_effect(
         generic_effect_application_filter(target_filter, static_def.affected.as_ref()),
         Some(TargetFilter::SelfRef)
     ) {
+        // CR 400.7: a returned source is a new object, even when its storage ID
+        // is reused. Keep triggered self-reference exceptions and resolution-local
+        // relatching in their existing authorities.
+        let source_is_current = if ability.trigger_source.is_some() {
+            ability.self_ref_is_current(state)
+        } else {
+            ability.source_is_current(state)
+        };
+        if !source_is_current {
+            // CR 113.7a: only this definition loses its source recipient; the
+            // ability, independent definitions, and later instructions still resolve.
+            return;
+        }
         install_transient(
             state,
             end_permission,

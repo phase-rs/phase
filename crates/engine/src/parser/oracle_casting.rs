@@ -2378,6 +2378,47 @@ Trample";
         }
     }
 
+    /// CR 508.1k + CR 118.9: Pitfall Trap — leading "If exactly one creature is
+    /// attacking, " (singular copula, EQ comparator) gates the {W} alternative
+    /// casting cost on an attacking-creature count of exactly one.
+    #[test]
+    fn alt_cost_leading_if_exactly_one_creature_attacking_binds() {
+        let option = parse_spell_casting_option_line(
+            "If exactly one creature is attacking, you may pay {W} rather than pay this spell's mana cost.",
+            "Pitfall Trap",
+        )
+        .expect("alt-cost should parse with leading-if exactly-one attacking gate");
+        assert_eq!(
+            option.kind,
+            crate::types::ability::SpellCastingOptionKind::AlternativeCost
+        );
+        assert_eq!(
+            option.condition,
+            Some(ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            crate::types::ability::TypedFilter::creature()
+                                .properties(vec![FilterProp::Attacking { defender: None }]),
+                        ),
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            })
+        );
+        assert_eq!(
+            option.cost,
+            Some(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    generic: 0,
+                    shards: vec![crate::types::mana::ManaCostShard::White],
+                },
+            }),
+            "the alternative cost must be exactly {{W}}"
+        );
+    }
+
     /// CR 508.1 + CR 105.1 + CR 118.9: Nemesis Trap — leading "If a white
     /// creature is attacking, " gates the {B}{B} alternative casting cost on a
     /// color-filtered attacker presence check (not a bare/count one).

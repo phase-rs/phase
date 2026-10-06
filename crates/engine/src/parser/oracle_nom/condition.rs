@@ -394,10 +394,12 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
 /// while preserving the precedence of its control-related productions.
 ///
 /// The group is an ARITY-MANAGEMENT device first. Besides the control-related
-/// productions it also hosts the THRESHOLD-COUNT family — the
-/// `parse_ge_threshold`-headed arms that compare an object count against a
-/// fixed number (`parse_creatures_are_attacking_count_ge`,
-/// `parse_attached_to_referent_count_ge`). The attacking-count arm lives here
+/// productions it also hosts the THRESHOLD-COUNT family — the arms that
+/// compare an object count against a fixed number
+/// (`parse_creatures_attacking_count_threshold`, headed by the
+/// comparator-aware `parse_count_threshold`, and
+/// `parse_attached_to_referent_count_ge`, headed by the GE-only
+/// `parse_ge_threshold`). The attacking-count arm lives here
 /// because it MUST precede `parse_control_conditions` (see its comment below);
 /// the attachment-threshold arm lives here for family proximity and to leave
 /// the parent `alt`'s remaining tuple headroom free.
@@ -409,17 +411,18 @@ fn parse_control_presence_conditions(input: &str) -> OracleResult<'_, StaticCond
         parse_control_named_pair,
         parse_compound_control_presence,
         parse_filter_have_total_property,
-        // CR 508.1 + CR 118.9: "N or more creatures are attacking" — must precede
-        // `parse_control_conditions` so the bare count phrase is not mis-read as
-        // "you control N or more creatures".
-        parse_creatures_are_attacking_count_ge,
+        // CR 508.1k + CR 118.9: "<count threshold> creature(s) is/are attacking"
+        // ("three or more creatures are attacking", "exactly one creature is
+        // attacking") — must precede `parse_control_conditions` so the bare
+        // count phrase is not mis-read as "you control N or more creatures".
+        parse_creatures_attacking_count_threshold,
         // CR 301.5 + CR 303.4 + CR 611.3a: "N or more <type> are attached to
         // <referent>" — the attachment-threshold sibling of the attacking-count
         // arm above. Ordering relative to that arm is NOT load-bearing (its
-        // `tag("creatures are attacking")` and this arm's required
-        // `" attached to "` referent are mutually exclusive after the shared
-        // `parse_ge_threshold` head); they are adjacent so the threshold-count
-        // family is discoverable in one place.
+        // "creature(s) is/are attacking" tail and this arm's required
+        // `" attached to "` referent are mutually exclusive after the count
+        // heads); they are adjacent so the threshold-count family is
+        // discoverable in one place.
         parse_attached_to_referent_count_ge,
         parse_source_controlled_or_your_commander,
         parse_control_conditions,
@@ -4633,6 +4636,38 @@ pub(crate) fn parse_strict_comparator_prefix(input: &str) -> OracleResult<'_, Co
     .parse(input)
 }
 
+/// CR 107.1: comparator-aware count head for "<threshold> <noun phrase>"
+/// conditions. Accepts every count-threshold idiom and returns `(N, comparator)`
+/// with the input positioned at the noun phrase:
+///
+/// * `"exactly N "` → EQ (the same leaf `parse_source_enchanted_by_aura_count`
+///   and `parse_control_count_eq` build inline);
+/// * `"fewer than N "` / `"more than N "` → LT / GT (via
+///   `parse_strict_comparator_prefix`);
+/// * `"at least N "` / `"N or more "` / `"N or fewer "` / `"N or less "` →
+///   GE / LE (via `parse_amount_threshold`).
+///
+/// Composes the existing comparator authorities rather than widening one in
+/// place, so the GE-only consumers of `parse_ge_threshold` and the mana-spent
+/// consumers of `parse_amount_threshold` keep their grammar unchanged. The
+/// arms are disjoint on their first token, so ordering is not load-bearing.
+fn parse_count_threshold(input: &str) -> OracleResult<'_, (u32, Comparator)> {
+    terminated(
+        alt((
+            map(preceded(tag("exactly "), parse_number), |n| {
+                (n, Comparator::EQ)
+            }),
+            map(
+                (parse_strict_comparator_prefix, parse_number),
+                |(comparator, n)| (n, comparator),
+            ),
+            parse_amount_threshold,
+        )),
+        tag(" "),
+    )
+    .parse(input)
+}
+
 /// CR 608.2c: the connectors that open the ELSE branch of a written-order
 /// if/else pair ("Otherwise, …", "If not, …", "If no one does, …").
 ///
@@ -5110,9 +5145,9 @@ fn parse_filtered_creature_is_attacking(input: &str) -> OracleResult<'_, StaticC
 /// The attacking case overlaps that combinator and yields the identical
 /// `IsPresent`; it is registered first, so this arm is reached for the blocking form.
 /// No controller restriction — a matching attacker/blocker controlled by any
-/// player qualifies. The singular article requirement rejects the plural count
-/// form ("creatures are attacking"), which `parse_creatures_are_attacking_count_ge`
-/// owns.
+/// player qualifies. The singular article requirement rejects the counted
+/// forms ("three or more creatures are attacking", "exactly one creature is
+/// attacking"), which `parse_creatures_attacking_count_threshold` owns.
 fn parse_a_type_is_in_combat(input: &str) -> OracleResult<'_, StaticCondition> {
     // Require a singular article; `parse_type_phrase_folding` strips it itself.
     nom::combinator::peek(alt((tag("a "), tag("an "))).map(|_| ())).parse(input)?;
@@ -5137,27 +5172,34 @@ fn parse_a_type_is_in_combat(input: &str) -> OracleResult<'_, StaticCondition> {
     ))
 }
 
-/// CR 508.1 + CR 118.9: Parse "N or more creatures are attacking" →
-/// `QuantityComparison(ObjectCount(creature + Attacking) >= N)`.
+/// CR 508.1k + CR 118.9: Parse "<count threshold> creature(s) is/are attacking"
+/// → `QuantityComparison(ObjectCount(creature + Attacking) <cmp> N)`.
 ///
-/// Lethargy Trap: "If three or more creatures are attacking, you may pay {U}
-/// rather than pay this spell's mana cost." Reuses `parse_ge_threshold` so
-/// "at least three creatures are attacking" shares the same parse path.
-fn parse_creatures_are_attacking_count_ge(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, n) = parse_ge_threshold(input)?;
-    let (rest, _) = tag("creatures are attacking").parse(rest.trim_start())?;
+/// The head is the comparator-aware `parse_count_threshold`, so every
+/// comparator idiom shares this one arm:
+///
+/// * Lethargy Trap: "If three or more creatures are attacking, …" → GE 3;
+/// * Arrow Volley Trap: "If four or more creatures are attacking, …" → GE 4;
+/// * Pitfall Trap: "If exactly one creature is attacking, …" → EQ 1.
+///
+/// Both copulas are accepted ("creatures are" / "creature is") because the
+/// singular follows "exactly one" / "more than one". The count spans every
+/// attacking creature regardless of controller (no defender restriction). A
+/// bare count ("one creature is attacking") and the defender form
+/// ("… is attacking you") are deliberately not produced here.
+fn parse_creatures_attacking_count_threshold(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, (n, comparator)) = parse_count_threshold(input)?;
+    let (rest, _) = (
+        alt((tag("creatures are"), tag("creature is"))),
+        tag(" attacking"),
+    )
+        .parse(rest)?;
     let filter = TargetFilter::Typed(
         TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }]),
     );
     Ok((
         rest,
-        StaticCondition::QuantityComparison {
-            lhs: QuantityExpr::Ref {
-                qty: QuantityRef::ObjectCount { filter },
-            },
-            comparator: Comparator::GE,
-            rhs: QuantityExpr::Fixed { value: n as i32 },
-        },
+        make_quantity_comparison(QuantityRef::ObjectCount { filter }, comparator, n),
     ))
 }
 
@@ -5191,8 +5233,9 @@ fn parse_creatures_are_attacking_count_ge(input: &str) -> OracleResult<'_, Stati
 /// count is built by their shared constructor (`attachment_object_count`), so
 /// all four referents (`~`, him/her, it/that creature, them/that player) and
 /// every multi-type list work here on day one. The ONLY things this combinator
-/// adds are the threshold head (`parse_ge_threshold`, shared with
-/// `parse_creatures_are_attacking_count_ge`) and the copula.
+/// adds are the threshold head (`parse_ge_threshold`; the attacking-count
+/// sibling `parse_creatures_attacking_count_threshold` uses the
+/// comparator-aware `parse_count_threshold`) and the copula.
 ///
 /// THE COPULA IS REQUIRED, NOT OPTIONAL. "two or more Equipment attached to it"
 /// is a NOUN PHRASE, not a condition; admitting it would let a bare noun phrase
@@ -7781,6 +7824,7 @@ fn parse_source_qualified_mana_spent_condition(input: &str) -> OracleResult<'_, 
 /// `(N, GE/LE)`. Factored from the byte-identical closures that previously
 /// duplicated this grammar in `parse_source_qualified_mana_spent_threshold`
 /// and `parse_mana_spent_threshold`; output is pinned by existing tests.
+/// Also composed (unchanged) into the comparator-aware `parse_count_threshold`.
 fn parse_amount_threshold(input: &str) -> OracleResult<'_, (u32, Comparator)> {
     alt((
         // "at least N " → GE
@@ -14389,6 +14433,140 @@ mod tests {
         }
     }
 
+    /// The expected attacking-creature count filter: every attacking creature,
+    /// any controller, no defender restriction.
+    fn attacking_creature_count_filter() -> TargetFilter {
+        TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }]),
+        )
+    }
+
+    /// Parse `input` fully through `parse_inner_condition` and return the
+    /// attacking-count `(comparator, n)`, or panic with the actual shape.
+    fn attacking_count_parts(input: &str) -> (Comparator, i32) {
+        let (rest, c) = parse_inner_condition(input)
+            .unwrap_or_else(|e| panic!("expected {input:?} to parse, got {e:?}"));
+        assert_eq!(rest, "", "combinator must consume all of {input:?}");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                comparator,
+                rhs: QuantityExpr::Fixed { value },
+            } if filter == attacking_creature_count_filter() => (comparator, value),
+            other => {
+                panic!("expected attacking-count QuantityComparison for {input:?}, got {other:?}")
+            }
+        }
+    }
+
+    /// CR 508.1k + CR 118.9: Pitfall Trap — "exactly one creature is attacking"
+    /// (singular copula) is an EQ 1 attacking-creature count, through both the
+    /// combinator and the restriction-condition bridge alt costs consume.
+    #[test]
+    fn creatures_attacking_count_exactly_one_singular_copula() {
+        assert_eq!(
+            attacking_count_parts("exactly one creature is attacking"),
+            (Comparator::EQ, 1)
+        );
+        assert_eq!(
+            crate::parser::oracle_condition::parse_restriction_condition(
+                "exactly one creature is attacking"
+            ),
+            Some(crate::types::ability::ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: attacking_creature_count_filter(),
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            })
+        );
+    }
+
+    /// CR 107.1: the attacking-count arm is comparator-aware — every count
+    /// threshold idiom lands on the same arm with its own comparator.
+    #[test]
+    fn creatures_attacking_count_comparator_axis() {
+        for (input, expected) in [
+            ("exactly two creatures are attacking", (Comparator::EQ, 2)),
+            ("two or fewer creatures are attacking", (Comparator::LE, 2)),
+            (
+                "at least three creatures are attacking",
+                (Comparator::GE, 3),
+            ),
+            ("three or more creatures are attacking", (Comparator::GE, 3)),
+            (
+                "fewer than three creatures are attacking",
+                (Comparator::LT, 3),
+            ),
+            ("more than one creature is attacking", (Comparator::GT, 1)),
+        ] {
+            assert_eq!(attacking_count_parts(input), expected, "for {input:?}");
+        }
+    }
+
+    /// Malformed attacking-count forms are refused by the restriction bridge.
+    /// Reach-guard: the well-formed Pitfall Trap gate (one token away from each
+    /// negative) parses, so the negatives cannot pass vacuously.
+    #[test]
+    fn creatures_attacking_count_refuses_malformed_forms() {
+        assert!(
+            crate::parser::oracle_condition::parse_restriction_condition(
+                "exactly one creature is attacking"
+            )
+            .is_some()
+        );
+        for input in [
+            "exactly one creature attacking",
+            "one creature is attacking",
+            "exactly one creature is attacking you",
+        ] {
+            assert_eq!(
+                crate::parser::oracle_condition::parse_restriction_condition(input),
+                None,
+                "{input:?} must not parse as a restriction condition"
+            );
+        }
+        // "blocking" is not the attacking count.
+        if let Ok((
+            _,
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                ..
+            },
+        )) = parse_inner_condition("exactly one creature is blocking")
+        {
+            assert_ne!(
+                filter,
+                attacking_creature_count_filter(),
+                "a blocking phrase must not become the attacking count"
+            );
+        }
+    }
+
+    /// CR 508.1k: the singular existential forms ("a creature is attacking",
+    /// "a white creature is attacking") stay `IsPresent`; the new singular
+    /// copula on the count arm does not shadow them.
+    #[test]
+    fn creatures_attacking_count_does_not_shadow_presence_forms() {
+        for input in ["a creature is attacking", "a white creature is attacking"] {
+            let (rest, c) = parse_inner_condition(input)
+                .unwrap_or_else(|e| panic!("expected {input:?} to parse, got {e:?}"));
+            assert_eq!(rest, "", "for {input:?}");
+            assert!(
+                matches!(c, StaticCondition::IsPresent { .. }),
+                "{input:?} must stay IsPresent, got {c:?}"
+            );
+        }
+    }
+
     /// Destructure an attachment-threshold condition into
     /// `(threshold, type_filters, properties)`, or panic with the actual shape.
     /// Shared by the `parse_attached_to_referent_count_ge` tests below.
@@ -14522,9 +14700,10 @@ mod tests {
         );
     }
 
-    /// Registering the attachment arm beside `parse_creatures_are_attacking_count_ge`
-    /// must not shadow it. Both share the `parse_ge_threshold` head, so a future
-    /// widening of either would surface here first.
+    /// Registering the attachment arm beside `parse_creatures_attacking_count_threshold`
+    /// must not shadow it. Both accept the "N or more" head (`parse_ge_threshold`
+    /// / `parse_count_threshold`), so a future widening of either would surface
+    /// here first.
     #[test]
     fn attachment_threshold_does_not_shadow_the_attacking_sibling() {
         let (rest, c) = parse_inner_condition("three or more creatures are attacking").unwrap();

@@ -7,7 +7,7 @@ import {
 } from "../stores/gameStore";
 import { useUiStore } from "../stores/uiStore";
 import { dispatchAction } from "../game/dispatch";
-import { getPlayerId } from "./usePlayerId";
+import { getCanActForWaitingState, getPlayerId } from "./usePlayerId";
 import { useAltToggle } from "./useAltToggle";
 import { useShiftHeld } from "./useShiftHeld";
 import {
@@ -110,9 +110,9 @@ export function useKeyboardShortcuts(): void {
           break;
 
         case " ":
-          if (waitingFor?.type === "Priority") {
+          if (waitingFor?.type === "Priority" && getCanActForWaitingState()) {
             e.preventDefault();
-            dispatch({ type: "PassPriority" });
+            dispatchAction({ type: "PassPriority" });
           }
           break;
 

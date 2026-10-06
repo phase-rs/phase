@@ -1130,26 +1130,37 @@ fn grant_exiled_source(input: &str) -> OracleResult<'_, crate::types::ability::T
             ),
         ),
         value(TargetFilter::ExiledBySource, tag("the exiled card")),
-        // "all [creature] cards exiled with it/~". The optional "creature"
-        // qualifier intersects `ExiledBySource` with the Creature type filter
-        // (CR 205.3 — a creature card is type Creature in exile) so Agatha grants
-        // only creature cards' abilities; the untyped form (Myr Welder, Territory
+        // "all [creature|land] cards exiled with it/~". The optional card-type
+        // qualifier intersects `ExiledBySource` with the matching type filter
+        // (CR 205.2a — a creature/land card is type Creature/Land in exile) so
+        // Agatha grants only creature cards' abilities and Steward of the
+        // Harvest only land cards'; the untyped form (Myr Welder, Territory
         // Forge) stays a bare `ExiledBySource`.
         (
             tag("all "),
-            opt(tag("creature ")),
+            opt(grant_exiled_card_type_qualifier),
             tag("cards exiled with "),
             alt((tag("it"), tag("~"))),
         )
-            .map(|(_, creature_qualifier, _, _)| match creature_qualifier {
-                Some(_) => TargetFilter::And {
-                    filters: vec![
-                        TargetFilter::Typed(TypedFilter::creature()),
-                        TargetFilter::ExiledBySource,
-                    ],
+            .map(|(_, qualifier, _, _)| match qualifier {
+                Some(typed) => TargetFilter::And {
+                    filters: vec![TargetFilter::Typed(typed), TargetFilter::ExiledBySource],
                 },
                 None => TargetFilter::ExiledBySource,
             }),
+    ))
+    .parse(input)
+}
+
+/// CR 205.2a + CR 607.2a: card-type qualifier of the exiled-cards grant set.
+/// Only card types printed with this phrase are accepted; any other word
+/// (nonland, artifact, ...) fails the following `cards exiled with ` tag so the
+/// whole clause declines rather than mis-scoping the set. The trailing space is
+/// part of each tag so "lands"/"landfall" cannot match.
+fn grant_exiled_card_type_qualifier(input: &str) -> OracleResult<'_, TypedFilter> {
+    alt((
+        value(TypedFilter::creature(), tag("creature ")),
+        value(TypedFilter::land(), tag("land ")),
     ))
     .parse(input)
 }

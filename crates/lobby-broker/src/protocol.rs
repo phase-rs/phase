@@ -60,6 +60,14 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 107 — `UntilCondition::NextMatches` gains `count` ("until you exile two
+///      nonland cards …" — Invasion of Alara, CR 608.2c), the paused loop
+///      (`PendingExileFromTopUntil`) keeps its `hits`,
+///      `ZoneChoiceCandidateSource` gains `ParentTargets`, and `SpellContext`
+///      gains `exile_until_batch` (the loop's cards, carried by a paused
+///      continuation). A v106 peer reads a counted loop as a one-card loop and
+///      cannot parse the new candidate source. P2P moves in lockstep
+///      (wire 89).
 /// 106 — Full-game replacement-choice preferences, exact source/definition
 ///       identities, remembered ordering/optional actions, and prompt
 ///       eligibility metadata. P2P moves in lockstep (wire 88); lobby-only
@@ -876,7 +884,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 106;
+pub const PROTOCOL_VERSION: u32 = 107;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2131,12 +2139,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 106);
+        assert_eq!(PROTOCOL_VERSION, 107);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 105);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 106);
     }
 
     #[test]

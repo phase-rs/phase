@@ -240,6 +240,9 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         // ability's chosen target) — the reference set can change, so treat as
         // population dependent, mirroring `DifferentNameFrom`.
         FilterProp::DistinctFrom { .. } => true,
+        // CR 701.15b: A functioning printed source elsewhere on the board can
+        // designate an existing permanent, so entry/exit can change this prop.
+        FilterProp::Goaded => true,
         // CR 603.4: "shares a quality with" a reference set is population
         // dependent ONLY when a reference filter is present — the reference set
         // is battlefield-derived. The multi-target group-share form
@@ -329,9 +332,6 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
         | FilterProp::Renowned
-        // CR 701.15b/c: goad is a candidate-local designation (reads only the
-        // object's own `goaded_by` set), so the board population is irrelevant.
-        | FilterProp::Goaded
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::Modified
@@ -727,7 +727,10 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         FilterProp::ControllerMatches { .. }
         // CR 115.1 + CR 707.10: evaluates the triggering spell's OWN target
         // filter, which is not reachable from this AST node.
-        | FilterProp::CouldBeTargetedByTriggeringSpell => CharacteristicKinds::ALL,
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+        // CR 701.15b: Printed sources and their affected filters can read
+        // controller, type, abilities, or other layered characteristics.
+        | FilterProp::Goaded => CharacteristicKinds::ALL,
         // CR 109.1: identity exclusion. Against the ability's own parent target
         // this is pure object identity and reads nothing; against any other
         // reference the excluded set is filter-derived and could be anything.
@@ -766,7 +769,6 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         | FilterProp::InTrackedSet { .. }
         | FilterProp::Suspected
         | FilterProp::Renowned
-        | FilterProp::Goaded
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::DealtDamageThisTurn { .. }
@@ -902,6 +904,9 @@ fn entered_object_perturbs_filter_prop(
         // matches any permanent).
         FilterProp::MostPrevalentCreatureTypeIn { .. } => true,
         FilterProp::NameMatchesAnyPermanent { .. } => true,
+        // CR 701.15b: An entering printed source can goad a pre-existing
+        // creature; conservatively refresh the live designation query.
+        FilterProp::Goaded => true,
         // The entered object's name joins the comparison set, so any entry
         // matching the inner filter changes the "different name than each X"
         // membership for pre-existing objects. No inner filter ⇒ conservatively
@@ -1003,9 +1008,6 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
         | FilterProp::Renowned
-        // CR 701.15b/c: an entering object cannot perturb a candidate-local goad
-        // designation (reads only the object's own `goaded_by` set).
-        | FilterProp::Goaded
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::Modified
@@ -7752,7 +7754,7 @@ fn matches_filter_prop(
         // CR 702.112b: Match permanents with the renowned designation.
         FilterProp::Renowned => obj.is_renowned,
         // CR 701.15b/c: a creature is goaded iff at least one player has goaded it.
-        FilterProp::Goaded => !obj.goaded_by.is_empty(),
+        FilterProp::Goaded => !combat::goading_players_for_creature(state, obj.id).is_empty(),
         // CR 700.9: A permanent is modified if it has one or more counters on
         // it (CR 122), is equipped (CR 301.5), or is enchanted by an Aura
         // controlled by its controller (CR 303.4).

@@ -11396,6 +11396,16 @@ pub(super) fn apply_where_x_effect_expression(
             bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x);
             bind_where_x_quantity(life_payment, where_x_expression, &mut unbound_where_x);
         }
+        // CR 608.2c: the "until you exile X … cards" match count and the
+        // cumulative threshold are the loop's quantity slots.
+        Effect::ExileFromTopUntil { until, .. } => match until {
+            crate::types::ability::UntilCondition::NextMatches { count, .. } => {
+                bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x);
+            }
+            crate::types::ability::UntilCondition::CumulativeThreshold { threshold, .. } => {
+                bind_where_x_quantity(threshold, where_x_expression, &mut unbound_where_x);
+            }
+        },
         Effect::CreateTokenCopyFromPool {
             mv_bound, count, ..
         } => {

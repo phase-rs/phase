@@ -2679,6 +2679,9 @@ pub struct PendingExileFromTopUntil {
     pub linked_batch: Vec<ObjectIncarnationRef>,
     /// Cumulative property total completed before the pause.
     pub cumulative: i32,
+    /// `NextMatches` hits completed before the pause, in exile order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hits: Vec<ObjectId>,
 }
 
 impl PendingContinuation {
