@@ -6763,6 +6763,14 @@ pub enum FilterProp {
     /// stack object's static printed modality (`obj.modal.is_some()`), a printed
     /// characteristic present from object creation.
     Modal,
+    /// CR 722.3d + CR 722.2a: Matches a spell cast as a prepare spell (the
+    /// prepare-spell copy cast from exile under CR 722.3c) and any copy of it
+    /// (CR 722.3d). Live stack-object read: the `prepared_copy_source` marker on
+    /// a Stack-zone object, which survives the exile-to-stack cast and is
+    /// inherited by spell copies. This is the spell-side reading only: it is not
+    /// the CR 722.3a permanent designation, so a prepared permanent on the
+    /// battlefield never matches.
+    PrepareSpell,
     /// CR 105.2: Matches objects that do NOT have a specific color.
     /// Parallel to `HasColor` — used for "nonblack", "nonwhite" in negation stacks.
     NotColor {

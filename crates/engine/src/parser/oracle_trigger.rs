@@ -12815,13 +12815,21 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
 
 /// Add FilterProp::Another to a TargetFilter. Distributes into Or branches recursively.
 fn add_another_prop(filter: TargetFilter) -> TargetFilter {
+    add_spell_prop(filter, FilterProp::Another)
+}
+
+/// Attach `prop` to a spell filter: pushed onto a `Typed` filter's properties,
+/// distributed into every `Or`/`And` branch, and wrapped in an `And` around any
+/// other filter so the constraint is preserved. Shared by `add_another_prop` and
+/// the spell-designation adjectives (CR 700.2 "modal", CR 722.3d "prepared").
+fn add_spell_prop(filter: TargetFilter, prop: FilterProp) -> TargetFilter {
     match filter {
         TargetFilter::Typed(TypedFilter {
             type_filters,
             controller,
             mut properties,
         }) => {
-            properties.push(FilterProp::Another);
+            properties.push(prop);
             TargetFilter::Typed(TypedFilter {
                 type_filters,
                 controller,
@@ -12829,51 +12837,37 @@ fn add_another_prop(filter: TargetFilter) -> TargetFilter {
             })
         }
         TargetFilter::Or { filters } => TargetFilter::Or {
-            filters: filters.into_iter().map(add_another_prop).collect(),
+            filters: filters
+                .into_iter()
+                .map(|inner| add_spell_prop(inner, prop.clone()))
+                .collect(),
         },
         TargetFilter::And { filters } => TargetFilter::And {
-            filters: filters.into_iter().map(add_another_prop).collect(),
+            filters: filters
+                .into_iter()
+                .map(|inner| add_spell_prop(inner, prop.clone()))
+                .collect(),
         },
         other => TargetFilter::And {
             filters: vec![
                 other,
-                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Another])),
+                TargetFilter::Typed(TypedFilter::default().properties(vec![prop])),
             ],
         },
     }
 }
 
-/// CR 700.2: Attach `FilterProp::Modal` to a spell filter parsed from a "modal
-/// [type] spell" qualifier, mirroring `add_another_prop`. Distributes into
-/// `Or`/`And` branches; wraps a non-`Typed` filter in an `And` so the modality
-/// constraint is preserved.
-fn add_modal_prop(filter: TargetFilter) -> TargetFilter {
-    match filter {
-        TargetFilter::Typed(TypedFilter {
-            type_filters,
-            controller,
-            mut properties,
-        }) => {
-            properties.push(FilterProp::Modal);
-            TargetFilter::Typed(TypedFilter {
-                type_filters,
-                controller,
-                properties,
-            })
-        }
-        TargetFilter::Or { filters } => TargetFilter::Or {
-            filters: filters.into_iter().map(add_modal_prop).collect(),
-        },
-        TargetFilter::And { filters } => TargetFilter::And {
-            filters: filters.into_iter().map(add_modal_prop).collect(),
-        },
-        other => TargetFilter::And {
-            filters: vec![
-                other,
-                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Modal])),
-            ],
-        },
-    }
+/// CR 700.2 + CR 722.3d: spell-designation adjectives that qualify "spell" in a
+/// cast trigger ("a modal spell", "a prepared spell"). The trailing space in
+/// each tag is the word boundary.
+fn parse_spell_designation_adjective(i: &str) -> OracleResult<'_, FilterProp> {
+    alt((
+        // CR 700.2: a modal spell.
+        value(FilterProp::Modal, tag("modal ")),
+        // CR 722.3d: a spell cast as a prepare spell (or a copy of one).
+        value(FilterProp::PrepareSpell, tag("prepared ")),
+    ))
+    .parse(i)
 }
 
 fn add_controller(filter: TargetFilter, controller: ControllerRef) -> TargetFilter {
@@ -18774,23 +18768,24 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         };
         def.spell_cast_origin = cast_origin;
 
-        // CR 700.2: Peel an optional leading "modal " qualifier off the payload
-        // BEFORE the type-phrase / spell-qualifier parsers run. "modal" is not a
-        // card type, so `parse_type_phrase_folding("modal spell")` yields an empty filter
-        // and `parse_spell_qualifier_payload` treats "modal" as an unknown pre-
-        // spell word — either way the modality is silently dropped and
-        // `valid_card` is left `None`, over-triggering on every spell (issue
-        // #750, Riku, of Many Paths). Peeling here reduces the payload to the
-        // bare type phrase (e.g. "modal spell" → "spell", "modal instant spell"
-        // → "instant spell"); the modality is re-attached as `FilterProp::Modal`
-        // after the filter is built. Scoped to the type-phrase / spell-qualifier
-        // paths below — the color-disjunction `parse_spell_that_clause_filter`
-        // branch above (Questing Druid: "a spell that's white…") returns before
-        // reaching here and is not exercised by any "modal <color>" card.
-        let (payload, is_modal) = opt(value((), tag::<_, _, OracleError<'_>>("modal ")))
+        // CR 700.2 + CR 722.3d: Peel an optional leading spell-designation
+        // adjective ("modal ", "prepared ") off the payload BEFORE the
+        // type-phrase / spell-qualifier parsers run. Neither word is a card
+        // type, so `parse_type_phrase_folding("modal spell")` yields an empty
+        // filter and `parse_spell_qualifier_payload` treats the adjective as an
+        // unknown pre-spell word — either way the designation is silently
+        // dropped and `valid_card` is left `None`, over-triggering on every
+        // spell (issue #750, Riku, of Many Paths; Codie, Ravenous Codex).
+        // Peeling here reduces the payload to the bare type phrase (e.g.
+        // "modal spell" → "spell", "prepared instant spell" → "instant spell");
+        // the designation is re-attached as its `FilterProp` after the filter is
+        // built. Scoped to the type-phrase / spell-qualifier paths below — the
+        // color-disjunction `parse_spell_that_clause_filter` branch above
+        // (Questing Druid: "a spell that's white…") returns before reaching here
+        // and is not exercised by any "modal <color>" card.
+        let (payload, designation) = opt(parse_spell_designation_adjective)
             .parse(payload)
-            .map(|(rest, matched)| (rest, matched.is_some()))
-            .unwrap_or((payload, false));
+            .unwrap_or((payload, None));
 
         // First, try the post-spell-modifier-aware decomposition for shapes
         // that include "with {X} in its mana cost" etc.
@@ -18800,10 +18795,9 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             } else {
                 filter
             };
-            let filter = if is_modal {
-                add_modal_prop(filter)
-            } else {
-                filter
+            let filter = match designation {
+                Some(prop) => add_spell_prop(filter, prop),
+                None => filter,
             };
             let filter = if spell_not_owned_by_you {
                 with_owner_scope(filter, ControllerRef::Opponent)
@@ -18821,10 +18815,9 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         } else {
             filter
         };
-        let filter = if is_modal {
-            add_modal_prop(filter)
-        } else {
-            filter
+        let filter = match designation {
+            Some(prop) => add_spell_prop(filter, prop),
+            None => filter,
         };
         let filter = if spell_not_owned_by_you {
             with_owner_scope(filter, ControllerRef::Opponent)
@@ -22596,6 +22589,151 @@ mod modal_spell_cast_trigger_tests {
             !valid_card_props(trigger.valid_card.as_ref()).contains(&FilterProp::Modal),
             "a plain 'you cast a spell' trigger must not gain FilterProp::Modal"
         );
+    }
+}
+
+/// CR 722.3d: "Whenever you cast a prepared spell" parses a `SpellCast` trigger
+/// whose `valid_card` carries `FilterProp::PrepareSpell`, sharing the
+/// spell-designation adjective peel with "modal" (CR 700.2).
+#[cfg(test)]
+mod prepared_spell_cast_trigger_tests {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{
+        AbilityDefinition, CopyRetargetPermission, Effect, FilterProp, TargetFilter, TypeFilter,
+        TypedFilter,
+    };
+    use crate::types::TriggerDefinition;
+    use crate::types::TriggerMode;
+
+    /// Verbatim Oracle text of Codie, Ravenous Codex.
+    const CODIE_ORACLE: &str = "Whenever you cast a prepared spell, copy it. You may choose new targets for the copy.\n{W}{U}{B}{R}{G}, {T}: Each creature you control becomes prepared. (Only creatures with prepare spells can become prepared.)";
+
+    fn spell_cast_trigger(text: &str, name: &str) -> TriggerDefinition {
+        parse_oracle_text(text, name, &[], &["Creature".into()], &[])
+            .triggers
+            .into_iter()
+            .find(|t| matches!(t.mode, TriggerMode::SpellCast))
+            .expect("must parse a SpellCast trigger")
+    }
+
+    fn chain_has_unimplemented(def: &AbilityDefinition) -> bool {
+        matches!(*def.effect, Effect::Unimplemented { .. })
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(chain_has_unimplemented)
+    }
+
+    fn typed_props(filter: Option<&TargetFilter>) -> Vec<FilterProp> {
+        match filter {
+            Some(TargetFilter::Typed(tf)) => tf.properties.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn prepared_spell_codie_trigger_carries_prepare_spell_prop() {
+        let parsed = parse_oracle_text(
+            CODIE_ORACLE,
+            "Codie, Ravenous Codex",
+            &[],
+            &["Legendary".into(), "Artifact".into(), "Creature".into()],
+            &["Book".into(), "Construct".into()],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::SpellCast))
+            .expect("Codie must parse a SpellCast trigger");
+        assert_eq!(
+            trigger.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Card],
+                controller: None,
+                properties: vec![FilterProp::PrepareSpell],
+            })),
+            "CR 722.3d: 'a prepared spell' must narrow valid_card to PrepareSpell"
+        );
+        assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
+        let execute = trigger
+            .execute
+            .as_deref()
+            .expect("Codie's trigger must have an execute chain");
+        assert!(
+            matches!(
+                &*execute.effect,
+                Effect::CopySpell {
+                    target: TargetFilter::TriggeringSource,
+                    retarget: CopyRetargetPermission::MayChooseNewTargets,
+                    ..
+                }
+            ),
+            "CR 707.10c: copy it, may choose new targets; got {:?}",
+            execute.effect
+        );
+        assert!(!chain_has_unimplemented(execute));
+    }
+
+    /// Negative paired with the positive above: a plain cast trigger gains no
+    /// `PrepareSpell` and no `valid_card` constraint.
+    #[test]
+    fn prepared_spell_plain_cast_trigger_has_no_prepare_spell_prop() {
+        let trigger = spell_cast_trigger(
+            "Whenever you cast a spell, draw a card.",
+            "Test Plain Spell Watcher",
+        );
+        assert!(trigger.valid_card.is_none(), "{:?}", trigger.valid_card);
+        assert!(!typed_props(trigger.valid_card.as_ref()).contains(&FilterProp::PrepareSpell));
+    }
+
+    /// Class generality: the peel composes with a type phrase.
+    #[test]
+    fn prepared_spell_trigger_keeps_type_phrase() {
+        let trigger = spell_cast_trigger(
+            "Whenever you cast a prepared instant spell, draw a card.",
+            "Test Prepared Instant Watcher",
+        );
+        match trigger.valid_card.as_ref() {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Instant),
+                    "{:?}",
+                    tf.type_filters
+                );
+                assert!(
+                    tf.properties.contains(&FilterProp::PrepareSpell),
+                    "{:?}",
+                    tf.properties
+                );
+                assert!(!tf.properties.contains(&FilterProp::Modal));
+            }
+            other => panic!("expected Typed valid_card, got {other:?}"),
+        }
+    }
+
+    /// The shared peel leaves "modal" byte-identical to its prior shape.
+    #[test]
+    fn modal_spell_trigger_shape_unchanged() {
+        let trigger = spell_cast_trigger(
+            "Whenever you cast a modal spell, draw a card.",
+            "Test Modal Watcher",
+        );
+        assert_eq!(
+            trigger.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Card],
+                controller: None,
+                properties: vec![FilterProp::Modal],
+            }))
+        );
+
+        let modal_instant = spell_cast_trigger(
+            "Whenever you cast a modal instant spell, draw a card.",
+            "Test Modal Instant Watcher",
+        );
+        let props = typed_props(modal_instant.valid_card.as_ref());
+        assert!(props.contains(&FilterProp::Modal), "{props:?}");
+        assert!(!props.contains(&FilterProp::PrepareSpell), "{props:?}");
     }
 }
 

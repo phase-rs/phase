@@ -12570,6 +12570,9 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         | FilterProp::FaceDown
         | FilterProp::Transformed
         | FilterProp::Foretold
+        // CR 722.3d: live per-object prepare-spell marker plus zone, scanned
+        // identically on both legs.
+        | FilterProp::PrepareSpell
         | FilterProp::Suspected
         | FilterProp::Renowned
         | FilterProp::Goaded

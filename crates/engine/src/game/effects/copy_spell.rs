@@ -126,6 +126,9 @@ pub fn resolve(
     // activated/triggered ability entries; clone a GameObject only when the
     // copied stack entry already has one.
     if let Some(source_obj) = source_object {
+        // CR 722.3d: the clone intentionally keeps `prepared_copy_source`, so a
+        // copy of a spell cast as a prepare spell is itself a prepare spell;
+        // `FilterProp::PrepareSpell` relies on this inheritance.
         let mut copy_obj = source_obj.clone();
         copy_obj.id = copy_id;
         copy_obj.controller = copy_controller;

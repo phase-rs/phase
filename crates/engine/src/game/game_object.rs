@@ -1436,6 +1436,10 @@ pub struct GameObject {
     /// CR 722.3c: Back-link carried only by the prepare-spell copy created in
     /// exile when a permanent becomes prepared. This lets the Prepare authority
     /// retain, cast, and clean up that exact copy without name/card-id guesses.
+    /// CR 722.3d: the marker also survives the cast onto the stack and is
+    /// inherited by spell copies, so on a Stack-zone object it marks a spell
+    /// cast as a prepare spell (or a copy of one); `FilterProp::PrepareSpell`
+    /// reads it there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prepared_copy_source: Option<ObjectId>,
 
