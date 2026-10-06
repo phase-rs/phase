@@ -63,13 +63,19 @@ fn technomancer_total_mana_value_return_shape() {
 /// SHAPE: Lively Dirge's exact return mode has a separate count limit.
 #[test]
 fn lively_dirge_bounded_total_mana_value_return_shape() {
-    let clause = parse_effect_clause(
-        "Return up to two creature cards with total mana value 4 or less from your graveyard to the battlefield.",
-        &mut ParseContext::default(),
+    let parsed = parse_oracle_text(
+        "Spree (Choose one or more additional costs.)\n+ {1} — Search your library for a card, put it into your graveyard, then shuffle.\n+ {2} — Return up to two creature cards with total mana value 4 or less from your graveyard to the battlefield.",
+        "Lively Dirge", &[], &["Sorcery".to_string()], &[],
     );
+    assert_eq!(
+        parsed.abilities.len(),
+        2,
+        "both Spree modes must be reached"
+    );
+    let clause = &parsed.abilities[1];
     assert!(
         matches!(
-            clause.effect,
+            clause.effect.as_ref(),
             Effect::ChooseFromZone {
                 count: 2,
                 constraint: Some(ChooseFromZoneConstraint::TotalManaValue {
@@ -108,13 +114,98 @@ fn total_mana_value_return_targeted_and_per_card_siblings_shape() {
 /// SHAPE: unsupported dynamic untargeted budgets never silently become zero.
 #[test]
 fn total_mana_value_return_dynamic_untargeted_budget_is_honest_gap() {
-    let clause = parse_effect_clause(
+    let parsed = parse_oracle_text(
         "Return any number of creature cards with total mana value X or less from your graveyard to the battlefield.",
+        "Dynamic aggregate return", &[], &["Sorcery".to_string()], &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+    assert!(
+        matches!(parsed.abilities[0].effect.as_ref(), Effect::Unimplemented { name, .. }
+        if name == "return_subset_dynamic_mana_value")
+    );
+}
+
+/// SHAPE: a delayed instruction must keep the descriptor's own count, too.
+#[test]
+fn delayed_aggregate_return_keeps_resolution_choice_cardinality() {
+    let parsed = parse_oracle_text(
+        "At the beginning of the next end step, return up to two creature cards with total mana value 4 or less from your graveyard to the battlefield.",
+        "Delayed aggregate return", &[], &["Sorcery".to_string()], &[],
+    );
+    let Effect::CreateDelayedTrigger { effect, .. } = parsed.abilities[0].effect.as_ref() else {
+        panic!("expected delayed trigger: {:?}", parsed.abilities);
+    };
+    assert!(matches!(
+        effect.effect.as_ref(),
+        Effect::ChooseFromZone {
+            count: 2,
+            constraint: Some(ChooseFromZoneConstraint::TotalManaValue { value: 4, .. }),
+            ..
+        }
+    ));
+}
+
+/// A clause harness drives the delayed normalization branch and the actual
+/// resolution-time choice, independently of the immediate Technomancer ETB.
+#[test]
+fn delayed_aggregate_return_rejects_excess_count_then_returns_selected_cards() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::WaitingFor;
+    use crate::types::phase::Phase;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ids: Vec<_> = (0..3)
+        .map(|_| {
+            scenario
+                .add_creature_to_graveyard(P0, "Memnite", 1, 1)
+                .as_artifact_creature()
+                .with_mana_cost(ManaCost::zero())
+                .id()
+        })
+        .collect();
+    let spell = scenario.add_spell_to_hand_from_oracle(
+        P0, "Delayed return clause harness", false,
+        "At the beginning of the next end step, return up to two creature cards with total mana value 4 or less from your graveyard to the battlefield.",
+    ).with_mana_cost(ManaCost::zero()).id();
+    let mut runner = scenario.build();
+    runner.cast(spell).resolve();
+    assert_eq!(runner.state().delayed_triggers.len(), 1);
+    runner.advance_to_end_step();
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(&runner.state().waiting_for, WaitingFor::ChooseFromZoneChoice { cards, count: 2, .. }
+        if ids.iter().all(|id| cards.contains(id)))
+    );
+    let prompt = runner.state().waiting_for.clone();
+    assert!(runner
+        .act(GameAction::SelectCards { cards: ids.clone() })
+        .is_err());
+    assert_eq!(runner.state().waiting_for, prompt);
+    assert!(ids
+        .iter()
+        .all(|id| runner.state().objects[id].zone == Zone::Graveyard));
+    runner
+        .act(GameAction::SelectCards {
+            cards: ids[..2].to_vec(),
+        })
+        .unwrap();
+    assert_eq!(runner.state().objects[&ids[0]].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&ids[1]].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&ids[2]].zone, Zone::Graveyard);
+}
+
+/// SHAPE: the bare-effect compound dispatcher must not drop the choice fields.
+#[test]
+fn compound_aggregate_return_remains_an_honest_gap() {
+    let clause = parse_effect_clause(
+        "Return any number of creature cards with total mana value 6 or less from your graveyard to the battlefield and draw a card.",
         &mut ParseContext::default(),
     );
     assert!(
         matches!(clause.effect, Effect::Unimplemented { ref name, .. }
-        if name == "return_subset_dynamic_mana_value")
+        if name == "return_subset_compound")
     );
 }
 

@@ -1885,6 +1885,40 @@ fn strip_fixed_return_mana_value_budget(
     ))
 }
 
+/// CR 115.1d + CR 608.2d: a quantified descriptor return owns a resolution
+/// choice, not an announced target count. Keep its cardinality in the clause
+/// text until the return AST can bind it to the aggregate choice.
+pub(super) fn aggregate_return_choice_cardinality(
+    text: &str,
+    ctx: &ParseContext,
+) -> Option<MultiTargetSpec> {
+    let lower = text.to_ascii_lowercase();
+    let (_, rest) = nom_on_lower(text, &lower, |input| value((), tag("return ")).parse(input))?;
+    let (noun, cardinality) = strip_leading_quantifier(rest);
+    let cardinality = cardinality?;
+    let (target_text, destination, _) = super::strip_return_destination_ext_with_remainder(noun);
+    let target_lower = target_text.to_ascii_lowercase();
+    nom_primitives::scan_preceded(target_lower.as_str(), |input| {
+        tag::<_, _, OracleError<'_>>("with total mana value ").parse(input)
+    })?;
+    // Preserve X for the existing honest-gap guard even when returning to hand.
+    // Fixed-budget choices implemented here are battlefield returns only.
+    if destination?.zone != Zone::Battlefield
+        && nom_primitives::scan_preceded(target_lower.as_str(), |input| {
+            tag::<_, _, OracleError<'_>>("with total mana value x").parse(input)
+        })
+        .is_none()
+    {
+        return None;
+    }
+    let mut probe_ctx = ctx.clone_throwaway();
+    matches!(
+        parse_target_with_syntax(target_text, &mut probe_ctx).2,
+        TargetSyntax::Descriptor
+    )
+    .then_some(cardinality)
+}
+
 pub(super) fn parse_targeted_action_ast(
     text: &str,
     lower: &str,
@@ -2349,7 +2383,7 @@ pub(super) fn parse_targeted_action_ast(
         // the genuinely bounded `max: Some(_)` result to avoid double-handling
         // it or disturbing that already-correct path.
         let (stripped_rest, return_multi_target) = strip_leading_quantifier(rest);
-        let return_choice_cardinality = return_multi_target.clone();
+        let return_choice_cardinality = aggregate_return_choice_cardinality(text, ctx);
         let return_multi_target = return_multi_target.filter(|spec| spec.max.is_some());
         let rest = if return_multi_target.is_some() {
             stripped_rest
