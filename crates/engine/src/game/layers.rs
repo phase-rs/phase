@@ -7945,7 +7945,8 @@ fn is_referenced_grant(effect: &ActiveContinuousEffect) -> bool {
 }
 
 /// A layer-6 ability writer cannot change a provider set whose filter and
-/// gates do not read abilities when it reaches neither a provider nor the host.
+/// gates do not read abilities when it reaches neither a provider, the host,
+/// nor the original granter of a synthesized static effect.
 /// Keep this rejection before any `GameState` preview clone.
 fn writer_cannot_reach_referenced_read(
     state: &GameState,
@@ -7976,9 +7977,21 @@ fn writer_cannot_reach_referenced_read(
         writer.source_id,
         &mut scan_cache,
     );
+    // CR 613.8a: Removing the original static granter can suppress an
+    // unstarted synthesized reader even when it touches neither its recipient
+    // nor a provider. Transients have no such live granter to consult.
+    let original_static_granter = if reader.def_index.is_none() && reader.transient_id.is_none() {
+        match reader.trigger_producer_origin.as_ref() {
+            Some(TriggerProducerOrigin::Static { source, .. }) => Some(source.object_id),
+            _ => None,
+        }
+    } else {
+        None
+    };
     let controllers: HashSet<_> = state.objects.values().map(|obj| obj.controller).collect();
     !candidate_ids.iter().any(|&id| {
         id == reader.source_id
+            || original_static_granter == Some(id)
             || controllers.iter().any(|&controller| {
                 let ctx = FilterContext::from_source_with_controller(reader.source_id, controller);
                 matches_target_filter(state, id, source, &ctx)

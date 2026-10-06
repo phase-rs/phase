@@ -531,3 +531,144 @@ fn retained_multilayer_trigger_grant_survives_earlier_ability_removal() {
     // The provider's printed trigger and the host's granted trigger each gain 2 life.
     assert_eq!(runner.life(P0), life_before + 4);
 }
+
+#[test]
+fn nested_meta_grants_read_original_static_granter_suppression() {
+    // Synthetic typed fixture: no printed Oracle premise is asserted here.
+    // The two runs distinguish an unstarted inner static from one whose
+    // earlier-layer part has already fixed its recipient under CR 613.6.
+    for retained_in_type_layer in [false, true] {
+        let mut scenario = GameScenario::new();
+        let granter = scenario.add_creature(P0, "Synthetic Granter", 1, 1).id();
+        let recipient = scenario.add_creature(P0, "Synthetic Recipient", 1, 1).id();
+        let trigger = TriggerDefinition::new(TriggerMode::Phase)
+            .phase(Phase::Upkeep)
+            .trigger_zones(vec![Zone::Battlefield])
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    player: TargetFilter::Controller,
+                },
+            ));
+        let provider = scenario
+            .add_creature(P0, "Synthetic Provider", 1, 1)
+            .with_trigger_definition(trigger)
+            .with_ability_definition(
+                AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp).cost(AbilityCost::Tap),
+            )
+            .id();
+        let remover = scenario.add_creature(P0, "Synthetic Remover", 1, 1).id();
+        let mut runner = scenario.build();
+        let mut inner_modifications = Vec::new();
+        if retained_in_type_layer {
+            inner_modifications.push(ContinuousModification::AddType {
+                core_type: CoreType::Artifact,
+            });
+        }
+        inner_modifications.extend([
+            ContinuousModification::GrantAllActivatedAbilitiesOf {
+                source: TargetFilter::SpecificObject { id: provider },
+                cap: None,
+            },
+            ContinuousModification::GrantAllTriggeredAbilitiesOf {
+                source: TargetFilter::SpecificObject { id: provider },
+            },
+        ]);
+        attach_synthetic_static(
+            &mut runner,
+            granter,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SpecificObject { id: recipient })
+                .modifications(vec![ContinuousModification::GrantStaticAbility {
+                    definition: Box::new(
+                        StaticDefinition::continuous()
+                            .affected(TargetFilter::SelfRef)
+                            .modifications(inner_modifications),
+                    ),
+                }]),
+        );
+        assert!(
+            runner.state().objects[&granter].timestamp < runner.state().objects[&remover].timestamp
+        );
+        assert_eq!(
+            activated_ability_definitions(runner.state(), provider).len(),
+            1
+        );
+        assert_eq!(
+            runner.state().objects[&provider].trigger_definitions.len(),
+            1
+        );
+        mark_layers_full(runner.state_mut());
+        flush_layers(runner.state_mut());
+
+        // CR 113.3d + CR 613.1f: the original granter reaches the recipient,
+        // and that recipient reads both exact definitions from the provider.
+        assert!(runner.state().objects[&recipient]
+            .static_definitions
+            .iter_all()
+            .any(
+                |definition| definition.modifications.iter().any(|modification| matches!(
+                    modification,
+                    ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+                ))
+            ));
+        assert_eq!(
+            activated_ability_definitions(runner.state(), recipient).len(),
+            1
+        );
+        let granted_trigger = &runner.state().objects[&recipient].trigger_definitions;
+        assert_eq!(granted_trigger.len(), 1);
+        assert!(matches!(
+            &granted_trigger[0].occurrence,
+            TriggerDefinitionOccurrenceRef::ExpandedGrant { provider: source, .. }
+                if source.source.object_id == provider
+        ));
+
+        attach_synthetic_static(
+            &mut runner,
+            remover,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SpecificObject { id: granter })
+                .modifications(vec![ContinuousModification::RemoveAllAbilities]),
+        );
+        mark_layers_full(runner.state_mut());
+        flush_layers(runner.state_mut());
+        assert!(runner.state().objects[&granter]
+            .static_definitions
+            .is_empty());
+        assert_eq!(
+            activated_ability_definitions(runner.state(), provider).len(),
+            1
+        );
+        assert_eq!(
+            runner.state().objects[&provider].trigger_definitions.len(),
+            1
+        );
+
+        if retained_in_type_layer {
+            // CR 613.6: the inner static began in layer 4, so ability removal
+            // cannot stop its later layer-6 grants to the retained recipient.
+            assert!(runner.state().objects[&recipient]
+                .card_types
+                .core_types
+                .contains(&CoreType::Artifact));
+            assert_eq!(
+                activated_ability_definitions(runner.state(), recipient).len(),
+                1
+            );
+            assert_eq!(
+                runner.state().objects[&recipient].trigger_definitions.len(),
+                1
+            );
+        } else {
+            // CR 613.8a-c: removal of the original granter precedes either
+            // unstarted nested reader. These assertions flip if the original
+            // granter is omitted from the dependency reach check.
+            assert!(activated_ability_definitions(runner.state(), recipient).is_empty());
+            assert!(runner.state().objects[&recipient]
+                .trigger_definitions
+                .is_empty());
+        }
+    }
+}
