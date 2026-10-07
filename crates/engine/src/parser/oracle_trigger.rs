@@ -16734,11 +16734,14 @@ fn try_parse_source_counter_state_trigger(lower: &str) -> Option<(TriggerMode, T
 ///   existential "there are [N or more] [type] counters on ~" (Mazemind Tome)
 ///
 /// Accepts only the depletion form (`minimum: 0, maximum: Some(0)`) and the
-/// threshold form (`minimum > 0, maximum: None`); mixed/range forms are
-/// rejected. All-consuming: the counter phrase must be the entire condition,
-/// so the state-trigger arm (`try_parse_source_counter_state_trigger`) and the
-/// effect-body pronoun pin (`trigger_object_pronoun_ref_for_condition`)
-/// recognize exactly the same conditions.
+/// threshold form (`minimum > 0, maximum: None`) of `HasCounters`; mixed/range
+/// forms are rejected, and so is a granted body's "counters on <granter>"
+/// (CR 201.5a), which the existential grammar reads as a `QuantityComparison`
+/// over the granting object rather than the source. All-consuming: the counter
+/// phrase must be the entire condition, so the state-trigger arm
+/// (`try_parse_source_counter_state_trigger`) and the effect-body pronoun pin
+/// (`trigger_object_pronoun_ref_for_condition`) recognize exactly the same
+/// conditions.
 fn parse_source_counter_state_condition(after_keyword: &str) -> Option<StaticCondition> {
     let (_, static_cond) = all_consuming(terminated(
         alt((parse_source_has_counters, parse_source_counters_exist)),
