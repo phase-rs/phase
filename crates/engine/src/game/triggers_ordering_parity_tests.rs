@@ -287,7 +287,7 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // its own exile pile and writes only to it, so the members commute.
     "cemetery desecrator",
     // Slime counter on SelfRef, then a token whose P/T reads the granter-named source's counters
-    // (member-bound, fail-closed): each member touches only its own source's counters, so they commute.
+    // (member-bound, fail-closed): each member touches only its own source's counters, so they commute (#9682).
     "gutter grime",
 ];
 
