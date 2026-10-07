@@ -5017,16 +5017,7 @@ fn counters_on_source_provably_excludes_class(
     }
     // (d) ARG-EQUIVALENCE — `game::quantity::object_id_for_scope`. Fail closed on
     // `None`: an unresolvable scope proves nothing about which object is read.
-    let ctx = crate::game::quantity::QuantityContext {
-        entering: None,
-        source: source.id,
-        trigger_source: None,
-        recipient: None,
-        scoped_player: None,
-        damage_source: None,
-        event_amount: None,
-        spell: None,
-    };
+    let ctx = crate::game::quantity::QuantityContext::new(source.id);
     crate::game::quantity::object_id_for_scope(state, ObjectScope::Source, ctx, &[])
         .is_some_and(|read_id| read_id != class_member)
 }
@@ -5751,7 +5742,7 @@ fn node_reads_mutable_resolution_local_state(node: &crate::types::ability::Targe
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -5884,7 +5875,7 @@ fn node_has_non_arrival_invariant_property(node: &crate::types::ability::TargetF
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::SourceOrPaired
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
@@ -6105,6 +6096,7 @@ fn player_filter_is_arrival_invariant(filter: &crate::types::ability::PlayerFilt
         | PlayerFilter::OpponentOfTriggeringPlayer
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::GrantingObjectCaster
         | PlayerFilter::ChosenPlayer { .. } => true,
         PlayerFilter::AllExcept { exclude } => player_filter_is_arrival_invariant(exclude),
         // ── REFUSED: board-census and ledger-derived designations ──
@@ -27198,16 +27190,7 @@ mod tests {
 
         let (state, member, host) = block2_fixture(vec![stockpile_counter_mana_ability()]);
         let host_obj = state.objects[&host].clone();
-        let ctx_no_trigger = crate::game::quantity::QuantityContext {
-            entering: None,
-            source: host,
-            trigger_source: None,
-            recipient: None,
-            scoped_player: None,
-            damage_source: None,
-            event_amount: None,
-            spell: None,
-        };
+        let ctx_no_trigger = crate::game::quantity::QuantityContext::new(host);
         assert_eq!(
             crate::game::quantity::object_id_for_scope(
                 &state,
@@ -27224,16 +27207,10 @@ mod tests {
         // The triggered branch: the captured incarnation's id, built through the SAME
         // production authority a triggered resolution uses.
         let ctx_triggered = crate::game::quantity::QuantityContext {
-            entering: None,
-            source: host,
             trigger_source: Some(crate::game::triggers::trigger_source_context_for_latch(
                 &state, &host_obj,
             )),
-            recipient: None,
-            scoped_player: None,
-            damage_source: None,
-            event_amount: None,
-            spell: None,
+            ..crate::game::quantity::QuantityContext::new(host)
         };
         assert_eq!(
             crate::game::quantity::object_id_for_scope(
@@ -31792,7 +31769,7 @@ mod tests {
     }
 
     /// **S6-A0 ⟨G⟩ (NEGATIVE — the totality check fails closed on ANY non-canonical axis).**
-    /// 22 inputs, each differing from the matched control on exactly ONE axis: the **19**
+    /// 23 inputs, each differing from the matched control on exactly ONE axis: the **20**
     /// constructible axes `ability_definition_axes` binds `_` (so a scanner-only inertness
     /// test is blind to every one of them), plus the **3** nested-ability axes the deleted
     /// `(a)` conjunct used to cover.
@@ -31801,22 +31778,23 @@ mod tests {
     /// arm IS consulted), and `(0)` is what refuses it. The matched control in the same fn is
     /// the UNMUTATED Snarl def, which is relieved — and since each mutant differs from it on
     /// one `_`-bound axis that no conjunct after `(0)` reads, deleting `(0)` admits every one
-    /// of the 22. That is what makes this row's mutation red rather than green.
+    /// of the 23. That is what makes this row's mutation red rather than green.
     ///
-    /// REVERT / MUTATION PROBE: delete conjunct `(0)` ⇒ **this row FAILS** on all 22 inputs.
+    /// REVERT / MUTATION PROBE: delete conjunct `(0)` ⇒ **this row FAILS** on all 23 inputs.
     /// Disagreeing input: each mutant below; the canonical control agrees under both designs.
     #[test]
     fn s6_arm_fails_closed_on_any_noncanonical_execute_axis() {
         use crate::types::ability::{
             AbilityCost, AbilityDefinition, AbilityTag, ActivationManaPaymentRestriction,
-            ActivationRestriction, IterationKindBinding, OpponentMayScope, PlayerFilter,
-            SiblingCondition, SubAbilityLink, TargetChoiceTiming, TargetSelectionMode,
+            ActivationRestriction, IllegalTargetsDisposition, IterationKindBinding,
+            OpponentMayScope, PlayerFilter, SiblingCondition, SubAbilityLink, TargetChoiceTiming,
+            TargetSelectionMode,
         };
 
         let hostile = s6_hostile_body();
         let (state, member, source) = s6_arm_board(&necroblossom_snarl_def());
 
-        // Matched control (same fn): the canonical def IS relieved. Without it the 22
+        // Matched control (same fn): the canonical def IS relieved. Without it the 23
         // refusals below could belong to some OTHER conjunct and deleting `(0)` would not
         // move them.
         assert!(
@@ -31825,12 +31803,12 @@ mod tests {
              attributable to the one axis that input moves"
         );
 
-        // The 18 capture-free `_`-bound axes. `cost` is the 19th and is built below because
+        // The 19 capture-free `_`-bound axes. `cost` is the 20th and is built below because
         // it carries a hostile PAYLOAD rather than an inert marker.
         // One `_`-bound axis moved off its constructor value. Aliased because the bare
         // fn-pointer-in-tuple-in-array type trips `clippy::type_complexity`.
         type AxisMutator = fn(&mut AbilityDefinition);
-        let inert: [(&str, AxisMutator); 18] = [
+        let inert: [(&str, AxisMutator); 19] = [
             ("description", |d| d.description = Some("C3b-2 axis".into())),
             ("target_prompt", |d| {
                 d.target_prompt = Some("C3b-2 axis".into())
@@ -31857,6 +31835,9 @@ mod tests {
             }),
             ("min_x_value", |d| d.min_x_value = 1),
             ("cant_be_copied", |d| d.cant_be_copied = true),
+            ("illegal_targets_disposition", |d| {
+                d.illegal_targets_disposition = IllegalTargetsDisposition::StillResolves
+            }),
             ("forward_result", |d| d.forward_result = true),
             ("target_selection_mode", |d| {
                 d.target_selection_mode = TargetSelectionMode::Random;
@@ -31877,7 +31858,7 @@ mod tests {
             .map(|(axis, f)| (axis, with_execute_axis(necroblossom_snarl_def(), axis, f)))
             .collect();
 
-        // The 19th `_`-bound axis. `AbilityCost::EffectCost { effect }` is routed to
+        // The 20th `_`-bound axis. `AbilityCost::EffectCost { effect }` is routed to
         // `scan_effect` by `scan_ability_cost`'s own arm, i.e. the codebase's OWN authority
         // says this payload can read the board — while `ability_definition_axes`
         // binds `cost` `_`. That pair is why `(0)` is a totality check and not a field list.
@@ -31912,8 +31893,8 @@ mod tests {
 
         assert_eq!(
             mutants.len(),
-            22,
-            "S6-A0 drives exactly 22 axes: 19 `_`-bound + the 3 the deleted `(a)` covered"
+            23,
+            "S6-A0 drives exactly 23 axes: 20 `_`-bound + the 3 the deleted `(a)` covered"
         );
 
         for (axis, mutant) in &mutants {
@@ -31929,7 +31910,7 @@ mod tests {
             );
             assert!(
                 !s6_arm(mutant, &state, member, &source),
-                "S6-A0 ({axis}): the firewall's scan binds 20 of this struct's 39 fields `_`, \
+                "S6-A0 ({axis}): the firewall's scan binds 21 of this struct's 40 fields `_`, \
                  so a non-constructor value on ANY of them is an unscanned payload and relief \
                  must be refused. Deleting conjunct `(0)` makes this FAIL"
             );

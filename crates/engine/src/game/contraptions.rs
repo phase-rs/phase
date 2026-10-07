@@ -2,7 +2,7 @@
 
 use crate::game::effects::choose_one_of;
 use crate::game::effects::gain_control;
-use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::filter::matches_target_filter;
 use crate::game::game_object::GameObject;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::targeting::resolved_object_ids_for_filter;
@@ -593,9 +593,10 @@ fn apply_assemble_replacements(state: &GameState, source_id: ObjectId, count: u3
                 continue;
             }
             let matches_source = replacement.valid_card.as_ref().is_none_or(|filter| {
-                let ctx = FilterContext::from_source_with_controller(
+                let ctx = replacement.valid_card_context(
+                    state,
                     *replacement_source_id,
-                    replacement_source.controller,
+                    Some(replacement_source.controller),
                 );
                 matches_target_filter(state, source_id, filter, &ctx)
             });

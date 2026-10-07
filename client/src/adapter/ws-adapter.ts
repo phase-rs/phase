@@ -210,10 +210,19 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 108 — TargetFilter gains DeclaredPlayer { group } (CR 608.2c + CR 115.1a), the
- *      player a later clause names after a declared target player. A v107 peer
+ * 110 — TargetFilter gains DeclaredPlayer { group } (CR 608.2c + CR 115.1a), the
+ *      player a later clause names after a declared target player. A v109 peer
  *      cannot deserialize it; the exact-match handshake refuses the pairing. P2P
- *      moves in lockstep (wire 90); lobby messages are unchanged.
+ *      moves in lockstep (wire 92); lobby messages are unchanged.
+ * 109 — CR 201.5a granter binding: ObjectScope gains GrantingObject and
+ *      SpecificObject, TargetFilter.GrantingObject gains `bound`, PlayerFilter
+ *      gains GrantingObjectCaster, and ability, trigger, static, replacement, spell and
+ *      trigger-source contexts gain the `granting_object` stamp. A v108 peer
+ *      cannot deserialize the new state. P2P moves in lockstep to wire 91.
+ * 108 — Serialized IllegalTargetsDisposition.StillResolves preserves a root
+ *       ability's printed resolution rule when its chosen target becomes
+ *       illegal. Older peers would silently apply ordinary non-resolution;
+ *       P2P moves in lockstep (wire 90).
  * 107 — UntilCondition NextMatches gains count ("until you exile two nonland
  *      cards …" — Invasion of Alara, CR 608.2c), the paused exile loop keeps
  *      its hits, ZoneChoiceCandidateSource gains ParentTargets, and
@@ -704,7 +713,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 108;
+export const PROTOCOL_VERSION = 110;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

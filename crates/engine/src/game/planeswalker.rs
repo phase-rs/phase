@@ -8,8 +8,9 @@ use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 
 use super::ability_utils::{
-    assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
-    build_target_slots, declared_targets_in_chain, random_select_targets_for_ability,
+    assign_selected_slots_in_chain, auto_select_targets_for_ability,
+    begin_target_selection_for_ability, build_target_slots, declared_targets_in_chain,
+    random_select_targets_for_ability,
 };
 use super::casting::emit_targeting_events;
 use super::engine::EngineError;
@@ -266,7 +267,7 @@ pub fn handle_activate_loyalty(
 
         if let Some(targets) = resolved_targets {
             let mut resolved = resolved;
-            assign_targets_in_chain(state, &mut resolved, &targets)?;
+            assign_selected_slots_in_chain(state, &mut resolved, &targets)?;
             // CR 601.2c: the automatically chosen targets, captured before the
             // loyalty cost is paid.
             let captured = super::casting::capture_activation_record(

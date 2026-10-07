@@ -96,6 +96,7 @@ pub(super) fn handle_resolution_optional_payment_choice(
         .find(|option| option.index == index && option.cost == advertised_cost.cost)
         .ok_or_else(|| EngineError::InvalidAction("payment branch is no longer payable".into()))?;
 
+    let granting_object = frame.ability.context.granting_object;
     let Effect::PayCost { cost, .. } = &mut frame.ability.effect else {
         return Err(EngineError::InvalidAction(
             "optional payment root is not PayCost".into(),
@@ -113,6 +114,7 @@ pub(super) fn handle_resolution_optional_payment_choice(
             state,
             live_player,
             advertised_source,
+            granting_object,
             &cost.target,
         );
         state.waiting_for = WaitingFor::PayCost {
@@ -1288,6 +1290,7 @@ pub(super) fn handle_unless_payment(
                     state,
                     player,
                     pending_effect.source_id,
+                    pending_effect.context.granting_object,
                     filter.as_ref(),
                 );
                 // CR 702.24a: partial payments aren't allowed — if the controller
@@ -2293,6 +2296,7 @@ pub(super) fn handle_ward_discard_choice(
             state,
             player,
             pending_effect.source_id,
+            pending_effect.context.granting_object,
             filter.as_ref(),
         );
         state.waiting_for = WaitingFor::WardDiscardChoice {

@@ -813,6 +813,8 @@ fn is_player_scope_damage_filter(filter: &TargetFilter) -> bool {
         // filter. Cartographer's Hawk exercises this event-time player-relative
         // damage-recipient shape; the unit test keeps future changes deliberate.
         TargetFilter::PlayerMatching { .. } => true,
+        // CR 120.3: a latched player recipient ("the player who cast <granter>").
+        TargetFilter::SpecificPlayer { .. } => true,
         _ => false,
     }
 }
@@ -901,9 +903,8 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::Owner => false,
         TargetFilter::Any
         | TargetFilter::SelfRef
-        // CR 201.5a: a source-relative object ref, concretized to SpecificObject
-        // before any trigger evaluates; delegates like the other object refs.
-        | TargetFilter::GrantingObject
+        // CR 201.5a: a source-relative object ref; delegates like the other object refs.
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::OriginalSource
         | TargetFilter::SourceOrPaired
         | TargetFilter::Typed(_)

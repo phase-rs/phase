@@ -60,11 +60,21 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 108 — `TargetFilter` gains `DeclaredPlayer { group }` (CR 608.2c + CR 115.1a),
+/// 110 — `TargetFilter` gains `DeclaredPlayer { group }` (CR 608.2c + CR 115.1a),
 ///      the player a later clause names after a declared target player. It
-///      reaches every serialized ability, so a v107 peer cannot deserialize it
+///      reaches every serialized ability, so a v109 peer cannot deserialize it
 ///      and the exact-match handshake refuses the pairing. Full-game peers and
-///      P2P move in lockstep (wire 90); lobby messages are unchanged.
+///      P2P move in lockstep (wire 92); lobby messages are unchanged.
+/// 109 — CR 201.5a granter binding: `ObjectScope::GrantingObject` and
+///      `ObjectScope::SpecificObject`, `TargetFilter::GrantingObject { bound }`,
+///      `PlayerFilter::GrantingObjectCaster`, plus the `granting_object` stamp on
+///      `AbilityDefinition`, `TriggerDefinition`, `StaticDefinition`,
+///      `ReplacementDefinition`, `SpellContext` and `TriggerSourceContext`.
+///      A v108 peer cannot deserialize the new state. P2P moves to wire 91.
+/// 108 — Serialized `IllegalTargetsDisposition::StillResolves` lets a root
+///       ability continue after its chosen target becomes illegal. Older peers
+///       would silently apply the ordinary non-resolution rule, so full-game
+///       and P2P refuse the capability mismatch (wire 90).
 /// 107 — `UntilCondition::NextMatches` gains `count` ("until you exile two
 ///      nonland cards …" — Invasion of Alara, CR 608.2c), the paused loop
 ///      (`PendingExileFromTopUntil`) keeps its `hits`,
@@ -889,7 +899,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 108;
+pub const PROTOCOL_VERSION: u32 = 110;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2144,12 +2154,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 108);
+        assert_eq!(PROTOCOL_VERSION, 110);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 107);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 109);
     }
 
     #[test]

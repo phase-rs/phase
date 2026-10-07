@@ -459,6 +459,7 @@ fn sub_effect_as_resolved(
     resolved.description = def.description.clone();
     resolved.min_x_value = def.min_x_value;
     resolved.cant_be_copied = def.cant_be_copied;
+    resolved.illegal_targets_disposition = def.illegal_targets_disposition;
     resolved.forward_result = def.forward_result;
     // CR 700.3: The per-object loop in `apply_pile_effect` already iterates
     // over each pile member — the parsed `player_scope` (e.g. "Each opponent")

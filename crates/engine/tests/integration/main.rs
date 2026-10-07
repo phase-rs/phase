@@ -1794,6 +1794,7 @@ mod tergrid_mirrormade_copy_on_effect_entry;
 mod the_mind_stone_harness_infinity;
 mod there_are_no_permanents_state_trigger;
 mod they_gain_keyword_anaphor;
+mod thranduil_graveyard_granted_abilities;
 mod three_blind_mice;
 mod token_storm_scaling_gate;
 mod token_zone_change_index;
@@ -1852,10 +1853,12 @@ mod ebondeath_not_named_died_condition;
 mod erratic_explosion;
 mod event_deadline_duration;
 mod exchange_control_of_a_spell;
+mod exchange_control_up_to_one_target;
 mod exploit_ceased_exploiter_lki;
 mod extra_turn_quantity;
 mod fathom_trawl_revealed_population;
 mod foreign_subject_split_guard;
+mod generated_target_slot_ownership;
 mod goblin_charbelcher;
 mod graveyard_permission_turn_timing;
 mod issue_vex_draw_card;
@@ -1877,6 +1880,7 @@ mod welcome_the_dead;
 #[cfg(feature = "test-support")]
 mod owned_you_target_authority;
 
+mod base_pt_designation_filter;
 mod declared_player_gate_arms;
 mod declared_player_object_controller;
 mod exile_origin_target_acquisition;

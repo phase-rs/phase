@@ -776,6 +776,9 @@ pub fn resolve_event_context_target(
             .first()
             .copied()
             .map(TargetRef::Object),
+        // CR 115.10a: a bound object id is affected, never a declared target; it
+        // names its object directly, independent of any trigger event.
+        TargetFilter::SpecificObject { id } => Some(TargetRef::Object(*id)),
         TargetFilter::AttachedTo
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
@@ -828,6 +831,9 @@ pub fn resolve_event_context_targets(
                 .map(|id| TargetRef::Object(*id))
                 .collect();
         }
+        // CR 115.10a: a bound object id is affected, never a declared target; it
+        // is one object, not one per batched event.
+        TargetFilter::SpecificObject { id } => return vec![TargetRef::Object(*id)],
         _ => {}
     }
 
@@ -882,18 +888,26 @@ pub fn resolved_targets(
     target_filter: &TargetFilter,
     state: &GameState,
 ) -> Vec<TargetRef> {
+    // CR 201.5a + CR 400.7: the stamped granter incarnation, and nothing once it has left.
+    if let TargetFilter::GrantingObject { bound } = target_filter {
+        if let Some(granter) = bound.or(ability.context.granting_object) {
+            return granter
+                .is_current(state)
+                .then_some(TargetRef::Object(granter.object_id))
+                .into_iter()
+                .collect();
+        }
+    }
     // CR 608.2c: SelfRef is the printed-name anaphor (`~`) — its referent is
     // the source object itself, never a chosen target. Must short-circuit
     // before the `ability.targets` fallback so chained "Exile ~" sub-abilities
     // don't accidentally inherit the parent's targets via the chain target
     // propagation in `effects::mod.rs::resolve_chain`.
-    // CR 201.5a: `GrantingObject` is always concretized to `SpecificObject` at
-    // grant-clone time and should never reach here; the arm is a fail-safe that
-    // degrades an un-concretized granter ref to the ability source (host) — the
-    // pre-fix binding, never worse.
+    // CR 201.5: an unstamped `GrantingObject` resolves to the exact current
+    // ability source.
     if matches!(
         target_filter,
-        TargetFilter::SelfRef | TargetFilter::GrantingObject
+        TargetFilter::SelfRef | TargetFilter::GrantingObject { .. }
     ) {
         // CR 400.7: A self-reference resolves to the exact source, except that
         // a departure trigger may follow its own immediate recorded event
@@ -901,7 +915,7 @@ pub fn resolved_targets(
         // new object and finds nothing.
         let source_is_current = match target_filter {
             TargetFilter::SelfRef => ability.self_ref_is_current(state),
-            TargetFilter::GrantingObject => ability.source_is_current(state),
+            TargetFilter::GrantingObject { .. } => ability.source_is_current(state),
             _ => unreachable!("self-reference branch only handles SelfRef or GrantingObject"),
         };
         return if source_is_current {
@@ -1326,6 +1340,10 @@ pub(crate) fn is_pure_event_context_filter(target_filter: &TargetFilter) -> bool
             | TargetFilter::PostReplacementSourceController
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
+            // CR 201.5a + CR 115.10a: resolved from its bound id, never chosen.
+            | TargetFilter::SpecificObject { .. }
+            // CR 201.5a + CR 115.10a: resolved from the granter stamp, never chosen.
+            | TargetFilter::GrantingObject { .. }
     )
 }
 
@@ -1448,19 +1466,21 @@ pub(crate) fn resolved_object_ids_for_filter_with_context(
         // CR 400.7: self-reference resolves only to the exact source or its own
         // immediate recorded event successor; a blinked-and-returned source
         // (higher incarnation) finds nothing.
-        // CR 201.5a: an un-concretized `GrantingObject` degrades to the source
-        // (host) — fail-safe; it is normally rewritten to `SpecificObject` at
-        // grant-clone time.
+        // CR 201.5: an unstamped `GrantingObject` resolves to the exact current
+        // ability source.
         TargetFilter::SelfRef => ability
             .self_ref_is_current(state)
             .then_some(ability.source_id)
             .into_iter()
             .collect(),
-        TargetFilter::GrantingObject => ability
-            .source_is_current(state)
-            .then_some(ability.source_id)
-            .into_iter()
-            .collect(),
+        TargetFilter::GrantingObject { bound } => match bound.or(ability.context.granting_object) {
+            Some(granter) => granter.is_current(state).then_some(granter.object_id),
+            None => ability
+                .source_is_current(state)
+                .then_some(ability.source_id),
+        }
+        .into_iter()
+        .collect(),
         // CR 400.7 + CR 603.7c: mirror the `resolved_targets` pin check on the
         // untargeted-pool path (the second SelfRef chokepoint).
         TargetFilter::ParentTarget => object_targets(&ability.live_object_targets(state)).collect(),
@@ -6568,6 +6588,40 @@ mod tests {
             Some(PlayerId(1)),
             "\"that player\" must still resolve to the scoped chooser"
         );
+    }
+
+    /// CR 201.5a + CR 400.7: the untargeted-pool reader names the stamped granter
+    /// incarnation, nothing once it left, and the source when unstamped.
+    #[test]
+    fn granting_object_pool_reads_the_stamped_incarnation() {
+        let mut state = GameState::new_two_player(42);
+        let mk = |state: &mut GameState, n: u64, name: &str| {
+            create_object(
+                state,
+                CardId(n),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            )
+        };
+        let host = mk(&mut state, 1, "Host");
+        let granter = mk(&mut state, 2, "Granter");
+        let mut ability = make_resolved_with_targets(vec![], host);
+        let pool = |state: &GameState, ability: &crate::types::ability::ResolvedAbility| {
+            resolved_object_ids_for_filter(
+                state,
+                ability,
+                &TargetFilter::GrantingObject { bound: None },
+            )
+        };
+        assert_eq!(pool(&state, &ability), vec![host]);
+        ability.context.granting_object = Some(
+            crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&granter]),
+        );
+        assert_eq!(pool(&state, &ability), vec![granter]);
+        crate::game::zones::move_to_zone(&mut state, granter, Zone::Exile, &mut Vec::new());
+        crate::game::zones::move_to_zone(&mut state, granter, Zone::Battlefield, &mut Vec::new());
+        assert!(pool(&state, &ability).is_empty());
     }
 
     /// CR 608.2c + 603.10a: Tier 1 — `SelfRef` with empty `ability.targets`

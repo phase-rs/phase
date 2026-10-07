@@ -5,19 +5,20 @@
 use std::sync::Arc;
 
 use engine::game::casting::{activated_ability_definitions, can_activate_ability_now};
+use engine::game::effects::attach::attach_to;
 use engine::game::layers::{flush_layers, mark_layers_full};
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::move_to_zone;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, Effect, FilterProp,
-    QuantityExpr, StaticCondition, StaticDefinition, TargetFilter, TriggerDefinition,
-    TriggerDefinitionOccurrenceRef, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Duration,
+    Effect, FilterProp, QuantityExpr, StaticCondition, StaticDefinition, TargetFilter,
+    TriggerDefinition, TriggerDefinitionOccurrenceRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::LayersDirty;
 use engine::types::keywords::Keyword;
-use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
@@ -26,6 +27,9 @@ const MARVIN: &str = "Marvin has all activated abilities of creatures you contro
 const MARCH: &str = "Each noncreature artifact is an artifact creature with power and toughness each equal to its mana value. (Equipment that's a creature can't equip a creature.)";
 const SOL_RING: &str = "{T}: Add {C}{C}.";
 const PRESENCE_OF_GOND: &str = "Enchant creature\nEnchanted creature has \"{T}: Create a 1/1 green Elf Warrior creature token.\"";
+const SEDGE_SLIVER: &str = "All Sliver creatures have \"This creature gets +1/+1 as long as you control a Swamp.\"\nAll Slivers have \"{B}: Regenerate this permanent.\" (The next time it would be destroyed this turn, instead tap it, remove it from combat, and heal all damage on it.)";
+const MASKWOOD_NEXUS: &str = "Creatures you control are every creature type. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.\n{3}, {T}: Create a 2/2 blue Shapeshifter creature token with changeling. (It is every creature type.)";
+const DAN_LEWIS: &str = "Noncreature, non-Equipment artifacts you control are Equipment in addition to their other types and have \"Equipped creature gets +1/+0\" and equip {1}.\nDoctor's companion (You can have two commanders if the other is the Doctor.)";
 
 #[test]
 fn march_animation_updates_marvins_live_activated_ability_providers() {
@@ -1394,6 +1398,7 @@ fn ordinary_granted_static_keeps_keyword_filter_dependency_in_referenced_bucket(
         .static_definitions
         .iter_unchecked()
         .any(|definition| definition == &ordinary_inner));
+    assert!(runner.state().objects[&recipient].has_keyword(&Keyword::Vigilance));
 }
 
 #[test]
@@ -1486,8 +1491,9 @@ fn participating_granted_static_keeps_keyword_filter_dependency_without_inner_re
     mark_layers_full(runner.state_mut());
     flush_layers(runner.state_mut());
 
-    // CR 613.8a-c + CR 611.3a: W changes G's carrier set before any inner
-    // reader was gathered; the independent E reader keeps layer 6 dynamic.
+    // CR 613.8a-c + CR 611.3a: W's Flying grant puts R into G's affected set in
+    // layer 6; R's inner reader applies from G's live set, and the independent
+    // E reader keeps layer 6 dynamic.
     assert!(runner.state().objects[&recipient].has_keyword(&Keyword::Flying));
     let independent_grant = activated_ability_definitions(runner.state(), meta_host);
     assert_eq!(independent_grant.len(), 1);
@@ -1496,4 +1502,423 @@ fn participating_granted_static_keeps_keyword_filter_dependency_without_inner_re
         .static_definitions
         .iter_unchecked()
         .any(|definition| definition == &inner));
+    let inner_grant = activated_ability_definitions(runner.state(), recipient);
+    assert_eq!(inner_grant.len(), 1);
+    assert_eq!(inner_grant[0].1, inner_donor_ability);
+}
+
+fn holds_static(
+    runner: &engine::game::scenario::GameRunner,
+    carrier: engine::types::identifiers::ObjectId,
+    definition: &StaticDefinition,
+) -> bool {
+    runner.state().objects[&carrier]
+        .static_definitions
+        .iter_unchecked()
+        .any(|installed| installed == definition)
+}
+
+fn power_toughness(
+    runner: &engine::game::scenario::GameRunner,
+    id: engine::types::identifiers::ObjectId,
+) -> (Option<i32>, Option<i32>) {
+    let object = &runner.state().objects[&id];
+    (object.power, object.toughness)
+}
+
+fn self_pump() -> StaticDefinition {
+    StaticDefinition::continuous()
+        .affected(TargetFilter::SelfRef)
+        .modifications(vec![
+            ContinuousModification::AddPower { value: 1 },
+            ContinuousModification::AddToughness { value: 1 },
+        ])
+}
+
+fn self_keyword(keyword: Keyword) -> StaticDefinition {
+    StaticDefinition::continuous()
+        .affected(TargetFilter::SelfRef)
+        .modifications(vec![ContinuousModification::AddKeyword { keyword }])
+}
+
+fn grant_static(affected: TargetFilter, inner: &StaticDefinition) -> StaticDefinition {
+    StaticDefinition::continuous()
+        .affected(affected)
+        .modifications(vec![ContinuousModification::GrantStaticAbility {
+            definition: Box::new(inner.clone()),
+        }])
+}
+
+#[test]
+fn late_carrier_receives_ordinary_granted_static_through_static_orderer() {
+    let mut scenario = GameScenario::new();
+    let recipient = scenario.add_creature(P0, "Recipient", 1, 1).id();
+    let host_a = scenario.add_creature(P0, "Keyword Host", 1, 1).id();
+    let host_b = scenario.add_creature(P0, "Land Host", 1, 1).id();
+    let writer = scenario.add_creature(P0, "Flying Writer", 1, 1).id();
+    let mut runner = scenario.build();
+    let inner_a = self_keyword(Keyword::Vigilance);
+    let inner_b = self_keyword(Keyword::Lifelink);
+    attach_synthetic_static(
+        &mut runner,
+        host_a,
+        grant_static(
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::SpecificObject { id: recipient },
+                    TargetFilter::Typed(TypedFilter::default().properties(vec![
+                        FilterProp::WithKeyword {
+                            value: Keyword::Flying,
+                        },
+                    ])),
+                ],
+            },
+            &inner_a,
+        ),
+    );
+    attach_synthetic_static(
+        &mut runner,
+        host_b,
+        grant_static(
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::SpecificObject { id: recipient },
+                    TargetFilter::Typed(TypedFilter::land()),
+                ],
+            },
+            &inner_b,
+        ),
+    );
+    attach_synthetic_static(
+        &mut runner,
+        writer,
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: recipient })
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }]),
+    );
+    assert!(runner.state().objects[&host_a].timestamp < runner.state().objects[&writer].timestamp);
+    assert!(!runner.state().objects[&recipient].has_keyword(&Keyword::Flying));
+
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+
+    // CR 613.8a + CR 611.3a: the later Flying grant puts R into A's affected set
+    // in layer 6, so A's granted Vigilance applies from that live set. B's grant
+    // never covers R, so its own late child must not apply through A's set.
+    assert!(runner.state().objects[&recipient].has_keyword(&Keyword::Flying));
+    assert!(runner.state().objects[&recipient].has_keyword(&Keyword::Vigilance));
+    assert!(holds_static(&runner, recipient, &inner_a));
+    assert!(!runner.state().objects[&recipient].has_keyword(&Keyword::Lifelink));
+    assert!(!holds_static(&runner, recipient, &inner_b));
+}
+
+#[test]
+fn maskwood_sliver_receives_sedge_sliver_granted_pump() {
+    let mut scenario = GameScenario::new();
+    let sedge = scenario
+        .add_creature_from_oracle(P0, "Sedge Sliver", 2, 2, SEDGE_SLIVER)
+        .with_subtypes(vec!["Sliver"])
+        .id();
+    scenario.add_artifact_from_oracle(P0, "Maskwood Nexus", MASKWOOD_NEXUS);
+    scenario.add_basic_land(P0, ManaColor::Black);
+    let bear = scenario
+        .add_creature(P0, "Grizzly Bears", 2, 2)
+        .with_subtypes(vec!["Bear"])
+        .id();
+    let opponent_bear = scenario
+        .add_creature(P1, "Grizzly Bears", 2, 2)
+        .with_subtypes(vec!["Bear"])
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().all_creature_types = vec!["Bear".to_string(), "Sliver".to_string()];
+    let sedge_grant = runner.state().objects[&sedge]
+        .base_static_definitions
+        .iter()
+        .flat_map(|definition| &definition.modifications)
+        .find_map(|modification| match modification {
+            ContinuousModification::GrantStaticAbility { definition } => {
+                Some(definition.as_ref().clone())
+            }
+            _ => None,
+        })
+        .expect("Sedge Sliver must parse its granted static");
+
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+
+    // CR 613.1d + CR 613.1f + CR 611.3a: Maskwood makes the Bear a Sliver in
+    // layer 4, so Sedge's grant reaches it in layer 6 and its layer-7c pump
+    // applies. The opponent's Bear is outside Maskwood's "you control".
+    assert_eq!(power_toughness(&runner, sedge), (Some(3), Some(3)));
+    assert!(runner.state().objects[&bear]
+        .card_types
+        .subtypes
+        .iter()
+        .any(|subtype| subtype == "Sliver"));
+    assert_eq!(power_toughness(&runner, bear), (Some(3), Some(3)));
+    assert!(holds_static(&runner, bear, &sedge_grant));
+    assert_eq!(power_toughness(&runner, opponent_bear), (Some(2), Some(2)));
+    assert!(!holds_static(&runner, opponent_bear, &sedge_grant));
+
+    // CR 400.7: the Bear returns as a new object and qualifies again.
+    let battlefield_incarnation = runner.state().objects[&bear].incarnation;
+    move_to_zone(runner.state_mut(), bear, Zone::Graveyard, &mut Vec::new());
+    flush_layers(runner.state_mut());
+    assert_eq!(runner.state().objects[&bear].zone, Zone::Graveyard);
+    assert!(!holds_static(&runner, bear, &sedge_grant));
+    assert_eq!(power_toughness(&runner, bear), (Some(2), Some(2)));
+    let graveyard_incarnation = runner.state().objects[&bear].incarnation;
+    move_to_zone(runner.state_mut(), bear, Zone::Battlefield, &mut Vec::new());
+    flush_layers(runner.state_mut());
+    assert_eq!(runner.state().objects[&bear].zone, Zone::Battlefield);
+    let returned_incarnation = runner.state().objects[&bear].incarnation;
+    assert_ne!(returned_incarnation, battlefield_incarnation);
+    assert_ne!(returned_incarnation, graveyard_incarnation);
+    assert!(holds_static(&runner, bear, &sedge_grant));
+    assert_eq!(power_toughness(&runner, bear), (Some(3), Some(3)));
+}
+
+#[test]
+fn transient_grant_reaches_march_animated_artifact() {
+    let mut scenario = GameScenario::new();
+    scenario.add_enchantment_from_oracle(P0, "March of the Machines", MARCH);
+    let ring = scenario
+        .add_artifact_from_oracle(P0, "Sol Ring", SOL_RING)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 1,
+        })
+        .id();
+    let grant_source = scenario.add_creature(P0, "Grant Source", 1, 1).id();
+    let opponent_creature = scenario.add_creature(P1, "Opponent Creature", 2, 2).id();
+    let mut runner = scenario.build();
+    flush_layers(runner.state_mut());
+    assert_eq!(power_toughness(&runner, ring), (Some(1), Some(1)));
+
+    runner
+        .state_mut()
+        .add_transient_continuous_effect(
+            grant_source,
+            P0,
+            Duration::UntilEndOfTurn,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            vec![ContinuousModification::GrantStaticAbility {
+                definition: Box::new(self_pump()),
+            }],
+            None,
+        )
+        .expect("the transient grant must install");
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+
+    // CR 613.1d + CR 613.1f + CR 611.2c: March animates Sol Ring in layer 4,
+    // so Sol Ring is a creature the transient grant affects when it applies in layer 6.
+    assert_eq!(power_toughness(&runner, ring), (Some(2), Some(2)));
+    assert_eq!(power_toughness(&runner, grant_source), (Some(2), Some(2)));
+    assert_eq!(
+        power_toughness(&runner, opponent_creature),
+        (Some(2), Some(2))
+    );
+}
+
+#[test]
+fn stolen_creature_receives_controller_scoped_granted_static() {
+    let mut scenario = GameScenario::new();
+    let host = scenario.add_creature(P0, "Host", 2, 2).id();
+    let stolen = scenario.add_creature(P1, "Stolen", 2, 2).id();
+    let unstolen = scenario.add_creature(P1, "Unstolen", 2, 2).id();
+    let mut runner = scenario.build();
+    attach_synthetic_static(
+        &mut runner,
+        host,
+        grant_static(
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            &self_pump(),
+        ),
+    );
+    runner
+        .state_mut()
+        .add_transient_continuous_effect(
+            host,
+            P0,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: stolen },
+            vec![ContinuousModification::ChangeController],
+            None,
+        )
+        .expect("the control change must install");
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+
+    // CR 613.1b + CR 611.3a: the layer-2 control change puts the stolen
+    // creature into the host's "you control" set before the grant applies.
+    assert_eq!(runner.state().objects[&stolen].controller, P0);
+    assert_eq!(power_toughness(&runner, stolen), (Some(3), Some(3)));
+    assert_eq!(power_toughness(&runner, unstolen), (Some(2), Some(2)));
+}
+
+#[test]
+fn layer_four_disqualified_carrier_loses_granted_static_effects() {
+    for remover_present in [false, true] {
+        let mut scenario = GameScenario::new();
+        let host = scenario.add_creature(P0, "Host", 1, 1).id();
+        let carrier = scenario.add_creature(P0, "Carrier", 1, 1).id();
+        let remover = scenario.add_creature(P0, "Remover", 1, 1).id();
+        let mut runner = scenario.build();
+        let inner = self_keyword(Keyword::Vigilance);
+        attach_synthetic_static(
+            &mut runner,
+            host,
+            grant_static(
+                TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::SpecificObject { id: carrier },
+                        TargetFilter::Typed(TypedFilter::creature()),
+                    ],
+                },
+                &inner,
+            ),
+        );
+        if remover_present {
+            attach_synthetic_static(
+                &mut runner,
+                remover,
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: carrier })
+                    .modifications(vec![ContinuousModification::RemoveType {
+                        core_type: CoreType::Creature,
+                    }]),
+            );
+        }
+        mark_layers_full(runner.state_mut());
+        flush_layers(runner.state_mut());
+
+        // CR 613.1d + CR 611.3a: once layer 4 removes the carrier's creature
+        // type, the grant no longer affects it, so no part of the granted
+        // static applies.
+        assert_eq!(
+            runner.state().objects[&carrier]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            !remover_present
+        );
+        assert_eq!(
+            runner.state().objects[&carrier].has_keyword(&Keyword::Vigilance),
+            !remover_present
+        );
+        assert_eq!(holds_static(&runner, carrier, &inner), !remover_present);
+    }
+}
+
+#[test]
+fn inactive_host_condition_withholds_ordinary_granted_static() {
+    let mut scenario = GameScenario::new();
+    let host = scenario.add_creature(P0, "Turn Host", 1, 1).id();
+    let carrier = scenario.add_creature(P0, "Carrier", 2, 2).id();
+    let mut runner = scenario.build();
+    let inner = self_pump();
+    attach_synthetic_static(
+        &mut runner,
+        host,
+        grant_static(TargetFilter::SpecificObject { id: carrier }, &inner)
+            .condition(StaticCondition::DuringYourTurn),
+    );
+
+    // CR 611.3a: the host's condition is false on the opponent's turn, so its
+    // grant does not apply and the carrier gets none of the granted effect.
+    runner.state_mut().active_player = P1;
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+    assert_eq!(power_toughness(&runner, carrier), (Some(2), Some(2)));
+    assert!(!holds_static(&runner, carrier, &inner));
+
+    runner.state_mut().active_player = P0;
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+    assert_eq!(power_toughness(&runner, carrier), (Some(3), Some(3)));
+    assert!(holds_static(&runner, carrier, &inner));
+}
+
+#[test]
+fn dan_lewis_equipment_keeps_granted_pump_after_becoming_equipment() {
+    let mut scenario = GameScenario::new();
+    scenario
+        .add_creature_from_oracle(P0, "Dan Lewis", 2, 2, DAN_LEWIS)
+        .as_legendary()
+        .with_subtypes(vec!["Human"]);
+    let ring = scenario
+        .add_artifact_from_oracle(P0, "Sol Ring", SOL_RING)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 1,
+        })
+        .id();
+    let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let mut runner = scenario.build();
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+    assert!(runner.state().objects[&ring]
+        .card_types
+        .subtypes
+        .iter()
+        .any(|subtype| subtype == "Equipment"));
+
+    attach_to(runner.state_mut(), ring, bear);
+    assert_eq!(runner.state().objects[&ring].attached_to, Some(bear.into()));
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+
+    // CR 613.6: Dan Lewis's effect starts in layer 4 on Sol Ring, while it is
+    // a non-Equipment artifact; its layer-6 grant keeps that set even though
+    // Sol Ring is Equipment by then, so the equipped Bear gets +1/+0.
+    assert_eq!(power_toughness(&runner, bear), (Some(3), Some(2)));
+}
+
+#[test]
+fn outside_slice_ordinary_granted_anthem_escalates_for_entrant() {
+    let mut scenario = GameScenario::new();
+    let granter = scenario.add_creature(P0, "Granter", 1, 1).id();
+    let carrier = scenario.add_creature(P0, "Carrier", 1, 1).id();
+    let entrant = scenario.add_creature_to_graveyard(P0, "Entrant", 2, 2).id();
+    let mut runner = scenario.build();
+    let inner = StaticDefinition::continuous()
+        .affected(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ))
+        .modifications(vec![
+            ContinuousModification::AddPower { value: 1 },
+            ContinuousModification::AddToughness { value: 1 },
+        ]);
+    attach_synthetic_static(
+        &mut runner,
+        granter,
+        grant_static(TargetFilter::SpecificObject { id: carrier }, &inner),
+    );
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+    assert!(holds_static(&runner, carrier, &inner));
+
+    move_to_zone(
+        runner.state_mut(),
+        entrant,
+        Zone::Battlefield,
+        &mut Vec::new(),
+    );
+    assert_eq!(
+        runner.state().layers_dirty,
+        LayersDirty::EnteredObjects([entrant].into())
+    );
+    engine::game::perf_counters::reset();
+    flush_layers(runner.state_mut());
+    let counters = engine::game::perf_counters::snapshot();
+
+    // CR 613.6 + CR 611.3a: the carrier has "creatures you control get +1/+1"
+    // once, so the entrant gets +1/+1 once. The restricted pass cannot decide
+    // the carrier's grant membership, so the flush re-derives the whole board.
+    assert_eq!(counters.layers_escalated, 1);
+    assert_eq!(counters.layers_incremental, 0);
+    assert_eq!(power_toughness(&runner, entrant), (Some(3), Some(3)));
 }

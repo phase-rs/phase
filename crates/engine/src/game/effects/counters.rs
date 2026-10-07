@@ -2346,6 +2346,11 @@ pub(super) fn resolve_defined_or_targets(
         return vec![ability.source_id];
     }
 
+    // CR 201.5a + CR 400.7: a granter named by a granted body is its stamped incarnation.
+    if let Some(filter @ TargetFilter::GrantingObject { .. }) = target_spec {
+        return crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter);
+    }
+
     // CR 608.2c (tier 2 of `resolved_targets`): `None` falls back to the source
     // object when no chosen targets were supplied — preserves the LTB
     // self-trigger anaphor ("put a +1/+1 counter on it"). Chain propagation
@@ -3478,6 +3483,7 @@ mod tests {
                 TransientContinuousEffectBindings {
                     affected_recipient: Some(affected_ref),
                     duration_subject: Some(subject),
+                    granting_object: None,
                 },
             )
             .expect("the fixture's duration begins")

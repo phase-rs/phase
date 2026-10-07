@@ -6,7 +6,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
+use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use std::sync::Arc;
@@ -79,10 +79,7 @@ fn emblem_link_binding(
     ability: &ResolvedAbility,
 ) -> Option<LinkedAbilitySource> {
     let source = state.objects.get(&ability.source_id)?;
-    let creator = ObjectIncarnationRef::of(
-        source.id,
-        ability.source_incarnation.unwrap_or(source.incarnation),
-    );
+    let creator = ability.source_ref(state)?;
     let characteristic_set = match ability.source_ability_provenance() {
         Some(AbilityProvenance::Characteristic(set)) => set,
         Some(AbilityProvenance::Granted) => return None,
@@ -157,7 +154,7 @@ mod tests {
         BounceSelection, CharacteristicSetRef, ContinuousModification, ControllerRef,
         StaticDefinition, TargetFilter, TypedFilter,
     };
-    use crate::types::identifiers::ObjectId;
+    use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
     use crate::types::player::PlayerId;
     use crate::types::statics::{CastFreeOrigin, CastFrequency, StaticMode};
 
@@ -188,6 +185,7 @@ mod tests {
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         }
     }
 

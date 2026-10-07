@@ -3347,8 +3347,16 @@ mod tests {
     }
 
     /// `TargetFilter::DeclaredPlayer` is new in serialized full-game state
-    /// (CR 608.2c + CR 115.1a); a v107 peer cannot deserialize it, so it must be
-    /// refused before it receives v108 state.
+    /// (CR 608.2c + CR 115.1a); a v109 peer cannot deserialize it, so it must be
+    /// refused before it receives v110 state.
+    /// The CR 201.5a granter binding adds `ObjectScope::GrantingObject` /
+    /// `ObjectScope::SpecificObject`, `TargetFilter::GrantingObject { bound }`,
+    /// `PlayerFilter::GrantingObjectCaster` and the `granting_object` stamp; v108 state
+    /// cannot decode as v109 state, so it must be refused before state delivery.
+    /// `IllegalTargetsDisposition::StillResolves` is serialized on the root
+    /// ability. A v107 peer would silently apply ordinary non-resolution
+    /// after target invalidation, so the handshake must refuse the mismatch
+    /// before it receives v108 state.
     /// `UntilCondition::NextMatches.count` (CR 608.2c), the paused loop's `hits`,
     /// `ZoneChoiceCandidateSource::ParentTargets` and
     /// `SpellContext.exile_until_batch` are new in serialized
@@ -3416,8 +3424,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_108_for_declared_player_reference() {
-        assert_eq!(PROTOCOL_VERSION, 108);
+    fn protocol_version_is_110_for_declared_player_reference() {
+        assert_eq!(PROTOCOL_VERSION, 110);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3428,7 +3436,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_108_for_declared_player_reference` stays
+    /// `protocol_version_is_110_for_declared_player_reference` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
