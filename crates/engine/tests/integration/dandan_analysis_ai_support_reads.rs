@@ -170,7 +170,7 @@ fn v7_the_block_read_out_covers_the_pile_graveyard() {
 }
 
 #[test]
-fn v8_card_name_candidates_come_from_the_pile() {
+fn v8_card_name_candidates_come_from_the_registered_pool() {
     let Some(db) = shared_card_db() else { return };
     for (shared, actor) in CASES {
         let mut sc = scenario(shared);
