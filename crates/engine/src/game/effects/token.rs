@@ -2699,11 +2699,12 @@ fn bulk_token_shape(
 /// CR 608.2 + CR 608.2c: Layer B — the Token-handler bulk admission gate.
 /// Returns `true` iff each of a run of identical untargeted resolutions of this
 /// base `Effect::Token` creates one token from the same spec, emits exactly the
-/// ETB pair, cannot pause for a replacement choice, and cannot trip a pairwise
-/// state-based action against an earlier member's token. The stack's bulk
-/// executor still resolves every member individually through `resolve_top`;
-/// this gate only decides that the checkpoints between them may be elided once
-/// member 1's checkpoint is shown inert.
+/// ETB pair, cannot pause for a replacement choice, and has no printed
+/// supertype that trips a pairwise state-based action against an earlier
+/// member's token. The stack's bulk executor still resolves every member
+/// individually through `resolve_top`; this gate only decides that the
+/// checkpoints between them may be elided once member 1's checkpoint is shown
+/// inert.
 ///
 /// A `ConditionInstead` sub-ability that is currently NOT met is accepted only
 /// when its condition is provably invariant across the run (so every member
@@ -2743,25 +2744,27 @@ pub(crate) fn admits_bulk_run(state: &GameState, ability: &ResolvedAbility) -> b
         return false;
     }
 
-    // CR 704.5j + CR 704.5k: the legend rule and the world rule compare a
-    // permanent with the others. A second identical legendary or world token
-    // trips them where the first did not, so member 1's checkpoint cannot
-    // speak for later members' checkpoints.
-    if spec
-        .characteristics
-        .supertypes
-        .iter()
-        .any(|supertype| match supertype {
-            Supertype::Legendary | Supertype::World => true,
-            Supertype::Basic | Supertype::Snow | Supertype::Ongoing | Supertype::Host => false,
-        })
-    {
+    // CR 704.5j + CR 704.5k: a printed legendary or world spec refuses before
+    // the executor clones; a supertype a continuous effect adds (CR 613.1d) is
+    // checked on member 1's layered token in the stack's bulk executor.
+    if has_pairwise_sba_supertype(&spec.characteristics.supertypes) {
         return false;
     }
 
     // CR 614.1a + CR 616.1: token creation must not be able to pause for an
     // interactive (optional / order-material) replacement choice.
     !token_creation_needs_choice(state, &spec, owner, enter_tapped, resolved_count)
+}
+
+/// CR 704.5j + CR 704.5k: the legend rule and the world rule compare a
+/// permanent with the others. A second identical legendary or world token
+/// trips them where the first did not, so member 1's checkpoint cannot speak
+/// for later members' checkpoints.
+pub(crate) fn has_pairwise_sba_supertype(supertypes: &[Supertype]) -> bool {
+    supertypes.iter().any(|supertype| match supertype {
+        Supertype::Legendary | Supertype::World => true,
+        Supertype::Basic | Supertype::Snow | Supertype::Ongoing | Supertype::Host => false,
+    })
 }
 
 /// Test-only entry to the copy arm's bulk admission. `admits_bulk_run` refuses

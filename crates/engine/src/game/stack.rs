@@ -3386,13 +3386,16 @@ fn resolve_keyword_action(
     }
 }
 
-// ── Session-authorized sequential batch proof ────────────────────────────
+// ── Session-authorized multi-entry resolution ────────────────────────────
 //
 // `resolve_next` normally resolves exactly one stack object. A live
 // stack-resolution session may authorize a fenced prefix through
-// `engine::stack_resolution_session_authorized_limit`; it is proved by
-// resolving each exact member through `resolve_top` and the normal post-action
-// pipeline on a clone.
+// `engine::stack_resolution_session_authorized_limit`. Every member of an
+// authorized run resolves through `resolve_top` on a clone: the bulk token
+// executor (`resolve_bulk_token_run`) runs member 1's full post-action
+// checkpoint and elides the later ones its admission proves inert, and the
+// sequential proof (`resolve_proven_inert_trigger_batch`) runs the normal
+// post-action pipeline after every member.
 
 /// CR 608.2: Resolve the next stack object, collapsing a batch-safe run when
 /// one begins at the top. Returns the number of stack entries consumed
@@ -3551,7 +3554,8 @@ enum BulkMemberRun {
 /// clone. Member 1 resolves and takes the full post-action checkpoint, exactly
 /// as the sequential proof does; it must be inert, and the run's remaining
 /// checkpoints are elided only on what member 1's shows: every produced token
-/// is a fixed point of that checkpoint's layer pass, the entry perturbs no
+/// is a fixed point of that checkpoint's layer pass and is neither legendary
+/// nor world once layered (CR 704.5j, CR 704.5k), the entry perturbs no
 /// other object's layered values (`layers::entry_perturbs_layer_reads`), and
 /// no state trigger (CR 603.8), delayed trigger (CR 603.7), epic effect or
 /// exile link exists. Members 2..N each resolve through `resolve_top` with
@@ -3605,6 +3609,18 @@ fn resolve_bulk_members(
     // checkpoint would have applied to its member's token; a reader between
     // members sees the token unflushed, so the pass must not change it.
     if token_reader_views(&bulk, &produced) != views_before {
+        return None;
+    }
+    // CR 613.1d + CR 704.5j + CR 704.5k: a continuous effect can make the
+    // token legendary or world in layer 4 though its printed spec is neither.
+    // Member 1's token alone trips neither rule, but member 2's identical
+    // token would at member 2's checkpoint; the fixed point above gives every
+    // later member's token the layered supertypes member 1's has.
+    if produced.iter().any(|id| {
+        bulk.objects.get(id).is_some_and(|obj| {
+            effects::token::has_pairwise_sba_supertype(&obj.card_types.supertypes)
+        })
+    }) {
         return None;
     }
     let entrants: std::collections::BTreeSet<ObjectId> = produced.iter().copied().collect();
@@ -3669,9 +3685,10 @@ fn resolve_bulk_token_run(
     if !priority_checkpoint_is_settled(state) {
         return None;
     }
-    // Activation-local trigger collection lives only in `state.pending_cast`;
-    // with none at the run start, the elided checkpoints' activation staging
-    // has nothing to stage.
+    // Activation-local trigger collection lives in `state.pending_cast` or in a
+    // cast prompt's `WaitingFor`; with no pending cast at the run start and
+    // `WaitingFor::Priority` after every member, the elided checkpoints'
+    // activation staging has nothing to stage.
     if state.pending_cast.is_some() || !bulk_checkpoint_carriers_are_empty(state) {
         return None;
     }

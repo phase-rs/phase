@@ -13,7 +13,7 @@ use engine::game::perf_counters;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::Effect;
 use engine::types::actions::GameAction;
-use engine::types::card_type::Supertype;
+use engine::types::card_type::{CoreType, Supertype};
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
     AutoPassMode, AutoPassRequest, GameState, StackEntryKind, StackResolutionAutoPassOverlay,
@@ -47,6 +47,7 @@ const RITE_OF_HARMONY: &str = "Whenever a creature or enchantment you control en
 const JETMIR: &str = "Creatures you control get +1/+0 and have vigilance as long as you control three or more creatures.\nCreatures you control also get +1/+0 and have trample as long as you control six or more creatures.\nCreatures you control also get +1/+0 and have double strike as long as you control nine or more creatures.";
 const INTANGIBLE_VIRTUE: &str = "Creature tokens you control get +1/+1 and have vigilance.";
 const BRISTLY_BILL: &str = "Landfall — Whenever a land you control enters, put a +1/+1 counter on target creature.\n{3}{G}{G}: Double the number of +1/+1 counters on each creature you control.";
+const LEYLINE_OF_SINGULARITY: &str = "If this card is in your opening hand, you may begin the game with it on the battlefield.\nAll nonland permanents are legendary.";
 
 // Synthetic class fixtures (no printed card has the shape). Each carries a
 // positive reach guard: the sequential life delta equals the derived figure
@@ -443,6 +444,63 @@ fn legendary_token_run_refuses_at_the_pairwise_sba_gate() {
         }
     });
     let (bulk, reference) = parity("A8-L", s0);
+    let WaitingFor::ChooseLegend { candidates, .. } = &reference.state.waiting_for else {
+        panic!("the legend rule must ask after member 2");
+    };
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(reference.state.stack.len(), RUN - 2);
+    assert_eq!(bulk.counters.bulk_entries, 0);
+}
+
+/// Six Scute Swarm sources under distinct names (labelled class fixture: each
+/// carries Scute Swarm's verbatim Oracle text, so Leyline of Singularity's
+/// legendary sources do not share a name).
+fn distinctly_named_scutes(scenario: &mut GameScenario) {
+    for index in 1..=RUN {
+        scenario
+            .add_creature_from_oracle(P0, &format!("Scute Swarm {index}"), 1, 1, SCUTE_SWARM)
+            .with_subtypes(vec!["Insect"]);
+    }
+}
+
+/// A8-LC: Leyline of Singularity makes each Insect legendary in layer 4
+/// (CR 613.1d) before its member's checkpoint, though the printed token spec
+/// is not legendary. The second Insect trips the legend rule (CR 704.5j) at
+/// member 2's checkpoint, so admission must read the layered supertypes.
+#[test]
+fn layered_legendary_token_run_refuses_at_the_pairwise_sba_gate() {
+    // Reach guard: without Leyline the distinctly named sources form one
+    // admitted run, so the refusal below comes from Leyline.
+    let control = landfall_board(0, distinctly_named_scutes);
+    let (control_bulk, _) = parity("A8-LC control", control);
+    assert_eq!(control_bulk.counters.bulk_entries, RUN as u64);
+
+    let s0 = landfall_board(0, |s| {
+        distinctly_named_scutes(s);
+        s.add_enchantment_from_oracle(P0, "Leyline of Singularity", LEYLINE_OF_SINGULARITY);
+    });
+    assert_eq!(s0.stack.len(), RUN, "reach guard: {RUN} Scute triggers");
+    assert!(
+        s0.battlefield.iter().all(|id| {
+            let object = &s0.objects[id];
+            object.card_types.supertypes.contains(&Supertype::Legendary)
+                != object.card_types.core_types.contains(&CoreType::Land)
+        }),
+        "reach guard: Leyline makes every nonland permanent legendary"
+    );
+    for entry in &s0.stack {
+        let StackEntryKind::TriggeredAbility { ability, .. } = &entry.kind else {
+            panic!("only Scute triggers are on the stack");
+        };
+        let Effect::Token { supertypes, .. } = &ability.effect else {
+            panic!("each Scute trigger creates a token");
+        };
+        assert!(
+            supertypes.is_empty(),
+            "reach guard: the printed token spec is not legendary"
+        );
+    }
+    let (bulk, reference) = parity("A8-LC", s0);
     let WaitingFor::ChooseLegend { candidates, .. } = &reference.state.waiting_for else {
         panic!("the legend rule must ask after member 2");
     };
