@@ -466,6 +466,7 @@ fn rewrite_resolved_ability(substitution: &TextSubstitution, ability: &mut Resol
         sibling_condition: _,
         modal: _,
         parent_target_missing_reason: _,
+        illegal_targets_disposition: _,
     } = ability;
 
     substitution.rewrite_in_place(effect);

@@ -8960,7 +8960,7 @@ pub(crate) enum TriggerDispatchDisposition {
     /// fallback below.
     DroppedNoLegalRequiredTarget,
     /// A target/resolution slot could not be auto-resolved (`build_target_slots`,
-    /// `auto_select_targets_for_ability`, or `assign_targets_in_chain` returned
+    /// `auto_select_targets_for_ability`, or `assign_selected_slots_in_chain` returned
     /// `Err`). For a genuine CR 115.1d target with no legal option this matches
     /// CR 603.3d removal; but `build_target_slots` also surfaces resolution-time
     /// filter slots that are *not* CR 115.1d targets (e.g. Good King Mog's "a
@@ -9071,7 +9071,7 @@ fn prepare_trigger_targets(state: &GameState, trigger: &PendingTrigger) -> Prepa
 
     match auto_targets {
         Ok(Some(targets)) => {
-            if super::ability_utils::assign_targets_in_chain(
+            if super::ability_utils::assign_selected_slots_in_chain(
                 &prepared_state,
                 &mut prepared_trigger.ability,
                 &targets,

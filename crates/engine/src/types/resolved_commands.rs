@@ -327,6 +327,7 @@ pub enum ResolvedDelayedTriggerReplayInvariantError {
 /// length of `GameState::transient_continuous_effects` before the push, which
 /// duration expiry continuously shortens.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResolvedContinuousEffectCommand {
     pub effect: TransientContinuousEffect,
     pub expected_installed_count: usize,
@@ -338,6 +339,130 @@ pub struct ResolvedContinuousEffectCommand {
     pub resulting_next_end_effect_group_id: u64,
     pub resulting_next_timestamp: u64,
     pub cause: RulesExecutionNodeRef,
+}
+
+/// Exact records selected at one settled CR 611.2b state-duration boundary.
+/// Replay consumes these operands without rechecking their expired conditions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedContinuousEffectRetirementCommand {
+    pub effects: Vec<TransientContinuousEffect>,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Installation and irreversible retirement of resolution-created effects
+/// (CR 611.2a / CR 611.2b), owned by the continuous-effect storage authority.
+// clippy::large_enum_variant: `Install` dwarfs `Retire`, but this enum is only
+// ever stored behind the `Box` in `ResolvedRulesCommand::ContinuousEffect`;
+// elsewhere it is a borrowed replay operand. Boxing `Install` as well would add
+// a second indirection without shrinking any stored value.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum ResolvedContinuousEffectEdit {
+    Install(ResolvedContinuousEffectCommand),
+    Retire(ResolvedContinuousEffectRetirementCommand),
+}
+
+impl<'de> Deserialize<'de> for ResolvedContinuousEffectEdit {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct EditVisitor;
+        impl<'de> serde::de::Visitor<'de> for EditVisitor {
+            type Value = ResolvedContinuousEffectEdit;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("one Install/Retire operation or a legacy bare install")
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut map: M,
+            ) -> Result<Self::Value, M::Error> {
+                use serde::de::Error;
+                let first = map.next_key::<String>()?.ok_or_else(|| {
+                    M::Error::custom("continuous-effect operation cannot be empty")
+                })?;
+                let tagged = match first.as_str() {
+                    "Install" => Some(ResolvedContinuousEffectEdit::Install(map.next_value()?)),
+                    "Retire" => Some(ResolvedContinuousEffectEdit::Retire(map.next_value()?)),
+                    _ => None,
+                };
+                if let Some(edit) = tagged {
+                    if map.next_key::<String>()?.is_some() {
+                        return Err(M::Error::custom(
+                            "continuous-effect operation must have exactly one tag",
+                        ));
+                    }
+                    return Ok(edit);
+                }
+
+                // Select the legacy form explicitly. The strict payload reader
+                // rejects unknown tags and bare/tagged mixtures rather than
+                // falling back to an install that silently discards fields.
+                let mut fields = serde_json::Map::new();
+                fields.insert(first, map.next_value::<serde_json::Value>()?);
+                while let Some(key) = map.next_key::<String>()? {
+                    if fields.contains_key(&key) {
+                        return Err(M::Error::custom("duplicate legacy install field"));
+                    }
+                    fields.insert(key, map.next_value::<serde_json::Value>()?);
+                }
+                serde_json::from_value(serde_json::Value::Object(fields))
+                    .map(ResolvedContinuousEffectEdit::Install)
+                    .map_err(M::Error::custom)
+            }
+        }
+        deserializer.deserialize_map(EditVisitor)
+    }
+}
+
+/// Typed, atomic failures for an exact state-duration retirement batch.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedContinuousEffectRetirementInvariantError {
+    #[error("continuous-effect retirement batch is empty")]
+    EmptyBatch,
+    #[error("continuous-effect retirement repeats operand id {0}")]
+    DuplicateOperandId(u64),
+    #[error("continuous-effect retirement operand {0} is not a state duration")]
+    NotStateDuration(u64),
+    #[error("continuous-effect retirement operand {0} is not installed")]
+    MissingEffect(u64),
+    #[error("continuous-effect retirement id {0} has multiple installed records")]
+    AmbiguousStoredId(u64),
+    #[error("continuous-effect retirement operand {0} does not match the installed record")]
+    EffectMismatch(u64),
+}
+
+impl ResolvedContinuousEffectRetirementCommand {
+    /// Payload-only validation shared by persistence and the exact remover.
+    pub(crate) fn validate_effects(
+        effects: &[TransientContinuousEffect],
+    ) -> Result<(), ResolvedContinuousEffectRetirementInvariantError> {
+        if effects.is_empty() {
+            return Err(ResolvedContinuousEffectRetirementInvariantError::EmptyBatch);
+        }
+        let mut ids = HashSet::new();
+        for effect in effects {
+            if !ids.insert(effect.id) {
+                return Err(
+                    ResolvedContinuousEffectRetirementInvariantError::DuplicateOperandId(effect.id),
+                );
+            }
+            if !effect.duration.is_for_as_long_as() {
+                return Err(
+                    ResolvedContinuousEffectRetirementInvariantError::NotStateDuration(effect.id),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedContinuousEffectEditReplayInvariantError {
+    #[error(transparent)]
+    Install(#[from] ResolvedContinuousEffectReplayInvariantError),
+    #[error(transparent)]
+    Retire(#[from] ResolvedContinuousEffectRetirementInvariantError),
 }
 
 /// Typed failure while applying one already-resolved continuous-effect install.
@@ -1352,7 +1477,8 @@ pub enum ResolvedRulesCommand {
     ObjectTransform(ResolvedObjectTransformCommand),
     Attachment(ResolvedAttachmentCommand),
     DelayedTriggerInstall(Box<ResolvedDelayedTriggerCommand>),
-    ContinuousEffectInstall(Box<ResolvedContinuousEffectCommand>),
+    #[serde(alias = "ContinuousEffectInstall")]
+    ContinuousEffect(Box<ResolvedContinuousEffectEdit>),
     CombatMembership(ResolvedCombatMembershipCommand),
     ControllerOverride(ResolvedControllerOverrideCommand),
     EntryProvenance(ResolvedEntryProvenanceCommand),
@@ -2331,9 +2457,24 @@ impl ResolvedRulesJournal {
     ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
         self.append_command(
             command.cause,
-            ResolvedRulesCommand::ContinuousEffectInstall(Box::new(command)),
+            ResolvedRulesCommand::ContinuousEffect(Box::new(
+                ResolvedContinuousEffectEdit::Install(command),
+            )),
         )
     }
+    /// Records one exact settled CR 611.2b retirement under its causal node.
+    pub fn record_continuous_effect_retirement(
+        &mut self,
+        command: ResolvedContinuousEffectRetirementCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::ContinuousEffect(Box::new(ResolvedContinuousEffectEdit::Retire(
+                command,
+            ))),
+        )
+    }
+
     /// Records one exact CR 506.3 / CR 506.4 combat-membership edit under its
     /// causal node.
     pub fn record_combat_membership(
@@ -2662,7 +2803,7 @@ impl ResolvedRulesJournal {
                 | ResolvedRulesCommand::ObjectTransform(_)
                 | ResolvedRulesCommand::Attachment(_)
                 | ResolvedRulesCommand::DelayedTriggerInstall(_)
-                | ResolvedRulesCommand::ContinuousEffectInstall(_)
+                | ResolvedRulesCommand::ContinuousEffect(_)
                 | ResolvedRulesCommand::CombatMembership(_)
                 | ResolvedRulesCommand::ControllerOverride(_)
                 | ResolvedRulesCommand::EntryProvenance(_)
@@ -2957,31 +3098,45 @@ impl ResolvedRulesJournal {
                     ));
                 }
             }
-            ResolvedRulesCommand::ContinuousEffectInstall(command) => {
-                // CR 613.7b: the effect's timestamp was drawn when it was
-                // created, so it — the effect id drawn alongside it, and any CR
-                // 116.2c termination-group identity — must lie strictly below
-                // the high-water the draw left behind, or the receipt describes
-                // an allocation that never happened.
-                let end_group_above_high_water = command
-                    .effect
-                    .end_permission
-                    .as_ref()
-                    .is_some_and(|permission| {
-                        permission.group.0 >= command.resulting_next_end_effect_group_id
-                    });
-                if entry.node != command.cause
-                    || command.effect.id >= command.resulting_next_continuous_effect_id
-                    || command.effect.timestamp >= command.resulting_next_timestamp
-                    || end_group_above_high_water
-                {
-                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+            ResolvedRulesCommand::ContinuousEffect(edit) => match edit.as_ref() {
+                ResolvedContinuousEffectEdit::Install(command) => {
+                    // CR 613.7b: the effect's timestamp was drawn when it was
+                    // created, so it — the effect id drawn alongside it, and any CR
+                    // 116.2c termination-group identity — must lie strictly below
+                    // the high-water the draw left behind, or the receipt describes
+                    // an allocation that never happened.
+                    let end_group_above_high_water = command
+                        .effect
+                        .end_permission
+                        .as_ref()
+                        .is_some_and(|permission| {
+                            permission.group.0 >= command.resulting_next_end_effect_group_id
+                        });
+                    if entry.node != command.cause
+                        || command.effect.id >= command.resulting_next_continuous_effect_id
+                        || command.effect.timestamp >= command.resulting_next_timestamp
+                        || end_group_above_high_water
+                    {
+                        return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
                         "continuous-effect install command has an impossible allocator receipt, \
                          or an unrelated cause"
                             .to_string(),
                     ));
+                    }
                 }
-            }
+                ResolvedContinuousEffectEdit::Retire(command) => {
+                    if entry.node != command.cause {
+                        return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                            "continuous-effect retirement command has an unrelated cause"
+                                .to_string(),
+                        ));
+                    }
+                    ResolvedContinuousEffectRetirementCommand::validate_effects(&command.effects)
+                        .map_err(|error| {
+                        ResolvedRulesJournalError::InvalidSerializedAuthority(error.to_string())
+                    })?;
+                }
+            },
             ResolvedRulesCommand::CombatMembership(command) => {
                 if entry.node != command.cause {
                     return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(

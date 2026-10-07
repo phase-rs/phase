@@ -3,12 +3,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { EMPTY_DRAFT_POOL_GROUPS } from "../draft-adapter";
 import { ServerDraftAdapter } from "../server-draft-adapter";
 import { PROTOCOL_VERSION } from "../ws-adapter";
+import { AdapterErrorCode } from "../types";
 import type { DraftPlayerView } from "../draft-adapter";
-import type { GameLogEntry, GameState, LegalActionsResult, ObjectAction } from "../types";
+import type { GameAction, GameLogEntry, GameState, LegalActionsResult, ObjectAction, SubmitResult } from "../types";
 import type {
   InteractionChoiceId,
   InteractionId,
   InteractionPreviewRequest,
+  InteractionSubmission,
   PreviewRequestId,
 } from "../generated/interaction";
 
@@ -30,8 +32,8 @@ class MockWebSocket extends EventTarget {
   }
   dispatchSynthetic(type: "message" | "close", data?: string) {
     if (type === "message" && data !== undefined) {
+      // Production handles messages through the onmessage IDL property only.
       this.onmessage?.({ data });
-      this.dispatchEvent(new MessageEvent("message", { data }));
     } else if (type === "close") {
       this.onclose?.();
       this.dispatchEvent(new Event("close"));
@@ -173,6 +175,93 @@ const objectActions: Record<string, ObjectAction[]> = {
 };
 
 const FULL_KEY = { game_code: "GAME01", generation: 7 };
+
+function interactionSubmission(id: string): InteractionSubmission {
+  return {
+    interactionId: id as InteractionId,
+    response: { type: "choose", data: { choiceId: `choice-${id}` as InteractionChoiceId } },
+  };
+}
+
+function deliveredEventMarker(observation: unknown): string | null {
+  if (typeof observation !== "object" || observation === null || !("resolvedWith" in observation)) return null;
+  const { resolvedWith } = observation as { resolvedWith: SubmitResult };
+  const first = resolvedWith.events[0] as unknown as { marker?: string } | undefined;
+  return first?.marker ?? null;
+}
+
+function submissionTypes(ws: MockWebSocket): string[] {
+  return ws.send.mock.calls
+    .map(([raw]) => JSON.parse(raw as string) as { type?: string })
+    .map((frame) => frame.type)
+    .filter((type): type is string => type === "Action" || type === "Interaction");
+}
+
+function enterAcceptedFullMatch(adapter: ServerDraftAdapter, ws: MockWebSocket): void {
+  const events = vi.fn();
+  adapter.onEvent(events);
+  receive(ws, "DraftMatchStart", {
+    match_id: "r1-t0",
+    round: 1,
+    game_code: FULL_KEY.game_code,
+    full_key: FULL_KEY,
+    player_token: "match-draft-token",
+    your_player: 0,
+    opponent_name: "Bob",
+  });
+  const startedState = matchState("accepted-full-start");
+  receive(ws, "GameStarted", {
+    state: startedState,
+    your_player: 0,
+    full_key: FULL_KEY,
+  });
+  expect(events).toHaveBeenCalledWith(expect.objectContaining({
+    type: "gameStateUpdated",
+    state: startedState,
+  }));
+  expect(adapter.currentPhase).toBe("match");
+  ws.send.mockClear();
+}
+
+function deliverOwnershipStateUpdate(ws: MockWebSocket, marker: string): void {
+  receive(ws, "StateUpdate", {
+    state: matchState(`reply-${marker}`),
+    events: [{ marker }],
+    full_key: FULL_KEY,
+  });
+}
+
+async function exerciseOverlappingSubmissionOwnership(
+  ws: MockWebSocket,
+  submitFirst: () => Promise<SubmitResult>,
+  submitSecond: () => Promise<SubmitResult>,
+): Promise<void> {
+  const readFirst = trackRejection(submitFirst());
+  const readSecond = trackRejection(submitSecond());
+
+  deliverOwnershipStateUpdate(ws, "A");
+  const [firstAfterA, secondAfterA] = await Promise.all([readFirst(), readSecond()]);
+  const secondWasSent = submissionTypes(ws).length > 1;
+
+  if (secondWasSent) deliverOwnershipStateUpdate(ws, "B");
+  const firstAfterB = await readFirst();
+  await readSecond();
+
+  const secondErrorCode = typeof secondAfterA === "object" && secondAfterA !== null && "code" in secondAfterA
+    ? secondAfterA.code
+    : null;
+  expect({
+    secondWasSent,
+    secondErrorCode,
+    firstOwnsReplyA: deliveredEventMarker(firstAfterA) === "A",
+    firstSettlesWithoutAnOrphan: deliveredEventMarker(firstAfterB) === "A",
+  }).toEqual({
+    secondWasSent: false,
+    secondErrorCode: AdapterErrorCode.ACTION_NOT_SENT,
+    firstOwnsReplyA: true,
+    firstSettlesWithoutAnOrphan: true,
+  });
+}
 
 describe("ServerDraftAdapter", () => {
   let adapter: ServerDraftAdapter;
@@ -376,6 +465,137 @@ describe("ServerDraftAdapter", () => {
     );
   });
 
+  describe("Issue #9319 pending submission reply ownership", () => {
+    beforeEach(() => {
+      enterAcceptedFullMatch(adapter, ws);
+    });
+
+    it("settles accepted ActionNoOp and releases the next Action and Interaction", async () => {
+      const pendingStates: boolean[] = [];
+      adapter.onEvent((event) => {
+        if (event.type === "actionPendingChanged") pendingStates.push(event.pending);
+      });
+
+      const zeroCountCreate: GameAction = {
+        type: "Debug",
+        data: {
+          type: "CreateCard",
+          data: {
+            card_name: "Lightning Bolt",
+            owner: 0,
+            zone: "Hand",
+            run_etb: false,
+            nonlegendary: false,
+            creation_kind: "Card",
+            count: 0,
+          },
+        },
+      };
+      const noOpPending = trackRejection(adapter.submitAction(zeroCountCreate, 0));
+      expect(JSON.parse(ws.send.mock.calls[0][0] as string)).toEqual({
+        type: "Action",
+        data: { action: zeroCountCreate },
+      });
+
+      receive(ws, "ActionNoOp", undefined);
+      const noOpOutcome = await noOpPending();
+
+      const actionPending = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+      deliverOwnershipStateUpdate(ws, "reply-after-noop-action");
+      const actionOutcome = await actionPending();
+
+      const interactionPending = trackRejection(
+        adapter.submitInteraction(interactionSubmission("after-noop"), 0),
+      );
+      deliverOwnershipStateUpdate(ws, "reply-after-noop-interaction");
+      const interactionOutcome = await interactionPending();
+
+      expect.soft(noOpOutcome).toMatchObject({
+        resolvedWith: { events: [], log_entries: [] },
+      });
+      expect.soft(actionOutcome).toMatchObject({
+        resolvedWith: { events: [{ marker: "reply-after-noop-action" }] },
+      });
+      expect.soft(interactionOutcome).toMatchObject({
+        resolvedWith: { events: [{ marker: "reply-after-noop-interaction" }] },
+      });
+      expect.soft(submissionTypes(ws)).toEqual(["Action", "Action", "Interaction"]);
+      expect.soft(pendingStates).toEqual([true, false, true, false, true, false]);
+    });
+
+    it("issue #9319 Action then Interaction keeps the first StateUpdate with its owner", async () => {
+      await exerciseOverlappingSubmissionOwnership(
+        ws,
+        () => adapter.submitAction({ type: "PassPriority" }, 0),
+        () => adapter.submitInteraction(interactionSubmission("overlap-interaction"), 0),
+      );
+    });
+
+    it("issue #9319 Interaction then Interaction keeps the first StateUpdate with its owner", async () => {
+      await exerciseOverlappingSubmissionOwnership(
+        ws,
+        () => adapter.submitInteraction(interactionSubmission("overlap-first"), 0),
+        () => adapter.submitInteraction(interactionSubmission("overlap-second"), 0),
+      );
+    });
+
+    it("claims the submission slot before pending notifications can re-enter", async () => {
+      let reentrant: Promise<SubmitResult> | undefined;
+      let didReenter = false;
+      adapter.onEvent((event) => {
+        if (event.type === "actionPendingChanged" && event.pending && !didReenter) {
+          didReenter = true;
+          reentrant = adapter.submitInteraction(interactionSubmission("reentrant"), 0);
+        }
+      });
+
+      const first = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+      const second = trackRejection(reentrant!);
+      deliverOwnershipStateUpdate(ws, "A");
+      const [firstResult, secondResult] = await Promise.all([first(), second()]);
+
+      expect(submissionTypes(ws)).toEqual(["Action"]);
+      expect(deliveredEventMarker(firstResult)).toBe("A");
+      expect(secondResult).toMatchObject({ code: AdapterErrorCode.ACTION_NOT_SENT });
+    });
+
+    it("releases the slot after an engine rejection", async () => {
+      const first = adapter.submitAction({ type: "PassPriority" }, 0);
+      ws.dispatchSynthetic("message", JSON.stringify({
+        type: "ActionRejected",
+        data: { rejection: { code: "invalid_action", disposition: "invalid", message: "Action rejected", related_object_ids: [] } },
+      }));
+      await expect(first).rejects.toMatchObject({ code: "ACTION_REJECTED" });
+
+      const next = trackRejection(adapter.submitInteraction(interactionSubmission("after-rejection"), 0));
+      expect(submissionTypes(ws)).toEqual(["Action", "Interaction"]);
+      deliverOwnershipStateUpdate(ws, "reply-after-rejection");
+      await expect(next()).resolves.toMatchObject({
+        resolvedWith: { events: [{ marker: "reply-after-rejection" }] },
+      });
+    });
+
+    it("issue #9319 sequential Action and Interaction submissions remain usable", async () => {
+      const action = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+      deliverOwnershipStateUpdate(ws, "A");
+      await expect(action()).resolves.toMatchObject({
+        resolvedWith: { events: [{ marker: "A" }] },
+      });
+
+      const interaction = trackRejection(adapter.submitInteraction(interactionSubmission("sequential-one"), 0));
+      deliverOwnershipStateUpdate(ws, "B");
+      await expect(interaction()).resolves.toMatchObject({
+        resolvedWith: { events: [{ marker: "B" }] },
+      });
+
+      const nextInteraction = trackRejection(adapter.submitInteraction(interactionSubmission("sequential-two"), 0));
+      deliverOwnershipStateUpdate(ws, "C");
+      await expect(nextInteraction()).resolves.toMatchObject({
+        resolvedWith: { events: [{ marker: "C" }] },
+      });
+    });
+  });
+
   it("rejects createDraft when the post-handshake setup frame cannot be sent", async () => {
     MockWebSocket.last = null;
     const setupFailingAdapter = new ServerDraftAdapter("ws://localhost:9374/ws");
@@ -433,6 +653,17 @@ describe("ServerDraftAdapter", () => {
     expect(listener).toHaveBeenCalledWith(
       expect.objectContaining({ type: "error" }),
     );
+
+    const next = adapter.submitInteraction(interactionSubmission("after-send-failure"), 0);
+    receive(ws, "ActionRejected", {
+      rejection: {
+        code: "invalid_action",
+        disposition: "invalid",
+        message: "Action rejected",
+        related_object_ids: [],
+      },
+    });
+    await expect(next).rejects.toMatchObject({ code: "ACTION_REJECTED" });
   });
 
   it("returns to between_rounds after GameOver", () => {
@@ -985,6 +1216,22 @@ describe("ServerDraftAdapter", () => {
       { code: "WS_CLOSED", message: "Adapter disposed during draft operation", recoverable: true },
       { code: "WS_CLOSED", message: "Adapter disposed before draft started", recoverable: true },
     ]);
+    await expect(adapter.submitInteraction(interactionSubmission("after-dispose"), 0)).rejects.toMatchObject({
+      code: "WS_ERROR",
+    });
+  });
+
+  it("releases the submission slot after a socket close", async () => {
+    enterAcceptedFullMatch(adapter, ws);
+    const pending = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+
+    ws.readyState = 3; // CLOSED
+    ws.dispatchSynthetic("close");
+
+    expect(await pending()).toMatchObject({ code: "WS_CLOSED" });
+    await expect(adapter.submitInteraction(interactionSubmission("after-close"), 0)).rejects.toMatchObject({
+      code: "WS_ERROR",
+    });
   });
 
   it("DraftOver sets phase to complete", () => {

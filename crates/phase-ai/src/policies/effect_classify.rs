@@ -1280,6 +1280,7 @@ fn exact_pending_node_is_eligible(node: &ResolvedAbility) -> bool {
         && node.min_x_value == 0
         && node.announced_x.is_none()
         && !node.cant_be_copied
+        && node.illegal_targets_disposition == Default::default()
         && node.copy_count_status == Default::default()
         && !node.forward_result
         && node.unless_pay.is_none()
@@ -2103,10 +2104,11 @@ mod live_quantity_targeting_tests {
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityCondition, AbilityCost, AbilityDefinition, CardSelectionMode, ControllerRef,
-        CopyCountStatus, DetachedRemainder, Duration, EffectKind, FilterProp, ModalChoice,
-        MultiTargetSpec, OpponentMayScope, ParentTargetMissingReason, PlayerFilter, PlayerScope,
-        QuantityRef, RepeatContinuation, ResolvedAbility, SiblingCondition, SubAbilityLink,
-        TargetChoiceTiming, TargetRef, TargetSelectionMode, TypedFilter, UnlessPayModifier,
+        CopyCountStatus, DetachedRemainder, Duration, EffectKind, FilterProp,
+        IllegalTargetsDisposition, ModalChoice, MultiTargetSpec, OpponentMayScope,
+        ParentTargetMissingReason, PlayerFilter, PlayerScope, QuantityRef, RepeatContinuation,
+        ResolvedAbility, SiblingCondition, SubAbilityLink, TargetChoiceTiming, TargetRef,
+        TargetSelectionMode, TypedFilter, UnlessPayModifier,
     };
     use engine::types::actions::GameAction;
     use engine::types::card_type::CoreType;
@@ -3166,6 +3168,14 @@ mod live_quantity_targeting_tests {
             "cant_be_copied",
             |node: &mut ResolvedAbility| {
                 node.cant_be_copied = true;
+            }
+        );
+        // CR 608.2b + CR 101.1: a node that still resolves with illegal targets is
+        // not the plain shape the exact classifier models.
+        assert_ineligible_on_root_and_fixed_child!(
+            "illegal_targets_disposition",
+            |node: &mut ResolvedAbility| {
+                node.illegal_targets_disposition = IllegalTargetsDisposition::StillResolves;
             }
         );
         assert_ineligible_on_root_and_fixed_child!(

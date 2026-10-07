@@ -11,8 +11,8 @@ use super::context::ParseContext;
 use super::effect_chain::{DieResultBranchIr, EffectChainIr, ModalModeIr};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ControllerRef,
-    Effect, ModalChoice, TargetFilter, TargetSelectionMode, TriggerCondition, TriggerConstraint,
-    TriggerDefinition, UnlessPayModifier,
+    Effect, IllegalTargetsDisposition, ModalChoice, TargetFilter, TargetSelectionMode,
+    TriggerCondition, TriggerConstraint, TriggerDefinition, UnlessPayModifier,
 };
 use crate::types::triggers::TriggerMode;
 
@@ -368,6 +368,11 @@ pub(crate) struct TriggerModifiers {
     pub(crate) constraint: Option<TriggerConstraint>,
     /// Whether effect text contains "up to one".
     pub(crate) has_up_to: bool,
+    /// CR 101.1 + CR 608.2b: the trailing "This ability still resolves if its target
+    /// becomes illegal" sentence. Set only for a plain effect-chain body; stamped on
+    /// the execute root by `lower_trigger_ir`.
+    #[serde(skip_serializing_if = "IllegalTargetsDisposition::is_does_not_resolve")]
+    pub(crate) illegal_targets_disposition: IllegalTargetsDisposition,
     /// Lowered effect text (after comma split), for `effect_adds_mana_to_triggering_player`.
     pub(crate) effect_lower: String,
     /// CR 109.4: The relative-player scope the trigger condition

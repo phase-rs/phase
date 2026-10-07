@@ -26,6 +26,7 @@ use super::oracle_ir::trigger::{
     TriggerBody, TriggerIr, TriggerModifiers, TriggerNodeIr,
 };
 use super::oracle_modal::try_parse_inline_modal_ir;
+use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition::{
     parse_affirmative_reflexive_connector, parse_elided_subject_state_condition,
 };
@@ -40,6 +41,7 @@ use super::oracle_nom::filter::{
 };
 use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
+    split_sentence_units,
 };
 use super::oracle_nom::target::parse_chosen_object_reference;
 use super::oracle_nom::target::parse_type_phrase as parse_type_phrase_nom;
@@ -65,12 +67,13 @@ use crate::types::ability::{
     Comparator, ControllerRef, CountScope, CounterTriggerFilter, DamageAmountScope,
     DamageAmountThreshold, DamageChannel, DamageKindFilter, DelayedTriggerCondition,
     DestinationConstraint, DieResultFilter, Effect, EffectScope, FilterProp,
-    ManaAbilityProducedFilter, NameStickerSet, ObjectScope, OriginConstraint, ParsedCondition,
-    PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, PtStat, PtValueScope,
-    QuantityExpr, QuantityRef, RenownSubject, SacrificeAggregateStat, SacrificeCost,
-    SacrificeRequirement, SharedQuality, StaticCondition, SubAbilityLink, TapCreaturesRequirement,
-    TapStateChange, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
+    IllegalTargetsDisposition, ManaAbilityProducedFilter, NameStickerSet, ObjectScope,
+    OriginConstraint, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope,
+    PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
+    SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, StaticCondition,
+    SubAbilityLink, TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition,
+    TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -1679,6 +1682,10 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // richer per-clause form when a chain has one.
     let has_up_to = scan_contains(&effect_for_parse_lower, "up to one")
         || scan_contains(&effect_for_parse_lower, "any number of target");
+    // CR 101.1 + CR 608.2b: set only by the plain effect-chain branch below, the one
+    // body shape the override sentence is printed on; every other body keeps the
+    // sentence in its text (strict failure).
+    let mut illegal_targets_disposition = IllegalTargetsDisposition::default();
     let body = if !effect_for_parse.is_empty() {
         if let Some((cost, connector, reflexive_effect_text)) =
             split_reflexive_optional_payment(&effect_for_parse)
@@ -1812,12 +1819,47 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 if let Some(modal) = try_parse_inline_modal_ir(&effect_for_parse, &effect_ctx) {
                     return Some(TriggerBody::Modal(Box::new(modal)));
                 }
-                let ir =
-                    parse_effect_chain_ir(&effect_for_parse, AbilityKind::Spell, &mut effect_ctx);
+                let (stripped_text, disposition) =
+                    extract_illegal_targets_disposition(&effect_for_parse);
+                let (chain_text, ir) = match disposition {
+                    IllegalTargetsDisposition::DoesNotResolve => {
+                        let ir = parse_effect_chain_ir(
+                            &stripped_text,
+                            AbilityKind::Spell,
+                            &mut effect_ctx,
+                        );
+                        (stripped_text, ir)
+                    }
+                    IllegalTargetsDisposition::StillResolves => {
+                        // Parse the stripped chain on a clone: it is committed only if kept.
+                        let mut stripped_ctx = effect_ctx.clone();
+                        let ir = parse_effect_chain_ir(
+                            &stripped_text,
+                            AbilityKind::Spell,
+                            &mut stripped_ctx,
+                        );
+                        if chain_creates_reflexive_ability(&lower_effect_chain_ir(&ir)) {
+                            // CR 603.12 + CR 608.2b: a reflexive node is a separate ability
+                            // with its own targets; the root stamp would not govern it. Fail
+                            // closed: re-parse the unstripped body so the sentence stays a
+                            // strict failure and the disposition stays the default.
+                            let ir = parse_effect_chain_ir(
+                                &effect_for_parse,
+                                AbilityKind::Spell,
+                                &mut effect_ctx,
+                            );
+                            (effect_for_parse.to_string(), ir)
+                        } else {
+                            effect_ctx = stripped_ctx;
+                            illegal_targets_disposition = disposition;
+                            (stripped_text, ir)
+                        }
+                    }
+                };
                 Some(TriggerBody::EffectChain(
                     fail_closed_on_dropped_intervening_if(
                         ir,
-                        &effect_for_parse,
+                        &chain_text,
                         if_condition.as_ref(),
                         &effect_ctx,
                     ),
@@ -1846,6 +1888,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             first_time_limit,
             constraint,
             has_up_to,
+            illegal_targets_disposition,
             effect_lower: effect_lower.to_string(),
             relative_player_scope,
         },
@@ -2189,6 +2232,10 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         });
     }
 
+    // CR 101.1 + CR 608.2b: root only — resolve_top reads the stack entry's root.
+    if let Some(ability) = execute.as_deref_mut() {
+        ability.illegal_targets_disposition = modifiers.illegal_targets_disposition;
+    }
     def.execute = execute;
     def.optional = modifiers.optional;
     // CR 603.3d + CR 608.2c: "you may cast target … from [public zone]"
@@ -3723,6 +3770,78 @@ fn parse_first_spell_disjunct<'a>(
         ],
     };
     Ok((rest, disjunct))
+}
+
+/// CR 101.1 + CR 608.2b: the printed override sentence.
+fn parse_illegal_targets_disposition(input: &str) -> OracleResult<'_, IllegalTargetsDisposition> {
+    value(
+        IllegalTargetsDisposition::StillResolves,
+        (
+            tag("this ability still resolves if "),
+            tag("its target becomes illegal"),
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 101.1 + CR 608.2b: detach the override sentence when it is the LAST
+/// sentence unit of the body. Any other position returns the text unchanged
+/// with the default disposition (fail closed: the sentence stays in the chain
+/// as a strict failure).
+fn extract_illegal_targets_disposition(text: &str) -> (String, IllegalTargetsDisposition) {
+    let Some(last_unit) = split_sentence_units(text).pop() else {
+        return (text.to_string(), IllegalTargetsDisposition::DoesNotResolve);
+    };
+    let last_unit_lower = last_unit.to_lowercase();
+    let Some((disposition, _)) = nom_on_lower(last_unit, &last_unit_lower, |input| {
+        all_consuming(terminated(parse_illegal_targets_disposition, opt(tag(".")))).parse(input)
+    }) else {
+        return (text.to_string(), IllegalTargetsDisposition::DoesNotResolve);
+    };
+    // Structural suffix removal: the last unit ends where the trimmed text ends
+    // (split_sentence_units' contract), so the kept text is everything before it.
+    // The previous sentence keeps its period.
+    let trimmed = text.trim_end();
+    let kept = trimmed[..trimmed.len() - last_unit.len()].trim_end();
+    if kept.is_empty() {
+        // The body is only the override sentence: there is no effect for it to
+        // govern. Fail closed — keep the sentence (strict failure) and the default.
+        return (text.to_string(), IllegalTargetsDisposition::DoesNotResolve);
+    }
+    (kept.to_string(), disposition)
+}
+
+/// CR 603.12: whether any node of this chain is a reflexive "when you do"
+/// ability. Such a node is a separate triggered ability with its own targets
+/// (`ability_utils::defers_conditional_target_selection` defers its slot and
+/// `effects::build_reflexive_pending_trigger` builds it from the sub), so an
+/// override stamped on this chain's root would not reach it. Walks the whole
+/// chain: `sub_ability`, `else_ability`, and every effect-carried definition
+/// through `Effect::for_each_nested_definition` (the single authority, as
+/// `oracle::any_unimplemented` walks it), so a reflexive node under a coin-flip
+/// branch, a "choose one of" branch, a die result or a vote outcome is seen.
+fn chain_creates_reflexive_ability(def: &AbilityDefinition) -> bool {
+    if def
+        .condition
+        .as_ref()
+        .is_some_and(AbilityCondition::has_when_you_do_marker)
+    {
+        return true;
+    }
+    let mut nested_creates_reflexive = false;
+    def.effect.for_each_nested_definition(&mut |_, nested| {
+        nested_creates_reflexive =
+            nested_creates_reflexive || chain_creates_reflexive_ability(nested);
+    });
+    nested_creates_reflexive
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(chain_creates_reflexive_ability)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(chain_creates_reflexive_ability)
 }
 
 /// Strip constraint sentences from effect text so they don't produce spurious sub-abilities.

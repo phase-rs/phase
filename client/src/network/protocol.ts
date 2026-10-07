@@ -106,36 +106,40 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
- *  96 — game_setup and state_update carry GameState, whose derived views can now
- *       carry shared_piles (the seat storing a shared library and graveyard). A v95
+ *  97 — game_setup and state_update carry GameState, whose derived views can now
+ *       carry shared_piles (the seat storing a shared library and graveyard). A v96
  *       peer drops the key and renders per-seat piles for a state whose other
  *       seat's containers are empty, so first contact rejects the skew. Bumped
- *       with full-game protocol 114.
- *  95 — game_setup and state_update carry GameState, whose resolution frames can
+ *       with full-game protocol 115.
+ *  96 — game_setup and state_update carry GameState, whose resolution frames can
  *       now hold a simultaneous-draw dealer (RESOLUTION_STATE_WIRE_VERSION 5). A
- *       v94 peer refuses the version-5 resolution state, so first contact rejects
- *       the skew. Bumped with full-game protocol 113.
- *  94 — game_setup and state_update carry GameState, whose waiting_for can now
+ *       v95 peer refuses the version-5 resolution state, so first contact rejects
+ *       the skew. Bumped with full-game protocol 114.
+ *  95 — game_setup and state_update carry GameState, whose waiting_for can now
  *       hold a held free reveal mulligan (MulliganDeclaration.kind) and whose
- *       MulliganDecision action gains the FreeReveal choice. A v93 peer would
+ *       MulliganDecision action gains the FreeReveal choice. A v94 peer would
  *       run the free reveal as a regular mulligan, so first contact rejects the
- *       skew. Bumped with full-game protocol 112.
- *  93 — game_setup and state_update carry GameState, whose waiting_for can now
+ *       skew. Bumped with full-game protocol 113.
+ *  94 — game_setup and state_update carry GameState, whose waiting_for can now
  *       hold the mulligans declared in a CR 103.5 round on
- *       MulliganDecision.declared. A v92 peer would drop them silently, so first
- *       contact rejects the skew. Bumped with full-game protocol 111.
- *  92 — game_setup and state_update carry GameState, whose journaled zone-change
+ *       MulliganDecision.declared. A v93 peer would drop them silently, so first
+ *       contact rejects the skew. Bumped with full-game protocol 112.
+ *  93 — game_setup and state_update carry GameState, whose journaled zone-change
  *       commands can now hold rebound_from, the owner a card had before a Hand
- *       entry from a shared zone rebound it to the taker. A v91 peer would drop
+ *       entry from a shared zone rebound it to the taker. A v92 peer would drop
  *       it silently, so first contact rejects the skew. Bumped with full-game
- *       protocol 110.
- *  91 — game_setup and state_update carry GameState, whose transient continuous
+ *       protocol 111.
+ *  92 — game_setup and state_update carry GameState, whose transient continuous
  *       effects can now hold the SubstituteTextWord modification (CR 612.1), so a
- *       v90 peer cannot parse the tag and first contact rejects the skew.
- *  90 — game_setup and state_update carry GameState, whose FormatConfig can
- *       now name the Dandan format. A v89 peer cannot parse the format name, so
+ *       v91 peer cannot parse the tag and first contact rejects the skew.
+ *  91 — game_setup and state_update carry GameState, whose FormatConfig can
+ *       now name the Dandan format. A v90 peer cannot parse the format name, so
  *       first contact rejects the skew. Bumped in lockstep with full-game
- *       protocol 108.
+ *       protocol 109.
+ *  90 — Serialized IllegalTargetsDisposition.StillResolves in GameState lets
+ *       the root ability resolve after its chosen target becomes illegal.
+ *       Older peers would silently apply ordinary non-resolution. Bumped
+ *       with full-game protocol 108.
  *  89 — game_setup and state_update carry GameState, whose exile-until
  *       loops now carry a match count, whose paused loop keeps its hits,
  *       whose zone choices can read ParentTargets, and whose spell context
@@ -577,7 +581,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 96 as const;
+export const WIRE_PROTOCOL_VERSION = 97 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

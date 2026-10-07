@@ -47,9 +47,10 @@ use super::triggers::trigger_matcher;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
 use super::ability_utils::{
-    assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
-    build_target_slots, build_target_slots_labelled, declared_targets_in_chain,
-    modal_choice_for_player, random_select_targets_for_ability, target_constraints_from_modal,
+    assign_selected_slots_in_chain, auto_select_targets_for_ability,
+    begin_target_selection_for_ability, build_target_slots, build_target_slots_labelled,
+    declared_targets_in_chain, modal_choice_for_player, random_select_targets_for_ability,
+    target_constraints_from_modal,
 };
 use super::life_costs::PayLifeCostResult;
 
@@ -1936,7 +1937,7 @@ pub(crate) fn begin_deferred_target_selection(
         let targets =
             random_select_targets_for_ability(state, &target_slots, &pending.target_constraints)?;
         let mut ability = pending.ability.clone();
-        assign_targets_in_chain(state, &mut ability, &targets)?;
+        assign_selected_slots_in_chain(state, &mut ability, &targets)?;
         pending.ability = ability;
         pending.crime_candidate = super::casting::targets_commit_crime(
             state,
@@ -1970,7 +1971,7 @@ pub(crate) fn begin_deferred_target_selection(
         &pending.target_constraints,
     )? {
         let mut ability = pending.ability.clone();
-        assign_targets_in_chain(state, &mut ability, &targets)?;
+        assign_selected_slots_in_chain(state, &mut ability, &targets)?;
         pending.ability = ability;
         pending.crime_candidate = super::casting::targets_commit_crime(
             state,
@@ -6724,7 +6725,7 @@ pub(super) fn push_activated_ability_to_stack(
                 crate::types::ability::TargetSelectionMode::Random
             ) {
                 let targets = random_select_targets_for_ability(state, &target_slots, &[])?;
-                assign_targets_in_chain(state, &mut resolved, &targets)?;
+                assign_selected_slots_in_chain(state, &mut resolved, &targets)?;
                 let mut pending = pending(resolved);
                 pending.crime_candidate = super::casting::targets_commit_crime(
                     state,
@@ -6747,7 +6748,7 @@ pub(super) fn push_activated_ability_to_stack(
             if let Some(targets) =
                 auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
             {
-                assign_targets_in_chain(state, &mut resolved, &targets)?;
+                assign_selected_slots_in_chain(state, &mut resolved, &targets)?;
                 let mut pending = pending(resolved);
                 pending.crime_candidate = super::casting::targets_commit_crime(
                     state,

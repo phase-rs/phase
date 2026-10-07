@@ -1,6 +1,7 @@
 use super::*;
+use crate::game::ability_utils::ability_definition_supported;
 use crate::game::scenario::{GameScenario, P0, P1};
-use crate::parser::oracle::parse_oracle_text;
+use crate::parser::oracle::{has_unimplemented, parse_oracle_text};
 use crate::parser::oracle_classifier::has_trigger_prefix;
 use crate::parser::oracle_effect::gap_diagnosis::diagnose_clause_gap;
 use crate::parser::oracle_ir::context::ParseContext;
@@ -21,6 +22,7 @@ use crate::types::ability::{
     SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter, TriggerCondition,
     TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
 };
+use crate::types::ability::{EffectOutcomeSignal, IllegalTargetsDisposition, MultiTargetSpec};
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::game_state::WaitingFor;
@@ -26835,11 +26837,17 @@ fn managorger_phoenix_perpetual_clause_fails_closed_instead_of_pumping() {
     );
 
     let execute = def.execute.as_ref().expect("trigger must execute");
-    // Reach guard: the counter clause still parses, so the gap below is the
-    // conditional sibling and not a wholesale parse failure.
+    // Reach guard: the counter clause is recognized, and its unsupported
+    // "for each {R} in that spell's mana cost" count is an explicit counter-tail
+    // gap rather than a silent one-counter placement (CR 608.2c), so the gap
+    // below is the conditional sibling and not a wholesale parse failure.
     assert!(
-        matches!(&*execute.effect, Effect::PutCounter { .. }),
-        "the flame-counter clause must still lower, got {:?}",
+        matches!(
+            &*execute.effect,
+            Effect::Unimplemented { name, description: Some(fragment) }
+                if name == "put_counter_tail" && fragment.contains("for each {R}")
+        ),
+        "the flame-counter clause must surface its count tail, got {:?}",
         execute.effect
     );
     let perpetual_branch = execute
@@ -37353,4 +37361,280 @@ fn count_qualified_blocks_preserves_article_qualified_shapes() {
         assert_eq!(trigger.condition, None);
         assert_no_unimplemented(trigger.execute.as_deref().unwrap());
     }
+}
+
+/// Verbatim from Scryfall (`cards/named?exact=Gilded%20Drake`).
+const GILDED_DRAKE_TEXT: &str = "Flying\nWhen this creature enters, exchange control of this \
+    creature and up to one target creature an opponent controls. If you don't or can't make an \
+    exchange, sacrifice this creature. This ability still resolves if its target becomes illegal.";
+
+/// Gilded Drake's trigger body as printed (the text after "When this creature enters, ").
+const GILDED_DRAKE_BODY: &str = "exchange control of this creature and up to one target creature \
+    an opponent controls. If you don't or can't make an exchange, sacrifice this creature. This \
+    ability still resolves if its target becomes illegal.";
+
+/// Parse `text` through the whole-card pipeline as a Drake creature and return
+/// its single trigger's execute.
+fn drake_shaped_trigger_execute(text: &str) -> AbilityDefinition {
+    let parsed = parse_oracle_text(
+        text,
+        "Gilded Drake",
+        &[],
+        &["Creature".to_string()],
+        &["Drake".to_string()],
+    );
+    let [trigger] = parsed.triggers.as_slice() else {
+        panic!("expected exactly one trigger, got {:?}", parsed.triggers);
+    };
+    trigger
+        .execute
+        .as_deref()
+        .cloned()
+        .expect("the trigger has an execute")
+}
+
+/// Every node reachable through `sub_ability` / `else_ability`, root first.
+fn chain_nodes(root: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+    let mut nodes = vec![root];
+    let mut index = 0;
+    while let Some(node) = nodes.get(index).copied() {
+        nodes.extend(node.sub_ability.as_deref());
+        nodes.extend(node.else_ability.as_deref());
+        index += 1;
+    }
+    nodes
+}
+
+fn has_unbound_subject_node(root: &AbilityDefinition) -> bool {
+    chain_nodes(root).iter().any(|node| {
+        matches!(&*node.effect, Effect::Unimplemented { name, .. } if name == "unbound_subject")
+    })
+}
+
+/// PU3 (CR 101.1 + CR 608.2b): Gilded Drake's verbatim text parses fully. The
+/// trailing override sentence becomes the execute root's disposition instead of
+/// a strict-failure node; the exchange and its rider are unchanged.
+///
+/// Fails on revert: the sentence stays an `unbound_subject` node and the root
+/// keeps the default disposition.
+#[test]
+fn gilded_drake_trailing_still_resolves_sentence_stamps_the_execute_root() {
+    let execute = drake_shaped_trigger_execute(GILDED_DRAKE_TEXT);
+
+    let opponent_creature =
+        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
+    assert_eq!(
+        *execute.effect,
+        Effect::ExchangeControl {
+            target_a: TargetFilter::SelfRef,
+            target_b: opponent_creature,
+        },
+        "REACH GUARD: the execute is the paired exchange"
+    );
+    assert_eq!(
+        execute.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+        "phase 1's up-to-one slot is preserved"
+    );
+    assert!(
+        !has_unimplemented(&execute),
+        "no strict-failure node remains anywhere in the chain: {execute:?}"
+    );
+    assert!(ability_definition_supported(&execute));
+    assert_eq!(
+        execute.illegal_targets_disposition,
+        IllegalTargetsDisposition::StillResolves
+    );
+
+    let rider = execute
+        .sub_ability
+        .as_deref()
+        .expect("the sacrifice rider follows the exchange");
+    assert!(
+        matches!(
+            &*rider.effect,
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "expected the rider to sacrifice the Drake, got {:?}",
+        rider.effect
+    );
+    assert_eq!(
+        rider.condition,
+        Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::OptionalEffectPerformed,
+            }),
+        }),
+        "CR 608.2c: \"If you don't or can't make an exchange\" gates the rider"
+    );
+    assert_eq!(
+        rider.illegal_targets_disposition,
+        IllegalTargetsDisposition::DoesNotResolve,
+        "the disposition is stamped on the root only"
+    );
+    assert!(rider.sub_ability.is_none(), "nothing follows the rider");
+}
+
+/// PU4: the same text without the override sentence parses to the same chain
+/// with the CR 608.2b default disposition. Paired positive: PU3.
+#[test]
+fn gilded_drake_text_without_the_override_keeps_the_default_disposition() {
+    let execute = drake_shaped_trigger_execute(
+        "Flying\nWhen this creature enters, exchange control of this creature and up to one \
+         target creature an opponent controls. If you don't or can't make an exchange, sacrifice \
+         this creature.",
+    );
+    assert_eq!(
+        execute.illegal_targets_disposition,
+        IllegalTargetsDisposition::DoesNotResolve
+    );
+
+    let mut with_override = drake_shaped_trigger_execute(GILDED_DRAKE_TEXT);
+    with_override.illegal_targets_disposition = IllegalTargetsDisposition::DoesNotResolve;
+    assert_eq!(
+        execute, with_override,
+        "the override sentence changes nothing but the root's disposition"
+    );
+}
+
+/// PU5 (CR 101.1 + CR 608.2b): the override is detached only when it is the
+/// last sentence of the body and an effect precedes it. Any other placement
+/// returns the text unchanged with the default, so the sentence stays a strict
+/// failure. Paired positives: the verbatim-body leg below and PU3.
+#[test]
+fn still_resolves_sentence_is_detached_only_as_the_last_sentence() {
+    let (kept, disposition) = extract_illegal_targets_disposition(GILDED_DRAKE_BODY);
+    assert_eq!(disposition, IllegalTargetsDisposition::StillResolves);
+    assert_eq!(
+        kept,
+        "exchange control of this creature and up to one target creature an opponent controls. \
+         If you don't or can't make an exchange, sacrifice this creature.",
+        "the previous sentence keeps its period"
+    );
+
+    for unchanged in [
+        // Not the last sentence.
+        "exchange control of this creature and up to one target creature an opponent controls. \
+         This ability still resolves if its target becomes illegal. Draw a card.",
+        // Inside a longer sentence, not a sentence of its own.
+        "exchange control of this creature and up to one target creature an opponent controls. \
+         If you don't or can't make an exchange, sacrifice this creature; this ability still \
+         resolves if its target becomes illegal.",
+        // The whole body: no effect for the override to govern.
+        "This ability still resolves if its target becomes illegal.",
+    ] {
+        let (kept, disposition) = extract_illegal_targets_disposition(unchanged);
+        assert_eq!(kept, unchanged);
+        assert_eq!(disposition, IllegalTargetsDisposition::DoesNotResolve);
+    }
+
+    // Full pipeline: the sentence placed before the rider is not detached.
+    let not_trailing = drake_shaped_trigger_execute(
+        "Flying\nWhen this creature enters, exchange control of this creature and up to one \
+         target creature an opponent controls. This ability still resolves if its target becomes \
+         illegal. If you don't or can't make an exchange, sacrifice this creature.",
+    );
+    assert!(
+        matches!(&*not_trailing.effect, Effect::ExchangeControl { .. }),
+        "REACH GUARD: the body parsed past the exchange, got {:?}",
+        not_trailing.effect
+    );
+    assert!(has_unbound_subject_node(&not_trailing));
+    assert!(chain_nodes(&not_trailing)
+        .iter()
+        .all(|node| node.illegal_targets_disposition == IllegalTargetsDisposition::DoesNotResolve));
+
+    // Full pipeline: a body that is only the sentence stays a strict failure.
+    let only_override = drake_shaped_trigger_execute(
+        "When this creature enters, this ability still resolves if its target becomes illegal.",
+    );
+    assert!(has_unbound_subject_node(&only_override));
+    assert!(!ability_definition_supported(&only_override));
+    assert_eq!(
+        only_override.illegal_targets_disposition,
+        IllegalTargetsDisposition::DoesNotResolve
+    );
+}
+
+/// PU6 (CR 603.12 + CR 608.2b): a shape fixture, not a printed card. When the
+/// targeted exchange sits on a reflexive "When you do" node, that node is a
+/// separate triggered ability with its own targets, so a stamp on the chain's
+/// root could not govern "its target". The override fails closed: the sentence
+/// stays a strict failure and no node carries the override.
+///
+/// Fails on revert of the fail-close: the root is stamped and the card reports
+/// supported while the reflexive ability would still fizzle. Paired positive: PU3.
+#[test]
+fn still_resolves_sentence_fails_closed_beside_a_reflexive_when_you_do_node() {
+    let execute = drake_shaped_trigger_execute(
+        "When this creature enters, you may pay {1}. When you do, exchange control of this \
+         creature and up to one target creature an opponent controls. This ability still \
+         resolves if its target becomes illegal.",
+    );
+    let nodes = chain_nodes(&execute);
+    assert!(
+        nodes.iter().any(|node| node
+            .condition
+            .as_ref()
+            .is_some_and(AbilityCondition::has_when_you_do_marker)),
+        "REACH GUARD: the chain carries the reflexive marker the fail-close reads: {execute:?}"
+    );
+    assert!(nodes
+        .iter()
+        .all(|node| node.illegal_targets_disposition == IllegalTargetsDisposition::DoesNotResolve));
+    assert!(has_unimplemented(&execute));
+    assert!(!ability_definition_supported(&execute));
+}
+
+/// PU7 (CR 603.12): the reflexive-node predicate descends effect-carried
+/// definitions, not only `sub_ability` / `else_ability`. Each positive is paired
+/// with the same shape minus the "When you do" marker.
+#[test]
+fn chain_creates_reflexive_ability_descends_nested_definitions() {
+    let draw = || Effect::Draw {
+        count: QuantityExpr::Fixed { value: 1 },
+        target: TargetFilter::Controller,
+    };
+    let plain_sub = AbilityDefinition::new(AbilityKind::Spell, draw());
+    let reflexive_sub = plain_sub.clone().condition(AbilityCondition::WhenYouDo);
+    let branch_with_reflexive =
+        AbilityDefinition::new(AbilityKind::Spell, draw()).sub_ability(reflexive_sub);
+    let branch_without_reflexive =
+        AbilityDefinition::new(AbilityKind::Spell, draw()).sub_ability(plain_sub);
+
+    let flip_coin = |win: AbilityDefinition| {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoin {
+                win_effect: Some(Box::new(win)),
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            },
+        )
+    };
+    assert!(chain_creates_reflexive_ability(&flip_coin(
+        branch_with_reflexive.clone()
+    )));
+    assert!(!chain_creates_reflexive_ability(&flip_coin(
+        branch_without_reflexive.clone()
+    )));
+
+    let choose_one_of = |branch: AbilityDefinition| {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![AbilityDefinition::new(AbilityKind::Spell, draw()), branch],
+            },
+        )
+    };
+    assert!(chain_creates_reflexive_ability(&choose_one_of(
+        branch_with_reflexive
+    )));
+    assert!(!chain_creates_reflexive_ability(&choose_one_of(
+        branch_without_reflexive
+    )));
 }

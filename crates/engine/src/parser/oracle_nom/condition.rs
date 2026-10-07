@@ -2103,6 +2103,22 @@ fn parse_bare_predicate_disjunction(input: &str) -> OracleResult<'_, Vec<TargetF
     nom::multi::separated_list1(tag(" or "), parse_bare_predicate_tail).parse(input)
 }
 
+/// CR 303.4b: being "enchanted" means having an Aura attached, regardless of
+/// which object supplies the condition or who controls the Aura.
+fn parse_enchanted_status_filter(input: &str) -> OracleResult<'_, TargetFilter> {
+    value(
+        TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::HasAttachment {
+                kind: crate::types::ability::AttachmentKind::Aura,
+                controller: None,
+                exclude_source: crate::types::ability::SourceExclusion::Include,
+            }]),
+        ),
+        tag("enchanted"),
+    )
+    .parse(input)
+}
+
 /// CR 401.1 + CR 401.5: "the top card of your library is [predicate]" — a
 /// continuous-static gate reading the top card of the controller's library
 /// (Vampire Nocturnus "is black", Mul Daya Channelers "is a creature card",
@@ -2143,17 +2159,45 @@ fn parse_top_of_library_condition(input: &str) -> OracleResult<'_, StaticConditi
 }
 
 /// CR 611.3a: "it's a Zombie" / "it isn't white" / "it's a Zombie or a Skeleton" —
-/// the anaphoric "it" binds to the recipient (effective subject) of the continuous
+/// the anaphoric "it" or "that <object>" binds to the recipient of the continuous
 /// effect. Emits `RecipientMatchesFilter` (affirmative), `Not(RecipientMatchesFilter)`
 /// (negated), or `Or([RecipientMatchesFilter, …])` (disjunction). The pronoun subject
 /// is scoped to this combinator only (it is NOT added to the shared source-subject
 /// dispatcher, mirroring `parse_counter_condition_subject`). A terminal-boundary guard
 /// rejects non-clause-ending predicates (e.g. "attacking alone") so the alt backtracks
 /// to the combat combinator.
+///
+/// Only the explicit "that <object>" anaphor also takes the "enchanted" status
+/// predicate (Rootwater Matriarch: "for as long as that creature is enchanted").
+/// Bare "it" stays limited to characteristic predicates: on a SelfRef static,
+/// "it's enchanted" names the source and is bound by the caller
+/// (`rewrite_self_pronoun_subject` → `SourceIsEnchanted`, Metathran Elite), which
+/// relies on this context-free grammar declining it.
 fn parse_recipient_is_filter_condition(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = tag("it").parse(input)?;
-    let (rest, negated) = parse_it_copula(rest)?;
-    let (rest, filters) = parse_bare_predicate_disjunction(rest)?;
+    let (rest, (negated, filters)) = alt((
+        preceded(
+            tag("it"),
+            (parse_it_copula, parse_bare_predicate_disjunction),
+        ),
+        preceded(
+            (
+                tag("that "),
+                alt((
+                    value((), super::primitives::parse_core_type),
+                    value((), tag("permanent")),
+                    value((), tag("card")),
+                )),
+            ),
+            (
+                parse_it_copula,
+                alt((
+                    map(parse_enchanted_status_filter, |filter| vec![filter]),
+                    parse_bare_predicate_disjunction,
+                )),
+            ),
+        ),
+    ))
+    .parse(input)?;
 
     // Pronoun-form boundary guard: the predicate must end at a clause boundary
     // (end of input or one of ",", ".", ";"). Otherwise leftover words (e.g.
@@ -17385,6 +17429,49 @@ mod tests {
     }
 
     // -- Anaphoric "it" recipient conditions (CR 611.3a) --
+
+    #[test]
+    fn recipient_enchanted_predicate_preserves_subject_and_attachment_kind() {
+        // CR 303.4b: any attached Aura, not the granting source's Aura.
+        let enchanted = StaticCondition::RecipientMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::HasAttachment {
+                    kind: crate::types::ability::AttachmentKind::Aura,
+                    controller: None,
+                    exclude_source: crate::types::ability::SourceExclusion::Include,
+                },
+            ])),
+        };
+        for text in [
+            "that creature is enchanted",
+            "that permanent is enchanted",
+            "that land is enchanted",
+        ] {
+            let (rest, condition) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "{text}");
+            assert_eq!(condition, enchanted, "{text}");
+        }
+        let (rest, negated) = parse_inner_condition("that creature isn't enchanted").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            negated,
+            StaticCondition::Not {
+                condition: Box::new(enchanted),
+            }
+        );
+        // Bare "it" is caller-bound for status predicates: a SelfRef static
+        // rewrites it to the source (Metathran Elite → `SourceIsEnchanted`).
+        for text in ["it is enchanted", "it's enchanted"] {
+            assert!(parse_recipient_is_filter_condition(text).is_err(), "{text}");
+        }
+        let (rest, source) = parse_inner_condition("~ is enchanted").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(source, StaticCondition::SourceIsEnchanted);
+        assert!(parse_recipient_is_filter_condition(
+            "that creature is enchanted by an Aura you control"
+        )
+        .is_err());
+    }
 
     fn recipient_filter(condition: &StaticCondition) -> &TargetFilter {
         match condition {

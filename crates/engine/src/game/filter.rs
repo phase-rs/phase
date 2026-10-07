@@ -7691,6 +7691,11 @@ fn matches_filter_prop(
             let Some(att) = state.objects.get(att_id) else {
                 return false;
             };
+            // CR 702.26b: a separately phased-out attachment does not exist
+            // for this live predicate, even though its attachment link remains.
+            if att.is_phased_out() {
+                return false;
+            }
             let kind_matches = match kind {
                 crate::types::ability::AttachmentKind::Aura => {
                     att.card_types.subtypes.iter().any(|s| s == "Aura")

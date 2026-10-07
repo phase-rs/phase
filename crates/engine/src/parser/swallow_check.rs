@@ -6455,7 +6455,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
             ("Perch Protection", "Gift an extra turn (You may promise an opponent a gift as you cast this spell. If you do, they take an extra turn after this one.)\nCreate four 2/2 blue Bird creature tokens with flying. If the gift was promised, all permanents you control phase out, and until your next turn, your life total can't change and you gain protection from everything.\nExile Perch Protection.", &["Instant"]),
             ("Jandor's Ring", "{2}, {T}, Discard the last card you drew this turn: Draw a card.", &["Artifact"]),
             ("Dragon Egg", "Defender\nWhen this creature dies, create a 2/2 red Dragon creature token with flying and \"{R}: This token gets +1/+0 until end of turn.\"", &["Creature"]),
-            ("Siege Behemoth", "Hexproof\nAs long as this creature is attacking, for each creature you control, you may have that creature assign its combat damage as though it weren't blocked.", &["Creature"]),
+            ("The Legend of Yangchen", "(As this Saga enters and after your draw step, add a lore counter.)\nI — Starting with you, each player chooses up to one permanent with mana value 3 or greater from among permanents your opponents control. Exile those permanents.\nII — You may have target opponent draw three cards. If you do, draw three cards.\nIII — Exile this Saga, then return it to the battlefield transformed under your control.", &["Enchantment"]),
             ("Ballot Broker", "While voting, you may vote an additional time. (The votes can be for different choices or for the same choice.)", &["Creature"]),
             ("Mikey & Don, Party Planners", "Ward {2}\nYou may look at the top card of your library any time.\nYou may play lands and cast Mutant, Ninja, or Turtle spells from the top of your library. If you cast a creature spell this way, that creature enters with an additional +1/+1 counter on it.", &["Creature"]),
         ];
@@ -11782,17 +11782,12 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         assert!(!has_swallowed_detector(&parsed, "Optional_MayHave"));
     }
 
-    /// KNOWN GAP, pinned deliberately — see `condition_as_long_as_accepts_bronze_horse_
-    /// and_champions_helm` for the full explanation of the vacuity this replaces.
-    ///
-    /// Siege Behemoth reports `Optional_MayHave`, `Optional_YouMay` and `DynamicQty` as
-    /// swallowed, and reported all three in the shipped card data long before this
-    /// change (verified against the pre-cutover full-pool export). This test asserted
-    /// the opposite and passed only because its empty MTGJSON keyword list turned the
-    /// "Hexproof" line into an `Effect::Unimplemented`, tripping the card-wide gate that
-    /// silenced every detector on the card.
+    /// Siege Behemoth's per-creature "you may have that creature assign its combat damage
+    /// as though it weren't blocked" is typed (`AssignDamageAsThoughUnblocked` on a gated
+    /// class static), so the optionality detectors no longer report it as swallowed. This
+    /// replaces the former known-gap pin. Reach guard: the typed grant is present.
     #[test]
-    fn optional_may_have_siege_behemoth_reports_known_gap() {
+    fn optional_may_have_siege_behemoth_is_typed() {
         let parsed = parse_named(
             "Hexproof\nAs long as this creature is attacking, for each creature you control, \
              you may have that creature assign its combat damage as though it weren't blocked.",
@@ -11800,11 +11795,24 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             &["Creature"],
         );
         assert!(
-            has_swallowed_detector(&parsed, "Optional_MayHave"),
-            "pre-existing gap: the per-creature 'you may have' optionality is not typed. \
-             Warnings: {:?}",
+            parsed.statics.iter().any(|d| d
+                .modifications
+                .contains(&ContinuousModification::AssignDamageAsThoughUnblocked)),
+            "reach guard: typed grant missing: {:?}",
+            parsed.statics
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Optional_MayHave"),
+            "Warnings: {:?}",
             parsed.parse_warnings
         );
+        for detector in ["Optional_YouMay", "DynamicQty"] {
+            assert!(
+                !has_swallowed_detector(&parsed, detector),
+                "{detector} must not fire: {:?}",
+                parsed.parse_warnings
+            );
+        }
     }
 
     #[test]

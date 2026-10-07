@@ -43,16 +43,16 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // v101 adds `ActivatedAbilityKind::Mana` (mana-ability activations now emit
 // `GameEvent::AbilityActivated`), the event's `departed_source_lki`, and
 // `AbilityActivationRecord.source_zone`.
-// v108 adds the `Dandan` GameFormat name.
-// v109 adds the `SubstituteTextWord` text-changing modification (CR 612.1).
-// v110 adds `ResolvedZoneChangeCommand.rebound_from` (the Dandan hand-entry
+// v109 adds the `Dandan` GameFormat name.
+// v110 adds the `SubstituteTextWord` text-changing modification (CR 612.1).
+// v111 adds `ResolvedZoneChangeCommand.rebound_from` (the Dandan hand-entry
 // ownership rebind).
-// v111 adds `WaitingFor::MulliganDecision.declared` (the CR 103.5 declare round).
-// v112 adds `MulliganChoice::FreeReveal` and `MulliganDeclaration.kind` (the Dandan
+// v112 adds `WaitingFor::MulliganDecision.declared` (the CR 103.5 declare round).
+// v113 adds `MulliganChoice::FreeReveal` and `MulliganDeclaration.kind` (the Dandan
 // free reveal mulligan).
-// v113 adds the simultaneous-draw dealer to the multi-draw resolution frame
+// v114 adds the simultaneous-draw dealer to the multi-draw resolution frame
 // (`RESOLUTION_STATE_WIRE_VERSION` 5).
-// v114 adds `DerivedViews.shared_piles` (the shared-pile holder seat).
+// v115 adds `DerivedViews.shared_piles` (the shared-pile holder seat).
 // Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
@@ -93,14 +93,15 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +34: v105 adds the nominal base quantity to deferred mana-source selections.
 // +35: v106 adds exact replacement-choice preferences and remembered response actions.
 // +36: v107 adds the counted exile-until loop and the ParentTargets zone choice.
-// +37: the v108 `Dandan` GameFormat name.
-// +38: the v109 `SubstituteTextWord` text-changing modification.
-// +39: v110 adds `ResolvedZoneChangeCommand.rebound_from`.
-// +40: v111 adds `WaitingFor::MulliganDecision.declared`.
-// +41: v112 adds `MulliganChoice::FreeReveal` and `MulliganDeclaration.kind`.
-// +42: v113 adds the simultaneous-draw dealer to the multi-draw resolution frame.
-// +43: v114 adds `DerivedViews.shared_piles` (the shared-pile holder seat).
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 43;
+// +37: v108 adds serialized IllegalTargetsDisposition.StillResolves.
+// +38: the v109 `Dandan` GameFormat name.
+// +39: the v110 `SubstituteTextWord` text-changing modification.
+// +40: v111 adds `ResolvedZoneChangeCommand.rebound_from`.
+// +41: v112 adds `WaitingFor::MulliganDecision.declared`.
+// +42: v113 adds `MulliganChoice::FreeReveal` and `MulliganDeclaration.kind`.
+// +43: v114 adds the simultaneous-draw dealer to the multi-draw resolution frame.
+// +44: v115 adds `DerivedViews.shared_piles` (the shared-pile holder seat).
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 44;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -161,14 +162,15 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +33: wire 87 moves with full-game v105 for deferred mana-source quantities.
 // +34: wire 88 moves with full-game v106 for remembered replacement choices.
 // +35: wire 89 moves with full-game v107 for the counted exile-until loop.
-// +36: wire 90 moves with full-game v108 for the `Dandan` GameFormat name.
-// +37: wire 91 moves with full-game v109 for the `SubstituteTextWord` modification.
-// +38: wire 92 moves with full-game v110 for the journaled `rebound_from`.
-// +39: wire 93 moves with full-game v111 for `MulliganDecision.declared`.
-// +40: wire 94 moves with full-game v112 for the free reveal mulligan.
-// +41: wire 95 moves with full-game v113 for the simultaneous-draw dealer.
-// +42: wire 96 moves with full-game v114 for `DerivedViews.shared_piles`.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 42;
+// +36: wire 90 moves with full-game v108 for illegal-target resolution disposition.
+// +37: wire 91 moves with full-game v109 for the `Dandan` GameFormat name.
+// +38: wire 92 moves with full-game v110 for the `SubstituteTextWord` modification.
+// +39: wire 93 moves with full-game v111 for the journaled `rebound_from`.
+// +40: wire 94 moves with full-game v112 for `MulliganDecision.declared`.
+// +41: wire 95 moves with full-game v113 for the free reveal mulligan.
+// +42: wire 96 moves with full-game v114 for the simultaneous-draw dealer.
+// +43: wire 97 moves with full-game v115 for `DerivedViews.shared_piles`.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 43;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

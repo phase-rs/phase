@@ -719,6 +719,33 @@ fn interaction_session_is_valid(session: &InteractionSessionId) -> bool {
     !session.0.is_empty() && session.0.len() <= MAX_INTERACTION_SESSION_ID_LEN
 }
 
+/// Read the authorized viewer's existing Scry identity independently of the
+/// bounded interaction payload. This getter never allocates or rotates a slot.
+pub(crate) fn scry_prompt_id_for_viewer(
+    state: &GameState,
+    viewer: PlayerId,
+) -> Option<InteractionId> {
+    let WaitingFor::ScryChoice { player, .. } = &state.waiting_for else {
+        return None;
+    };
+    if interaction_submitter_for_owner(state, *player) != viewer
+        || state
+            .interaction_session_id
+            .as_ref()
+            .is_none_or(|session| !interaction_session_is_valid(session))
+        || !interaction_serial_is_valid(&state.next_interaction_serial)
+    {
+        return None;
+    }
+    state
+        .active_interaction_slots
+        .iter()
+        .find(|slot| {
+            slot.semantic_owner == player.0 && slot.slot_kind == InteractionSlotKind::Single
+        })
+        .map(|slot| slot.interaction_id.clone())
+}
+
 fn increment_decimal(value: &str) -> Option<String> {
     if !interaction_serial_is_valid(value) {
         return None;

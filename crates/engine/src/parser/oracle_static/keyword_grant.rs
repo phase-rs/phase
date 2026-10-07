@@ -1033,20 +1033,9 @@ fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::abili
             ),
             tag("all creatures your opponents control"),
         ),
-        // CR 613.1f: "all creature cards in all graveyards" (Necrotic Ooze)
-        value(
-            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
-                zone: Zone::Graveyard,
-            }])),
-            tag("all creature cards in all graveyards"),
-        ),
-        // CR 613.1f: "all land cards in all graveyards"
-        value(
-            TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::InZone {
-                zone: Zone::Graveyard,
-            }])),
-            tag("all land cards in all graveyards"),
-        ),
+        // CR 613.1f + CR 108.3: "all <type> cards in your graveyard | all
+        // graveyards" (Necrotic Ooze, Thranduil, the Elvenking).
+        grant_graveyard_source,
         // CR 613.1f: "all lands on the battlefield" (Manascape Refractor)
         // — zone is explicit in the phrase; encode it so graveyard/hand land
         // cards are excluded from the runtime provider scan.
@@ -1073,20 +1062,6 @@ fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::abili
                     ]),
             ),
             tag("all legendary creatures you control"),
-        ),
-        // CR 613.1f: "all artifact cards in your graveyard"
-        // CR 108.3: Graveyard cards are "yours" by ownership, not control —
-        // use FilterProp::Owned rather than TypedFilter::controller here.
-        value(
-            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![
-                FilterProp::Owned {
-                    controller: ControllerRef::You,
-                },
-                FilterProp::InZone {
-                    zone: Zone::Graveyard,
-                },
-            ])),
-            tag("all artifact cards in your graveyard"),
         ),
         // CR 607.2a + CR 607.2d: "the last chosen card" (Koh, the Face Stealer) —
         // the card most recently recorded on the host via `Effect::RememberCard`
@@ -1161,6 +1136,54 @@ fn grant_exiled_card_type_qualifier(input: &str) -> OracleResult<'_, TypedFilter
     alt((
         value(TypedFilter::creature(), tag("creature ")),
         value(TypedFilter::land(), tag("land ")),
+    ))
+    .parse(input)
+}
+
+/// CR 613.1f + CR 113.3: "all <type> cards in your graveyard | all graveyards" —
+/// the graveyard-card source set of an ability-grant-by-reference static
+/// (Necrotic Ooze: creature cards in all graveyards; Thranduil, the Elvenking:
+/// Elf cards in your graveyard). Composed along two independent axes rather
+/// than one arm per printed type:
+///   - the type word, via the shared [`nom_target::parse_type_filter_word`]
+///     alphabet — a card type ("creature", "land", "artifact") or a subtype
+///     (CR 205.3m: the creature type "Elf");
+///   - the graveyard owner scope ([`grant_graveyard_owner`]).
+///
+/// CR 109.2a: a description naming "card" and a zone means a card matching it
+/// in that zone, so the set is pinned to `Zone::Graveyard`.
+fn grant_graveyard_source(input: &str) -> OracleResult<'_, TargetFilter> {
+    (
+        tag("all "),
+        nom_target::parse_type_filter_word,
+        tag(" cards in "),
+        grant_graveyard_owner,
+    )
+        .map(|(_, type_filter, _, owner)| {
+            // CR 108.3: a card in a graveyard is "yours" by ownership, not
+            // control — scope with `FilterProp::Owned`, never
+            // `TypedFilter::controller`. "All graveyards" carries no owner axis.
+            let properties = owner
+                .map(|controller| FilterProp::Owned { controller })
+                .into_iter()
+                .chain(std::iter::once(FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                }))
+                .collect();
+            TargetFilter::Typed(TypedFilter::new(type_filter).properties(properties))
+        })
+        .parse(input)
+}
+
+/// CR 108.3 + CR 109.5: the graveyard owner axis of [`grant_graveyard_source`].
+/// "your graveyard" names the graveyard of the player who controls the object
+/// with the ability (`ControllerRef::You` resolves against the recipient's
+/// controller in the layer-6 expansion); "all graveyards" spans every
+/// player's (`None`).
+fn grant_graveyard_owner(input: &str) -> OracleResult<'_, Option<ControllerRef>> {
+    alt((
+        value(Some(ControllerRef::You), tag("your graveyard")),
+        value(None, tag("all graveyards")),
     ))
     .parse(input)
 }

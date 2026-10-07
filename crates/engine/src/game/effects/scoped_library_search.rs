@@ -135,9 +135,9 @@ fn is_plain_parent_target_delivery(delivery: &ResolvedAbility) -> bool {
 }
 
 /// CR 608.2c: true when `ability` carries no resolution-time rider (sub, else,
-/// condition, choice, repeat, payment, mode or applied replacement) that a
-/// shortcut resolving only its own effect would drop. Target, scope and
-/// ordering fields are the caller's own checks.
+/// condition, choice, repeat, payment, mode, applied replacement or illegal-target
+/// disposition) that a shortcut resolving only its own effect would drop.
+/// Target, scope and ordering fields are the caller's own checks.
 pub(crate) fn has_no_resolution_riders(ability: &ResolvedAbility) -> bool {
     ability.sub_ability.is_none()
         && ability.else_ability.is_none()
@@ -154,6 +154,7 @@ pub(crate) fn has_no_resolution_riders(ability: &ResolvedAbility) -> bool {
         && ability.repeat_for.is_none()
         && ability.min_x_value == 0
         && !ability.cant_be_copied
+        && ability.illegal_targets_disposition.is_does_not_resolve()
         && !ability.forward_result
         && ability.unless_pay.is_none()
         && ability.distribution.is_none()
@@ -1935,7 +1936,7 @@ mod tests {
         };
         assert!(has_no_resolution_riders(&bare()), "reach: a bare effect");
         type Mutation = fn(&mut ResolvedAbility);
-        let riders: [(&str, Mutation); 7] = [
+        let riders: [(&str, Mutation); 8] = [
             ("sub_ability", |a| a.sub_ability = Some(Box::new(a.clone()))),
             ("else_ability", |a| {
                 a.else_ability = Some(Box::new(a.clone()))
@@ -1946,6 +1947,10 @@ mod tests {
             }),
             ("min_x_value", |a| a.min_x_value = 1),
             ("forward_result", |a| a.forward_result = true),
+            ("illegal_targets_disposition", |a| {
+                a.illegal_targets_disposition =
+                    crate::types::ability::IllegalTargetsDisposition::StillResolves
+            }),
             ("replacement_applied", |a| {
                 a.replacement_applied.insert(
                     crate::types::proposed_event::AppliedReplacementKey::Floating { index: 0 },

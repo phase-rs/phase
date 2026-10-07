@@ -173,13 +173,23 @@ export function CardChoiceModal() {
   const activeSelectInteractionId = useGameStore((s) =>
     selectionInteractionId(s.viewerInteraction),
   );
+  const scryPromptId = useGameStore((s) => s.gameState?.derived?.scry_prompt_id);
 
   if (!waitingFor) return null;
 
   switch (waitingFor.type) {
     case "ScryChoice":
       if (!canActForWaitingState) return null;
-      return <ScryModal data={waitingFor.data} />;
+      return (
+        <ScryModal
+          key={
+            activeSelectInteractionId ??
+            scryPromptId ??
+            `${waitingFor.data.player}:${waitingFor.data.cards.join(",")}`
+          }
+          data={waitingFor.data}
+        />
+      );
     case "ArrangePlanarDeckTopChoice":
       if (!canActForWaitingState) return null;
       return <ArrangePlanarDeckTopModal data={waitingFor.data} />;

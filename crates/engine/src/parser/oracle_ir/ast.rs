@@ -810,6 +810,11 @@ pub(crate) enum ImperativeFamilyAst {
     ExchangeControl {
         target_a: TargetFilter,
         target_b: TargetFilter,
+        /// CR 115.6: "up to N target …" on the one declared slot, from
+        /// `strip_optional_target_prefix`; lowered onto
+        /// `ParsedEffectClause.multi_target` in `lower_imperative_family_ast`,
+        /// never onto `Effect::ExchangeControl`. `None` for mandatory slots.
+        multi_target: Option<MultiTargetSpec>,
     },
     /// CR 701.12a: Exchange a player's life total with the source's power or
     /// toughness (Tree of Perdition, Tree of Redemption, Evra). `player` is the
@@ -2004,9 +2009,10 @@ pub(crate) enum ZoneCounterImperativeAst {
     /// CR 122.1: "Put a X counter, a Y counter[, and a Z counter] on TARGET" —
     /// a list of typed counters placed on one shared target. Lowered to a
     /// `PutCounter` chain where the first entry carries the resolved target
-    /// and each remaining entry uses `TargetFilter::ParentTarget` so the
-    /// target is chosen once and reused. Covers Abigale, Unexpected Fangs,
-    /// Gift of the Viper, Qarsi Revenant, Nezumi Prowler, Arwen, Champion of
+    /// and later source-bound entries preserve `TargetFilter::SelfRef`.
+    /// Other entries use `TargetFilter::ParentTarget` to reuse the chosen or
+    /// anaphoric recipient without extra target slots. Covers Abigale, Unexpected
+    /// Fangs, Gift of the Viper, Qarsi Revenant, Nezumi Prowler, Arwen, Champion of
     /// Dusan, Quicksilver.
     PutCounterList {
         entries: Vec<(CounterType, QuantityExpr)>,

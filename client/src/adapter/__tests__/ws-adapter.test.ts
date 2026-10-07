@@ -15,11 +15,12 @@ import {
   WebSocketAdapter,
 } from "../ws-adapter";
 import { AdapterError, AdapterErrorCode, supportsMatchConcede, supportsServerRewind } from "../types";
-import type { FormatConfig, GameAction, GameState } from "../types";
+import type { FormatConfig, GameAction, GameState, SubmitResult } from "../types";
 import type {
   InteractionChoiceId,
   InteractionId,
   InteractionPreviewRequest,
+  InteractionSubmission,
   PreviewRequestId,
 } from "../generated/interaction";
 import type { PhaseSocketTransport } from "../../services/openPhaseSocket";
@@ -84,6 +85,8 @@ const SERVER_HELLO = JSON.stringify({
   },
 });
 
+const REPLY_OWNERSHIP_FULL_KEY = { game_code: "GAME01", generation: 7 };
+
 /**
  * Drives an adapter through the shared-handshake pipeline to the
  * post-ServerHello state. Returns the adapter's underlying mock ws once
@@ -129,6 +132,95 @@ function trackRejection(promise: Promise<unknown>): () => Promise<unknown> {
     await new Promise((resolve) => setTimeout(resolve, 0));
     return outcome;
   };
+}
+
+function interactionSubmission(id: string): InteractionSubmission {
+  return {
+    interactionId: id as InteractionId,
+    response: { type: "choose", data: { choiceId: `choice-${id}` as InteractionChoiceId } },
+  };
+}
+
+function deliveredEventMarker(observation: unknown): string | null {
+  if (typeof observation !== "object" || observation === null || !("resolvedWith" in observation)) return null;
+  const { resolvedWith } = observation as { resolvedWith: SubmitResult };
+  const first = resolvedWith.events[0] as unknown as { marker?: string } | undefined;
+  return first?.marker ?? null;
+}
+
+function submissionTypes(ws: MockWebSocket): string[] {
+  return ws.send.mock.calls
+    .map(([raw]) => JSON.parse(raw as string) as { type?: string })
+    .map((frame) => frame.type)
+    .filter((type): type is string => type === "Action" || type === "Interaction");
+}
+
+function deliverOwnershipStateUpdate(ws: MockWebSocket, marker: string, revision: number): void {
+  ws.dispatchSynthetic("message", JSON.stringify({
+    type: "StateUpdate",
+    data: {
+      state_revision: revision,
+      state: { ...createMockState(), turn_number: revision },
+      events: [{ marker }],
+      log_entries: [],
+      full_key: REPLY_OWNERSHIP_FULL_KEY,
+    },
+  }));
+}
+
+function acceptFullReplyOwnershipSession(
+  adapter: WebSocketAdapter,
+  ws: MockWebSocket,
+): void {
+  const events = vi.fn();
+  adapter.onEvent(events);
+  ws.dispatchSynthetic("message", JSON.stringify({
+    type: "GameStarted",
+    data: {
+      state_revision: 1,
+      state: createMockState(),
+      your_player: 0,
+      player_token: "accepted-full-session-token",
+      full_key: REPLY_OWNERSHIP_FULL_KEY,
+    },
+  }));
+  expect(events).toHaveBeenCalledWith(expect.objectContaining({
+    type: "sessionChanged",
+    session: expect.objectContaining({ fullKey: REPLY_OWNERSHIP_FULL_KEY }),
+  }));
+  ws.send.mockClear();
+}
+
+async function exerciseOverlappingSubmissionOwnership(
+  ws: MockWebSocket,
+  submitFirst: () => Promise<SubmitResult>,
+  submitSecond: () => Promise<SubmitResult>,
+): Promise<void> {
+  const readFirst = trackRejection(submitFirst());
+  const readSecond = trackRejection(submitSecond());
+
+  deliverOwnershipStateUpdate(ws, "reply-A", 2);
+  const [firstAfterA, secondAfterA] = await Promise.all([readFirst(), readSecond()]);
+  const secondWasSent = submissionTypes(ws).length > 1;
+
+  if (secondWasSent) deliverOwnershipStateUpdate(ws, "reply-B", 3);
+  const firstAfterB = await readFirst();
+  await readSecond();
+
+  const secondErrorCode = typeof secondAfterA === "object" && secondAfterA !== null && "code" in secondAfterA
+    ? secondAfterA.code
+    : null;
+  expect({
+    secondWasSent,
+    secondErrorCode,
+    firstOwnsReplyA: deliveredEventMarker(firstAfterA) === "reply-A",
+    firstSettlesWithoutAnOrphan: deliveredEventMarker(firstAfterB) === "reply-A",
+  }).toEqual({
+    secondWasSent: false,
+    secondErrorCode: AdapterErrorCode.ACTION_NOT_SENT,
+    firstOwnsReplyA: true,
+    firstSettlesWithoutAnOrphan: true,
+  });
 }
 
 // Shared session service relies on localStorage in test environments.
@@ -1722,6 +1814,84 @@ describe("WebSocketAdapter", () => {
     expect(MockWebSocket.last).toBeNull();
   });
 
+  describe("Issue #9319 pending submission reply ownership", () => {
+    beforeEach(() => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+    });
+
+    it("issue #9319 Action then Interaction keeps the first StateUpdate with its owner", async () => {
+      await exerciseOverlappingSubmissionOwnership(
+        ws,
+        () => adapter.submitAction({ type: "PassPriority" }, 0),
+        () => adapter.submitInteraction(interactionSubmission("overlap-interaction"), 0),
+      );
+    });
+
+    it("issue #9319 Interaction then Interaction keeps the first StateUpdate with its owner", async () => {
+      await exerciseOverlappingSubmissionOwnership(
+        ws,
+        () => adapter.submitInteraction(interactionSubmission("overlap-first"), 0),
+        () => adapter.submitInteraction(interactionSubmission("overlap-second"), 0),
+      );
+    });
+
+    it("claims the submission slot before pending notifications can re-enter", async () => {
+      let reentrant: Promise<SubmitResult> | undefined;
+      let didReenter = false;
+      adapter.onEvent((event) => {
+        if (event.type === "actionPendingChanged" && event.pending && !didReenter) {
+          didReenter = true;
+          reentrant = adapter.submitInteraction(interactionSubmission("reentrant"), 0);
+        }
+      });
+
+      const first = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+      const second = trackRejection(reentrant!);
+      deliverOwnershipStateUpdate(ws, "reply-A", 2);
+      const [firstResult, secondResult] = await Promise.all([first(), second()]);
+
+      expect(submissionTypes(ws)).toEqual(["Action"]);
+      expect(deliveredEventMarker(firstResult)).toBe("reply-A");
+      expect(secondResult).toMatchObject({ code: AdapterErrorCode.ACTION_NOT_SENT });
+    });
+
+    it("releases the slot after an engine rejection", async () => {
+      const first = adapter.submitAction({ type: "PassPriority" }, 0);
+      ws.dispatchSynthetic("message", JSON.stringify({
+        type: "ActionRejected",
+        data: { rejection: { code: "invalid_action", disposition: "invalid", message: "Action rejected", related_object_ids: [] } },
+      }));
+      await expect(first).rejects.toMatchObject({ code: "ACTION_REJECTED" });
+
+      const next = trackRejection(adapter.submitInteraction(interactionSubmission("after-rejection"), 0));
+      expect(submissionTypes(ws)).toEqual(["Action", "Interaction"]);
+      deliverOwnershipStateUpdate(ws, "reply-after-rejection", 2);
+      await expect(next()).resolves.toMatchObject({
+        resolvedWith: { events: [{ marker: "reply-after-rejection" }] },
+      });
+    });
+
+    it("issue #9319 sequential Action and Interaction submissions remain usable", async () => {
+      const action = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+      deliverOwnershipStateUpdate(ws, "reply-A", 2);
+      await expect(action()).resolves.toMatchObject({
+        resolvedWith: { events: [{ marker: "reply-A" }] },
+      });
+
+      const interaction = trackRejection(adapter.submitInteraction(interactionSubmission("sequential-one"), 0));
+      deliverOwnershipStateUpdate(ws, "reply-B", 3);
+      await expect(interaction()).resolves.toMatchObject({
+        resolvedWith: { events: [{ marker: "reply-B" }] },
+      });
+
+      const nextInteraction = trackRejection(adapter.submitInteraction(interactionSubmission("sequential-two"), 0));
+      deliverOwnershipStateUpdate(ws, "reply-C", 4);
+      await expect(nextInteraction()).resolves.toMatchObject({
+        resolvedWith: { events: [{ marker: "reply-C" }] },
+      });
+    });
+  });
+
   describe("send() error handling", () => {
     it("rejects initialize when the post-handshake setup frame cannot be sent", async () => {
       MockWebSocket.last = null;
@@ -1988,6 +2158,12 @@ describe("WebSocketAdapter", () => {
       expect(listener).toHaveBeenCalledWith(
         expect.objectContaining({ type: "error" }),
       );
+
+      const next = trackRejection(adapter.submitInteraction(interactionSubmission("after-send-failure"), 0));
+      deliverOwnershipStateUpdate(ws, "after-send-failure", 2);
+      await expect(next()).resolves.toMatchObject({
+        resolvedWith: { events: [{ marker: "after-send-failure" }] },
+      });
     });
 
     it("rejects an in-flight action when the native AI driver faults", async () => {
@@ -2024,6 +2200,9 @@ describe("WebSocketAdapter", () => {
         message: "Adapter disposed during action",
         recoverable: true,
       });
+      await expect(adapter.submitInteraction(interactionSubmission("after-dispose"), 0)).rejects.toMatchObject({
+        code: "WS_ERROR",
+      });
     });
 
     // The `sessionIdentityRejected` guard used to sit ABOVE the pending
@@ -2053,11 +2232,15 @@ describe("WebSocketAdapter", () => {
         type: "Action",
         data: { action: { type: "PassPriority" } },
       }));
+      ws.readyState = 3; // CLOSED
       ws.dispatchSynthetic("close");
 
       expect(await pending()).toMatchObject({
         code: "WS_CLOSED",
         message: "Connection closed during action",
+      });
+      await expect(adapter.submitInteraction(interactionSubmission("after-close"), 0)).rejects.toMatchObject({
+        code: "WS_ERROR",
       });
     });
 

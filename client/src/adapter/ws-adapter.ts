@@ -210,35 +210,39 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 114 — DerivedViews gains `shared_piles`, the seat whose Player container stores a
- *      shared library and graveyard, omitted for a per-player format. A v113 peer
+ * 115 — DerivedViews gains `shared_piles`, the seat whose Player container stores a
+ *      shared library and graveyard, omitted for a per-player format. A v114 peer
  *      drops the key and renders per-seat piles for a state whose other seat's
- *      containers are empty. Wire 96 moves with it; no lobby frame names it.
- * 113 — DrawSequenceFrame gains `dealer`, the in-game simultaneous-draw dealer,
+ *      containers are empty. Wire 97 moves with it; no lobby frame names it.
+ * 114 — DrawSequenceFrame gains `dealer`, the in-game simultaneous-draw dealer,
  *      serialized in the resolution frames behind RESOLUTION_STATE_WIRE_VERSION 5.
- *      A v112 peer refuses the version-5 resolution state. Wire 95 moves with it;
+ *      A v113 peer refuses the version-5 resolution state. Wire 96 moves with it;
  *      no lobby frame names it.
- * 112 — MulliganChoice gains `FreeReveal` and MulliganDeclaration gains `kind`:
+ * 113 — MulliganChoice gains `FreeReveal` and MulliganDeclaration gains `kind`:
  *      the Dandan free reveal mulligan, a MulliganDecision action payload and a
- *      held declaration in GameState.waiting_for. A v111 peer cannot parse the
+ *      held declaration in GameState.waiting_for. A v112 peer cannot parse the
  *      choice and would carry out a held free reveal as a regular mulligan.
- *      Wire 94 moves with it; no lobby frame names it.
- * 111 — WaitingFor::MulliganDecision gains `declared`, the mulligans recorded
+ *      Wire 95 moves with it; no lobby frame names it.
+ * 112 — WaitingFor::MulliganDecision gains `declared`, the mulligans recorded
  *      in a CR 103.5 declare round until every player has declared. It is
- *      serialized in GameState.waiting_for, so a v110 peer would drop it
- *      silently. Wire 93 moves with it; no lobby frame names it.
- * 110 — ResolvedZoneChangeCommand gains `rebound_from`, the owner a card had
+ *      serialized in GameState.waiting_for, so a v111 peer would drop it
+ *      silently. Wire 94 moves with it; no lobby frame names it.
+ * 111 — ResolvedZoneChangeCommand gains `rebound_from`, the owner a card had
  *      before a Hand entry from a shared zone rebound it to the taker
  *      (CR 108.3 as modified by the Dandan announcement). It is serialized
- *      inside GameState.resolved_rules_journal, so a v109 peer would drop it
- *      silently. Wire 92 moves with it; no lobby frame names it.
- * 109 — ContinuousModification gains `SubstituteTextWord` (CR 612.1), serialized
- *      inside GameState's transient continuous effects, so a v108 peer cannot
+ *      inside GameState.resolved_rules_journal, so a v110 peer would drop it
+ *      silently. Wire 93 moves with it; no lobby frame names it.
+ * 110 — ContinuousModification gains `SubstituteTextWord` (CR 612.1), serialized
+ *      inside GameState's transient continuous effects, so a v109 peer cannot
  *      parse the tag.
- * 108 — GameFormat gains `Dandan`. It serializes as its Display string and
- *      deserializes through FromStr, so a v107 peer cannot parse a GameState or
- *      a lobby FormatConfig that names it. Wire 90 and lobby 16 move with it;
+ * 109 — GameFormat gains `Dandan`. It serializes as its Display string and
+ *      deserializes through FromStr, so a v108 peer cannot parse a GameState or
+ *      a lobby FormatConfig that names it. Wire 91 and lobby 16 move with it;
  *      see PROTOCOL_VERSION in crates/lobby-broker/src/protocol.rs.
+ * 108 — Serialized IllegalTargetsDisposition.StillResolves preserves a root
+ *       ability's printed resolution rule when its chosen target becomes
+ *       illegal. Older peers would silently apply ordinary non-resolution;
+ *       P2P moves in lockstep (wire 90).
  * 107 — UntilCondition NextMatches gains count ("until you exile two nonland
  *      cards …" — Invasion of Alara, CR 608.2c), the paused exile loop keeps
  *      its hits, ZoneChoiceCandidateSource gains ParentTargets, and
@@ -729,7 +733,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 114;
+export const PROTOCOL_VERSION = 115;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -760,7 +764,7 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * PROTOCOL_VERSION moved twice for GameState-only changes and the derived lobby
  * window went disjoint from the deployed broker's.
  *
- * 16 — GameFormat gains `Dandan` (see PROTOCOL_VERSION 105). A Rust broker below
+ * 16 — GameFormat gains `Dandan` (see PROTOCOL_VERSION 109). A Rust broker below
  *      16 rejects a lobby frame naming it; MIN_LOBBY_PROTOCOL_FOR_DANDAN below
  *      is this client's frozen floor for that pairing.
  * 15 — FormatConfig loses `allow_experimental_dungeons` on its three lobby
@@ -1720,42 +1724,66 @@ export class WebSocketAdapter implements EngineAdapter {
     // from the join-token-authenticated session, never from the payload.
     // A client-supplied actor here would provide zero additional safety and
     // only creates a spoofing surface if it were ever put on the wire.
+    this.assertNoPendingSubmission();
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "WebSocket not connected", false);
     }
 
-    this.emit({ type: "actionPendingChanged", pending: true });
-    return new Promise<SubmitResult>((resolve, reject) => {
-      this.pendingResolve = resolve;
-      this.pendingReject = reject;
-      // If the frame cannot be sent, the server will never reply, so clear the
-      // pending state and reject now instead of leaving the caller hanging.
-      if (!this.send({ type: "Action", data: { action } })) {
-        this.pendingResolve = null;
-        this.pendingReject = null;
-        this.emit({ type: "actionPendingChanged", pending: false });
-        reject(new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Failed to send action", true));
-      }
-    });
+    return this.submitGameFrame(
+      { type: "Action", data: { action } },
+      new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Failed to send action", true),
+    );
   }
 
   async submitInteraction(
     submission: InteractionSubmission,
     _actor: PlayerId,
   ): Promise<SubmitResult> {
+    this.assertNoPendingSubmission();
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
     }
 
-    this.emit({ type: "actionPendingChanged", pending: true });
+    return this.submitGameFrame(
+      { type: "Interaction", data: { submission } },
+      new AdapterError("WS_CLOSED", "Failed to send interaction", true),
+    );
+  }
+
+  private assertNoPendingSubmission(): void {
+    if (this.pendingResolve !== null || this.pendingReject !== null) {
+      throw new AdapterError(
+        AdapterErrorCode.ACTION_NOT_SENT,
+        "Another game submission is pending; this submission was not sent.",
+        true,
+      );
+    }
+  }
+
+  private submitGameFrame(frame: unknown, sendFailure: AdapterError): Promise<SubmitResult> {
     return new Promise<SubmitResult>((resolve, reject) => {
+      // Claim before emitting: event listeners run synchronously and may submit
+      // again while handling actionPendingChanged.
       this.pendingResolve = resolve;
       this.pendingReject = reject;
-      if (!this.send({ type: "Interaction", data: { submission } })) {
+      try {
+        this.emit({ type: "actionPendingChanged", pending: true });
+      } catch (error) {
+        if (this.pendingResolve === resolve) {
+          this.pendingResolve = null;
+          this.pendingReject = null;
+        }
+        reject(error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
+      // A synchronous listener may close/dispose the adapter or otherwise
+      // settle this slot. Do not send after that owner has been released.
+      if (this.pendingResolve !== resolve) return;
+      if (!this.send(frame) && this.pendingResolve === resolve) {
         this.pendingResolve = null;
         this.pendingReject = null;
         this.emit({ type: "actionPendingChanged", pending: false });
-        reject(new AdapterError("WS_CLOSED", "Failed to send interaction", true));
+        reject(sendFailure);
       }
     });
   }

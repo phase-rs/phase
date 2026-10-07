@@ -3347,31 +3347,35 @@ mod tests {
     }
 
     /// `DerivedViews` gains `shared_piles` (the seat storing a shared library and
-    /// graveyard); a v113 peer drops the key and renders per-seat piles for a
+    /// graveyard); a v114 peer drops the key and renders per-seat piles for a
     /// state whose other seat's containers are empty, so it must be refused before
-    /// it receives v114 state.
+    /// it receives v115 state.
     /// `DrawSequenceFrame` gains `dealer` (the in-game simultaneous-draw dealer),
     /// serialized in the resolution frames behind `RESOLUTION_STATE_WIRE_VERSION`
-    /// 5; a v112 peer refuses that resolution state, so it must be refused before it
-    /// receives v113 state.
+    /// 5; a v113 peer refuses that resolution state, so it must be refused before it
+    /// receives v114 state.
     /// `MulliganChoice` gains `FreeReveal` and `MulliganDeclaration` gains `kind`
-    /// (the Dandân free reveal mulligan); a v111 peer cannot deserialize the
+    /// (the Dandân free reveal mulligan); a v112 peer cannot deserialize the
     /// choice and would carry out a held free reveal as a regular mulligan, so it
-    /// must be refused before it receives v112 state.
+    /// must be refused before it receives v113 state.
     /// `WaitingFor::MulliganDecision` gains `declared` (CR 103.5 declare round),
-    /// serialized in `GameState.waiting_for`; a v110 peer would drop it silently,
-    /// so it must be refused before it receives v111 state.
+    /// serialized in `GameState.waiting_for`; a v111 peer would drop it silently,
+    /// so it must be refused before it receives v112 state.
     /// `ResolvedZoneChangeCommand` gains `rebound_from` (CR 108.3 as modified by
     /// the Dandân hand-entry rebind), serialized inside
-    /// `GameState.resolved_rules_journal`; a v109 peer would drop it silently,
-    /// so it must be refused before it receives v110 state.
+    /// `GameState.resolved_rules_journal`; a v110 peer would drop it silently,
+    /// so it must be refused before it receives v111 state.
     /// `ContinuousModification` gains `SubstituteTextWord` (CR 612.1), serialized
-    /// inside `GameState`'s transient continuous effects; a v108 peer cannot parse
-    /// the tag, so it must be refused before it receives v109 state.
+    /// inside `GameState`'s transient continuous effects; a v109 peer cannot parse
+    /// the tag, so it must be refused before it receives v110 state.
     /// `GameFormat` gains `Dandan`, which serializes as its `Display` string and
-    /// deserializes through `FromStr`; a v107 peer cannot parse a `GameState`
-    /// whose format names it, so it must be refused before it receives v108
+    /// deserializes through `FromStr`; a v108 peer cannot parse a `GameState`
+    /// whose format names it, so it must be refused before it receives v109
     /// state.
+    /// `IllegalTargetsDisposition::StillResolves` is serialized on the root
+    /// ability. A v107 peer would silently apply ordinary non-resolution
+    /// after target invalidation, so the handshake must refuse the mismatch
+    /// before it receives v108 state.
     /// `UntilCondition::NextMatches.count` (CR 608.2c), the paused loop's `hits`,
     /// `ZoneChoiceCandidateSource::ParentTargets` and
     /// `SpellContext.exile_until_batch` are new in serialized
@@ -3443,8 +3447,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_114_for_shared_piles_view() {
-        assert_eq!(PROTOCOL_VERSION, 114);
+    fn protocol_version_is_115_for_shared_piles_view() {
+        assert_eq!(PROTOCOL_VERSION, 115);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3455,7 +3459,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_114_for_shared_piles_view` stays
+    /// `protocol_version_is_115_for_shared_piles_view` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
