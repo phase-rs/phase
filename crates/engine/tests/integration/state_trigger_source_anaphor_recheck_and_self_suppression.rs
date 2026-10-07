@@ -29,14 +29,18 @@
 //!    resolved, has been countered, or has otherwise left the stack." Another
 //!    triggered ability of the same permanent on the stack (Force Bubble's
 //!    end-step trigger) does not hold it back, and neither does the pending
-//!    state trigger of the object a flickered permanent used to be.
+//!    state trigger of the object a flickered permanent used to be. A granted
+//!    state trigger (Olivia, Crimson Bride's quoted "When you don't control a
+//!    legendary Vampire, exile this creature.") keeps one identity across
+//!    priority passes, so it too is held back by its own stack instance.
 //!
-//! Every Oracle text below is verbatim from MTGJSON, except the two synthetic
-//! cards (named so no word of the name appears in their text), which are
-//! documented where they are defined.
+//! Every Oracle text below is verbatim from MTGJSON, except the one synthetic
+//! card, Gloamwire Capacitor (named so no word of the name appears in its
+//! text), which is documented where it is defined.
 
+use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{AbilityKind, TargetRef};
+use engine::types::ability::{AbilityKind, TargetRef, TriggerDefinitionOccurrenceRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
@@ -44,6 +48,7 @@ use engine::types::game_state::{StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 const MAZEMIND_TOME: &str = "{T}, Put a page counter on this artifact: Scry 1. (Look at the top card of your library. You may put that card on the bottom.)\n{2}, {T}, Put a page counter on this artifact: Draw a card.\nWhen there are four or more page counters on this artifact, exile it. If you do, you gain 4 life.";
@@ -59,10 +64,13 @@ const SHOCK: &str = "Shock deals 2 damage to any target.";
 const RAISE_THE_ALARM: &str = "Create two 1/1 white Soldier creature tokens.";
 const WHITESUNS_PASSAGE: &str = "You gain 5 life.";
 const STEADY_PROGRESS: &str = "Proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)\nDraw a card.";
+const OLIVIA_CRIMSON_BRIDE: &str = "Flying, haste\nWhenever Olivia attacks, return target creature card from your graveyard to the battlefield tapped and attacking. It gains \"When you don't control a legendary Vampire, exile this creature.\"";
+const WORD_OF_SEIZING: &str = "Split second (As long as this spell is on the stack, players can't cast spells or activate abilities that aren't mana abilities.)\nUntap target permanent and gain control of it until end of turn. It gains haste until end of turn.";
 const FORCE_BUBBLE: &str = "If damage would be dealt to you, put that many depletion counters on this enchantment instead.\nWhen there are four or more depletion counters on this enchantment, sacrifice it.\nAt the beginning of each end step, remove all depletion counters from this enchantment.";
 
 /// Scrollshift (verbatim): an instant flicker, so it can be cast while a trigger
-/// is on the stack. Its extra card draw doesn't touch any assertion here.
+/// is on the stack. It also draws a card, so every test that casts it stocks the
+/// library.
 const SCROLLSHIFT: &str = "Exile up to one target artifact, creature, or enchantment you control, then return it to the battlefield under its owner's control.\nDraw a card.";
 
 /// Synthetic artifact: a source-counter state trigger carrying a genuine
@@ -646,6 +654,8 @@ fn nine_lives_flickered_in_response_new_nine_lives_stays_on_battlefield() {
     let blink = scenario
         .add_spell_to_hand_from_oracle(P0, "Scrollshift", true, SCROLLSHIFT)
         .id();
+    // Scrollshift draws a card, so stock the library.
+    scenario.with_library_top(P0, &["Island"]);
     let mut runner = scenario.build();
     let life_before = runner.life(P0);
 
@@ -873,5 +883,225 @@ fn emperor_crocodile_flickered_in_response_new_object_triggers_at_once() {
         zone(&runner, crocodile),
         Zone::Graveyard,
         "the new Crocodile's own state trigger sacrifices it"
+    );
+}
+
+/// Olivia, Crimson Bride (a legendary Vampire) for `controller`.
+fn add_olivia(scenario: &mut GameScenario, controller: PlayerId) -> ObjectId {
+    scenario
+        .add_creature(controller, "Olivia, Crimson Bride", 3, 4)
+        .as_legendary()
+        .with_subtypes(vec!["Vampire", "Noble"])
+        .from_oracle_text_with_keywords(&["Flying", "Haste"], OLIVIA_CRIMSON_BRIDE)
+        .id()
+}
+
+/// The trigger-definition occurrence a stacked triggered ability carries.
+fn stacked_occurrence(runner: &GameRunner, entry_id: ObjectId) -> TriggerDefinitionOccurrenceRef {
+    runner
+        .state()
+        .stack
+        .iter()
+        .find(|entry| entry.id == entry_id)
+        .and_then(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility { ability, .. } => {
+                ability.trigger_definition_ref.as_ref()
+            }
+            _ => None,
+        })
+        .map(|definition_ref| definition_ref.occurrence.clone())
+        .expect("the stacked triggered ability must carry its definition ref")
+}
+
+/// CR 508.1m + CR 603.2: Olivia attacks; her trigger returns Grizzly Bears from
+/// the graveyard tapped and attacking with the granted "When you don't control a
+/// legendary Vampire, exile this creature." While Olivia is under P0's control
+/// the granted state trigger stays quiet; then Boomerang returns Olivia to hand
+/// and the granted state trigger goes on the stack (CR 603.8). Returns the
+/// runner, the Bears and the granted trigger's stack-entry id.
+fn olivia_granted_trigger_on_stack(
+    scenario: GameScenario,
+    olivia: ObjectId,
+    bears: ObjectId,
+) -> (GameRunner, ObjectId) {
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(olivia, AttackTarget::Player(P1))])
+        .expect("Olivia must be able to attack");
+    for _ in 0..4 {
+        if !matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ) {
+            break;
+        }
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(bears)),
+            })
+            .expect("Grizzly Bears in P0's graveyard must be a legal target");
+    }
+    assert!(
+        top_is_trigger_of(&runner, olivia),
+        "reach guard: Olivia's attack trigger is on the stack"
+    );
+    resolve_one(&mut runner);
+    assert_eq!(
+        zone(&runner, bears),
+        Zone::Battlefield,
+        "reach guard: Olivia's trigger returned Grizzly Bears"
+    );
+    assert!(
+        runner.state().combat.as_ref().is_some_and(|combat| combat
+            .attackers
+            .iter()
+            .any(|attacker| attacker.object_id == bears)),
+        "reach guard: Grizzly Bears returned attacking"
+    );
+    assert!(
+        runner.state().objects[&bears]
+            .trigger_definitions
+            .iter_unchecked()
+            .any(|entry| matches!(
+                entry.occurrence,
+                TriggerDefinitionOccurrenceRef::Granted { .. }
+            )),
+        "reach guard: Grizzly Bears gained Olivia's quoted state trigger"
+    );
+    assert!(
+        !trigger_on_stack(&runner, bears),
+        "P0 still controls Olivia, a legendary Vampire, so the granted trigger is quiet"
+    );
+
+    let boomerang = runner
+        .state()
+        .players
+        .iter()
+        .find(|player| player.id == P0)
+        .expect("P0 is in the game")
+        .hand
+        .iter()
+        .copied()
+        .find(|id| runner.state().objects[id].name == "Boomerang")
+        .expect("Boomerang is in P0's hand");
+    add_mana(&mut runner, ManaType::Blue, 2);
+    runner.cast(boomerang).target_object(olivia).commit();
+    resolve_one(&mut runner);
+    assert_eq!(
+        zone(&runner, olivia),
+        Zone::Hand,
+        "reach guard: Boomerang returned Olivia to P0's hand"
+    );
+    let granted_trigger = top_entry_id(&runner);
+    assert_eq!(
+        triggers_of(&runner, bears),
+        vec![granted_trigger],
+        "with no legendary Vampire under P0's control, the granted state trigger fires"
+    );
+    assert!(
+        matches!(
+            stacked_occurrence(&runner, granted_trigger),
+            TriggerDefinitionOccurrenceRef::Granted { .. }
+        ),
+        "reach guard: the stacked trigger is the granted occurrence"
+    );
+    (runner, granted_trigger)
+}
+
+/// Olivia, Crimson Bride and Grizzly Bears in P0's graveyard, at P0's
+/// precombat main phase, with Boomerang in hand.
+fn olivia_scenario() -> (GameScenario, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let olivia = add_olivia(&mut scenario, P0);
+    let bears = scenario
+        .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+        .id();
+    scenario.add_spell_to_hand_from_oracle(P0, "Boomerang", true, BOOMERANG);
+    (scenario, olivia, bears)
+}
+
+/// CR 603.8: the state trigger Olivia, Crimson Bride grants fires once P0
+/// controls no legendary Vampire, and while it is on the stack a priority pass
+/// does not put a second instance on the stack — the granted occurrence keeps
+/// its identity, so its own stack instance holds it back. It then exiles the
+/// returned creature.
+#[test]
+fn olivia_granted_state_trigger_fires_once_and_exiles_without_legendary_vampire() {
+    let (scenario, olivia, bears) = olivia_scenario();
+    let (mut runner, granted_trigger) = olivia_granted_trigger_on_stack(scenario, olivia, bears);
+
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes priority");
+    assert_eq!(
+        triggers_of(&runner, bears),
+        vec![granted_trigger],
+        "the granted state trigger must not trigger again while it is on the stack"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P1),
+        "reach guard: P1 receives priority with the granted trigger still on the stack"
+    );
+
+    resolve_one(&mut runner);
+    assert_eq!(
+        zone(&runner, bears),
+        Zone::Exile,
+        "the granted state trigger exiles the returned creature"
+    );
+    assert!(
+        !trigger_on_stack(&runner, bears),
+        "no second instance was waiting behind the first"
+    );
+}
+
+/// CR 603.8: the granted state condition is not rechecked on resolution.
+/// Gaining control of P1's Olivia, Crimson Bride (a legendary Vampire) with
+/// Word of Seizing in response does not stop the exile. Casting the response
+/// is itself a priority window with the condition still true, and the granted
+/// trigger stays a single instance there too.
+#[test]
+fn olivia_granted_state_trigger_exiles_despite_gaining_legendary_vampire_in_response() {
+    let (mut scenario, olivia, bears) = olivia_scenario();
+    let rival_olivia = add_olivia(&mut scenario, P1);
+    let seizing = scenario
+        .add_spell_to_hand_from_oracle(P0, "Word of Seizing", true, WORD_OF_SEIZING)
+        // MTGJSON lists Split second as a keyword; naming it lets the keyword
+        // line parse as it does in card data.
+        .from_oracle_text_with_keywords(&["Split second"], WORD_OF_SEIZING)
+        .id();
+    let (mut runner, granted_trigger) = olivia_granted_trigger_on_stack(scenario, olivia, bears);
+
+    add_mana(&mut runner, ManaType::Colorless, 3);
+    add_mana(&mut runner, ManaType::Red, 2);
+    runner.cast(seizing).target_object(rival_olivia).commit();
+    assert!(
+        on_stack(&runner, seizing),
+        "reach guard: Word of Seizing is on the stack above the granted trigger"
+    );
+    assert_eq!(
+        triggers_of(&runner, bears),
+        vec![granted_trigger],
+        "the granted state trigger must not trigger again while it is on the stack"
+    );
+
+    resolve_one(&mut runner);
+    assert_eq!(
+        runner.state().objects[&rival_olivia].controller,
+        P0,
+        "reach guard: P0 gained control of a legendary Vampire before the trigger resolves"
+    );
+    assert!(
+        top_is_trigger_of(&runner, bears),
+        "reach guard: the granted state trigger is still on the stack"
+    );
+
+    resolve_one(&mut runner);
+    assert_eq!(
+        zone(&runner, bears),
+        Zone::Exile,
+        "the state condition is not rechecked, so the returned creature is exiled"
     );
 }
