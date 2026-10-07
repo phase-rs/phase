@@ -10,7 +10,7 @@
 //! All tests drive the real pipeline: production entry into the prompt,
 //! `legal_actions` for the offer, `act(CancelCast)` for acceptance.
 
-use engine::ai_support::legal_actions;
+use engine::ai_support::{legal_actions, legal_actions_full};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
@@ -18,7 +18,7 @@ use engine::types::counter::CounterType;
 use engine::types::game_state::{CastPaymentMode, ManaChoicePrompt, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
-use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -49,6 +49,66 @@ fn cancel_offer_count(runner: &GameRunner) -> usize {
         .count()
 }
 
+fn tap_manual_land(runner: &mut GameRunner, land: ObjectId) {
+    let (_, _, grouped) = legal_actions_full(runner.state());
+    let action = grouped
+        .get(&land)
+        .into_iter()
+        .flatten()
+        .find(|action| matches!(action, GameAction::TapLandForMana { .. }))
+        .expect("the engine must offer the land's mana ability")
+        .clone();
+    runner
+        .act(action)
+        .expect("the manual mana tap must succeed");
+    assert!(runner.state().objects[&land].tapped);
+    assert_eq!(pool_total(runner), 1);
+    assert_eq!(
+        runner.state().lands_tapped_for_mana.get(&P0),
+        Some(&vec![land]),
+        "reach guard: the real tap opened the mana-undo window"
+    );
+}
+
+fn undo_manual_land_after_cancel(runner: &mut GameRunner, land: ObjectId) {
+    assert!(matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0));
+    assert_eq!(
+        pool_total(runner),
+        1,
+        "cancel must preserve the unspent mana"
+    );
+    assert_eq!(
+        runner.state().lands_tapped_for_mana.get(&P0),
+        Some(&vec![land]),
+        "the pre-cost cancel must preserve the open mana-undo window"
+    );
+    runner
+        .act(GameAction::UntapLandForMana { object_id: land })
+        .expect("the pre-cost cancel must leave the manual tap reversible");
+    assert!(!runner.state().objects[&land].tapped);
+    assert_eq!(pool_total(runner), 0, "undo must remove the land's mana");
+}
+
+fn assert_mana_undo_closed_after_priority_passes(runner: &mut GameRunner, land: ObjectId) {
+    assert!(matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0));
+    assert!(runner.state().objects[&land].tapped);
+    assert_eq!(
+        pool_total(runner),
+        1,
+        "the tapped land's mana is still unspent"
+    );
+    assert!(
+        !runner.state().lands_tapped_for_mana.contains_key(&P0),
+        "the subsequent accepted priority pass must close the mana-undo window"
+    );
+    assert!(
+        runner
+            .act(GameAction::UntapLandForMana { object_id: land })
+            .is_err(),
+        "the canceled selection must not make mana undo survive a later priority pass"
+    );
+}
+
 /// CR 602.2b + CR 601.2c: backing out of equip target selection restores
 /// priority with zero state change — nothing attached, nothing tapped, no mana
 /// spent. Fails pre-fix: the engine rejects `CancelCast` in `EquipTarget`.
@@ -56,6 +116,7 @@ fn cancel_offer_count(runner: &GameRunner) -> usize {
 fn equip_cancel_restores_priority_untouched() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    let land = scenario.add_basic_land(P0, ManaColor::Green);
     let creature_a = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
     let creature_b = scenario.add_creature(P0, "Elite Vanguard", 2, 1).id();
     let equipment = {
@@ -65,6 +126,7 @@ fn equip_cancel_restores_priority_untouched() {
     };
 
     let mut runner = scenario.build();
+    tap_manual_land(&mut runner, land);
     let pool_before = pool_total(&runner);
 
     runner
@@ -112,9 +174,11 @@ fn equip_cancel_restores_priority_untouched() {
         pool_before,
         "cancel must not spend mana"
     );
+    undo_manual_land_after_cancel(&mut runner, land);
 
     // Hostile round-trip: cancel leaves no stale state behind — re-activate
     // and complete the attach.
+    tap_manual_land(&mut runner, land);
     runner
         .act(GameAction::Equip {
             equipment_id: equipment,
@@ -128,6 +192,7 @@ fn equip_cancel_restores_priority_untouched() {
         })
         .expect("completing the re-activated equip must succeed");
     runner.advance_until_stack_empty();
+    assert_mana_undo_closed_after_priority_passes(&mut runner, land);
     assert!(
         runner.state().objects[&creature_b]
             .attachments
@@ -152,6 +217,7 @@ fn equip_cancel_restores_priority_untouched() {
 fn station_cancel_restores_priority_untapped() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    let land = scenario.add_basic_land(P0, ManaColor::Green);
     let spacecraft = {
         let mut builder = scenario.add_creature(P0, "Test Spacecraft", 5, 5);
         builder
@@ -163,6 +229,7 @@ fn station_cancel_restores_priority_untapped() {
     let crew_creature = scenario.add_creature(P0, "Station Crew", 3, 3).id();
 
     let mut runner = scenario.build();
+    tap_manual_land(&mut runner, land);
 
     runner
         .act(GameAction::ActivateStation {
@@ -207,9 +274,11 @@ fn station_cancel_restores_priority_untapped() {
         runner.state().stack.is_empty(),
         "cancel must leave the stack empty"
     );
+    undo_manual_land_after_cancel(&mut runner, land);
 
     // Hostile round-trip: the same creature can station immediately after the
     // cancel, and resolution adds counters equal to its power.
+    tap_manual_land(&mut runner, land);
     runner
         .act(GameAction::ActivateStation {
             spacecraft_id: spacecraft,
@@ -227,6 +296,7 @@ fn station_cancel_restores_priority_untapped() {
         "announcement taps the chosen creature"
     );
     runner.advance_until_stack_empty();
+    assert_mana_undo_closed_after_priority_passes(&mut runner, land);
     assert_eq!(
         charge_count(&runner, spacecraft),
         3,
@@ -241,6 +311,7 @@ fn station_cancel_restores_priority_untapped() {
 fn saddle_cancel_offered_and_accepted() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    let land = scenario.add_basic_land(P0, ManaColor::Green);
     let mount = {
         let mut builder = scenario.add_creature(P0, "Test Mount", 0, 4);
         builder.with_keyword(Keyword::Saddle(2));
@@ -249,6 +320,7 @@ fn saddle_cancel_offered_and_accepted() {
     let rider = scenario.add_creature(P0, "Rider", 3, 3).id();
 
     let mut runner = scenario.build();
+    tap_manual_land(&mut runner, land);
 
     runner
         .act(GameAction::SaddleMount {
@@ -292,6 +364,26 @@ fn saddle_cancel_offered_and_accepted() {
         runner.state().stack.is_empty(),
         "cancel must leave the stack empty"
     );
+    undo_manual_land_after_cancel(&mut runner, land);
+
+    tap_manual_land(&mut runner, land);
+    runner
+        .act(GameAction::SaddleMount {
+            mount_id: mount,
+            creature_ids: vec![],
+        })
+        .expect("re-saddle after cancel must reach the selection");
+    runner
+        .act(GameAction::SaddleMount {
+            mount_id: mount,
+            creature_ids: vec![rider],
+        })
+        .expect("the re-announced saddle must succeed");
+    assert!(runner.state().objects[&rider].tapped);
+    assert!(!runner.state().stack.is_empty());
+    runner.advance_until_stack_empty();
+    assert!(runner.state().objects[&mount].is_saddled);
+    assert_mana_undo_closed_after_priority_passes(&mut runner, land);
 }
 
 /// The crew offer moved from its per-state push to the generic push: exactly
@@ -301,6 +393,7 @@ fn saddle_cancel_offered_and_accepted() {
 fn crew_cancel_offered_exactly_once() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    let land = scenario.add_basic_land(P0, ManaColor::Green);
     let vehicle = {
         let mut builder = scenario.add_creature(P0, "Test Vehicle", 6, 5);
         builder
@@ -316,6 +409,7 @@ fn crew_cancel_offered_exactly_once() {
     let pilot_b = scenario.add_creature(P0, "Pilot B", 2, 2).id();
 
     let mut runner = scenario.build();
+    tap_manual_land(&mut runner, land);
 
     runner
         .act(GameAction::CrewVehicle {
@@ -364,8 +458,10 @@ fn crew_cancel_offered_exactly_once() {
             "cancel must not tap any creature"
         );
     }
+    undo_manual_land_after_cancel(&mut runner, land);
 
     // Round-trip cleanliness: re-crew and resolve through the real pipeline.
+    tap_manual_land(&mut runner, land);
     runner
         .act(GameAction::CrewVehicle {
             vehicle_id: vehicle,
@@ -379,6 +475,7 @@ fn crew_cancel_offered_exactly_once() {
         })
         .expect("announcing the re-crew must succeed");
     runner.advance_until_stack_empty();
+    assert_mana_undo_closed_after_priority_passes(&mut runner, land);
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
         "resolved crew must settle back at priority"

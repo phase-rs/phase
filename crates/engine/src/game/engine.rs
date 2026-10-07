@@ -6037,14 +6037,21 @@ fn restore_non_mana_activation(
 }
 
 /// CR 601.2f + CR 602.2: whether the in-flight activation `waiting_for` is
-/// paused on still has an OPEN cost lock. The acceptance authority runs where
-/// the cost locks: an activation paused before its lock (at its cost election,
+/// paused on is in a pre-cost keyword selection or still has an OPEN cost lock.
+/// The acceptance authority runs where the cost locks: an activation paused
+/// before its lock (at its cost election,
 /// or with its lock deferred to a later point such as the X announcement) has
 /// not been accepted, so reversing it — by the player's cancel or because the
 /// locked total proves unpayable (CR 601.2h -> CR 733.1) — has no acceptance
 /// bookkeeping to undo.
 fn activation_cost_still_open(state: &GameState, waiting_for: &WaitingFor) -> bool {
     let carrier = match waiting_for {
+        // CR 602.2b + CR 601.2c + CR 601.2h: these keyword selections
+        // precede cost payment and do not carry a PendingCast cost snapshot.
+        WaitingFor::EquipTarget { .. }
+        | WaitingFor::StationTarget { .. }
+        | WaitingFor::CrewVehicle { .. }
+        | WaitingFor::SaddleMount { .. } => return true,
         WaitingFor::OrderCostReductions { pending_cast, .. }
         | WaitingFor::ChooseXValue { pending_cast, .. }
         | WaitingFor::TargetSelection { pending_cast, .. } => {
