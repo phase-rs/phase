@@ -1066,6 +1066,7 @@ fn settled_compound_and_successive_wave_retirements_replay_exactly() {
                 TransientContinuousEffectBindings {
                     affected_recipient: Some(affected),
                     duration_subject: Some(subject),
+                    granting_object: None,
                 },
             )
             .expect("the fixture's duration begins");
@@ -1083,6 +1084,7 @@ fn settled_compound_and_successive_wave_retirements_replay_exactly() {
                     TransientContinuousEffectBindings {
                         affected_recipient: Some(b_ref),
                         duration_subject: Some(b_ref),
+                        granting_object: None,
                     },
                 )
                 .expect("the fixture's duration begins");

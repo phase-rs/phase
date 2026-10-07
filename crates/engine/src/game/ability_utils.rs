@@ -1,14 +1,14 @@
 #[cfg(test)]
 use crate::types::ability::TapStateChange;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, AttachSelection,
+    AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCost, AttachSelection,
     CardTypeSetSource, CastManaSpentMetric, CombatRelationSubject, ContinuousModification,
     ControllerRef, CountBinding, CounterMoveSelection, DamageSource, EachDamageRecipient, Effect,
     EffectKind, EffectScope, FilterProp, GameRestriction, ModalChoice, ModalSelectionCondition,
     ModalSelectionConstraint, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, PtValue,
     QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope, SpellContext,
-    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef,
-    TriggerDefinition, TypeFilter, TypedFilter,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef, TypeFilter,
+    TypedFilter,
 };
 // CR 601.2c: mana recipient / count-source role slot gate.
 use crate::types::ability::mana_multi_role;
@@ -160,6 +160,7 @@ pub fn build_resolved_from_def_with_targets(
     resolved.reads_return_result = def.reads_return_result.clone();
     resolved.context.face_down_in_exile = def.face_down_in_exile;
     resolved.context.ability_tag = def.ability_tag;
+    resolved.context.granting_object = def.granting_object;
     resolved.activation_cost_reduction = def.cost_reduction.clone();
     if let Some(sub) = &def.sub_ability {
         resolved = resolved.sub_ability(build_resolved_from_def(sub, source_id, controller));
@@ -4918,6 +4919,12 @@ fn union_over_prior_object_candidates(
     legal_targets
 }
 
+/// CR 201.5a + CR 601.2c: a slot is enumerated with its ability in scope when the
+/// filter needs it or the ability carries a granter stamp.
+fn slot_needs_ability_context(filter: &TargetFilter, ability: &ResolvedAbility) -> bool {
+    target_filter_needs_ability_context(filter) || ability.context.granting_object.is_some()
+}
+
 fn target_filter_needs_ability_context(filter: &TargetFilter) -> bool {
     target_filter_contains_chosen_x_ref(filter)
         || target_filter_contains_quantity_scope(filter, ObjectScope::AmassedArmy)
@@ -7004,7 +7011,7 @@ fn legal_targets_for_ability_filter_uncapped(
         return targets;
     }
     let filter = slot.filter();
-    let needs_ability_context = target_filter_needs_ability_context(filter);
+    let needs_ability_context = slot_needs_ability_context(filter, ability);
     // CR 109.5 + CR 108.3: original "your" ownership keeps the declaring
     // ability's authority even when a companion player narrows control.
     let mut bound_filter = filter.clone();
@@ -7418,164 +7425,6 @@ fn rewrite_declared_target_player(
     rewrite_relative_controller(&rewritten, ControllerRef::TargetOpponent, to)
 }
 
-/// CR 201.5a + CR 613.1f: Concretize `TargetFilter::GrantingObject` → the live
-/// granting object once a granted ability is cloned onto its recipient at a
-/// Layer-6 grant (`game/layers.rs` GrantAbility/GrantTrigger). `granter` is the
-/// granting object's id (`effect.source_id` at the grant site). Walks the
-/// definition's cost, effect, and nested sub/else/mode abilities.
-///
-/// This is the single concretization point: at parse time the granted body's
-/// by-name reference to its granting object is a symbolic `GrantingObject`; here
-/// it becomes a concrete `SpecificObject { id }`, so no new runtime resolution
-/// logic is required. Host self-references (`SelfRef`) and every other filter
-/// are left untouched — the dual binding (granter vs. host) is preserved.
-/// Idempotent and re-minted each layer pass (CR 613.1f: Layer 6 ability-adding
-/// effects are applied fresh each pass).
-///
-/// ZONE-MOVE SCOPING (CR 201.5a second sentence + CR 400.7): the snapshot binds
-/// the granter's CURRENT battlefield id. It is correct only while the granter is
-/// not moved-then-re-referenced within a single resolution. CR 201.5a's second
-/// sentence — "if the second ability also moved the first ability's source to a
-/// different public zone, the name refers to the object the source became in its
-/// new zone" — is not modeled: a granter that leaves the battlefield becomes a
-/// new object (CR 400.7), so a later reference would need the new-zone object.
-/// No R4 card requires this today: Hammer/Bracelet move as a *cost* (paid and
-/// gone before the effect, never re-referenced); Trusty/Razor/Toralf Boomerang
-/// return themselves as their final action. A future card that exiles-or-moves
-/// its granter and then references it again in the same resolution must extend
-/// this to carry the post-move incarnation.
-pub(crate) fn concretize_granting_object(def: &mut AbilityDefinition, granter: ObjectId) {
-    if let Some(cost) = def.cost.as_mut() {
-        concretize_granting_object_in_cost(cost, granter);
-    }
-    concretize_granting_object_in_effect(def.effect.as_mut(), granter);
-    if let Some(sub) = def.sub_ability.as_mut() {
-        concretize_granting_object(sub, granter);
-    }
-    if let Some(els) = def.else_ability.as_mut() {
-        concretize_granting_object(els, granter);
-    }
-    for mode in def.mode_abilities.iter_mut() {
-        concretize_granting_object(mode, granter);
-    }
-}
-
-/// CR 201.5a: Concretize `GrantingObject` inside a granted *trigger's* execute
-/// chain (`game/layers.rs` GrantTrigger — e.g. a "you may sacrifice <granter>"
-/// action). The trigger's condition/metadata filters never carry a granter
-/// by-name self-reference, so only `execute` is walked.
-pub(crate) fn concretize_granting_object_in_trigger(
-    trigger: &mut TriggerDefinition,
-    granter: ObjectId,
-) {
-    if let Some(execute) = trigger.execute.as_mut() {
-        concretize_granting_object(execute, granter);
-    }
-}
-
-fn concretize_granting_object_in_filter(filter: &mut TargetFilter, granter: ObjectId) {
-    match filter {
-        TargetFilter::GrantingObject => *filter = TargetFilter::SpecificObject { id: granter },
-        TargetFilter::Not { filter } => concretize_granting_object_in_filter(filter, granter),
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            for f in filters {
-                concretize_granting_object_in_filter(f, granter);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn concretize_granting_object_in_cost(cost: &mut AbilityCost, granter: ObjectId) {
-    match cost {
-        AbilityCost::Sacrifice(sac) => {
-            concretize_granting_object_in_filter(&mut sac.target, granter)
-        }
-        AbilityCost::Exile {
-            filter: Some(f), ..
-        }
-        | AbilityCost::ReturnToHand {
-            filter: Some(f), ..
-        }
-        | AbilityCost::RemoveCounter {
-            target: Some(f), ..
-        } => concretize_granting_object_in_filter(f, granter),
-        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
-            for c in costs.iter_mut() {
-                concretize_granting_object_in_cost(c, granter);
-            }
-        }
-        AbilityCost::EffectCost { effect } => concretize_granting_object_in_effect(effect, granter),
-        _ => {}
-    }
-}
-
-/// Mirrors the canonical target-bearing `Effect` list
-/// (`oracle_effect::rewrite_parent_targets_to_tracked_set`). Effects with no
-/// `target` slot cannot carry a `GrantingObject`, so `_ => {}` is complete for
-/// the emitting parser paths; any future target-bearing effect that is missed
-/// degrades fail-safe (runtime resolves an un-concretized `GrantingObject` to
-/// the ability source — the pre-fix host binding), never worse.
-fn concretize_granting_object_in_effect(effect: &mut Effect, granter: ObjectId) {
-    match effect {
-        Effect::SetTapState {
-            scope: EffectScope::Single,
-            target,
-            ..
-        }
-        | Effect::Destroy { target, .. }
-        | Effect::GainControl { target }
-        | Effect::Fight { target, .. }
-        | Effect::Bounce { target, .. }
-        | Effect::DealDamage { target, .. }
-        | Effect::Pump { target, .. }
-        | Effect::Counter { target, .. }
-        // CR 701.27a: only single-scope Transform carries a targetable slot that
-        // can bind a GrantingObject anaphor; the mass (`All`) scope's `target` is a
-        // population filter (mirrors the SetTapState Single-gate above).
-        | Effect::Transform {
-            scope: EffectScope::Single,
-            target,
-            ..
-        }
-        // CR 710.4: same single-target-slot shape as `Transform`'s single scope.
-        | Effect::FlipPermanent { target, .. }
-        | Effect::Connive { target, .. }
-        | Effect::PhaseOut { target }
-        | Effect::PhaseIn { target }
-        | Effect::ForceBlock { target, .. }
-        | Effect::ForceAttack { target, .. }
-        | Effect::CastCopyOfCard { target, .. }
-        | Effect::CopyTokenOf { target, .. }
-        | Effect::PutCounter { target, .. }
-        | Effect::RemoveCounter { target, .. }
-        | Effect::ChangeZone { target, .. }
-        | Effect::ChangeZoneAll { target, .. }
-        | Effect::CastFromZone { target, .. }
-        | Effect::Attach { target, .. }
-        | Effect::UnattachAll { target, .. } => {
-            concretize_granting_object_in_filter(target, granter)
-        }
-        // Parity with `rewrite_parent_targets_to_tracked_set`: walk both the
-        // GenericEffect target and any granted static's `affected` filter.
-        Effect::GenericEffect {
-            target,
-            static_abilities,
-            ..
-        } => {
-            if let Some(t) = target {
-                concretize_granting_object_in_filter(t, granter);
-            }
-            for static_def in static_abilities.iter_mut() {
-                if let Some(affected) = static_def.affected.as_mut() {
-                    concretize_granting_object_in_filter(affected, granter);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
 fn target_slot_specs(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetSlotSpec> {
     let mut specs = Vec::new();
     // CR 601.2c + CR 115.3: instance ids are allocated densely from 0 as specs
@@ -7759,7 +7608,7 @@ fn legal_targets_for_selected_slot(
             crate::game::perf_counters::record_prior_target_binding_selection();
         }
         let enumeration_ability = bound.as_ref().unwrap_or(ability);
-        if bound.is_some() || target_filter_needs_ability_context(&enumeration_filter) {
+        if bound.is_some() || slot_needs_ability_context(&enumeration_filter, ability) {
             if controller == ability.controller {
                 targeting::find_legal_targets_for_ability(
                     state,

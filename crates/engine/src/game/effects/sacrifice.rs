@@ -692,13 +692,16 @@ mod tests {
     use crate::game::effects::resolve_ability_chain;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityKind, AggregateFunction, Comparator, ControllerRef, CostPaidObjectSnapshot, Effect,
-        FilterProp, ObjectProperty, PtStat, PtValueScope, QuantityRef, TargetFilter, TypedFilter,
+        AbilityCondition, AbilityKind, AggregateFunction, Comparator, ControllerRef,
+        CostPaidObjectSnapshot, Effect, FilterProp, ObjectProperty, PtStat, PtValue, PtValueScope,
+        QuantityRef, SubAbilityLink, TargetFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::statics::StaticMode;
+    use crate::types::StaticDefinition;
 
     fn make_sacrifice_ability(target: ObjectId) -> ResolvedAbility {
         ResolvedAbility::new(
@@ -2158,6 +2161,83 @@ mod tests {
              (battlefield went from {tokens_before} to {})",
             state.battlefield.len()
         );
+    }
+
+    /// CR 118.12 + CR 608.2c: "Sacrifice it and gain 1 life. If you do, create a
+    /// token." The rider needs the whole compound, so a refused sacrifice keeps it
+    /// false even though the later member performed.
+    #[test]
+    fn compound_if_you_do_needs_every_mandatory_member() {
+        for refuse in [false, true] {
+            let mut state = GameState::new_two_player(42);
+            let victim = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Victim".to_string(),
+                Zone::Battlefield,
+            );
+            if refuse {
+                state
+                    .objects
+                    .get_mut(&victim)
+                    .unwrap()
+                    .static_definitions
+                    .push(
+                        StaticDefinition::new(StaticMode::Other("CantBeSacrificed".to_string()))
+                            .affected(TargetFilter::SelfRef),
+                    );
+            }
+            let mut rider = ResolvedAbility::new(
+                Effect::Token {
+                    name: "Test Token".to_string(),
+                    power: PtValue::Fixed(1),
+                    toughness: PtValue::Fixed(1),
+                    types: vec!["Creature".to_string()],
+                    colors: vec![],
+                    keywords: vec![],
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    owner: TargetFilter::Controller,
+                    attach_to: None,
+                    enters_attacking: false,
+                    supertypes: vec![],
+                    static_abilities: vec![],
+                    enter_with_counters: vec![],
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            )
+            .condition(AbilityCondition::effect_performed());
+            rider.sub_link = SubAbilityLink::SequentialSibling;
+            let mut gain = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            gain.sub_link = SubAbilityLink::ContinuationStep;
+            gain.sub_ability = Some(Box::new(rider));
+            let mut ability = make_sacrifice_ability(victim);
+            ability.sub_ability = Some(Box::new(gain));
+
+            let life_before = state.players[0].life;
+            let mut events = Vec::new();
+            resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+            assert_eq!(state.battlefield.contains(&victim), refuse);
+            assert_eq!(state.players[0].life, life_before + 1, "later member ran");
+            let created = state
+                .battlefield
+                .iter()
+                .filter_map(|id| state.objects.get(id))
+                .any(|obj| obj.is_token && obj.name == "Test Token");
+            assert_eq!(created, !refuse, "refuse={refuse}");
+        }
     }
 
     /// Build the LKI carcass a `CostPaidObjectSnapshot` carries. The fields are

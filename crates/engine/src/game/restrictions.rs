@@ -1164,9 +1164,17 @@ fn activation_restriction_applies(
                 .unwrap_or(0)
                 < u32::from(*count)
         }
-        ActivationRestriction::RequiresCondition { condition } => condition
-            .as_ref()
-            .is_none_or(|cond| evaluate_condition(state, player, source_id, cond)),
+        // CR 201.5a + CR 602.5c: the condition reads the granter stamped on the ability being activated.
+        ActivationRestriction::RequiresCondition { condition } => {
+            condition.as_ref().is_none_or(|cond| {
+                let granting_object = state
+                    .objects
+                    .get(&source_id)
+                    .and_then(|obj| obj.abilities.get(ability_index))
+                    .and_then(|ability| ability.granting_object);
+                evaluate_condition_for_granter(state, player, source_id, granting_object, cond)
+            })
+        }
         // CR 719.3c: Only activatable while the source Case is solved.
         ActivationRestriction::IsSolved => state
             .objects
@@ -1295,6 +1303,17 @@ pub(crate) fn evaluate_condition(
     state: &crate::types::game_state::GameState,
     player: PlayerId,
     source_id: ObjectId,
+    condition: &ParsedCondition,
+) -> bool {
+    evaluate_condition_for_granter(state, player, source_id, None, condition)
+}
+
+/// CR 201.5a: [`evaluate_condition`] for a definition carrying a granter stamp.
+fn evaluate_condition_for_granter(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    granting_object: Option<crate::types::identifiers::ObjectIncarnationRef>,
     condition: &ParsedCondition,
 ) -> bool {
     match condition {
@@ -1442,8 +1461,13 @@ pub(crate) fn evaluate_condition(
             rhs,
         } => {
             let lhs_expr = QuantityExpr::Ref { qty: lhs.clone() };
-            let lhs_val =
-                crate::game::quantity::resolve_quantity_scoped(state, &lhs_expr, source_id, player);
+            let lhs_val = crate::game::quantity::resolve_quantity_scoped(
+                state,
+                &lhs_expr,
+                source_id,
+                player,
+                granting_object,
+            );
             // CR 102.2 + CR 102.3 + CR 800.4a: each opponent still in the game,
             // not every other seat (a player who left the game or a teammate is
             // not an opponent).
@@ -1452,7 +1476,11 @@ pub(crate) fn evaluate_condition(
                 .all(|opponent| {
                     let rhs_expr = QuantityExpr::Ref { qty: rhs.clone() };
                     let rhs_val = crate::game::quantity::resolve_quantity_scoped(
-                        state, &rhs_expr, source_id, opponent,
+                        state,
+                        &rhs_expr,
+                        source_id,
+                        opponent,
+                        granting_object,
                     );
                     comparator.evaluate(lhs_val, rhs_val)
                 })
@@ -1462,10 +1490,20 @@ pub(crate) fn evaluate_condition(
             comparator,
             rhs,
         } => {
-            let lhs_val =
-                crate::game::quantity::resolve_quantity_scoped(state, lhs, source_id, player);
-            let rhs_val =
-                crate::game::quantity::resolve_quantity_scoped(state, rhs, source_id, player);
+            let lhs_val = crate::game::quantity::resolve_quantity_scoped(
+                state,
+                lhs,
+                source_id,
+                player,
+                granting_object,
+            );
+            let rhs_val = crate::game::quantity::resolve_quantity_scoped(
+                state,
+                rhs,
+                source_id,
+                player,
+                granting_object,
+            );
             comparator.evaluate(lhs_val, rhs_val)
         }
         ParsedCondition::CreaturesYouControlTotalPowerAtLeast { minimum } => {
@@ -1573,7 +1611,8 @@ pub(crate) fn evaluate_condition(
             Some(filter) => {
                 let filter_ctx = crate::game::filter::FilterContext::from_source_with_controller(
                     source_id, player,
-                );
+                )
+                .with_granting_object(granting_object);
                 state
                     .attacker_declarations_this_turn
                     .iter()
@@ -1693,14 +1732,8 @@ pub(crate) fn evaluate_condition(
                 filter,
                 player,
                 crate::game::quantity::QuantityContext {
-                    entering: None,
-                    source: source_id,
-                    trigger_source: None,
-                    recipient: None,
-                    scoped_player: None,
-                    damage_source: None,
-                    event_amount: None,
-                    spell: None,
+                    granting_object,
+                    ..crate::game::quantity::QuantityContext::new(source_id)
                 },
             ) as usize
                 >= *minimum
@@ -1796,14 +1829,14 @@ pub(crate) fn evaluate_condition(
         // CR 601.3 / CR 602.5: Compound restriction — all inner conditions must be true.
         ParsedCondition::And { conditions } => conditions
             .iter()
-            .all(|c| evaluate_condition(state, player, source_id, c)),
+            .all(|c| evaluate_condition_for_granter(state, player, source_id, granting_object, c)),
         // CR 601.3 / CR 602.5: Disjunctive restriction — any inner condition must be true.
         ParsedCondition::Or { conditions } => conditions
             .iter()
-            .any(|c| evaluate_condition(state, player, source_id, c)),
+            .any(|c| evaluate_condition_for_granter(state, player, source_id, granting_object, c)),
         // CR 601.3 / CR 602.5: Logical negation — true when the inner condition is false.
         ParsedCondition::Not { condition } => {
-            !evaluate_condition(state, player, source_id, condition)
+            !evaluate_condition_for_granter(state, player, source_id, granting_object, condition)
         }
     }
 }

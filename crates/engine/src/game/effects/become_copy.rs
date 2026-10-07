@@ -256,6 +256,7 @@ pub(crate) fn apply_precomputed_copy_values(
         TransientContinuousEffectBindings {
             affected_recipient: Some(recipient),
             duration_subject: Some(duration_subject),
+            granting_object: None,
         },
     );
 

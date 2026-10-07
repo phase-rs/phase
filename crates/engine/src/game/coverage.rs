@@ -720,7 +720,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::ScopedPlayer => "scoped player".into(),
         TargetFilter::SelfRef => "self".into(),
         // CR 201.5a: a granted body's by-name reference to its granting object.
-        TargetFilter::GrantingObject => "granting object".into(),
+        TargetFilter::GrantingObject { .. } => "granting object".into(),
         // CR 608.2c: the ability's pre-rebind source (reanimator-Aura keyword swap).
         TargetFilter::OriginalSource => "original source".into(),
         TargetFilter::SourceOrPaired => "source or paired creature".into(),
@@ -1532,6 +1532,8 @@ fn fmt_name_sticker_letter_count(stickers: &NameStickerSet, letters: &LetterQuer
             ObjectScope::AmassedArmy => "in name stickers on amassed Army",
             ObjectScope::BatchSource => "in name stickers on batch source",
             ObjectScope::ChainRootTarget => "in name stickers on chain-root target",
+            ObjectScope::GrantingObject => "in name stickers on granting object",
+            ObjectScope::SpecificObject { .. } => "in name stickers on bound object",
         },
     };
     format!("{statistic} {set}")
@@ -1613,6 +1615,8 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::AmassedArmy => "amassed Army",
                 ObjectScope::BatchSource => "batch source",
                 ObjectScope::ChainRootTarget => "chain-root target",
+                ObjectScope::GrantingObject => "granting object",
+                ObjectScope::SpecificObject { .. } => "bound object",
             };
             match counter_type {
                 Some(ct) => format!("{} counters on {scope_str}", ct.as_str()),
@@ -1642,6 +1646,8 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::AmassedArmy => "amassed Army's power".into(),
             ObjectScope::BatchSource => "batch source's power".into(),
             ObjectScope::ChainRootTarget => "chain-root target's power".into(),
+            ObjectScope::GrantingObject => "granting object's power".into(),
+            ObjectScope::SpecificObject { .. } => "bound object's power".into(),
         },
         QuantityRef::BasePower { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1657,6 +1663,8 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::AmassedArmy => "amassed Army's base power".into(),
             ObjectScope::BatchSource => "batch source's base power".into(),
             ObjectScope::ChainRootTarget => "chain-root target's base power".into(),
+            ObjectScope::GrantingObject => "granting object's base power".into(),
+            ObjectScope::SpecificObject { .. } => "bound object's base power".into(),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1672,6 +1680,8 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::AmassedArmy => "amassed Army's toughness".into(),
             ObjectScope::BatchSource => "batch source's toughness".into(),
             ObjectScope::ChainRootTarget => "chain-root target's toughness".into(),
+            ObjectScope::GrantingObject => "granting object's toughness".into(),
+            ObjectScope::SpecificObject { .. } => "bound object's toughness".into(),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1687,6 +1697,8 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::AmassedArmy => "amassed Army's mana value".into(),
             ObjectScope::BatchSource => "batch source's mana value".into(),
             ObjectScope::ChainRootTarget => "chain-root target's mana value".into(),
+            ObjectScope::GrantingObject => "granting object's mana value".into(),
+            ObjectScope::SpecificObject { .. } => "bound object's mana value".into(),
         },
         QuantityRef::TargetObjectManaValue { .. } => "target object's mana value".into(),
         QuantityRef::ObjectColorCount { scope } => match scope {
@@ -1703,6 +1715,8 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::AmassedArmy => "amassed Army's colors".into(),
             ObjectScope::BatchSource => "batch source's colors".into(),
             ObjectScope::ChainRootTarget => "chain-root target's colors".into(),
+            ObjectScope::GrantingObject => "granting object's colors".into(),
+            ObjectScope::SpecificObject { .. } => "bound object's colors".into(),
         },
         QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1720,6 +1734,8 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::AmassedArmy => "typeline components on amassed Army".into(),
             ObjectScope::BatchSource => "typeline components on batch source".into(),
             ObjectScope::ChainRootTarget => "typeline components on chain-root target".into(),
+            ObjectScope::GrantingObject => "typeline components on granting object".into(),
+            ObjectScope::SpecificObject { .. } => "typeline components on bound object".into(),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1735,6 +1751,8 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::AmassedArmy => "words in amassed Army's name".into(),
             ObjectScope::BatchSource => "words in batch source's name".into(),
             ObjectScope::ChainRootTarget => "words in chain-root target's name".into(),
+            ObjectScope::GrantingObject => "words in granting object's name".into(),
+            ObjectScope::SpecificObject { .. } => "words in bound object's name".into(),
         },
         QuantityRef::NameStickerLetterCount { stickers, letters } => {
             fmt_name_sticker_letter_count(stickers, letters)
@@ -1752,6 +1770,8 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::AmassedArmy => "amassed Army",
                 ObjectScope::BatchSource => "batch source",
                 ObjectScope::ChainRootTarget => "chain-root target",
+                ObjectScope::GrantingObject => "granting object",
+                ObjectScope::SpecificObject { .. } => "bound object",
             };
             match color {
                 Some(c) => format!("{c:?} mana symbols in {scope_str}'s mana cost"),
@@ -2220,6 +2240,7 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
             return format!("the chosen player {index}");
         }
         PlayerFilter::ParentObjectTargetOwner => "the parent target's owner",
+        PlayerFilter::GrantingObjectCaster => "the player who cast the granting object",
         // CR 109.4 + CR 109.5: "each [player class] who controls [comparator]
         // [count] matching permanents"
         PlayerFilter::ControlsCount {
@@ -9885,6 +9906,8 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             // chain-root target's characteristics yet (CR 601.2c referent is
             // wired for `CountersOn` only).
             ObjectScope::ChainRootTarget => ("ChainRootTargetPower", Unhandled),
+            ObjectScope::GrantingObject => ("GrantingObjectPower", Unhandled),
+            ObjectScope::SpecificObject { .. } => ("SpecificObjectPower", Handled),
         },
         QuantityRef::BasePower { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -9903,6 +9926,8 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             // chain-root target's characteristics yet (CR 601.2c referent is
             // wired for `CountersOn` only).
             ObjectScope::ChainRootTarget => ("ChainRootTargetBasePower", Unhandled),
+            ObjectScope::GrantingObject => ("GrantingObjectBasePower", Unhandled),
+            ObjectScope::SpecificObject { .. } => ("SpecificObjectBasePower", Handled),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -9921,6 +9946,8 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             // chain-root target's characteristics yet (CR 601.2c referent is
             // wired for `CountersOn` only).
             ObjectScope::ChainRootTarget => ("ChainRootTargetToughness", Unhandled),
+            ObjectScope::GrantingObject => ("GrantingObjectToughness", Unhandled),
+            ObjectScope::SpecificObject { .. } => ("SpecificObjectToughness", Handled),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -9939,6 +9966,8 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             // chain-root target's characteristics yet (CR 601.2c referent is
             // wired for `CountersOn` only).
             ObjectScope::ChainRootTarget => ("ChainRootTargetManaValue", Unhandled),
+            ObjectScope::GrantingObject => ("GrantingObjectManaValue", Unhandled),
+            ObjectScope::SpecificObject { .. } => ("SpecificObjectManaValue", Handled),
         },
         QuantityRef::TargetObjectManaValue { .. } => ("TargetObjectManaValue", Handled),
         QuantityRef::ObjectColorCount { scope } => match scope {
@@ -9961,6 +9990,8 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             // chain-root target's characteristics yet (CR 601.2c referent is
             // wired for `CountersOn` only).
             ObjectScope::ChainRootTarget => ("ChainRootTargetObjectColorCount", Unhandled),
+            ObjectScope::GrantingObject => ("GrantingObjectObjectColorCount", Unhandled),
+            ObjectScope::SpecificObject { .. } => ("SpecificObjectObjectColorCount", Handled),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -9979,6 +10010,8 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             // chain-root target's characteristics yet (CR 601.2c referent is
             // wired for `CountersOn` only).
             ObjectScope::ChainRootTarget => ("ChainRootTargetObjectNameWordCount", Unhandled),
+            ObjectScope::GrantingObject => ("GrantingObjectObjectNameWordCount", Unhandled),
+            ObjectScope::SpecificObject { .. } => ("SpecificObjectObjectNameWordCount", Handled),
         },
         // CR 608.2c: `game/quantity.rs` reads the resolution's placed-sticker record.
         QuantityRef::NameStickerLetterCount {
@@ -10015,6 +10048,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::AmassedArmy => ("AmassedArmyNameStickerLetterCount", Unhandled),
             // `object_for_scope` has no referent for this scope → fail-closed 0.
             ObjectScope::ChainRootTarget => ("ChainRootTargetNameStickerLetterCount", Unhandled),
+            // `object_for_scope` has no referent for this scope → fail-closed 0.
+            ObjectScope::GrantingObject => ("GrantingObjectNameStickerLetterCount", Unhandled),
+            ObjectScope::SpecificObject { .. } => ("SpecificObjectNameStickerLetterCount", Handled),
         },
         QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -10037,6 +10073,12 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::ChainRootTarget => {
                 ("ChainRootTargetObjectTypelineComponentCount", Unhandled)
             }
+            ObjectScope::GrantingObject => {
+                ("GrantingObjectObjectTypelineComponentCount", Unhandled)
+            }
+            ObjectScope::SpecificObject { .. } => {
+                ("SpecificObjectObjectTypelineComponentCount", Handled)
+            }
         },
         QuantityRef::ManaSymbolsInManaCost { scope, .. } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -10057,6 +10099,8 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             // chain-root target's characteristics yet (CR 601.2c referent is
             // wired for `CountersOn` only).
             ObjectScope::ChainRootTarget => ("ChainRootTargetManaSymbolsInManaCost", Unhandled),
+            ObjectScope::GrantingObject => ("GrantingObjectManaSymbolsInManaCost", Unhandled),
+            ObjectScope::SpecificObject { .. } => ("SpecificObjectManaSymbolsInManaCost", Handled),
         },
         QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
         QuantityRef::PropertyAggregate(_) => ("PropertyAggregate", Handled),
@@ -10197,6 +10241,8 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         // target owner anchors for villainous-choice choosers).
         PlayerFilter::ChosenPlayer { .. } => ("ChosenPlayer", Handled),
         PlayerFilter::ParentObjectTargetOwner => ("ParentObjectTargetOwner", Handled),
+        // CR 201.5a: installing the grant replaces it with the caster's `SpecificPlayer`.
+        PlayerFilter::GrantingObjectCaster => ("GrantingObjectCaster", Handled),
         PlayerFilter::ControlsCount { .. } => ("ControlsCount", Handled),
         PlayerFilter::PlayerAttribute { .. } => ("PlayerAttribute", Handled),
         // CR 608.2c + CR 109.4: resolved by `quantity::possessed_tracked_set_member`
@@ -13592,6 +13638,7 @@ mod tests {
                     bypass_beneficiary: None,
                     protection_does_not_remove: None,
                     room_door: None,
+                    granting_object: None,
                 }],
                 ..Default::default()
             }
@@ -18763,6 +18810,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     bypass_beneficiary: None,
                     protection_does_not_remove: None,
                     room_door: None,
+                    granting_object: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -18813,6 +18861,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     bypass_beneficiary: None,
                     protection_does_not_remove: None,
                     room_door: None,
+                    granting_object: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -20341,6 +20390,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -20385,6 +20435,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         });
 
         assert!(
@@ -20426,6 +20477,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -20461,6 +20513,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         });
 
         let findings = audit_card_lines(oracle, &face);
@@ -21139,6 +21192,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         });
 
         assert!(
@@ -21173,6 +21227,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         });
 
         assert!(
@@ -21217,6 +21272,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -21252,6 +21308,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -21289,6 +21346,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -21332,6 +21390,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 bypass_beneficiary: None,
                 protection_does_not_remove: None,
                 room_door: None,
+                granting_object: None,
             });
         }
 
@@ -21561,6 +21620,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         });
 
         assert!(

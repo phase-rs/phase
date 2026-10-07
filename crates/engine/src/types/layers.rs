@@ -4,7 +4,7 @@ use super::ability::{
     ContinuousModification, StaticCondition, TargetFilter, TriggerDefinitionRef,
     TriggerProducerOrigin,
 };
-use super::identifiers::ObjectId;
+use super::identifiers::{ObjectId, ObjectIncarnationRef};
 use super::player::PlayerId;
 use super::statics::StaticMode;
 
@@ -252,6 +252,8 @@ pub struct ActiveContinuousEffect {
     /// True for characteristic-defining abilities (CDAs), which are processed
     /// before other effects within their layer per CR 604.3.
     pub characteristic_defining: bool,
+    /// CR 201.5a: the granter stamped on the static this effect comes from.
+    pub granter: Option<ObjectIncarnationRef>,
 }
 
 #[cfg(test)]

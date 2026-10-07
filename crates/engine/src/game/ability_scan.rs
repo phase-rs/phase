@@ -3258,7 +3258,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
         TargetFilter::SelfRef => Axes::NONE,
         // CR 201.5a: a source-relative object ref (the granting object), like
         // SelfRef — no event/sibling/projected resource axis.
-        TargetFilter::GrantingObject => Axes::NONE,
+        TargetFilter::GrantingObject { .. } => Axes::NONE,
         // CR 608.2c: source-relative object ref (concretized to SpecificObject),
         // like SelfRef — no event/sibling/projected resource axis.
         TargetFilter::OriginalSource => Axes::NONE,
@@ -3490,6 +3490,9 @@ fn scan_object_scope(x: &ObjectScope) -> Axes {
         // resolving ability's context — no event/sibling projected axis
         // (mirrors Target/Demonstrative).
         ObjectScope::ChainRootTarget => Axes::NONE,
+        // CR 201.5a: both name one fixed object — the stamped granter or the bound
+        // incarnation. Neither has an event/sibling axis.
+        ObjectScope::GrantingObject | ObjectScope::SpecificObject { .. } => Axes::NONE,
         ObjectScope::EventTarget => Axes {
             event: true,
             sibling: false,
@@ -3609,6 +3612,7 @@ fn scan_trigger_definition(t: &TriggerDefinition, mode: ScanMode) -> Axes {
         taps_for_mana_produced: _,
         mana_ability_produced: _,
         clash_result: _,
+        granting_object: _,
     } = t;
 
     let mut acc = Axes::NONE;
@@ -4728,7 +4732,7 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes {
             acc
         }
         PlayerFilter::ChosenPlayer { index: _ } => Axes::NONE,
-        PlayerFilter::ParentObjectTargetOwner => Axes {
+        PlayerFilter::ParentObjectTargetOwner | PlayerFilter::GrantingObjectCaster => Axes {
             event: true,
             sibling: false,
             projected: false,
@@ -5147,6 +5151,7 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
         // `types::ability::UnloweredGuard`.)
         unlowered_guard: _,
         face_down_in_exile: _,
+        granting_object: _,
     } = def;
 
     let mut acc = scan_effect(effect, mode);

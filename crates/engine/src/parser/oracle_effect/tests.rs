@@ -64537,7 +64537,7 @@ fn filter_has_chosen_color(f: &TargetFilter) -> bool {
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
@@ -64747,7 +64747,8 @@ fn player_filter_has_chosen_color(pf: &PlayerFilter) -> bool {
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::PlayerAttribute { .. }
         | PlayerFilter::ChosenPlayer { .. }
-        | PlayerFilter::ParentObjectTargetOwner => false,
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::GrantingObjectCaster => false,
     }
 }
 
@@ -72413,11 +72414,11 @@ fn consign_to_the_pit_constant_damage_keeps_the_spell_as_source() {
 #[test]
 fn amount_reads_the_antecedent_accepts_only_anaphoric_subject_scopes() {
     macro_rules! every_object_scope {
-        ($($scope:ident),+ $(,)?) => {{
+        ($($scope:ident $({ $field:ident: $value:expr $(,)? })?),+ $(,)?) => {{
             let _exhaustive = |scope: ObjectScope| match scope {
-                $(ObjectScope::$scope)|+ => {}
+                $(ObjectScope::$scope $({ $field: _ })?)|+ => {}
             };
-            [$((stringify!($scope), ObjectScope::$scope)),+]
+            [$((stringify!($scope), ObjectScope::$scope $({ $field: $value })?)),+]
         }};
     }
     let power = |scope| QuantityExpr::Ref {
@@ -72440,6 +72441,13 @@ fn amount_reads_the_antecedent_accepts_only_anaphoric_subject_scopes() {
         OwnedLinkedExileCard,
         BatchSource,
         ChainRootTarget,
+        GrantingObject,
+        SpecificObject {
+            object: crate::types::identifiers::ObjectIncarnationRef::of(
+                crate::types::identifiers::ObjectId(1),
+                0,
+            ),
+        },
     )
     .into_iter()
     .map(|(name, scope)| (format!("Power{{{name}}}"), power(scope)))
@@ -80559,6 +80567,87 @@ fn prevention_declared_prefixes_keep_full_filters_and_counts() {
             "{text}: announced count"
         );
     }
+}
+
+/// CR 115.10a + CR 608.2d: the bare-"and" compound's continuation is classified like a
+/// standalone clause — an untargeted choice in it is made while it resolves.
+#[test]
+fn compound_continuation_untargeted_choice_is_resolution_timed() {
+    fn continuation(text: &str) -> AbilityDefinition {
+        *parse_effect_chain(text, AbilityKind::Spell)
+            .sub_ability
+            .unwrap_or_else(|| panic!("{text}: expected a compound continuation"))
+    }
+    for (text, timing) in [
+        (
+            "Sacrifice a creature and attach this Aura to a creature you control.",
+            TargetChoiceTiming::Resolution,
+        ),
+        (
+            "Exile target creature and put a +1/+1 counter on a creature you control.",
+            TargetChoiceTiming::Resolution,
+        ),
+        (
+            "Sacrifice a creature and attach this Aura to target creature you control.",
+            TargetChoiceTiming::Stack,
+        ),
+    ] {
+        let sub = continuation(text);
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::Attach { .. } | Effect::PutCounter { .. }
+            ),
+            "{text}: {:?}",
+            sub.effect
+        );
+        assert_eq!(sub.target_choice_timing, timing, "{text}");
+    }
+}
+
+/// CR 115.10a + CR 608.2d: the printed members of the class — "attach this Aura to a
+/// creature you control" and "up to one creature that saddled it" name no target.
+#[test]
+fn printed_compound_continuations_choose_at_resolution() {
+    let breath = parse_oracle_text(
+        "Enchant creature you control\nWhen enchanted creature deals combat damage to a player, sacrifice it and attach this Aura to a creature you control. If you do, untap all creatures you control and after this phase, there is an additional combat phase.",
+        "Breath of Fury",
+        &[],
+        &["Enchantment".to_string()],
+        &["Aura".to_string()],
+    );
+    let attach = breath.triggers[0]
+        .execute
+        .as_ref()
+        .and_then(|e| e.sub_ability.as_deref())
+        .expect("Breath of Fury's attach continuation");
+    assert!(
+        matches!(&*attach.effect, Effect::Attach { .. }),
+        "{attach:?}"
+    );
+    assert_eq!(attach.target_choice_timing, TargetChoiceTiming::Resolution);
+
+    let fortune = parse_oracle_text(
+        "When Fortune enters, scry 2.\nWhenever Fortune attacks while saddled, at end of combat, exile it and up to one creature that saddled it this turn, then return those cards to the battlefield under their owner's control.\nSaddle 1",
+        "Fortune, Loyal Steed",
+        &[],
+        &["Creature".to_string()],
+        &["Horse".to_string(), "Mount".to_string()],
+    );
+    let Effect::CreateDelayedTrigger { effect, .. } = &*fortune.triggers[1]
+        .execute
+        .as_ref()
+        .expect("execute")
+        .effect
+    else {
+        panic!("expected the end-of-combat delayed trigger");
+    };
+    let saddler = effect.sub_ability.as_deref().expect("the saddler exile");
+    assert!(
+        matches!(&*saddler.effect, Effect::ChangeZone { .. }),
+        "{saddler:?}"
+    );
+    assert_eq!(saddler.target_choice_timing, TargetChoiceTiming::Resolution);
 }
 
 /// CR 608.2c: the until-clause's count is a quantity — "a/an" is one card,

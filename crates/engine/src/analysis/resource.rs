@@ -5018,16 +5018,7 @@ fn counters_on_source_provably_excludes_class(
     }
     // (d) ARG-EQUIVALENCE — `game::quantity::object_id_for_scope`. Fail closed on
     // `None`: an unresolvable scope proves nothing about which object is read.
-    let ctx = crate::game::quantity::QuantityContext {
-        entering: None,
-        source: source.id,
-        trigger_source: None,
-        recipient: None,
-        scoped_player: None,
-        damage_source: None,
-        event_amount: None,
-        spell: None,
-    };
+    let ctx = crate::game::quantity::QuantityContext::new(source.id);
     crate::game::quantity::object_id_for_scope(state, ObjectScope::Source, ctx, &[])
         .is_some_and(|read_id| read_id != class_member)
 }
@@ -5752,7 +5743,7 @@ fn node_reads_mutable_resolution_local_state(node: &crate::types::ability::Targe
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -5884,7 +5875,7 @@ fn node_has_non_arrival_invariant_property(node: &crate::types::ability::TargetF
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::SourceOrPaired
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
@@ -6104,6 +6095,7 @@ fn player_filter_is_arrival_invariant(filter: &crate::types::ability::PlayerFilt
         | PlayerFilter::OpponentOfTriggeringPlayer
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::GrantingObjectCaster
         | PlayerFilter::ChosenPlayer { .. } => true,
         PlayerFilter::AllExcept { exclude } => player_filter_is_arrival_invariant(exclude),
         // ── REFUSED: board-census and ledger-derived designations ──
@@ -27196,16 +27188,7 @@ mod tests {
 
         let (state, member, host) = block2_fixture(vec![stockpile_counter_mana_ability()]);
         let host_obj = state.objects[&host].clone();
-        let ctx_no_trigger = crate::game::quantity::QuantityContext {
-            entering: None,
-            source: host,
-            trigger_source: None,
-            recipient: None,
-            scoped_player: None,
-            damage_source: None,
-            event_amount: None,
-            spell: None,
-        };
+        let ctx_no_trigger = crate::game::quantity::QuantityContext::new(host);
         assert_eq!(
             crate::game::quantity::object_id_for_scope(
                 &state,
@@ -27222,16 +27205,10 @@ mod tests {
         // The triggered branch: the captured incarnation's id, built through the SAME
         // production authority a triggered resolution uses.
         let ctx_triggered = crate::game::quantity::QuantityContext {
-            entering: None,
-            source: host,
             trigger_source: Some(crate::game::triggers::trigger_source_context_for_latch(
                 &state, &host_obj,
             )),
-            recipient: None,
-            scoped_player: None,
-            damage_source: None,
-            event_amount: None,
-            spell: None,
+            ..crate::game::quantity::QuantityContext::new(host)
         };
         assert_eq!(
             crate::game::quantity::object_id_for_scope(

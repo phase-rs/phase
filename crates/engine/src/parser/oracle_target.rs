@@ -3476,6 +3476,21 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
         pos += consumed;
     }
 
+    // CR 208.4b: "with base power and toughness N/M" — a conjunctive base-P/T
+    // designation (Duskana, Bess, Andrios class). Lowers to two base-scope
+    // `PtComparison` props appended to the conjunctive property list. Kept apart
+    // from `parse_power_suffix`, whose contract is a single prop; that
+    // combinator cannot match this form (it stops at "and toughness"), so the
+    // ordering is for grouping only, not precedence.
+    {
+        let after_ws = lower[pos..].trim_start();
+        let ws = lower[pos..].len() - after_ws.len();
+        if let Ok((rest, props)) = nom_filter::parse_with_base_pt_designation(after_ws) {
+            properties.extend(props);
+            pos += ws + (after_ws.len() - rest.len());
+        }
+    }
+
     // Check "with power N or less/greater" suffix
     if let Some((prop, consumed)) = parse_power_suffix(&lower[pos..], ctx) {
         properties.push(prop);
@@ -4992,6 +5007,10 @@ fn finalize_or_disjunction(combined: TargetFilter, shared_props: &[FilterProp]) 
 /// through this path today — the gate exists so the two distributors cannot
 /// diverge, not because it fixes a card.
 ///
+/// Pushes go through `push_distributable_props`, which also owns the shared
+/// dedupe contract (pre-distribution `same_kind` witness, so a multi-prop group
+/// lands whole).
+///
 /// No relocation sweep here: this function receives `shared_props` from its
 /// caller and never harvests them off a leg, so there is no origin leg to
 /// relocate away from.
@@ -5011,16 +5030,7 @@ pub(super) fn distribute_shared_properties(
 ) -> TargetFilter {
     match filter {
         TargetFilter::Typed(mut typed) => {
-            for prop in shared_props {
-                if prop_distributes_to_leg(prop, &typed)
-                    && !typed
-                        .properties
-                        .iter()
-                        .any(|existing| prop.same_kind(existing))
-                {
-                    typed.properties.push(prop.clone());
-                }
-            }
+            push_distributable_props(&mut typed, shared_props);
             TargetFilter::Typed(typed)
         }
         TargetFilter::Or { filters } => TargetFilter::Or {
@@ -5612,6 +5622,38 @@ fn prop_distributes_to_leg(prop: &FilterProp, typed: &TypedFilter) -> bool {
     !prop_reads_creature_pt(prop) || leg_admits_creature_pt(&typed.type_filters)
 }
 
+/// Push each prop of a distributed suffix group onto `typed`. Single
+/// receiving-leg authority shared by `distribute_properties_to_or` and
+/// `distribute_shared_properties`, so the two distributors cannot diverge.
+///
+/// A prop is pushed when the CR 208.3 gate `prop_distributes_to_leg` accepts
+/// the leg AND the leg did not ALREADY carry a prop of the same kind
+/// (`FilterProp::same_kind`) before this call.
+///
+/// The dedupe witness is the leg's PRE-distribution properties, never the props
+/// this call pushes: a postnominal "with …" suffix is one restrictive clause, so
+/// the group harvested from it lands on a leg whole. CR 208.1 + CR 208.4b:
+/// "with base power and toughness N/M" names both numbers and lowers to two
+/// same-variant `PtComparison` props (base power = N, base toughness = M);
+/// deduping the group against its own pushes would land only the power half and
+/// let a base 2/3 creature satisfy "2/2". A leg that parsed its own restriction
+/// of a kind still receives none of that kind from another leg's suffix (matrix
+/// row 7), so a `PtComparison` group lands all-or-nothing per leg.
+fn push_distributable_props(typed: &mut TypedFilter, props: &[FilterProp]) {
+    let additions: Vec<FilterProp> = props
+        .iter()
+        .filter(|prop| {
+            prop_distributes_to_leg(prop, typed)
+                && !typed
+                    .properties
+                    .iter()
+                    .any(|existing| prop.same_kind(existing))
+        })
+        .cloned()
+        .collect();
+    typed.properties.extend(additions);
+}
+
 /// Collect the P/T-family props that depth-1 `Typed` legs the CR 208.3 gate
 /// ACCEPTS actually carry. This is the rehoming witness set consumed by
 /// `strip_misplaced_pt_props_from_or_legs`.
@@ -5673,8 +5715,9 @@ fn pt_hosting_leg_props(filters: &[TargetFilter]) -> Vec<FilterProp> {
 ///    WotC writes `creature` mid-list.
 ///
 /// 2. WHY THE WITNESS IS `==` AND NOT `same_kind`. `FilterProp::same_kind` is
-///    discriminant-only, so the push loop's dedupe suppresses a *different
-///    payload* prop of the same variant. For
+///    discriminant-only, so the distribution dedupe (`push_distributable_props`)
+///    suppresses a harvested prop when the receiving leg ALREADY carried a
+///    *different-payload* prop of the same variant. For
 ///    `Or[Creature{Pt(Toughness,GE,2)}, Enchantment{Pt(Power,GE,4)}]` the
 ///    harvested `Pt(Power,GE,4)` is never pushed onto the creature leg. A sweep
 ///    conditioned merely on "some gate-accepted leg exists" would then DELETE a
@@ -5725,8 +5768,9 @@ fn strip_misplaced_pt_props_from_or_legs(filters: &mut [TargetFilter]) {
 }
 
 /// Distribute trailing filter properties (Cmc, PtComparison, etc.)
-/// from the last `Typed` element in an `Or` filter to all preceding `Typed`
-/// elements that lack a property of the same kind.
+/// from the last `Typed` element in an `Or` filter to every `Typed` element
+/// that did not already carry a property of the same kind before this
+/// distribution (see `push_distributable_props`).
 /// Handles "artifacts and creatures with mana value 2 or less" where only the
 /// final type parses the "with mana value N or less/greater" suffix.
 ///
@@ -5795,15 +5839,8 @@ pub(crate) fn distribute_properties_to_or(filter: TargetFilter) -> TargetFilter 
     if !trailing_props.is_empty() {
         for f in &mut filters {
             if let TargetFilter::Typed(ref mut typed) = f {
-                for prop in &trailing_props {
-                    // CR 208.3: never push a power/toughness restriction onto a
-                    // leg pinned to a noncreature core type.
-                    if prop_distributes_to_leg(prop, typed)
-                        && !typed.properties.iter().any(|p| prop.same_kind(p))
-                    {
-                        typed.properties.push(prop.clone());
-                    }
-                }
+                // CR 208.3 gate + pre-distribution same_kind dedupe: see push_distributable_props.
+                push_distributable_props(typed, &trailing_props);
             }
         }
     }
@@ -8718,11 +8755,17 @@ pub(crate) fn parse_attachment_kind_disjunction(
 /// Aura/Equipment has left, CR 608.2h + CR 113.7a). The adjective comes from
 /// `parse_attachment_kind_disjunction`; its compound "enchanted or equipped"
 /// forms are refused, leaving the suffix unconsumed. The host noun is the
-/// closed singular set of `parse_attached_host_noun`.
+/// closed singular set of `parse_attached_host_noun`. CR 201.5a: a granted
+/// body's own card name excludes the granting object (`FilterProp::DistinctFrom`).
 fn parse_other_than_exclusion(input: &str) -> OracleResult<'_, FilterProp> {
     preceded(
         tag("other than "),
         alt((
+            map(nom_target::parse_granting_object_ref, |reference| {
+                FilterProp::DistinctFrom {
+                    reference: Box::new(reference),
+                }
+            }),
             map(nom_target::parse_self_reference, |_| FilterProp::Another),
             map_opt(
                 (
@@ -9682,7 +9725,7 @@ fn narrow_population_for_exclusion(
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
@@ -13447,6 +13490,41 @@ mod tests {
                     }])
             )
         );
+    }
+
+    /// CR 208.4b: the type-phrase suffix arm folds "with base power and
+    /// toughness N/M" into two base-scope exact props alongside the subject's
+    /// other qualifiers, under any prefix, leaving the predicate unconsumed.
+    #[test]
+    fn type_phrase_base_pt_designation_suffix() {
+        let base_eq = |stat, value| FilterProp::PtComparison {
+            stat,
+            scope: PtValueScope::Base,
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value },
+        };
+
+        // Andrios, Roaming Explorer subject.
+        let (filter, rest) = parse_type_phrase_folding(
+            "tapped creatures you control with base power and toughness 4/3 have trample",
+        );
+        let tf = typed_leg(&filter).expect("typed filter");
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.properties.contains(&FilterProp::Tapped));
+        assert!(tf.properties.contains(&base_eq(PtStat::Power, 4)));
+        assert!(tf.properties.contains(&base_eq(PtStat::Toughness, 3)));
+        assert_eq!(rest.trim(), "have trample");
+
+        // Bess, Soul Nourisher subject.
+        let (filter, rest) = parse_type_phrase_folding(
+            "other creatures you control with base power and toughness 1/1 enter",
+        );
+        let tf = typed_leg(&filter).expect("typed filter");
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.properties.contains(&FilterProp::Another));
+        assert!(tf.properties.contains(&base_eq(PtStat::Power, 1)));
+        assert!(tf.properties.contains(&base_eq(PtStat::Toughness, 1)));
+        assert_eq!(rest.trim(), "enter");
     }
 
     #[test]
@@ -17669,10 +17747,16 @@ mod tests {
         );
     }
 
-    /// Matrix row 7 — `FilterProp::same_kind` is discriminant-only, so a
-    /// different-payload sibling prop suppresses the push. Without a per-prop
-    /// `==` witness the sweep would DELETE a printed restriction that was never
-    /// rehomed. No printed card produces this shape — structural guard. The
+    /// Matrix row 7 — the creature leg already carries its own leg-local P/T
+    /// restriction (a different stat), so `push_distributable_props`'s
+    /// `same_kind` dedupe, witnessed against the leg's PRE-distribution props,
+    /// suppresses the harvested prop. This is the contract the base-P/T group
+    /// rule deliberately keeps: the witness excludes only the group's own
+    /// pushes, never what a leg parsed itself. Stat-aware or payload-equality
+    /// dedupe keys were rejected because they would conjoin another leg's power
+    /// restriction onto this creature leg (see the base-P/T group rows). Without
+    /// a per-prop `==` witness the sweep would DELETE a printed restriction that
+    /// was never rehomed. No printed card produces this shape — structural guard. The
     /// retained AST is deliberately imperfect-but-faithful (a vacuous P/T
     /// restriction on an enchantment leg) rather than lossy. Rejected
     /// alternative: making `same_kind` payload-sensitive — it is the dedupe
@@ -17712,7 +17796,7 @@ mod tests {
         assert_eq!(
             typed_or_leg(&filters, 0).properties,
             vec![toughness_ge_2],
-            "creature leg must be unchanged — same_kind suppressed the push"
+            "creature leg must be unchanged — its own pre-existing PtComparison suppressed the push"
         );
     }
 
@@ -18185,6 +18269,236 @@ mod tests {
             has_prop(typed_or_leg(&filters, 0), cmc),
             "CR 202.3: a mana value suffix must still reach the type-open leg: \
              {filters:?}"
+        );
+    }
+
+    /// `base power = N` / `base toughness = M` props, the exact lowering of
+    /// "with base power and toughness N/M" (CR 208.4b).
+    fn base_eq(stat: PtStat, value: i32) -> FilterProp {
+        FilterProp::PtComparison {
+            stat,
+            scope: PtValueScope::Base,
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value },
+        }
+    }
+
+    /// Matrix row 15 — CR 208.4b: "with base power and toughness 2/2" is one
+    /// postnominal clause lowering to TWO same-variant `PtComparison` props, so
+    /// the trailing distributor must land the whole group on every eligible
+    /// creature leg. No printed card — latent generic grammar (PR #9653 review).
+    /// Reverting `push_distributable_props` to dedupe against its own pushes
+    /// lands only base power on leg 0, so the base-toughness assertion fails and
+    /// a base 2/3 creature would satisfy "2/2".
+    #[test]
+    fn base_pt_designation_distributes_whole_to_every_creature_or_leg() {
+        let (f, rest) =
+            parse_target("target creature or artifact creature with base power and toughness 2/2");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Or { filters } = &f else {
+            panic!("expected Or filter, got {f:?}");
+        };
+        assert_eq!(filters.len(), 2, "{filters:?}");
+
+        let creature = typed_or_leg(filters, 0);
+        assert!(has_type(creature, TypeFilter::Creature), "{creature:?}");
+        let artifact_creature = typed_or_leg(filters, 1);
+        assert!(
+            has_type(artifact_creature, TypeFilter::Artifact)
+                && has_type(artifact_creature, TypeFilter::Creature),
+            "{artifact_creature:?}"
+        );
+
+        // Reach guards: the suffix arm fired on the origin leg, and the
+        // distributor ran on the earlier creature leg.
+        for stat in [PtStat::Power, PtStat::Toughness] {
+            assert!(
+                has_prop(artifact_creature, base_eq(stat, 2)),
+                "origin leg must carry the whole designation: {artifact_creature:?}"
+            );
+        }
+        assert!(
+            has_prop(creature, base_eq(PtStat::Power, 2)),
+            "distribution must reach the creature leg: {creature:?}"
+        );
+        assert!(
+            has_prop(creature, base_eq(PtStat::Toughness, 2)),
+            "whole group on every eligible creature leg — base toughness must \
+             not be self-suppressed by the group's own base-power push: {creature:?}"
+        );
+
+        // No duplication across the per-merge distributor re-calls.
+        for leg in [creature, artifact_creature] {
+            let pt_count = leg
+                .properties
+                .iter()
+                .filter(|p| matches!(p, FilterProp::PtComparison { .. }))
+                .count();
+            assert_eq!(pt_count, 2, "exactly the two base props: {leg:?}");
+        }
+    }
+
+    /// Matrix row 16 — the whole-group rule composed with the CR 208.3
+    /// relocation sweep. The designation is harvested off the planeswalker
+    /// origin leg, lands whole on the creature leg, and the sweep then strips
+    /// BOTH props off the planeswalker leg (each has an exactly-equal witness).
+    /// No printed card — latent generic grammar (PR #9653 review). Reverting
+    /// leaves the creature leg with base power only, so base toughness has no
+    /// witness and the planeswalker leg keeps a vacuous base-toughness
+    /// restriction — the `!has_pt_prop` assertion fails.
+    #[test]
+    fn base_pt_designation_relocates_whole_off_noncreature_origin_leg() {
+        let (f, rest) =
+            parse_target("target creature or planeswalker with base power and toughness 2/2");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Or { filters } = &f else {
+            panic!("expected Or filter, got {f:?}");
+        };
+        assert_eq!(filters.len(), 2, "{filters:?}");
+
+        let creature = typed_or_leg(filters, 0);
+        assert!(has_type(creature, TypeFilter::Creature), "{creature:?}");
+        let planeswalker = typed_or_leg(filters, 1);
+        assert!(
+            has_type(planeswalker, TypeFilter::Planeswalker),
+            "{planeswalker:?}"
+        );
+
+        // Paired positive: the designation reached the creature disjunct whole.
+        for stat in [PtStat::Power, PtStat::Toughness] {
+            assert!(
+                has_prop(creature, base_eq(stat, 2)),
+                "whole group on every eligible creature leg: {creature:?}"
+            );
+        }
+        assert!(
+            !has_pt_prop(planeswalker),
+            "CR 208.3: the planeswalker leg must keep no P/T restriction — a \
+             vacuous base-toughness prop would make it untargetable: {planeswalker:?}"
+        );
+    }
+
+    /// Matrix row 17 — a multi-prop group never lands PARTIALLY on a leg that
+    /// parsed its own P/T restriction (the row-7 contract, kept for groups).
+    /// Rejects the payload-equality and stat-aware dedupe keys: either would
+    /// push the base props onto leg 0. CR 208.4b. No printed card — latent
+    /// generic grammar (PR #9653 review). Reverting to the in-loop dedupe leaves
+    /// the bare creature leg 1 with base power only, failing its base-toughness
+    /// assertion.
+    #[test]
+    fn base_pt_group_never_lands_partially_on_leg_with_own_pt_restriction() {
+        let power_ge_3 = FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::GE,
+            value: QuantityExpr::Fixed { value: 3 },
+        };
+        let designation = vec![base_eq(PtStat::Power, 2), base_eq(PtStat::Toughness, 2)];
+        let origin = TypedFilter {
+            type_filters: vec![TypeFilter::Artifact, TypeFilter::Creature],
+            properties: designation.clone(),
+            ..Default::default()
+        };
+        let input = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    properties: vec![power_ge_3.clone()],
+                    ..Default::default()
+                }),
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    ..Default::default()
+                }),
+                TargetFilter::Typed(origin.clone()),
+            ],
+        };
+        let TargetFilter::Or { filters } = distribute_properties_to_or(input) else {
+            panic!("expected Or");
+        };
+
+        let bare = typed_or_leg(&filters, 1);
+        assert!(
+            has_prop(bare, base_eq(PtStat::Power, 2)),
+            "the group was distributed in this call: {bare:?}"
+        );
+        assert!(
+            has_prop(bare, base_eq(PtStat::Toughness, 2)),
+            "whole group on every eligible creature leg: {bare:?}"
+        );
+        assert_eq!(
+            typed_or_leg(&filters, 0).properties,
+            vec![power_ge_3],
+            "never partially on a leg with its own P/T restriction"
+        );
+        assert_eq!(
+            typed_or_leg(&filters, 2),
+            &origin,
+            "origin leg is unchanged"
+        );
+    }
+
+    /// Matrix row 18 — the left-to-right `distribute_shared_properties` path
+    /// implements the same whole-group contract through the same helper, and
+    /// keeps the CR 208.3 gate and the leg-local collision rule. No printed
+    /// card — latent generic grammar (PR #9653 review). Reverting to the
+    /// in-loop dedupe leaves legs 0 and 2 with base power only, failing the
+    /// base-toughness assertions.
+    #[test]
+    fn shared_property_distribution_pushes_whole_base_pt_group() {
+        let toughness_ge_2 = FilterProp::PtComparison {
+            stat: PtStat::Toughness,
+            scope: PtValueScope::Current,
+            comparator: Comparator::GE,
+            value: QuantityExpr::Fixed { value: 2 },
+        };
+        let input = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    ..Default::default()
+                }),
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact],
+                    ..Default::default()
+                }),
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact, TypeFilter::Creature],
+                    ..Default::default()
+                }),
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    properties: vec![toughness_ge_2.clone()],
+                    ..Default::default()
+                }),
+            ],
+        };
+        let TargetFilter::Or { filters } = distribute_shared_properties(
+            input,
+            &[base_eq(PtStat::Power, 2), base_eq(PtStat::Toughness, 2)],
+        ) else {
+            panic!("expected Or");
+        };
+
+        for idx in [0, 2] {
+            let leg = typed_or_leg(&filters, idx);
+            assert!(
+                has_prop(leg, base_eq(PtStat::Power, 2)),
+                "leg {idx} must receive the shared group: {leg:?}"
+            );
+            assert!(
+                has_prop(leg, base_eq(PtStat::Toughness, 2)),
+                "whole group on every eligible creature leg (leg {idx}): {leg:?}"
+            );
+        }
+        assert!(
+            !has_pt_prop(typed_or_leg(&filters, 1)),
+            "CR 208.3: the artifact leg must not receive the P/T group"
+        );
+        assert_eq!(
+            typed_or_leg(&filters, 3).properties,
+            vec![toughness_ge_2],
+            "never partially on a leg with its own P/T restriction"
         );
     }
 

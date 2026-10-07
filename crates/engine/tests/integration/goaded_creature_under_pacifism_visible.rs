@@ -678,3 +678,110 @@ fn kardurs_attack_requirement_does_not_designate_creatures_goaded() {
         &FilterContext::neutral()
     ));
 }
+
+/// CR 701.15b + CR 508.1d: an Aura that goads, cast and resolved in the
+/// precombat main phase, is seen by the next declare-attackers query.
+#[test]
+fn sound_of_drums_cast_mid_turn_goads_at_next_declare_attackers() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let aura = scenario
+        .add_spell_to_hand(P0, "The Sound of Drums", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text_with_keywords(&["Enchant"], SOUND_OF_DRUMS_ORACLE)
+        .with_mana_cost(engine::types::mana::ManaCost::generic(0))
+        .id();
+    let mut runner = scenario.build();
+
+    let mut uncast = engine::game::scenario::GameRunner::from_state(runner.state().clone());
+    uncast.advance_to_combat();
+    let uncast_valid = get_valid_attacker_ids(uncast.state());
+    assert!(uncast_valid.contains(&host), "the Bear can attack");
+    assert_eq!(
+        attacker_constraints_for_active_player(uncast.state(), &uncast_valid).get(&host),
+        None,
+        "without the Aura the Bear has no attack requirement"
+    );
+
+    runner.cast(aura).target_object(host).resolve();
+    assert_eq!(runner.state().objects[&aura].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&aura].attached_to, Some(host.into()));
+
+    runner.advance_to_combat();
+    assert_eq!(runner.waiting_for_kind(), "DeclareAttackers");
+    assert_eq!(
+        attacker_constraints_for_active_player(
+            runner.state(),
+            &get_valid_attacker_ids(runner.state()),
+        )
+        .get(&host),
+        Some(&CombatRequirement::MustAttack {
+            defenders: vec![],
+            sources: vec![aura]
+        })
+    );
+    assert!(
+        runner.declare_attackers(&[]).is_err(),
+        "the goaded Bear must attack"
+    );
+}
+
+const FEALTY_TO_THE_REALM_ORACLE: &str = "Enchant creature\nWhen this Aura enters, you become the monarch.\nThe monarch controls enchanted creature.\nEnchanted creature attacks each combat if able and can't attack you.";
+
+/// CR 508.1c + CR 508.1d: a goad-like Aura that never says "goad" forces the
+/// enchanted creature to attack and keeps it off the Aura's controller, and does
+/// not designate it goaded (CR 701.15a).
+#[test]
+fn fealty_to_the_realm_forces_and_redirects_without_goading() {
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P1, "Bear", 2, 2).id();
+    let aura = scenario
+        .add_enchantment_from_oracle(P0, "Fealty to the Realm", "")
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text(FEALTY_TO_THE_REALM_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    engine::game::effects::attach::attach_to(runner.state_mut(), aura, host);
+    refresh(&mut runner);
+    assert_eq!(runner.state().objects[&host].controller, P1);
+    let goaded = TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Goaded]));
+    assert!(!matches_target_filter(
+        runner.state(),
+        host,
+        &goaded,
+        &FilterContext::neutral()
+    ));
+
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    runner.advance_to_combat();
+    assert_eq!(runner.waiting_for_kind(), "DeclareAttackers");
+    assert!(
+        get_valid_attacker_ids(runner.state()).contains(&host),
+        "the enchanted creature can attack"
+    );
+
+    let mut no_attack = runner.state().clone();
+    assert!(
+        declare_attackers(&mut no_attack, &[], &mut Vec::new()).is_err(),
+        "the enchanted creature attacks each combat if able"
+    );
+    let mut at_aura_controller = runner.state().clone();
+    assert!(
+        declare_attackers(
+            &mut at_aura_controller,
+            &[(host, AttackTarget::Player(P0))],
+            &mut Vec::new()
+        )
+        .is_err(),
+        "the enchanted creature can't attack the Aura's controller"
+    );
+    runner
+        .declare_attackers(&[(host, AttackTarget::Player(p2))])
+        .expect("attacking another player obeys both clauses");
+}

@@ -9,7 +9,7 @@ use crate::game::combat;
 use crate::game::game_object::GameObject;
 use crate::game::quantity::{
     counter_count_from_map, quantity_expr_characteristic_reads_at, resolve_quantity,
-    resolve_quantity_with_targets,
+    resolve_quantity_with_ctx, resolve_quantity_with_targets, QuantityContext,
 };
 use crate::types::ability::{
     AttackerBlockStatus, CardTypeSetSource, CastManaSpentMetric, ChoiceValue, ChosenAttribute,
@@ -214,9 +214,8 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
-        // CR 201.5a: append-only; GrantingObject is concretized to SpecificObject
-        // at grant-clone and never reaches this object predicate.
-        | TargetFilter::GrantingObject
+        // CR 201.5a: the stamped granter is one fixed object.
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -488,7 +487,7 @@ pub(crate) fn target_filter_characteristic_reads_at(
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::Owner
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::AllPlayers => CharacteristicKinds::EMPTY,
     }
 }
@@ -878,9 +877,8 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
-        // CR 201.5a: append-only; GrantingObject is concretized to SpecificObject
-        // at grant-clone and never reaches this object predicate.
-        | TargetFilter::GrantingObject
+        // CR 201.5a: the stamped granter is one fixed object.
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -1223,9 +1221,19 @@ pub struct FilterContext<'a> {
     /// the same storage id is recognized as the DIFFERENT object it is and is
     /// admitted to the "another" population.
     pub triggering_object: Option<TriggeringObjectRef>,
+    /// CR 201.5a: the granter stamped on the definition this filter is read for.
+    pub granting_object: Option<ObjectIncarnationRef>,
 }
 
 impl<'a> FilterContext<'a> {
+    /// CR 201.5a: bind the granter of a definition read with no ability or trigger source in scope.
+    pub fn with_granting_object(self, granting_object: Option<ObjectIncarnationRef>) -> Self {
+        FilterContext {
+            granting_object,
+            ..self
+        }
+    }
+
     /// CR 603.4 + CR 603.6a: Rebind the triggering-object referent for the
     /// duration of one intervening-`if` evaluation. Takes `&self` and returns a
     /// fresh value (the struct is `Copy`), so the caller's borrowed context is
@@ -1282,6 +1290,7 @@ impl<'a> FilterContext<'a> {
             recipient_id: None,
             scoped_iteration_player: None,
             triggering_object: None,
+            granting_object: None,
         }
     }
 
@@ -1301,6 +1310,7 @@ impl<'a> FilterContext<'a> {
             recipient_id: None,
             scoped_iteration_player: None,
             triggering_object: None,
+            granting_object: None,
         }
     }
 
@@ -1316,6 +1326,7 @@ impl<'a> FilterContext<'a> {
             recipient_id: None,
             scoped_iteration_player: None,
             triggering_object: None,
+            granting_object: None,
         }
     }
 
@@ -1331,6 +1342,7 @@ impl<'a> FilterContext<'a> {
             recipient_id: None,
             scoped_iteration_player: None,
             triggering_object: None,
+            granting_object: source.granting_object,
         }
     }
 
@@ -1349,6 +1361,7 @@ impl<'a> FilterContext<'a> {
             recipient_id: None,
             scoped_iteration_player: None,
             triggering_object: None,
+            granting_object: source.granting_object,
         }
     }
 
@@ -1369,6 +1382,7 @@ impl<'a> FilterContext<'a> {
             recipient_id: Some(recipient_id),
             scoped_iteration_player: None,
             triggering_object: None,
+            granting_object: None,
         }
     }
 
@@ -1384,6 +1398,7 @@ impl<'a> FilterContext<'a> {
             recipient_id: None,
             scoped_iteration_player: None,
             triggering_object: None,
+            granting_object: ability.context.granting_object,
         }
     }
 
@@ -1401,6 +1416,7 @@ impl<'a> FilterContext<'a> {
             recipient_id: Some(recipient_id),
             scoped_iteration_player: None,
             triggering_object: None,
+            granting_object: ability.context.granting_object,
         }
     }
 
@@ -1421,6 +1437,7 @@ impl<'a> FilterContext<'a> {
             recipient_id: None,
             scoped_iteration_player: None,
             triggering_object: None,
+            granting_object: ability.context.granting_object,
         }
     }
 }
@@ -1780,7 +1797,7 @@ pub(crate) fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
@@ -1990,7 +2007,8 @@ pub(crate) fn player_filter_contains(
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::PlayerAttribute { .. }
         | PlayerFilter::ChosenPlayer { .. }
-        | PlayerFilter::ParentObjectTargetOwner => false,
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::GrantingObjectCaster => false,
     }
 }
 
@@ -2031,7 +2049,7 @@ pub(crate) fn filter_contains_filter_prop(
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
@@ -2242,7 +2260,8 @@ fn player_filter_contains_filter_prop(
         | PlayerFilter::VotedFor { .. }
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
-        | PlayerFilter::ParentObjectTargetOwner => false,
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::GrantingObjectCaster => false,
     }
 }
 
@@ -2550,7 +2569,7 @@ fn rewrite_filter_props(
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
@@ -2772,7 +2791,8 @@ fn rewrite_player_filter_props(
         | PlayerFilter::VotedFor { .. }
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
-        | PlayerFilter::ParentObjectTargetOwner => {}
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::GrantingObjectCaster => {}
     }
 }
 
@@ -3290,6 +3310,7 @@ fn stack_entry_controller_matches(
         ctx.trigger_source,
         ctx.recipient_id,
         ctx.triggering_object,
+        ctx.granting_object,
     );
     match controller {
         None => true,
@@ -3371,6 +3392,7 @@ pub fn matches_target_filter_including_phased_out(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.granting_object,
         ControllerLookup::LiveOnly,
     )
 }
@@ -3708,6 +3730,7 @@ pub fn matches_target_filter_in_owner_zone(
             ctx.recipient_id,
             ctx.scoped_iteration_player,
             ctx.triggering_object,
+            ctx.granting_object,
             ControllerLookup::OwnerZone,
         );
     }
@@ -3726,6 +3749,7 @@ pub fn matches_target_filter_in_owner_zone(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.granting_object,
         ControllerLookup::OwnerZone,
     )
 }
@@ -3833,6 +3857,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                     ctx.recipient_id,
                     ctx.scoped_iteration_player,
                     ctx.triggering_object,
+                    ctx.granting_object,
                     ControllerLookup::LiveOrLki,
                 );
             }
@@ -3859,6 +3884,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                     ctx.recipient_id,
                     ctx.scoped_iteration_player,
                     ctx.triggering_object,
+                    ctx.granting_object,
                     ControllerLookup::LiveOrLki,
                 )
             } else if let Some(entry) = state.liminal_entries.get(object_id) {
@@ -3874,6 +3900,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                     ctx.recipient_id,
                     ctx.scoped_iteration_player,
                     ctx.triggering_object,
+                    ctx.granting_object,
                     ControllerLookup::LiveOrLki,
                 )
             } else {
@@ -3894,6 +3921,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                     ctx.recipient_id,
                     ctx.scoped_iteration_player,
                     ctx.triggering_object,
+                    ctx.granting_object,
                     ControllerLookup::LiveOrLki,
                 )
             })
@@ -3917,6 +3945,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                 ctx.recipient_id,
                 ctx.scoped_iteration_player,
                 ctx.triggering_object,
+                ctx.granting_object,
                 ControllerLookup::LiveOrLki,
             )
         }
@@ -3991,6 +4020,7 @@ pub fn matches_target_filter_on_counter_added_record(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.granting_object,
         ControllerLookup::LiveOrLki,
     )
 }
@@ -4037,6 +4067,7 @@ pub fn matches_target_filter_on_attack_declaration_record(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.granting_object,
         ControllerLookup::LiveOrLki,
     )
 }
@@ -4087,6 +4118,7 @@ pub fn matches_target_filter_on_damage_record_source(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.granting_object,
         ControllerLookup::LiveOrLki,
     )
 }
@@ -4326,6 +4358,7 @@ pub(crate) fn matches_target_filter_on_event_snapshot(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.granting_object,
         ControllerLookup::LiveOnly,
     )
 }
@@ -4497,6 +4530,7 @@ fn filter_inner_with_lookup(
         ctx.recipient_id,
         ctx.scoped_iteration_player,
         ctx.triggering_object,
+        ctx.granting_object,
         controller_lookup,
     )
 }
@@ -4514,6 +4548,7 @@ fn filter_inner_for_object(
     recipient_id: Option<ObjectId>,
     scoped_iteration_player: Option<PlayerId>,
     triggering_object: Option<TriggeringObjectRef>,
+    granting_object: Option<ObjectIncarnationRef>,
     controller_lookup: ControllerLookup,
 ) -> bool {
     match filter {
@@ -4680,6 +4715,7 @@ fn filter_inner_for_object(
                             trigger_source,
                             recipient_id,
                             triggering_object,
+                            granting_object,
                         );
                         match source_defending_player(state, &source_ctx) {
                             Some(pid) if pid == obj_ctrl => {}
@@ -4697,6 +4733,7 @@ fn filter_inner_for_object(
                             trigger_source,
                             recipient_id,
                             triggering_object,
+                            granting_object,
                         );
                         match source_chosen_player(&source_ctx) {
                             Some(pid) if pid == obj_ctrl => {}
@@ -4774,6 +4811,7 @@ fn filter_inner_for_object(
                 trigger_source,
                 recipient_id,
                 triggering_object,
+                granting_object,
             );
             properties.iter().all(|p| match p {
                 FilterProp::Owned { controller } => {
@@ -4796,6 +4834,7 @@ fn filter_inner_for_object(
             recipient_id,
             scoped_iteration_player,
             triggering_object,
+            granting_object,
             controller_lookup,
         ),
         TargetFilter::Or { filters } => filters.iter().any(|f| {
@@ -4811,6 +4850,7 @@ fn filter_inner_for_object(
                 recipient_id,
                 scoped_iteration_player,
                 triggering_object,
+                granting_object,
                 controller_lookup,
             )
         }),
@@ -4827,6 +4867,7 @@ fn filter_inner_for_object(
                 recipient_id,
                 scoped_iteration_player,
                 triggering_object,
+                granting_object,
                 controller_lookup,
             )
         }),
@@ -4845,6 +4886,7 @@ fn filter_inner_for_object(
                     recipient_id,
                     scoped_iteration_player,
                     triggering_object,
+                    granting_object,
                 },
             )
         }
@@ -4945,6 +4987,7 @@ fn filter_inner_for_object(
             trigger_source,
             recipient_id,
             triggering_object,
+            granting_object,
         )
         .chosen_attributes
         .iter()
@@ -5046,6 +5089,7 @@ fn filter_inner_for_object(
                     recipient_id,
                     scoped_iteration_player,
                     triggering_object,
+                    granting_object,
                     controller_lookup,
                 )
         }
@@ -5061,6 +5105,7 @@ fn filter_inner_for_object(
                 trigger_source,
                 recipient_id,
                 triggering_object,
+                granting_object,
             );
             let linked = if trigger_source.is_some() {
                 source_ctx.linked_exile_snapshot
@@ -5173,6 +5218,7 @@ fn filter_inner_for_object(
                 trigger_source,
                 recipient_id,
                 triggering_object,
+                granting_object,
             );
             let chosen_name = source_ctx.chosen_attributes.iter().find_map(|a| match a {
                 ChosenAttribute::CardName(n) => Some(n.as_str()),
@@ -5191,6 +5237,7 @@ fn filter_inner_for_object(
                 recipient_id,
                 scoped_iteration_player,
                 triggering_object,
+                granting_object,
             };
             state
                 .last_chosen_damage_source
@@ -5214,9 +5261,17 @@ fn filter_inner_for_object(
         TargetFilter::Named { name } => obj.name == *name,
         // CR 400.3: Owner is a player-resolving filter (resolves to the owner of
         // source_id), meaningless as an object-matching predicate.
-        // CR 201.5a: GrantingObject appended append-only (concretized before runtime).
-        TargetFilter::Owner | TargetFilter::GrantingObject => false,
+        TargetFilter::Owner => false,
+        TargetFilter::GrantingObject { bound } => {
+            is_stamped_granter(obj, bound.or(granting_object))
+        }
     }
+}
+
+/// CR 201.5a + CR 400.7: `obj` is the exact incarnation stamped on the definition
+/// the filter is read for; unbound, nothing is.
+fn is_stamped_granter(obj: &GameObject, granting_object: Option<ObjectIncarnationRef>) -> bool {
+    granting_object.is_some_and(|granter| ObjectIncarnationRef::from_object(obj) == granter)
 }
 
 /// Build a synthetic `GameObject` from a `TokenSpec` for filter evaluation
@@ -5336,6 +5391,7 @@ fn zone_change_filter_inner(
                 trigger_source,
                 None,
                 triggering_object,
+                ctx.granting_object,
             );
 
             // CR 400.1 + CR 109.4: a zone without controllers answers the controller axis
@@ -5449,6 +5505,7 @@ fn zone_change_filter_inner(
                 trigger_source,
                 None,
                 triggering_object,
+                ctx.granting_object,
             );
             let chosen_name = source_ctx.chosen_attributes.iter().find_map(|a| match a {
                     ChosenAttribute::CardName(n) => Some(n.as_str()),
@@ -5483,6 +5540,7 @@ fn zone_change_filter_inner(
                     trigger_source,
                     None,
                     triggering_object,
+                    ctx.granting_object,
                 )
                 .chosen_attributes
                 .iter()
@@ -5539,8 +5597,8 @@ fn zone_change_filter_inner(
         | TargetFilter::DefendingPlayer
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
-        // CR 201.5a: append-only (concretized before runtime).
-        | TargetFilter::GrantingObject
+        // CR 201.5a: record matching does not bind the granter, so it fails closed.
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::Owner => false,
     }
 }
@@ -5876,8 +5934,8 @@ pub fn spell_record_matches_filter(
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
-        // CR 201.5a: append-only (concretized before runtime).
-        | TargetFilter::GrantingObject
+        // CR 201.5a: record matching does not bind the granter, so it fails closed.
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::Owner => false,
     }
 }
@@ -6200,8 +6258,8 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
-        // CR 201.5a: append-only (concretized before runtime).
-        | TargetFilter::GrantingObject
+        // CR 201.5a: spell matching does not bind the granter, so it fails closed.
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::Owner => false,
     }
 }
@@ -6625,6 +6683,8 @@ struct SourceContext<'a> {
     /// (e.g., target validation, spell-record matching, single-shot quantity
     /// resolution).
     recipient_id: Option<ObjectId>,
+    /// CR 201.5a: mirror of `FilterContext::granting_object`.
+    granting_object: Option<ObjectIncarnationRef>,
 }
 
 /// CR 508.5 + CR 508.5a: `ControllerRef::DefendingPlayer` door for
@@ -6660,8 +6720,16 @@ pub(crate) fn source_defending_player_for_test(
     source_id: ObjectId,
     trigger_source: Option<&TriggerSourceContext>,
 ) -> Option<PlayerId> {
-    let context =
-        source_context_from_filter(state, source_id, None, None, trigger_source, None, None);
+    let context = source_context_from_filter(
+        state,
+        source_id,
+        None,
+        None,
+        trigger_source,
+        None,
+        None,
+        None,
+    );
     source_defending_player(state, &context)
 }
 
@@ -6733,6 +6801,7 @@ fn attached_to_source_referent(
     attached_to_referent(state, source.id, candidate, candidate_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn source_context_from_filter<'a>(
     state: &GameState,
     source_id: ObjectId,
@@ -6741,6 +6810,7 @@ fn source_context_from_filter<'a>(
     trigger_source: Option<&'a TriggerSourceContext>,
     recipient_id: Option<ObjectId>,
     triggering_object: Option<TriggeringObjectRef>,
+    granting_object: Option<ObjectIncarnationRef>,
 ) -> SourceContext<'a> {
     let (lki, attached_to, saddled_by, convoked_creatures, linked_exile_snapshot) =
         if let Some(source) = trigger_source {
@@ -6845,6 +6915,7 @@ fn source_context_from_filter<'a>(
         ability,
         recipient_id,
         triggering_object,
+        granting_object,
     }
 }
 
@@ -6931,11 +7002,13 @@ fn combat_relation_subject_ref(
         CombatRelationSubject::Source => source
             .trigger_source
             .map(|context| context.identity.reference)
+            // CR 113.7: the ability's capture describes its own source, so it does not answer
+            // for a context rebound to another object (a damage source chosen as a target).
             .or_else(|| {
                 source
                     .ability
-                    .and_then(|ability| ability.source_incarnation)
-                    .map(|incarnation| ObjectIncarnationRef::of(source.id, incarnation))
+                    .filter(|ability| ability.source_id == source.id)
+                    .and_then(|ability| ability.source_ref(state))
             })
             .or_else(|| live(source.id)),
         CombatRelationSubject::ParentTarget => {
@@ -7035,6 +7108,7 @@ fn aura_can_enchant_referenced_target(
                 recipient_id: source.recipient_id,
                 scoped_iteration_player: None,
                 triggering_object: source.triggering_object,
+                granting_object: source.granting_object,
             };
             filter_inner(state, *target_id, enchant_filter, &ctx)
         }
@@ -7060,11 +7134,14 @@ fn resolve_filter_threshold(
 ) -> i32 {
     match source.ability {
         Some(ability) => resolve_quantity_with_targets(state, expr, ability),
-        None => resolve_quantity(
+        None => resolve_quantity_with_ctx(
             state,
             expr,
             source.controller.unwrap_or(PlayerId(0)),
-            source.id,
+            QuantityContext {
+                granting_object: source.granting_object,
+                ..QuantityContext::new(source.id)
+            },
         ),
     }
 }
@@ -7979,6 +8056,8 @@ fn matches_filter_prop(
                         .iter()
                         .any(|t| matches!(t, TargetRef::Object(id) if *id == object_id))
                 })
+            } else if let TargetFilter::GrantingObject { bound } = **reference {
+                is_stamped_granter(obj, bound.or(source.granting_object))
             } else {
                 crate::game::targeting::resolve_event_context_targets(state, reference, source.id)
                     .into_iter()
@@ -9098,6 +9177,7 @@ fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceCo
         chosen_attributes: lki.chosen_attributes,
         ability: None,
         recipient_id: None,
+        granting_object: None,
     }
 }
 
@@ -9270,6 +9350,7 @@ fn object_shares_quality_with_reference_filter(
         // entrant and the exclusion is silently inert.
         scoped_iteration_player: None,
         triggering_object: source.triggering_object,
+        granting_object: source.granting_object,
     };
     // CR 109.2 + CR 205.3m: resolve a bare descriptive reference such as "a
     // creature you control" or "a creature card in your graveyard" to the zone
@@ -10013,6 +10094,7 @@ mod tests {
             source,
             Some(PlayerId(0)),
             Some(&child),
+            None,
             None,
             None,
             None,
@@ -12943,6 +13025,48 @@ mod tests {
             "the snapshot's own captured incarnation must match the ledger, \
              regardless of where the live object has since moved"
         );
+    }
+
+    /// CR 113.7: a context rebound to another source names that object in a combat relation,
+    /// not the resolving ability's own source.
+    #[test]
+    fn combat_relation_source_follows_a_rebound_context_source() {
+        let mut state = setup();
+        let blocker = add_creature(&mut state, PlayerId(1), "Blocker");
+        let attacker = add_creature(&mut state, PlayerId(0), "Attacker");
+        let ability_source = add_creature(&mut state, PlayerId(1), "Ability Source");
+        state
+            .creature_blocked_attackers_this_turn
+            .insert(combat::BlockHistoryPair {
+                blocker: ObjectIncarnationRef::from_object(&state.objects[&blocker]),
+                attacker: ObjectIncarnationRef::from_object(&state.objects[&attacker]),
+            });
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ability_source,
+            PlayerId(1),
+        );
+        let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::CombatRelation {
+                relation: CombatRelation::BlockedBySubject {
+                    scope: CombatHistoryScope::ThisTurn,
+                },
+                subject: CombatRelationSubject::Source,
+            },
+        ]));
+        let mut ctx = FilterContext::from_ability(&ability);
+        assert!(
+            !super::matches_target_filter(&state, attacker, &filter, &ctx),
+            "reach guard: the ability's own source never blocked"
+        );
+        ctx.source_id = blocker;
+        assert!(super::matches_target_filter(
+            &state, attacker, &filter, &ctx
+        ));
     }
 
     #[test]
@@ -17156,6 +17280,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         // Leg 1: legendary creature (Arbaaz Mir, In Garruk's Wake-style ETB).
@@ -17230,6 +17355,7 @@ mod tests {
             &state,
             ObjectId(1),
             Some(PlayerId(0)),
+            None,
             None,
             None,
             None,
@@ -17332,6 +17458,7 @@ mod tests {
             &state,
             ObjectId(1),
             Some(PlayerId(0)),
+            None,
             None,
             None,
             None,
@@ -17467,7 +17594,7 @@ mod tests {
         assert_eq!(record.toughness, Some(2));
 
         let source_ctx =
-            source_context_from_filter(&state, id, Some(PlayerId(0)), None, None, None, None);
+            source_context_from_filter(&state, id, Some(PlayerId(0)), None, None, None, None, None);
         let pt_filter = |scope| FilterProp::PtComparison {
             stat: PtStat::Power,
             scope,
@@ -17609,6 +17736,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         let token_record = ZoneChangeRecord {
@@ -17688,6 +17816,7 @@ mod tests {
             &state,
             ObjectId(1),
             Some(PlayerId(0)),
+            None,
             None,
             None,
             None,
@@ -17822,8 +17951,16 @@ mod tests {
             .chosen_attributes
             .push(ChosenAttribute::Player(PlayerId(1)));
 
-        let source_ctx =
-            source_context_from_filter(&state, src, Some(PlayerId(0)), None, None, None, None);
+        let source_ctx = source_context_from_filter(
+            &state,
+            src,
+            Some(PlayerId(0)),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
 
         assert!(
             attacking_defender_matches(

@@ -55,7 +55,7 @@ use super::oracle_target::{
 use super::oracle_util::{
     canonicalize_subtype_name, is_core_type_name, is_non_subtype_subject_name, merge_or_filters,
     normalize_card_name_refs, parse_number, parse_ordinal, parse_subtype, strip_after,
-    strip_reminder_text, TextPair, SELF_REF_PARSE_ONLY_PHRASES,
+    strip_reminder_text, TextPair, GRANTING_SELF_PLACEHOLDER, SELF_REF_PARSE_ONLY_PHRASES,
 };
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::ManaProduction;
@@ -13168,6 +13168,13 @@ fn parse_damage_to_qualifier_with_rest(after_verb: &str) -> OracleResult<'_, Tar
                 ],
             },
             alt((tag("a player or battle"), tag("a player or a battle"))),
+        ),
+        // CR 601.2a + CR 201.5a: "the player who cast <granter>".
+        value(
+            TargetFilter::PlayerMatching {
+                player: Box::new(PlayerFilter::GrantingObjectCaster),
+            },
+            preceded(tag("the player who cast "), tag(GRANTING_SELF_PLACEHOLDER)),
         ),
         value(TargetFilter::Player, tag("a player")),
         // CR 506.2: "defending player" names the player being attacked in combat,

@@ -552,6 +552,8 @@ pub(crate) fn matches_player_scope(
                     // `ability_utils::parent_target_owner`. Resolved in
                     // `choose_one_of::choosing_players`; unreachable here.
                     PlayerFilter::ParentObjectTargetOwner => false,
+                    // CR 201.5a: an unlatched caster names nobody.
+                    PlayerFilter::GrantingObjectCaster => false,
                     // CR 109.4 + CR 109.5: "each [player class] who controls
                     // [comparator] [count] [filter]" — the candidate must
                     // satisfy both the `relation` predicate and the
@@ -594,14 +596,8 @@ pub(crate) fn matches_player_scope(
                                     value,
                                     controller,
                                     crate::game::quantity::QuantityContext {
-                                        entering: None,
-                                        source: source_id,
-                                        trigger_source: None,
-                                        recipient: None,
                                         scoped_player: Some(p.id),
-                                        damage_source: None,
-                                        spell: None,
-                                        event_amount: None,
+                                        ..crate::game::quantity::QuantityContext::new(source_id)
                                     },
                                 );
                                 candidate_player_scalar_with_state(state, p, controller, attr)
@@ -4060,6 +4056,10 @@ pub(crate) fn apply_parent_chain_context(
     // different slot — so clear the inherited copy here and let the one-sided
     // fight descent re-stamp it on the child it actually binds.
     child.context.target_damage_source = None;
+    // CR 608.2c: a sequential sibling starts a new instruction run.
+    if child.sub_link == SubAbilityLink::SequentialSibling {
+        child.context.unperformed_compound_instruction = None;
+    }
     bind_forwarded_result_targets_for_legacy_effect(child);
     // CR 701.20e + CR 608.2c: Look-result membership is owned by precisely
     // one immediate looping child. Ordinary hand-offs must not let it leak to
@@ -5562,6 +5562,7 @@ fn static_binds_nothing(static_ability: &StaticDefinition) -> bool {
         bypass_beneficiary,
         protection_does_not_remove,
         room_door,
+        granting_object,
     } = static_ability;
     condition.is_none()
         && per_player_condition.is_none()
@@ -5575,6 +5576,7 @@ fn static_binds_nothing(static_ability: &StaticDefinition) -> bool {
         && bypass_beneficiary.is_none()
         && protection_does_not_remove.is_none()
         && room_door.is_none()
+        && granting_object.is_none()
 }
 
 /// CR 608.2c: the one object class a static ability granted by a
@@ -5683,7 +5685,7 @@ fn referent_exists_without_gated_action(
         TargetFilter::None
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::SelfRef
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
@@ -6259,8 +6261,8 @@ fn effect_manages_own_outcome_flag(effect: &Effect) -> bool {
 ///      would be judged against an empty slice and wrongly downgraded — and a
 ///      parked `ResolutionFrame::AbilityContinuation` would additionally be
 ///      re-stamped `true` by `resolve_optional_effect_decision`'s post-chain
-///      continuation writer, silently defeating this verdict. Both current
-///      members are synchronous and self-completing.
+///      continuation writer, silently defeating this verdict. Exception: an
+///      effect that parks its own printed tail and stamps it on resume (Attach).
 ///   3. Its verdict is chain-local — `set_optional_effect_performed_recursive`
 ///      stamps the whole local chain including grandchildren, which is correct
 ///      only when every gate below belongs to THIS instruction (Volatile
@@ -6269,7 +6271,7 @@ fn resolver_performed_outcome(
     ability: &ResolvedAbility,
     effect_events: &[GameEvent],
 ) -> Option<bool> {
-    match &ability.effect {
+    let performed = match &ability.effect {
         // CR 608.2c: derives success from its exact one-hop operation result.
         // A count/cause mismatch is a resolved no-op and keeps `WhenYouDo` /
         // `IfYouDo` descendants false. (Moved verbatim from the inline block
@@ -6294,8 +6296,15 @@ fn resolver_performed_outcome(
             &ability.effect,
             effect_events,
         )),
+        // CR 701.3b: an attach that attached nothing was not done.
+        Effect::Attach { .. } => Some(mandatory_parent_effect_performed(
+            &ability.effect,
+            effect_events,
+        )),
         _ => None,
-    }
+    };
+    // CR 118.12: a mandatory member also needs every earlier member of its run.
+    performed.map(|performed| performed && !compound_run_unperformed(ability))
 }
 
 fn effect_writes_last_revealed_ids(effect: &Effect) -> bool {
@@ -6887,6 +6896,7 @@ fn scope_keeps_scoped_whole_hand_shuffle_local(scope: &PlayerFilter) -> bool {
         | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::GrantingObjectCaster
         | PlayerFilter::ChosenPlayer { .. }
         // Turn/combat ledgers.
         | PlayerFilter::OpponentLostLife
@@ -8672,6 +8682,7 @@ fn player_filter_references_tracked_set(filter: &PlayerFilter) -> bool {
         | PlayerFilter::VotedFor { .. }
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::GrantingObjectCaster
         | PlayerFilter::ChosenPlayer { .. }
         | PlayerFilter::ControlsCount { .. }
         | PlayerFilter::PlayerAttribute { .. } => false,
@@ -9472,6 +9483,12 @@ mod reflexive_occurrence_verdict_tests {
     }
 }
 
+/// CR 118.12: an earlier mandatory run member did nothing; an accepted "you may" keeps its verdict.
+fn compound_run_unperformed(ability: &ResolvedAbility) -> bool {
+    ability.context.unperformed_compound_instruction.is_some()
+        && !ability.context.optional_effect_performed
+}
+
 fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> bool {
     match effect {
         Effect::Destroy { .. } | Effect::DestroyAll { .. } => events.iter().any(|event| {
@@ -9671,6 +9688,17 @@ fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> b
         Effect::TurnFaceDown { .. } => events
             .iter()
             .any(|event| matches!(event, GameEvent::TurnedFaceDown { .. })),
+        // CR 701.3b: only an attach that took effect carries a subject.
+        Effect::Attach { .. } => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Attach,
+                    subject: Some(_),
+                    ..
+                }
+            )
+        }),
         _ => true,
     }
 }
@@ -12228,11 +12256,20 @@ fn ability_with_event_context_targets(
     if pending.targets.is_empty() {
         if let Some(filter) = pending.effect.target_filter() {
             if filter.is_context_ref() {
-                if let Some(target) = crate::game::targeting::resolve_event_context_target(
-                    state,
-                    filter,
-                    pending.source_id,
-                ) {
+                // CR 201.5a: only the ability carries the stamp that names its granter.
+                let target = match filter {
+                    TargetFilter::GrantingObject { .. } => {
+                        crate::game::targeting::resolved_targets(&pending, filter, state)
+                            .into_iter()
+                            .next()
+                    }
+                    _ => crate::game::targeting::resolve_event_context_target(
+                        state,
+                        filter,
+                        pending.source_id,
+                    ),
+                };
+                if let Some(target) = target {
                     pending.targets.push(target);
                 }
             }
@@ -16157,7 +16194,7 @@ fn resolve_chain_body(
             if let Some(choice) = state.may_trigger_auto_choice_for_live_prompt(key) {
                 resolve_optional_effect_decision(
                     state,
-                    ability.clone(),
+                    ability_with_event_context_targets(state, ability),
                     choice,
                     events,
                     depth + 1,
@@ -17239,6 +17276,7 @@ fn resolve_chain_body(
     let mandatory_rider_owned;
     let ability = if !ability.optional
         && !ability.context.optional_effect_performed
+        && !compound_run_unperformed(ability)
         && !state.cost_payment_failed_flag
         && !bounded_move_refused
         && mandatory_parent_effect_performed(&ability.effect, &events[events_before..])
@@ -17252,6 +17290,20 @@ fn resolve_chain_body(
         }) {
         let mut owned = ability.clone();
         owned.context.optional_effect_performed = true;
+        mandatory_rider_owned = owned;
+        &mandatory_rider_owned
+    // CR 118.12: a member that did nothing fails its compound; a suspended one has not resolved.
+    } else if !ability.optional
+        && !ability.context.optional_effect_performed
+        && !waits_for_resolution_choice(&state.waiting_for)
+        && !effect_manages_own_outcome_flag(&ability.effect)
+        && !mandatory_parent_effect_performed(&ability.effect, &events[events_before..])
+        && ability.sub_ability.as_ref().is_some_and(|sub| {
+            sub.sub_link == SubAbilityLink::ContinuationStep && sub.condition.is_none()
+        })
+    {
+        let mut owned = ability.clone();
+        owned.context.unperformed_compound_instruction = Some(EffectKind::from(&ability.effect));
         mandatory_rider_owned = owned;
         &mandatory_rider_owned
     } else {
@@ -19494,6 +19546,8 @@ pub(crate) fn evaluate_condition(
             | crate::types::ability::ObjectScope::EventTarget
             | crate::types::ability::ObjectScope::AmassedArmy
             | crate::types::ability::ObjectScope::ChainRootTarget
+            | crate::types::ability::ObjectScope::GrantingObject
+            | crate::types::ability::ObjectScope::SpecificObject { .. }
             | crate::types::ability::ObjectScope::BatchSource => false,
         },
         AbilityCondition::AlternativeManaCostPaid => ability.context.alternative_mana_cost_paid,
@@ -19759,6 +19813,8 @@ pub(crate) fn evaluate_condition(
                 | crate::types::ability::ObjectScope::EventTarget
                 | crate::types::ability::ObjectScope::AmassedArmy
                 | crate::types::ability::ObjectScope::ChainRootTarget
+                | crate::types::ability::ObjectScope::GrantingObject
+                | crate::types::ability::ObjectScope::SpecificObject { .. }
                 | crate::types::ability::ObjectScope::BatchSource => None,
             };
             object_id
@@ -19815,11 +19871,15 @@ pub(crate) fn evaluate_condition(
                     state.last_effect_amount.unwrap_or(0)
                 }
             };
-            let r = crate::game::quantity::resolve_quantity(
+            // CR 201.5a: the rhs reads the granter the ability is stamped with.
+            let r = crate::game::quantity::resolve_quantity_with_ctx(
                 state,
                 rhs,
                 ability.controller,
-                ability.source_id,
+                crate::game::quantity::QuantityContext {
+                    granting_object: ability.context.granting_object,
+                    ..crate::game::quantity::QuantityContext::new(ability.source_id)
+                },
             );
             comparator.evaluate(l, r)
         }
@@ -20376,6 +20436,7 @@ fn scoped_player_matches_filter(
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
         | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::GrantingObjectCaster
         | PlayerFilter::ControlsCount { .. }
         | PlayerFilter::TrackedSetPossessor { .. }
         | PlayerFilter::PlayerAttribute { .. } => false,
@@ -41245,6 +41306,50 @@ mod tests {
             !mandatory_parent_effect_performed(&give, &not_transferred),
             "GiveControl that failed must not seed the if-they-do rider"
         );
+    }
+
+    /// CR 118.12 + CR 608.2c: an earlier run member that did nothing makes a
+    /// mandatory resolver verdict false; an accepted "you may" keeps its own.
+    #[test]
+    fn resolver_verdict_needs_every_earlier_run_member() {
+        let exchanged = [GameEvent::ControllerChanged {
+            object_id: ObjectId(1),
+            old_controller: PlayerId(0),
+            new_controller: PlayerId(1),
+        }];
+        let mut ability =
+            ResolvedAbility::new(exchange_control_effect(), vec![], ObjectId(9), PlayerId(0));
+        assert_eq!(resolver_performed_outcome(&ability, &exchanged), Some(true));
+        ability.context.unperformed_compound_instruction = Some(EffectKind::Sacrifice);
+        assert_eq!(
+            resolver_performed_outcome(&ability, &exchanged),
+            Some(false)
+        );
+        ability.context.optional_effect_performed = true;
+        assert_eq!(resolver_performed_outcome(&ability, &exchanged), Some(true));
+    }
+
+    /// CR 608.2c: the run mark rides plain continuations and ends at a new sentence.
+    #[test]
+    fn compound_run_mark_ends_at_sequential_sibling() {
+        let mut state = GameState::new_two_player(42);
+        let mut parent =
+            ResolvedAbility::new(exchange_control_effect(), vec![], ObjectId(9), PlayerId(0));
+        parent.context.unperformed_compound_instruction = Some(EffectKind::Sacrifice);
+        for (link, kept) in [
+            (SubAbilityLink::ContinuationStep, true),
+            (SubAbilityLink::SequentialSibling, false),
+        ] {
+            let mut child =
+                ResolvedAbility::new(exchange_control_effect(), vec![], ObjectId(9), PlayerId(0));
+            child.sub_link = link;
+            apply_parent_chain_context(&mut child, &parent, None, &mut state);
+            assert_eq!(
+                child.context.unperformed_compound_instruction.is_some(),
+                kept,
+                "{link:?}"
+            );
+        }
     }
 
     /// The `ExchangeControl` shape both of the rows below judge: Gilded Drake's

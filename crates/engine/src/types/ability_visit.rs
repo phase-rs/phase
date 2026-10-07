@@ -42,6 +42,9 @@
 //! would change replacement behavior). Neither is migrated here, because either
 //! migration would change behavior.
 //!
+//! The effect-axis walk is one `define_walk!` body, expanded as the shared
+//! `&Effect` walk here and as the exclusive definition-node walk in [`nodes_mut`].
+//!
 //! # [`ResolutionScope`] — the own-resolution boundary
 //!
 //! Some callers need to know only what an ability does during **its own**
@@ -157,58 +160,6 @@ fn debug_assert_own_resolution_unreachable(scope: ResolutionScope, fn_name: &str
     );
 }
 
-/// Effect-axis wrapper over [`scope_prunes_nested_ability`]. Every recursion
-/// into a nested `AbilityDefinition` that is *not* already behind a boundary
-/// gate goes through here.
-fn visit_nested_ability_def_scoped<F>(
-    def: &AbilityDefinition,
-    scope: ResolutionScope,
-    visit: &mut F,
-) -> ControlFlow<()>
-where
-    F: FnMut(&Effect) -> ControlFlow<()>,
-{
-    if scope_prunes_nested_ability(def, scope) {
-        return ControlFlow::Continue(());
-    }
-    visit_ability_def_scoped(def, scope, visit)
-}
-
-pub fn visit_ability_def<F>(def: &AbilityDefinition, visit: &mut F) -> ControlFlow<()>
-where
-    F: FnMut(&Effect) -> ControlFlow<()>,
-{
-    visit_ability_def_scoped(def, ResolutionScope::IncludeRegisteredLater, visit)
-}
-
-pub(crate) fn visit_ability_def_scoped<F>(
-    def: &AbilityDefinition,
-    scope: ResolutionScope,
-    visit: &mut F,
-) -> ControlFlow<()>
-where
-    F: FnMut(&Effect) -> ControlFlow<()>,
-{
-    visit_effect_scoped(&def.effect, scope, visit)?;
-    if let Some(cost) = &def.cost {
-        visit_cost_scoped(cost, scope, visit)?;
-    }
-    if let Some(sub) = &def.sub_ability {
-        visit_nested_ability_def_scoped(sub, scope, visit)?;
-    }
-    if let Some(else_ability) = &def.else_ability {
-        visit_nested_ability_def_scoped(else_ability, scope, visit)?;
-    }
-    for mode in &def.mode_abilities {
-        visit_nested_ability_def_scoped(mode, scope, visit)?;
-    }
-    // "unless [player] pays {cost}" — the cost may be an EffectCost that conjures.
-    if let Some(unless_pay) = &def.unless_pay {
-        visit_cost_scoped(&unless_pay.cost, scope, visit)?;
-    }
-    ControlFlow::Continue(())
-}
-
 /// CR 605.1a "its cost and effect" — the COST axis companion to
 /// [`visit_ability_def_scoped`].
 ///
@@ -293,53 +244,113 @@ where
     ControlFlow::Continue(())
 }
 
-pub fn visit_trigger<F>(trigger: &TriggerDefinition, visit: &mut F) -> ControlFlow<()>
+/// The effect-axis walk, written once and expanded in two borrow modes so both
+/// descend the one carrier list: shared (every `Effect`) at this module's root,
+/// exclusive (every definition node) in [`nodes_mut`].
+macro_rules! define_walk {
+    ([$($mut_:tt)?]; [$($bound:tt)+]; $on_effect:ident; $on_node:ident; $arc_iter:ident) => {
+/// Effect-axis wrapper over [`scope_prunes_nested_ability`]. Every recursion
+/// into a nested `AbilityDefinition` that is *not* already behind a boundary
+/// gate goes through here.
+fn visit_nested_ability_def_scoped<F>(
+    def: &$($mut_)? AbilityDefinition,
+    scope: ResolutionScope,
+    visit: &mut F,
+) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
+{
+    if scope_prunes_nested_ability(def, scope) {
+        return ControlFlow::Continue(());
+    }
+    visit_ability_def_scoped(def, scope, visit)
+}
+
+pub fn visit_ability_def<F>(def: &$($mut_)? AbilityDefinition, visit: &mut F) -> ControlFlow<()>
+where
+    F: $($bound)+,
+{
+    visit_ability_def_scoped(def, ResolutionScope::IncludeRegisteredLater, visit)
+}
+
+pub(crate) fn visit_ability_def_scoped<F>(
+    def: &$($mut_)? AbilityDefinition,
+    scope: ResolutionScope,
+    visit: &mut F,
+) -> ControlFlow<()>
+where
+    F: $($bound)+,
+{
+    $on_node!(visit, Ability, def);
+    visit_effect_scoped(&$($mut_)? def.effect, scope, visit)?;
+    if let Some(cost) = &$($mut_)? def.cost {
+        visit_cost_scoped(cost, scope, visit)?;
+    }
+    if let Some(sub) = &$($mut_)? def.sub_ability {
+        visit_nested_ability_def_scoped(sub, scope, visit)?;
+    }
+    if let Some(else_ability) = &$($mut_)? def.else_ability {
+        visit_nested_ability_def_scoped(else_ability, scope, visit)?;
+    }
+    for mode in &$($mut_)? def.mode_abilities {
+        visit_nested_ability_def_scoped(mode, scope, visit)?;
+    }
+    // "unless [player] pays {cost}" — the cost may be an EffectCost that conjures.
+    if let Some(unless_pay) = &$($mut_)? def.unless_pay {
+        visit_cost_scoped(&$($mut_)? unless_pay.cost, scope, visit)?;
+    }
+    ControlFlow::Continue(())
+}
+
+pub fn visit_trigger<F>(trigger: &$($mut_)? TriggerDefinition, visit: &mut F) -> ControlFlow<()>
+where
+    F: $($bound)+,
 {
     visit_trigger_scoped(trigger, ResolutionScope::IncludeRegisteredLater, visit)
 }
 
 pub(crate) fn visit_trigger_scoped<F>(
-    trigger: &TriggerDefinition,
+    trigger: &$($mut_)? TriggerDefinition,
     scope: ResolutionScope,
     visit: &mut F,
 ) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
     debug_assert_own_resolution_unreachable(scope, "visit_trigger_scoped");
-    if let Some(execute) = &trigger.execute {
+    $on_node!(visit, Trigger, trigger);
+    if let Some(execute) = &$($mut_)? trigger.execute {
         visit_ability_def_scoped(execute, scope, visit)?;
     }
-    if let Some(unless_pay) = &trigger.unless_pay {
-        visit_cost_scoped(&unless_pay.cost, scope, visit)?;
+    if let Some(unless_pay) = &$($mut_)? trigger.unless_pay {
+        visit_cost_scoped(&$($mut_)? unless_pay.cost, scope, visit)?;
     }
     ControlFlow::Continue(())
 }
 
-pub fn visit_replacement<F>(replacement: &ReplacementDefinition, visit: &mut F) -> ControlFlow<()>
+pub fn visit_replacement<F>(replacement: &$($mut_)? ReplacementDefinition, visit: &mut F) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
     visit_replacement_scoped(replacement, ResolutionScope::IncludeRegisteredLater, visit)
 }
 
 pub(crate) fn visit_replacement_scoped<F>(
-    replacement: &ReplacementDefinition,
+    replacement: &$($mut_)? ReplacementDefinition,
     scope: ResolutionScope,
     visit: &mut F,
 ) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
     debug_assert_own_resolution_unreachable(scope, "visit_replacement_scoped");
-    if let Some(execute) = &replacement.execute {
+    $on_node!(visit, Replacement, replacement);
+    if let Some(execute) = &$($mut_)? replacement.execute {
         visit_ability_def_scoped(execute, scope, visit)?;
     }
     // The mode carries the decline continuation (and, for MayCost, a cost),
     // either of which may conjure. Descend into both.
-    match &replacement.mode {
+    match &$($mut_)? replacement.mode {
         ReplacementMode::MayCost { cost, decline } => {
             visit_cost_scoped(cost, scope, visit)?;
             if let Some(decline) = decline {
@@ -358,45 +369,46 @@ where
     ControlFlow::Continue(())
 }
 
-pub fn visit_static<F>(static_def: &StaticDefinition, visit: &mut F) -> ControlFlow<()>
+pub fn visit_static<F>(static_def: &$($mut_)? StaticDefinition, visit: &mut F) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
     visit_static_scoped(static_def, ResolutionScope::IncludeRegisteredLater, visit)
 }
 
 pub(crate) fn visit_static_scoped<F>(
-    static_def: &StaticDefinition,
+    static_def: &$($mut_)? StaticDefinition,
     scope: ResolutionScope,
     visit: &mut F,
 ) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
     debug_assert_own_resolution_unreachable(scope, "visit_static_scoped");
-    for modification in &static_def.modifications {
+    $on_node!(visit, Static, static_def);
+    for modification in &$($mut_)? static_def.modifications {
         visit_continuous_mod_scoped(modification, scope, visit)?;
     }
     ControlFlow::Continue(())
 }
 
 pub fn visit_continuous_mod<F>(
-    modification: &ContinuousModification,
+    modification: &$($mut_)? ContinuousModification,
     visit: &mut F,
 ) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
     visit_continuous_mod_scoped(modification, ResolutionScope::IncludeRegisteredLater, visit)
 }
 
 pub(crate) fn visit_continuous_mod_scoped<F>(
-    modification: &ContinuousModification,
+    modification: &$($mut_)? ContinuousModification,
     scope: ResolutionScope,
     visit: &mut F,
 ) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
     debug_assert_own_resolution_unreachable(scope, "visit_continuous_mod_scoped");
     match modification {
@@ -478,51 +490,51 @@ where
     ControlFlow::Continue(())
 }
 
-pub fn visit_copiable_values<F>(values: &CopiableValues, visit: &mut F) -> ControlFlow<()>
+pub fn visit_copiable_values<F>(values: &$($mut_)? CopiableValues, visit: &mut F) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
     visit_copiable_values_scoped(values, ResolutionScope::IncludeRegisteredLater, visit)
 }
 
 pub(crate) fn visit_copiable_values_scoped<F>(
-    values: &CopiableValues,
+    values: &$($mut_)? CopiableValues,
     scope: ResolutionScope,
     visit: &mut F,
 ) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
     debug_assert_own_resolution_unreachable(scope, "visit_copiable_values_scoped");
-    for ability in values.abilities.iter() {
+    for ability in $arc_iter!(values.abilities) {
         visit_ability_def_scoped(ability, scope, visit)?;
     }
-    for trigger in values.trigger_definitions.iter() {
+    for trigger in $arc_iter!(values.trigger_definitions) {
         visit_trigger_scoped(trigger, scope, visit)?;
     }
-    for static_def in values.static_definitions.iter() {
+    for static_def in $arc_iter!(values.static_definitions) {
         visit_static_scoped(static_def, scope, visit)?;
     }
-    for replacement in values.replacement_definitions.iter() {
+    for replacement in $arc_iter!(values.replacement_definitions) {
         visit_replacement_scoped(replacement, scope, visit)?;
     }
     ControlFlow::Continue(())
 }
 
-pub fn visit_cost<F>(cost: &AbilityCost, visit: &mut F) -> ControlFlow<()>
+pub fn visit_cost<F>(cost: &$($mut_)? AbilityCost, visit: &mut F) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
     visit_cost_scoped(cost, ResolutionScope::IncludeRegisteredLater, visit)
 }
 
 pub(crate) fn visit_cost_scoped<F>(
-    cost: &AbilityCost,
+    cost: &$($mut_)? AbilityCost,
     scope: ResolutionScope,
     visit: &mut F,
 ) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
     match cost {
         AbilityCost::EffectCost { effect } => visit_effect_scoped(effect, scope, visit)?,
@@ -577,22 +589,22 @@ where
 /// `ai_support::targeted_exchange::tests::predicate_sees_a_fight_in_every_nested_carrier`
 /// are the complementary safety nets for those cases — extend both whenever a
 /// carrier is added.
-pub fn visit_effect<F>(effect: &Effect, visit: &mut F) -> ControlFlow<()>
+pub fn visit_effect<F>(effect: &$($mut_)? Effect, visit: &mut F) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
     visit_effect_scoped(effect, ResolutionScope::IncludeRegisteredLater, visit)
 }
 
 pub(crate) fn visit_effect_scoped<F>(
-    effect: &Effect,
+    effect: &$($mut_)? Effect,
     scope: ResolutionScope,
     visit: &mut F,
 ) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
-    visit(effect)?;
+    $on_effect!(visit, effect);
     match effect {
         Effect::Intensify { .. } => {}
         Effect::ApplyPerpetual { .. } => {}
@@ -719,7 +731,7 @@ where
         }
         Effect::RollDie { results, .. } => {
             for branch in results {
-                visit_nested_ability_def_scoped(&branch.effect, scope, visit)?;
+                visit_nested_ability_def_scoped(&$($mut_)? branch.effect, scope, visit)?;
             }
         }
         Effect::ChooseOneOf { branches, .. } => {
@@ -1040,4 +1052,460 @@ where
         | Effect::Unimplemented { .. } => {}
     }
     ControlFlow::Continue(())
+}
+    };
+}
+
+macro_rules! visit_each_effect {
+    ($visit:ident, $effect:ident) => {
+        $visit($effect)?
+    };
+}
+macro_rules! skip_effects {
+    ($visit:ident, $effect:ident) => {};
+}
+macro_rules! skip_nodes {
+    ($visit:ident, $kind:ident, $node:ident) => {};
+}
+macro_rules! visit_each_node {
+    ($visit:ident, $kind:ident, $node:ident) => {
+        $visit(DefinitionNodeMut::$kind(&mut *$node))?
+    };
+}
+macro_rules! shared_iter {
+    ($vec:expr) => {
+        $vec.iter()
+    };
+}
+macro_rules! exclusive_iter {
+    ($vec:expr) => {
+        std::sync::Arc::make_mut(&mut $vec).iter_mut()
+    };
+}
+
+define_walk!([]; [FnMut(&Effect) -> ControlFlow<()>]; visit_each_effect; skip_nodes; shared_iter);
+
+/// A definition node surfaced by the exclusive walk.
+pub enum DefinitionNodeMut<'a> {
+    Ability(&'a mut AbilityDefinition),
+    Trigger(&'a mut TriggerDefinition),
+    Static(&'a mut StaticDefinition),
+    Replacement(&'a mut ReplacementDefinition),
+}
+
+/// The exclusive walk: visits every definition node the shared walk descends.
+pub mod nodes_mut {
+    use super::*;
+
+    define_walk!([mut]; [FnMut(DefinitionNodeMut<'_>) -> ControlFlow<()>]; skip_effects; visit_each_node; exclusive_iter);
+}
+
+macro_rules! visit_each_node_ref {
+    ($visit:ident, $kind:ident, $node:ident) => {
+        $visit(DefinitionNode::$kind(&*$node))?
+    };
+}
+
+/// A definition node surfaced by the shared node walk.
+pub enum DefinitionNode<'a> {
+    Ability(&'a AbilityDefinition),
+    Trigger(&'a TriggerDefinition),
+    Static(&'a StaticDefinition),
+    Replacement(&'a ReplacementDefinition),
+}
+
+/// The shared twin of [`nodes_mut`].
+pub mod nodes {
+    use super::*;
+
+    define_walk!([]; [FnMut(DefinitionNode<'_>) -> ControlFlow<()>]; skip_effects; visit_each_node_ref; shared_iter);
+}
+
+/// CR 201.5a: the positions in one definition node where a granter symbol is bound.
+///
+/// The parser can place a symbol elsewhere; every entry that parses masked text then refuses
+/// that definition (`parser::oracle::granter_reference_unreached`).
+macro_rules! define_granter_walk {
+    ([$($mut_:tt)?]; $Node:ident; $nodes:ident) => {
+use crate::types::ability::{
+    AbilityCondition, AbilityCost, ActivationRestriction, CardTypeSetSource,
+    ContinuousModification, Duration, Effect, FilterProp, ObjectScope, ParsedCondition,
+    PlayerFilter, PtValue, QuantityExpr, QuantityRef, ReplacementCondition, StaticCondition,
+    TargetFilter, TriggerCondition,
+};
+use crate::types::identifiers::ObjectIncarnationRef;
+use crate::types::statics::{BlockExceptionKind, StaticMode};
+use super::{$Node, $nodes};
+use std::ops::ControlFlow;
+
+/// A granter symbol: the incarnation slot of a filter, an object scope, or the caster
+/// player filter.
+pub(crate) enum Symbol<'a> {
+    Filter(&'a $($mut_)? Option<ObjectIncarnationRef>),
+    Scope(&'a $($mut_)? ObjectScope),
+    Caster(&'a $($mut_)? TargetFilter),
+}
+
+/// Visits `root` and every definition node nested in it — the nodes whose fields
+/// [`node_fields`] reads.
+pub(crate) fn each_node(root: $Node<'_>, v: &mut impl FnMut($Node<'_>)) {
+    let mut on = |node: $Node<'_>| on_node(node, v);
+    let _ = match root {
+        $Node::Ability(def) => $nodes::visit_ability_def(def, &mut on),
+        $Node::Trigger(trigger) => $nodes::visit_trigger(trigger, &mut on),
+        $Node::Static(def) => $nodes::visit_static(def, &mut on),
+        $Node::Replacement(def) => $nodes::visit_replacement(def, &mut on),
+    };
+}
+
+/// [`each_node`] over the definitions a modification grants.
+pub(crate) fn each_node_in(m: &$($mut_)? ContinuousModification, v: &mut impl FnMut($Node<'_>)) {
+    let _ = $nodes::visit_continuous_mod(m, &mut |node| on_node(node, &mut *v));
+}
+
+/// The "player who cast <granter>" filters in the definitions `m` grants.
+pub(crate) fn each_caster_in(m: &$($mut_)? ContinuousModification, v: &mut impl FnMut(&$($mut_)? TargetFilter)) {
+    each_node_in(m, &mut |node| node_fields(node, &mut |symbol| {
+        if let Symbol::Caster(f) = symbol {
+            v(f);
+        }
+    }));
+}
+
+// `BecomeCopy` is a leaf of the node walk, but its extra modifications carry grants.
+fn on_node($($mut_)? node: $Node<'_>, v: &mut impl FnMut($Node<'_>)) -> ControlFlow<()> {
+    if let $Node::Ability(def) = &$($mut_)? node {
+        if let Effect::BecomeCopy { additional_modifications, .. } = &$($mut_)? *def.effect {
+            for m in additional_modifications {
+                each_node_in(m, v);
+            }
+        }
+    }
+    v(node);
+    ControlFlow::Continue(())
+}
+
+/// Visits the symbols in `node`'s own fields; nested definition nodes are not entered.
+pub(crate) fn node_fields(node: $Node<'_>, v: &mut impl FnMut(Symbol<'_>)) {
+    match node {
+        $Node::Ability(def) => {
+            effect(&$($mut_)? def.effect, v);
+            if let Some(cost) = &$($mut_)? def.cost {
+                ability_cost(cost, v);
+            }
+            if let Some(condition) = &$($mut_)? def.condition {
+                ability_condition(condition, v);
+            }
+            if let Some(d) = &$($mut_)? def.duration {
+                duration(d, v);
+            }
+            for restriction in &$($mut_)? def.activation_restrictions {
+                if let ActivationRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::QuantityComparison { lhs, rhs, .. }),
+                } = restriction
+                {
+                    quantity(lhs, v);
+                    quantity(rhs, v);
+                }
+            }
+        }
+        $Node::Trigger(trigger) => {
+            for f in [&$($mut_)? trigger.valid_card, &$($mut_)? trigger.valid_target, &$($mut_)? trigger.valid_source]
+                .into_iter()
+                .flatten()
+            {
+                filter(f, v);
+            }
+            if let Some(condition) = &$($mut_)? trigger.condition {
+                trigger_condition(condition, v);
+            }
+        }
+        $Node::Static(def) => {
+            if let Some(affected) = &$($mut_)? def.affected {
+                filter(affected, v);
+            }
+            if let Some(condition) = &$($mut_)? def.condition {
+                static_condition(condition, v);
+            }
+            static_mode(&$($mut_)? def.mode, v);
+            for m in &$($mut_)? def.modifications {
+                modification(m, v);
+            }
+        }
+        $Node::Replacement(def) => {
+            if let Some(f) = &$($mut_)? def.valid_card {
+                filter(f, v);
+            }
+            if let Some(condition) = &$($mut_)? def.condition {
+                replacement_condition(condition, v);
+            }
+        }
+    }
+}
+
+fn effect(e: &$($mut_)? Effect, v: &mut impl FnMut(Symbol<'_>)) {
+    match e {
+        Effect::Sacrifice { target, count, .. }
+        | Effect::PutCounter { target, count, .. }
+        | Effect::RemoveCounter { target, count, .. } => {
+            filter(target, v);
+            quantity(count, v);
+        }
+        Effect::ChangeZone { target, .. }
+        | Effect::Bounce { target, .. }
+        | Effect::Destroy { target, .. }
+        | Effect::Fight { target, .. }
+        | Effect::SetTapState { target, .. }
+        | Effect::Attach { attachment: target, .. } => filter(target, v),
+        Effect::DealDamage { amount, target, .. } => {
+            quantity(amount, v);
+            filter(target, v);
+        }
+        Effect::GainLife { amount, .. } => quantity(amount, v),
+        Effect::Pump { power, toughness, target, .. } => {
+            pt(power, v);
+            pt(toughness, v);
+            filter(target, v);
+        }
+        Effect::Token { power, toughness, .. } => {
+            pt(power, v);
+            pt(toughness, v);
+        }
+        Effect::Animate { power, toughness, .. } => {
+            for p in [power, toughness].into_iter().flatten() {
+                pt(p, v);
+            }
+        }
+        Effect::BecomeCopy { duration: Some(d), .. }
+        | Effect::CastFromZone { duration: Some(d), .. }
+        | Effect::GenericEffect { duration: Some(d), .. } => duration(d, v),
+        _ => {}
+    }
+}
+
+fn ability_cost(cost: &$($mut_)? AbilityCost, v: &mut impl FnMut(Symbol<'_>)) {
+    match cost {
+        AbilityCost::Sacrifice(sacrifice) => filter(&$($mut_)? sacrifice.target, v),
+        AbilityCost::Exile { filter: Some(f), .. }
+        | AbilityCost::RemoveCounter { target: Some(f), .. }
+        | AbilityCost::ReturnToHand { filter: Some(f), .. }
+        | AbilityCost::Reveal { filter: Some(f), .. } => filter(f, v),
+        AbilityCost::EffectCost { effect: e } => effect(e, v),
+        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+            for c in costs {
+                ability_cost(c, v);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn ability_condition(condition: &$($mut_)? AbilityCondition, v: &mut impl FnMut(Symbol<'_>)) {
+    match condition {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+            quantity(lhs, v);
+            quantity(rhs, v);
+        }
+        AbilityCondition::PreviousEffectAmount { rhs, .. } => quantity(rhs, v),
+        AbilityCondition::ConditionInstead { inner: c } | AbilityCondition::Not { condition: c } => {
+            ability_condition(c, v)
+        }
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            for c in conditions {
+                ability_condition(c, v);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn trigger_condition(condition: &$($mut_)? TriggerCondition, v: &mut impl FnMut(Symbol<'_>)) {
+    match condition {
+        TriggerCondition::ControlsType { filter: f } | TriggerCondition::ControlsNone { filter: f } => {
+            filter(f, v)
+        }
+        TriggerCondition::QuantityComparison { lhs, rhs, .. } => {
+            quantity(lhs, v);
+            quantity(rhs, v);
+        }
+        TriggerCondition::Not { condition: c } => trigger_condition(c, v),
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+            for c in conditions {
+                trigger_condition(c, v);
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn static_condition(condition: &$($mut_)? StaticCondition, v: &mut impl FnMut(Symbol<'_>)) {
+    match condition {
+        StaticCondition::QuantityComparison { lhs, rhs, .. } => {
+            quantity(lhs, v);
+            quantity(rhs, v);
+        }
+        StaticCondition::IsTapped { scope } => object_scope(scope, v),
+        StaticCondition::Not { condition: c } => static_condition(c, v),
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
+            for c in conditions {
+                static_condition(c, v);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn replacement_condition(condition: &$($mut_)? ReplacementCondition, v: &mut impl FnMut(Symbol<'_>)) {
+    match condition {
+        ReplacementCondition::OnlyIfQuantity { lhs, rhs, .. }
+        | ReplacementCondition::UnlessQuantity { lhs, rhs, .. } => {
+            quantity(lhs, v);
+            quantity(rhs, v);
+        }
+        ReplacementCondition::UnlessControlsCountMatching { filter: f, .. } => filter(f, v),
+        ReplacementCondition::And { conditions } => {
+            for c in conditions {
+                replacement_condition(c, v);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn static_mode(mode: &$($mut_)? StaticMode, v: &mut impl FnMut(Symbol<'_>)) {
+    match mode {
+        StaticMode::CantBeBlockedBy { filter: f }
+        | StaticMode::CantBeBlockedExceptBy { kind: BlockExceptionKind::Quality(f) } => filter(f, v),
+        _ => {}
+    }
+}
+
+/// Only a modification's own values; a grant's definition is a node of its own.
+pub(crate) fn modification(m: &$($mut_)? ContinuousModification, v: &mut impl FnMut(Symbol<'_>)) {
+    match m {
+        ContinuousModification::SetDynamicPower { value }
+        | ContinuousModification::SetDynamicToughness { value }
+        | ContinuousModification::SetPowerDynamic { value }
+        | ContinuousModification::SetToughnessDynamic { value }
+        | ContinuousModification::AddDynamicPower { value }
+        | ContinuousModification::AddDynamicToughness { value } => quantity(value, v),
+        ContinuousModification::AddStaticMode { mode } => static_mode(mode, v),
+        _ => {}
+    }
+}
+
+fn duration(d: &$($mut_)? Duration, v: &mut impl FnMut(Symbol<'_>)) {
+    if let Duration::ForAsLongAs { condition } = d {
+        static_condition(condition, v);
+    }
+}
+
+pub(crate) fn filter(f: &$($mut_)? TargetFilter, v: &mut impl FnMut(Symbol<'_>)) {
+    // Checked before the `match`: an arm there would still borrow `f` while handing it off.
+    if matches!(f, TargetFilter::PlayerMatching { player } if **player == PlayerFilter::GrantingObjectCaster) {
+        v(Symbol::Caster(f));
+        return;
+    }
+    match f {
+        TargetFilter::GrantingObject { bound } => v(Symbol::Filter(bound)),
+        TargetFilter::Typed(typed) => {
+            for prop in &$($mut_)? typed.properties {
+                match prop {
+                    FilterProp::DistinctFrom { reference } => filter(reference, v),
+                    FilterProp::Cmc { value, .. } | FilterProp::PtComparison { value, .. } => {
+                        quantity(value, v)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        TargetFilter::Not { filter: inner } => filter(inner, v),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            for inner in filters {
+                filter(inner, v);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn pt(p: &$($mut_)? PtValue, v: &mut impl FnMut(Symbol<'_>)) {
+    if let PtValue::Quantity(q) = p {
+        quantity(q, v);
+    }
+}
+
+fn quantity(q: &$($mut_)? QuantityExpr, v: &mut impl FnMut(Symbol<'_>)) {
+    match q {
+        QuantityExpr::Ref { qty } => quantity_ref(qty, v),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power { exponent: inner, .. } => quantity(inner, v),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            for inner in exprs {
+                quantity(inner, v);
+            }
+        }
+        QuantityExpr::Difference { left, right } => {
+            quantity(left, v);
+            quantity(right, v);
+        }
+        QuantityExpr::Fixed { .. } => {}
+    }
+}
+
+fn quantity_ref(r: &$($mut_)? QuantityRef, v: &mut impl FnMut(Symbol<'_>)) {
+    match r {
+        QuantityRef::CountersOn { scope, .. } => object_scope(scope, v),
+        QuantityRef::ObjectCount { filter: f } => filter(f, v),
+        QuantityRef::PropertyAggregate(aggregate) => {
+            if let CardTypeSetSource::Objects { filter: f } = define_granter_walk!(@source aggregate $($mut_)?) {
+                filter(f, v);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn object_scope(scope: &$($mut_)? ObjectScope, v: &mut impl FnMut(Symbol<'_>)) {
+    if matches!(scope, ObjectScope::GrantingObject) {
+        v(Symbol::Scope(scope));
+    }
+}
+    };
+    (@source $aggregate:ident) => { $aggregate.source() };
+    (@source $aggregate:ident mut) => { $aggregate.source_mut() };
+}
+
+/// Shared granter-symbol walk.
+pub(crate) mod granter_symbols {
+    define_granter_walk!([]; DefinitionNode; nodes);
+}
+
+/// Exclusive granter-symbol walk.
+pub(crate) mod granter_symbols_mut {
+    define_granter_walk!([mut]; DefinitionNodeMut; nodes_mut);
+
+    /// CR 201.5a + CR 400.7: binds a symbol to `granter` — a scope to that incarnation
+    /// whether current or not, a filter to match that incarnation and no later one.
+    pub(crate) fn bind(granter: ObjectIncarnationRef) -> impl FnMut(Symbol<'_>) {
+        move |symbol| match symbol {
+            Symbol::Filter(bound) => {
+                bound.get_or_insert(granter);
+            }
+            Symbol::Scope(scope) => *scope = ObjectScope::SpecificObject { object: granter },
+            Symbol::Caster(_) => {}
+        }
+    }
+}
+
+/// Visits every granter symbol in `root` and the definition nodes nested in it.
+pub(crate) fn each_granter_symbol(
+    root: DefinitionNode<'_>,
+    v: &mut impl FnMut(granter_symbols::Symbol<'_>),
+) {
+    granter_symbols::each_node(root, &mut |node| granter_symbols::node_fields(node, v));
 }

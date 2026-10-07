@@ -936,7 +936,7 @@ pub(crate) fn filter_domain(filter: &TargetFilter) -> FilterDomain {
         // Runtime-bound object references. The filter names no type line, so the
         // object axis stays open and the player axis is closed.
         TargetFilter::SelfRef
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::SourceOrPaired
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::AttachedTo

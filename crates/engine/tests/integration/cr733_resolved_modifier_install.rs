@@ -352,6 +352,7 @@ fn retirement_fixture() -> (
                 TransientContinuousEffectBindings {
                     affected_recipient: Some(recipient_ref),
                     duration_subject: Some(source_ref),
+                    granting_object: None,
                 },
             );
     }

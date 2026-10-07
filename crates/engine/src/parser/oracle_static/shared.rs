@@ -5302,15 +5302,24 @@ fn parse_subtype_or_list_prefix_with_word_parser(
     }
 }
 
-/// Try to strip a leading "with [counter] counter(s) on it/them" clause from `text`,
-/// returning the `FilterProp` and the remaining text after the clause.
-/// CR 613.1 + CR 613.7: Used to parse conditional static keyword grants in layer 6.
-pub(crate) fn strip_counter_condition_prefix(text: &str) -> Option<(FilterProp, &str)> {
+/// Strip a leading "with <qualifier>" object qualifier sitting between a static's
+/// subject ("… creatures you control") and its predicate, returning the
+/// conjoined `FilterProp`s it denotes and the remaining text. Two forms:
+/// - CR 122.1: "with [counter] counter(s) on it/them" — one `Counters` prop via
+///   `parse_counter_suffix` (conditional anthems / keyword grants);
+/// - CR 208.4b: "with base power and toughness N/M" — two base-scope
+///   `PtComparison` props via `nom_filter::parse_with_base_pt_designation`
+///   (Andrios, Roaming Explorer: "tapped creatures you control with base power
+///   and toughness 4/3 have base power and toughness 16/9").
+pub(crate) fn strip_with_qualifier_prefix(text: &str) -> Option<(Vec<FilterProp>, &str)> {
     let lower = text.to_lowercase();
     nom_tag_lower(&lower, &lower, "with ")?;
     // parse_counter_suffix expects optional leading whitespace before "with"
-    let (prop, consumed) = parse_counter_suffix(&lower)?;
-    Some((prop, text[consumed..].trim_start()))
+    if let Some((prop, consumed)) = parse_counter_suffix(&lower) {
+        return Some((vec![prop], text[consumed..].trim_start()));
+    }
+    let (props, rest) = nom_on_lower(text, &lower, nom_filter::parse_with_base_pt_designation)?;
+    Some((Vec::from(props), rest.trim_start()))
 }
 
 pub(crate) fn parse_modified_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
@@ -5849,20 +5858,25 @@ pub(crate) fn add_another_filter(filter: TargetFilter) -> TargetFilter {
     }
 }
 
-/// Add a single `FilterProp` to an existing `TargetFilter`.
-pub(crate) fn add_property(filter: TargetFilter, prop: FilterProp) -> TargetFilter {
+/// Add `FilterProp`s (conjoined) to an existing `TargetFilter`.
+pub(crate) fn add_properties(filter: TargetFilter, props: Vec<FilterProp>) -> TargetFilter {
     match filter {
         TargetFilter::Typed(mut typed) => {
-            typed.properties.push(prop);
+            typed.properties.extend(props);
             TargetFilter::Typed(typed)
         }
         other => TargetFilter::And {
             filters: vec![
                 other,
-                TargetFilter::Typed(TypedFilter::default().properties(vec![prop])),
+                TargetFilter::Typed(TypedFilter::default().properties(props)),
             ],
         },
     }
+}
+
+/// Add a single `FilterProp` to an existing `TargetFilter`.
+pub(crate) fn add_property(filter: TargetFilter, prop: FilterProp) -> TargetFilter {
+    add_properties(filter, vec![prop])
 }
 
 /// CR 109.5: True when `filter` is anchored to the source's controller via a
