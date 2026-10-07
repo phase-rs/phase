@@ -1663,10 +1663,20 @@ fn maskwood_sliver_receives_sedge_sliver_granted_pump() {
     assert!(!holds_static(&runner, opponent_bear, &sedge_grant));
 
     // CR 400.7: the Bear returns as a new object and qualifies again.
+    let battlefield_incarnation = runner.state().objects[&bear].incarnation;
     move_to_zone(runner.state_mut(), bear, Zone::Graveyard, &mut Vec::new());
     flush_layers(runner.state_mut());
+    assert_eq!(runner.state().objects[&bear].zone, Zone::Graveyard);
+    assert!(!holds_static(&runner, bear, &sedge_grant));
+    assert_eq!(power_toughness(&runner, bear), (Some(2), Some(2)));
+    let graveyard_incarnation = runner.state().objects[&bear].incarnation;
     move_to_zone(runner.state_mut(), bear, Zone::Battlefield, &mut Vec::new());
     flush_layers(runner.state_mut());
+    assert_eq!(runner.state().objects[&bear].zone, Zone::Battlefield);
+    let returned_incarnation = runner.state().objects[&bear].incarnation;
+    assert_ne!(returned_incarnation, battlefield_incarnation);
+    assert_ne!(returned_incarnation, graveyard_incarnation);
+    assert!(holds_static(&runner, bear, &sedge_grant));
     assert_eq!(power_toughness(&runner, bear), (Some(3), Some(3)));
 }
 
@@ -1703,8 +1713,8 @@ fn transient_grant_reaches_march_animated_artifact() {
     mark_layers_full(runner.state_mut());
     flush_layers(runner.state_mut());
 
-    // CR 613.1d + CR 613.1f: March animates Sol Ring in layer 4, so the
-    // transient grant's live affected set includes it in layer 6.
+    // CR 613.1d + CR 613.1f + CR 611.2c: March animates Sol Ring in layer 4,
+    // so Sol Ring is a creature the transient grant affects when it applies in layer 6.
     assert_eq!(power_toughness(&runner, ring), (Some(2), Some(2)));
     assert_eq!(power_toughness(&runner, grant_source), (Some(2), Some(2)));
     assert_eq!(
