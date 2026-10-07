@@ -3,6 +3,7 @@ use std::sync::Arc;
 use engine::analysis::decision_template::{
     DecisionPoint, DecisionPointKind, DecisionSlot, IterationCount, ShortcutDecisionSchema,
 };
+use engine::game::derived_views::{derive_filtered_views, ClientGameStateRef};
 use engine::game::engine::apply;
 use engine::game::interaction::{
     bind_interaction_authority, derive_viewer_interaction, preview_interaction,
@@ -1838,6 +1839,207 @@ fn tap_land_for_mana_projects_resolved_and_missing_chosen_color_restrictions() {
         ],
         "a missing choice remains visibly fail-closed instead of appearing unrestricted"
     );
+}
+
+fn scry_identity_runner() -> (engine::game::scenario::GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let scry = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Scry {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    );
+    let mut twice = scry.clone();
+    twice.sub_ability = Some(Box::new(scry));
+    let spell = scenario
+        .add_spell_to_hand(P0, "Scry identity witness", true)
+        .with_ability_definition(twice)
+        .id();
+    scenario.add_card_to_library_top(P0, "Scry identity library card");
+    let host = scenario.add_creature(P0, "Scry attachment host", 2, 2).id();
+    let seed = scenario
+        .add_enchantment_from_oracle(P0, "Scry attachment seed", "Enchant permanent")
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    state.active_player = P1;
+    state.priority_player = P0;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+    attach_and_assert_linked(state, seed, host);
+    bind(state, "scry-identity");
+    let card_id = state.objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast the consecutive-Scry building block on the other player's turn");
+    runner.advance_until_stack_empty();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ScryChoice { player: P0, .. }
+    ));
+    assert_eq!(
+        runner.state().objects[&seed].attached_to,
+        Some(engine::game::game_object::AttachTarget::Object(host)),
+        "the Aura seed must remain attached through cast and resolution"
+    );
+    (runner, seed)
+}
+
+fn scry_wire(state: &GameState, viewer: Option<PlayerId>) -> serde_json::Value {
+    serde_json::to_value(ClientGameStateRef::wrap(state, viewer))
+        .expect("serialize Scry projection")
+}
+
+#[test]
+fn scry_prompt_identity_survives_omitted_opportunities_and_rotates_after_apply() {
+    let (mut runner, seed) = scry_identity_runner();
+    let first = scry_wire(runner.state(), Some(P0))["derived"]["scry_prompt_id"].clone();
+    assert!(
+        first.is_string(),
+        "the raw getter's viewer 0 receives the native slot identity"
+    );
+    assert_eq!(
+        first,
+        runner.state().active_interaction_slots[0].interaction_id.0
+    );
+    let legacy = derive_viewer_interaction(runner.state(), runner.state(), P1);
+    assert!(!legacy.can_submit && legacy.opportunities.is_empty());
+    assert_eq!(
+        scry_wire(runner.state(), Some(P0))["derived"]["scry_prompt_id"],
+        first
+    );
+
+    let normal = runner.state().clone();
+    let state = runner.state_mut();
+    let mut next_id = next_object_id(state);
+    let mut tip = seed;
+    for _ in 1..140 {
+        tip = clone_attachment_onto(state, seed, tip, &mut next_id);
+    }
+    assert_eq!(
+        state
+            .objects
+            .values()
+            .filter(|object| object.attached_to.is_some())
+            .count(),
+        140,
+        "match the actual 140-Aura chain rather than an SBA-detached seed"
+    );
+    let unsupported = viewer_interaction(runner.state(), P0);
+    assert_eq!(
+        unsupported.availability,
+        InteractionAvailability::Unsupported {
+            reason: InteractionReasonCode::PayloadTooLarge,
+        }
+    );
+    assert!(unsupported.opportunities.is_empty());
+    assert_eq!(
+        scry_wire(runner.state(), Some(P0))["derived"]["scry_prompt_id"],
+        first
+    );
+    *runner.state_mut() = normal;
+    assert!(!viewer_interaction(runner.state(), P0)
+        .opportunities
+        .is_empty());
+    assert_eq!(
+        scry_wire(runner.state(), Some(P0))["derived"]["scry_prompt_id"],
+        first
+    );
+
+    apply(
+        runner.state_mut(),
+        P0,
+        GameAction::SetPhaseStops { stops: Vec::new() },
+    )
+    .expect("a preference leaves the Scry standing");
+    assert!(apply(
+        runner.state_mut(),
+        P1,
+        GameAction::SelectCards { cards: Vec::new() }
+    )
+    .is_err());
+    assert_eq!(
+        scry_wire(runner.state(), Some(P0))["derived"]["scry_prompt_id"],
+        first
+    );
+    let before = runner.state().waiting_for.clone();
+    apply(
+        runner.state_mut(),
+        P0,
+        GameAction::SelectCards { cards: Vec::new() },
+    )
+    .expect("accept Bottom for the first Scry");
+    assert_eq!(
+        runner.state().waiting_for,
+        before,
+        "the next Scry repeats the same card payload"
+    );
+    let second = scry_wire(runner.state(), Some(P0))["derived"]["scry_prompt_id"].clone();
+    assert!(second.is_string());
+    assert_ne!(first, second);
+}
+
+#[test]
+fn scry_prompt_identity_is_authorized_before_filtering_and_follows_rekey() {
+    let (mut runner, _) = scry_identity_runner();
+    for viewer in [None, Some(P1), Some(PlayerId(255))] {
+        assert!(scry_wire(runner.state(), viewer)["derived"]
+            .get("scry_prompt_id")
+            .is_none());
+    }
+    let original = runner.state().active_interaction_slots[0]
+        .interaction_id
+        .clone();
+    let state = runner.state_mut();
+    state.active_player = P0;
+    state.turn_decision_controller = Some(P1);
+    assert!(scry_wire(state, Some(P0))["derived"]
+        .get("scry_prompt_id")
+        .is_none());
+    assert_eq!(
+        scry_wire(state, Some(P1))["derived"]["scry_prompt_id"],
+        original.0
+    );
+    let mut filtered = filter_state_for_viewer(state, P1);
+    filtered.active_interaction_slots.clear();
+    filtered.interaction_session_id = None;
+    filtered.turn_decision_controller = None;
+    assert_eq!(
+        derive_filtered_views(state, &filtered, Some(P1)).scry_prompt_id,
+        Some(original.clone())
+    );
+    assert_eq!(
+        derive_filtered_views(state, &filtered, Some(P0)).scry_prompt_id,
+        None
+    );
+
+    let persisted = serde_json::to_string(state).expect("persist the paused native state");
+    let mut restored: GameState = serde_json::from_str(&persisted).expect("decode paused state");
+    bind(&mut restored, "scry-restored-namespace");
+    let rebound = scry_wire(&restored, Some(P1))["derived"]["scry_prompt_id"].clone();
+    assert!(rebound.is_string());
+    assert_ne!(rebound, original.0);
+    assert_eq!(
+        rebound,
+        restored.active_interaction_slots[0].interaction_id.0
+    );
+
+    restored.interaction_session_id = None;
+    assert!(scry_wire(&restored, Some(P1))["derived"]
+        .get("scry_prompt_id")
+        .is_none());
+    restored.interaction_session_id = Some(InteractionSessionId("valid-session".into()));
+    restored.next_interaction_serial = "0".into();
+    assert!(scry_wire(&restored, Some(P1))["derived"]
+        .get("scry_prompt_id")
+        .is_none());
 }
 
 #[test]

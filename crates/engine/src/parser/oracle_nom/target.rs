@@ -396,7 +396,11 @@ pub fn parse_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
 /// [`parse_self_reference`] (effect-target channel) and
 /// [`parse_cost_self_reference`] (cost channel).
 pub fn parse_granting_object_ref(input: &str) -> OracleResult<'_, TargetFilter> {
-    value(TargetFilter::GrantingObject, tag(GRANTING_SELF_PLACEHOLDER)).parse(input)
+    value(
+        TargetFilter::GrantingObject { bound: None },
+        tag(GRANTING_SELF_PLACEHOLDER),
+    )
+    .parse(input)
 }
 
 /// CR 201.5 / CR 201.5a: Shared self-reference combinator for *cost* positions
@@ -1004,12 +1008,16 @@ pub(crate) enum ObjectExclusion {
 /// `separated_list1` is deliberate: a list with any unparsed item
 /// ("enchanted creature", "those that attacked this turn") is refused whole, so
 /// the caller's existing single-referent path keeps charge of every form it
-/// already consumes.
+/// already consumes. CR 201.5a: a granter reference is not the source, so a list
+/// naming it is refused.
 pub(crate) fn parse_object_exclusion_list(input: &str) -> OracleResult<'_, Vec<ObjectExclusion>> {
     all_consuming(separated_list1(
         tag(" and "),
         alt((
-            map(parse_self_reference, |_| ObjectExclusion::Source),
+            preceded(
+                not(parse_granting_object_ref),
+                map(parse_self_reference, |_| ObjectExclusion::Source),
+            ),
             map(parse_chosen_object_reference, |_| {
                 ObjectExclusion::ChosenObject
             }),
@@ -1021,6 +1029,20 @@ pub(crate) fn parse_object_exclusion_list(input: &str) -> OracleResult<'_, Vec<O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn object_exclusion_list_refuses_a_granter_reference() {
+        assert!(parse_object_exclusion_list(&format!(
+            "{GRANTING_SELF_PLACEHOLDER} and the chosen creature"
+        ))
+        .is_err());
+        assert_eq!(
+            parse_object_exclusion_list("~ and the chosen creature")
+                .unwrap()
+                .1,
+            vec![ObjectExclusion::Source, ObjectExclusion::ChosenObject]
+        );
+    }
 
     #[test]
     fn test_parse_type_phrase_creature() {

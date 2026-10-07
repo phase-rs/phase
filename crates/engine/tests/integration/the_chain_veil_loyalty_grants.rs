@@ -198,6 +198,7 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         min_x_value: 0,
         announced_x: None,
         cant_be_copied: false,
+        illegal_targets_disposition: Default::default(),
         copy_count_status: CopyCountStatus::Pending,
         forward_result: false,
         unless_pay: None,

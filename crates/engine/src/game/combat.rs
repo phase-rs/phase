@@ -93,9 +93,7 @@ struct CombatStaticGates {
 
 impl CombatStaticGates {
     /// Reads the presence flags from the O(1) `StaticModePresence` index
-    /// (Unit 1) instead of sweeping `game_functioning_statics`. Goad also
-    /// admits Continuous definitions, which can contain a printed Goaded
-    /// designation; the exact source scan discards unrelated definitions.
+    /// (Unit 1) instead of sweeping `game_functioning_statics`.
     ///
     /// `has_attack_only_neighbor` (CR 508.1c) is read from the SAME index; the
     /// enforcement loop still sweeps `game_functioning_statics`, and the index is
@@ -109,8 +107,7 @@ impl CombatStaticGates {
             has_cant_attack: static_kind_present(state, StaticModeKind::CantAttack),
             has_cant_attack_or_block: static_kind_present(state, StaticModeKind::CantAttackOrBlock),
             has_must_attack: static_kind_present(state, StaticModeKind::MustAttack),
-            has_goad: static_kind_present(state, StaticModeKind::Goaded)
-                || static_kind_present(state, StaticModeKind::Continuous),
+            has_goad: static_kind_present(state, StaticModeKind::Goaded),
             has_attack_only_neighbor: static_kind_present(
                 state,
                 StaticModeKind::AttackOnlyNeighbor,
@@ -6643,8 +6640,8 @@ pub fn declare_attackers(
 
 /// CR 701.15b/c: The players who goaded this permanent. Direct goad, live
 /// resolution-created designations, and functioning printed statics are three
-/// independent causes. The printed-static scan is gated by the presence of a
-/// Goaded or Continuous definition; transient designations are read regardless.
+/// independent causes. The printed-static scan is gated by the `Goaded`
+/// presence bit; transient designations are read regardless.
 pub(crate) fn goading_players_for_creature_gated(
     state: &GameState,
     creature_id: ObjectId,
@@ -6687,8 +6684,7 @@ pub(crate) fn goading_players_for_creature(
     state: &GameState,
     creature_id: ObjectId,
 ) -> HashSet<PlayerId> {
-    let has_goad_static = static_kind_present(state, StaticModeKind::Goaded)
-        || static_kind_present(state, StaticModeKind::Continuous);
+    let has_goad_static = static_kind_present(state, StaticModeKind::Goaded);
     goading_players_for_creature_gated(state, creature_id, has_goad_static)
 }
 
@@ -6765,6 +6761,21 @@ pub(crate) fn players_to_attack_away_from_gated(
     players
 }
 
+/// CR 701.15b: whether a printed static designates the permanents it affects
+/// goaded — directly, or as a Continuous `AddStaticMode { Goaded }` grant.
+pub(crate) fn static_designates_goad(def: &StaticDefinition) -> bool {
+    def.mode == StaticMode::Goaded
+        || (def.mode == StaticMode::Continuous
+            && def.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded
+                    }
+                )
+            }))
+}
+
 /// CR 701.15b: `(goading player, source id)` for each functioning printed
 /// static designating `creature_id`. Both the player-set query and source-badge
 /// collector consume these hits. Direct and resolution-created designations
@@ -6775,17 +6786,7 @@ fn goad_static_hits_for_creature<'a>(
 ) -> impl Iterator<Item = (PlayerId, ObjectId)> + 'a {
     super::functioning_abilities::battlefield_active_statics(state).filter_map(
         move |(source, def)| {
-            if def.mode != StaticMode::Goaded
-                && !(def.mode == StaticMode::Continuous
-                    && def.modifications.iter().any(|modification| {
-                        matches!(
-                            modification,
-                            ContinuousModification::AddStaticMode {
-                                mode: StaticMode::Goaded
-                            }
-                        )
-                    }))
-            {
+            if !static_designates_goad(def) {
                 return None;
             }
             let affected = def.affected.as_ref()?;

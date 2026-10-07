@@ -60,6 +60,16 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 109 — CR 201.5a granter binding: `ObjectScope::GrantingObject` and
+///      `ObjectScope::SpecificObject`, `TargetFilter::GrantingObject { bound }`,
+///      `PlayerFilter::GrantingObjectCaster`, plus the `granting_object` stamp on
+///      `AbilityDefinition`, `TriggerDefinition`, `StaticDefinition`,
+///      `ReplacementDefinition`, `SpellContext` and `TriggerSourceContext`.
+///      A v108 peer cannot deserialize the new state. P2P moves to wire 91.
+/// 108 — Serialized `IllegalTargetsDisposition::StillResolves` lets a root
+///       ability continue after its chosen target becomes illegal. Older peers
+///       would silently apply the ordinary non-resolution rule, so full-game
+///       and P2P refuse the capability mismatch (wire 90).
 /// 107 — `UntilCondition::NextMatches` gains `count` ("until you exile two
 ///      nonland cards …" — Invasion of Alara, CR 608.2c), the paused loop
 ///      (`PendingExileFromTopUntil`) keeps its `hits`,
@@ -884,7 +894,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 107;
+pub const PROTOCOL_VERSION: u32 = 109;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2139,12 +2149,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 107);
+        assert_eq!(PROTOCOL_VERSION, 109);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 106);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 108);
     }
 
     #[test]

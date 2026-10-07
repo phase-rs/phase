@@ -58,6 +58,7 @@ pub fn resolve(
                     .then_some(recipient),
                 duration_subject: matches!(duration, Duration::ForAsLongAs { .. })
                     .then_some(recipient),
+                granting_object: None,
             },
         );
         if installed.is_none() {

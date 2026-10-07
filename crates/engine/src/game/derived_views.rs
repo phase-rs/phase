@@ -38,6 +38,7 @@ use crate::types::game_state::{
     SyntheticTriggerProvenance, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
+use crate::types::interaction::InteractionId;
 use crate::types::keywords::Keyword;
 use crate::types::layers::Layer;
 use crate::types::mana::ManaCost;
@@ -623,6 +624,10 @@ pub struct DerivedViews {
     /// when there is no actor or multiple distinct authorized submitters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unique_authorized_submitter: Option<PlayerId>,
+    /// The authorized viewer's Scry identity, retained when the bounded
+    /// interaction projection omits its opportunities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scry_prompt_id: Option<InteractionId>,
     /// Viewer-visible object ids in each player's shared exile pile. This is
     /// projected after face-down visibility filtering so the client can anchor
     /// rejection feedback without reimplementing private-information rules.
@@ -1535,6 +1540,8 @@ fn temporary_cant_be_blocked_source(
 pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews {
     let mut views = DerivedViews {
         unique_authorized_submitter: unique_authorized_submitter(state),
+        scry_prompt_id: viewer
+            .and_then(|viewer| crate::game::interaction::scry_prompt_id_for_viewer(state, viewer)),
         blocker_assignment_pairs: blocker_assignment_pairs(state),
         debug_library_cards: debug_library_cards(state, viewer),
         current_target_kind: current_target_kind(state),
@@ -2169,6 +2176,9 @@ pub fn derive_filtered_views(
 ) -> DerivedViews {
     let mut views = derive_views(filtered_state, viewer);
     views.unique_authorized_submitter = unique_authorized_submitter(authoritative_state);
+    views.scry_prompt_id = viewer.and_then(|viewer| {
+        crate::game::interaction::scry_prompt_id_for_viewer(authoritative_state, viewer)
+    });
     views.debug_library_cards = debug_library_cards(authoritative_state, viewer);
     views.visible_exile_object_ids = visible_exile_object_ids(filtered_state);
     // CR 509.1g: blocking relationships are public information. Preserve this
@@ -4233,6 +4243,7 @@ mod tests {
                             &state.objects[&target],
                         ),
                     ),
+                    granting_object: None,
                 },
             )
             .expect("the fixture's duration begins");
@@ -6627,6 +6638,7 @@ mod tests {
                 bypass_beneficiary: None,
                 protection_does_not_remove: None,
                 room_door: None,
+                granting_object: None,
             }]
             .into();
         }

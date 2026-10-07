@@ -13603,8 +13603,12 @@ pub(super) fn parse_imperative_family_ast(
             // parse_target sees clean input (parse_target is whitespace-tolerant
             // but stops on punctuation only via its own grammar).
             let span = rest.trim_end_matches(['.', ';']);
-            try_parse_exchange_control_targets(span).map(|(target_a, target_b)| {
-                ImperativeFamilyAst::ExchangeControl { target_a, target_b }
+            try_parse_exchange_control_targets(span).map(|(target_a, target_b, multi_target)| {
+                ImperativeFamilyAst::ExchangeControl {
+                    target_a,
+                    target_b,
+                    multi_target,
+                }
             })
         }
 
@@ -13890,7 +13894,15 @@ fn try_parse_exchange_life_totals(lower: &str) -> Option<(TargetFilter, TargetFi
 /// Each per-slot parse must consume its entire substring (no trailing remainder)
 /// so we don't accept malformed inputs like "target creature and dance" as a
 /// valid two-target phrase.
-fn try_parse_exchange_control_targets(span: &str) -> Option<(TargetFilter, TargetFilter)> {
+///
+/// The third element is the ability's target-count spec. It is `Some` only for
+/// a compound shape whose sole declared slot is printed "up to one target …"
+/// beside a context-ref slot (Gilded Drake: "this creature and up to one target
+/// creature an opponent controls"); every other "up to"/"any number of" shape
+/// is rejected (`None` overall) rather than parsed with its count dropped.
+fn try_parse_exchange_control_targets(
+    span: &str,
+) -> Option<(TargetFilter, TargetFilter, Option<MultiTargetSpec>)> {
     // CR 601.2c + CR 115.1: a trailing "controlled by different players"
     // (Kitsune, Dragon's Daughter: "exchange control of two other target
     // creatures controlled by different players") is a target-SET constraint
@@ -13916,7 +13928,7 @@ fn try_parse_exchange_control_targets(span: &str) -> Option<(TargetFilter, Targe
     {
         let (filter, remainder) = parse_target(span);
         if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
-            return Some((filter.clone(), filter));
+            return Some((filter.clone(), filter, None));
         }
     }
 
@@ -13935,8 +13947,20 @@ fn try_parse_exchange_control_targets(span: &str) -> Option<(TargetFilter, Targe
         nom::sequence::pair(take_until::<_, _, OracleError<'_>>(" and "), tag(" and "))
             .parse(span)
             .ok()?;
-    let target_a = parse_exchange_slot(left.trim())?;
-    let mut target_b = parse_exchange_slot(right.trim())?;
+    let (target_a, spec_a) = parse_exchange_slot(left.trim())?;
+    let (mut target_b, spec_b) = parse_exchange_slot(right.trim())?;
+    // CR 115.6 + CR 601.2c: an "up to" count is an ability-wide zero-target
+    // authority (targeting_is_optional), so it is admitted only when it is the
+    // ability's sole declared slot; a quantified slot beside a declared
+    // mandatory slot fails closed rather than making both optional, and its
+    // maximum is one, because a paired node claims one slot per declared filter.
+    let up_to_one = MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 });
+    let multi_target = match (spec_a, spec_b) {
+        (None, None) => None,
+        (Some(spec), None) if target_b.is_context_ref() && spec == up_to_one => Some(spec),
+        (None, Some(spec)) if target_a.is_context_ref() && spec == up_to_one => Some(spec),
+        _ => return None,
+    };
     // The relative clause attaches RIGHTWARD, to slot B, and its antecedent is
     // slot A's declared object target. Guarded on slot A actually
     // surfacing one: `collect_target_slots`' ExchangeControl loop skips a
@@ -13947,29 +13971,34 @@ fn try_parse_exchange_control_targets(span: &str) -> Option<(TargetFilter, Targe
     if !matches!(target_a, TargetFilter::SelfRef) {
         crate::parser::oracle_target::rebind_compound_slot_referent_to_prior_target(&mut target_b);
     }
-    Some((target_a, target_b))
+    Some((target_a, target_b, multi_target))
 }
 
-/// Parse a single exchange-control slot phrase. Returns the slot filter, or
-/// `None` if the phrase isn't a recognised slot. The slot must be fully
-/// consumed — a trailing remainder indicates the caller handed us malformed
-/// input and we must fall through rather than silently accepting a partial
-/// parse.
-fn parse_exchange_slot(phrase: &str) -> Option<TargetFilter> {
+/// Parse a single exchange-control slot phrase. Returns the slot filter and the
+/// slot's printed "up to N" / "any number of" count (`None` when the slot has
+/// none), or `None` if the phrase isn't a recognised slot. The slot must be
+/// fully consumed — a trailing remainder indicates the caller handed us
+/// malformed input and we must fall through rather than silently accepting a
+/// partial parse.
+fn parse_exchange_slot(phrase: &str) -> Option<(TargetFilter, Option<MultiTargetSpec>)> {
     // Self-referential slot dispatch via nom: "this <type>" refers to the
     // source permanent and resolves to SelfRef regardless of the type word
     // (artifact, creature, enchantment …).
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("this ").parse(phrase) {
         if !rest.trim().is_empty() {
-            return Some(TargetFilter::SelfRef);
+            return Some((TargetFilter::SelfRef, None));
         }
     }
 
     // Standard target slot: "target …" / "another target …" / "other target …".
     // parse_target absorbs all "target"/"another target"/"other target" prefixes.
+    // CR 115.6: a leading "up to N" / "any number of" count is peeled by the
+    // single authority `strip_optional_target_prefix` and returned to the
+    // caller, which decides whether this paired shape can carry it.
+    let (phrase, multi_target) = super::strip_optional_target_prefix(phrase);
     let (filter, remainder) = parse_target(phrase);
     if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
-        return Some(filter);
+        return Some((filter, multi_target));
     }
     None
 }
@@ -15665,6 +15694,29 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             )));
             clause
         }
+        // CR 115.6 + CR 701.12a: "exchange control of this creature and up to
+        // one target creature an opponent controls" (Gilded Drake). Same shape
+        // as the GainControl arm: the bare-Effect lowering cannot carry the
+        // target count, so the AST that captured one is lowered here and the
+        // count is threaded onto the clause, where it becomes the ability's
+        // zero-target authority. The variant is rebuilt with
+        // `multi_target: None` so lowering still flows through the single
+        // authority (`lower_imperative_family_effect`).
+        ImperativeFamilyAst::ExchangeControl {
+            target_a,
+            target_b,
+            multi_target: Some(multi_target),
+        } => {
+            let mut clause = parsed_clause(lower_imperative_family_effect(
+                ImperativeFamilyAst::ExchangeControl {
+                    target_a,
+                    target_b,
+                    multi_target: None,
+                },
+            ));
+            clause.multi_target = Some(multi_target);
+            clause
+        }
         // All other arms produce a bare Effect with no sub_ability chain.
         other => parsed_clause(lower_imperative_family_effect(other)),
     }
@@ -15796,9 +15848,12 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         // CR 701.12a: Exchange control of two permanents. The two slot filters
         // come from the parser; resolution reads ability.targets for the chosen
         // objects.
-        ImperativeFamilyAst::ExchangeControl { target_a, target_b } => {
-            Effect::ExchangeControl { target_a, target_b }
-        }
+        ImperativeFamilyAst::ExchangeControl {
+            target_a,
+            target_b,
+            // Recovered at the clause layer in `lower_imperative_family_ast`.
+            multi_target: _,
+        } => Effect::ExchangeControl { target_a, target_b },
         ImperativeFamilyAst::ExchangeLifeWithStat { player, stat } => {
             Effect::ExchangeLifeWithStat { player, stat }
         }
@@ -27221,6 +27276,91 @@ mod tests {
                 assert_eq!(*player_b, TargetFilter::Player);
             }
             other => panic!("expected ExchangeLifeTotals, got {other:?}"),
+        }
+    }
+
+    /// CR 115.6 + CR 701.12a (PU1): the declared slot of "exchange control of
+    /// <self> and up to one target creature an opponent controls" carries its
+    /// "up to one" count, beside the context-ref `SelfRef` slot.
+    #[test]
+    fn exchange_control_self_and_up_to_one_target_carries_the_count() {
+        let opponent_creature =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
+        let up_to_one = MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 });
+        for span in [
+            "~ and up to one target creature an opponent controls",
+            "this creature and up to one target creature an opponent controls",
+        ] {
+            assert_eq!(
+                try_parse_exchange_control_targets(span),
+                Some((
+                    TargetFilter::SelfRef,
+                    opponent_creature.clone(),
+                    Some(up_to_one.clone())
+                )),
+                "span {span:?}"
+            );
+        }
+
+        // Sibling (Volatile Stormdrake): the mandatory slot has no count.
+        assert_eq!(
+            try_parse_exchange_control_targets(
+                "this creature and target creature an opponent controls"
+            ),
+            Some((TargetFilter::SelfRef, opponent_creature, None)),
+        );
+    }
+
+    /// CR 115.6 + CR 601.2c (PU1, full pipeline): Gilded Drake's verbatim
+    /// Oracle text lowers the "up to one" count onto the trigger's execute as
+    /// its `multi_target`, the ability's zero-target authority, without also
+    /// setting the ability-wide `optional_targeting` flag.
+    #[test]
+    fn gilded_drake_trigger_execute_carries_up_to_one_multi_target() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Flying\nWhen this creature enters, exchange control of this creature and up to \
+             one target creature an opponent controls. If you don't or can't make an exchange, \
+             sacrifice this creature. This ability still resolves if its target becomes illegal.",
+            "Gilded Drake",
+            &[],
+            &["Creature".to_string()],
+            &["Drake".to_string()],
+        );
+        let execute = parsed
+            .triggers
+            .first()
+            .and_then(|trigger| trigger.execute.as_deref())
+            .expect("Gilded Drake has an ETB trigger with an execute");
+        assert!(
+            matches!(&*execute.effect, Effect::ExchangeControl { .. }),
+            "expected ExchangeControl, got {:?}",
+            execute.effect
+        );
+        assert_eq!(
+            execute.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
+        );
+        assert!(!execute.optional_targeting);
+    }
+
+    /// CR 115.6 + CR 601.2c (PU2): an "up to" count is admitted only on the
+    /// sole declared slot and only as "up to one". Two declared slots, or any
+    /// other count, fail closed instead of misdescribing a mandatory slot or
+    /// dropping a count no paired slot can hold. Paired positives: PU1 above
+    /// parses the same grammar with "up to one" beside a context-ref slot.
+    #[test]
+    fn exchange_control_up_to_count_fails_closed_outside_the_sole_up_to_one_slot() {
+        for span in [
+            "target creature and up to one target creature",
+            "up to one target creature and up to one target creature",
+            "this creature and up to two target creatures an opponent controls",
+            "this creature and any number of target creatures an opponent controls",
+        ] {
+            assert_eq!(
+                try_parse_exchange_control_targets(span),
+                None,
+                "span {span:?}"
+            );
         }
     }
 

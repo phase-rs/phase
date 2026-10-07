@@ -143,6 +143,7 @@ fn is_plain_parent_target_delivery(delivery: &ResolvedAbility) -> bool {
         && delivery.repeat_for.is_none()
         && delivery.min_x_value == 0
         && !delivery.cant_be_copied
+        && delivery.illegal_targets_disposition.is_does_not_resolve()
         && !delivery.forward_result
         && delivery.unless_pay.is_none()
         && delivery.distribution.is_none()

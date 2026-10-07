@@ -7,6 +7,15 @@ description: Review an implementation in scope, such as an uncommitted diff, a j
 
 Review for gaps: things that are missing or wrong. Do not spend findings on style nits, CI-enforced formatting, or a diff recap.
 
+## Review the change
+
+This applies in every mode. Findings are defects in the change under review: what it introduces, the premises it rests on, and what it states it delivers but does not.
+
+- A defect is **pre-existing** when it reproduces at the change's base. The change **depends on** it when a test or acceptance row the change asserts cannot pass, or would have to be weakened, without fixing it. Run that one probe only when the answer changes what happens next.
+- A pre-existing defect the change depends on is a finding (`behavior`; in charter mode, a decision finding).
+- Any other pre-existing defect goes in a separate **Pre-existing** list after the findings, once, with its evidence. It is untagged, never blocks, and is not repeated in a later round.
+- Aim probes at the change's own claims. Do not hunt for pre-existing defects.
+
 ## Workflow
 
 1. Identify the changed surface from the diff, commit, or named files.
@@ -14,7 +23,7 @@ Review for gaps: things that are missing or wrong. Do not spend findings on styl
 3. Apply only the relevant lenses below.
 4. If the scope is a PR, fetch whatever external review comments exist (CodeRabbit, human reviewers) and confirm-or-refute each against the current head with code evidence, folding confirmed findings into your own. **Assume none exist by default** — Gemini Code Assist has been sunset, so no bot is guaranteed to have pre-screened this PR. Your own lenses are the complete review, not a supplement to a bot's; do not under-invest expecting a backstop. Where an external finding *does* exist, silently omitting it — or returning a verdict less severe than an open, unrefuted finding from another reviewer — is itself a defect. Review comments, checks, and uploaded/sticky artifacts count only when their evidence identifies the current PR head SHA; otherwise report the evidence as missing rather than attributing it to the current diff.
 5. If the scope is a PR touching engine/parser source, the parse-diff sticky comment (marker `<!-- coverage-parse-diff -->`) is required evidence: fetch its full body and confront the card-level diff against the PR's claimed scope. Unexplained gained/lost/changed cards are findings (unintended parser blast radius). A *Baseline pending* body means the diff is unavailable — flag it so the handler brings the branch current to regenerate it; an absent comment despite changed engine source, or a comment/artifact not bound to the current PR head SHA, means CI evidence is missing for the current head. This PR-head requirement does not apply to Engine-Implementer Checkpoint Mode: review the committed `BASE_SHA..CANDIDATE_SHA` diff instead.
-6. Report findings only. Silence means LGTM.
+6. Report findings, then the **Pre-existing** list when it has entries. Silence on both means LGTM.
 
 When `pr-contribution-handler` explicitly requests the manual quality gate, add `Quality Gate: PASS|FAIL` before findings. PASS requires all three current-PR facts: (1) claimed parse-impact count equals the measured parse-diff count and the normalized card sets are identical, using the full artifact when the sticky comment truncates examples; (2) the change is at an existing authority/right seam and reuses its vocabulary; and (3) a production-pipeline test is demonstrated to fail when the production change is reverted. On PASS, return the applicable existing praise tokens (`right-seam`, `scope-discipline`, `discriminating-runtime-test`, `parameterized-not-proliferated`) for the ordinary review/enqueue event. Never infer quality from Tier or standing and never create a `quality_recommended` event.
 

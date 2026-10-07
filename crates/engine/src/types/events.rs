@@ -603,7 +603,7 @@ impl EventObjectSnapshot {
             // Answering any of these would require resolving the candidate (or an engine
             // referent) out of live state, which is exactly what this snapshot forbids.
             // If the parser ever reaches one, the gate fails and it must be handled here.
-            TargetFilter::GrantingObject
+            TargetFilter::GrantingObject { .. }
             | TargetFilter::SourceOrPaired
             | TargetFilter::SpecificObject { .. }
             | TargetFilter::LastCreated

@@ -21,7 +21,7 @@
 // `validate_child_span` that failed open). Each suppression below names the unit
 // that gives the item a production caller, and dies when that unit lands.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::diagnostic::OracleDiagnostic;
 use super::effect_chain::AbilityIr;
@@ -685,13 +685,14 @@ pub(crate) struct OracleDocIr {
     /// `lower_oracle_ir`. Empty for the vast majority of cards. See `relation`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) relations: Vec<DocumentRelationIr>,
+    /// CR 201.5a: the source lines where the masker left a quoted name as the host `~`.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(crate) granter_name_refusals: BTreeSet<usize>,
 }
 
 impl OracleDocIr {
     /// Look up an item by its stable id. Cross-item lowering binds through this,
     /// never by scanning category vectors for a matching shape.
-    // PLAN-05 DEBT (2026-07-17, post-U2): used only by the source-context consumers in the Class-B bring-up (unit 3); retire this allow there.
-    #[allow(dead_code)]
     pub(crate) fn item(&self, id: OracleItemId) -> Option<&OracleItemIr> {
         self.items.iter().find(|item| item.id == id)
     }
@@ -1180,6 +1181,7 @@ impl OracleDocBuilder {
             // assembled (both the main path and the Class path converge there),
             // where the full source-ordered item list and card types are in hand.
             relations: Vec::new(),
+            granter_name_refusals: BTreeSet::new(),
         }
     }
 }
