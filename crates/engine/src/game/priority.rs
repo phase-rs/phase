@@ -1044,8 +1044,8 @@ mod tests {
             standing_priority_pass(&state, PlayerId(0), Some(&opponent_top)),
             StandingPriorityPass::Granted
         );
-        // CR 117.3d: only triggered abilities can be yielded, so the same
-        // stored yield does not cover a spell from that card.
+        // Yields match only triggered abilities (`GameState::is_priority_yielded`),
+        // so the same stored yield does not cover a spell from that card.
         let opponent_spell = spell_entry(2, PlayerId(1), CardId(77));
         assert_eq!(
             standing_priority_pass(&state, PlayerId(0), Some(&opponent_spell)),

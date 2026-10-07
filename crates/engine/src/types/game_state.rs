@@ -17987,11 +17987,12 @@ pub enum AutoPassMode {
 ///   never reach a client, which is why `FullControl` has to live in engine
 ///   state rather than in a frontend toggle: an auto-pass session installed by
 ///   another player (Resolve All, CR 117.3d) drives this loop, and a
-///   client-only preference is invisible to it. Inside a stack-resolution
-///   session that loop also executes the ladder's standing rungs (Full
-///   Control, yields, own object on top) through
-///   `priority::standing_priority_pass`, the same authority the recommendation
-///   uses.
+///   client-only preference is invisible to it. Inside a rechecking
+///   (`RecheckNoMeaningfulPriorityAction`) stack-resolution session that loop
+///   also executes the ladder's standing rungs (Full Control, yields, own
+///   object on top) through `priority::standing_priority_pass`, the same
+///   authority the recommendation uses; a Committed session consults only its
+///   Full Control rung.
 ///
 /// `Standard` is the meaningful-action-aware ladder. `SkipLowUseWindows` adds a
 /// narrow fast path for the active player's empty-stack Upkeep, Draw, and End

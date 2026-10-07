@@ -7942,8 +7942,9 @@ mod tests {
 
     /// G3 (hoist, meaningful-ability variant): on your own turn with your own
     /// spell on top of the stack AND a meaningful non-mana activated ability
-    /// available, auto-pass fires — the hoisted own-top rung (Rung 4) outranks
-    /// the meaningful-action hold below (accepted MTGA parity). The reach-guard
+    /// available, auto-pass fires — the own-top standing pass
+    /// (`priority::standing_priority_pass`) outranks the meaningful-action hold
+    /// below (accepted MTGA parity). The reach-guard
     /// (same state/actions, EMPTY stack) proves the ability genuinely HOLDS the
     /// window absent an own-top entry, so the flip is non-vacuous: it is the
     /// presence of the own object on top that turns the hold into a pass. This
@@ -7973,8 +7974,9 @@ mod tests {
             "reach-guard: own turn + meaningful activated ability, empty stack → hold"
         );
 
-        // Own spell on top of the stack: the hoisted own-top rung (Rung 4) flips
-        // that hold to a PASS, outranking the meaningful-action hold below.
+        // Own spell on top of the stack: the own-top standing pass
+        // (`priority::standing_priority_pass`) flips that hold to a PASS,
+        // outranking the meaningful-action hold below.
         state.stack.push_back(StackEntry {
             id: ObjectId(900),
             source_id: ObjectId(901),
