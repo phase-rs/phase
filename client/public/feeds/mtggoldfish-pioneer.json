@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-10-06T00:00:00Z",
+  "updated": "2026-10-07T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -1204,108 +1204,122 @@
       ]
     },
     {
-      "name": "Mono-White Humans",
+      "name": "Jund Artifact Sacrifice",
       "author": "MTGGoldfish",
       "colors": [
-        "W"
+        "B",
+        "R",
+        "G"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 3,
-          "name": "Zack Fair"
+          "count": 4,
+          "name": "Biotech Specialist"
         },
         {
           "count": 2,
-          "name": "Basri, Tomorrow's Champion"
-        },
-        {
-          "count": 2,
-          "name": "Kellan, Daring Traveler"
+          "name": "Thoughtseize"
         },
         {
           "count": 4,
-          "name": "Adeline, Resplendent Cathar"
+          "name": "The Sackville-Bagginses"
         },
         {
-          "count": 4,
-          "name": "Thalia, Guardian of Thraben"
-        },
-        {
-          "count": 3,
-          "name": "Eiganjo, Seat of the Empire"
-        },
-        {
-          "count": 3,
-          "name": "Kytheon, Hero of Akros"
-        },
-        {
-          "count": 4,
-          "name": "Thalia's Lieutenant"
-        },
-        {
-          "count": 10,
-          "name": "Plains"
+          "count": 1,
+          "name": "Swamp"
         },
         {
           "count": 2,
-          "name": "The Queen of Dale"
-        },
-        {
-          "count": 3,
-          "name": "Cavern of Souls"
+          "name": "Stomping Ground"
         },
         {
           "count": 4,
-          "name": "Mox Amber"
+          "name": "Deadly Dispute"
         },
         {
           "count": 4,
-          "name": "Dauntless Bodyguard"
+          "name": "Experimental Synthesizer"
+        },
+        {
+          "count": 4,
+          "name": "Greedy Freebooter"
+        },
+        {
+          "count": 4,
+          "name": "Springleaf Drum"
+        },
+        {
+          "count": 4,
+          "name": "Oni-Cult Anvil"
+        },
+        {
+          "count": 4,
+          "name": "Shrapnel Blast"
+        },
+        {
+          "count": 2,
+          "name": "Overgrown Tomb"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
         },
         {
           "count": 3,
-          "name": "Erode"
-        },
-        {
-          "count": 2,
-          "name": "Extraction Specialist"
-        },
-        {
-          "count": 2,
-          "name": "Arachne, Psionic Weaver"
-        },
-        {
-          "count": 2,
-          "name": "Thalia, Heretic Cathar"
+          "name": "Copperline Gorge"
         },
         {
           "count": 3,
-          "name": "Mutavault"
+          "name": "Blooming Marsh"
+        },
+        {
+          "count": 4,
+          "name": "Blood Crypt"
+        },
+        {
+          "count": 4,
+          "name": "Blackcleave Cliffs"
+        },
+        {
+          "count": 2,
+          "name": "Torch the Tower"
+        },
+        {
+          "count": 4,
+          "name": "Voldaren Epicure"
         }
       ],
       "sideboard": [
         {
           "count": 2,
-          "name": "Scout for Survivors"
-        },
-        {
-          "count": 4,
-          "name": "Seam Rip"
+          "name": "Thoughtseize"
         },
         {
           "count": 3,
-          "name": "Aven Interrupter"
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 1,
+          "name": "Fable of the Mirror-Breaker"
         },
         {
           "count": 2,
-          "name": "Unlicensed Hearse"
+          "name": "Hexing Squelcher"
         },
         {
-          "count": 4,
-          "name": "Wedding Announcement"
+          "count": 3,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 1,
+          "name": "Duress"
+        },
+        {
+          "count": 3,
+          "name": "Abrupt Decay"
         }
       ]
     }

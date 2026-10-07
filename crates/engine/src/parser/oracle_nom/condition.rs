@@ -2700,22 +2700,63 @@ pub(crate) fn parse_source_has_counters(input: &str) -> OracleResult<'_, StaticC
 /// self-referential subject such as Mazemind Tome's "this artifact" arrives as
 /// `~` here (do not write an un-normalized unit test against this combinator).
 pub(crate) fn parse_source_counters_exist(input: &str) -> OracleResult<'_, StaticCondition> {
+    // Source-referential subject only: `~` (normalized self-ref) or bound `it`.
+    // A non-source subject ("that creature") is not a source state trigger and
+    // correctly falls through (recoverable Err → the enclosing `alt()` moves on).
+    parse_there_are_counters_on(input, alt((tag("~"), tag("it"))))
+}
+
+/// CR 122.1: "there are <quantity> [<type>] counter[s] on <subject>", shared by the
+/// state-trigger and condition forms; each caller passes its own source subjects.
+fn parse_there_are_counters_on<'a>(
+    input: &'a str,
+    source_subject: impl Parser<&'a str, Output = &'a str, Error = OracleError<'a>>,
+) -> OracleResult<'a, StaticCondition> {
     let (rest, _) = tag("there are ").parse(input)?;
     let (rest, (minimum, maximum)) = parse_has_counters_quantity(rest)?;
     let (rest, counters) = parse_counter_noun_match(rest)?;
     let (rest, _) = tag(" on ").parse(rest)?;
-    // Source-referential subject only: `~` (normalized self-ref) or bound `it`.
-    // A non-source subject ("that creature") is not a source state trigger and
-    // correctly falls through (recoverable Err → the enclosing `alt()` moves on).
-    let (rest, _) = alt((tag("~"), tag("it"))).parse(rest)?;
-    Ok((
-        rest,
-        StaticCondition::HasCounters {
-            counters,
+    let granter_counters = counters.clone();
+    alt((
+        // CR 201.5a: counters on a granted ability's granter are read from the granter.
+        map(nom_target::parse_granting_object_ref, move |_| {
+            granter_counters_condition(&granter_counters, minimum, maximum)
+        }),
+        map(source_subject, move |_| StaticCondition::HasCounters {
+            counters: counters.clone(),
             minimum,
             maximum,
-        },
+        }),
     ))
+    .parse(rest)
+}
+
+/// The `HasCounters` bounds as a comparison on the granter's counter count.
+fn granter_counters_condition(
+    counters: &CounterMatch,
+    minimum: u32,
+    maximum: Option<u32>,
+) -> StaticCondition {
+    let qty = QuantityRef::CountersOn {
+        scope: ObjectScope::GrantingObject,
+        counter_type: match counters {
+            CounterMatch::OfType(counter_type) => Some(counter_type.clone()),
+            CounterMatch::Any => None,
+        },
+    };
+    match maximum {
+        None => make_quantity_ge(qty, minimum),
+        Some(maximum) if maximum == minimum => {
+            make_quantity_comparison(qty, Comparator::EQ, maximum)
+        }
+        Some(maximum) if minimum == 0 => make_quantity_comparison(qty, Comparator::LE, maximum),
+        Some(maximum) => StaticCondition::And {
+            conditions: vec![
+                make_quantity_ge(qty.clone(), minimum),
+                make_quantity_comparison(qty, Comparator::LE, maximum),
+            ],
+        },
+    }
 }
 
 /// Recipient-bound counterpart to [`parse_source_has_counters`] for
@@ -10117,23 +10158,7 @@ fn parse_zone_count_ref(input: &str) -> OracleResult<'_, ZoneRef> {
 /// - Source subject: any pronoun / `~` form accepted by
 ///   `parse_counter_on_source_subject`.
 fn parse_there_are_counters_on_source(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = tag("there are ").parse(input)?;
-    let (rest, (minimum, maximum)) = parse_has_counters_quantity(rest)?;
-    let (rest, counters) = alt((
-        parse_typed_counter_noun,
-        value(CounterMatch::Any, alt((tag("counters"), tag("counter")))),
-    ))
-    .parse(rest)?;
-    let (rest, _) = tag(" on ").parse(rest)?;
-    let (rest, _) = parse_counter_on_source_subject(rest)?;
-    Ok((
-        rest,
-        StaticCondition::HasCounters {
-            counters,
-            minimum,
-            maximum,
-        },
-    ))
+    parse_there_are_counters_on(input, parse_counter_on_source_subject)
 }
 
 /// Trailing source subject for `parse_there_are_counters_on_source`. Mirrors the

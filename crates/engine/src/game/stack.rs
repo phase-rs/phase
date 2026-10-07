@@ -1,8 +1,9 @@
 use crate::types::ability::{
     cost_paid_object_snapshot_ids_eq, AbilityKind, ContinuousModification, CopyCountStatus,
-    DetachedRemainder, Duration, Effect, EffectKind, KeywordAction, PlayerFilter, QuantityExpr,
-    ResolvedAbility, SiblingCondition, SpellContext, SubAbilityLink, TargetChoiceTiming,
-    TargetFilter, TargetReadOrigin, TargetRef, TargetSelectionMode, TriggerCondition,
+    DetachedRemainder, Duration, Effect, EffectKind, IllegalTargetsDisposition, KeywordAction,
+    PlayerFilter, QuantityExpr, ResolvedAbility, SiblingCondition, SpellContext, SubAbilityLink,
+    TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef, TargetSelectionMode,
+    TriggerCondition,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -1867,7 +1868,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         {
             let mut validated = validate_targets_in_chain(state, ability);
             let legal_targets = flatten_specified_targets_in_chain(&validated);
-            if targeting::check_fizzle(&original_targets, &legal_targets) {
+            // CR 608.2b + CR 101.1: the ability's own text ("This ability still resolves if
+            // its target becomes illegal") can override non-resolution. Targets are still
+            // pruned by validate_targets_in_chain above, so illegal targets stay unaffected.
+            let fizzle_applies = match ability.illegal_targets_disposition {
+                IllegalTargetsDisposition::DoesNotResolve => true,
+                IllegalTargetsDisposition::StillResolves => false,
+            };
+            if fizzle_applies && targeting::check_fizzle(&original_targets, &legal_targets) {
                 // CR 608.2b: Fizzle — all targets illegal, spell is countered on resolution.
                 if is_spell {
                     // CR 702.34a / CR 702.127a / CR 702.180a: Flashback,
@@ -3860,6 +3868,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         min_x_value,
         announced_x,
         cant_be_copied,
+        illegal_targets_disposition,
         copy_count_status,
         forward_result,
         unless_pay,
@@ -3939,6 +3948,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         // it is not the vanilla self-counter shape this batch path proves safe.
         && announced_x.is_none()
         && !*cant_be_copied
+        && *illegal_targets_disposition == IllegalTargetsDisposition::DoesNotResolve
         && *copy_count_status == CopyCountStatus::Pending
         && !*forward_result
         && unless_pay.is_none()
@@ -4104,6 +4114,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         min_x_value,
         announced_x,
         cant_be_copied,
+        illegal_targets_disposition,
         copy_count_status,
         forward_result,
         unless_pay,
@@ -4175,6 +4186,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         && *min_x_value == 0
         && announced_x.is_none()
         && !*cant_be_copied
+        && *illegal_targets_disposition == IllegalTargetsDisposition::DoesNotResolve
         && *copy_count_status == CopyCountStatus::Pending
         && !*forward_result
         && unless_pay.is_none()
@@ -4328,6 +4340,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         min_x_value,
         announced_x,
         cant_be_copied,
+        illegal_targets_disposition,
         copy_count_status,
         forward_result,
         unless_pay,
@@ -4403,6 +4416,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         && *min_x_value == 0
         && announced_x.is_none()
         && !*cant_be_copied
+        && *illegal_targets_disposition == IllegalTargetsDisposition::DoesNotResolve
         && *copy_count_status == CopyCountStatus::Pending
         && !*forward_result
         && unless_pay.is_none()
@@ -4820,6 +4834,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         min_x_value: a_min_x_value,
         announced_x: a_announced_x,
         cant_be_copied: a_cant_be_copied,
+        illegal_targets_disposition: a_illegal_targets_disposition,
         copy_count_status: a_copy_count_status,
         forward_result: a_forward_result,
         unless_pay: a_unless_pay,
@@ -4902,6 +4917,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         min_x_value: b_min_x_value,
         announced_x: b_announced_x,
         cant_be_copied: b_cant_be_copied,
+        illegal_targets_disposition: b_illegal_targets_disposition,
         copy_count_status: b_copy_count_status,
         forward_result: b_forward_result,
         unless_pay: b_unless_pay,
@@ -4986,6 +5002,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_min_x_value == b_min_x_value
         && a_announced_x == b_announced_x
         && a_cant_be_copied == b_cant_be_copied
+        && a_illegal_targets_disposition == b_illegal_targets_disposition
         && a_copy_count_status == b_copy_count_status
         && a_forward_result == b_forward_result
         && a_unless_pay == b_unless_pay

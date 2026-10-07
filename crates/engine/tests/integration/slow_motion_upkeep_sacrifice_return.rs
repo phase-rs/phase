@@ -8,17 +8,19 @@
 //! CR 701.21a (Sacrifice) + CR 704.5m (Aura unattached state-based action) + CR 118.12 (Unless payment) + CR 109.5 ("You").
 
 use engine::game::effects::attach::attach_to;
+use engine::game::game_object::AttachTarget;
 use engine::game::sba::check_state_based_actions;
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::game::triggers::process_triggers;
-use engine::types::ability::{ControllerRef, TargetFilter, TypedFilter};
+use engine::game::triggers::{drain_order_triggers_with_identity, process_triggers};
+use engine::types::ability::{ControllerRef, EffectKind, TargetFilter, TypedFilter};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
@@ -499,4 +501,232 @@ fn breath_of_fury_trigger_does_not_sacrifice_creature_if_control_changed() {
         runner.state().objects[&other_creature].tapped,
         "P0's other creature must remain tapped because sacrifice was not performed"
     );
+}
+
+const BREATH_OF_FURY_VERBATIM: &str = "Enchant creature you control\n\
+When enchanted creature deals combat damage to a player, sacrifice it and attach this Aura to a creature you control. If you do, untap all creatures you control and after this phase, there is an additional combat phase.";
+
+#[derive(Debug)]
+struct BreathOfFuryOutcome {
+    goblin_zone: Zone,
+    host: Option<ObjectId>,
+    bears_tapped: Vec<bool>,
+    extra_phases: usize,
+    choice_offered: bool,
+}
+
+/// Breath of Fury on a goblin that deals combat damage, with `bears` tapped
+/// Bears; any attach choice picks the first Bear.
+fn breath_of_fury_combat_damage(cant_be_sacrificed: bool, bears: usize) -> BreathOfFuryOutcome {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::CombatDamage);
+    let mut goblin_builder = scenario.add_creature(P0, "Raging Goblin", 1, 1);
+    if cant_be_sacrificed {
+        goblin_builder.with_static(StaticMode::Other("CantBeSacrificed".to_string()));
+    }
+    let goblin = goblin_builder.id();
+    let bear_ids: Vec<ObjectId> = (0..bears)
+        .map(|i| scenario.add_creature(P0, &format!("Bear {i}"), 2, 2).id())
+        .collect();
+    let breath_of_fury = scenario
+        .add_enchantment_from_oracle(P0, "Breath of Fury", BREATH_OF_FURY_VERBATIM)
+        .with_subtypes(vec!["Aura"])
+        .with_keyword(enchant_creature_you_control())
+        .id();
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), breath_of_fury, goblin);
+    for bear in &bear_ids {
+        runner.state_mut().objects.get_mut(bear).unwrap().tapped = true;
+    }
+    process_triggers(
+        runner.state_mut(),
+        &[GameEvent::CombatDamageDealtToPlayer {
+            player_id: P1,
+            source_amounts: vec![(goblin, 1)],
+            total_damage: 1,
+        }],
+    );
+    assert!(!runner.state().stack.is_empty(), "trigger must be stacked");
+
+    let mut choice_offered = false;
+    for _ in 0..40 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::EffectZoneChoice {
+                effect_kind: EffectKind::Attach,
+                ..
+            } => {
+                choice_offered = true;
+                let pick = bear_ids.first().copied().unwrap_or(goblin);
+                runner
+                    .act(GameAction::SelectCards { cards: vec![pick] })
+                    .expect("attach choice accepted");
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    let state = runner.state();
+    BreathOfFuryOutcome {
+        goblin_zone: state.objects[&goblin].zone,
+        host: match state.objects[&breath_of_fury].attached_to {
+            Some(AttachTarget::Object(id)) => Some(id),
+            _ => None,
+        },
+        bears_tapped: bear_ids.iter().map(|b| state.objects[b].tapped).collect(),
+        extra_phases: state.extra_phases.len(),
+        choice_offered,
+    }
+}
+
+/// CR 118.12: "If you do" after "sacrifice it and attach this Aura" needs the attach.
+#[test]
+fn breath_of_fury_if_you_do_needs_the_attach() {
+    let attached = breath_of_fury_combat_damage(false, 1);
+    assert_eq!(attached.goblin_zone, Zone::Graveyard);
+    assert!(attached.host.is_some(), "{attached:?}");
+    assert_eq!(attached.bears_tapped, vec![false], "{attached:?}");
+    assert_eq!(attached.extra_phases, 1, "{attached:?}");
+
+    let no_host = breath_of_fury_combat_damage(false, 0);
+    assert_eq!(no_host.goblin_zone, Zone::Graveyard);
+    assert_eq!(no_host.host, None);
+    assert_eq!(no_host.extra_phases, 0, "{no_host:?}");
+}
+
+/// CR 118.12: "If you do" after "sacrifice it and attach this Aura" needs the sacrifice.
+#[test]
+fn breath_of_fury_if_you_do_needs_the_sacrifice() {
+    let sacrificed = breath_of_fury_combat_damage(false, 1);
+    assert_eq!(sacrificed.bears_tapped, vec![false], "{sacrificed:?}");
+    assert_eq!(sacrificed.extra_phases, 1, "{sacrificed:?}");
+
+    let refused = breath_of_fury_combat_damage(true, 1);
+    assert_eq!(refused.goblin_zone, Zone::Battlefield);
+    assert!(refused.choice_offered, "{refused:?}");
+    assert_eq!(refused.bears_tapped, vec![true], "{refused:?}");
+    assert_eq!(refused.extra_phases, 0, "{refused:?}");
+}
+
+/// CR 608.2c: a host chosen after the trigger paused still lets the rider read the attach.
+#[test]
+fn breath_of_fury_chosen_host_runs_the_if_you_do_rider() {
+    let outcome = breath_of_fury_combat_damage(false, 2);
+    assert!(outcome.choice_offered, "{outcome:?}");
+    assert_eq!(outcome.goblin_zone, Zone::Graveyard);
+    assert_eq!(outcome.bears_tapped, vec![false, false], "{outcome:?}");
+    assert_eq!(outcome.extra_phases, 1, "{outcome:?}");
+}
+
+/// CR 400.7: a Breath of Fury that went to the graveyard is a new object and is not attached.
+#[test]
+fn breath_of_fury_in_graveyard_is_not_attached() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::CombatDamage);
+    let creature = scenario.add_creature(P0, "Raging Goblin", 1, 1).id();
+    let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let breath_of_fury = scenario
+        .add_enchantment_from_oracle(P0, "Breath of Fury", BREATH_OF_FURY_VERBATIM)
+        .with_subtypes(vec!["Aura"])
+        .with_keyword(enchant_creature_you_control())
+        .id();
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), breath_of_fury, creature);
+    process_triggers(
+        runner.state_mut(),
+        &[GameEvent::CombatDamageDealtToPlayer {
+            player_id: P1,
+            source_amounts: vec![(creature, 1)],
+            total_damage: 1,
+        }],
+    );
+    assert!(
+        !runner.state().stack.is_empty(),
+        "reach-guard: Breath of Fury's combat damage trigger is on the stack"
+    );
+    {
+        let obj = runner.state_mut().objects.get_mut(&creature).unwrap();
+        obj.base_controller = Some(P1);
+        obj.controller = P1;
+    }
+    let mut sba_events = Vec::new();
+    check_state_based_actions(runner.state_mut(), &mut sba_events);
+    assert_eq!(
+        runner.state().objects[&breath_of_fury].zone,
+        Zone::Graveyard
+    );
+
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty(), "the trigger resolved");
+
+    let state = runner.state();
+    assert_ne!(
+        state.objects[&breath_of_fury].attached_to,
+        Some(AttachTarget::Object(bear))
+    );
+    assert!(!state.objects[&bear].attachments.contains(&breath_of_fury));
+}
+
+const LAT_NAMS_LEGACY_ORACLE: &str = "Shuffle a card from your hand into your library. If you do, draw two cards at the beginning of the next turn's upkeep.";
+
+/// Casts Lat-Nam's Legacy with `hand` other cards in hand; returns (delayed
+/// triggers, card choices offered).
+fn cast_lat_nams_legacy(hand: usize) -> (usize, usize) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for i in 0..hand {
+        scenario.add_card_to_hand(P0, &format!("Card {i}"));
+    }
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Lat-Nam's Legacy", false, LAT_NAMS_LEGACY_ORACLE)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        [ManaType::Colorless, ManaType::Blue]
+            .into_iter()
+            .map(|ty| ManaUnit::new(ty, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast");
+    let mut offered = 0;
+    for _ in 0..40 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            WaitingFor::EffectZoneChoice { cards, .. } => {
+                offered += 1;
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![cards[0]],
+                    })
+                    .expect("pick");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    (runner.state().delayed_triggers.len(), offered)
+}
+
+/// CR 118.12: a shuffle-in that waits on the card choice still counts once it is performed.
+#[test]
+fn lat_nams_legacy_chosen_card_schedules_the_draw() {
+    assert_eq!(cast_lat_nams_legacy(0), (0, 0), "empty hand");
+    assert_eq!(cast_lat_nams_legacy(2), (1, 1), "two cards");
+    assert_eq!(cast_lat_nams_legacy(3), (1, 1), "three cards");
 }

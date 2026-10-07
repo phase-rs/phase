@@ -184,13 +184,17 @@ fn public_concession_refuses_stale_sacrifice_before_any_payment() {
                 assert_ne!(runner.state().objects[&aura].zone, Zone::Battlefield);
                 assert_eq!(runner.state().objects[&fodder].controller, p2);
                 assert!(prompt(&runner, (1, 1)).contains(&fodder));
-                assert!(
-                    !find_eligible_sacrifice_targets(runner.state(), P0, source, &filter)
-                        .contains(&fodder)
-                );
+                assert!(!find_eligible_sacrifice_targets(
+                    runner.state(),
+                    P0,
+                    source,
+                    None,
+                    &filter
+                )
+                .contains(&fodder));
             } else {
                 assert!(
-                    find_eligible_sacrifice_targets(runner.state(), P0, source, &filter)
+                    find_eligible_sacrifice_targets(runner.state(), P0, source, None, &filter)
                         .contains(&fodder)
                 );
             }
@@ -269,7 +273,7 @@ fn unselected_advertised_control_loss_keeps_lawful_full_selection() {
     )
     .unwrap();
     assert_eq!(prompt(&runner, (1, 1)), advertised);
-    let live = find_eligible_sacrifice_targets(runner.state(), P0, source, &filter);
+    let live = find_eligible_sacrifice_targets(runner.state(), P0, source, None, &filter);
     assert!(live.contains(&retained) && !live.contains(&lost));
     let before = serde_json::to_value(runner.state()).unwrap();
     assert!(matches!(
@@ -519,6 +523,7 @@ fn real_spell_additional_cost_and_keyword_costs_pay_exact_reductions() {
             runner.state(),
             P0,
             spell,
+            None,
             &TypedFilter::creature().subtype("Spirit".into()).into()
         )
         .contains(&fodder));
@@ -961,6 +966,7 @@ fn selected_keyword_sacrifice_revalidates_its_current_quality() {
                 runner.state(),
                 P0,
                 spell,
+                None,
                 &TypedFilter::creature().subtype("Spirit".into()).into()
             )
             .contains(&fodder));
@@ -1032,7 +1038,7 @@ fn selected_keyword_sacrifice_revalidates_its_current_quality() {
                 obj.base_card_types = obj.card_types.clone();
             }
             assert_eq!(
-                find_eligible_sacrifice_targets(runner.state(), P0, spell, &filter)
+                find_eligible_sacrifice_targets(runner.state(), P0, spell, None, &filter)
                     .contains(&fodder),
                 eligible
             );
@@ -1124,7 +1130,7 @@ fn additional_variable_sacrifice_keeps_announced_bound_after_control_loss() {
             )
             .unwrap();
             assert_eq!(prompt(&runner, (2, 2)), advertised);
-            let live = find_eligible_sacrifice_targets(runner.state(), P0, spell, &filter);
+            let live = find_eligible_sacrifice_targets(runner.state(), P0, spell, None, &filter);
             assert!(live.contains(&retained) && !live.contains(&lost));
             refuse_unchanged(&mut runner, P0, vec![retained]);
             let before = serde_json::to_value(runner.state()).unwrap();

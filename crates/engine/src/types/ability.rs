@@ -32,6 +32,7 @@ use super::statics::{ActivationExemption, CastFrequency, CostModifyMode, StaticM
 use super::stickers::{AppliedSticker, StickerKind};
 use super::triggers::TriggerMode;
 use super::zones::{EtbTapState, Zone};
+use crate::game::filter::FilterContext;
 use crate::game::game_object::DisplaySource;
 use crate::types::events::{ClashResult, PlayerActionKind};
 
@@ -7291,6 +7292,29 @@ impl TargetSelectionMode {
     }
 }
 
+/// CR 608.2b + CR 101.1: what happens when every target of this spell or
+/// ability is illegal as it tries to resolve. Root-only: read by the single
+/// CR 608.2b authority in `stack::resolve_top`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum IllegalTargetsDisposition {
+    /// CR 608.2b: the spell or ability doesn't resolve (the rules default).
+    #[default]
+    DoesNotResolve,
+    /// CR 101.1 overriding CR 608.2b: the card's own text says the ability still
+    /// resolves ("This ability still resolves if its target becomes illegal").
+    /// Illegal targets are still pruned and unaffected.
+    StillResolves,
+}
+
+impl IllegalTargetsDisposition {
+    /// `serde(skip_serializing_if)` helper: the rules default is omitted from
+    /// card-data.json so every other card's export is byte-identical.
+    pub fn is_does_not_resolve(&self) -> bool {
+        matches!(self, Self::DoesNotResolve)
+    }
+}
+
 /// CR 701.9a: How cards are selected from a zone during an effect or cost.
 ///
 /// Analogous to `TargetSelectionMode` but for cards from a player's hand (or
@@ -7605,18 +7629,15 @@ pub enum TargetFilter {
     /// "Exile <equipment-name>" / "Return <equipment-name> to its owner's
     /// hand"). Distinct from `SelfRef`, which is the object the ability is ON
     /// (the host creature). Emitted at parse time by the quote masker in
-    /// `normalize_card_name_refs`; always concretized to `SpecificObject { id }`
-    /// (the live granting-object id) at grant-clone time (`game/layers.rs`).
-    /// If it ever reaches runtime unconcretized it degrades to the ability
-    /// source (host) — fail-safe, never worse than the pre-fix behavior.
-    ///
-    /// ZONE-MOVE SCOPING (CR 201.5a second sentence + CR 400.7): the grant-time
-    /// concretization snapshots the granter's current battlefield id. CR 201.5a's
-    /// second sentence (a source moved to a new public zone → the name refers to
-    /// the new-zone object) is not modeled; no current card moves its granter and
-    /// then re-references it within one resolution (cost-exile/sacrifice cards
-    /// consume the granter before the effect; boomerangs return themselves last).
-    GrantingObject,
+    /// `normalize_card_name_refs`. It is read against the granter incarnation
+    /// stamped on the enclosing definition; unstamped, it resolves to the current
+    /// ability source, or inside a filter to no object. `bound` pins the stamped
+    /// incarnation into the filter itself for carriers read without the stamp; it
+    /// matches only that incarnation (CR 400.7).
+    GrantingObject {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bound: Option<ObjectIncarnationRef>,
+    },
     /// CR 702.95b: Resolves to the source object and the creature it is paired
     /// with. If the source is not paired, this matches no objects.
     SourceOrPaired,
@@ -8379,6 +8400,16 @@ pub enum ObjectScope {
     /// (Dismantle, Rite of the Serpent); every object-characteristic reader
     /// fail-closes to 0 and is marked `Unhandled` in `game/coverage.rs`.
     ChainRootTarget,
+    /// CR 201.5a: a granted ability's by-name reference to its granting object; unbound,
+    /// it reads as `Source` in counter reads (the one position produced) and fails closed
+    /// everywhere else.
+    GrantingObject,
+    /// CR 201.5a + CR 400.7: one exact object incarnation, read live while it exists in
+    /// any zone. After it changes zones, counter, power/toughness and mana-value reads use
+    /// its last known information only in a resolution that carries its ability
+    /// (CR 608.2h) and read 0 otherwise; color, name, typeline and mana-symbol reads are
+    /// live only and read 0.
+    SpecificObject { object: ObjectIncarnationRef },
 }
 
 /// CR 601.2a: A per-turn action journal — a chronological record of a kind of
@@ -8812,6 +8843,11 @@ impl PropertyAggregate {
 
     pub fn source(&self) -> &CardTypeSetSource {
         &self.source
+    }
+
+    /// Filter rewrites keep every member's kind, so the constructor's invariants hold.
+    pub(crate) fn source_mut(&mut self) -> &mut CardTypeSetSource {
+        &mut self.source
     }
 }
 
@@ -11107,6 +11143,9 @@ pub enum PlayerFilter {
     /// player facing the choice is the owner of the targeted permanent named in
     /// the prior clause, not the ability controller.
     ParentObjectTargetOwner,
+    /// CR 601.2a + CR 201.5a: the player who cast the granting object; lowered to
+    /// `TargetFilter::SpecificPlayer` when the grant is latched.
+    GrantingObjectCaster,
     /// CR 608.2c + CR 608.2h + CR 109.4 + CR 102.2: Each player matching
     /// `relation` who possessed — per `possession` — at least one member of the
     /// most recent tracked object set matching `filter`, restricted to members
@@ -21621,6 +21660,11 @@ impl TargetFilter {
                 | TargetFilter::ControllerAndControlledPermanents { .. }
                 | TargetFilter::TrackedSet { .. }
                 | TargetFilter::TrackedSetFiltered { .. }
+                // CR 115.10a: a bound object id is affected, never a declared target.
+                | TargetFilter::SpecificObject { .. }
+                // CR 201.5a + CR 115.10a: a granter named by a granted body is affected, never a
+                // declared target.
+                | TargetFilter::GrantingObject { .. }
         )
     }
 
@@ -26170,6 +26214,9 @@ pub struct AbilityDefinition {
     pub announced_x: Option<QuantityExpr>,
     /// Stack-copy restriction from "This ability can't be copied."
     pub cant_be_copied: bool,
+    /// CR 608.2b + CR 101.1: root-only; read by stack::resolve_top. Set by the
+    /// trigger parser for "This ability still resolves if its target becomes illegal".
+    pub illegal_targets_disposition: IllegalTargetsDisposition,
     /// CR 601.2f: Self-referential cost reduction applied before activation.
     /// "This ability costs {N} less to activate for each [condition]"
     pub cost_reduction: Option<CostReduction>,
@@ -26232,6 +26279,8 @@ pub struct AbilityDefinition {
     /// This is deliberately separate from `FaceDownProfile`, which describes
     /// battlefield characteristics only.
     pub face_down_in_exile: ExileConcealment,
+    /// CR 201.5a: granter stamp; `stamp_granter` decides which nodes carry it.
+    pub granting_object: Option<ObjectIncarnationRef>,
 }
 
 /// Private serialization mirror for `AbilityDefinition`. Holds a borrowed view
@@ -26302,6 +26351,8 @@ struct AbilityDefinitionRepr<'a> {
     announced_x: &'a Option<QuantityExpr>,
     #[serde(skip_serializing_if = "is_false")]
     cant_be_copied: bool,
+    #[serde(skip_serializing_if = "IllegalTargetsDisposition::is_does_not_resolve")]
+    illegal_targets_disposition: IllegalTargetsDisposition,
     #[serde(skip_serializing_if = "Option::is_none")]
     cost_reduction: &'a Option<CostReduction>,
     forward_result: bool,
@@ -26327,6 +26378,8 @@ struct AbilityDefinitionRepr<'a> {
     unlowered_guard: &'a Option<UnloweredGuard>,
     #[serde(skip_serializing_if = "ExileConcealment::is_public")]
     face_down_in_exile: ExileConcealment,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    granting_object: &'a Option<ObjectIncarnationRef>,
 }
 
 impl Serialize for AbilityDefinition {
@@ -26368,6 +26421,7 @@ impl Serialize for AbilityDefinition {
             min_x_value,
             announced_x,
             cant_be_copied,
+            illegal_targets_disposition,
             cost_reduction,
             forward_result,
             player_scope,
@@ -26381,6 +26435,7 @@ impl Serialize for AbilityDefinition {
             sibling_condition,
             unlowered_guard,
             face_down_in_exile,
+            granting_object,
         } = self;
         let repr = AbilityDefinitionRepr {
             kind,
@@ -26417,6 +26472,7 @@ impl Serialize for AbilityDefinition {
             min_x_value: *min_x_value,
             announced_x,
             cant_be_copied: *cant_be_copied,
+            illegal_targets_disposition: *illegal_targets_disposition,
             cost_reduction,
             forward_result: *forward_result,
             player_scope,
@@ -26430,6 +26486,7 @@ impl Serialize for AbilityDefinition {
             sibling_condition: *sibling_condition,
             unlowered_guard,
             face_down_in_exile: *face_down_in_exile,
+            granting_object,
         };
         /// Flatten wrapper: the mirror carries the real field set;
         /// `consumes_source` (#506) and `is_mana_ability` (CR 605.1a) are
@@ -26533,6 +26590,8 @@ struct AbilityDefinitionDe {
     #[serde(default)]
     cant_be_copied: bool,
     #[serde(default)]
+    illegal_targets_disposition: IllegalTargetsDisposition,
+    #[serde(default)]
     cost_reduction: Option<CostReduction>,
     #[serde(default)]
     forward_result: bool,
@@ -26558,6 +26617,8 @@ struct AbilityDefinitionDe {
     unlowered_guard: Option<UnloweredGuard>,
     #[serde(default)]
     face_down_in_exile: ExileConcealment,
+    #[serde(default)]
+    granting_object: Option<ObjectIncarnationRef>,
 }
 
 impl<'de> Deserialize<'de> for AbilityDefinition {
@@ -26604,6 +26665,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             min_x_value: de.min_x_value,
             announced_x: de.announced_x,
             cant_be_copied: de.cant_be_copied,
+            illegal_targets_disposition: de.illegal_targets_disposition,
             cost_reduction: de.cost_reduction,
             forward_result: de.forward_result,
             player_scope: de.player_scope,
@@ -26617,6 +26679,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             sibling_condition: de.sibling_condition,
             unlowered_guard: de.unlowered_guard,
             face_down_in_exile: de.face_down_in_exile,
+            granting_object: de.granting_object,
         })
     }
 }
@@ -26903,6 +26966,7 @@ impl AbilityDefinition {
             min_x_value: 0,
             announced_x: None,
             cant_be_copied: false,
+            illegal_targets_disposition: IllegalTargetsDisposition::DoesNotResolve,
             cost_reduction: None,
             forward_result: false,
             player_scope: None,
@@ -26916,6 +26980,7 @@ impl AbilityDefinition {
             sibling_condition: SiblingCondition::Dependent,
             unlowered_guard: None,
             face_down_in_exile: ExileConcealment::Public,
+            granting_object: None,
         }
     }
 
@@ -28305,6 +28370,9 @@ pub struct SpellContext {
     /// ordinary ability-chain handoffs without widening every ability literal.
     #[serde(default, skip_serializing_if = "ExileConcealment::is_public")]
     pub face_down_in_exile: ExileConcealment,
+    /// CR 201.5a: the granter stamped on the definition this ability was built from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granting_object: Option<ObjectIncarnationRef>,
     /// CR 603.7 + CR 603.10a + CR 608.2h: The battlefield-departure event a
     /// phase-delayed triggered ability was created under ("When this creature
     /// dies, at the beginning of the next end step, …"). The later phase event
@@ -28435,6 +28503,10 @@ pub struct SpellContext {
     /// Used by AbilityCondition::effect_performed() to gate dependent sub_abilities.
     #[serde(default)]
     pub optional_effect_performed: bool,
+    /// CR 118.12: A mandatory instruction of this run ("sacrifice it and attach …")
+    /// that did nothing, so a later member's "if you do" is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unperformed_compound_instruction: Option<EffectKind>,
     /// CR 608.2d: The just-resolved `Effect::OpponentGuess` outcome, stamped onto
     /// the stashed continuation chain by the guess answer handler. Tri-state:
     /// `None` = no guess happened (impossible commit per CR 609.3 / empty hand),
@@ -29929,6 +30001,9 @@ pub struct TriggerDefinition {
     /// every non-Room trigger: no door gating.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_door: Option<crate::game::game_object::RoomDoor>,
+    /// CR 201.5a: granter stamp; `stamp_granter` decides which nodes carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granting_object: Option<ObjectIncarnationRef>,
 }
 
 /// CR 605.1b: Which aggregate mana output a mana-ability trigger requires.
@@ -30523,6 +30598,7 @@ impl TriggerDefinition {
             mana_ability_produced: None,
             clash_result: None,
             room_door: None,
+            granting_object: None,
         }
     }
 
@@ -30780,6 +30856,9 @@ pub struct StaticDefinition {
     /// static: no door gating.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_door: Option<crate::game::game_object::RoomDoor>,
+    /// CR 201.5a: granter stamp; `stamp_granter` decides which nodes carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granting_object: Option<ObjectIncarnationRef>,
 }
 
 /// CR 702.16n / CR 702.16p: Which attachments a protection-granting continuous
@@ -30965,6 +31044,7 @@ impl StaticDefinition {
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         }
     }
 
@@ -31793,6 +31873,9 @@ pub struct ReplacementDefinition {
     /// official Vorinclex ruling). Ignored by every non-`AddCounter` event.
     #[serde(default, skip_serializing_if = "CounterReplacementSubject::is_default")]
     pub counter_replacement_subject: CounterReplacementSubject,
+    /// CR 201.5a: granter stamp; `stamp_granter` decides which nodes carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granting_object: Option<ObjectIncarnationRef>,
 }
 
 impl ReplacementDefinition {
@@ -31906,6 +31989,7 @@ impl ReplacementDefinition {
             source_object: None,
             origin: ReplacementOrigin::Characteristic,
             counter_replacement_subject: CounterReplacementSubject::Recipient,
+            granting_object: None,
         }
     }
 
@@ -31938,6 +32022,20 @@ impl ReplacementDefinition {
     pub fn valid_card(mut self, filter: TargetFilter) -> Self {
         self.valid_card = Some(filter);
         self
+    }
+
+    /// CR 201.5a: the context `valid_card` is read in, naming this replacement's granter.
+    pub(crate) fn valid_card_context(
+        &self,
+        state: &super::game_state::GameState,
+        source_id: ObjectId,
+        controller: Option<PlayerId>,
+    ) -> FilterContext<'static> {
+        match controller {
+            Some(controller) => FilterContext::from_source_with_controller(source_id, controller),
+            None => FilterContext::from_source(state, source_id),
+        }
+        .with_granting_object(self.granting_object)
     }
 
     pub fn description(mut self, desc: String) -> Self {
@@ -32433,11 +32531,10 @@ pub enum ContinuousModification {
     /// of** the objects matching `source` (Myr Welder / Dark Impostor / Patchwork
     /// Crawler "all [creature] cards exiled with it", Territory Forge "the exiled
     /// card", Mairsil, Experiment Kraj, …). The set is dynamic — recomputed each
-    /// layer pass — so it is expanded into one `GrantAbility` per matching
-    /// activated ability at continuous-effect collection time
-    /// (`active_continuous_effects_from_static_definitions`); the layer-6 apply of
-    /// this variant itself is therefore a no-op. `source` is resolved relative to
-    /// each recipient of the host static (`FilterContext::from_source(recipient)`).
+    /// layer pass — so the meta-effect is retained through earlier layers and
+    /// expanded into `GrantAbility` effects when it applies in layer 6. The
+    /// provider filter uses the host's identity and each recipient's current
+    /// controller for controller-relative references.
     GrantAllActivatedAbilitiesOf {
         source: TargetFilter,
         /// CR 602.5b + CR 602.5c: An optional use-restriction injected into every
@@ -32457,12 +32554,10 @@ pub enum ContinuousModification {
     /// abilities of** the objects matching `source` (Koh, the Face Stealer "Koh
     /// has all activated and triggered abilities of the last chosen card"). The
     /// triggered-ability mirror of `GrantAllActivatedAbilitiesOf`: the set is
-    /// dynamic — recomputed each layer pass — so it is expanded into one
-    /// `GrantTrigger` per matching trigger definition at continuous-effect
-    /// collection time (`expand_granted_triggered_abilities`); the layer-6 apply
-    /// of this variant itself is therefore a no-op. `source` is resolved relative
-    /// to the host static with each recipient's controller, mirroring the
-    /// activated expander. Distinct sibling rather than a parameter of
+    /// dynamic — recomputed each layer pass — so it is retained through earlier
+    /// layers and expanded into `GrantTrigger` effects when it applies in layer
+    /// 6. `source` is resolved relative to the host static with each recipient's
+    /// current controller, mirroring the activated expander. Distinct sibling rather than a parameter of
     /// `GrantAllActivatedAbilitiesOf` because activated and triggered abilities
     /// land in different stores (CR 602.1 `obj.abilities` via `GrantAbility` vs
     /// CR 603.1 `obj.trigger_definitions` via `GrantTrigger`) with different
@@ -33338,6 +33433,13 @@ pub struct ResolvedAbility {
     /// Stack-copy restriction from "This ability can't be copied."
     #[serde(default, skip_serializing_if = "is_false")]
     pub cant_be_copied: bool,
+    /// CR 608.2b + CR 101.1: root-only; read by stack::resolve_top. Copied from
+    /// `AbilityDefinition::illegal_targets_disposition`; a sub-ability's value is ignored.
+    #[serde(
+        default,
+        skip_serializing_if = "IllegalTargetsDisposition::is_does_not_resolve"
+    )]
+    pub illegal_targets_disposition: IllegalTargetsDisposition,
     /// CR 707.10 + CR 614.1a + CR 614.5: `Finalized` on a `repeat_for` iteration
     /// that the drain driver resumes after a per-copy pause, so the "copy an
     /// additional time" replacement bonus (Twinning Staff) is folded into the
@@ -33637,6 +33739,7 @@ impl PartialEq for ResolvedAbility {
             min_x_value: a_min_x_value,
             announced_x: a_announced_x,
             cant_be_copied: a_cant_be_copied,
+            illegal_targets_disposition: a_illegal_targets_disposition,
             copy_count_status: a_copy_count_status,
             forward_result: a_forward_result,
             unless_pay: a_unless_pay,
@@ -33707,6 +33810,7 @@ impl PartialEq for ResolvedAbility {
             min_x_value: b_min_x_value,
             announced_x: b_announced_x,
             cant_be_copied: b_cant_be_copied,
+            illegal_targets_disposition: b_illegal_targets_disposition,
             copy_count_status: b_copy_count_status,
             forward_result: b_forward_result,
             unless_pay: b_unless_pay,
@@ -33777,6 +33881,7 @@ impl PartialEq for ResolvedAbility {
             && a_min_x_value == b_min_x_value
             && a_announced_x == b_announced_x
             && a_cant_be_copied == b_cant_be_copied
+            && a_illegal_targets_disposition == b_illegal_targets_disposition
             && a_copy_count_status == b_copy_count_status
             && a_forward_result == b_forward_result
             && a_unless_pay == b_unless_pay
@@ -34124,6 +34229,7 @@ impl ResolvedAbility {
             min_x_value: 0,
             announced_x: None,
             cant_be_copied: false,
+            illegal_targets_disposition: IllegalTargetsDisposition::DoesNotResolve,
             copy_count_status: CopyCountStatus::Pending,
             forward_result: false,
             unless_pay: None,
@@ -34750,6 +34856,24 @@ impl ResolvedAbility {
             if r.object_id == self.source_id
                 && r.original_stamp == captured
                 && Some(r.current_incarnation) == current_incarnation)
+    }
+
+    /// CR 113.7 + CR 400.7: the ability's source as the object it was when the ability was
+    /// created; a spell, which captures no incarnation, is its current stack object.
+    pub fn source_ref(
+        &self,
+        state: &crate::types::game_state::GameState,
+    ) -> Option<crate::types::identifiers::ObjectIncarnationRef> {
+        let incarnation = self.source_incarnation.or_else(|| {
+            state
+                .objects
+                .get(&self.source_id)
+                .map(|obj| obj.incarnation)
+        })?;
+        Some(crate::types::identifiers::ObjectIncarnationRef::of(
+            self.source_id,
+            incarnation,
+        ))
     }
 
     /// CR 400.7: True if the ability's source is still the same object instance it
@@ -38514,6 +38638,7 @@ mod tests {
             mana_ability_produced: None,
             clash_result: None,
             room_door: Some(crate::game::game_object::RoomDoor::Left),
+            granting_object: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: TriggerDefinition = serde_json::from_str(&json).unwrap();
@@ -38574,6 +38699,7 @@ mod tests {
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         };
         let json = serde_json::to_string(&static_def).unwrap();
         let deserialized: StaticDefinition = serde_json::from_str(&json).unwrap();
@@ -39078,6 +39204,7 @@ mod tests {
                 bypass_beneficiary: None,
                 protection_does_not_remove: None,
                 room_door: None,
+                granting_object: None,
             }],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,
