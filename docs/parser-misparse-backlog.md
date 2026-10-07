@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4554
-- **Total card appearances across root causes:** 4587 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4553
+- **Total card appearances across root causes:** 4586 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > Counting method: both figures count the per-root-cause card bullets only — the
 > three metadata bullets above are excluded — and are the source of truth.
@@ -27,7 +27,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 10 | Trigger event/mode unrecognized → Unknown | 167 | oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes |
 | 11 | Replacement / prevention / 'instead' effect mis-modeled | 152 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
 | 12 | Modal 'choose one/N' parsed as independent abilities | 132 | oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf |
-| 13 | State/game-state condition → StaticCondition::Unrecognized | 129 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
+| 13 | State/game-state condition → StaticCondition::Unrecognized | 128 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
 | 14 | Granted/quoted ability or continuous modification dropped | 94 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
 | 15 | Multi-target / 'up to N' optionality or count dropped | 83 | oracle_target.rs strip_optional_target_prefix — preserve MultiTargetSpec and optional_targeting |
 | 16 | Keyword payload / multiplicity / mis-tokenization | 83 | game/keywords.rs + oracle keyword parsing — use typed discriminants and guard ability-word labels |
@@ -3904,7 +3904,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 13. State/game-state condition → StaticCondition::Unrecognized  (129 cards)
+### 13. State/game-state condition → StaticCondition::Unrecognized  (128 cards)
 
 **Signature.** A parseable game-state predicate falls to StaticCondition::Unrecognized (evaluates permissively true) instead of a typed presence/combat/counter/comparison condition.
 
@@ -3983,7 +3983,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Knight of Malice
 - Kosei, Penitent Warlord
 - Masked Bandits
-- Mazemind Tome
 - Metathran Elite
 - Minas Morgul, Dark Fortress
 - Nature's Chosen

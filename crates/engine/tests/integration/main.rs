@@ -1322,6 +1322,7 @@ mod snow_mana_production;
 mod sothera_supervoid_edict_reanimate;
 mod soul_tether_heartwood_token;
 mod source_counter_gate_anaphor_8549;
+mod source_counter_state_trigger_self_exile_if_you_do;
 mod sovereign_okinec_ahau;
 mod sower_phase_out_ends_presence_bound_steal;
 mod spark_double_as_enters;

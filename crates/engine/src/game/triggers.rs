@@ -11189,7 +11189,14 @@ pub fn check_state_triggers(state: &mut GameState) {
                 pending.push(PendingTrigger {
                     source_id: obj_id,
                     controller,
-                    condition: trigger.condition.clone(),
+                    // CR 603.8 + CR 603.4: the state condition was read above as
+                    // the trigger event (an `EventTime` wrapper, stripped here) and
+                    // is not rechecked on resolution; only an intervening "if"
+                    // beside it reaches the stacked condition.
+                    condition: trigger
+                        .condition
+                        .as_ref()
+                        .and_then(|condition| stack_condition_for_trigger(trigger, condition)),
                     ability: Box::new(ability),
                     timestamp,
                     target_constraints,
@@ -19277,6 +19284,61 @@ pub mod tests {
                 "{mode:?}: the intervening-if beside it must stay on the stack"
             );
         }
+    }
+
+    /// CR 603.8 + CR 603.4: a parsed state trigger stacks exactly its intervening
+    /// "if" — the state condition itself is the trigger event (lowered as
+    /// `EventTime`) and is never rechecked on resolution. A state trigger with no
+    /// intervening "if" stacks no condition at all. Verbatim Oracle text (MTGJSON).
+    #[test]
+    fn parsed_state_trigger_stacks_only_its_intervening_if() {
+        let state_trigger = |oracle: &str, name: &str, core_type: &str| {
+            crate::parser::oracle::parse_oracle_text(
+                oracle,
+                name,
+                &[],
+                &[core_type.to_string()],
+                &[],
+            )
+            .triggers
+            .into_iter()
+            .find(|t| t.mode == TriggerMode::StateCondition)
+            .unwrap_or_else(|| panic!("{name} must parse a StateCondition trigger"))
+        };
+
+        let hidden_predators = state_trigger(
+            "When an opponent controls a creature with power 4 or greater, if this permanent is an enchantment, it becomes a 4/4 Beast creature.",
+            "Hidden Predators",
+            "Enchantment",
+        );
+        let condition = hidden_predators
+            .condition
+            .as_ref()
+            .expect("Hidden Predators' state trigger must carry a condition");
+        assert!(
+            matches!(
+                stack_condition_for_trigger(&hidden_predators, condition),
+                Some(TriggerCondition::SourceMatchesFilter { .. })
+            ),
+            "only the intervening \"if this permanent is an enchantment\" may be \
+             rechecked on resolution; stacked {:?} from {condition:?}",
+            stack_condition_for_trigger(&hidden_predators, condition),
+        );
+
+        let emperor_crocodile = state_trigger(
+            "When you control no other creatures, sacrifice this creature.",
+            "Emperor Crocodile",
+            "Creature",
+        );
+        let condition = emperor_crocodile
+            .condition
+            .as_ref()
+            .expect("Emperor Crocodile's state trigger must carry a condition");
+        assert_eq!(
+            stack_condition_for_trigger(&emperor_crocodile, condition),
+            None,
+            "a state trigger without an intervening \"if\" stacks no recheck"
+        );
     }
 
     #[test]
