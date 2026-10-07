@@ -25,6 +25,9 @@ import { flattenRichLabel, RichLabel } from "../mana/RichLabel.tsx";
 /** Ties the disclosure button to the panel it opens (`aria-controls`). */
 const DESCRIPTION_PANEL_ID = "targeting-description-panel";
 
+/** Board-choice intents whose Cancel gates on the engine `legalActions` offer (Cancel-01). Constant set, hoisted to module scope so renders do not rebuild it. */
+const IN_SCOPE_CANCEL_INTENTS = new Set(["crew", "saddle", "station"]);
+
 /**
  * The two frames the prompt renders in, selected by whether the slot is a
  * single optional pick. A frame is NOT a wrapper around a noun: each phrase is
@@ -154,7 +157,6 @@ export function TargetingOverlay() {
   // Cancel-01 scope: only the five in-scope flows gate cancel on engine
   // legalActions. Every other cancel button keeps status-quo rendering:
   // for out-of-scope views `canCancel` is unconditionally true.
-  const IN_SCOPE_CANCEL_INTENTS = new Set(["crew", "saddle", "station"]);
   const cancelGatedOnLegalActions =
     waitingFor?.type === "TargetSelection" ||
     waitingFor?.type === "EquipTarget" ||
