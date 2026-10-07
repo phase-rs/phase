@@ -49,6 +49,7 @@ use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 const MAZEMIND_TOME: &str = "{T}, Put a page counter on this artifact: Scry 1. (Look at the top card of your library. You may put that card on the bottom.)\n{2}, {T}, Put a page counter on this artifact: Draw a card.\nWhen there are four or more page counters on this artifact, exile it. If you do, you gain 4 life.";
@@ -918,7 +919,7 @@ fn stacked_occurrence(runner: &GameRunner, entry_id: ObjectId) -> TriggerDefinit
 /// legendary Vampire, exile this creature." While Olivia is under P0's control
 /// the granted state trigger stays quiet; then Boomerang returns Olivia to hand
 /// and the granted state trigger goes on the stack (CR 603.8). Returns the
-/// runner, the Bears and the granted trigger's stack-entry id.
+/// runner and the granted trigger's stack-entry id.
 fn olivia_granted_trigger_on_stack(
     scenario: GameScenario,
     olivia: ObjectId,
@@ -966,7 +967,7 @@ fn olivia_granted_trigger_on_stack(
             .any(|entry| matches!(
                 entry.occurrence,
                 TriggerDefinitionOccurrenceRef::Granted { .. }
-            )),
+            ) && entry.definition.mode == TriggerMode::StateCondition),
         "reach guard: Grizzly Bears gained Olivia's quoted state trigger"
     );
     assert!(
@@ -1067,7 +1068,7 @@ fn olivia_granted_state_trigger_exiles_despite_gaining_legendary_vampire_in_resp
     let (mut scenario, olivia, bears) = olivia_scenario();
     let rival_olivia = add_olivia(&mut scenario, P1);
     let seizing = scenario
-        .add_spell_to_hand_from_oracle(P0, "Word of Seizing", true, WORD_OF_SEIZING)
+        .add_spell_to_hand(P0, "Word of Seizing", true)
         // MTGJSON lists Split second as a keyword; naming it lets the keyword
         // line parse as it does in card data.
         .from_oracle_text_with_keywords(&["Split second"], WORD_OF_SEIZING)
