@@ -118,6 +118,8 @@ fn run_post_action_pipeline_from_with_policy(
     drain_policy: DeferredTriggerDrainPolicy,
     carried_priority_recipient: Option<PlayerId>,
 ) -> Result<WaitingFor, EngineError> {
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_post_action_pipeline_pass();
     stage_pending_activation_trigger_events(state, events, event_start);
 
     // CR 117.3c + CR 117.5: the wait a completed no-choice pass hands back. With

@@ -1338,6 +1338,7 @@ mod sprout_inalla_realistic_offer;
 mod squirming_emergence_mana_value_target;
 mod squirrel_mob_dynamic_pump;
 mod stack_ability_kind_axis;
+mod stack_bulk_token_executor;
 mod stack_entry_node_reach;
 mod stack_object_keyword_grants;
 mod stack_session_batch_authority;

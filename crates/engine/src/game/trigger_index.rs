@@ -1235,10 +1235,9 @@ pub fn candidates_for_event(state: &GameState, event: &GameEvent) -> SmallVec<[O
                     .and_then(|obj| (obj.zone != Zone::Battlefield).then_some((*id, obj.zone)))
             })
             .collect();
-        // `stale` and `event` are reported as SEPARATE fields. A consult reached
-        // via the batch-safety probe in `observers_are_batch_safe` carries a
-        // synthetic probe event that has nothing to do with the stale object;
-        // conflating them would misdirect the first person to hit this.
+        // `stale` and `event` are reported as SEPARATE fields: the consulted
+        // event says nothing about why an object went stale, and conflating
+        // them would misdirect the first person to hit this.
         debug_assert!(
             stale.is_empty(),
             "TriggerIndex holds off-battlefield candidates (CR 113.6): \
@@ -1249,8 +1248,7 @@ pub fn candidates_for_event(state: &GameState, event: &GameEvent) -> SmallVec<[O
         let Some(obj) = state.objects.get(id) else {
             // Absent objects are RETAINED, preserving the previous `is_none_or`
             // semantics exactly: the production candidate loop already
-            // `continue`s on a missing object, `observers_are_batch_safe`'s
-            // inertness check does the same, and `DebugAction::RemoveObject`
+            // `continue`s on a missing object, and `DebugAction::RemoveObject`
             // deletes an object without an index removal — so dropping here
             // would change no behavior while breaking existing fixtures.
             return true;

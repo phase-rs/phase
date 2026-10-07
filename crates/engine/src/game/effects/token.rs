@@ -1,4 +1,3 @@
-#[cfg(test)]
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -2422,25 +2421,25 @@ pub(crate) fn realize_settled_token_battlefield_entry(
     }
 }
 
-// ── Layer B: token-handler batch purity gate (Tier 3) ────────────────────
+// ── Layer B: token-handler bulk admission gate ────────────────────────────
 
-/// CR 603.2 + CR 603.6a: The §2.2a emits-exactly-{ZoneChanged,TokenCreated}
-/// gate. Layer C (`game/stack.rs::observers_are_batch_safe`) probes ONLY the
-/// `ZoneChanged(ETB)` + `TokenCreated` events one produced token emits. That
-/// probe is COMPLETE only if the resolved spec's creation emits exactly those
-/// two events. Every `TokenSpec` field that would emit an additional
-/// `GameEvent` (`enter_with_counters` → `CounterAdded`, counters.rs), introduce
-/// an interactive replacement (`enter_with_counters` → AddCounter replacement),
-/// or mutate extra battlefield state (`enters_attacking` → combat;
-/// `sacrifice_at` → delayed trigger, CR 603.7; `attach_to` → host attachments,
-/// CR 303.4) is rejected. A spec passing this gate provably emits exactly
-/// `{ZoneChanged(ETB), TokenCreated}` per produced token (see the field-by-field
-/// proof in `apply_create_token_after_replacement`).
+/// CR 603.2 + CR 603.6a: The emits-exactly-{ZoneChanged,TokenCreated} gate.
+/// The stack's bulk executor (`game/stack.rs::resolve_bulk_token_run`) elides
+/// the priority checkpoints between members on the proof that every member's
+/// creation does what member 1's did, and that its events reach no delayed
+/// trigger, combat state or host. That holds only if the resolved spec's
+/// creation emits exactly those two events. Every `TokenSpec` field that would
+/// emit an additional `GameEvent` (`enter_with_counters` → `CounterAdded`,
+/// counters.rs), introduce an interactive replacement (`enter_with_counters` →
+/// AddCounter replacement), or mutate extra battlefield state
+/// (`enters_attacking` → combat; `sacrifice_at` → delayed trigger, CR 603.7;
+/// `attach_to` → host attachments, CR 303.4) is rejected. A spec passing this
+/// gate provably emits exactly `{ZoneChanged(ETB), TokenCreated}` per produced
+/// token (see the field-by-field proof in `apply_create_token_after_replacement`).
 ///
 /// `characteristics` / `script_name` / `static_abilities` / `tapped` /
-/// `source_id` / `controller` are INERT: they set object fields directly or
-/// feed the ETB probe and emit no creation-time event beyond the ETB pair.
-#[cfg(test)]
+/// `source_id` / `controller` are INERT: they set object fields directly and
+/// emit no creation-time event beyond the ETB pair.
 pub(crate) fn spec_emits_only_etb_pair(spec: &TokenSpec) -> bool {
     spec.enter_with_counters.is_empty() // no CounterAdded event / AddCounter replacement
         && !spec.enters_attacking // no combat-state mutation (CR 508.4)
@@ -2520,7 +2519,6 @@ pub(crate) fn produced_token_is_non_observer(
 /// (Doubling Season's mandatory Double) are fine and stay per-token (§5.2) —
 /// they never produce `NeedsChoice`. Reuses the live pipeline's exact decision
 /// functions, side-effect-free (`&GameState`, no `apply_single_replacement`).
-#[cfg(test)]
 fn token_creation_needs_choice(
     state: &GameState,
     spec: &TokenSpec,
@@ -2556,7 +2554,6 @@ fn token_creation_needs_choice(
 /// type predicate the disjointness check can reason about (negation,
 /// subtype-only, broad `Permanent`/`Card`/`Any`) — the caller then conserves by
 /// refusing the batch.
-#[cfg(test)]
 fn type_filter_core_types(filter: &TypeFilter) -> Option<Vec<CoreType>> {
     match filter {
         TypeFilter::Creature => Some(vec![CoreType::Creature]),
@@ -2587,7 +2584,6 @@ fn type_filter_core_types(filter: &TypeFilter) -> Option<Vec<CoreType>> {
 
 /// CR 205: The concrete `CoreType` set a `TargetFilter` counts, when it is a
 /// single-`TypeFilter` `Typed` filter. Any other shape yields `None`.
-#[cfg(test)]
 fn target_filter_counted_core_types(filter: &TargetFilter) -> Option<Vec<CoreType>> {
     match filter {
         TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
@@ -2607,7 +2603,6 @@ fn target_filter_counted_core_types(filter: &TargetFilter) -> Option<Vec<CoreTyp
 /// quantity inside a `QuantityCheck` is provably disjoint from `token_core_types`.
 /// Any other condition shape (or an un-provable filter) returns `false` →
 /// conserve.
-#[cfg(test)]
 fn condition_invariant_for_token(
     condition: &crate::types::ability::AbilityCondition,
     token_core_types: &[CoreType],
@@ -2680,100 +2675,117 @@ pub(crate) fn token_effect_is_source_independent(ability: &ResolvedAbility) -> b
         && attach_to.is_none()
 }
 
-/// CR 608.2 + CR 608.2c: Layer B — the Token-handler purity gate. Returns a
-/// `BatchPlan` iff resolving this `Effect::Token` `run_len` times one-by-one
-/// would produce the identical per-resolution decision and token spec as one
-/// batched application of the base `Token` effect.
-///
-/// v1 batches the base `Effect::Token` (untargeted, `Fixed` count, emitting
-/// exactly the ETB pair, with no produced-token observer and no interactive
-/// replacement). A `CopyTokenOf`-instead sub-ability whose condition is
-/// currently met (the copy branch) is batched along a CONTIGUOUS PREFIX of the
-/// run whose copy sources share identical copiable values (CR 707.2) — the
-/// prefix length may be shorter than `run_len`, with the remaining entries
-/// resolved in a later step. A `ConditionInstead` sub-ability that is currently
-/// NOT met is accepted only when its condition is provably invariant across the
-/// run (so all N resolutions take the base branch).
-///
-/// `run_source_ids` are the per-entry source object ids of the contiguous run
-/// (resolution order, top-down), needed only by the met-copy prefix path to
-/// gather each entry's `SelfRef` copy source. The base-token path ignores them.
-#[cfg(test)]
-pub(crate) fn try_resolve_batch(
+/// CR 608.2c: The run-invariant shape both bulk arms share: a bare
+/// `Effect::Token` with a literal `Fixed` count whose per-resolution spec
+/// resolves read-only, mirroring `resolve`. `None` for any other shape.
+fn bulk_token_shape(
     state: &GameState,
     ability: &ResolvedAbility,
-    run_len: u32,
-    run_source_ids: &[ObjectId],
-) -> Option<super::BatchPlan> {
-    // The effect must be a bare `Effect::Token` with a literal `Fixed` count.
+) -> Option<(
+    TokenSpec,
+    PlayerId,
+    crate::types::proposed_event::EtbTapState,
+    u32,
+)> {
     let Effect::Token { count, .. } = &ability.effect else {
         return None;
     };
     if !matches!(count, QuantityExpr::Fixed { .. }) {
         return None;
     }
+    resolve_token_spec(state, ability)
+}
 
-    // Resolve the per-resolution TokenSpec read-only, mirroring `resolve`.
-    // HIGH-1: resolve ONCE here — `resolve_token_spec` parses token scripts,
-    // resolves quantities, and builds attributes, so the perf-path must not
-    // resolve it twice. The resolved spec's `core_types` feed the disjointness
-    // invariance proof below directly.
-    let (spec, owner, enter_tapped, resolved_count) = resolve_token_spec(state, ability)?;
+/// CR 608.2 + CR 608.2c: Layer B — the Token-handler bulk admission gate.
+/// Returns `true` iff each of a run of identical untargeted resolutions of this
+/// base `Effect::Token` creates one token from the same spec, emits exactly the
+/// ETB pair, cannot pause for a replacement choice, and cannot trip a pairwise
+/// state-based action against an earlier member's token. The stack's bulk
+/// executor still resolves every member individually through `resolve_top`;
+/// this gate only decides that the checkpoints between them may be elided once
+/// member 1's checkpoint is shown inert.
+///
+/// A `ConditionInstead` sub-ability that is currently NOT met is accepted only
+/// when its condition is provably invariant across the run (so every member
+/// takes the base branch). A met copy-instead swap (`CopyTokenOf`) is refused:
+/// the copy arm's bulk admission (`try_resolve_copy_batch`) is not a production
+/// path, so such a run goes to the stack's sequential proof.
+pub(crate) fn admits_bulk_run(state: &GameState, ability: &ResolvedAbility) -> bool {
+    let Some((spec, owner, enter_tapped, resolved_count)) = bulk_token_shape(state, ability) else {
+        return false;
+    };
 
-    // CR 608.2c: A sub-ability changes the resolved effect. Two acceptable
-    // shapes: a `ConditionInstead`-gated sub currently NOT met (the base
-    // `Token` resolves, provably invariant across the run), or a met
-    // `ConditionInstead` copy-instead swap which is batched along a value-equal
-    // prefix (CR 707.2). Any other sub shape conserves.
+    // CR 608.2c: A sub-ability changes the resolved effect. The only acceptable
+    // shape is a `ConditionInstead`-gated sub currently NOT met whose condition
+    // is provably invariant across the run (the base `Token` resolves for every
+    // member).
     if let Some(sub) = &ability.sub_ability {
-        match &sub.condition {
-            Some(crate::types::ability::AbilityCondition::ConditionInstead { inner }) => {
-                if super::evaluate_condition(inner, state, ability) {
-                    // The swap currently fires: the resolved effect is the
-                    // sub's (e.g. CopyTokenOf). Attempt copy-prefix batching.
-                    return try_resolve_copy_batch(state, ability, sub, inner, run_source_ids);
-                }
-                // NOT met: base `Token` resolves. Token core types feed the
-                // disjointness invariance proof.
-                if !condition_invariant_for_token(inner, &spec.characteristics.core_types) {
-                    return None;
-                }
-            }
-            // Any other sub-ability shape (continuation step, sequential
-            // sibling, other instead conditions) is not proven batch-safe.
-            _ => return None,
+        let Some(crate::types::ability::AbilityCondition::ConditionInstead { inner }) =
+            &sub.condition
+        else {
+            return false;
+        };
+        if super::evaluate_condition(inner, state, ability)
+            || !condition_invariant_for_token(inner, &spec.characteristics.core_types)
+        {
+            return false;
         }
     }
 
-    // v1 batches a single base token per resolution. A non-unit per-resolution
-    // count (e.g. "create two Insects") is correct to batch but the count-fusion
-    // interaction is out of v1 scope (§5.2a) — conserve.
+    // One base token per resolution. A non-unit per-resolution count (e.g.
+    // "create two Insects") is not admitted — conserve.
     if resolved_count != 1 {
-        return None;
+        return false;
     }
 
-    // §2.2a: the resolved spec must emit exactly {ZoneChanged, TokenCreated}.
+    // The resolved spec must emit exactly {ZoneChanged, TokenCreated}.
     if !spec_emits_only_etb_pair(&spec) {
-        return None;
+        return false;
     }
 
-    // §2.3a: the produced token must not itself observe the ETB/TokenCreated
-    // events its in-batch siblings emit. The produced token's emission is
-    // derived from its own core types (the spec's characteristics).
-    if !produced_token_is_non_observer(
-        &base_token_trigger_defs(&spec),
-        &spec.characteristics.core_types,
-    ) {
-        return None;
+    // CR 704.5j + CR 704.5k: the legend rule and the world rule compare a
+    // permanent with the others. A second identical legendary or world token
+    // trips them where the first did not, so member 1's checkpoint cannot
+    // speak for later members' checkpoints.
+    if spec
+        .characteristics
+        .supertypes
+        .iter()
+        .any(|supertype| match supertype {
+            Supertype::Legendary | Supertype::World => true,
+            Supertype::Basic | Supertype::Snow | Supertype::Ongoing | Supertype::Host => false,
+        })
+    {
+        return false;
     }
 
-    // §3.4: token creation must not be able to pause for an interactive
-    // (optional / order-material) replacement choice.
-    if token_creation_needs_choice(state, &spec, owner, enter_tapped, resolved_count) {
-        return None;
-    }
+    // CR 614.1a + CR 616.1: token creation must not be able to pause for an
+    // interactive (optional / order-material) replacement choice.
+    !token_creation_needs_choice(state, &spec, owner, enter_tapped, resolved_count)
+}
 
-    Some(super::BatchPlan::token(spec, run_len))
+/// Test-only entry to the copy arm's bulk admission. `admits_bulk_run` refuses
+/// every met copy-instead swap, so the copy arm's inline tests reach it here,
+/// through the same base-shape and met-condition dispatch the production
+/// verdict performs before refusing.
+#[cfg(test)]
+pub(crate) fn copy_arm_admits_bulk_run(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    run_source_ids: &[ObjectId],
+) -> bool {
+    if bulk_token_shape(state, ability).is_none() {
+        return false;
+    }
+    let Some(sub) = &ability.sub_ability else {
+        return false;
+    };
+    let Some(crate::types::ability::AbilityCondition::ConditionInstead { inner }) = &sub.condition
+    else {
+        return false;
+    };
+    super::evaluate_condition(inner, state, ability)
+        && try_resolve_copy_batch(state, ability, sub, inner, run_source_ids)
 }
 
 /// Token handler-owned admission for the stack's clone-and-proof runner.
@@ -2801,7 +2813,7 @@ fn try_resolve_copy_batch(
     sub: &ResolvedAbility,
     inner: &crate::types::ability::AbilityCondition,
     run_source_ids: &[ObjectId],
-) -> Option<super::BatchPlan> {
+) -> bool {
     // 1. SHAPE GATE FIRST (cheapest): the swapped effect must be a bare
     //    self-copy with the default single-token shape and no exceptions.
     let Effect::CopyTokenOf {
@@ -2815,10 +2827,10 @@ fn try_resolve_copy_batch(
         additional_modifications,
     } = &sub.effect
     else {
-        return None;
+        return false;
     };
     if !extra_keywords.is_empty() || !additional_modifications.is_empty() {
-        return None;
+        return false;
     }
 
     // 2. LAZY-GATHER the run's copy sources (only now, after the shape gate).
@@ -2826,24 +2838,27 @@ fn try_resolve_copy_batch(
     //    object — exactly `run_source_ids` (top-down resolution order).
     if run_source_ids.len() < 2 {
         // A prefix of fewer than 2 cannot collapse; fall back to sequential.
-        return None;
+        return false;
     }
 
     // 3. Compute the value-equal contiguous prefix (CR 707.2).
-    let (prefix_values, prefix_len) =
-        super::token_copy::compute_copy_batch_prefix(state, run_source_ids)?;
+    let Some((prefix_values, prefix_len)) =
+        super::token_copy::compute_copy_batch_prefix(state, run_source_ids)
+    else {
+        return false;
+    };
     if prefix_len < 2 {
-        return None;
+        return false;
     }
     if !copy_token_values_emit_only_etb_pair(&prefix_values) {
-        return None;
+        return false;
     }
 
     // 4. H1 INVARIANCE GATE (AFTER prefix): the condition must be invariant over
     //    the COPY's core types (what enters), not the placeholder spec's. A copy
     //    creating Lands gated on a Land count would diverge per resolution.
     if !condition_invariant_for_token(inner, &prefix_values.card_types.core_types) {
-        return None;
+        return false;
     }
 
     // 5. Build the probe spec from the prefix's shared copiable values so the
@@ -2851,7 +2866,7 @@ fn try_resolve_copy_batch(
     //    `zone_change_record_from_spec` reflects the true produced token.
     let probe_spec = copy_probe_spec(ability, &prefix_values);
     if !spec_emits_only_etb_pair(&probe_spec) {
-        return None;
+        return false;
     }
     // §2.3a: a copy token inherits the copied permanent's full trigger set
     // (CR 707.2 + CR 707.5 — the copy's ETB triggers fire), so the non-observer
@@ -2865,7 +2880,7 @@ fn try_resolve_copy_batch(
         &prefix_values.trigger_definitions,
         &prefix_values.card_types.core_types,
     ) {
-        return None;
+        return false;
     }
     let owner = resolve_token_owner(state, ability, &TargetFilter::Controller);
     if token_creation_needs_choice(
@@ -2875,15 +2890,9 @@ fn try_resolve_copy_batch(
         crate::types::proposed_event::EtbTapState::from_seeded_tapped(false),
         1,
     ) {
-        return None;
+        return false;
     }
-
-    // 6. Retain only the read-only probe facts needed by legacy observer tests.
-    Some(super::BatchPlan::copy_token(
-        probe_spec,
-        prefix_values.mana_cost.mana_value(),
-        prefix_len,
-    ))
+    true
 }
 
 /// CR 306.5b + CR 614.1c + CR 707.2: `CopyTokenOf` seeds intrinsic counters
@@ -2947,27 +2956,6 @@ pub(crate) fn copy_probe_spec_for(
         controller,
         attach_to: TokenHostRequest::NotRequested,
     }
-}
-
-/// CR 111.10: Enumerate the trigger definitions a BASE `Token` spec injects on
-/// the produced token, WITHOUT creating an object — the §2.3a non-observer gate
-/// input. Predefined subtype abilities (`predefined_token_abilities`) are
-/// ACTIVATED abilities and register no trigger; spec `static_abilities` are
-/// continuous (CR 611) and register no trigger. A `Role` subtype would inject
-/// `predefined_role_token_spec(name).triggers`, but Roles are created via
-/// `attach_to`, which `spec_emits_only_etb_pair` already excludes — so a
-/// passing spec injects no triggers. Collected explicitly (defense in depth):
-/// if a future spec ever carries a Role subtype while passing the gate, its
-/// triggers are surfaced here for classification.
-#[cfg(test)]
-fn base_token_trigger_defs(spec: &TokenSpec) -> Vec<TriggerDefinition> {
-    let mut out: Vec<TriggerDefinition> = Vec::new();
-    if spec.characteristics.subtypes.iter().any(|s| s == "Role") {
-        if let Some(role) = predefined_role_token_spec(&spec.characteristics.display_name) {
-            out.extend(role.triggers);
-        }
-    }
-    out
 }
 
 fn normalized_token_static_definition(mut static_def: StaticDefinition) -> StaticDefinition {

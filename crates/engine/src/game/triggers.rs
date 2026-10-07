@@ -345,6 +345,7 @@ struct MatchedTrigger {
     constraint: Option<crate::types::ability::TriggerConstraint>,
 }
 
+#[derive(Clone)]
 struct OffZoneTriggerSourceCache {
     zone: Zone,
     source_ids: Vec<ObjectIncarnationRef>,
@@ -568,6 +569,12 @@ enum TriggerCollectionOperation {
     PrepareEventBatch {
         events: Vec<GameEvent>,
     },
+    /// The per-event observation ledgers of `PrepareEventBatch` without its
+    /// layer flush and off-zone keyword reconcile, for a bulk-run member whose
+    /// run start already proved both inert (`BulkMemberTriggerCollection`).
+    ObserveEventBatch {
+        events: Vec<GameEvent>,
+    },
     RecordTriggerFired {
         constraint: Option<TriggerConstraint>,
         source_context: Box<Option<TriggerSourceContext>>,
@@ -601,6 +608,10 @@ struct TriggerCollectionSession {
     /// How many matched triggers this session admitted (`record_match`),
     /// counted before any context is pruned as an auto-inert no-op.
     admitted_matches: usize,
+    /// Off-zone trigger sources hoisted to a bulk run's start. When set, this
+    /// session prepares each event batch with `ObserveEventBatch` and reads
+    /// these sources instead of rebuilding them (`BulkMemberTriggerCollection`).
+    bulk_member_sources: Option<Vec<OffZoneTriggerSourceCache>>,
 }
 
 impl TriggerCollectionSession {
@@ -609,6 +620,7 @@ impl TriggerCollectionSession {
             overlay,
             operation_journal: None,
             admitted_matches: 0,
+            bulk_member_sources: None,
         }
     }
 
@@ -621,16 +633,21 @@ impl TriggerCollectionSession {
             overlay,
             operation_journal: Some(operation_journal),
             admitted_matches: 0,
+            bulk_member_sources: None,
         }
     }
 
     fn prepare(&mut self, state: &mut GameState, events: &[GameEvent]) {
-        let _ = self.apply(
-            state,
+        let operation = if self.bulk_member_sources.is_some() {
+            TriggerCollectionOperation::ObserveEventBatch {
+                events: events.to_vec(),
+            }
+        } else {
             TriggerCollectionOperation::PrepareEventBatch {
                 events: events.to_vec(),
-            },
-        );
+            }
+        };
+        let _ = self.apply(state, operation);
     }
 
     /// Atomically admits one already-matched trigger candidate to collection.
@@ -762,6 +779,12 @@ impl TriggerCollectionSession {
             TriggerCollectionOperation::PrepareEventBatch { events } => {
                 super::layers::flush_layers(state);
                 reconcile_off_zone_keyword_triggers(state);
+                observe_object_taps(state, &events);
+                observe_object_counter_placements(state, &events);
+                observe_creatures_exploited(state, &events);
+                None
+            }
+            TriggerCollectionOperation::ObserveEventBatch { events } => {
                 observe_object_taps(state, &events);
                 observe_object_counter_placements(state, &events);
                 observe_creatures_exploited(state, &events);
@@ -4419,6 +4442,89 @@ fn collect_latched_batched_zone_triggers(
     Ok(())
 }
 
+/// The non-battlefield zones whose objects can source triggers, with each
+/// zone's current trigger sources (graveyard, exile, stack and command zone).
+fn off_zone_trigger_source_caches(state: &GameState) -> Vec<OffZoneTriggerSourceCache> {
+    [Zone::Graveyard, Zone::Exile, Zone::Stack, Zone::Command]
+        .into_iter()
+        .map(|zone| {
+            let source_ids = trigger_source_ids_for_zone(state, zone);
+            let source_ids = source_ids
+                .into_iter()
+                .filter_map(|object_id| {
+                    state
+                        .objects
+                        .get(&object_id)
+                        .map(ObjectIncarnationRef::from_object)
+                })
+                .collect();
+            OffZoneTriggerSourceCache { zone, source_ids }
+        })
+        .collect()
+}
+
+/// CR 603.2 + CR 603.3b: the production event-trigger collector run over one
+/// bulk-run member's events, with its run-invariant preparation hoisted to the
+/// run start. Matching, suppression, ledgers and auto-inert pruning are the
+/// ordinary `collect_pending_triggers_with_collection`; only two preparation
+/// steps are hoisted, each proved invariant across the run by its caller
+/// (`stack::resolve_bulk_token_run`): the layer flush (member 1's checkpoint is
+/// a fixed point and no entry perturbs another object's layered values) and
+/// the off-zone source scan with its keyword reconcile (members move no object
+/// between the graveyard, exile, stack and command zones).
+pub(crate) struct BulkMemberTriggerCollection {
+    off_zone: Vec<OffZoneTriggerSourceCache>,
+}
+
+impl BulkMemberTriggerCollection {
+    pub(crate) fn prepare(state: &GameState) -> Self {
+        Self {
+            off_zone: off_zone_trigger_source_caches(state),
+        }
+    }
+
+    pub(crate) fn collect(
+        &self,
+        state: &mut GameState,
+        events: &[GameEvent],
+    ) -> Vec<PendingTriggerContext> {
+        let mut session = TriggerCollectionSession::new(TriggerCollectionOverlay::default());
+        session.bulk_member_sources = Some(self.off_zone.clone());
+        collect_pending_triggers_with_collection(
+            state,
+            events,
+            LogicalZoneTriggerCollection::Ordinary,
+            &mut session,
+        )
+    }
+}
+
+/// CR 603.8: the state-trigger definitions functioning on `obj`. The single
+/// authority shared by `check_state_triggers` and `has_active_state_triggers`.
+fn active_state_trigger_definitions<'a>(
+    state: &'a GameState,
+    obj: &'a GameObject,
+) -> impl Iterator<Item = &'a TriggerDefinition> + 'a {
+    super::functioning_abilities::active_trigger_definitions(state, obj)
+        .map(|active| active.definition)
+        .filter(|definition| definition.mode == TriggerMode::StateCondition)
+}
+
+/// CR 603.8: whether any battlefield permanent has a functioning state trigger,
+/// i.e. whether `check_state_triggers` has anything to check.
+pub(crate) fn has_active_state_triggers(state: &GameState) -> bool {
+    state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|obj| obj.zone == Zone::Battlefield)
+        .any(|obj| {
+            active_state_trigger_definitions(state, obj)
+                .next()
+                .is_some()
+        })
+}
+
 fn collect_pending_triggers_with_collection(
     state: &mut GameState,
     events: &[GameEvent],
@@ -4457,23 +4563,10 @@ fn collect_pending_triggers_with_collection(
     let mut initiative_stolen_this_pass: HashSet<PlayerId> = HashSet::new();
     let off_zone_trigger_sources = if events.is_empty() {
         Vec::new()
+    } else if let Some(sources) = &session.bulk_member_sources {
+        sources.clone()
     } else {
-        [Zone::Graveyard, Zone::Exile, Zone::Stack, Zone::Command]
-            .into_iter()
-            .map(|zone| {
-                let source_ids = trigger_source_ids_for_zone(state, zone);
-                let source_ids = source_ids
-                    .into_iter()
-                    .filter_map(|object_id| {
-                        state
-                            .objects
-                            .get(&object_id)
-                            .map(ObjectIncarnationRef::from_object)
-                    })
-                    .collect();
-                OffZoneTriggerSourceCache { zone, source_ids }
-            })
-            .collect::<Vec<_>>()
+        off_zone_trigger_source_caches(state)
     };
     let active_suppress_triggers = if events.is_empty() {
         Vec::new()
@@ -11156,17 +11249,13 @@ pub fn check_state_triggers(state: &mut GameState) {
             (
                 obj.controller,
                 obj.entered_battlefield_turn.unwrap_or(0),
-                super::functioning_abilities::active_trigger_definitions(state, obj)
-                    .map(|active| active.definition.clone())
+                active_state_trigger_definitions(state, obj)
+                    .cloned()
                     .collect(),
             )
         };
 
         for trigger in &trigger_defs {
-            if trigger.mode != TriggerMode::StateCondition {
-                continue;
-            }
-
             // CR 603.8: Don't re-trigger if this state trigger is already on the stack.
             let already_on_stack = state.stack.iter().any(|entry| {
                 entry.source_id == obj_id
