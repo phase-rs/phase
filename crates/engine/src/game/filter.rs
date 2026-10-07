@@ -1657,8 +1657,9 @@ pub(crate) fn controller_ref_player(
     }
 }
 
-/// CR 608.2c + CR 608.2b: the player announced by the clause tagged `group`; `None` when that
-/// target is illegal or no ability is resolving.
+/// CR 608.2c + CR 608.2b: the player announced by the clause tagged `group`, as instructions
+/// see it; `None` when that target is illegal or gone, or no ability is resolving. Mass filters
+/// ("each creature they control") inherit this gate.
 fn declared_player(
     state: &GameState,
     ability: Option<&ResolvedAbility>,

@@ -3,15 +3,20 @@
 //! caster. Three seats: caster P0, declared player P1, bystander P2.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::static_abilities::player_has_hexproof;
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::TargetRef;
+use engine::types::ability::{
+    ControllerRef, StaticDefinition, TargetFilter, TargetRef, TypedFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, GameState, LayersDirty, WaitingFor};
+use engine::types::identifiers::CardId;
 use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 use engine::types::ObjectId;
 
@@ -70,12 +75,75 @@ fn controller(r: &GameRunner, t: &TargetRef) -> Option<PlayerId> {
 /// Every offered target slot, as `(slot index, legal targets)`.
 type Offers = Vec<(usize, Vec<TargetRef>)>;
 
+/// A change to the game applied once, after targets are announced and before the stack first
+/// resolves.
+#[derive(Clone, Copy)]
+enum Invalidate {
+    /// Marks the seat as having left the game; its permanents stay on the battlefield.
+    Leave(PlayerId),
+    /// Runs the real elimination, which exiles the seat's objects (CR 800.4a).
+    Eliminate(PlayerId),
+    /// The player becomes an illegal target while remaining in the game (CR 702.11c).
+    Hexproof(PlayerId),
+    /// Every permanent `from` controls changes controller to `to`.
+    Steal { from: PlayerId, to: PlayerId },
+}
+
+const HEXPROOF_SOURCE: &str = "You Have Hexproof Source";
+
+/// "You have hexproof" (the Leyline of Sanctity shape); the new static needs a full layer pass.
+fn grant_hexproof(state: &mut GameState, player: PlayerId) {
+    let grantor = engine::game::zones::create_object(
+        state,
+        CardId(951),
+        player,
+        HEXPROOF_SOURCE.to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&grantor)
+        .expect("the grantor was just created")
+        .static_definitions =
+        vec![
+            StaticDefinition::new(StaticMode::Hexproof).affected(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            )),
+        ]
+        .into();
+    state.layers_dirty = LayersDirty::Full;
+    engine::game::layers::flush_layers(state);
+    assert!(
+        player_has_hexproof(state, player),
+        "reach guard: {player:?} has hexproof"
+    );
+}
+
+fn apply_invalidation(state: &mut GameState, change: Invalidate) {
+    match change {
+        Invalidate::Leave(p) => state.players[p.0 as usize].is_eliminated = true,
+        Invalidate::Eliminate(p) => {
+            engine::game::elimination::eliminate_player(state, p, &mut Vec::new());
+        }
+        Invalidate::Hexproof(p) => grant_hexproof(state, p),
+        Invalidate::Steal { from, to } => {
+            let ids: Vec<ObjectId> = state.battlefield.iter().copied().collect();
+            for id in ids {
+                let o = state.objects.get_mut(&id).expect("battlefield object");
+                if o.controller == from && o.name != HEXPROOF_SOURCE {
+                    o.controller = to;
+                }
+            }
+        }
+    }
+}
+
 /// Drives prompts to quiescence: player slots take P1 (the declared player), object slots take
-/// the first offer controlled by `want`; `eliminate` removes a seat once the stack is first
-/// passed. Before taking its pick, a slot first tries one offered object controlled by another
-/// seat and requires the rejection.
-fn drive(r: &mut GameRunner, want: PlayerId, eliminate: Option<usize>) -> Offers {
-    drive_with(r, want, eliminate, true)
+/// the first offer controlled by `want`; `invalidate` lands once the stack is first passed.
+/// Before taking its pick, a slot first tries one offered object controlled by another seat and
+/// requires the rejection.
+fn drive(r: &mut GameRunner, want: PlayerId, invalidate: &[Invalidate]) -> Offers {
+    drive_with(r, want, invalidate, true)
 }
 
 /// `drive`, with the wrong-controller rejection required only when `strict` (an unrestricted
@@ -83,11 +151,11 @@ fn drive(r: &mut GameRunner, want: PlayerId, eliminate: Option<usize>) -> Offers
 fn drive_with(
     r: &mut GameRunner,
     want: PlayerId,
-    eliminate: Option<usize>,
+    invalidate: &[Invalidate],
     strict: bool,
 ) -> Offers {
     let mut offers = Offers::new();
-    let mut eliminate = eliminate;
+    let mut pending = invalidate;
     for _ in 0..60 {
         match r.state().waiting_for.clone() {
             WaitingFor::TargetSelection {
@@ -141,8 +209,8 @@ fn drive_with(
                 if r.state().stack.is_empty() {
                     break;
                 }
-                if let Some(seat) = eliminate.take() {
-                    r.state_mut().players[seat].is_eliminated = true;
+                for change in std::mem::take(&mut pending) {
+                    apply_invalidation(r.state_mut(), *change);
                 }
                 r.act(GameAction::PassPriority).expect("pass");
             }
@@ -152,7 +220,7 @@ fn drive_with(
     offers
 }
 
-fn cast_row(text: &str, want: PlayerId, eliminate: Option<usize>) -> (GameRunner, Board, Offers) {
+fn cast_row(text: &str, want: PlayerId, invalidate: &[Invalidate]) -> (GameRunner, Board, Offers) {
     let mut sc = three_player();
     let b = board(&mut sc);
     let spell = sc
@@ -168,7 +236,7 @@ fn cast_row(text: &str, want: PlayerId, eliminate: Option<usize>) -> (GameRunner
         payment_mode: CastPaymentMode::Auto,
     })
     .expect("cast");
-    let offers = drive(&mut r, want, eliminate);
+    let offers = drive(&mut r, want, invalidate);
     (r, b, offers)
 }
 
@@ -214,7 +282,7 @@ fn offered_only_to(r: &GameRunner, offers: &Offers, slot: usize, seat: PlayerId)
 /// player the first clause chose, across the intervening object-target clause.
 #[test]
 fn the_fall_of_kroog_acts_on_the_chosen_opponent() {
-    let (r, b, offers) = cast_row(KROOG, P1, None);
+    let (r, b, offers) = cast_row(KROOG, P1, &[]);
     offered_not_to(&r, &offers, 1, P0);
     assert_eq!(offers.len(), 2, "one player slot and one land slot");
     assert_eq!(zone_of(&r, b.lands[1]), Zone::Graveyard, "P1's land died");
@@ -236,7 +304,7 @@ fn the_fall_of_kroog_acts_on_the_chosen_opponent() {
 /// bystanders and the caster are untouched.
 #[test]
 fn the_fall_of_kroog_affects_no_one_once_the_chosen_opponent_is_gone() {
-    let (r, b, offers) = cast_row(KROOG, P1, Some(1));
+    let (r, b, offers) = cast_row(KROOG, P1, &[Invalidate::Leave(P1)]);
     offered_not_to(&r, &offers, 1, P0);
     assert_eq!(
         zone_of(&r, b.lands[1]),
@@ -251,7 +319,7 @@ fn the_fall_of_kroog_affects_no_one_once_the_chosen_opponent_is_gone() {
     assert_eq!(damage(&r, b.creatures[2]), 0);
 }
 
-fn keeper_row(eliminate: Option<usize>) -> (GameRunner, Board, Offers) {
+fn keeper_row(invalidate: &[Invalidate]) -> (GameRunner, Board, Offers) {
     let mut sc = three_player();
     let b = board(&mut sc);
     let keeper = sc
@@ -264,7 +332,7 @@ fn keeper_row(eliminate: Option<usize>) -> (GameRunner, Board, Offers) {
         ability_index: 0,
     })
     .expect("activate");
-    let offers = drive(&mut r, P1, eliminate);
+    let offers = drive(&mut r, P1, invalidate);
     (r, b, offers)
 }
 
@@ -272,7 +340,7 @@ fn keeper_row(eliminate: Option<usize>) -> (GameRunner, Board, Offers) {
 /// that opponent's creatures.
 #[test]
 fn keeper_of_the_dead_destroys_the_chosen_opponents_creature() {
-    let (r, b, offers) = keeper_row(None);
+    let (r, b, offers) = keeper_row(&[]);
     offered_not_to(&r, &offers, 1, P0);
     assert_eq!(zone_of(&r, b.creatures[1]), Zone::Graveyard);
     assert_eq!(zone_of(&r, b.creatures[0]), Zone::Battlefield);
@@ -282,7 +350,7 @@ fn keeper_of_the_dead_destroys_the_chosen_opponents_creature() {
 /// CR 608.2b: the chosen opponent is gone, so "that player controls" determines nothing.
 #[test]
 fn keeper_of_the_dead_destroys_nothing_once_the_chosen_opponent_is_gone() {
-    let (r, b, offers) = keeper_row(Some(1));
+    let (r, b, offers) = keeper_row(&[Invalidate::Leave(P1)]);
     offered_not_to(&r, &offers, 1, P0);
     for c in b.creatures {
         assert_eq!(zone_of(&r, c), Zone::Battlefield);
@@ -314,7 +382,7 @@ fn down_for_repairs_destroys_the_chosen_opponents_attraction() {
         payment_mode: CastPaymentMode::Auto,
     })
     .expect("cast");
-    let offers = drive(&mut r, P1, None);
+    let offers = drive(&mut r, P1, &[]);
     offered_not_to(&r, &offers, 1, P0);
     assert_eq!(
         zone_of(&r, attractions[1]),
@@ -336,7 +404,7 @@ fn yosei_taps_the_declared_players_permanents() {
     let mut r = sc.build();
     r.state_mut().objects.get_mut(&yosei).unwrap().damage_marked = 5;
     r.act(GameAction::PassPriority).expect("pass");
-    drive(&mut r, P1, None);
+    drive(&mut r, P1, &[]);
     assert_eq!(
         zone_of(&r, yosei),
         Zone::Graveyard,
@@ -346,6 +414,11 @@ fn yosei_taps_the_declared_players_permanents() {
     assert!(
         tapped(b.creatures[1]) || tapped(b.lands[1]),
         "P1's permanent tapped"
+    );
+    assert_eq!(
+        r.state().steps_to_skip[1].get(&Phase::Untap).copied(),
+        Some(1),
+        "P1 skips their next untap step"
     );
     for id in [b.lands[0], b.creatures[0], b.lands[2], b.creatures[2]] {
         assert!(
@@ -359,7 +432,7 @@ fn yosei_taps_the_declared_players_permanents() {
 /// counter slot offers the caster's creature, not the revealed opponent's.
 #[test]
 fn aggressive_negotiations_counter_goes_on_the_casters_creature() {
-    let (r, b, offers) = cast_row(AGGRESSIVE_NEGOTIATIONS, P0, None);
+    let (r, b, offers) = cast_row(AGGRESSIVE_NEGOTIATIONS, P0, &[]);
     offered_only_to(&r, &offers, 1, P0);
     let counters = |id: ObjectId| {
         r.state().objects[&id]
@@ -376,7 +449,7 @@ fn aggressive_negotiations_counter_goes_on_the_casters_creature() {
 /// announced.
 #[test]
 fn radiating_lightning_hits_only_the_chosen_players_creatures() {
-    let (r, b, _) = cast_row(RADIATING_LIGHTNING, P1, None);
+    let (r, b, _) = cast_row(RADIATING_LIGHTNING, P1, &[]);
     assert_eq!(lives(&r), vec![20, 17, 20], "only P1 took the 3 damage");
     assert_eq!(
         [
@@ -439,7 +512,7 @@ fn hand_sizes(r: &GameRunner) -> Vec<usize> {
         .to_vec()
 }
 
-fn treasure_chain(eliminate: Option<usize>) -> (GameRunner, Vec<usize>) {
+fn treasure_chain(invalidate: &[Invalidate]) -> (GameRunner, Vec<usize>) {
     let mut sc = three_player();
     board(&mut sc);
     let spell = sc
@@ -456,7 +529,7 @@ fn treasure_chain(eliminate: Option<usize>) -> (GameRunner, Vec<usize>) {
         payment_mode: CastPaymentMode::Auto,
     })
     .expect("cast");
-    drive_with(&mut r, P2, eliminate, false);
+    drive_with(&mut r, P2, invalidate, false);
     (r, before)
 }
 
@@ -464,7 +537,7 @@ fn treasure_chain(eliminate: Option<usize>) -> (GameRunner, Vec<usize>) {
 /// opponent discards (reach guard for the eliminated leg).
 #[test]
 fn that_player_after_a_token_clause_discards_the_declared_opponent() {
-    let (r, before) = treasure_chain(None);
+    let (r, before) = treasure_chain(&[]);
     let after = hand_sizes(&r);
     assert_eq!(lives(&r), vec![20, 18, 20], "reach guard: P1 lost 2 life");
     assert_eq!(
@@ -482,7 +555,7 @@ fn that_player_after_a_token_clause_discards_the_declared_opponent() {
 /// into a bystander.
 #[test]
 fn that_player_after_a_token_clause_affects_no_one_once_the_declared_opponent_is_gone() {
-    let (r, before) = treasure_chain(Some(1));
+    let (r, before) = treasure_chain(&[Invalidate::Leave(P1)]);
     assert_eq!(
         hand_sizes(&r),
         vec![before[0] - 1, before[1], before[2]],
@@ -498,5 +571,230 @@ fn that_player_after_a_token_clause_affects_no_one_once_the_declared_opponent_is
             && o.controller == P2
             && o.card_types.core_types.contains(&CoreType::Creature)),
         "reach guard: the Destroy clause ran"
+    );
+}
+
+fn untap_skips(r: &GameRunner, p: PlayerId) -> Option<u32> {
+    r.state().steps_to_skip[p.0 as usize]
+        .get(&Phase::Untap)
+        .copied()
+}
+
+fn yosei_row(invalidate: &[Invalidate]) -> (GameRunner, Board) {
+    let mut sc = three_player();
+    let b = board(&mut sc);
+    let yosei = sc
+        .add_creature_from_oracle(P0, "Yosei, the Morning Star", 5, 5, YOSEI)
+        .id();
+    let mut r = sc.build();
+    r.state_mut().objects.get_mut(&yosei).unwrap().damage_marked = 5;
+    r.act(GameAction::PassPriority).expect("pass");
+    drive(&mut r, P1, invalidate);
+    assert_eq!(
+        zone_of(&r, yosei),
+        Zone::Graveyard,
+        "reach guard: Yosei died"
+    );
+    assert!(
+        r.state().stack.is_empty(),
+        "reach guard: the trigger resolved"
+    );
+    (r, b)
+}
+
+fn tapped_among(r: &GameRunner, ids: &[ObjectId]) -> Vec<bool> {
+    ids.iter().map(|id| r.state().objects[id].tapped).collect()
+}
+
+/// CR 608.2b: only the declared player is an illegal target, so the permanents that player
+/// controls are still tapped (Yosei ruling), while the player's instruction does not happen.
+#[test]
+fn yosei_taps_the_permanents_when_only_the_declared_player_is_illegal() {
+    let (r, b) = yosei_row(&[Invalidate::Hexproof(P1)]);
+    assert_eq!(
+        tapped_among(&r, &[b.creatures[1], b.lands[1]]),
+        [true, true],
+        "P1's permanents stay legal targets"
+    );
+    for id in [b.lands[0], b.creatures[0], b.lands[2], b.creatures[2]] {
+        assert!(!r.state().objects[&id].tapped, "{id:?} was not targeted");
+    }
+    assert_eq!(
+        untap_skips(&r, P1),
+        None,
+        "the illegal player skips nothing"
+    );
+}
+
+/// CR 608.2b: each permanent is revalidated on its own controller, so with every target illegal
+/// nothing happens.
+#[test]
+fn yosei_does_nothing_when_the_player_and_every_permanent_are_illegal() {
+    let (r, b) = yosei_row(&[
+        Invalidate::Hexproof(P1),
+        Invalidate::Steal { from: P1, to: P2 },
+    ]);
+    let all = [
+        b.creatures[0],
+        b.lands[0],
+        b.creatures[1],
+        b.lands[1],
+        b.creatures[2],
+        b.lands[2],
+    ];
+    assert_eq!(tapped_among(&r, &all), [false; 6]);
+    assert_eq!(untap_skips(&r, P1), None);
+}
+
+/// Yosei ruling: if all the permanents are illegal, the player still skips their untap step.
+#[test]
+fn yosei_skips_the_untap_step_when_only_the_permanents_are_illegal() {
+    let (r, b) = yosei_row(&[Invalidate::Steal { from: P1, to: P2 }]);
+    let all = [
+        b.creatures[0],
+        b.lands[0],
+        b.creatures[1],
+        b.lands[1],
+        b.creatures[2],
+        b.lands[2],
+    ];
+    assert_eq!(tapped_among(&r, &all), [false; 6]);
+    assert_eq!(
+        untap_skips(&r, P1),
+        Some(1),
+        "reach guard: the player was legal"
+    );
+}
+
+/// CR 800.4a: a player who left the game takes their permanents with them, so nothing is tapped
+/// and no untap step is skipped.
+#[test]
+fn yosei_does_nothing_once_the_declared_player_has_been_eliminated() {
+    let (r, b) = yosei_row(&[Invalidate::Eliminate(P1)]);
+    assert!(r.state().players[1].is_eliminated, "reach guard");
+    assert_eq!(zone_of(&r, b.creatures[1]), Zone::Exile);
+    assert_eq!(zone_of(&r, b.lands[1]), Zone::Exile);
+    assert_eq!(untap_skips(&r, P1), None);
+}
+
+fn hand_names(r: &GameRunner, p: PlayerId) -> Vec<String> {
+    let mut names: Vec<String> = r
+        .state()
+        .objects
+        .values()
+        .filter(|o| o.zone == Zone::Hand && o.owner == p)
+        .map(|o| o.name.clone())
+        .collect();
+    names.sort();
+    names
+}
+
+struct DownForRepairs {
+    runner: GameRunner,
+    attraction: ObjectId,
+    hands_before: Vec<usize>,
+    names_before: [Vec<String>; 2],
+}
+
+fn down_for_repairs_row(invalidate: &[Invalidate]) -> DownForRepairs {
+    let mut sc = three_player();
+    let _b = board(&mut sc);
+    let attractions = [P0, P1, P2].map(|p| attraction(&mut sc, p));
+    let spell = sc
+        .add_spell_to_hand_from_oracle(P0, "Row", false, DOWN_FOR_REPAIRS)
+        .id();
+    let mut r = sc.build();
+    hand_cards_become_creatures(&mut r);
+    let card_id = r.state().objects[&spell].card_id;
+    r.act(GameAction::CastSpell {
+        object_id: spell,
+        card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    })
+    .expect("cast");
+    // The spell stays in hand until its targets are chosen, so the baseline is taken without it.
+    let mut hands_before = hand_sizes(&r);
+    hands_before[0] -= 1;
+    let mut names_before = [hand_names(&r, P0), hand_names(&r, P1)];
+    names_before[0].retain(|name| name != "Row");
+    drive(&mut r, P1, invalidate);
+    assert!(
+        r.state().stack.is_empty(),
+        "reach guard: the spell resolved"
+    );
+    assert_eq!(
+        zone_of(&r, spell),
+        Zone::Graveyard,
+        "reach guard: it left the stack"
+    );
+    DownForRepairs {
+        runner: r,
+        attraction: attractions[1],
+        hands_before,
+        names_before,
+    }
+}
+
+/// CR 608.2b: only the revealed opponent is an illegal target, so the Attraction is still
+/// destroyed, while the reveal and the discard that name the opponent do nothing, and the
+/// caster discards nothing in the opponent's place.
+#[test]
+fn down_for_repairs_destroys_the_attraction_when_only_the_opponent_is_illegal() {
+    let row = down_for_repairs_row(&[Invalidate::Hexproof(P1)]);
+    let r = &row.runner;
+    assert_eq!(zone_of(r, row.attraction), Zone::Command, "destroyed");
+    assert_eq!(hand_sizes(r), row.hands_before, "no card was discarded");
+    assert_eq!(hand_names(r, P0), row.names_before[0]);
+    assert_eq!(hand_names(r, P1), row.names_before[1]);
+}
+
+/// CR 608.2b: with the opponent and the Attraction both illegal, nothing happens.
+#[test]
+fn down_for_repairs_does_nothing_when_the_opponent_and_attraction_are_illegal() {
+    let row = down_for_repairs_row(&[
+        Invalidate::Hexproof(P1),
+        Invalidate::Steal { from: P1, to: P2 },
+    ]);
+    let r = &row.runner;
+    assert_eq!(zone_of(r, row.attraction), Zone::Battlefield);
+    assert_eq!(hand_sizes(r), row.hands_before);
+}
+
+/// Ruling: do as much as possible to the remaining legal target. Only the Attraction is illegal,
+/// so the opponent still reveals and discards.
+#[test]
+fn down_for_repairs_discards_when_only_the_attraction_is_illegal() {
+    let row = down_for_repairs_row(&[Invalidate::Steal { from: P1, to: P2 }]);
+    let r = &row.runner;
+    assert_eq!(zone_of(r, row.attraction), Zone::Battlefield);
+    assert_eq!(hand_sizes(r), vec![2, 1, 2], "P1 discarded");
+}
+
+/// CR 800.4a: the caster's hand is untouched once the revealed opponent has been eliminated.
+#[test]
+fn down_for_repairs_leaves_the_caster_alone_once_the_opponent_is_eliminated() {
+    let row = down_for_repairs_row(&[Invalidate::Eliminate(P1)]);
+    let r = &row.runner;
+    assert!(r.state().players[1].is_eliminated, "reach guard");
+    assert_eq!(hand_names(r, P0), row.names_before[0]);
+    assert_eq!(hand_sizes(r)[2], row.hands_before[2]);
+}
+
+/// CR 608.2b: "each creature they control" requires information about the illegal player and
+/// does not happen; the independently targeted land still dies.
+#[test]
+fn the_fall_of_kroog_destroys_the_land_when_only_the_chosen_opponent_is_illegal() {
+    let (r, b, _) = cast_row(KROOG, P1, &[Invalidate::Hexproof(P1)]);
+    assert_eq!(zone_of(&r, b.lands[1]), Zone::Graveyard, "P1's land died");
+    assert_eq!(lives(&r), vec![20, 20, 20], "no damage to the player");
+    assert_eq!(
+        [
+            damage(&r, b.creatures[0]),
+            damage(&r, b.creatures[1]),
+            damage(&r, b.creatures[2])
+        ],
+        [0, 0, 0],
+        "no creature damaged"
     );
 }

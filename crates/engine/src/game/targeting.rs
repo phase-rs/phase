@@ -1299,12 +1299,13 @@ pub(crate) fn resolve_live_parent_slot_from_root(
     })
 }
 
-/// CR 608.2c + CR 608.2b: the player announced by the chain clause tagged
-/// `declares_chosen_group == Some(group)`, read from the resolving chain's
-/// declared targets. `None` when that target was illegal as the chain began to
-/// resolve (`illegal_target_slots`, CR 608.2b: an illegal target is not
-/// affected and "any part of the effect that requires that information won't
-/// happen"), or when no player was announced.
+/// CR 608.2c + CR 608.2b: the instruction-time read of the player announced by the chain
+/// clause tagged `declares_chosen_group == Some(group)`. `None` when no player was announced,
+/// when that target was illegal as the chain began to resolve (`illegal_target_slots`), or when
+/// the player has left the game (CR 800.4a): an illegal target is not affected and "any part of
+/// the effect that requires that information won't happen". An independently announced object
+/// ("target land that player controls") is checked before the stamp exists (CR 608.2 runs
+/// 608.2a/b first) and so still reads the announced player.
 pub(crate) fn resolve_live_declared_player(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -1317,7 +1318,7 @@ pub(crate) fn resolve_live_declared_player(
     let illegal = resolution_carrier_entry(state, ability)
         .and_then(StackEntry::ability)
         .is_some_and(|root| root.illegal_target_slots.contains(&slot));
-    (!illegal).then_some(player)
+    (!illegal && super::players::is_alive(state, player)).then_some(player)
 }
 
 /// CR 608.2b: whether `ability` is the resolving stack entry or a node of it.

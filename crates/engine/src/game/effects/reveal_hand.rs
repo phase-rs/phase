@@ -81,7 +81,13 @@ pub fn resolve(
     {
         match super::resolve_player_for_context_ref(state, ability, &target) {
             Some(player) => Some(player),
-            None => return Ok(()),
+            None => {
+                if reveal_hand_parks_card_choice(&card_filter, choice_optional) {
+                    state.last_parent_target_missing_reason =
+                        Some(ParentTargetMissingReason::RevealHandChoice);
+                }
+                return Ok(());
+            }
         }
     } else {
         None

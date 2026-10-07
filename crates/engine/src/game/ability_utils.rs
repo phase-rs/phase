@@ -3138,33 +3138,7 @@ fn validate_targets_in_chain_inner(
             validate_targets_in_chain_inner(state, else_ability, TargetReadOrigin::OwnAnnouncement);
     }
     restamp_chosen_group_targets(&mut validated);
-    drop_targets_of_vanished_declared_player(&mut validated);
     validated
-}
-
-/// CR 608.2b: an object target whose criteria name a declared player ("target land that player
-/// controls") is illegal once that player's own target is, because the criteria can no longer be
-/// determined; it is dropped as a pruned target is.
-fn drop_targets_of_vanished_declared_player(root: &mut ResolvedAbility) {
-    let mut vanished: Vec<Vec<ChainStep>> = Vec::new();
-    walk_declared_slots(root, &mut |node, path, _| {
-        let Some(ControllerRef::DeclaredPlayer { group }) = node
-            .effect
-            .target_filter()
-            .and_then(relative_controller_kind)
-        else {
-            return;
-        };
-        if matches!(declared_group_player_slot(root, group), Some(None)) {
-            vanished.push(path.to_vec());
-        }
-    });
-    for path in vanished {
-        if let Some(node) = node_at_mut(root, &path) {
-            node.targets
-                .retain(|target| matches!(target, TargetRef::Player(_)));
-        }
-    }
 }
 
 /// CR 608.2b + CR 608.2c: set an inheriting rider's `targets` (and its selected

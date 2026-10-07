@@ -6287,7 +6287,8 @@ pub enum ControllerRef {
     /// CR 608.2c + CR 115.1a: Filter controller is the player announced as the target of the
     /// chain clause tagged `declares_chosen_group == Some(group)` ("Choose target opponent.
     /// Destroy target land that player controls."). Names that clause's player without
-    /// announcing a second one, and names no one once that target is illegal (CR 608.2b).
+    /// announcing a second one, and names no one to instructions once that target is illegal
+    /// (CR 608.2b); an object target's own legality criterion still reads the announced player.
     /// The `ControllerRef` twin of [`TargetFilter::DeclaredPlayer`], read through the same
     /// `targeting::resolve_live_declared_player`.
     DeclaredPlayer {
