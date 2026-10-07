@@ -61,11 +61,9 @@ const WHITESUNS_PASSAGE: &str = "You gain 5 life.";
 const STEADY_PROGRESS: &str = "Proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)\nDraw a card.";
 const FORCE_BUBBLE: &str = "If damage would be dealt to you, put that many depletion counters on this enchantment instead.\nWhen there are four or more depletion counters on this enchantment, sacrifice it.\nAt the beginning of each end step, remove all depletion counters from this enchantment.";
 
-/// Synthetic instant carrying Flicker's exact Oracle text (Flicker itself is a
-/// sorcery, so it cannot be cast while a trigger is on the stack).
-const BLINK_REVERSAL_NAME: &str = "Blink Reversal";
-const BLINK_REVERSAL: &str =
-    "Exile target nontoken permanent, then return it to the battlefield under its owner's control.";
+/// Scrollshift (verbatim): an instant flicker, so it can be cast while a trigger
+/// is on the stack. Its extra card draw doesn't touch any assertion here.
+const SCROLLSHIFT: &str = "Exile up to one target artifact, creature, or enchantment you control, then return it to the battlefield under its owner's control.\nDraw a card.";
 
 /// Synthetic artifact: a source-counter state trigger carrying a genuine
 /// intervening "if" (CR 603.4). No printed card pairs these two clauses with a
@@ -354,7 +352,7 @@ fn mazemind_tome_bounced_in_response_stays_in_hand_and_gains_no_life() {
 fn mazemind_tome_flickered_in_response_new_tome_stays_and_gains_no_life() {
     let (mut scenario, tome) = tome_scenario();
     let blink = scenario
-        .add_spell_to_hand_from_oracle(P0, BLINK_REVERSAL_NAME, true, BLINK_REVERSAL)
+        .add_spell_to_hand_from_oracle(P0, "Scrollshift", true, SCROLLSHIFT)
         .id();
     let mut runner = scenario.build();
     let life_before = runner.life(P0);
@@ -646,7 +644,7 @@ fn nine_lives_flickered_in_response_new_nine_lives_stays_on_battlefield() {
         .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK)
         .id();
     let blink = scenario
-        .add_spell_to_hand_from_oracle(P0, BLINK_REVERSAL_NAME, true, BLINK_REVERSAL)
+        .add_spell_to_hand_from_oracle(P0, "Scrollshift", true, SCROLLSHIFT)
         .id();
     let mut runner = scenario.build();
     let life_before = runner.life(P0);
@@ -830,6 +828,8 @@ fn emperor_crocodile_flickered_in_response_new_object_triggers_at_once() {
     let mut pool = mana(ManaType::Colorless, 1);
     pool.extend(mana(ManaType::White, 1));
     scenario.with_mana_pool(P0, pool);
+    // Scrollshift draws a card, so stock the library.
+    scenario.with_library_top(P0, &["Island"]);
     let crocodile = scenario
         .add_creature_from_oracle(P0, "Emperor Crocodile", 5, 5, EMPEROR_CROCODILE)
         .id();
@@ -837,7 +837,7 @@ fn emperor_crocodile_flickered_in_response_new_object_triggers_at_once() {
         .add_creature_from_oracle(P0, "Vampire Hexmage", 2, 1, VAMPIRE_HEXMAGE)
         .id();
     let blink = scenario
-        .add_spell_to_hand_from_oracle(P0, BLINK_REVERSAL_NAME, true, BLINK_REVERSAL)
+        .add_spell_to_hand_from_oracle(P0, "Scrollshift", true, SCROLLSHIFT)
         .id();
     let mut runner = scenario.build();
 

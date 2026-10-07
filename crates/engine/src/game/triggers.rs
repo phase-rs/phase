@@ -11149,11 +11149,12 @@ pub fn check_state_triggers(state: &mut GameState) {
         for (definition_ref, trigger) in &trigger_defs {
             // CR 603.8: "A state-triggered ability doesn't trigger again until
             // the ability has resolved, has been countered, or has otherwise
-            // left the stack." Only THIS ability suppresses itself: another
-            // triggered ability of the same source on the stack does not. The
-            // exact definition occurrence also pins the source incarnation, so
-            // a pending trigger of an object that left the battlefield never
-            // suppresses the new object it became (CR 400.7).
+            // left the stack." Only an instance of THIS ability suppresses it:
+            // another triggered ability of the same source on the stack does
+            // not. (A copy of the ability carries the same definition ref and
+            // holds it back too, as before.) The ref's source pins the source
+            // incarnation, so a pending trigger of an object that left the
+            // battlefield never suppresses the new object it became (CR 400.7).
             let already_on_stack = state.stack.iter().any(|entry| {
                 matches!(
                     &entry.kind,
@@ -15517,9 +15518,10 @@ fn evaluate_trigger_condition_with_source(
             source_context,
             trigger_event,
         ),
-        // CR 508.1m + CR 603.4: an event-time gate evaluates its wrapped
-        // condition when the trigger event occurs; it never reaches the
-        // resolution recheck (`stack_condition_for_trigger` drops it).
+        // CR 508.1m + CR 603.4 / CR 603.8: an event-time gate ("while" gates, and
+        // a state trigger's own condition) evaluates its wrapped condition when
+        // the ability triggers; it never reaches the resolution recheck
+        // (`stack_condition_for_trigger` drops it).
         TriggerCondition::EventTime { condition } => evaluate_trigger_condition_with_source(
             state,
             condition,
@@ -15974,8 +15976,9 @@ fn stack_condition_for_trigger(
     }
 
     match condition {
-        // CR 508.1m + CR 603.4: a "while" gate was read at the trigger event and
-        // is not an intervening `if`, so it never becomes a resolution recheck.
+        // CR 508.1m + CR 603.4 / CR 603.8: a "while" gate, or a state trigger's
+        // own condition, was read when the ability triggered and is not an
+        // intervening `if`, so it never becomes a resolution recheck.
         TriggerCondition::EventTime { .. } => None,
         TriggerCondition::And { conditions } => {
             let mut remaining: Vec<TriggerCondition> = conditions
