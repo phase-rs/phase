@@ -118,6 +118,7 @@ fn resolve_reveal(
     // Transmogrify); other player-resolving filters → player extracted from
     // `ability.targets` (e.g., Telemin Performance "target opponent reveals...").
     let Some(revealing_player) = resolve_revealing_player(state, ability, player_filter) else {
+        super::publish_reveal_result(state, Vec::new());
         return Ok(());
     };
 
@@ -233,7 +234,11 @@ fn resolve_reveal(
     // matching or not. Publish them as the chain's tracked set so a downstream
     // "the number of nonland cards revealed this way" reads the revealed
     // population (Goblin Charbelcher) even after the cards have been moved.
-    super::publish_tracked_set(state, all_revealed.clone());
+    if all_revealed.is_empty() {
+        super::publish_fresh_tracked_set(state, Vec::new());
+    } else {
+        super::publish_tracked_set(state, all_revealed.clone());
+    }
 
     // CR 701.20b: reveal-only until-loop — cards stay in their zones (Sanar's
     // Vivid draws nothing to hand before per-color exile from the library).
@@ -637,6 +642,7 @@ fn resolve_choose_any_number(
     // CR 608.2c: nothing was revealed (count 0 or an empty library) — the
     // disposition has no cards to act on; resolve cleanly with no interaction.
     if revealed.is_empty() {
+        super::publish_fresh_tracked_set(state, Vec::new());
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::RevealUntil,
             source_id: ability.source_id,

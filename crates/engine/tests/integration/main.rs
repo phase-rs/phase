@@ -1446,6 +1446,7 @@ mod unholy_citadel_legendary_color_banding_grant;
 mod unique_player_property_leader_condition;
 mod unmaterialized_lki_serialization;
 mod unravel_counter_mana_value;
+mod unresolved_look_result;
 mod unstoppable_slasher_half_life;
 mod until_next_step_deadline_durations;
 mod until_source_leaves_cr610_3b;

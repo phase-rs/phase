@@ -21690,9 +21690,9 @@ declare_game_state! {
     /// clearing immediately before that hand-off — in
     /// particular, the shared
     /// `resolved_targets` chokepoint does not, so an empty Dig/ChooseFromZone/
-    /// RevealHand can never affect any `ParentTarget` consumer beyond its own
-    /// immediate sub_ability (e.g. Avenging Angel's unrelated LTB self-return
-    /// stays unaffected). See [`crate::types::ability::ParentTargetMissingReason`]
+    /// RevealHand reaches a later `ParentTarget` consumer only through the typed
+    /// field, down the chain its producer heads (e.g. Avenging Angel's
+    /// unrelated LTB self-return stays unaffected). See [`crate::types::ability::ParentTargetMissingReason`]
     /// for what each reason gates and who consults it. Transient resolution
     /// bookkeeping — not serialized. (Consolidated from three parallel
     /// booleans — `last_dig_found_nothing`, `last_choose_from_zone_found_nothing`,
