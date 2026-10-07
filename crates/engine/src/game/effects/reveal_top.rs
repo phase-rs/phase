@@ -69,9 +69,6 @@ pub fn resolve(
         }
         // CR 108.3 + CR 608.2c: the full ordered set drives owner-keyed per-player
         // binding and the OtherRevealedCard by-exclusion cross-loss.
-        if accumulated.is_empty() {
-            state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
-        }
         super::publish_reveal_result(state, accumulated);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Reveal,
