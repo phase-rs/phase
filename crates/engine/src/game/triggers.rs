@@ -11125,7 +11125,11 @@ pub fn check_state_triggers(state: &mut GameState) {
         // phased-out / command-zone gate. We clone the yielded triggers to a
         // local Vec so the mutable-state pass below (push_pending_trigger_to_stack)
         // doesn't collide with the shared borrow on `state.objects`.
-        let (controller, timestamp, trigger_defs): (PlayerId, u32, Vec<TriggerDefinition>) = {
+        let (controller, timestamp, trigger_defs): (
+            PlayerId,
+            u32,
+            Vec<(TriggerDefinitionRef, TriggerDefinition)>,
+        ) = {
             let Some(obj) = state.objects.get(&obj_id) else {
                 continue;
             };
@@ -11136,20 +11140,26 @@ pub fn check_state_triggers(state: &mut GameState) {
                 obj.controller,
                 obj.entered_battlefield_turn.unwrap_or(0),
                 super::functioning_abilities::active_trigger_definitions(state, obj)
-                    .map(|active| active.definition.clone())
+                    .filter(|active| active.definition.mode == TriggerMode::StateCondition)
+                    .map(|active| (active.definition_ref, active.definition.clone()))
                     .collect(),
             )
         };
 
-        for trigger in &trigger_defs {
-            if trigger.mode != TriggerMode::StateCondition {
-                continue;
-            }
-
-            // CR 603.8: Don't re-trigger if this state trigger is already on the stack.
+        for (definition_ref, trigger) in &trigger_defs {
+            // CR 603.8: "A state-triggered ability doesn't trigger again until
+            // the ability has resolved, has been countered, or has otherwise
+            // left the stack." Only THIS ability suppresses itself: another
+            // triggered ability of the same source on the stack does not. The
+            // exact definition occurrence also pins the source incarnation, so
+            // a pending trigger of an object that left the battlefield never
+            // suppresses the new object it became (CR 400.7).
             let already_on_stack = state.stack.iter().any(|entry| {
-                entry.source_id == obj_id
-                    && matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. })
+                matches!(
+                    &entry.kind,
+                    StackEntryKind::TriggeredAbility { ability, .. }
+                        if ability.trigger_definition_ref.as_ref() == Some(definition_ref)
+                )
             });
             if already_on_stack {
                 continue;
@@ -11184,8 +11194,14 @@ pub fn check_state_triggers(state: &mut GameState) {
                 });
 
                 let target_constraints = execute.target_constraints.clone();
-                let ability =
-                    build_triggered_ability_from_context(state, trigger, &source_context, None);
+                // The exact occurrence rides on the stacked ability; it is the
+                // identity the CR 603.8 self-suppression check above reads.
+                let ability = build_triggered_ability_from_context(
+                    state,
+                    trigger,
+                    &source_context,
+                    Some(definition_ref),
+                );
                 pending.push(PendingTrigger {
                     source_id: obj_id,
                     controller,

@@ -1,8 +1,9 @@
 //! State triggers (CR 603.8) through the real priority pipeline: what the
-//! effect body's "it" names, and which part of the condition is rechecked when
-//! the triggered ability resolves.
+//! effect body's "it" names, which part of the condition is rechecked when the
+//! triggered ability resolves, and which stack object keeps a state trigger
+//! from triggering again.
 //!
-//! Two class-level rules are pinned here:
+//! Three class-level rules are pinned here:
 //!
 //! 1. **"it" in a source-counter state trigger is the source (CR 608.2k).**
 //!    "When there are four or more page counters on this artifact, exile it"
@@ -22,6 +23,13 @@
 //!    Emperor Crocodile ruling (2016-06-08): "It does not check again on
 //!    resolution, so gaining control of a creature before then will not save
 //!    Emperor Crocodile."
+//!
+//! 3. **A state trigger is held back only by itself (CR 603.8 + CR 400.7).** "A
+//!    state-triggered ability doesn't trigger again until the ability has
+//!    resolved, has been countered, or has otherwise left the stack." Another
+//!    triggered ability of the same permanent on the stack (Force Bubble's
+//!    end-step trigger) does not hold it back, and neither does the pending
+//!    state trigger of the object a flickered permanent used to be.
 //!
 //! Every Oracle text below is verbatim from MTGJSON, except the two synthetic
 //! cards (named so no word of the name appears in their text), which are
@@ -50,6 +58,8 @@ const BOOMERANG: &str = "Return target permanent to its owner's hand.";
 const SHOCK: &str = "Shock deals 2 damage to any target.";
 const RAISE_THE_ALARM: &str = "Create two 1/1 white Soldier creature tokens.";
 const WHITESUNS_PASSAGE: &str = "You gain 5 life.";
+const STEADY_PROGRESS: &str = "Proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)\nDraw a card.";
+const FORCE_BUBBLE: &str = "If damage would be dealt to you, put that many depletion counters on this enchantment instead.\nWhen there are four or more depletion counters on this enchantment, sacrifice it.\nAt the beginning of each end step, remove all depletion counters from this enchantment.";
 
 /// Synthetic instant carrying Flicker's exact Oracle text (Flicker itself is a
 /// sorcery, so it cannot be cast while a trigger is on the stack).
@@ -118,6 +128,37 @@ fn trigger_on_stack(runner: &GameRunner, source: ObjectId) -> bool {
     runner.state().stack.iter().any(|entry| {
         entry.source_id == source && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
     })
+}
+
+/// Stack-entry ids of the triggered abilities of `source`, bottom to top.
+fn triggers_of(runner: &GameRunner, source: ObjectId) -> Vec<ObjectId> {
+    runner
+        .state()
+        .stack
+        .iter()
+        .filter(|entry| {
+            entry.source_id == source
+                && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+        })
+        .map(|entry| entry.id)
+        .collect()
+}
+
+fn top_entry_id(runner: &GameRunner) -> ObjectId {
+    runner
+        .state()
+        .stack
+        .last()
+        .map(|entry| entry.id)
+        .expect("the stack must not be empty")
+}
+
+fn on_stack(runner: &GameRunner, entry_id: ObjectId) -> bool {
+    runner
+        .state()
+        .stack
+        .iter()
+        .any(|entry| entry.id == entry_id)
 }
 
 fn top_is_trigger_of(runner: &GameRunner, source: ObjectId) -> bool {
@@ -622,6 +663,7 @@ fn nine_lives_flickered_in_response_new_nine_lives_stays_on_battlefield() {
         top_is_trigger_of(&runner, nine_lives),
         "reach guard: nine incarnation counters put the exile trigger on the stack"
     );
+    let exile_trigger = top_entry_id(&runner);
 
     runner.cast(blink).target_object(nine_lives).commit();
     resolve_one(&mut runner);
@@ -632,8 +674,9 @@ fn nine_lives_flickered_in_response_new_nine_lives_stays_on_battlefield() {
         "reach guard: the returned Nine Lives is a new object"
     );
     assert!(
-        trigger_on_stack(&runner, nine_lives),
-        "reach guard: the old object's exile trigger is still on the stack"
+        on_stack(&runner, exile_trigger),
+        "reach guard: the old object's exile trigger (not merely the \
+         leaves-the-battlefield trigger) is still on the stack"
     );
 
     runner.advance_until_stack_empty();
@@ -645,5 +688,190 @@ fn nine_lives_flickered_in_response_new_nine_lives_stays_on_battlefield() {
         zone(&runner, nine_lives),
         Zone::Battlefield,
         "the exile trigger must not exile the new Nine Lives"
+    );
+}
+
+/// Force Bubble with three depletion counters, two Steady Progress in hand,
+/// and a library to draw from.
+fn force_bubble_scenario(phase: Phase) -> (GameScenario, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(phase);
+    scenario.with_library_top(P0, &["Island", "Island", "Island"]);
+    let bubble = scenario
+        .add_enchantment_from_oracle(P0, "Force Bubble", FORCE_BUBBLE)
+        .id();
+    scenario.with_counter(bubble, CounterType::Generic("depletion".to_string()), 3);
+    let first_progress = scenario
+        .add_spell_to_hand_from_oracle(P0, "Steady Progress", true, STEADY_PROGRESS)
+        .id();
+    let second_progress = scenario
+        .add_spell_to_hand_from_oracle(P0, "Steady Progress", true, STEADY_PROGRESS)
+        .id();
+    (scenario, bubble, first_progress, second_progress)
+}
+
+/// CR 701.34a: cast Steady Progress and proliferate onto Force Bubble only,
+/// giving it one more depletion counter; stop once the spell has resolved.
+fn proliferate_onto(runner: &mut GameRunner, progress: ObjectId, bubble: ObjectId) {
+    let before = counters(runner, bubble, "depletion");
+    runner.cast(progress).commit();
+    resolve_one(runner);
+    match &runner.state().waiting_for {
+        WaitingFor::ProliferateChoice { .. } => {}
+        other => panic!("expected Steady Progress's proliferate choice, got {other:?}"),
+    }
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(bubble)],
+        })
+        .expect("proliferating onto Force Bubble must be accepted");
+    assert!(
+        !on_stack(runner, progress),
+        "reach guard: Steady Progress has resolved"
+    );
+    assert_eq!(
+        counters(runner, bubble, "depletion"),
+        before + 1,
+        "reach guard: proliferate added a depletion counter"
+    );
+}
+
+/// CR 603.8: Force Bubble's end-step trigger ("remove all depletion counters")
+/// is on the stack when proliferating in response brings it to four depletion
+/// counters. That end-step trigger is a different ability, so the state trigger
+/// fires above it and Force Bubble is sacrificed before the counters could be
+/// removed.
+#[test]
+fn force_bubble_state_trigger_fires_while_its_end_step_trigger_is_on_the_stack() {
+    let (scenario, bubble, progress, _) = force_bubble_scenario(Phase::PostCombatMain);
+    let mut runner = scenario.build();
+
+    runner.advance_to_end_step();
+    assert_eq!(runner.state().phase, Phase::End);
+    let end_step_trigger = top_entry_id(&runner);
+    assert_eq!(
+        triggers_of(&runner, bubble),
+        vec![end_step_trigger],
+        "reach guard: the end-step trigger is on the stack"
+    );
+
+    proliferate_onto(&mut runner, progress, bubble);
+    assert_eq!(
+        counters(&runner, bubble, "depletion"),
+        4,
+        "reach guard: four depletion counters with the end-step trigger pending"
+    );
+    let bubble_triggers = triggers_of(&runner, bubble);
+    assert_eq!(
+        bubble_triggers.len(),
+        2,
+        "the state trigger must fire although the end-step trigger of the same \
+         permanent is on the stack, got {bubble_triggers:?}"
+    );
+    assert_eq!(bubble_triggers[0], end_step_trigger);
+
+    resolve_one(&mut runner);
+    assert_eq!(
+        zone(&runner, bubble),
+        Zone::Graveyard,
+        "the state trigger sacrifices Force Bubble"
+    );
+    assert!(
+        on_stack(&runner, end_step_trigger),
+        "the sacrifice happened before the end-step trigger resolved"
+    );
+}
+
+/// CR 603.8: while Force Bubble's own state trigger is on the stack, another
+/// depletion counter does not trigger it again — exactly one instance resolves.
+#[test]
+fn force_bubble_state_trigger_does_not_retrigger_while_itself_on_the_stack() {
+    let (scenario, bubble, first_progress, second_progress) =
+        force_bubble_scenario(Phase::PreCombatMain);
+    let mut runner = scenario.build();
+
+    proliferate_onto(&mut runner, first_progress, bubble);
+    assert_eq!(counters(&runner, bubble, "depletion"), 4);
+    let state_trigger = top_entry_id(&runner);
+    assert_eq!(
+        triggers_of(&runner, bubble),
+        vec![state_trigger],
+        "reach guard: four depletion counters put the state trigger on the stack"
+    );
+
+    proliferate_onto(&mut runner, second_progress, bubble);
+    assert_eq!(
+        counters(&runner, bubble, "depletion"),
+        5,
+        "reach guard: the trigger condition still holds after the second proliferate"
+    );
+    assert_eq!(
+        triggers_of(&runner, bubble),
+        vec![state_trigger],
+        "the state trigger must not trigger again while it is on the stack"
+    );
+
+    resolve_one(&mut runner);
+    assert_eq!(zone(&runner, bubble), Zone::Graveyard);
+    assert!(
+        runner.state().stack.is_empty(),
+        "no second state trigger was waiting behind the first"
+    );
+}
+
+/// CR 603.8 + CR 400.7: Emperor Crocodile flickered while its state trigger is
+/// on the stack is a new object with its own state-triggered ability. The old
+/// object's pending trigger does not hold the new one back, so the new
+/// Crocodile's trigger goes on the stack at once and sacrifices it.
+#[test]
+fn emperor_crocodile_flickered_in_response_new_object_triggers_at_once() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut pool = mana(ManaType::Colorless, 1);
+    pool.extend(mana(ManaType::White, 1));
+    scenario.with_mana_pool(P0, pool);
+    let crocodile = scenario
+        .add_creature_from_oracle(P0, "Emperor Crocodile", 5, 5, EMPEROR_CROCODILE)
+        .id();
+    let hexmage = scenario
+        .add_creature_from_oracle(P0, "Vampire Hexmage", 2, 1, VAMPIRE_HEXMAGE)
+        .id();
+    let blink = scenario
+        .add_spell_to_hand_from_oracle(P0, BLINK_REVERSAL_NAME, true, BLINK_REVERSAL)
+        .id();
+    let mut runner = scenario.build();
+
+    let hexmage_ability = activated_index(&runner, hexmage, 0);
+    activate_to_priority(&mut runner, hexmage, hexmage_ability, Some(crocodile));
+    let old_trigger = top_entry_id(&runner);
+    assert_eq!(
+        triggers_of(&runner, crocodile),
+        vec![old_trigger],
+        "reach guard: controlling no other creatures put the state trigger on the stack"
+    );
+    let incarnation_before = runner.state().objects[&crocodile].incarnation;
+
+    runner.cast(blink).target_object(crocodile).commit();
+    resolve_one(&mut runner);
+    assert_eq!(zone(&runner, crocodile), Zone::Battlefield);
+    assert_ne!(
+        runner.state().objects[&crocodile].incarnation,
+        incarnation_before,
+        "reach guard: the returned Crocodile is a new object"
+    );
+    let crocodile_triggers = triggers_of(&runner, crocodile);
+    assert_eq!(
+        crocodile_triggers.len(),
+        2,
+        "the new Crocodile's state trigger must not wait for the old object's, \
+         got {crocodile_triggers:?}"
+    );
+    assert_eq!(crocodile_triggers[0], old_trigger);
+
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        zone(&runner, crocodile),
+        Zone::Graveyard,
+        "the new Crocodile's own state trigger sacrifices it"
     );
 }

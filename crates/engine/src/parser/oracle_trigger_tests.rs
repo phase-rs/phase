@@ -28618,7 +28618,7 @@ fn source_counter_state_trigger_bare_it_binds_source() {
 fn source_counter_state_trigger_chain_typed_referent_keeps_parent_target() {
     let parsed = parse_oracle_text(
         "When there are three or more charge counters on this artifact, tap target creature. Put a stun counter on it.",
-        "Gloamwire Capacitor",
+        "Corvane Stunlatch",
         &[],
         &["Artifact".to_string()],
         &[],
