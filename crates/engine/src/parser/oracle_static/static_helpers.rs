@@ -794,7 +794,7 @@ pub(crate) fn try_parse_cost_modification(
     let mut dynamic_count = if let Some((_, after_for_each)) = cost_tp.split_around("for each ") {
         // Strip trailing period/punctuation
         let count_text = after_for_each.original.trim_end_matches('.');
-        super::oracle_quantity::parse_for_each_clause(count_text)
+        let count = super::oracle_quantity::parse_for_each_clause(count_text)
             .or_else(|| {
                 parse_cda_quantity(count_text).and_then(|expr| match expr {
                     QuantityExpr::Ref { qty } => Some(qty),
@@ -812,11 +812,24 @@ pub(crate) fn try_parse_cost_modification(
                 }
             })
             .or_else(|| {
+                // CR 122.1 + CR 601.2f: a counter-kind census ("kind of
+                // counter on it", "different kind of counter on it", "of the
+                // kinds of counters on it") reaching this fallback is one every
+                // census reader above declined — its object has no binding on
+                // this route — and is never a type phrase. Reading it as one
+                // would count every object; decline the whole modification so
+                // the line stays an honest gap instead.
+                if super::oracle_quantity::names_counter_kind_quantifier(after_for_each.lower) {
+                    return None;
+                }
                 let (count_filter, _) = parse_type_phrase_folding(count_text);
                 Some(QuantityRef::ObjectCount {
                     filter: count_filter,
                 })
-            })
+            });
+        // A "for each" the readers above could not count leaves no reduction
+        // to state: decline rather than fall back to a flat {N}.
+        Some(count?)
     } else {
         None
     };

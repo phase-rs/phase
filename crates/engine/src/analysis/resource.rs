@@ -4939,7 +4939,7 @@ fn exiled_colors_provably_exclude_class(
 /// object IS a member. `ObjectScope::Source` resolves to the ability's own source object on
 /// BOTH resolver branches: `object_id_for_scope`'s `Source` arm returns `ctx.source` when
 /// `trigger_source` is `None` and the captured incarnation's id when it is `Some`, and
-/// `resolve_counters_on_live_or_lki_scope` routes `Source` through `source_lki_for_context`
+/// `read_counters_on_live_or_lki_scope` routes `Source` through `source_lki_for_context`
 /// in the trigger case — the SAME object's LKI. ⇒ relief iff the resolved id differs from
 /// every member.
 ///

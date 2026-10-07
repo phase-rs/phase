@@ -37363,6 +37363,146 @@ fn count_qualified_blocks_preserves_article_qualified_shapes() {
     }
 }
 
+/// CR 608.2k + CR 608.2h: the counter-kind census of "it" in a trigger whose
+/// condition names the ability's own object reads that object — Blitzball
+/// Stadium's granted "Whenever this creature deals combat damage to a player,
+/// draw a card for each kind of counter on it", and a self dies trigger.
+#[test]
+fn kinds_census_pronoun_in_a_self_trigger_binds_the_abilitys_own_object() {
+    let census_count = QuantityExpr::Ref {
+        qty: QuantityRef::DistinctCounterKindsAmong {
+            filter: TargetFilter::SelfRef,
+        },
+    };
+    for text in [
+        "Whenever this creature deals combat damage to a player, draw a card for each kind of counter on it",
+        "When this creature dies, draw a card for each kind of counter on it.",
+    ] {
+        let trigger = parse_trigger_line(text, "Synthetic Census");
+        let execute = trigger.execute.as_deref().expect("trigger body");
+        assert_no_unimplemented(execute);
+        let Effect::Draw { count, .. } = execute.effect.as_ref() else {
+            panic!("{text:?}: expected a draw, got {:?}", execute.effect);
+        };
+        assert_eq!(*count, census_count, "{text:?}");
+    }
+}
+
+/// CR 608.2k + CR 603.2: a trigger on ANOTHER object ("a creature you
+/// control", "another creature you control", "equipped creature", a cast
+/// spell) names that object, which the census does not read — an explicit
+/// gap, never the listener's own kinds and never a bare one-card draw.
+#[test]
+fn kinds_census_pronoun_in_a_trigger_on_another_object_is_unimplemented() {
+    for text in [
+        "Whenever a creature you control deals combat damage to a player, draw a card for each kind of counter on it.",
+        "Whenever another creature you control dies, draw a card for each kind of counter on it.",
+        "Whenever equipped creature deals combat damage to a player, draw a card for each kind of counter on it.",
+        "Whenever you cast a creature spell, draw a card for each kind of counter on it.",
+    ] {
+        let trigger = parse_trigger_line(text, "Synthetic Census");
+        let execute = trigger.execute.as_deref().expect("trigger body");
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::Unimplemented { name, .. } if name == "counter_kinds_pronoun_antecedent"
+            ),
+            "{text:?}: expected the antecedent gap, got {:?}",
+            execute.effect
+        );
+    }
+}
+
+/// CR 603.1 + CR 608.2k + CR 109.1: a trigger condition is `SourceOnly` when
+/// it names the ability's own object and no other object — a player
+/// participant or no second participant at all. A second object recorded in a
+/// typed slot or named only in the text, a condition qualifier, and a
+/// condition whose subject is not the source are all `NotSourceOnly`.
+#[test]
+fn trigger_condition_objects_is_source_only_only_without_a_second_object() {
+    let classify = |condition: &str| {
+        let (_, def) = parse_trigger_condition(condition, &mut ParseContext::default());
+        trigger_condition_objects(condition, &def)
+    };
+    for condition in [
+        "whenever ~ deals combat damage to a player",
+        "whenever ~ deals combat damage to an opponent",
+        "when ~ dies",
+        "whenever ~ attacks",
+        "whenever ~ attacks a player",
+        "whenever ~ blocks",
+        "whenever ~ becomes blocked",
+        "whenever ~ is dealt damage",
+        "when ~ enters",
+        "whenever ~ becomes tapped",
+        "whenever one or more counters are put on ~",
+    ] {
+        assert_eq!(
+            classify(condition),
+            TriggerConditionObjects::SourceOnly,
+            "{condition:?}"
+        );
+    }
+    for condition in [
+        // A second object in a typed event slot.
+        "whenever ~ blocks a creature",
+        "whenever ~ becomes blocked by a creature",
+        "whenever ~ becomes attached to a creature",
+        "whenever ~ deals combat damage to a player or planeswalker",
+        "whenever ~ becomes the target of a spell",
+        "whenever ~ becomes the target of an ability",
+        "whenever ~ attacks a planeswalker",
+        // A second object the event parser records in no slot.
+        "whenever ~ fights a creature",
+        "whenever ~ crews a vehicle",
+        "whenever ~ becomes blocked by two or more creatures",
+        "whenever ~ deals damage to a token",
+        "whenever ~ is dealt damage by a source an opponent controls",
+        // A condition qualifier is not proven object-free.
+        "whenever ~ attacks alone",
+        // The subject is not the source.
+        "whenever a creature you control deals combat damage to a player",
+        "whenever you cast a creature spell",
+    ] {
+        assert_eq!(
+            classify(condition),
+            TriggerConditionObjects::NotSourceOnly,
+            "{condition:?}"
+        );
+    }
+}
+
+/// CR 109.1: the object-noun detector reads a type or subtype head noun, or a
+/// non-type object noun, only as a whole word; players and other words are
+/// not objects.
+#[test]
+fn object_head_noun_matches_whole_object_nouns_only() {
+    for input in [
+        "creature",
+        "creatures you control",
+        "vehicle",
+        "spell",
+        "token",
+        "tokens",
+        "source an opponent controls",
+        "ability",
+        "object",
+    ] {
+        assert!(parse_object_head_noun(input).is_ok(), "{input:?}");
+    }
+    for input in [
+        "player",
+        "opponent",
+        "tokenize",
+        "sourced",
+        "combat damage",
+        "counters",
+        "dies",
+    ] {
+        assert!(parse_object_head_noun(input).is_err(), "{input:?}");
+    }
+}
+
 /// Verbatim from Scryfall (`cards/named?exact=Gilded%20Drake`).
 const GILDED_DRAKE_TEXT: &str = "Flying\nWhen this creature enters, exchange control of this \
     creature and up to one target creature an opponent controls. If you don't or can't make an \

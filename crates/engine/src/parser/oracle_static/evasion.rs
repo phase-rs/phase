@@ -4,6 +4,7 @@
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use crate::parser::oracle_ir::ast::AnaphorNumber;
 use crate::parser::oracle_nom::defender_exception;
 use crate::parser::oracle_nom::defender_exception::DefenderExceptionSegment;
 
@@ -3068,10 +3069,19 @@ pub(crate) fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxPa
     // Optional ", where X is the number of <filter>" — only valid when the base
     // cost carried an {X} shard. Used by Sphere of Safety.
     let (input, dynamic_qty) = opt(parse_dynamic_x_clause).parse(input)?;
-    let (input, for_each_qty) = if per_affected.is_none() {
-        opt(parse_for_each_cost_quantity).parse(input)?
-    } else {
-        (input, None)
+    // CR 118.12a + CR 508.1h / CR 509.1d: the counter-kind census of a pronoun
+    // ("{1} for each kind of counter on it") names one object the attack/block
+    // cost is determined from. Only a tax on the source permanent itself names
+    // that object unambiguously; every other subject leaves the tail
+    // unconsumed, so the whole line declines (`parse_combat_tax_static`).
+    let (input, for_each_qty) = match (per_affected, &subject) {
+        (Some(_), _) => (input, None),
+        (None, CombatTaxSubject::SourcePermanent) => opt(alt((
+            parse_for_each_own_counter_kinds,
+            parse_for_each_cost_quantity,
+        )))
+        .parse(input)?,
+        (None, _) => opt(parse_for_each_cost_quantity).parse(input)?,
     };
     let dynamic_qty = dynamic_qty.or(for_each_qty);
 
@@ -3155,6 +3165,30 @@ pub(crate) fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxPa
             defended,
         },
     ))
+}
+
+/// CR 122.1 + CR 608.2k: " for each kind of counter on it" on a self tax —
+/// the pronoun names the source permanent, so the census reads
+/// `DistinctCounterKindsAmong { SelfRef }`. A plural pronoun names no single
+/// source and declines.
+fn parse_for_each_own_counter_kinds(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag_no_case::<_, _, OracleError<'_>>(" for each ").parse(input)?;
+    let lowered = rest.trim_end_matches('.').to_lowercase();
+    let number = all_consuming(nom_quantity::parse_counter_kinds_on_object_pronoun)
+        .parse(lowered.as_str())
+        .map(|(_, number)| number);
+    match number {
+        Ok(AnaphorNumber::Singular) => Ok((
+            "",
+            QuantityRef::DistinctCounterKindsAmong {
+                filter: TargetFilter::SelfRef,
+            },
+        )),
+        _ => Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        ))),
+    }
 }
 
 /// CR 702.3b + CR 611.3a: parse "<subject> can attack as though <pronoun>

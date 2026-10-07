@@ -28570,6 +28570,58 @@ fn combat_tax_self_ref_subject_cant_attack_only() {
     assert!(matches!(scaling, UnlessPayScaling::PerQuantityRef { .. }));
 }
 
+/// CR 118.12a + CR 508.1h / CR 509.1d + CR 608.2k: a combat tax reads the
+/// counter-kind census of "it" only when the tax is on the source permanent
+/// itself, whose pronoun names that one object (`SelfRef`). A tax on other
+/// creatures ("each creature with …", "enchanted creature") leaves the tail
+/// unconsumed, so no combat-tax static is produced from it, and a plural
+/// pronoun on a self tax declines likewise.
+#[test]
+fn combat_tax_kinds_census_pronoun_binds_only_a_self_tax() {
+    use super::evasion::parse_combat_tax_static;
+    use crate::parser::oracle_util::TextPair;
+
+    let self_tax = parse_static_line(
+        "~ can't attack or block unless you pay {1} for each kind of counter on it.",
+    )
+    .expect("self-referential kinds tax should parse");
+    assert_eq!(self_tax.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        extract_unless_pay(&self_tax).1,
+        UnlessPayScaling::PerQuantityRef {
+            quantity: QuantityRef::DistinctCounterKindsAmong {
+                filter: TargetFilter::SelfRef,
+            },
+        }
+    );
+
+    // Reach guard: the per-recipient subject is a combat tax without the tail.
+    assert!(parse_combat_tax_static(
+        &TextPair::new(
+            "Each creature with one or more counters on it can't attack you unless its controller pays {1}.",
+            "each creature with one or more counters on it can't attack you unless its controller pays {1}.",
+        ),
+        "",
+    )
+    .is_some());
+    for text in [
+        "Each creature with one or more counters on it can't attack you unless its controller pays {1} for each kind of counter on it.",
+        "Enchanted creature can't attack unless its controller pays {1} for each kind of counter on it.",
+        "~ can't attack or block unless you pay {1} for each kind of counter on them.",
+    ] {
+        let lower = text.to_lowercase();
+        assert!(
+            parse_combat_tax_static(&TextPair::new(text, &lower), text).is_none(),
+            "{text:?}: no combat tax may read this census"
+        );
+        let serialized = serde_json::to_string(&parse_static_line(text)).unwrap();
+        assert!(
+            !serialized.contains("DistinctCounterKindsAmong"),
+            "{text:?}: {serialized}"
+        );
+    }
+}
+
 /// CR 506.3 + CR 508.1d: Propaganda — `defended` field captures the
 /// "you" attack-target scope so the runtime tax only applies to attacks
 /// targeting the static's controller. Regression for issue #302

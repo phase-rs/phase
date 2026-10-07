@@ -306,13 +306,15 @@ impl EntersUnderSpec {
     }
 }
 
-/// Grammatical number of an anaphoric pronoun that refers back to earlier
-/// instructions ("it" vs "they" / "those").
+/// Grammatical number of an anaphoric pronoun: one that refers back to
+/// earlier instructions ("it" vs "they" / "those"), or an object pronoun
+/// ("it" / "him" / "her" vs "them").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) enum AnaphorNumber {
-    /// "It" — the nearest antecedent instruction.
+    /// "It" — the nearest antecedent instruction, or a single object.
     Singular,
-    /// "They" / "those" — every instruction of the preceding run.
+    /// "They" / "those" / "them" — every instruction of the preceding run, or
+    /// several objects.
     Plural,
 }
 

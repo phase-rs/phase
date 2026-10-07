@@ -981,16 +981,22 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 )
                 .parse(after_n)
                 {
-                    if let Ok((_, qty)) =
-                        nom_quantity::parse_for_each_clause_ref_complete(for_each_clause)
-                    {
-                        return AbilityCost::PayLife {
+                    return match nom_quantity::parse_for_each_clause_ref_complete(for_each_clause) {
+                        Ok((_, qty)) => AbilityCost::PayLife {
                             amount: QuantityExpr::Multiply {
                                 factor: n as i32,
                                 inner: Box::new(QuantityExpr::Ref { qty }),
                             },
-                        };
-                    }
+                        },
+                        // CR 119.4 + CR 601.2f: a multiplier the quantity grammar
+                        // cannot read (a counter-kind census of a pronoun, whose
+                        // object this cost cannot bind, or any other unread
+                        // clause) is a gap — never the flat "Pay N life" with the
+                        // "for each" dropped, which would under-charge the cost.
+                        Err(_) => AbilityCost::Unimplemented {
+                            description: text.to_string(),
+                        },
+                    };
                 }
                 // Flat "Pay N life" — no " for each " tail.
                 return AbilityCost::PayLife {
@@ -3933,6 +3939,36 @@ mod tests {
         );
     }
 
+    /// CR 119.4 + CR 601.2f: a "Pay N life for each <clause>" whose clause the
+    /// quantity grammar cannot read — here the counter-kind census of a
+    /// pronoun, whose object a cost cannot bind — is an explicit gap, never the
+    /// flat "Pay N life" with the multiplier dropped (which under-charges).
+    #[test]
+    fn cost_pay_life_with_an_unread_for_each_is_a_gap() {
+        // Reach guard: Hand of Vecna's printed multiplier still reads.
+        let (_, hand) = nom_quantity::parse_for_each_clause_ref_complete("card in your hand")
+            .expect("for-each clause");
+        assert_eq!(
+            parse_oracle_cost("Pay 1 life for each card in your hand"),
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Multiply {
+                    factor: 1,
+                    inner: Box::new(QuantityExpr::Ref { qty: hand }),
+                },
+            }
+        );
+        for text in [
+            "Pay 1 life for each kind of counter on it",
+            "Pay 2 life for each kind of counter on them",
+        ] {
+            assert!(
+                matches!(parse_oracle_cost(text), AbilityCost::Unimplemented { .. }),
+                "{text:?}: {:?}",
+                parse_oracle_cost(text)
+            );
+        }
+    }
+
     #[test]
     fn equip_pay_mana_or_discard_parses_as_one_of() {
         use crate::types::ability::{CardSelectionMode, DiscardSelfScope};
@@ -5074,6 +5110,104 @@ mod tests {
                 },
             },
         );
+    }
+
+    /// CR 601.2f + CR 122.1: Deepwood Denizen — the rider counts +1/+1
+    /// counters summed over the controlled creature population.
+    #[test]
+    fn cost_reduction_for_each_counter_on_a_controlled_population() {
+        use crate::types::ability::{
+            ControllerRef, QuantityExpr, QuantityRef, TargetFilter, TypedFilter,
+        };
+        use crate::types::counter::CounterType;
+        use crate::types::statics::CostModifyMode;
+
+        let reduction = try_parse_cost_reduction(
+            "This ability costs {1} less to activate for each +1/+1 counter on creatures you control.",
+        )
+        .expect("Deepwood Denizen discount should parse");
+        assert_eq!(reduction.mode, CostModifyMode::Reduce);
+        assert_eq!(reduction.amount_per, 1);
+        assert_eq!(reduction.condition, None);
+        assert_eq!(
+            reduction.count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::CountersOnObjects {
+                    counter_type: Some(CounterType::Plus1Plus1),
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You)
+                    ),
+                },
+            },
+        );
+        // An unanchored population is declined: no cost reduction is produced.
+        assert!(
+            try_parse_cost_reduction(
+                "This ability costs {1} less to activate for each +1/+1 counter on creatures.",
+            )
+            .is_none(),
+            "an unanchored population must not produce a cost reduction"
+        );
+    }
+
+    /// CR 601.2c + CR 602.2b: Warrior's Blades — the equip discount counts the
+    /// +1/+1 counters on the creature the ability targets (Dragonfire Blade's
+    /// counter-kind sibling).
+    #[test]
+    fn cost_reduction_for_each_counter_on_creature_it_targets() {
+        use crate::types::ability::{ObjectScope, QuantityExpr, QuantityRef};
+        use crate::types::counter::CounterType;
+
+        let reduction = try_parse_cost_reduction(
+            "this ability costs {1} less to activate for each +1/+1 counter on the creature it targets",
+        )
+        .expect("Warrior's Blades equip discount should parse");
+        assert_eq!(reduction.amount_per, 1);
+        assert_eq!(reduction.condition, None);
+        assert_eq!(
+            reduction.count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::CountersOn {
+                    scope: ObjectScope::Target,
+                    counter_type: Some(CounterType::Plus1Plus1),
+                },
+            },
+        );
+    }
+
+    /// CR 122.1 + CR 601.2f: the activated-ability cost-modification rider
+    /// never reads a counter-kind census it cannot bind — the pronoun census,
+    /// the "different" and "of the kinds of" forms — as a type phrase: no
+    /// reduction is produced, so the sentence stays an explicit gap. The
+    /// census over a named population still reads.
+    #[test]
+    fn cost_reduction_declines_an_unbound_counter_kind_census() {
+        use crate::types::ability::{ControllerRef, TargetFilter, TypedFilter};
+
+        let population = try_parse_cost_reduction(
+            "This ability costs {1} less to activate for each kind of counter among creatures \
+             you control.",
+        )
+        .expect("reach guard: the population census reads on this route");
+        assert_eq!(
+            population.count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::DistinctCounterKindsAmong {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You)
+                    ),
+                },
+            },
+        );
+        for text in [
+            "This ability costs {1} less to activate for each kind of counter on it.",
+            "This ability costs {1} less to activate for each kind of counter on them.",
+            "This ability costs {1} more to activate for each kind of counter on it.",
+            "This ability costs {1} less to activate for each different kind of counter on it.",
+            "This ability costs {1} less to activate for each of the kinds of counters on it.",
+        ] {
+            assert_eq!(try_parse_cost_reduction(text), None, "{text:?}");
+        }
     }
 
     /// #3223: the self cost-reduction *head* recognizer matches both the bare

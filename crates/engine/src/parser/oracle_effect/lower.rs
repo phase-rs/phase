@@ -12766,7 +12766,7 @@ pub(crate) fn parse_with_counters_suffix_spanned(
 /// conjoined grammar but never reaches this combinator: a CR 614.1c
 /// "[permanent] enters with …" line is an object-hosted REPLACEMENT, parsed by
 /// `oracle_replacement::parse_enters_with_counters`, which carries its own
-/// conjoined-list reader (`parse_enters_counter_entries`). That reader already
+/// conjoined-list reader (`parse_enters_counter_entries_with_rest`). That reader already
 /// lifts every conjunct — pinned by `gated_self_enters_with_conjoined_counters`
 /// there — so there is no missing routing to add. Do NOT "unify" the two by
 /// pointing the replacement seam at this list: the two count axes are not the

@@ -535,7 +535,7 @@ pub(crate) fn replace_first_object_pronoun(body: &str, replacement: &str) -> Opt
 /// `trigger_object_pronoun_ref_for_condition` (oracle_trigger.rs) pins
 /// `ctx.object_pronoun_ref` to `EventTarget` for that class and the match below
 /// is never consulted.
-pub(crate) fn resolve_it_pronoun(ctx: &mut ParseContext) -> TargetFilter {
+pub(crate) fn resolve_it_pronoun(ctx: &ParseContext) -> TargetFilter {
     if let Some(target) = ctx.object_pronoun_ref.clone() {
         return target;
     }
@@ -10205,6 +10205,19 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     if counter_unless_payment_is_unsupported(text) {
         return parsed_unless_payment_unsupported_clause(text);
     }
+    // CR 608.2k + CR 608.2h: the single choke point for the counter-kind census
+    // of a pronoun ("for each kind of counter on it/them"). Only the for-each
+    // effect dispatch may read it — and only for the ability's own object — so
+    // no pump, mass pump, granted-continuous, or damage route ever sees the
+    // grammar; anything that dispatch cannot faithfully read is an explicit gap.
+    if super::oracle_quantity::has_kinds_pronoun_census_tail(text) {
+        return try_parse_for_each_effect(text, ctx).unwrap_or_else(|| {
+            parsed_clause(Effect::unimplemented(
+                "counter_kinds_pronoun_antecedent",
+                text,
+            ))
+        });
+    }
     // CR 102.2 + CR 102.3 + CR 608.2c: "For each opponent, choose [up to one]
     // <type> that player controls" — the controller chooses one permanent per
     // opponent (Ultimate Magic: Meteor). Lowers to `ChooseFromZone { zone_owner:
@@ -12186,8 +12199,7 @@ fn parse_perpetual_self_subject<'a>(
                 TargetFilter::ParentTarget
             }
             None => {
-                let mut pronoun_ctx = ctx.clone();
-                let target = resolve_it_pronoun(&mut pronoun_ctx);
+                let target = resolve_it_pronoun(ctx);
                 if matches!(target, TargetFilter::SelfRef) {
                     return None;
                 }
@@ -18138,6 +18150,35 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
     let (for_each_no_duration, stripped_for_each_duration) =
         strip_trailing_duration(for_each_clause);
     let for_each_stripped = for_each_no_duration.trim_end_matches('.');
+
+    // CR 608.2k + CR 608.2h: the counter-kind census of a pronoun ("for each
+    // kind of counter on it") has exactly one reading here —
+    // `kinds_census_controller_effect`'s. Every other form is an explicit gap,
+    // never a dropped "for each" that would leave the bare base count.
+    let kinds_census = [
+        (for_each_full, None),
+        (for_each_stripped, stripped_for_each_duration.clone()),
+    ]
+    .into_iter()
+    .find_map(|(clause, duration)| {
+        super::oracle_quantity::counter_kinds_pronoun_number(clause)
+            .map(|number| (number, duration, clause))
+    });
+    if let Some((number, census_duration, census_clause)) = kinds_census {
+        return Some(
+            match kinds_census_controller_effect(number, base_no_duration, ctx) {
+                Some(effect) => parsed_for_each_quantity_effect(
+                    effect,
+                    base_duration.or(census_duration),
+                    for_each_clause_target_controller_filter(census_clause),
+                ),
+                None => parsed_clause(Effect::unimplemented(
+                    "counter_kinds_pronoun_antecedent",
+                    text,
+                )),
+            },
+        );
+    }
     let (quantity, for_each_duration, reference_clause) = if let Some(quantity) =
         parse_for_each_clause_expr_with_context(for_each_full, &quantity_ctx)
     {
@@ -18851,6 +18892,101 @@ fn is_player_scoped_filter(filter: &TargetFilter) -> bool {
 fn subject_application_is_player_scoped(sub_text: &str, ctx: &mut ParseContext) -> bool {
     parse_subject_application(sub_text, ctx)
         .is_some_and(|app| is_player_scoped_filter(&app.affected))
+}
+
+/// CR 608.2k + CR 608.2h + CR 109.5: The one effect-clause reading of a
+/// counter-kind census of a pronoun: "[you [may]] draw a card / gain N life /
+/// lose N life / scry N / surveil N / mill N for each kind of counter on it",
+/// with the census counting the ability's own object (current or last-known
+/// counters). Three conditions make "it" name that object and nothing else:
+///
+/// - the pronoun is singular and the context positively establishes the
+///   ability's own object as its antecedent
+///   (`kinds_census_pronoun_self_antecedent`);
+/// - the instruction's recipient is the ability's controller — "you", stated or
+///   implicit. Any other subject ("target creature's controller", "the
+///   controller of target creature", "that player", "each opponent") introduces
+///   an object or player of its own that the pronoun could name or that the
+///   numeric reader would scan past, so only a controller subject is stripped
+///   and the bare imperative verb must then head the clause;
+/// - the produced effect's player is positively the controller.
+///
+/// `None` for every other form; the caller makes it an explicit gap. Whether
+/// the census clause is the ability's first instruction (no nearer antecedent
+/// in the chain) is the chunk loop's to enforce (`parse_effect_chain_ir_body`).
+fn kinds_census_controller_effect(
+    number: AnaphorNumber,
+    base: &str,
+    ctx: &mut ParseContext,
+) -> Option<Effect> {
+    if number != AnaphorNumber::Singular {
+        return None;
+    }
+    let filter = super::oracle_quantity::kinds_census_pronoun_self_antecedent(ctx)?;
+    let imperative_storage = subject::strip_controller_subject_clause(base);
+    let imperative = imperative_storage.as_deref().unwrap_or(base);
+    let imperative_lower = imperative.to_lowercase();
+    parse_controller_census_verb(&imperative_lower).ok()?;
+    let ast = imperative::parse_numeric_imperative_ast(imperative, &imperative_lower)?;
+    let census = QuantityExpr::Ref {
+        qty: QuantityRef::DistinctCounterKindsAmong { filter },
+    };
+    // The census multiplies a fixed base ("draw a card", "you gain 2 life").
+    // A dynamic base ("that much life", "X life", "life equal to its power")
+    // has no product form with a second dynamic quantity, so the for-each
+    // would be dropped and the bare base kept — decline instead.
+    let base_amount = match &ast {
+        NumericImperativeAst::Draw { count, .. }
+        | NumericImperativeAst::Scry { count }
+        | NumericImperativeAst::Surveil { count }
+        | NumericImperativeAst::Mill { count } => count,
+        NumericImperativeAst::GainLife { amount } | NumericImperativeAst::LoseLife { amount } => {
+            amount
+        }
+        NumericImperativeAst::Pump { .. } => return None,
+    };
+    if !matches!(base_amount, QuantityExpr::Fixed { value } if *value >= 1) {
+        return None;
+    }
+    let effect = imperative::lower_numeric_imperative_ast(ast.with_for_each_quantity(census));
+    let effect = thread_for_each_subject(effect, base, ctx);
+    census_recipient_is_controller(&effect).then_some(effect)
+}
+
+/// CR 121.1 / CR 119.3 / CR 701.22a / CR 701.25a / CR 701.17a: The bare
+/// imperative verb of a player-recipient numeric instruction (draw, gain or
+/// lose life, scry, surveil, mill) at the head of an already-lowercased clause
+/// — the clause names no subject of its own.
+fn parse_controller_census_verb(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("draw "),
+            tag("gain "),
+            tag("lose "),
+            tag("scry "),
+            tag("surveil "),
+            tag("mill "),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 109.5: Whether a player-recipient numeric effect's player is the
+/// ability's controller — the only recipient a kinds census of the ability's
+/// own object is read for (`kinds_census_controller_effect`).
+fn census_recipient_is_controller(effect: &Effect) -> bool {
+    match effect {
+        Effect::Draw { target, .. }
+        | Effect::Scry { target, .. }
+        | Effect::Surveil { target, .. }
+        | Effect::Mill { target, .. } => *target == TargetFilter::Controller,
+        Effect::GainLife { player, .. } => *player == TargetFilter::Controller,
+        Effect::LoseLife { target, .. } => {
+            matches!(target, None | Some(TargetFilter::Controller))
+        }
+        _ => false,
+    }
 }
 
 fn thread_for_each_subject(effect: Effect, original: &str, ctx: &mut ParseContext) -> Effect {
@@ -39599,6 +39735,24 @@ fn parse_effect_chain_ir_body(
             continue;
         }
         let chain_parent_target_owner_scope_for_chunk = chain_parent_target_owner_scope.take();
+        // CR 608.2c + CR 608.2k: the counter-kind census of a pronoun ("for each
+        // kind of counter on it") is read only as the FIRST instruction of the
+        // chain. Any earlier instruction — a search, a reveal, a discard, a
+        // moved or chosen card — may introduce the object "it" names, so a
+        // census after one is an explicit gap rather than a census of the
+        // ability's own object. Checked before every chunk recognizer so no
+        // route can reach the census reading for a later chunk.
+        if !builder.clauses().is_empty()
+            && super::oracle_quantity::has_kinds_pronoun_census_tail(normalized_text)
+        {
+            unimplemented_clause(
+                &mut builder,
+                "counter_kinds_pronoun_antecedent",
+                normalized_text,
+                chunk.boundary_after,
+            );
+            continue;
+        }
         let previous_is_multi_coin_flip = builder
             .clauses()
             .iter()
@@ -41382,6 +41536,19 @@ fn parse_effect_chain_ir_body(
             );
             continue;
         }
+        // CR 608.2c + CR 608.2k: a "for each <object>, …" iteration whose body
+        // census reads "kind of counter on it/them" binds the pronoun to each
+        // iterated object, which a single-number `repeat_for` count cannot carry
+        // (and the body's own reading would bind the wrong object). Fail closed.
+        if repeat_for.is_some() && super::oracle_quantity::has_kinds_pronoun_census_tail(&text) {
+            unimplemented_clause(
+                &mut builder,
+                "counter_kinds_pronoun_iteration",
+                normalized_text,
+                chunk.boundary_after,
+            );
+            continue;
+        }
         // CR 608.2c: "twice" / "N times" suffix — same mechanism as "for each" prefix.
         let (repeat_count, text) = if repeat_for.is_none() {
             let (repeat_count, stripped_text) =
@@ -41439,6 +41606,24 @@ fn parse_effect_chain_ir_body(
             // CR 101.4 + CR 608.2f: forward-carry from a preceding
             // "Repeat the following process for each <scope> [in turn order]."
             .or(pending_player_scope_for_clause);
+        // CR 608.2k + CR 109.5: the counter-kind census of a pronoun is read
+        // only for an instruction whose recipient is the ability's controller
+        // (`kinds_census_controller_effect`). A peeled player subject ("each
+        // opponent loses …", "each player draws …") or a non-controller "may"
+        // actor ("an opponent may draw …") names another recipient, and the
+        // clause reader no longer sees it once peeled — so the gap is taken
+        // here, while the subject is still known.
+        if (player_scope.is_some() || opponent_may_scope.is_some())
+            && super::oracle_quantity::has_kinds_pronoun_census_tail(&text)
+        {
+            unimplemented_clause(
+                &mut builder,
+                "counter_kinds_pronoun_antecedent",
+                normalized_text,
+                chunk.boundary_after,
+            );
+            continue;
+        }
 
         // CR 608.2e + CR 608.2c + CR 101.3: A decline-tail strips one of four
         // shapes (prepositional vs subject-only × optional `doesn't` vs
@@ -42074,6 +42259,11 @@ fn parse_effect_chain_ir_body(
             // object's LKI. This struct literal REPLACES the parent context, so
             // the carry has to be spelled; `..Default::default()` would reset it.
             trigger_zone_change: ctx.trigger_zone_change.clone(),
+            // CR 603.1 + CR 608.2k: what the enclosing trigger's condition names
+            // is a property of the whole body, so every chunk keeps it; the
+            // kinds-census pronoun gate reads it. Spelled for the same reason
+            // as `trigger_zone_change`.
+            trigger_condition_objects: ctx.trigger_condition_objects,
             ..Default::default()
         };
         let ctx = &mut chunk_ctx;
@@ -42253,6 +42443,9 @@ fn parse_effect_chain_ir_body(
         });
         if let Some(prefix_condition) = prefix_delayed {
             let (inner_text, inner_multi_target) = strip_any_number_quantifier(text_after_prefix);
+            // CR 603.7: the inner chain is the body of a delayed triggered
+            // ability that resolves later, on its own trigger event.
+            ctx.enter_delayed_trigger_body();
             let inner_ir = parse_effect_chain_ir(&inner_text, kind, ctx);
             let mut inner_def = lower_effect_chain_ir(&inner_ir);
             if let Some(spec) = inner_multi_target {
@@ -42417,6 +42610,11 @@ fn parse_effect_chain_ir_body(
         }
 
         let (text_no_temporal, delayed_condition) = strip_temporal_suffix(&text);
+        if delayed_condition.is_some() {
+            // CR 603.7: assembly wraps this clause in `CreateDelayedTrigger`, so
+            // it is the body of a delayed triggered ability that resolves later.
+            ctx.enter_delayed_trigger_body();
+        }
         let (text_no_qty, mut multi_target) = strip_any_number_quantifier(text_no_temporal);
         let retained_type_clause = {
             let lower = text_no_qty.to_lowercase();

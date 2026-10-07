@@ -35634,22 +35634,22 @@ fn have_you_put_parses_as_change_zone() {
 
 #[test]
 fn resolve_it_pronoun_default_context() {
-    let mut ctx = ParseContext::default();
-    assert_eq!(resolve_it_pronoun(&mut ctx), TargetFilter::SelfRef);
+    let ctx = ParseContext::default();
+    assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::SelfRef);
 }
 
 #[test]
 fn resolve_it_pronoun_self_ref_subject() {
-    let mut ctx = ParseContext {
+    let ctx = ParseContext {
         subject: Some(TargetFilter::SelfRef),
         ..Default::default()
     };
-    assert_eq!(resolve_it_pronoun(&mut ctx), TargetFilter::SelfRef);
+    assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::SelfRef);
 }
 
 #[test]
 fn resolve_it_pronoun_typed_subject() {
-    let mut ctx = ParseContext {
+    let ctx = ParseContext {
         subject: Some(TargetFilter::Typed(crate::types::ability::TypedFilter {
             type_filters: vec![TypeFilter::Creature],
             controller: Some(ControllerRef::You),
@@ -35657,25 +35657,25 @@ fn resolve_it_pronoun_typed_subject() {
         })),
         ..Default::default()
     };
-    assert_eq!(resolve_it_pronoun(&mut ctx), TargetFilter::TriggeringSource);
+    assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::TriggeringSource);
 }
 
 #[test]
 fn resolve_it_pronoun_attached_to_subject() {
-    let mut ctx = ParseContext {
+    let ctx = ParseContext {
         subject: Some(TargetFilter::AttachedTo),
         ..Default::default()
     };
-    assert_eq!(resolve_it_pronoun(&mut ctx), TargetFilter::TriggeringSource);
+    assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::TriggeringSource);
 }
 
 #[test]
 fn resolve_it_pronoun_any_subject() {
-    let mut ctx = ParseContext {
+    let ctx = ParseContext {
         subject: Some(TargetFilter::Any),
         ..Default::default()
     };
-    assert_eq!(resolve_it_pronoun(&mut ctx), TargetFilter::SelfRef);
+    assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::SelfRef);
 }
 
 /// Issue #6507 (CR 122.1): `condition_refs_source_object` must

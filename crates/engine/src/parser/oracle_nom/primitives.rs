@@ -11,6 +11,7 @@ use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use super::error::{OracleError, OracleResult};
+use crate::parser::oracle_ir::ast::AnaphorNumber;
 use crate::types::ability::{AggregateFunction, ObjectProperty, PtValue};
 use crate::types::card_type::CoreType;
 use crate::types::counter::{CounterType, KEYWORD_COUNTERS};
@@ -219,13 +220,30 @@ pub fn parse_article(input: &str) -> OracleResult<'_, ()> {
 /// cannot drift between modules. Callers that also accept the self-reference
 /// token `~` compose it as an outer `alt((tag("~"), parse_object_recipient_pronoun))`.
 pub fn parse_object_recipient_pronoun(input: &str) -> OracleResult<'_, &str> {
-    recognize(terminated(
-        alt((tag("it"), tag("them"), tag("him"), tag("her"))),
+    recognize(parse_object_recipient_pronoun_number).parse(input)
+}
+
+/// The same object-recipient pronoun set as [`parse_object_recipient_pronoun`],
+/// reporting the pronoun's grammatical number instead of its slice: "them" is
+/// plural, "it" / "him" / "her" are singular. Callers whose referent depends on
+/// the number (a singular pronoun can name one antecedent object; a plural one
+/// cannot) read it here rather than re-matching the recognized word.
+pub(crate) fn parse_object_recipient_pronoun_number(
+    input: &str,
+) -> OracleResult<'_, AnaphorNumber> {
+    terminated(
+        alt((
+            value(
+                AnaphorNumber::Singular,
+                alt((tag("it"), tag("him"), tag("her"))),
+            ),
+            value(AnaphorNumber::Plural, tag("them")),
+        )),
         peek(alt((
             value((), eof),
             value((), satisfy(|c| !c.is_alphanumeric() && c != '\'')),
         ))),
-    ))
+    )
     .parse(input)
 }
 
@@ -522,6 +540,29 @@ pub fn parse_player_counter_kind(input: &str) -> OracleResult<'_, PlayerCounterK
     .parse(input)
 }
 
+/// CR 122.1: The counter-KIND quantifier "kind of" / "kinds of" — the head of
+/// a counter-kind census ("for each kind of counter on …", "the number of
+/// different kinds of counters among …"). It quantifies over counter kinds; it
+/// never names one (no counter is called "kind"). Lowercase input.
+pub fn parse_counter_kind_quantifier(input: &str) -> OracleResult<'_, ()> {
+    value((), (tag("kind"), opt(tag("s")), tag(" of"))).parse(input)
+}
+
+/// CR 122.1: Guard for open-ended counter-NAME readers — those that slice an
+/// arbitrary phrase before " counter[s]" and map it to `CounterType::Generic`.
+/// Succeeds without consuming unless the input opens with the counter-kind
+/// quantifier (optionally after the "different " determiner) at a word
+/// boundary, so "kind of counter on ~" can never be read as a count of a
+/// counter named "kind of". Lowercase input.
+pub fn not_counter_kind_quantifier(input: &str) -> OracleResult<'_, ()> {
+    not((
+        opt(tag("different ")),
+        parse_counter_kind_quantifier,
+        alt((eof, tag(" "))),
+    ))
+    .parse(input)
+}
+
 /// Parse a counter type: power/toughness counter notation (`+1/+1`,
 /// `-0/-1`, etc.) or one of the named counter types recognized by Oracle text
 /// (`loyalty`, `charge`, `lore`, …).
@@ -621,6 +662,10 @@ fn parse_keyword_counter_name(input: &str) -> OracleResult<'_, &str> {
 fn parse_named_counter_type(input: &str) -> OracleResult<'_, &str> {
     // Split into two alt groups to stay within nom's 21-arm tuple limit.
     alt((
+        // CR 122.1: multi-word counter names must be enumerated — the open
+        // fallback consumes one token; 'acquired taste' is the only multi-word
+        // non-keyword name in the corpus.
+        tag("acquired taste"),
         tag("loyalty"),
         tag("charge"),
         tag("lore"),

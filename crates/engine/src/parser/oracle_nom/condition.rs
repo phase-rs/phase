@@ -2947,6 +2947,9 @@ fn parse_strict_n_counters(input: &str) -> OracleResult<'_, (u32, Option<u32>)> 
 /// Fails if the input does not contain `" counter"` before end of string,
 /// or if the token slice is empty (that case is the caller's `Any` branch).
 fn parse_typed_counter_noun(input: &str) -> OracleResult<'_, CounterMatch> {
+    // CR 122.1: "[different] kinds of counters on ~" quantifies over counter
+    // kinds; it names none, so it must not become `Generic("kinds of")`.
+    let (input, _) = super::primitives::not_counter_kind_quantifier(input)?;
     let (rest_after_noun, type_slice) = take_until(" counter").parse(input)?;
     if type_slice.is_empty() {
         // Fail so the caller's `Any` branch (bare "counter[s]") can try.
@@ -13692,6 +13695,43 @@ mod tests {
             ),
             "expected DistinctCounterKindsAmong >= 2, got {cond:?}"
         );
+    }
+
+    /// CR 122.1: the counter-has condition family never reads the counter-kind
+    /// quantifier ("[different] kind(s) of") as a counter NAME — no counter is
+    /// named "kind". A kinds census on a single object has no condition arm, so
+    /// it fails closed instead of becoming `HasCounters` over a counter named
+    /// "kinds of".
+    #[test]
+    fn counter_has_condition_never_names_a_kind_of_counter() {
+        // Reach guards: both surface forms still read a named counter.
+        for (text, minimum) in [
+            ("there are two or more ki counters on ~", 2),
+            ("~ has a ki counter on it", 1),
+        ] {
+            assert_eq!(
+                parse_inner_condition(text),
+                Ok((
+                    "",
+                    StaticCondition::HasCounters {
+                        counters: CounterMatch::OfType(CounterType::Generic("ki".into())),
+                        minimum,
+                        maximum: None,
+                    }
+                )),
+                "{text:?}"
+            );
+        }
+        for text in [
+            "there are three or more different kinds of counters on ~",
+            "there are two or more kinds of counters on ~",
+            "there are three or more kinds of counters on it",
+            "~ has a kind of counter on it",
+            "~ has two or more kinds of counters on it",
+        ] {
+            let parsed = parse_inner_condition(text);
+            assert!(parsed.is_err(), "{text:?} must fail closed, got {parsed:?}");
+        }
     }
 
     /// Kavu Runner / Skittish Kavu: "... as long as no opponent controls a white

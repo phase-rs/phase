@@ -28249,12 +28249,10 @@ fn cost_reduction_reads_targets(reduction: &CostReduction, read: TargetRead) -> 
 // and so are `TargetFilter` and its `FilterProp`s, the leaves every filter-scoped
 // count and condition recurses into.
 //
-// Measured on the corpus: of the 84 printed self cost riders, exactly 2 carry any
-// target reference (Dragonfire Blade, Raft Security Officer), both on targeted
-// abilities, and both were already classified as target-dependent before these
-// classifiers were widened. Neither reads through a newly covered shape (a
-// player predicate, a typed-filter property) nor an unbindable one, so widening
-// them changes no current card.
+// Every self rider whose count reads ObjectScope::Target (Dragonfire Blade,
+// Warrior's Blades), and Raft Security Officer's target-referencing rider, sits
+// on a targeted ability and is classified target-dependent, so it is priced at
+// target settlement.
 
 /// Which reads of an activation's chosen targets a classifier reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

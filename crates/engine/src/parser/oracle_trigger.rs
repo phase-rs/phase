@@ -18,7 +18,9 @@ use super::oracle_effect::{
     try_parse_reanimator_aura_etb_effect_ir, try_parse_reanimator_aura_grant_etb_effect_ir,
 };
 use super::oracle_ir::ast::parsed_clause;
-use super::oracle_ir::context::{ParseContext, TriggerConditionScope, TriggerZoneChangeProvenance};
+use super::oracle_ir::context::{
+    ParseContext, TriggerConditionObjects, TriggerConditionScope, TriggerZoneChangeProvenance,
+};
 use super::oracle_ir::doc::PrintedTriggerIndex;
 use super::oracle_ir::effect_chain::{DieResultBranchIr, EffectChainIr};
 use super::oracle_ir::trigger::{
@@ -43,8 +45,8 @@ use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
     split_sentence_units,
 };
-use super::oracle_nom::target::parse_chosen_object_reference;
 use super::oracle_nom::target::parse_type_phrase as parse_type_phrase_nom;
+use super::oracle_nom::target::{parse_chosen_object_reference, parse_type_filter_word};
 use super::oracle_static::{
     add_property, parse_commander_subject_filter_prefix, typed_filter_for_subtype,
 };
@@ -1574,6 +1576,17 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // spell qualifier becomes the trigger's `valid_card`.
     let pending_mana_symbol_count_color =
         extract_colored_mana_symbol_spell_qualifier(condition_text);
+
+    // Parse the condition to get TriggerMode + partial TriggerDefinition. It
+    // runs before the body so the body's context can carry what the condition
+    // names (`trigger_condition_objects`). The body parses on its own
+    // `effect_ctx`, so the outer context is untouched in between; the
+    // condition's diagnostics are held back and re-emitted after the body's,
+    // keeping the warning order the card data records.
+    let condition_diagnostics_start = ctx.diagnostics.len();
+    let (condition, partial_def) = parse_trigger_condition(condition_text, ctx);
+    let condition_diagnostics = ctx.diagnostics.split_off(condition_diagnostics_start);
+
     let mut effect_ctx = ParseContext {
         subject: Some(trigger_subject.clone()),
         card_name: Some(card_name.to_string()),
@@ -1633,6 +1646,9 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             TriggerZoneChangeProvenance::none,
             |(origin, destination)| TriggerZoneChangeProvenance::established(origin, destination),
         ),
+        // CR 603.1 + CR 608.2k: what the condition names decides whether a
+        // bare "it" in the body can only be the ability's own object.
+        trigger_condition_objects: trigger_condition_objects(&cond_lower, &partial_def),
         ..Default::default()
     };
 
@@ -1871,9 +1887,11 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     };
     // Transfer diagnostics from the per-trigger effect context to the outer ctx.
     ctx.diagnostics.append(&mut effect_ctx.diagnostics);
-
-    // Parse the condition to get TriggerMode + partial TriggerDefinition
-    let (condition, partial_def) = parse_trigger_condition(condition_text, ctx);
+    // Re-emit the condition's diagnostics after the body's, as before the
+    // condition parse moved ahead of the body.
+    for diagnostic in condition_diagnostics {
+        ctx.push_diagnostic(diagnostic);
+    }
 
     TriggerIr {
         condition,
@@ -12283,6 +12301,150 @@ fn trigger_damage_recipient_ref_for_condition(
     }
 
     None
+}
+
+/// CR 603.1 + CR 608.2k + CR 109.1: classify which objects a parsed trigger
+/// condition names — the ability's own object only (`SourceOnly`), or
+/// something else (`NotSourceOnly`).
+///
+/// A positive whitelist over the typed condition: `SourceOnly` requires that
+/// the condition names the ability's own object (`SelfRef` in an event-object
+/// slot) and that every other event-object slot is empty or names players
+/// only ("deals combat damage to a player", "attacks a player"). A second
+/// object ("blocks a creature", "becomes blocked by a creature", "becomes
+/// attached to a creature", "becomes the target of a spell", "attacks a
+/// planeswalker"), an unrecognized event, a condition qualifier, or a
+/// disjunctive zone-change clause each yield `NotSourceOnly`.
+///
+/// The typed slots alone are not proof: several event parsers recognize the
+/// event verb and leave a trailing object phrase unrecorded ("fights a
+/// creature", "crews a Vehicle", "is dealt damage by a creature", "becomes
+/// blocked by two or more creatures", "deals damage to a token" all parse
+/// with no second-object slot).
+/// So the condition text must also name no object noun at any word boundary
+/// (`parse_object_head_noun`, built on the shared type-word combinator). A
+/// false positive only declines.
+///
+/// The destructuring is exhaustive on purpose: a field added to
+/// `TriggerDefinition` must be classified here before this compiles, so a new
+/// way for a condition to name an object cannot slip past the whitelist.
+fn trigger_condition_objects(
+    condition_lower: &str,
+    def: &TriggerDefinition,
+) -> TriggerConditionObjects {
+    let TriggerDefinition {
+        mode,
+        // The effect, not the condition (and unset at condition-parse time).
+        execute: _,
+        valid_card,
+        valid_source,
+        valid_target,
+        zone_change_clauses,
+        condition,
+        attack_target_filter,
+        // CR 115.1: the player leaf of a becomes-target subject — a player,
+        // never an object.
+        valid_subject_player: _,
+        // Zones, phases, timing, amounts, counter kinds, die/coin/clash
+        // results, mana, player actions, rooms, and bookkeeping: none names an
+        // object.
+        origin: _,
+        origin_zones: _,
+        destination: _,
+        destination_constraint: _,
+        trigger_zones: _,
+        phase: _,
+        optional: _,
+        damage_kind: _,
+        secondary: _,
+        spell_cast_origin: _,
+        description: _,
+        constraint: _,
+        counter_filter: _,
+        saga_chapter: _,
+        unless_pay: _,
+        batched: _,
+        die_sides: _,
+        expend_threshold: _,
+        player_actions: _,
+        scry_bottom_count: _,
+        damage_amount: _,
+        life_amount: _,
+        coin_flip_result: _,
+        die_result: _,
+        taps_for_mana_produced: _,
+        mana_ability_produced: _,
+        clash_result: _,
+        room_door: _,
+    } = def;
+    let event_objects = [valid_card, valid_source, valid_target];
+    let names_source = event_objects
+        .iter()
+        .any(|slot| matches!(slot, Some(TargetFilter::SelfRef)));
+    // CR 109.1: a player is not an object, so a player slot leaves the source
+    // as the only object the condition names.
+    let names_no_other_object = event_objects.iter().all(|slot| match slot {
+        None => true,
+        Some(filter) => *filter == TargetFilter::SelfRef || filter.is_player_scope(),
+    });
+    // CR 506.2: a planeswalker or battle may be attacked; those are objects.
+    let attacks_no_object = match attack_target_filter {
+        None
+        | Some(AttackTargetFilter::Player)
+        | Some(AttackTargetFilter::Owner)
+        | Some(AttackTargetFilter::Monarch) => true,
+        Some(
+            AttackTargetFilter::Planeswalker
+            | AttackTargetFilter::PlayerOrPlaneswalker
+            | AttackTargetFilter::Battle
+            | AttackTargetFilter::OwnerOrPlaneswalker
+            | AttackTargetFilter::PlayerOrPermanents,
+        ) => false,
+    };
+    // CR 109.1: an object noun ("a creature", "a Vehicle", "a spell", "a
+    // token", "a source") names an object whether or not the event parser
+    // recorded it in a slot.
+    let text_names_no_object_noun =
+        nom_primitives::scan_at_word_boundaries(condition_lower, parse_object_head_noun).is_none();
+    let source_only = !matches!(mode, TriggerMode::Unknown(_))
+        && zone_change_clauses.is_empty()
+        && condition.is_none()
+        && names_source
+        && names_no_other_object
+        && attacks_no_object
+        && text_names_no_object_noun;
+    if source_only {
+        TriggerConditionObjects::SourceOnly
+    } else {
+        TriggerConditionObjects::NotSourceOnly
+    }
+}
+
+/// CR 109.1: an object head noun at the start of an already-lowercased
+/// input — a card-type or subtype word ("creature", "vehicle", "spell"), or a
+/// noun that names objects without being a type ("token", "source", "object",
+/// "ability") — ending at a word boundary.
+fn parse_object_head_noun(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value((), parse_type_filter_word),
+        value(
+            (),
+            terminated(
+                alt((
+                    tag("tokens"),
+                    tag("token"),
+                    tag("sources"),
+                    tag("source"),
+                    tag("objects"),
+                    tag("object"),
+                    tag("abilities"),
+                    tag("ability"),
+                )),
+                not(alpha1),
+            ),
+        ),
+    ))
+    .parse(input)
 }
 
 fn trigger_object_pronoun_ref_for_condition(

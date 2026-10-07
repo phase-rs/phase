@@ -4,6 +4,7 @@
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use crate::parser::oracle_ir::ast::AnaphorNumber;
 
 /// Try to parse "[Subtype] creatures you control get/have ..." patterns.
 /// `text` is the original-case text starting at the subtype word.
@@ -1102,22 +1103,21 @@ pub(crate) fn parse_continuous_gets_has(
         // `scan_timing_restrictions`) so the dynamic P/T is still extracted; the
         // leading keyword is recovered separately via `extract_keyword_clause`.
         let mut pt_scan: &str = &pt_lower;
-        let pt_source = loop {
-            if let Some(rest) = nom_tag_lower(pt_scan, pt_scan, "gets ")
-                .or_else(|| nom_tag_lower(pt_scan, pt_scan, "get "))
-            {
-                break rest;
+        let (pt_source, subject_number) = loop {
+            if let Ok((rest, number)) = parse_pump_verb(pt_scan) {
+                break (rest, Some(number));
             }
             match pt_scan.find(' ') {
                 Some(idx) => pt_scan = pt_scan[idx + 1..].trim_start(),
-                None => break pt_lower.as_str(),
+                None => break (pt_lower.as_str(), None),
             }
         };
 
         if let Some((p, t)) = parse_pt_mod(pt_source) {
-            if let Some(quantity) =
-                super::oracle_quantity::parse_for_each_clause_expr_deferred(for_each_clause)
-            {
+            if let Some(quantity) = super::oracle_quantity::parse_for_each_clause_expr_deferred(
+                for_each_clause,
+                subject_number,
+            ) {
                 let mut modifications = Vec::new();
                 push_dynamic_pt_modifications(&mut modifications, p, t, quantity);
                 if !modifications.is_empty() {
@@ -1172,6 +1172,25 @@ pub(crate) fn parse_continuous_gets_has(
 pub(crate) fn parse_dynamic_for_each_pt_modifications(
     text: &str,
 ) -> Option<Vec<ContinuousModification>> {
+    parse_dynamic_for_each_pt_term(text, PumpTermVerb::Own)
+}
+
+/// Where a dynamic pump term's verb — and with it the static subject's
+/// grammatical number — comes from.
+#[derive(Debug, Clone, Copy)]
+enum PumpTermVerb {
+    /// The term must carry its own "gets"/"get".
+    Own,
+    /// A term of a repeated pump ("… and +1/+0 for each …") whose verb may be
+    /// elided and shared with the lead term; carries the lead term's number
+    /// when the lead carried a verb.
+    SharedWithLead(Option<AnaphorNumber>),
+}
+
+fn parse_dynamic_for_each_pt_term(
+    text: &str,
+    verb: PumpTermVerb,
+) -> Option<Vec<ContinuousModification>> {
     let lower = text.to_lowercase();
     let (for_each_with_marker, pt_text) = take_until::<_, _, OracleError<'_>>("for each ")
         .parse(lower.as_str())
@@ -1180,11 +1199,15 @@ pub(crate) fn parse_dynamic_for_each_pt_modifications(
         .parse(for_each_with_marker)
         .ok()?;
     let pt_text = pt_text.trim();
-    let pt_source = nom_tag_lower(pt_text, pt_text, "gets ")
-        .or_else(|| nom_tag_lower(pt_text, pt_text, "get "))?;
+    let (pt_source, subject_number) = match (parse_pump_verb(pt_text), verb) {
+        (Ok((rest, number)), _) => (rest, Some(number)),
+        (Err(_), PumpTermVerb::SharedWithLead(lead_number)) => (pt_text, lead_number),
+        (Err(_), PumpTermVerb::Own) => return None,
+    };
     let (power, toughness) = parse_pt_mod(pt_source)?;
     let quantity = super::oracle_quantity::parse_for_each_clause_expr_deferred(
         strip_trailing_keyword_clause(for_each_clause.trim_end_matches('.')),
+        subject_number,
     )?;
 
     let mut modifications = Vec::new();
@@ -1221,18 +1244,15 @@ fn parse_repeated_for_each_pt_modifications(text: &str) -> Option<Vec<Continuous
         return None;
     }
 
+    // Only the first term carries the verb once the predicate is split; every
+    // term shares it, and with it the subject's number.
+    let lead_number = parse_pump_verb(&terms[0]).ok().map(|(_, number)| number);
     let mut modifications = Vec::new();
     for term in &terms {
-        // `parse_dynamic_for_each_pt_modifications` expects the "gets"/"get" verb;
-        // only the first term carries it once the predicate is split.
-        let owned;
-        let term = if segment_has_gets_verb(term) {
-            term.as_str()
-        } else {
-            owned = format!("gets {term}");
-            owned.as_str()
-        };
-        modifications.extend(parse_dynamic_for_each_pt_modifications(term)?);
+        modifications.extend(parse_dynamic_for_each_pt_term(
+            term,
+            PumpTermVerb::SharedWithLead(lead_number),
+        )?);
     }
     (!modifications.is_empty()).then_some(modifications)
 }
@@ -1252,11 +1272,19 @@ fn split_on_and(s: &str) -> Vec<&str> {
     segments
 }
 
-/// True iff `segment` (already lowercased) opens with a "gets"/"get" verb.
-fn segment_has_gets_verb(segment: &str) -> bool {
-    alt((tag::<_, _, OracleError<'_>>("gets "), tag("get ")))
-        .parse(segment)
-        .is_ok()
+/// CR 613.4c + CR 608.2k: The pump verb "gets" / "get" at the head of
+/// `input` (already lowercased), with the grammatical number its agreement
+/// gives the static's subject: "gets" follows a singular subject ("Each
+/// creature you control gets", "Enchanted creature gets"), "get" a plural one
+/// ("Creatures you control get"). A census pronoun in the "for each" tail must
+/// agree with that number to name the subject's object(s)
+/// (`parse_for_each_clause_deferred`).
+fn parse_pump_verb(input: &str) -> OracleResult<'_, AnaphorNumber> {
+    alt((
+        value(AnaphorNumber::Singular, tag("gets ")),
+        value(AnaphorNumber::Plural, tag("get ")),
+    ))
+    .parse(input)
 }
 
 /// True iff `segment` (already lowercased) begins a "+N/+M for each …" pump term:
@@ -1264,7 +1292,7 @@ fn segment_has_gets_verb(segment: &str) -> bool {
 /// a repeated-pump term boundary apart from an " and " inside a count clause.
 fn segment_starts_pump_term(segment: &str) -> bool {
     preceded(
-        opt(alt((tag::<_, _, OracleError<'_>>("gets "), tag("get ")))),
+        opt(parse_pump_verb),
         preceded(nom_primitives::parse_pt_modifier, tag(" for each ")),
     )
     .parse(segment.trim_start())
