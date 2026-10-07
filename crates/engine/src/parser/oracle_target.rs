@@ -11,10 +11,10 @@ use nom::Parser;
 use crate::types::ability::{
     AggregateFunction, AttachmentKind, CardTypeSetSource, ChoiceType, CombatRelation,
     CombatRelationSubject, Comparator, ControllerRef, CountScope, DamageKindFilter, FilterProp,
-    NameStickerSet, ObjectProperty, ObjectScope, ParitySource, PlayerFilter, PlayerRelation,
-    PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, SeatDirection,
-    SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode, ThisWayCause,
-    TypeFilter, TypedFilter,
+    NameStickerSet, ObjectProperty, ObjectScope, Parity, ParitySource, PlayerFilter,
+    PlayerRelation, PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+    SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode,
+    ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -6792,6 +6792,58 @@ pub(crate) fn parse_mana_value_suffix(
         return Some((
             FilterProp::ManaValueParity {
                 parity: ParitySource::LastNamedChoice,
+            },
+            text.len() - after.len(),
+        ));
+    }
+
+    // CR 202.3 + CR 601.3a: the FIXED odd/even mana-value filter — "with an
+    // even mana value" (Desecrate Reality, Gyruda), "with even mana values"
+    // (Void Winnower), "with an odd mana value" (Soundwave). CR 202.3 defines
+    // the mana value whose parity is read; CR 601.3a is the rule written
+    // around this exact wording — its own example is "A player controls Void
+    // Winnower, which reads, in part, 'Your opponents can't cast spells with
+    // even mana values.'" — so the Comprehensive Rules treat the parity as a
+    // QUALITY OF THE SPELL, which is what makes it a filter conjunct here
+    // rather than a property of the prohibition.
+    //
+    // This sits in the slot the branch-order comment below calls "parity",
+    // beside the `LastNamedChoice` arm above: both produce
+    // `FilterProp::ManaValueParity` and differ only in which `ParitySource`
+    // supplies the quality. `ParitySource::Fixed` already had a complete
+    // runtime (`parity_from_source` in `filter.rs`, plus coverage and trigger
+    // binding arms) and no parser constructed it, so every printed fixed-parity
+    // clause silently dropped its conjunct. The plural "values" is accepted
+    // because the printed wording pluralizes with the plural subject noun
+    // ("spells with even mana values") while meaning the same per-object
+    // predicate.
+    //
+    // Ordering is load-bearing in one direction only: this must stay AFTER the
+    // relative head, which claims "with the same/lesser/greater mana value
+    // ...". It cannot shadow that head (no relative form begins "odd"/"even")
+    // nor the numeric head below ("mana value" never begins with a parity
+    // word), so it is grammatically disjoint from both — but keeping it in the
+    // parity slot is what the comment below documents.
+    if let Ok((after, parity)) = (
+        parse_suffix_subject_head,
+        opt(alt((
+            tag::<_, _, OracleError<'_>>("an "),
+            tag("a "),
+            tag("the "),
+        ))),
+        alt((
+            value(Parity::Even, tag::<_, _, OracleError<'_>>("even")),
+            value(Parity::Odd, tag("odd")),
+        )),
+        tag::<_, _, OracleError<'_>>(" mana value"),
+        opt(tag::<_, _, OracleError<'_>>("s")),
+    )
+        .parse(trimmed)
+        .map(|(after, (_, _, parity, _, _))| (after, parity))
+    {
+        return Some((
+            FilterProp::ManaValueParity {
+                parity: ParitySource::Fixed(parity),
             },
             text.len() - after.len(),
         ));
@@ -21410,6 +21462,77 @@ mod tests {
                 }
             ),
             "expected Cmc LE CountersOn(Source, Time), got {prop:?}"
+        );
+    }
+
+    /// CR 202.3 + CR 601.3a: the FIXED odd/even head. Every surface form the
+    /// corpus prints must bind the printed parity and consume exactly its own
+    /// clause — the singular-with-article form (Desecrate Reality, Gyruda,
+    /// Soundwave), the bare plural (Void Winnower), and both parities. A head
+    /// that hardcoded one parity, or that over-consumed a trailing clause,
+    /// would pass a single-case test and fail here.
+    #[test]
+    fn mana_value_suffix_fixed_parity_binds_printed_parity() {
+        use crate::types::ability::Parity;
+
+        for (input, expected) in [
+            ("with an even mana value", Parity::Even),
+            ("with an odd mana value", Parity::Odd),
+            ("with even mana values", Parity::Even),
+            ("with odd mana values", Parity::Odd),
+            ("that have an even mana value", Parity::Even),
+            ("that each have an odd mana value", Parity::Odd),
+        ] {
+            let mut ctx = ParseContext::default();
+            let (prop, consumed) = parse_mana_value_suffix(input, &mut ctx)
+                .unwrap_or_else(|| panic!("fixed-parity suffix {input:?} must parse"));
+            assert_eq!(consumed, input.len(), "{input:?} must consume its clause");
+            assert_eq!(
+                prop,
+                FilterProp::ManaValueParity {
+                    parity: ParitySource::Fixed(expected),
+                },
+                "{input:?} must bind {expected:?}"
+            );
+        }
+    }
+
+    /// CR 202.3: the fixed-parity head must stop at the property noun so a
+    /// trailing clause survives for the caller — Gyruda's "with an even mana
+    /// value from among the milled cards" keeps its source-set phrase. This is
+    /// the same consumption contract the elliptical-possessive head below
+    /// documents; an over-consuming head would swallow "from among …" and the
+    /// tracked-set reference would be lost.
+    #[test]
+    fn mana_value_suffix_fixed_parity_leaves_trailing_clause() {
+        use crate::types::ability::Parity;
+
+        let mut ctx = ParseContext::default();
+        let input = "with an even mana value from among the milled cards";
+        let (prop, consumed) =
+            parse_mana_value_suffix(input, &mut ctx).expect("fixed-parity suffix parses");
+        assert_eq!(
+            prop,
+            FilterProp::ManaValueParity {
+                parity: ParitySource::Fixed(Parity::Even),
+            }
+        );
+        assert_eq!(&input[consumed..], " from among the milled cards");
+    }
+
+    /// CR 202.3: guard — the fixed-parity head must not shadow the RELATIVE
+    /// head above it. "with the same mana value as" and "with lesser mana value
+    /// than" are owned by `parse_relative_mana_value_suffix` (~46 cards); the
+    /// parity head sits after it and must leave those shapes alone.
+    #[test]
+    fn mana_value_suffix_fixed_parity_does_not_shadow_relative_head() {
+        let mut ctx = ParseContext::default();
+        let (prop, _) =
+            parse_mana_value_suffix("with lesser mana value than that creature", &mut ctx)
+                .expect("relative suffix still parses");
+        assert!(
+            !matches!(prop, FilterProp::ManaValueParity { .. }),
+            "relative head must keep its shape, got {prop:?}"
         );
     }
 

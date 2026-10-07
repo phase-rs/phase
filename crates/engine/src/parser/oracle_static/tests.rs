@@ -22956,7 +22956,19 @@ fn cant_cast_spells_of_chosen_color() {
 
 #[test]
 fn cant_cast_spells_with_even_mana_values() {
-    // CR 101.2: "can't cast spells with even mana values"
+    // CR 601.3a: "can't cast spells with even mana values" — Void Winnower, the
+    // card that rule's own example is written about. The parity is one of the
+    // "certain qualities" CR 601.3a says the prohibition names, so it must
+    // reach `affected`; CR 202.3 defines the mana value it is read from.
+    //
+    // This test used to assert `def.mode` ALONE and passed with the card
+    // completely broken: `affected` was `None`, and
+    // `is_blocked_by_cant_be_cast_for` skips its filter test when `affected` is
+    // `None` and falls through to PROHIBITED — so Void Winnower stopped
+    // opponents from casting every spell in the game. Asserting the filter is
+    // the whole point of this test; do not weaken it back to a mode check.
+    use crate::types::ability::{Parity, ParitySource};
+
     let def = parse_static_line("Your opponents can't cast spells with even mana values.").unwrap();
     assert_eq!(
         def.mode,
@@ -22964,6 +22976,46 @@ fn cant_cast_spells_with_even_mana_values() {
             who: ProhibitionScope::Opponents,
         }
     );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => assert!(
+            tf.properties.contains(&FilterProp::ManaValueParity {
+                parity: ParitySource::Fixed(Parity::Even),
+            }),
+            "even-mana-value cast prohibition must scope to EVEN mana values; got {:?}",
+            tf.properties
+        ),
+        other => panic!(
+            "expected a Typed filter carrying ManaValueParity(Fixed(Even)), got {other:?} \
+             (an unfiltered prohibition is a total cast-lock on every spell)"
+        ),
+    }
+}
+
+#[test]
+fn cant_cast_spells_with_odd_mana_values() {
+    // CR 601.3a + CR 202.3: the ODD mirror of the Void Winnower arm. No printed
+    // card uses it today, but the parity must be read from the text rather than
+    // defaulted — a head that hardcoded `Even` would pass the sibling test
+    // above and silently invert this one.
+    use crate::types::ability::{Parity, ParitySource};
+
+    let def = parse_static_line("Your opponents can't cast spells with odd mana values.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantBeCast {
+            who: ProhibitionScope::Opponents,
+        }
+    );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => assert!(
+            tf.properties.contains(&FilterProp::ManaValueParity {
+                parity: ParitySource::Fixed(Parity::Odd),
+            }),
+            "odd-mana-value cast prohibition must scope to ODD mana values; got {:?}",
+            tf.properties
+        ),
+        other => panic!("expected ManaValueParity(Fixed(Odd)), got {other:?}"),
+    }
 }
 
 #[test]

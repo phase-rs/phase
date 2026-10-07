@@ -33250,3 +33250,217 @@ fn lich_as_enters_life_loss_parses_as_moved_self_replacement() {
         .iter()
         .any(|def| matches!(def.mode, StaticMode::CantLoseTheGame)));
 }
+
+/// CR 202.3 + CR 601.3a: the FIXED odd/even mana-value conjunct must reach
+/// every call site the corpus exercises, and must stay away from the two
+/// printed shapes that only LOOK like it.
+///
+/// `ParitySource::Fixed` had a complete runtime (`filter::parity_from_source`,
+/// `coverage`, `triggers`) and was constructed by NO parser, so every printed
+/// fixed-parity clause silently dropped its conjunct. The four cards below are
+/// the whole set of corpus cards whose fixed-parity clause is a FILTER, and they
+/// cover four distinct call sites: a casting prohibition's `affected`
+/// (Void Winnower), a target filter (Desecrate Reality), a tracked-set filter
+/// inside a trigger's sub-ability (Gyruda), and a spell-cast trigger's
+/// `valid_card` (Soundwave). One head feeds all four — a per-site fix would
+/// have had to be written four times.
+///
+/// The three EXCLUSIONS are asserted too, because "no parity anywhere" is the
+/// correct answer for them and a greedier head would wrongly claim them:
+///
+///   * Obosh, the Preypiercer — "a source you control with an odd mana value
+///     would deal damage" is a REPLACEMENT's damage-source filter
+///     (`damage_source_filter`), which is `None` for reasons that have nothing
+///     to do with this suffix (the whole source filter is dropped, the
+///     "you control" half included). A separate seam; see the follow-up note.
+///   * Gyruda / Obosh companion lines — "Your starting deck contains only cards
+///     with even mana values" is a CR 702.139a DECKBUILDING constraint, not a
+///     filter over game objects, and is carried by the `Companion` keyword
+///     rather than a `TargetFilter`. Forcing it through this arm would invent a
+///     filter the card does not apply in play.
+#[test]
+fn fixed_mana_value_parity_conjunct_reaches_every_filter_call_site() {
+    /// Collect every `FilterProp::ManaValueParity` anywhere in a parse, as
+    /// "<source>(<parity>)". Walking the serialized form rather than the typed
+    /// tree is deliberate: the four call sites nest the prop at four different
+    /// depths behind four different wrappers, and the point of this test is that
+    /// ONE head serves all of them — a per-site typed navigation would re-encode
+    /// the very assumption under test.
+    fn parities(parsed: &ParsedAbilities) -> Vec<String> {
+        fn walk(v: &serde_json::Value, out: &mut Vec<String>) {
+            match v {
+                serde_json::Value::Object(map) => {
+                    if map.get("type").and_then(serde_json::Value::as_str)
+                        == Some("ManaValueParity")
+                    {
+                        let p = &map["parity"];
+                        out.push(format!(
+                            "{}({})",
+                            p.get("type")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("?"),
+                            p.get("value")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("?"),
+                        ));
+                    }
+                    for child in map.values() {
+                        walk(child, out);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for child in items {
+                        walk(child, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        walk(
+            &serde_json::to_value(parsed).expect("ParsedAbilities serializes"),
+            &mut out,
+        );
+        out.sort();
+        out
+    }
+
+    /// One corpus card: its name, type line axes, and the fixed-parity
+    /// conjuncts its printed text must produce (empty = off this seam).
+    struct Case {
+        name: &'static str,
+        types: &'static [&'static str],
+        subtypes: &'static [&'static str],
+        expected: &'static [&'static str],
+    }
+
+    let cases: &[Case] = &[
+        Case {
+            name: "Void Winnower",
+            types: &["Creature"],
+            subtypes: &["Eldrazi"],
+            expected: &["Fixed(Even)"],
+        },
+        Case {
+            name: "Desecrate Reality",
+            types: &["Instant"],
+            subtypes: &[],
+            // One leg per printed clause: the even-mana-value exile target and
+            // the adamant odd-mana-value graveyard return.
+            expected: &["Fixed(Even)", "Fixed(Odd)"],
+        },
+        Case {
+            name: "Gyruda, Doom of Depths",
+            types: &["Creature"],
+            subtypes: &["Demon", "Kraken"],
+            // ONE conjunct: the milled-card filter. The companion line is a
+            // deckbuilding constraint and contributes none.
+            expected: &["Fixed(Even)"],
+        },
+        Case {
+            name: "Soundwave, Superior Captain",
+            types: &["Artifact"],
+            subtypes: &[],
+            expected: &["Fixed(Even)", "Fixed(Odd)"],
+        },
+        Case {
+            // Both lines are off this seam: a companion constraint and a
+            // replacement-effect damage-source filter.
+            name: "Obosh, the Preypiercer",
+            types: &["Creature"],
+            subtypes: &["Hellion", "Horror"],
+            expected: &[],
+        },
+        // CR 702.16e: "Protection from odd/even mana values" is the PROTECTION
+        // keyword's quality slot, not a postnominal filter suffix — there is no
+        // "with "/"that have " subject head for the parity production to attach
+        // to, so these two cannot reach it. Both are unfinished playtest cards
+        // ({TK} cost placeholders) that parse entirely to `Unimplemented`
+        // today; asserting the empty set here is what keeps a future, greedier
+        // parity head from quietly claiming the keyword's quality.
+        Case {
+            name: "Squid Fire Knight",
+            types: &[],
+            subtypes: &[],
+            expected: &[],
+        },
+        Case {
+            name: "Weird Angel Flame",
+            types: &[],
+            subtypes: &[],
+            expected: &[],
+        },
+    ];
+
+    for case in cases {
+        let oracle = corpus_oracle_text(case.name);
+        let types: Vec<String> = case.types.iter().map(|s| (*s).to_string()).collect();
+        let subtypes: Vec<String> = case.subtypes.iter().map(|s| (*s).to_string()).collect();
+        let parsed = parse_oracle_text(&oracle, case.name, &[], &types, &subtypes);
+        assert_eq!(
+            parities(&parsed),
+            case.expected,
+            "{}: fixed-parity conjuncts must match the printed clauses",
+            case.name
+        );
+    }
+}
+
+/// The printed Oracle text this test file asserts against, kept beside the
+/// assertions so a reader can see what is being parsed. Held here rather than
+/// read from the card-data export on purpose: the export is GENERATED and may
+/// lag the parser, so judging a parse against it would compare the parser to a
+/// stale snapshot of itself.
+fn corpus_oracle_text(name: &str) -> String {
+    match name {
+        "Void Winnower" => concat!(
+            "Your opponents can't cast spells with even mana values. (Zero is even.)\n",
+            "Your opponents can't block with creatures with even mana values."
+        ),
+        "Desecrate Reality" => concat!(
+            "For each opponent, exile up to one target permanent that player controls ",
+            "with an even mana value. (Zero is even.)\n",
+            "Adamant \u{2014} If at least three colorless mana was spent to cast this spell, ",
+            "return a permanent card with an odd mana value from your graveyard to the battlefield."
+        ),
+        "Gyruda, Doom of Depths" => concat!(
+            "Companion \u{2014} Your starting deck contains only cards with even mana values. ",
+            "(If this card is your chosen companion, you may put it into your hand from ",
+            "outside the game for {3} as a sorcery.)\n",
+            "When Gyruda enters, each player mills four cards. Put a creature card with an ",
+            "even mana value from among the milled cards onto the battlefield under your control."
+        ),
+        "Soundwave, Superior Captain" => concat!(
+            "Whenever you cast a spell with an odd mana value, convert Soundwave. If you do, ",
+            "create Ravage, a legendary 3/3 black Robot artifact creature token with menace ",
+            "and deathtouch.\n",
+            "Whenever you cast a spell with an even mana value, convert Soundwave. If you do, ",
+            "create Laserbeak, a legendary 2/2 blue Robot artifact creature token with flying ",
+            "and hexproof."
+        ),
+        "Obosh, the Preypiercer" => concat!(
+            "Companion \u{2014} Your starting deck contains only cards with odd mana values and ",
+            "land cards. (If this card is your chosen companion, you may put it into your hand ",
+            "from outside the game for {3} as a sorcery.)\n",
+            "If a source you control with an odd mana value would deal damage to a permanent ",
+            "or player, it deals double that damage to that permanent or player instead."
+        ),
+        "Squid Fire Knight" => concat!(
+            "{TK}{TK} \u{2014} {T}: The next time target player would roll one or more dice ",
+            "this turn, instead they roll that many dice plus one, then you choose one of ",
+            "those rolls to ignore.\n",
+            "{TK}{TK}{TK} \u{2014} Protection from odd mana values\n",
+            "{TK}{TK} \u{2014} 4/1\n",
+            "{TK}{TK}{TK}{TK} \u{2014} 6/6"
+        ),
+        "Weird Angel Flame" => concat!(
+            "{TK}{TK} \u{2014} Heroic \u{2014} Whenever you cast a spell that targets this ",
+            "permanent, put two +1/+1 counters on it.\n",
+            "{TK}{TK}{TK} \u{2014} Protection from even mana values\n",
+            "{TK}{TK} \u{2014} 2/3\n",
+            "{TK}{TK}{TK}{TK}{TK} \u{2014} 7/8"
+        ),
+        other => panic!("no corpus oracle text recorded for {other}"),
+    }
+    .to_string()
+}
