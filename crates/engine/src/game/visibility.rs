@@ -3734,6 +3734,34 @@ fn redact_hidden_library_identity_carriers(
     // `CardsRevealed.card_names`), so its ids join to the names. No client
     // reads it.
     filtered.last_revealed_ids.clear();
+    // A tracked set is the engine's "revealed this way" population, kept in
+    // reveal order. Its members that sit in a library are position handles that
+    // join to the public ordered names (CR 401.2), so the viewer copy drops them;
+    // the engine's own copy keeps the full population for its quantity readers.
+    {
+        let in_library = |id: &ObjectId| {
+            hidden_library.contains(id)
+                || filtered
+                    .objects
+                    .get(id)
+                    .is_some_and(|object| object.zone == Zone::Library)
+        };
+        let hidden: HashSet<ObjectId> = filtered
+            .tracked_object_sets
+            .values()
+            .flatten()
+            .filter(|id| in_library(id))
+            .copied()
+            .collect();
+        if !hidden.is_empty() {
+            for members in filtered.tracked_object_sets.values_mut() {
+                members.retain(|id| !hidden.contains(id));
+            }
+            for causes in filtered.tracked_set_member_causes.values_mut() {
+                causes.retain(|id, _| !hidden.contains(id));
+            }
+        }
+    }
     for entry in filtered
         .stack
         .iter_mut()
@@ -8449,6 +8477,7 @@ mod tests {
                 remaining: vec![remaining],
                 linked_batch: Vec::new(),
                 cumulative: 0,
+                hits: Vec::new(),
             },
         ));
         let authoritative = serde_json::to_string(&state.pending_exile_from_top_until)

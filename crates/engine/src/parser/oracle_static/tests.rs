@@ -6,15 +6,16 @@ use super::support::*;
 use super::*;
 use crate::types::ability::{
     ActivationRestriction, AggregateFunction, AttackedYouScope, AttackerBlockStatus,
-    CardTypeSetSource, CommanderOwnership, Comparator, CountScope, DamageKindFilter, Duration,
-    Effect, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope,
-    PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation,
-    SubtypeExclusion, TypeFilter, ZoneRef,
+    CardTypeSetSource, CommanderOwnership, Comparator, ControllerRef, CountScope, DamageKindFilter,
+    Duration, Effect, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation,
+    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
+    SharedQualityRelation, SubtypeExclusion, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::{Keyword, WardCost};
 use crate::types::mana::ManaCost;
 use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
+use crate::types::zones::Zone;
 
 /// CR 613.1f (Layer 6) + CR 105.2: Scion of Draco — "Each creature you control has
 /// vigilance if it's white, hexproof if it's blue, lifelink if it's black, first
@@ -10501,7 +10502,7 @@ fn locus_cap_via_standard_oracle_dispatch() {
     );
 }
 
-/// CR 613.1f + CR 607.2a + CR 205.3: "all creature cards exiled with it/~" narrows
+/// CR 613.1f + CR 607.2a + CR 205.2a: "all creature cards exiled with it/~" narrows
 /// the granted set to creature cards only (Agatha's Soul Cauldron) — the source
 /// filter intersects `ExiledBySource` with the Creature type filter.
 #[test]
@@ -10527,6 +10528,120 @@ fn parse_continuous_modifications_grants_creature_cards_exiled() {
             "predicate: {predicate}"
         );
     }
+}
+
+/// CR 613.1f + CR 607.2a + CR 205.2a: "all land cards exiled with it/~" narrows
+/// the granted set to land cards (Steward of the Harvest) — same qualifier axis
+/// as the creature form, intersected with `ExiledBySource`.
+#[test]
+fn parse_continuous_modifications_grants_land_cards_exiled() {
+    use crate::types::ability::{TargetFilter, TypedFilter};
+    let expected = ContinuousModification::GrantAllActivatedAbilitiesOf {
+        source: TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::land()),
+                TargetFilter::ExiledBySource,
+            ],
+        },
+        cap: None,
+    };
+    for predicate in [
+        "all activated abilities of all land cards exiled with it",
+        "all activated abilities of all land cards exiled with ~",
+        "have all activated abilities of all land cards exiled with ~",
+    ] {
+        assert_eq!(
+            parse_continuous_modifications(predicate),
+            vec![expected.clone()],
+            "predicate: {predicate}"
+        );
+    }
+
+    // The full static line scopes the grant to creatures you control.
+    let defs = parse_static_line_multi(
+        "Creatures you control have all activated abilities of all land cards exiled with ~.",
+    );
+    assert_eq!(defs.len(), 1, "got {defs:?}");
+    assert_eq!(defs[0].modifications, vec![expected]);
+    let Some(TargetFilter::Typed(ref tf)) = defs[0].affected else {
+        panic!("expected a Typed filter, got {:?}", defs[0].affected);
+    };
+    assert_eq!(
+        *tf,
+        TypedFilter::creature().controller(crate::types::ability::ControllerRef::You)
+    );
+}
+
+/// Hostile siblings of the land-qualifier arm. Each decline is paired with the
+/// positive reach-guard (the accepted land form) so the negatives cannot pass
+/// because the predicate never reached the grant parser.
+#[test]
+fn land_cards_exiled_grant_declines_mis_scoped_sets() {
+    use crate::types::ability::{TargetFilter, TypedFilter};
+    // Positive reach-guard.
+    assert_eq!(
+        parse_continuous_modifications(
+            "have all activated abilities of all land cards exiled with ~"
+        ),
+        vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+            source: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::land()),
+                    TargetFilter::ExiledBySource,
+                ],
+            },
+            cap: None,
+        }]
+    );
+    let grants_exiled = |mods: &[ContinuousModification]| {
+        mods.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+                    | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+            )
+        })
+    };
+    for predicate in [
+        "have all activated abilities of all nonland cards exiled with ~",
+        "have all activated abilities of all artifact cards exiled with ~",
+        "have all activated abilities of all land cards exiled with ~ this turn",
+        "have all activated abilities of all lands exiled with ~",
+        "have all activated abilities of all land creature cards exiled with ~",
+        "have all activated abilities of all land land cards exiled with ~",
+    ] {
+        let mods = parse_continuous_modifications(predicate);
+        assert!(
+            !grants_exiled(&mods),
+            "predicate must decline, got {mods:?}: {predicate}"
+        );
+    }
+    // Full-line declines never yield a partial static carrying the grant.
+    for line in [
+        "Creatures you control have all activated abilities of all nonland cards exiled with ~.",
+        "Creatures you control have all activated abilities of all land cards exiled with ~ this turn.",
+    ] {
+        let defs = parse_static_line_multi(line);
+        assert!(
+            defs.iter().all(|d| !grants_exiled(&d.modifications)),
+            "line must not produce a grant static: {line}: {defs:?}"
+        );
+    }
+
+    // Triggered kind: exactly the single Triggered grant, never an Activated one.
+    assert_eq!(
+        parse_continuous_modifications(
+            "have all triggered abilities of all land cards exiled with ~"
+        ),
+        vec![ContinuousModification::GrantAllTriggeredAbilitiesOf {
+            source: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::land()),
+                    TargetFilter::ExiledBySource,
+                ],
+            },
+        }]
+    );
 }
 
 /// CR 613.1f + CR 201.2: "all activated abilities of creatures you control that
@@ -10728,6 +10843,56 @@ fn parse_grant_all_activated_abilities_artifact_cards_in_your_graveyard() {
             "predicate: {predicate}"
         );
     }
+}
+
+/// CR 613.1f + CR 205.3m + CR 108.3: the graveyard grant source composes ANY
+/// type word — including a creature subtype — with either owner scope, not one
+/// arm per printed card type. Thranduil, the Elvenking (#7891): "all Elf cards
+/// in your graveyard" → `Subtype("Elf")` + `Owned { You }` + `InZone`; the
+/// "all graveyards" scope over a subtype carries no owner axis. Before the
+/// composed arm these phrases parsed to no modification at all.
+#[test]
+fn parse_grant_all_activated_abilities_subtype_cards_in_graveyard() {
+    let your_graveyard = ContinuousModification::GrantAllActivatedAbilitiesOf {
+        source: TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Subtype("Elf".to_string())).properties(vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::You,
+                },
+                FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                },
+            ]),
+        ),
+        cap: None,
+    };
+    for predicate in [
+        "all activated abilities of all elf cards in your graveyard",
+        "has all activated abilities of all elf cards in your graveyard",
+    ] {
+        assert_eq!(
+            parse_continuous_modifications(predicate),
+            vec![your_graveyard.clone()],
+            "predicate: {predicate}"
+        );
+    }
+
+    let all_graveyards = ContinuousModification::GrantAllActivatedAbilitiesOf {
+        source: TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Subtype("Elf".to_string())).properties(vec![
+                FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                },
+            ]),
+        ),
+        cap: None,
+    };
+    assert_eq!(
+        parse_continuous_modifications(
+            "has all activated abilities of all elf cards in all graveyards"
+        ),
+        vec![all_graveyards]
+    );
 }
 
 /// CR 305.6 + CR 305.7 + CR 205.3i: "gain all basic land types" (and the
@@ -15533,6 +15698,67 @@ fn persistent_exile_play_permission_evendo_sacrificed_permanent_gate() {
         "full Oracle dispatch must route Evendo's line to the same static, got {:?}",
         parsed.statics
     );
+}
+
+/// CR 607.2a + CR 609.4b: "the exiled card" names the pool the card's own
+/// trigger exiled into (Null Summoner), the same pool as "cards exiled with ~".
+/// The threshold gate and the any-type concession ride the permission.
+#[test]
+fn persistent_exile_cast_permission_the_exiled_card_null_summoner() {
+    let card_text = "When this creature enters, if you cast it, target opponent reveals their hand. You choose a nonland card from it. Exile that card.\nThreshold — As long as there are seven or more cards in your graveyard, you may cast the exiled card, and mana of any type can be spent to cast that spell.";
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        card_text,
+        "Null Summoner",
+        &[],
+        &["Creature".to_string()],
+        &["Phyrexian".to_string(), "Wizard".to_string()],
+    );
+    let [def] = parsed.statics.as_slice() else {
+        panic!("expected exactly one static, got {:?}", parsed.statics);
+    };
+    assert_eq!(
+        def.mode,
+        StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Cast,
+            cost: ExileCastCost::PayNormalCost,
+            pool: ExileCardPool::Persistent,
+            timing: ExileCastTiming::AnyTime,
+            mana_spend_permission: Some(crate::types::ability::ManaSpendPermission::AnyTypeOrColor),
+            grants_flash: false,
+            extra_cost: None,
+            enters_with_counter: None,
+            grantee: crate::types::statics::ExileCastGrantee::SourceController,
+        }
+    );
+    assert!(
+        matches!(
+            def.condition,
+            Some(StaticCondition::QuantityComparison {
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 7 },
+                ..
+            })
+        ),
+        "the threshold gate must stay on the permission, got {:?}",
+        def.condition
+    );
+
+    // The plural names the same pool.
+    assert!(matches!(
+        parse_static_line("You may cast the exiled cards.").map(|d| d.mode),
+        Some(StaticMode::ExileCastPermission {
+            pool: ExileCardPool::Persistent,
+            ..
+        })
+    ));
+
+    // A possessive object is not the pool: the "'s copy" tail is left over and
+    // the permission declines (green on main too, where the anchor was absent).
+    assert!(!matches!(
+        parse_static_line("You may cast the exiled card's copy.").map(|d| d.mode),
+        Some(StaticMode::ExileCastPermission { .. })
+    ));
 }
 
 /// CR 601.3f + CR 305.1: The "you may look at cards exiled with ~, and you may
@@ -38698,4 +38924,162 @@ fn leading_if_gates_this_spell_cant_be_countered_or_fails_closed() {
     let bare = parse_static_line("This spell can't be countered.").expect("bare form");
     assert_eq!(bare.mode, StaticMode::CantBeCountered);
     assert_eq!(bare.condition, None);
+}
+
+/// CR 510.1c + CR 609.4 + CR 611.3a: "[As long as <cond>, ]for each <creature class>
+/// you control, you may have that creature assign its combat damage as though it
+/// weren't blocked" (Siege Behemoth, Zilortha, Ruxa) parses to a typed class grant,
+/// not an `Unrecognized` gate on `SelfRef`.
+#[test]
+fn for_each_creature_assign_damage_as_though_unblocked_class_grant() {
+    const SENTENCE: &str =
+        "you may have that creature assign its combat damage as though it weren't blocked.";
+    let creature_you = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+
+    // Siege Behemoth: gated on the source attacking (full-line routing, ahead of the
+    // inverted "As long as" split).
+    let behemoth = parse_static_line(
+        "As long as ~ is attacking, for each creature you control, you may have that creature assign its combat damage as though it weren't blocked.",
+    )
+    .expect("Siege Behemoth line must parse");
+    assert_eq!(behemoth.mode, StaticMode::Continuous);
+    assert_eq!(behemoth.affected, Some(creature_you.clone()));
+    assert_eq!(
+        behemoth.modifications,
+        vec![ContinuousModification::AssignDamageAsThoughUnblocked]
+    );
+    assert_eq!(behemoth.condition, Some(StaticCondition::SourceIsAttacking));
+
+    // Card path: the same line, as printed ("this creature"), through the full pipeline.
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Hexproof\nAs long as this creature is attacking, for each creature you control, you may have that creature assign its combat damage as though it weren't blocked.",
+        "Siege Behemoth",
+        &["Hexproof".to_string()],
+        &["Creature".to_string()],
+        &[],
+    );
+    let grant = parsed
+        .statics
+        .iter()
+        .find(|d| {
+            d.modifications
+                .contains(&ContinuousModification::AssignDamageAsThoughUnblocked)
+        })
+        .unwrap_or_else(|| panic!("card path produced no grant: {:?}", parsed.statics));
+    assert_eq!(grant.affected, Some(creature_you.clone()));
+    assert_eq!(grant.condition, Some(StaticCondition::SourceIsAttacking));
+
+    // Zilortha: ungated, non-Human subject.
+    let zilortha = parse_static_line(
+        "For each non-Human creature you control, you may have that creature assign its combat damage as though it weren't blocked.",
+    )
+    .expect("Zilortha line must parse");
+    assert_eq!(zilortha.condition, None);
+    assert_eq!(
+        zilortha.modifications,
+        vec![ContinuousModification::AssignDamageAsThoughUnblocked]
+    );
+    let Some(TargetFilter::Typed(tf)) = &zilortha.affected else {
+        panic!(
+            "Zilortha subject must be Typed, got {:?}",
+            zilortha.affected
+        );
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(
+        tf.type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                "Human".into()
+            )))),
+        "{tf:?}"
+    );
+
+    // Ruxa: ungated, "with no abilities" subject.
+    let ruxa = parse_static_line(
+        "For each creature you control with no abilities, you may have that creature assign its combat damage as though it weren't blocked.",
+    )
+    .expect("Ruxa line must parse");
+    assert_eq!(ruxa.condition, None);
+    assert_eq!(
+        ruxa.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::HasNoAbilities])
+        ))
+    );
+
+    // Synthetic siblings of the class.
+    let bare = parse_static_line(&format!("For each creature you control, {SENTENCE}"))
+        .expect("ungated form");
+    assert_eq!(bare.affected, Some(creature_you.clone()));
+    assert_eq!(bare.condition, None);
+
+    let or_blocking = parse_static_line(&format!(
+        "As long as ~ is attacking or blocking, for each creature you control, {SENTENCE}"
+    ))
+    .expect("attacking-or-blocking gate");
+    assert_eq!(
+        or_blocking.condition,
+        Some(StaticCondition::Or {
+            conditions: vec![
+                StaticCondition::SourceIsAttacking,
+                StaticCondition::SourceIsBlocking
+            ]
+        })
+    );
+
+    let other = parse_static_line(&format!("For each other creature you control, {SENTENCE}"))
+        .expect("other-creature form");
+    let Some(TargetFilter::Typed(other_tf)) = &other.affected else {
+        panic!("other subject must be Typed, got {:?}", other.affected);
+    };
+    assert!(
+        other_tf.properties.contains(&FilterProp::Another),
+        "{other_tf:?}"
+    );
+}
+
+/// Negative cases for the class grant. Every one is paired with the positive
+/// Siege Behemoth line in the same body (reach guard), so a failure here cannot be
+/// an upstream short-circuit. Nothing may produce a partial grant, and an unparsable
+/// gate must never degrade to an ungated static.
+#[test]
+fn for_each_creature_assign_damage_as_though_unblocked_declines_unmodeled_forms() {
+    let positive = parse_static_line(
+        "As long as ~ is attacking, for each creature you control, you may have that creature assign its combat damage as though it weren't blocked.",
+    )
+    .expect("reach guard: Siege Behemoth line parses");
+    assert_eq!(positive.condition, Some(StaticCondition::SourceIsAttacking));
+
+    let grants_unblocked = |text: &str| {
+        parse_static_line(text).is_some_and(|d| {
+            d.modifications
+                .contains(&ContinuousModification::AssignDamageAsThoughUnblocked)
+        })
+    };
+    for text in [
+        // "it" instead of "that creature".
+        "For each creature you control, you may have it assign its combat damage as though it weren't blocked.",
+        // Unmodeled trailing duration.
+        "For each creature you control, you may have that creature assign its combat damage as though it weren't blocked this turn.",
+        // Different effect tail.
+        "For each creature you control, you may have that creature assign its combat damage to any target.",
+        // No controller scope.
+        "For each creature, you may have that creature assign its combat damage as though it weren't blocked.",
+        // No type anchor.
+        "For each frobnicator you control, you may have that creature assign its combat damage as though it weren't blocked.",
+        // Unparsable gate: must not degrade to an ungated grant.
+        "As long as the moon is full, for each creature you control, you may have that creature assign its combat damage as though it weren't blocked.",
+        // Opponent-scoped subject.
+        "For each creature your opponents control, you may have that creature assign its combat damage as though it weren't blocked.",
+        // Targeted player scope.
+        "For each creature target player controls, you may have that creature assign its combat damage as though it weren't blocked.",
+        // Trailing text after an otherwise valid gated line.
+        "As long as ~ is attacking, for each creature you control, you may have that creature assign its combat damage as though it weren't blocked and gains flying.",
+        // Or subject (multi-type union is unmodeled).
+        "For each creature or planeswalker you control, you may have that creature assign its combat damage as though it weren't blocked.",
+    ] {
+        assert!(!grants_unblocked(text), "{text}: must not yield a grant");
+    }
 }

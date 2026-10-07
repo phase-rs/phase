@@ -125,6 +125,24 @@ pub(in crate::parser) fn parse_player_property_keyword(
     .parse(input)
 }
 
+/// CR 102.1: the superlative-or-tie tail "most `<property>` or [are] tied for
+/// most `<property>`" — read by both the defender qualifier ("attacks the
+/// player with the most life or tied for most life") and the controller gate
+/// ("while you have the most life or are tied for most life"). Both property
+/// words must agree; `Speed` declines, like `player_property_leader_filter`,
+/// because `candidate_player_scalar` has no speed arm.
+pub(in crate::parser) fn parse_most_or_tied_for_most(
+    input: &str,
+) -> OracleResult<'_, PlayerProperty> {
+    let (rest, property) = preceded(tag("most "), parse_player_property_keyword).parse(input)?;
+    let (rest, _) = (tag(" or "), opt(tag("are ")), tag("tied for most ")).parse(rest)?;
+    let (rest, repeated) = parse_player_property_keyword(rest)?;
+    if repeated != property || property == PlayerProperty::Speed {
+        return Err(oracle_err(input));
+    }
+    Ok((rest, property))
+}
+
 /// Build the `QuantityRef` for a player-property of the given player scope.
 /// Infallible — every arm has a runtime resolver, but NOT a single shared one:
 /// `Speed` and `HandSize` resolve through

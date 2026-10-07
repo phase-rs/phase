@@ -38,6 +38,7 @@ use crate::types::game_state::{
     SyntheticTriggerProvenance, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
+use crate::types::interaction::InteractionId;
 use crate::types::keywords::Keyword;
 use crate::types::layers::Layer;
 use crate::types::mana::ManaCost;
@@ -623,6 +624,10 @@ pub struct DerivedViews {
     /// when there is no actor or multiple distinct authorized submitters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unique_authorized_submitter: Option<PlayerId>,
+    /// The authorized viewer's Scry identity, retained when the bounded
+    /// interaction projection omits its opportunities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scry_prompt_id: Option<InteractionId>,
     /// Viewer-visible object ids in each player's shared exile pile. This is
     /// projected after face-down visibility filtering so the client can anchor
     /// rejection feedback without reimplementing private-information rules.
@@ -1535,6 +1540,8 @@ fn temporary_cant_be_blocked_source(
 pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews {
     let mut views = DerivedViews {
         unique_authorized_submitter: unique_authorized_submitter(state),
+        scry_prompt_id: viewer
+            .and_then(|viewer| crate::game::interaction::scry_prompt_id_for_viewer(state, viewer)),
         blocker_assignment_pairs: blocker_assignment_pairs(state),
         debug_library_cards: debug_library_cards(state, viewer),
         current_target_kind: current_target_kind(state),
@@ -2169,6 +2176,9 @@ pub fn derive_filtered_views(
 ) -> DerivedViews {
     let mut views = derive_views(filtered_state, viewer);
     views.unique_authorized_submitter = unique_authorized_submitter(authoritative_state);
+    views.scry_prompt_id = viewer.and_then(|viewer| {
+        crate::game::interaction::scry_prompt_id_for_viewer(authoritative_state, viewer)
+    });
     views.debug_library_cards = debug_library_cards(authoritative_state, viewer);
     views.visible_exile_object_ids = visible_exile_object_ids(filtered_state);
     // CR 509.1g: blocking relationships are public information. Preserve this
@@ -4204,36 +4214,38 @@ mod tests {
         let values = crate::game::printed_cards::intrinsic_copiable_values(
             state.objects.get(&target).unwrap(),
         );
-        let tce_id = state.add_transient_continuous_effect_with_bindings(
-            source,
-            PlayerId(0),
-            Duration::ForAsLongAs {
-                condition: StaticCondition::IsTapped {
-                    scope: ObjectScope::Target,
+        let tce_id = state
+            .add_transient_continuous_effect_with_bindings(
+                source,
+                PlayerId(0),
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::IsTapped {
+                        scope: ObjectScope::Target,
+                    },
                 },
-            },
-            TargetFilter::SpecificObject { id: source },
-            vec![ContinuousModification::CopyValues {
-                values: Box::new(values),
-                display_source: DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
-            }],
-            None,
-            crate::types::game_state::TransientContinuousEffectBindings {
-                affected_recipient: Some(
-                    crate::types::identifiers::ObjectIncarnationRef::from_object(
-                        &state.objects[&source],
+                TargetFilter::SpecificObject { id: source },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(values),
+                    display_source: DisplaySource::Card,
+                    printed_ref: None,
+                    token_image_ref: None,
+                    token_art: None,
+                }],
+                None,
+                crate::types::game_state::TransientContinuousEffectBindings {
+                    affected_recipient: Some(
+                        crate::types::identifiers::ObjectIncarnationRef::from_object(
+                            &state.objects[&source],
+                        ),
                     ),
-                ),
-                duration_subject: Some(
-                    crate::types::identifiers::ObjectIncarnationRef::from_object(
-                        &state.objects[&target],
+                    duration_subject: Some(
+                        crate::types::identifiers::ObjectIncarnationRef::from_object(
+                            &state.objects[&target],
+                        ),
                     ),
-                ),
-            },
-        );
+                },
+            )
+            .expect("the fixture's duration begins");
 
         assert_eq!(
             derive_views(&state, None).copied_permanents,
@@ -4306,20 +4318,22 @@ mod tests {
         let values = crate::game::printed_cards::intrinsic_copiable_values(
             state.objects.get(&host).unwrap(),
         );
-        let independent_copy_effect_id = state.add_transient_continuous_effect(
-            host,
-            PlayerId(0),
-            Duration::Permanent,
-            TargetFilter::SpecificObject { id: host },
-            vec![ContinuousModification::CopyValues {
-                values: Box::new(values),
-                display_source: DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
-            }],
-            None,
-        );
+        let independent_copy_effect_id = state
+            .add_transient_continuous_effect(
+                host,
+                PlayerId(0),
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id: host },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(values),
+                    display_source: DisplaySource::Card,
+                    printed_ref: None,
+                    token_image_ref: None,
+                    token_art: None,
+                }],
+                None,
+            )
+            .expect("the fixture's duration begins");
         assert_ne!(
             Some(independent_copy_effect_id),
             merge_effect_id,

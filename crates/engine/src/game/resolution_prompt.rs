@@ -615,6 +615,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         detached_remainder: _,
         min_x_value: _,                  // u32
         cant_be_copied: _,               // bool
+        illegal_targets_disposition: _,  // CR 608.2b resolution disposition, offers no choice
         copy_count_status: _,            // status tag
         forward_result: _,               // bool
         chosen_x: _, // concrete cast-time X (chosen at announcement, not resolution)

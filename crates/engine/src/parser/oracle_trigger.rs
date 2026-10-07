@@ -26,6 +26,7 @@ use super::oracle_ir::trigger::{
     TriggerBody, TriggerIr, TriggerModifiers, TriggerNodeIr,
 };
 use super::oracle_modal::try_parse_inline_modal_ir;
+use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition::{
     parse_affirmative_reflexive_connector, parse_elided_subject_state_condition,
 };
@@ -40,6 +41,7 @@ use super::oracle_nom::filter::{
 };
 use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
+    split_sentence_units,
 };
 use super::oracle_nom::target::parse_chosen_object_reference;
 use super::oracle_nom::target::parse_type_phrase as parse_type_phrase_nom;
@@ -65,12 +67,13 @@ use crate::types::ability::{
     Comparator, ControllerRef, CountScope, CounterTriggerFilter, DamageAmountScope,
     DamageAmountThreshold, DamageChannel, DamageKindFilter, DelayedTriggerCondition,
     DestinationConstraint, DieResultFilter, Effect, EffectScope, FilterProp,
-    ManaAbilityProducedFilter, NameStickerSet, ObjectScope, OriginConstraint, ParsedCondition,
-    PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, PtStat, PtValueScope,
-    QuantityExpr, QuantityRef, RenownSubject, SacrificeAggregateStat, SacrificeCost,
-    SacrificeRequirement, SharedQuality, StaticCondition, SubAbilityLink, TapCreaturesRequirement,
-    TapStateChange, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
+    IllegalTargetsDisposition, ManaAbilityProducedFilter, NameStickerSet, ObjectScope,
+    OriginConstraint, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope,
+    PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
+    SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, StaticCondition,
+    SubAbilityLink, TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition,
+    TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -1679,6 +1682,10 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // richer per-clause form when a chain has one.
     let has_up_to = scan_contains(&effect_for_parse_lower, "up to one")
         || scan_contains(&effect_for_parse_lower, "any number of target");
+    // CR 101.1 + CR 608.2b: set only by the plain effect-chain branch below, the one
+    // body shape the override sentence is printed on; every other body keeps the
+    // sentence in its text (strict failure).
+    let mut illegal_targets_disposition = IllegalTargetsDisposition::default();
     let body = if !effect_for_parse.is_empty() {
         if let Some((cost, connector, reflexive_effect_text)) =
             split_reflexive_optional_payment(&effect_for_parse)
@@ -1812,12 +1819,47 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 if let Some(modal) = try_parse_inline_modal_ir(&effect_for_parse, &effect_ctx) {
                     return Some(TriggerBody::Modal(Box::new(modal)));
                 }
-                let ir =
-                    parse_effect_chain_ir(&effect_for_parse, AbilityKind::Spell, &mut effect_ctx);
+                let (stripped_text, disposition) =
+                    extract_illegal_targets_disposition(&effect_for_parse);
+                let (chain_text, ir) = match disposition {
+                    IllegalTargetsDisposition::DoesNotResolve => {
+                        let ir = parse_effect_chain_ir(
+                            &stripped_text,
+                            AbilityKind::Spell,
+                            &mut effect_ctx,
+                        );
+                        (stripped_text, ir)
+                    }
+                    IllegalTargetsDisposition::StillResolves => {
+                        // Parse the stripped chain on a clone: it is committed only if kept.
+                        let mut stripped_ctx = effect_ctx.clone();
+                        let ir = parse_effect_chain_ir(
+                            &stripped_text,
+                            AbilityKind::Spell,
+                            &mut stripped_ctx,
+                        );
+                        if chain_creates_reflexive_ability(&lower_effect_chain_ir(&ir)) {
+                            // CR 603.12 + CR 608.2b: a reflexive node is a separate ability
+                            // with its own targets; the root stamp would not govern it. Fail
+                            // closed: re-parse the unstripped body so the sentence stays a
+                            // strict failure and the disposition stays the default.
+                            let ir = parse_effect_chain_ir(
+                                &effect_for_parse,
+                                AbilityKind::Spell,
+                                &mut effect_ctx,
+                            );
+                            (effect_for_parse.to_string(), ir)
+                        } else {
+                            effect_ctx = stripped_ctx;
+                            illegal_targets_disposition = disposition;
+                            (stripped_text, ir)
+                        }
+                    }
+                };
                 Some(TriggerBody::EffectChain(
                     fail_closed_on_dropped_intervening_if(
                         ir,
-                        &effect_for_parse,
+                        &chain_text,
                         if_condition.as_ref(),
                         &effect_ctx,
                     ),
@@ -1846,6 +1888,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             first_time_limit,
             constraint,
             has_up_to,
+            illegal_targets_disposition,
             effect_lower: effect_lower.to_string(),
             relative_player_scope,
         },
@@ -2189,6 +2232,10 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         });
     }
 
+    // CR 101.1 + CR 608.2b: root only — resolve_top reads the stack entry's root.
+    if let Some(ability) = execute.as_deref_mut() {
+        ability.illegal_targets_disposition = modifiers.illegal_targets_disposition;
+    }
     def.execute = execute;
     def.optional = modifiers.optional;
     // CR 603.3d + CR 608.2c: "you may cast target … from [public zone]"
@@ -3723,6 +3770,78 @@ fn parse_first_spell_disjunct<'a>(
         ],
     };
     Ok((rest, disjunct))
+}
+
+/// CR 101.1 + CR 608.2b: the printed override sentence.
+fn parse_illegal_targets_disposition(input: &str) -> OracleResult<'_, IllegalTargetsDisposition> {
+    value(
+        IllegalTargetsDisposition::StillResolves,
+        (
+            tag("this ability still resolves if "),
+            tag("its target becomes illegal"),
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 101.1 + CR 608.2b: detach the override sentence when it is the LAST
+/// sentence unit of the body. Any other position returns the text unchanged
+/// with the default disposition (fail closed: the sentence stays in the chain
+/// as a strict failure).
+fn extract_illegal_targets_disposition(text: &str) -> (String, IllegalTargetsDisposition) {
+    let Some(last_unit) = split_sentence_units(text).pop() else {
+        return (text.to_string(), IllegalTargetsDisposition::DoesNotResolve);
+    };
+    let last_unit_lower = last_unit.to_lowercase();
+    let Some((disposition, _)) = nom_on_lower(last_unit, &last_unit_lower, |input| {
+        all_consuming(terminated(parse_illegal_targets_disposition, opt(tag(".")))).parse(input)
+    }) else {
+        return (text.to_string(), IllegalTargetsDisposition::DoesNotResolve);
+    };
+    // Structural suffix removal: the last unit ends where the trimmed text ends
+    // (split_sentence_units' contract), so the kept text is everything before it.
+    // The previous sentence keeps its period.
+    let trimmed = text.trim_end();
+    let kept = trimmed[..trimmed.len() - last_unit.len()].trim_end();
+    if kept.is_empty() {
+        // The body is only the override sentence: there is no effect for it to
+        // govern. Fail closed — keep the sentence (strict failure) and the default.
+        return (text.to_string(), IllegalTargetsDisposition::DoesNotResolve);
+    }
+    (kept.to_string(), disposition)
+}
+
+/// CR 603.12: whether any node of this chain is a reflexive "when you do"
+/// ability. Such a node is a separate triggered ability with its own targets
+/// (`ability_utils::defers_conditional_target_selection` defers its slot and
+/// `effects::build_reflexive_pending_trigger` builds it from the sub), so an
+/// override stamped on this chain's root would not reach it. Walks the whole
+/// chain: `sub_ability`, `else_ability`, and every effect-carried definition
+/// through `Effect::for_each_nested_definition` (the single authority, as
+/// `oracle::any_unimplemented` walks it), so a reflexive node under a coin-flip
+/// branch, a "choose one of" branch, a die result or a vote outcome is seen.
+fn chain_creates_reflexive_ability(def: &AbilityDefinition) -> bool {
+    if def
+        .condition
+        .as_ref()
+        .is_some_and(AbilityCondition::has_when_you_do_marker)
+    {
+        return true;
+    }
+    let mut nested_creates_reflexive = false;
+    def.effect.for_each_nested_definition(&mut |_, nested| {
+        nested_creates_reflexive =
+            nested_creates_reflexive || chain_creates_reflexive_ability(nested);
+    });
+    nested_creates_reflexive
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(chain_creates_reflexive_ability)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(chain_creates_reflexive_ability)
 }
 
 /// Strip constraint sentences from effect text so they don't produce spurious sub-abilities.
@@ -6217,12 +6336,19 @@ fn graveyard_origin_or_condition(
 /// matched clause from the effect text.
 ///
 /// Grammar (subject anaphor × graveyard-origin disjunction):
-///   "if " ( "it " | "they " | "that creature " )
-///   ( <compact-form> | <split-your-form> | <split-a-form> )
+///   "if " ( "it " | "they " | "that creature " | "one or more of them " )
+///   ( <compact-form> | <split-form> | <bare-cast-form> ) ( "," | end of input )
 /// where
 ///   <compact-form>     = "entered or " ( "was" | "were" ) " cast from a graveyard"
-///   <split-your-form>  = "entered from your graveyard or you cast it from your graveyard"
-///   <split-a-form>     = "entered from a graveyard or you cast it from a graveyard"
+///   <split-form>       = "entered from " <gy> " or " ( "you cast it" | "was" | "were" ) " cast from " <gy>
+///                        (the active "you cast it from" form scopes the caster to You;
+///                        the passive form carries no caster clause)
+///   <gy>               = "your graveyard" | "a graveyard"
+/// The trailing anchor keeps a longer tail ("... from a graveyard card, ...")
+/// from being half-consumed: it falls through to the unparsed-condition path.
+///
+/// CR 603.2c: "one or more of them" is the batch partitive anaphor; the
+/// batched trigger path evaluates this condition per entering object.
 /// CR 701.54a + CR 603.4: "if you chose a creature other than ~ as your
 /// ring-bearer, " — Aragorn, Company Leader's intervening-if. The card name is
 /// already normalized to `~` at the parser entry point (CR 201.5: a name in an
@@ -6240,7 +6366,14 @@ fn parse_graveyard_origin_intervening_if(input: &str) -> OracleResult<'_, Trigge
     // "that creature" (Breathless Knight: "Whenever ~ or another creature you
     // control enters, if that creature entered from a graveyard or you cast it
     // from a graveyard") is the same anaphor as "it": the entering object.
-    let (rest, _) = alt((tag("it "), tag("they "), tag("that creature "))).parse(rest)?;
+    // "one or more of them" (Kotis, Celes) is the batched-trigger partitive form.
+    let (rest, _) = alt((
+        tag("it "),
+        tag("they "),
+        tag("that creature "),
+        tag("one or more of them "),
+    ))
+    .parse(rest)?;
     // Compact "a graveyard" form: "entered or (was|were) cast from a graveyard".
     let compact = map(
         (
@@ -6259,15 +6392,21 @@ fn parse_graveyard_origin_intervening_if(input: &str) -> OracleResult<'_, Trigge
                 value(Some(ControllerRef::You), tag("your ")),
                 value(None, tag("a ")),
             )),
-            tag("graveyard or you cast it from "),
+            tag("graveyard or "),
+            // Caster axis: the active "you cast it from" scopes the caster to
+            // You; the passive "(was|were) cast from" carries no caster clause.
+            alt((
+                value(Some(ControllerRef::You), tag("you cast it from ")),
+                value(None, (alt((tag("was"), tag("were"))), tag(" cast from "))),
+            )),
             alt((
                 value(Some(ControllerRef::You), tag("your ")),
                 value(None, tag("a ")),
             )),
             tag("graveyard"),
         ),
-        |(_, entered_owner, _, cast_owner, _)| {
-            graveyard_origin_or_condition(entered_owner, cast_owner, Some(ControllerRef::You))
+        |(_, entered_owner, _, caster, cast_owner, _)| {
+            graveyard_origin_or_condition(entered_owner, cast_owner, caster)
         },
     );
     // CR 601.2 + CR 603.4: bare "(was|were) cast from [a|your] graveyard" with no
@@ -6293,7 +6432,8 @@ fn parse_graveyard_origin_intervening_if(input: &str) -> OracleResult<'_, Trigge
             owner,
         },
     );
-    alt((compact, split, bare_cast)).parse(rest)
+    // Trailing anchor: the clause must end at the clause comma or end of input.
+    terminated(alt((compact, split, bare_cast)), peek(alt((tag(","), eof)))).parse(rest)
 }
 
 /// CR 701.26 + CR 603.4: "if it's the first time that creature/permanent has become
@@ -9348,7 +9488,8 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
         return Some((TriggerMode::AbilityActivated, def));
     }
 
-    // CR 606.2 + CR 606.1: "Whenever you activate a loyalty ability of <pw>"
+    // CR 606.2 + CR 603.2: actor-scoped loyalty activation triggers.
+    // CR 602.2a identifies the activator; CR 109.5 makes "you" controller-relative.
     // (Chandra's Regulator, Keral Keep Disciples → "a Chandra planeswalker";
     // Elspeth's Talent, Rowan's Talent → "enchanted planeswalker"). The
     // planeswalker scope rides on `valid_card`:
@@ -9380,17 +9521,21 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
         .parse(input)
     }
 
-    fn parse_loyalty_line(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
-        preceded(
-            alt((tag("whenever "), tag("when "))),
-            preceded(tag("you activate a loyalty ability"), parse_loyalty_scope),
-        )
-        .parse(input)
+    fn parse_loyalty_line(
+        input: &str,
+    ) -> OracleResult<'_, (Option<TargetFilter>, Option<TargetFilter>)> {
+        let (rest, _) = alt((tag("whenever "), tag("when "))).parse(input)?;
+        let (rest, (subject, _)) = parse_subject_and_verb(rest)?;
+        let (rest, _) = tag("a loyalty ability").parse(rest)?;
+        let (rest, pw_filter) = parse_loyalty_scope(rest)?;
+        Ok((rest, (subject, pw_filter)))
     }
 
-    if let Ok((_, pw_filter)) = all_consuming(parse_loyalty_line).parse(lower) {
+    if let Ok((_, (subject, pw_filter))) = all_consuming(parse_loyalty_line).parse(lower) {
         let mut def = make_base();
         def.mode = TriggerMode::LoyaltyAbilityActivated;
+        // Explicit "a player" must not use the legacy implicit-you encoding.
+        def.valid_target = Some(subject.unwrap_or(TargetFilter::Player));
         def.valid_card = pw_filter;
         return Some((TriggerMode::LoyaltyAbilityActivated, def));
     }
@@ -13965,6 +14110,13 @@ fn try_parse_event(
     if let Some(after) = attacks_result {
         let (attacks_and_unblocked, after) = strip_attack_unblocked_qualifier(after);
         let (attacks_alone, after) = strip_attack_alone_qualifier(after);
+        // CR 603.2 + CR 508.1m: `strip_while_state_clause` consumes complete
+        // event-time gates before this attack branch. If a `while` qualification
+        // remains, its state was unrecognized or only partly parsed; a broad
+        // `Attacks` trigger would silently drop that restriction.
+        if scan_contains(after, "while ") {
+            return None;
+        }
         // CR 508.3a: Detect attack target qualifier ("attacks a planeswalker" etc.)
         fn parse_attack_target(input: &str) -> OracleResult<'_, AttackTargetFilter> {
             alt((
@@ -13981,6 +14133,22 @@ fn try_parse_event(
                     preceded(tag(" "), parse_one_of_your_opponents),
                 ),
                 value(AttackTargetFilter::Player, tag(" a player")),
+                // CR 102.1 + CR 508.1b: "attacks the player with the most life or
+                // tied for most life" (Preacher of the Schism, Seraphic
+                // Greatsword, Undercover Butler). Only matched when the whole
+                // superlative-or-tie qualifier follows, so "the player" never
+                // binds the broad Player scope on its own; the qualifier
+                // becomes `valid_target` below.
+                value(
+                    AttackTargetFilter::Player,
+                    terminated(
+                        tag(" the player"),
+                        peek(preceded(
+                            tag(" with the "),
+                            crate::parser::oracle_nom::quantity::parse_most_or_tied_for_most,
+                        )),
+                    ),
+                ),
                 value(AttackTargetFilter::Player, tag(" you")),
                 // CR 303.4e: "attacks enchanted player" — a Curse Aura trigger
                 // scoped to the player this permanent is attached to (whose
@@ -14003,6 +14171,19 @@ fn try_parse_event(
         // "who has more life than you" (Namor, Atlantean King) and "who controls
         // eight or more lands" (Owlbear Cub) from the trigger event clause.
         let attack_target_parsed = parse_attack_target.parse(after).ok();
+        // CR 508.1b: "attacks the player <qualifier>" names one specific
+        // defending player. A qualifier `parse_attack_target` cannot model
+        // ("the player with the most life" without the tie, "the player with
+        // the fewest cards in hand", …) must not fall through to an Attacks
+        // trigger that fires against any defender — decline instead, so the
+        // line stays explicitly unsupported.
+        if attack_target_parsed.is_none()
+            && tag::<_, _, OracleError<'_>>(" the player ")
+                .parse(after)
+                .is_ok()
+        {
+            return None;
+        }
         let attack_target_filter = attack_target_parsed.as_ref().map(|(_, f)| f.clone());
         let attacks_one_of_your_opponents = preceded(
             tag::<_, _, OracleError<'_>>(" "),
@@ -14090,11 +14271,33 @@ fn try_parse_event(
                 // is a real clause boundary, checked with the shared
                 // `peek_clause_terminator` authority; anything else falls into
                 // the SAME declined branch as a total parse failure.
-                let modelled = parse_player_relative_clause(after_noun, relation, ctx)
-                    .ok()
-                    .filter(|(remainder, _)| {
-                        nom_primitives::peek_clause_terminator(remainder).is_ok()
-                    });
+                // CR 102.1 + CR 508.1b: "the player with the most life or tied
+                // for most life" — the defender's life must be ≥ the highest
+                // life total among ALL players, read once at declaration (the
+                // same `valid_target` home as the `who` clauses, so CR 603.4's
+                // resolution re-check does not apply).
+                let most_life = preceded(
+                    tag::<_, _, OracleError<'_>>("with the "),
+                    crate::parser::oracle_nom::quantity::parse_most_or_tied_for_most,
+                )
+                .parse(after_noun)
+                .ok()
+                .and_then(|(remainder, property)| {
+                    nom_primitives::peek_clause_terminator(remainder).ok()?;
+                    let player =
+                        crate::parser::oracle_nom::quantity::player_property_leader_filter(
+                            property,
+                            PlayerRelation::All,
+                        )?;
+                    Some((remainder, player))
+                });
+                let modelled = most_life.or_else(|| {
+                    parse_player_relative_clause(after_noun, relation, ctx)
+                        .ok()
+                        .filter(|(remainder, _)| {
+                            nom_primitives::peek_clause_terminator(remainder).is_ok()
+                        })
+                });
                 match modelled {
                     Some((_, player)) => {
                         def.valid_target = Some(TargetFilter::PlayerMatching {
@@ -14109,9 +14312,17 @@ fn try_parse_event(
                         // Detect it with a zero-consumption `peek`, never
                         // `starts_with`. The trailing space inside the tag IS the
                         // word boundary, so "whoever"/"whose" cannot match.
-                        declined_unmodelled_predicate = peek(tag::<_, _, OracleError<'_>>("who "))
-                            .parse(after_noun)
-                            .is_ok();
+                        // CR 508.1b: the `with the …` leader family is the same
+                        // case — its arm binds `Player` on a PREFIX match, so a
+                        // qualifier that continues past the recognised part
+                        // ("… or tied for most life and controls a Forest")
+                        // fails the terminator here and must decline too.
+                        declined_unmodelled_predicate = peek(alt((
+                            tag::<_, _, OracleError<'_>>("who "),
+                            tag("with the "),
+                        )))
+                        .parse(after_noun)
+                        .is_ok();
                     }
                 }
             }
@@ -21227,11 +21438,15 @@ fn try_parse_put_into_exile_from(
             ))
             .parse(input)
         }
-        parse_origin_zone
-            .parse(after_from)
-            .ok()
-            .map(|(_, z)| z)
-            .unwrap_or(None)
+        // Strict origin + tail (mirrors `parse_graveyard_origin_union`): an
+        // origin this grammar cannot fully consume fails the arm. Dropping it
+        // would leave an unconstrained trigger that fires on exile from any
+        // zone (e.g. "from an opponent's library").
+        let (tail, origin) = parse_origin_zone.parse(after_from).ok()?;
+        if !tail.trim().is_empty() {
+            return None;
+        }
+        origin
     } else if after_verb.is_empty() {
         None
     } else {

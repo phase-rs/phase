@@ -802,6 +802,7 @@ pub fn ability_definition_is_cast_stable_for_pre_cast(definition: &AbilityDefini
         min_x_value: _,
         announced_x,
         cant_be_copied: _,
+        illegal_targets_disposition: _, // CR 608.2b resolution disposition, no quantity
         cost_reduction,
         forward_result: _,
         player_scope,
@@ -935,6 +936,7 @@ pub fn ability_definition_has_only_unbound_variable_quantities_for_pre_cast(
         min_x_value: _,
         announced_x: None,
         cant_be_copied: _,
+        illegal_targets_disposition: _, // CR 608.2b resolution disposition, no quantity
         cost_reduction: None,
         forward_result: _,
         player_scope: None,

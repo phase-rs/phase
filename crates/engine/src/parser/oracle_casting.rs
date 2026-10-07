@@ -8,12 +8,13 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::oracle_cost::{parse_gerund_cost, parse_oracle_cost};
+use super::oracle_nom::condition::parse_you_cast_another_spell_filter_this_turn;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_util::{parse_mana_symbols, parse_ordinal, TextPair};
 use crate::parser::oracle_condition::parse_restriction_condition;
 use crate::types::ability::{
-    AbilityCost, AdditionalCost, CastingRestriction, Comparator, ParsedCondition, QuantityExpr,
-    QuantityRef, SpellCastingOption,
+    AbilityCost, AdditionalCost, CastingRestriction, Comparator, CountScope, ParsedCondition,
+    QuantityExpr, QuantityRef, SpellCastingOption, TargetFilter,
 };
 use crate::types::mana::ManaColor;
 
@@ -614,17 +615,46 @@ pub(crate) fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRe
     {
         let condition_text = strip_casting_condition_suffixes(condition);
         restrictions.push(CastingRestriction::RequiresCondition {
-            condition: Some(parse_restriction_condition(condition_text)?),
+            condition: Some(parse_casting_condition(condition_text)?),
         });
     }
     if let Some(condition) = rest.split(" and only if ").nth(1) {
         let condition_text = strip_casting_condition_suffixes(condition);
         restrictions.push(CastingRestriction::RequiresCondition {
-            condition: Some(parse_restriction_condition(condition_text)?),
+            condition: Some(parse_casting_condition(condition_text)?),
         });
     }
 
     (!restrictions.is_empty()).then_some(restrictions)
+}
+
+/// CR 601.3 + CR 109.1: The condition of a "Cast this spell only if …" line.
+///
+/// "you've cast another [<filter>] spell this turn" (Illusory Angel, Talara's
+/// Battalion) is checked BEFORE the spell is cast (CR 601.3), when the spell
+/// being cast is not yet in this turn's spell history. The shared condition
+/// grammar reads the phrase as `SpellsCastThisTurn >= 2`, which is right where
+/// the condition is evaluated on resolution (the resolving spell is already
+/// recorded) but asks for TWO earlier spells here — so the card was never
+/// castable. Same shape as the ETB "unless you've cast another spell" route in
+/// `oracle_replacement`: the own-cast exclusion marker plus GE 1, which counts
+/// one OTHER matching spell whether or not this spell's own cast is recorded.
+fn parse_casting_condition(condition_text: &str) -> Option<ParsedCondition> {
+    if let Ok((rest, filter)) = parse_you_cast_another_spell_filter_this_turn(condition_text) {
+        if rest.trim().is_empty() {
+            return Some(ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter: Some(TargetFilter::with_own_cast_exclusion(filter)),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            });
+        }
+    }
+    parse_restriction_condition(condition_text)
 }
 
 /// CR 601.2g / CR 118.3: "You can't spend mana to cast this spell." A payment
@@ -1164,13 +1194,73 @@ Trample";
         );
     }
 
+    /// The "another [<filter>] spell" condition this restriction must produce:
+    /// own-cast exclusion marker + GE 1 (`parse_casting_condition`).
+    fn assert_another_spell_restriction(text: &str) -> Option<TargetFilter> {
+        let restrictions = parse_casting_restriction_line(text).expect("restrictions should parse");
+        let [CastingRestriction::RequiresCondition {
+            condition:
+                Some(ParsedCondition::QuantityComparison {
+                    lhs:
+                        QuantityExpr::Ref {
+                            qty:
+                                QuantityRef::SpellsCastThisTurn {
+                                    scope: CountScope::Controller,
+                                    filter: Some(filter),
+                                },
+                        },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                }),
+        }] = restrictions.as_slice()
+        else {
+            panic!("got {restrictions:?}");
+        };
+        filter
+            .peel_own_cast_exclusion()
+            .expect("\"another\" must carry the own-cast exclusion marker")
+    }
+
     #[test]
     fn spell_cast_restriction_cast_another_spell_this_turn() {
-        let restrictions = parse_casting_restriction_line(
+        // CR 601.3: checked before the spell is cast, so "another spell" is one
+        // OTHER spell (GE 1), with this spell's own cast excluded (CR 109.1) —
+        // never "two spells including this one", which needed two earlier spells
+        // (Illusory Angel was never castable).
+        let peeled = assert_another_spell_restriction(
             "Cast this spell only if you've cast another spell this turn.",
+        );
+        assert_eq!(peeled, None, "any spell — no filter beyond the marker");
+    }
+
+    #[test]
+    fn spell_cast_restriction_cast_another_green_spell_this_turn() {
+        // Talara's Battalion: the colour filter survives inside the marker.
+        let peeled = assert_another_spell_restriction(
+            "Cast this spell only if you've cast another green spell this turn.",
+        )
+        .expect("green filter");
+        let TargetFilter::Typed(typed) = peeled else {
+            panic!("expected a typed filter, got {peeled:?}");
+        };
+        assert!(
+            typed.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::HasColor {
+                    color: ManaColor::Green
+                }
+            )),
+            "got {typed:?}"
+        );
+    }
+
+    #[test]
+    fn spell_cast_restriction_two_or_more_spells_keeps_threshold_two() {
+        // No "another": two EARLIER spells, the plain count — unchanged.
+        let restrictions = parse_casting_restriction_line(
+            "Cast this spell only if you've cast two or more spells this turn.",
         )
         .expect("restrictions should parse");
-        // "another spell" — the spell being cast is itself counted, so the threshold is 2.
         assert!(
             matches!(
                 restrictions.as_slice(),
@@ -2286,6 +2376,47 @@ Trample";
             }
             other => panic!("expected QuantityComparison GE 3 attacking creatures, got {other:?}"),
         }
+    }
+
+    /// CR 508.1k + CR 118.9: Pitfall Trap — leading "If exactly one creature is
+    /// attacking, " (singular copula, EQ comparator) gates the {W} alternative
+    /// casting cost on an attacking-creature count of exactly one.
+    #[test]
+    fn alt_cost_leading_if_exactly_one_creature_attacking_binds() {
+        let option = parse_spell_casting_option_line(
+            "If exactly one creature is attacking, you may pay {W} rather than pay this spell's mana cost.",
+            "Pitfall Trap",
+        )
+        .expect("alt-cost should parse with leading-if exactly-one attacking gate");
+        assert_eq!(
+            option.kind,
+            crate::types::ability::SpellCastingOptionKind::AlternativeCost
+        );
+        assert_eq!(
+            option.condition,
+            Some(ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            crate::types::ability::TypedFilter::creature()
+                                .properties(vec![FilterProp::Attacking { defender: None }]),
+                        ),
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            })
+        );
+        assert_eq!(
+            option.cost,
+            Some(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    generic: 0,
+                    shards: vec![crate::types::mana::ManaCostShard::White],
+                },
+            }),
+            "the alternative cost must be exactly {{W}}"
+        );
     }
 
     /// CR 508.1 + CR 105.1 + CR 118.9: Nemesis Trap — leading "If a white

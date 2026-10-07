@@ -5091,26 +5091,53 @@ mod difference_binding_tests {
     }
 }
 
-/// CR 705.2: Strip the redundant `"for each flip you won, "` (Mirror March)
-/// quantifier from a coin-flip win clause. Unlike `strip_for_each_prefix`, this
-/// carries NO iteration count: `FlipCoinUntilLose`/`FlipCoins` already run their
-/// `win_effect` once per win (`finish_until_lose`), so lifting the count into a
-/// `repeat_for` loop would double-apply it. Dropping the quantifier lets the
-/// bare imperative ("create a token that's a copy of that creature") reach the
-/// `CopyTokenOf` combinator. The `"flip(s) you won"` noun is not a countable
-/// `parse_for_each_clause` clause, so `strip_for_each_prefix` cannot handle it.
-/// Anchored nom strip — never a substring dispatch.
+/// CR 705.2: Strip the redundant coin-flip win quantifier from a win clause,
+/// whether it leads (`"for each flip you won, create …"` — Mirror March) or
+/// trails (`"put a +1/+1 counter on ~ for each flip you won"` — Crazed
+/// Firecat). Unlike `strip_for_each_prefix`, this carries NO iteration count:
+/// `FlipCoinUntilLose`/`FlipCoins` already run their `win_effect` once per win
+/// (`finish_until_lose`), so lifting the count into a `repeat_for` loop (or a
+/// counter-count multiplier) would double-apply it. Dropping the quantifier
+/// lets the bare imperative reach its own combinator. The `"flip(s) you won"`
+/// noun is not a countable `parse_for_each_clause` clause, so neither
+/// `strip_for_each_prefix` nor a verb's for-each suffix can consume it.
+/// Anchored nom strips at word boundaries — never a substring dispatch.
 pub(crate) fn strip_redundant_flip_win_quantifier(text: &str) -> Option<String> {
-    let lower = text.to_lowercase();
-    let ((), rest) = nom_on_lower(text, &lower, |i| {
-        let (i, _) = tag::<_, _, OracleError<'_>>("for each ").parse(i)?;
-        let (i, _) = alt((tag("flips"), tag("flip"))).parse(i)?;
-        let (i, _) = tag(" you ").parse(i)?;
-        let (i, _) = alt((tag("won"), tag("win"))).parse(i)?;
-        let (i, _) = tag(", ").parse(i)?;
-        Ok((i, ()))
-    })?;
-    Some(rest.to_string())
+    // ASCII folding keeps `lower` byte-aligned with `text`, so the trailing
+    // form's `cut` offset is a valid boundary in the original casing.
+    let lower = text.to_ascii_lowercase();
+    if let Some(((), rest)) = nom_on_lower(text, &lower, |i| {
+        value((), terminated(parse_flip_win_quantifier, tag(", "))).parse(i)
+    }) {
+        return Some(rest.to_string());
+    }
+    // Trailing form: try the quantifier at each " for each " boundary and
+    // accept it only when nothing but terminal punctuation follows.
+    let mut search = lower.as_str();
+    while let Ok((at, _)) = take_until::<_, _, OracleError<'_>>(" for each ").parse(search) {
+        if let Ok((_, (_, (), period, _))) = (
+            tag::<_, _, OracleError<'_>>(" "),
+            parse_flip_win_quantifier,
+            opt(tag(".")),
+            eof,
+        )
+            .parse(at)
+        {
+            let cut = lower.len() - at.len();
+            return Some(format!("{}{}", &text[..cut], period.unwrap_or_default()));
+        }
+        search = &at[1..];
+    }
+    None
+}
+
+/// CR 705.2: `"for each flip(s) you won|win"` — the per-win quantifier noun.
+fn parse_flip_win_quantifier(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("for each ").parse(input)?;
+    let (input, _) = alt((tag("flips"), tag("flip"))).parse(input)?;
+    let (input, _) = tag(" you ").parse(input)?;
+    let (input, _) = alt((tag("won"), tag("win"))).parse(input)?;
+    Ok((input, ()))
 }
 
 /// CR 107.1: Parse an anchored `for each <clause>` multiplier for an effect's
@@ -6842,8 +6869,14 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
     // (for example, "where X is the number of tokens you created this turn"),
     // in which case it belongs to the quantity grammar, not to the outer
     // effect duration.
+    // CR 113.1a: a duration inside a quoted granted ability is that ability's
+    // own text (Predators' Hour: `gain menace and "… You may look at and play
+    // that card for as long as it remains exiled, …"`), never the granting
+    // clause's. Both scans below run over the quote-masked text; the mask keeps
+    // byte offsets, so `before.len()` still slices `lower` and `duration_text`.
+    let scan = nom_primitives::mask_double_quoted_spans_preserving_len(&lower);
     if let Some((before, duration, _)) =
-        nom_primitives::scan_preceded(&lower, |i| terminated(parse_duration, eof).parse(i))
+        nom_primitives::scan_preceded(&scan, |i| terminated(parse_duration, eof).parse(i))
     {
         let quantity_owns_suffix = all_consuming(tag::<_, _, OracleError<'_>>("this turn"))
             .parse(&lower[before.len()..])
@@ -6867,7 +6900,7 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
     // Do NOT treat " unless " as a boundary here — unless-pay parsers
     // (`try_parse_unless_player_have_deal_damage`, `extract_resolution_unless_pay_modifier`)
     // own that tail and must see the full phrase.
-    if let Some((before, duration, _)) = nom_primitives::scan_preceded(&lower, |i| {
+    if let Some((before, duration, _)) = nom_primitives::scan_preceded(&scan, |i| {
         terminated(
             parse_duration,
             peek(alt((
@@ -9432,10 +9465,14 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
         } else {
             return None;
         }
-    } else if let Ok((rem, _)) =
-        tag::<_, _, OracleError<'_>>("twice that much damage").parse(after_lower)
+    } else if let Ok((rem, _)) = alt((
+        tag::<_, _, OracleError<'_>>("twice that much damage"),
+        tag("double that damage"),
+    ))
+    .parse(after_lower)
     {
-        // CR 120.8: "twice that much damage" → Multiply { factor: 2, inner: EventContextAmount }
+        // CR 701.10g: doubling damage replaces it with twice that amount —
+        // Multiply { factor: 2, inner: EventContextAmount }.
         let consumed = after_lower.len() - rem.len();
         (
             QuantityExpr::Multiply {
@@ -11386,6 +11423,16 @@ pub(super) fn apply_where_x_effect_expression(
             bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x);
             bind_where_x_quantity(life_payment, where_x_expression, &mut unbound_where_x);
         }
+        // CR 608.2c: the "until you exile X … cards" match count and the
+        // cumulative threshold are the loop's quantity slots.
+        Effect::ExileFromTopUntil { until, .. } => match until {
+            crate::types::ability::UntilCondition::NextMatches { count, .. } => {
+                bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x);
+            }
+            crate::types::ability::UntilCondition::CumulativeThreshold { threshold, .. } => {
+                bind_where_x_quantity(threshold, where_x_expression, &mut unbound_where_x);
+            }
+        },
         Effect::CreateTokenCopyFromPool {
             mv_bound, count, ..
         } => {
@@ -13041,6 +13088,44 @@ mod tests {
         }
     }
 
+    #[test]
+    fn strip_redundant_flip_win_quantifier_accepts_trailing_form() {
+        // CR 705.2: the per-win quantifier may trail the win clause (Crazed
+        // Firecat); the loop already repeats the clause, so it is dropped.
+        for suffix in [
+            " for each flip you won",
+            " for each flips you won",
+            " for each flip you win",
+        ] {
+            for period in ["", "."] {
+                assert_eq!(
+                    strip_redundant_flip_win_quantifier(&format!(
+                        "Put a +1/+1 counter on ~{suffix}{period}"
+                    )),
+                    Some(format!("Put a +1/+1 counter on ~{period}")),
+                    "must strip {suffix:?}{period:?}"
+                );
+            }
+        }
+        // The cut is computed on the folded text, so a character whose
+        // full-Unicode lowercase changes byte length must not shift it.
+        assert_eq!(
+            strip_redundant_flip_win_quantifier(
+                "Put a +1/+1 counter on İstanbul Ward for each flip you won."
+            ),
+            Some("Put a +1/+1 counter on İstanbul Ward.".to_string())
+        );
+        // Only a quantifier that ends the clause is redundant; a countable
+        // for-each or a quantifier with following text is left alone.
+        for text in [
+            "Put a +1/+1 counter on ~ for each creature you control",
+            "Put a +1/+1 counter on ~ for each flip you won this turn",
+            "Put a +1/+1 counter on ~ for each flip you lost",
+        ] {
+            assert_eq!(strip_redundant_flip_win_quantifier(text), None, "{text}");
+        }
+    }
+
     fn gated_token_creator_for_relink() -> AbilityDefinition {
         let mut creator = AbilityDefinition::new(
             AbilityKind::Spell,
@@ -14619,7 +14704,7 @@ mod tests {
 }
 #[cfg(test)]
 mod where_x_tests {
-    use super::parse_where_x_quantity_expression;
+    use super::{parse_where_x_quantity_expression, strip_trailing_duration};
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Comparator, ContinuousModification, ControllerRef,
         DigSource, Duration, Effect, FilterProp, ObjectScope, PlayerScope, PtValue, QuantityExpr,
@@ -14699,6 +14784,47 @@ mod where_x_tests {
             "quantity tracker must not become a duration"
         );
         assert_eq!(stripped, text);
+    }
+
+    /// CR 113.1a: a duration inside a quoted granted ability belongs to that
+    /// ability (Predators' Hour); the same duration outside the quote is the
+    /// granting clause's own.
+    #[test]
+    fn strip_trailing_duration_leaves_a_quoted_abilitys_duration_alone() {
+        let quoted = "creatures you control gain \"Whenever ~ deals combat damage to a player, exile the top card of that player's library. You may play that card for as long as it remains exiled.\"";
+        let (stripped, duration) = strip_trailing_duration(quoted);
+        assert_eq!(duration, None, "the quoted ability keeps its duration");
+        assert_eq!(stripped, quoted);
+
+        // The mid-clause form (a duration before ", where …") inside a quote.
+        let quoted_mid = "creatures you control gain \"Whenever ~ attacks, it gets +X/+0 until end of turn, where X is the number of cards in your hand.\"";
+        let (stripped, duration) = strip_trailing_duration(quoted_mid);
+        assert_eq!(duration, None, "the quoted ability keeps its duration");
+        assert_eq!(stripped, quoted_mid);
+
+        // Green on main too: the first duration here sits after the quote.
+        let outside = "creatures you control gain \"Whenever ~ deals combat damage to a player, draw a card.\" for as long as you control ~.";
+        let (stripped, duration) = strip_trailing_duration(outside);
+        assert!(
+            duration.is_some(),
+            "a duration after the closing quote is still the clause's: {duration:?}"
+        );
+        assert_eq!(
+            stripped,
+            "creatures you control gain \"Whenever ~ deals combat damage to a player, draw a card.\""
+        );
+
+        // A quoted duration does not hide the clause's own after the quote.
+        let both = "creatures you control gain \"You may play that card for as long as it remains exiled.\" for as long as you control ~.";
+        let (stripped, duration) = strip_trailing_duration(both);
+        assert!(
+            duration.is_some(),
+            "the duration after the quote is found past the quoted one: {duration:?}"
+        );
+        assert_eq!(
+            stripped,
+            "creatures you control gain \"You may play that card for as long as it remains exiled.\""
+        );
     }
 
     #[test]

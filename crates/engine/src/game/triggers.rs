@@ -8960,7 +8960,7 @@ pub(crate) enum TriggerDispatchDisposition {
     /// fallback below.
     DroppedNoLegalRequiredTarget,
     /// A target/resolution slot could not be auto-resolved (`build_target_slots`,
-    /// `auto_select_targets_for_ability`, or `assign_targets_in_chain` returned
+    /// `auto_select_targets_for_ability`, or `assign_selected_slots_in_chain` returned
     /// `Err`). For a genuine CR 115.1d target with no legal option this matches
     /// CR 603.3d removal; but `build_target_slots` also surfaces resolution-time
     /// filter slots that are *not* CR 115.1d targets (e.g. Good King Mog's "a
@@ -9071,7 +9071,7 @@ fn prepare_trigger_targets(state: &GameState, trigger: &PendingTrigger) -> Prepa
 
     match auto_targets {
         Ok(Some(targets)) => {
-            if super::ability_utils::assign_targets_in_chain(
+            if super::ability_utils::assign_selected_slots_in_chain(
                 &prepared_state,
                 &mut prepared_trigger.ability,
                 &targets,
@@ -37424,6 +37424,93 @@ pub mod tests {
         assert!(
             !graveyard_state.stack.is_empty() || graveyard_state.pending_trigger.is_some(),
             "Twilight Diviner must trigger when a creature enters from a graveyard"
+        );
+    }
+
+    /// CR 603.2c + CR 603.4 + CR 603.6a: Kotis, Sibsig Champion's batched
+    /// "one or more of them entered from a graveyard or was cast from a
+    /// graveyard" intervening-if is existential over the simultaneous batch:
+    /// it fires exactly once when at least one entrant satisfies either leg,
+    /// regardless of the other entrants or their order, and not at all when
+    /// none does.
+    #[test]
+    fn kotis_batched_graveyard_origin_condition_is_existential_over_batch() {
+        #[derive(Clone, Copy)]
+        enum Origin {
+            /// Entered the battlefield directly from a graveyard (reanimated).
+            GraveyardEntry,
+            /// Cast from a graveyard, entering from the stack.
+            CastFromGraveyard,
+            /// Cast from hand, entering from the stack.
+            CastFromHand,
+        }
+
+        let trigger = crate::parser::oracle_trigger::parse_trigger_line(
+            "Whenever one or more creatures you control enter, if one or more of them entered from a graveyard or was cast from a graveyard, put two +1/+1 counters on Kotis.",
+            "Kotis, Sibsig Champion",
+        );
+        assert!(
+            matches!(trigger.condition, Some(TriggerCondition::Or { .. })),
+            "Kotis must carry the typed graveyard-origin Or condition; got {:?}",
+            trigger.condition
+        );
+
+        let stacked_triggers = |batch: &[Origin]| -> usize {
+            let mut state = setup();
+            install_twilight_diviner_trigger(&mut state, trigger.clone());
+            let mut events = Vec::new();
+            for (index, origin) in batch.iter().enumerate() {
+                let id = create_entering_creature(
+                    &mut state,
+                    &format!("Entrant {index}"),
+                    Zone::Battlefield,
+                );
+                let (from, cast_from) = match origin {
+                    Origin::GraveyardEntry => (Zone::Graveyard, None),
+                    Origin::CastFromGraveyard => (Zone::Stack, Some(Zone::Graveyard)),
+                    Origin::CastFromHand => (Zone::Stack, Some(Zone::Hand)),
+                };
+                state.objects.get_mut(&id).unwrap().cast_from_zone = cast_from;
+                events.push(zone_changed_event(
+                    id,
+                    from,
+                    Zone::Battlefield,
+                    vec![CoreType::Creature],
+                    Vec::new(),
+                ));
+            }
+            process_triggers(&mut state, &events);
+            state.stack.len() + usize::from(state.pending_trigger.is_some())
+        };
+
+        // (i) graveyard entry + hand cast: one firing (the existential leg is A).
+        assert_eq!(
+            stacked_triggers(&[Origin::GraveyardEntry, Origin::CastFromHand]),
+            1
+        );
+        // (iii) same pair, other order.
+        assert_eq!(
+            stacked_triggers(&[Origin::CastFromHand, Origin::GraveyardEntry]),
+            1
+        );
+        // (ii) graveyard entry + cast from graveyard: both legs hold, still once.
+        assert_eq!(
+            stacked_triggers(&[Origin::GraveyardEntry, Origin::CastFromGraveyard]),
+            1
+        );
+        assert_eq!(
+            stacked_triggers(&[Origin::CastFromGraveyard, Origin::GraveyardEntry]),
+            1
+        );
+        // Cast-from-graveyard alone reaches the WasCast leg.
+        assert_eq!(
+            stacked_triggers(&[Origin::CastFromHand, Origin::CastFromGraveyard]),
+            1
+        );
+        // (iv) neither entrant qualifies: no firing (reach-guard for the above).
+        assert_eq!(
+            stacked_triggers(&[Origin::CastFromHand, Origin::CastFromHand]),
+            0
         );
     }
 

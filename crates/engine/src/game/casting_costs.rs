@@ -47,9 +47,10 @@ use super::triggers::trigger_matcher;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
 use super::ability_utils::{
-    assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
-    build_target_slots, build_target_slots_labelled, declared_targets_in_chain,
-    modal_choice_for_player, random_select_targets_for_ability, target_constraints_from_modal,
+    assign_selected_slots_in_chain, auto_select_targets_for_ability,
+    begin_target_selection_for_ability, build_target_slots, build_target_slots_labelled,
+    declared_targets_in_chain, modal_choice_for_player, random_select_targets_for_ability,
+    target_constraints_from_modal,
 };
 use super::life_costs::PayLifeCostResult;
 
@@ -1936,7 +1937,7 @@ pub(crate) fn begin_deferred_target_selection(
         let targets =
             random_select_targets_for_ability(state, &target_slots, &pending.target_constraints)?;
         let mut ability = pending.ability.clone();
-        assign_targets_in_chain(state, &mut ability, &targets)?;
+        assign_selected_slots_in_chain(state, &mut ability, &targets)?;
         pending.ability = ability;
         pending.crime_candidate = super::casting::targets_commit_crime(
             state,
@@ -1970,7 +1971,7 @@ pub(crate) fn begin_deferred_target_selection(
         &pending.target_constraints,
     )? {
         let mut ability = pending.ability.clone();
-        assign_targets_in_chain(state, &mut ability, &targets)?;
+        assign_selected_slots_in_chain(state, &mut ability, &targets)?;
         pending.ability = ability;
         pending.crime_candidate = super::casting::targets_commit_crime(
             state,
@@ -6724,7 +6725,7 @@ pub(super) fn push_activated_ability_to_stack(
                 crate::types::ability::TargetSelectionMode::Random
             ) {
                 let targets = random_select_targets_for_ability(state, &target_slots, &[])?;
-                assign_targets_in_chain(state, &mut resolved, &targets)?;
+                assign_selected_slots_in_chain(state, &mut resolved, &targets)?;
                 let mut pending = pending(resolved);
                 pending.crime_candidate = super::casting::targets_commit_crime(
                     state,
@@ -6747,7 +6748,7 @@ pub(super) fn push_activated_ability_to_stack(
             if let Some(targets) =
                 auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
             {
-                assign_targets_in_chain(state, &mut resolved, &targets)?;
+                assign_selected_slots_in_chain(state, &mut resolved, &targets)?;
                 let mut pending = pending(resolved);
                 pending.crime_candidate = super::casting::targets_commit_crime(
                     state,
@@ -13616,10 +13617,11 @@ fn collect_sorted_auto_tap_source_options(
 ) -> Vec<ManaSourceOption> {
     use crate::types::card_type::{CoreType, Supertype};
 
-    // Loop-invariant hoist: the TapsForMana trigger-source list is identical for
-    // every land in this board-global sweep, so compute it once instead of
-    // re-scanning the whole battlefield per land inside `land_mana_options`.
+    // Loop-invariant hoist: the TapsForMana trigger-source list and the activation-prohibition
+    // presence gates are identical for every permanent in this board-global sweep, so compute
+    // them once instead of re-scanning the whole battlefield per source.
     let aura_sources = mana_sources::taps_for_mana_trigger_sources(state);
+    let gates = mana_abilities::ManaActivationGates::compute(state);
 
     // Build list of activatable mana options for ALL permanents this player controls.
     // CR 605.1b: Non-land permanents can have mana abilities.
@@ -13657,14 +13659,20 @@ fn collect_sorted_auto_tap_source_options(
             // payable from the current pool; Phase 3 pays those sub-costs from
             // other selected sources before resolving the paid mana ability.
             if obj.card_types.core_types.contains(&CoreType::Land) {
-                Some(mana_sources::auto_tap_land_mana_options_indexed(
+                Some(mana_sources::auto_tap_land_mana_options_indexed_gated(
                     state,
                     oid,
                     player,
                     &aura_sources,
+                    Some(&gates),
                 ))
             } else {
-                Some(mana_sources::auto_tap_mana_options(state, oid, player))
+                Some(mana_sources::auto_tap_mana_options_gated(
+                    state,
+                    oid,
+                    player,
+                    Some(&gates),
+                ))
             }
         })
         .flatten()

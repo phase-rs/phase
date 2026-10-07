@@ -275,6 +275,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         detached_remainder: _,
         min_x_value: _,                  // u32
         cant_be_copied: _,               // bool
+        illegal_targets_disposition: _,  // CR 608.2b resolution disposition, not a dynamic read
         copy_count_status: _,            // status tag
         forward_result: _,               // bool
         distribution: _,                 // concrete pre-assigned (TargetRef, u32) portions
@@ -475,6 +476,9 @@ fn scan_zone_choice_candidate_source(
         // record, narrowed by live zone membership. Both are ability/state reads
         // this local node cannot see; fail closed.
         ZoneChoiceCandidateSource::CostPaidObjects => Axes::CONSERVATIVE,
+        // CR 608.2c: the pool is the ability's handed-over targets, narrowed by
+        // live zone membership; fail closed like the cost-paid record.
+        ZoneChoiceCandidateSource::ParentTargets => Axes::CONSERVATIVE,
     }
 }
 
@@ -5127,6 +5131,7 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
         target_choice_timing: _,
         min_x_value: _,
         cant_be_copied: _,
+        illegal_targets_disposition: _, // CR 608.2b resolution disposition, not a dynamic read
         forward_result: _,
         target_selection_mode: _,
         sub_link: _,

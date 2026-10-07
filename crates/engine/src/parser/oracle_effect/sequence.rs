@@ -1904,6 +1904,19 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
         return true;
     }
 
+    // CR 602.2b + CR 601.2f: a "This ability costs {N} less/more to activate …"
+    // sentence after a closed quote modifies the OUTER activated ability's total
+    // cost — "this ability" names the ability whose text holds the sentence, never
+    // the quoted grant (Llanowar Greenwidow: `It gains "If this permanent would
+    // leave the battlefield, exile it instead …" This ability costs {1} less to
+    // activate for each basic land type among lands you control.`). Splitting here
+    // lets the sentence reach `extract_cost_reduction_from_chain` as its own chain
+    // node; otherwise the quoted grant's static text swallows it and the reduction
+    // is lost.
+    if crate::parser::oracle_cost::is_self_cost_reduction_prefix(trimmed_lower.as_str()) {
+        return true;
+    }
+
     // CR 608.2c: read the whole text and apply the rules of English — a
     // granted-ability quote that ends a sentence can be followed by a fresh
     // causative "may have …" sentence directed at the affected object's
@@ -4034,6 +4047,17 @@ fn next_token_is_player_action_count(s: &str) -> bool {
 /// Used by `starts_bare_and_clause` to split patterns like
 /// "sacrifice ~ and it deals 3 damage to target player".
 fn starts_with_damage_clause(lower: &str) -> bool {
+    // CR 608.2c: a source-pronoun damage instruction follows the earlier effect in order.
+    if (
+        alt((tag::<_, _, OracleError<'_>>("he"), tag("she"))),
+        multispace1,
+        alt((tag("deals "), tag("deal "))),
+    )
+        .parse(lower)
+        .is_ok()
+    {
+        return true;
+    }
     if let Ok((_, before)) = take_until::<_, _, OracleError<'_>>("deals ")
         .parse(lower)
         .or_else(|_| take_until::<_, _, OracleError<'_>>("deal ").parse(lower))
@@ -5117,7 +5141,8 @@ pub(super) fn apply_clause_continuation(
             ));
         }
         ContinuationAst::GoadLastCreated { duration } => {
-            // CR 701.15b: Goaded is a static ability on the just-created tokens.
+            // CR 701.15b: Goaded is a designation on the created tokens. The
+            // static-mode modification is an intermediate resolution encoding.
             defs.push(AbilityDefinition::new(
                 kind,
                 Effect::GenericEffect {
@@ -6206,6 +6231,52 @@ pub(super) fn apply_clause_continuation(
                 )
                 .or_else(|| defs.len().checked_sub(1));
             if let Some(target_idx) = target_idx {
+                // CR 608.2c: instructions are followed in the order written. When
+                // another instruction sits between the reveal and this pile
+                // placement (Goblin Charbelcher's damage), folding the placement
+                // into the reveal would move the pile BEFORE that instruction.
+                // Leave the cards where the reveal found them and emit the
+                // placement as a later chain instruction over the revealed set.
+                // Scoped to an intervening damage instruction: damage is the
+                // replaceable event whose replacement effects (CR 615.5) act on the
+                // revealed cards before the placement.
+                let intervening_damage = defs[target_idx + 1..]
+                    .iter()
+                    .any(super::def_is_damage_dealer);
+                if intervening_damage && defs[target_idx].sub_ability.is_none() {
+                    if let Effect::RevealUntil {
+                        matched_disposition,
+                        ..
+                    } = &mut *defs[target_idx].effect
+                    {
+                        *matched_disposition = RevealUntilDisposition::RevealOnly;
+                        let mut placement = AbilityDefinition::new(
+                            kind,
+                            Effect::ChangeZoneAll {
+                                origin: Some(Zone::Library),
+                                destination,
+                                // The cards this reveal revealed — those still in the
+                                // library: a card an intervening replacement moved
+                                // elsewhere (Swans's draw) is no longer part of the pile.
+                                target: TargetFilter::LastRevealed,
+                                enters_under: None,
+                                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                                enters_attacking: false,
+                                enter_with_counters: vec![],
+                                face_down_profile: None,
+                                library_position: (destination == Zone::Library)
+                                    .then_some(LibraryPosition::Bottom),
+                                library_shuffle: Default::default(),
+                                random_order: matches!(rest_order, DigRestOrder::Random),
+                            },
+                        );
+                        // An independent following instruction, performed on every
+                        // branch of an intervening "instead" override.
+                        placement.sub_link = SubAbilityLink::SequentialSibling;
+                        defs.push(placement);
+                        return;
+                    }
+                }
                 patch_reveal_until_all_to_zone_recursively(
                     &mut defs[target_idx],
                     destination,
@@ -9866,6 +9937,64 @@ pub(super) fn try_parse_scoped_does_the_same(text: &str) -> Option<PlayerFilter>
 mod tests {
     use super::*;
     use crate::types::ability::{QuantityExpr, SearchSelectionConstraint, ZoneChoiceChooser};
+
+    #[test]
+    fn source_pronoun_damage_boundaries_compose_pronoun_verb_and_connector() {
+        for pronoun in ["he", "she"] {
+            for verb in ["deal", "deals"] {
+                for connector in [", and ", " and "] {
+                    let tail = format!("{pronoun} {verb} 4 damage to each opponent");
+                    assert!(starts_with_damage_clause(&tail), "{tail}");
+                    let text = format!("put four +1/+1 counters on ~{connector}{tail}");
+                    let chunks = split_clause_sequence(&text);
+                    assert_eq!(chunks.len(), 2, "{text}: {chunks:?}");
+                    assert_eq!(chunks[0].text, "put four +1/+1 counters on ~");
+                    let raw_tail = if connector == ", and " {
+                        format!("and {tail}")
+                    } else {
+                        tail.clone()
+                    };
+                    assert_eq!(chunks[1].text, raw_tail, "{text}");
+                    assert_eq!(
+                        super::super::lower::strip_leading_sequence_connector(&chunks[1].text)
+                            .trim(),
+                        tail,
+                        "{text}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn source_pronoun_damage_boundary_requires_an_immediate_whole_verb() {
+        assert!(starts_with_damage_clause(
+            "she deals 4 damage to each opponent"
+        ));
+        for tail in [
+            "shell deals 4 damage to each opponent",
+            "he dealing 4 damage to each opponent",
+            "she eventually deals 4 damage to each opponent",
+            "they deal 4 damage to each opponent",
+        ] {
+            assert!(!starts_with_damage_clause(tail), "{tail}");
+            let text = format!("put four +1/+1 counters on ~ and {tail}");
+            assert_eq!(split_clause_sequence(&text).len(), 1, "{text}");
+        }
+    }
+
+    #[test]
+    fn source_pronoun_damage_boundaries_do_not_escape_quoted_abilities() {
+        let text = "target creature gains \"{T}: Put a +1/+1 counter on this creature and he deals 1 damage to each opponent.\" until end of turn";
+        assert_eq!(split_clause_sequence(text).len(), 1);
+        assert_eq!(
+            split_clause_sequence(
+                "put a +1/+1 counter on ~ and he deals 1 damage to each opponent"
+            )
+            .len(),
+            2,
+        );
+    }
 
     // CR 401.4: unspecified library placement preserves the owner's choice;
     // explicit randomization and non-library destinations retain their modes.
@@ -14870,10 +14999,14 @@ mod tests {
         assert!(starts_bare_and_clause(
             "she doesn't untap during her next untap step"
         ));
+        // CR 608.2c: a source-pronoun damage instruction is its own clause
+        // (Aang, Master of Elements: "... counters on him, and he deals 4
+        // damage to each opponent").
+        assert!(starts_bare_and_clause("she deals 2 damage to any target"));
         // Guard: a gendered pronoun WITHOUT a recognized continuous/restriction
-        // verb must NOT split (no false clause boundary).
+        // or damage verb must NOT split (no false clause boundary).
         assert!(!starts_bare_and_clause("he attacks this turn"));
-        assert!(!starts_bare_and_clause("she deals 2 damage to any target"));
+        assert!(!starts_bare_and_clause("she eventually deals 2 damage"));
     }
 
     /// CR 104.2b + CR 104.3e + CR 119.7 + CR 119.8: plural-player subject +

@@ -187,6 +187,15 @@ pub enum ZoneChoiceCandidateSource {
     /// cost-paid object that has since left that zone is simply not offered and an
     /// unrelated object that happens to sit in the zone can never be.
     CostPaidObjects,
+    /// Read only the objects the preceding instruction handed this one as its
+    /// targets, filtered to the declared zone(s).
+    ///
+    /// CR 608.2c + CR 608.2d: "Put one of them into your hand" after "exile
+    /// cards … until you exile two nonland cards …" (Invasion of Alara) names
+    /// the batch that instruction found, not every card it exiled and not a
+    /// tracked set an earlier clause published. A member of the batch that has
+    /// since left the zone (cast from exile onto the stack) is not offered.
+    ParentTargets,
 }
 
 impl ZoneChoiceCandidateSource {
@@ -1935,19 +1944,22 @@ pub enum PreventionAmount {
 
 /// CR 614.9: Recipient of a damage-redirection effect — the
 /// battle/creature/planeswalker/player the replaced damage is dealt to instead.
-/// Each variant is a distinct IDENTITY SOURCE for that recipient, resolved
-/// against live game state at damage-apply time by
+/// Each variant identifies the authority for that recipient. Resolution-created
+/// effects materialize `Controller` into `ChosenTarget` plus a concrete player;
+/// the remaining live identities are resolved at damage-apply time by
 /// `effects::create_damage_replacement::resolve_redirect_recipient`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DamageRedirectTarget {
-    /// "...to you instead" — the replacement source's controller (Jade Monolith,
-    /// Goblin Psychopath).
+    /// CR 109.5 + CR 113.8: "...to you instead" in a resolving instruction is
+    /// the creating ability's controller (Jade Monolith, Goblin Psychopath),
+    /// captured at resolution. Outside that normalization, the live recipient
+    /// resolver reads the replacement host's current controller.
     Controller,
     /// "...to its/that source's/that spell's controller instead" — the
     /// prospective damage source's controller, read when the damage event is
     /// replaced (Mirror Strike, Reverberation, Reflect Damage). This is distinct
-    /// from [`Self::Controller`], which is the replacement host's controller.
+    /// from the creating ability's controller and the replacement host's controller.
     ///
     /// CR 614.9: a redirection effect may redirect damage to another player.
     DamageSourceController,
@@ -1959,6 +1971,8 @@ pub enum DamageRedirectTarget {
     /// or ability (spell: CR 115.1a + CR 601.2c; activated ability: CR 115.1c +
     /// CR 602.2b; "any target" domain CR 115.4); latched into the shield's
     /// `redirect_target` at resolution (Soltari Guerrillas, Harm's Way).
+    /// Runtime shields also use this concrete-destination carrier for an implicit
+    /// player captured from `Controller`; that use declares no additional target.
     #[serde(alias = "ChosenObjectTarget")]
     ChosenTarget,
     /// CR 303.4b + CR 301.5a: "...to enchanted creature instead" / "...to
@@ -4182,6 +4196,31 @@ impl Duration {
             | Self::UntilEndOfNextTurnOf { .. }
             | Self::UntilNextStepOf { .. }
             | Self::ForAsLongAs { .. }
+            | Self::UntilSourceExilesAnotherCard
+            | Self::UntilOpponentBecomesMonarch
+            | Self::UntilEvent { .. }
+            | Self::Permanent => false,
+        }
+    }
+
+    /// CR 611.2b: true for every "for as long as" STATE reading — the
+    /// durations that may already be over when the effect would begin, and
+    /// then never start. A resolver must test them on a settled board before
+    /// installing anything (`layers::resolved_duration_begins`).
+    pub const fn is_for_as_long_as(&self) -> bool {
+        match self {
+            Self::ForAsLongAs { .. }
+            | Self::WhileControllingHost
+            | Self::WhileHostOnBattlefield => true,
+            // Event deadlines and turn boundaries cannot be over before the
+            // effect begins; listed rather than swept into `_` so a new
+            // duration has to choose a side here.
+            Self::UntilHostLeavesPlay
+            | Self::UntilEndOfTurn
+            | Self::UntilEndOfCombat
+            | Self::UntilNextTurnOf { .. }
+            | Self::UntilEndOfNextTurnOf { .. }
+            | Self::UntilNextStepOf { .. }
             | Self::UntilSourceExilesAnotherCard
             | Self::UntilOpponentBecomesMonarch
             | Self::UntilEvent { .. }
@@ -7252,6 +7291,29 @@ impl TargetSelectionMode {
     }
 }
 
+/// CR 608.2b + CR 101.1: what happens when every target of this spell or
+/// ability is illegal as it tries to resolve. Root-only: read by the single
+/// CR 608.2b authority in `stack::resolve_top`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum IllegalTargetsDisposition {
+    /// CR 608.2b: the spell or ability doesn't resolve (the rules default).
+    #[default]
+    DoesNotResolve,
+    /// CR 101.1 overriding CR 608.2b: the card's own text says the ability still
+    /// resolves ("This ability still resolves if its target becomes illegal").
+    /// Illegal targets are still pruned and unaffected.
+    StillResolves,
+}
+
+impl IllegalTargetsDisposition {
+    /// `serde(skip_serializing_if)` helper: the rules default is omitted from
+    /// card-data.json so every other card's export is byte-identical.
+    pub fn is_does_not_resolve(&self) -> bool {
+        matches!(self, Self::DoesNotResolve)
+    }
+}
+
 /// CR 701.9a: How cards are selected from a zone during an effect or cost.
 ///
 /// Analogous to `TargetSelectionMode` but for cards from a player's hand (or
@@ -10112,9 +10174,22 @@ pub enum ObjectProperty {
 #[serde(tag = "type")]
 pub enum UntilCondition {
     /// CR 702.85a / CR 701.57a: Loop terminates when the just-exiled card
-    /// satisfies the filter. The matching card is exposed to the sub_ability
-    /// chain as an injected target.
-    NextMatches { filter: TargetFilter },
+    /// satisfies the filter and `count` cards have matched so far. The
+    /// matching cards are exposed to the sub_ability chain as injected
+    /// targets.
+    NextMatches {
+        filter: TargetFilter,
+        /// CR 608.2c: How many matching cards end the loop — "until you exile
+        /// two nonland cards with mana value 4 or less" (Invasion of Alara).
+        /// Defaults to one ("until you exile a nonland card"), so every
+        /// single-hit form and on-disk record keeps its meaning. When the
+        /// library runs out first, the loop ends with the matches found so far.
+        #[serde(
+            default = "default_quantity_one",
+            skip_serializing_if = "is_default_quantity_one"
+        )]
+        count: QuantityExpr,
+    },
     /// CR 202.3 + CR 107.3e: Loop terminates when the cumulative `property`
     /// summed over every card exiled this resolution satisfies
     /// `comparator(sum, threshold)`.
@@ -19036,8 +19111,10 @@ pub enum Effect {
     /// Guerrillas; "to any target" — Harm's Way), `redirect_object_filter`
     /// carries the recipient's `TargetFilter` so the targeting layer surfaces a
     /// standard target slot (`ability_utils::collect_target_slots`); the
-    /// resolver captures the chosen object or player into the shield. All other redirect forms host on the
-    /// controller / source with no declared target.
+    /// resolver captures the chosen object or player into the shield. `Controller`
+    /// instead captures the creating ability's controller without declaring a
+    /// redirect target. Either form can independently declare an original-recipient
+    /// target through `recipient_object_filter` (Jade Monolith).
     CreateDamageReplacement {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_filter: Option<TargetFilter>,
@@ -19059,7 +19136,7 @@ pub enum Effect {
         /// `ChosenTarget` form ("...deals that damage to target creature
         /// instead" — Soltari Guerrillas; "...is dealt to any target instead" —
         /// Harm's Way). `None` for the `Controller` /
-        /// `SourceObject` redirect forms, which need no target slot.
+        /// `SourceObject` redirect forms, which need no redirect-recipient slot.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         redirect_object_filter: Option<TargetFilter>,
         /// CR 115.1 + CR 614.9: The *original-recipient* target filter when the
@@ -23562,7 +23639,7 @@ impl Effect {
             // resolved up-front when the until-loop starts
             // (`game/effects/exile_from_top_until.rs`).
             Effect::ExileFromTopUntil { until, .. } => match until {
-                UntilCondition::NextMatches { .. } => {}
+                UntilCondition::NextMatches { count, .. } => f(count),
                 UntilCondition::CumulativeThreshold { threshold, .. } => f(threshold),
             },
             // A proposition guess resolves both comparison sides live
@@ -26116,6 +26193,9 @@ pub struct AbilityDefinition {
     pub announced_x: Option<QuantityExpr>,
     /// Stack-copy restriction from "This ability can't be copied."
     pub cant_be_copied: bool,
+    /// CR 608.2b + CR 101.1: root-only; read by stack::resolve_top. Set by the
+    /// trigger parser for "This ability still resolves if its target becomes illegal".
+    pub illegal_targets_disposition: IllegalTargetsDisposition,
     /// CR 601.2f: Self-referential cost reduction applied before activation.
     /// "This ability costs {N} less to activate for each [condition]"
     pub cost_reduction: Option<CostReduction>,
@@ -26248,6 +26328,8 @@ struct AbilityDefinitionRepr<'a> {
     announced_x: &'a Option<QuantityExpr>,
     #[serde(skip_serializing_if = "is_false")]
     cant_be_copied: bool,
+    #[serde(skip_serializing_if = "IllegalTargetsDisposition::is_does_not_resolve")]
+    illegal_targets_disposition: IllegalTargetsDisposition,
     #[serde(skip_serializing_if = "Option::is_none")]
     cost_reduction: &'a Option<CostReduction>,
     forward_result: bool,
@@ -26314,6 +26396,7 @@ impl Serialize for AbilityDefinition {
             min_x_value,
             announced_x,
             cant_be_copied,
+            illegal_targets_disposition,
             cost_reduction,
             forward_result,
             player_scope,
@@ -26363,6 +26446,7 @@ impl Serialize for AbilityDefinition {
             min_x_value: *min_x_value,
             announced_x,
             cant_be_copied: *cant_be_copied,
+            illegal_targets_disposition: *illegal_targets_disposition,
             cost_reduction,
             forward_result: *forward_result,
             player_scope,
@@ -26479,6 +26563,8 @@ struct AbilityDefinitionDe {
     #[serde(default)]
     cant_be_copied: bool,
     #[serde(default)]
+    illegal_targets_disposition: IllegalTargetsDisposition,
+    #[serde(default)]
     cost_reduction: Option<CostReduction>,
     #[serde(default)]
     forward_result: bool,
@@ -26550,6 +26636,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             min_x_value: de.min_x_value,
             announced_x: de.announced_x,
             cant_be_copied: de.cant_be_copied,
+            illegal_targets_disposition: de.illegal_targets_disposition,
             cost_reduction: de.cost_reduction,
             forward_result: de.forward_result,
             player_scope: de.player_scope,
@@ -26849,6 +26936,7 @@ impl AbilityDefinition {
             min_x_value: 0,
             announced_x: None,
             cant_be_copied: false,
+            illegal_targets_disposition: IllegalTargetsDisposition::DoesNotResolve,
             cost_reduction: None,
             forward_result: false,
             player_scope: None,
@@ -28269,6 +28357,12 @@ pub struct SpellContext {
     pub forwarded_result_context: Option<Box<ForwardedResultContext>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_forwarded_zone_result: Option<PendingForwardedZoneResult>,
+    /// CR 400.7j + CR 608.2c: every card an "exile cards … until …" loop moved
+    /// to exile in this resolution, handed down the rest of its chain. "The
+    /// other cards exiled this way" (Invasion of Alara) are found among exactly
+    /// these cards. Empty outside such a chain.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exile_until_batch: Vec<crate::types::identifiers::ObjectIncarnationRef>,
     /// CR 610.3b: specified duration events observed after a triggered ability
     /// triggered but before this initial zone-change effect occurred.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -32368,11 +32462,10 @@ pub enum ContinuousModification {
     /// of** the objects matching `source` (Myr Welder / Dark Impostor / Patchwork
     /// Crawler "all [creature] cards exiled with it", Territory Forge "the exiled
     /// card", Mairsil, Experiment Kraj, …). The set is dynamic — recomputed each
-    /// layer pass — so it is expanded into one `GrantAbility` per matching
-    /// activated ability at continuous-effect collection time
-    /// (`active_continuous_effects_from_static_definitions`); the layer-6 apply of
-    /// this variant itself is therefore a no-op. `source` is resolved relative to
-    /// each recipient of the host static (`FilterContext::from_source(recipient)`).
+    /// layer pass — so the meta-effect is retained through earlier layers and
+    /// expanded into `GrantAbility` effects when it applies in layer 6. The
+    /// provider filter uses the host's identity and each recipient's current
+    /// controller for controller-relative references.
     GrantAllActivatedAbilitiesOf {
         source: TargetFilter,
         /// CR 602.5b + CR 602.5c: An optional use-restriction injected into every
@@ -32392,12 +32485,10 @@ pub enum ContinuousModification {
     /// abilities of** the objects matching `source` (Koh, the Face Stealer "Koh
     /// has all activated and triggered abilities of the last chosen card"). The
     /// triggered-ability mirror of `GrantAllActivatedAbilitiesOf`: the set is
-    /// dynamic — recomputed each layer pass — so it is expanded into one
-    /// `GrantTrigger` per matching trigger definition at continuous-effect
-    /// collection time (`expand_granted_triggered_abilities`); the layer-6 apply
-    /// of this variant itself is therefore a no-op. `source` is resolved relative
-    /// to the host static with each recipient's controller, mirroring the
-    /// activated expander. Distinct sibling rather than a parameter of
+    /// dynamic — recomputed each layer pass — so it is retained through earlier
+    /// layers and expanded into `GrantTrigger` effects when it applies in layer
+    /// 6. `source` is resolved relative to the host static with each recipient's
+    /// current controller, mirroring the activated expander. Distinct sibling rather than a parameter of
     /// `GrantAllActivatedAbilitiesOf` because activated and triggered abilities
     /// land in different stores (CR 602.1 `obj.abilities` via `GrantAbility` vs
     /// CR 603.1 `obj.trigger_definitions` via `GrantTrigger`) with different
@@ -33273,6 +33364,13 @@ pub struct ResolvedAbility {
     /// Stack-copy restriction from "This ability can't be copied."
     #[serde(default, skip_serializing_if = "is_false")]
     pub cant_be_copied: bool,
+    /// CR 608.2b + CR 101.1: root-only; read by stack::resolve_top. Copied from
+    /// `AbilityDefinition::illegal_targets_disposition`; a sub-ability's value is ignored.
+    #[serde(
+        default,
+        skip_serializing_if = "IllegalTargetsDisposition::is_does_not_resolve"
+    )]
+    pub illegal_targets_disposition: IllegalTargetsDisposition,
     /// CR 707.10 + CR 614.1a + CR 614.5: `Finalized` on a `repeat_for` iteration
     /// that the drain driver resumes after a per-copy pause, so the "copy an
     /// additional time" replacement bonus (Twinning Staff) is folded into the
@@ -33572,6 +33670,7 @@ impl PartialEq for ResolvedAbility {
             min_x_value: a_min_x_value,
             announced_x: a_announced_x,
             cant_be_copied: a_cant_be_copied,
+            illegal_targets_disposition: a_illegal_targets_disposition,
             copy_count_status: a_copy_count_status,
             forward_result: a_forward_result,
             unless_pay: a_unless_pay,
@@ -33642,6 +33741,7 @@ impl PartialEq for ResolvedAbility {
             min_x_value: b_min_x_value,
             announced_x: b_announced_x,
             cant_be_copied: b_cant_be_copied,
+            illegal_targets_disposition: b_illegal_targets_disposition,
             copy_count_status: b_copy_count_status,
             forward_result: b_forward_result,
             unless_pay: b_unless_pay,
@@ -33712,6 +33812,7 @@ impl PartialEq for ResolvedAbility {
             && a_min_x_value == b_min_x_value
             && a_announced_x == b_announced_x
             && a_cant_be_copied == b_cant_be_copied
+            && a_illegal_targets_disposition == b_illegal_targets_disposition
             && a_copy_count_status == b_copy_count_status
             && a_forward_result == b_forward_result
             && a_unless_pay == b_unless_pay
@@ -34059,6 +34160,7 @@ impl ResolvedAbility {
             min_x_value: 0,
             announced_x: None,
             cant_be_copied: false,
+            illegal_targets_disposition: IllegalTargetsDisposition::DoesNotResolve,
             copy_count_status: CopyCountStatus::Pending,
             forward_result: false,
             unless_pay: None,
@@ -34722,8 +34824,31 @@ impl ResolvedAbility {
         &self,
         state: &crate::types::game_state::GameState,
     ) -> bool {
-        let Some(source) = self.trigger_source.as_ref() else {
+        if self.trigger_source.is_none() {
             return true;
+        }
+        state
+            .objects
+            .get(&self.source_id)
+            .is_some_and(|object| self.is_own_departure_successor_in(state, object.zone, None))
+    }
+
+    /// CR 400.7e: True when the source, sitting in public `zone`, is the
+    /// immediate successor of its own triggering zone change: the triggering
+    /// event moved this exact captured identity into `zone`, and no later zone
+    /// change of the same storage id has been recorded. A trigger cannot find
+    /// the new object in a hidden zone. Callers pass the zone the source
+    /// occupies, or, for a move still being applied, the zone it is leaving
+    /// plus that move's departing incarnation: an incarnation departs only
+    /// once, so a record carrying it is that in-flight move, not an earlier one.
+    pub(crate) fn is_own_departure_successor_in(
+        &self,
+        state: &crate::types::game_state::GameState,
+        zone: Zone,
+        in_flight_departure: Option<u64>,
+    ) -> bool {
+        let Some(source) = self.trigger_source.as_ref() else {
+            return false;
         };
         let Some(crate::types::GameEvent::ZoneChanged {
             object_id,
@@ -34738,10 +34863,8 @@ impl ResolvedAbility {
             || record.trigger_source_context().is_none_or(|event_source| {
                 event_source.identity.reference != source.identity.reference
             })
-            || state
-                .objects
-                .get(object_id)
-                .is_none_or(|object| object.zone != *to)
+            || zone != *to
+            || !zone.is_public()
         {
             return false;
         }
@@ -34761,7 +34884,14 @@ impl ResolvedAbility {
                 .zone_changes_this_turn
                 .iter()
                 .skip(record.turn_zone_change_index + 1)
-                .all(|later| later.object_id != self.source_id)
+                .all(|later| {
+                    later.object_id != self.source_id
+                        || in_flight_departure.is_some_and(|departing| {
+                            later.trigger_source_context().is_some_and(|context| {
+                                context.identity.reference.incarnation == departing
+                            })
+                        })
+                })
     }
 
     /// CR 400.7e: True when an off-battlefield zone-match would mis-latch SelfRef

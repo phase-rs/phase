@@ -3454,8 +3454,18 @@ fn strip_leading_permission_condition(input: &str) -> Option<(&str, StaticCondit
 
 fn strip_exile_play_source_reference(rest: &str, grantee: ExileCastGrantee) -> Option<&str> {
     let after_anchor = match grantee {
-        ExileCastGrantee::SourceController => nom_tag_lower(rest, rest, "cards exiled with ")
-            .or_else(|| nom_tag_lower(rest, rest, "the cards exiled with "))?,
+        ExileCastGrantee::SourceController => {
+            // CR 607.2a: "the exiled card[s]" names the same linked pool as
+            // "cards exiled with [this object]" (Null Summoner), so it needs no
+            // self-reference after it.
+            if let Some(after) = nom_tag_lower(rest, rest, "the exiled cards")
+                .or_else(|| nom_tag_lower(rest, rest, "the exiled card"))
+            {
+                return Some(after);
+            }
+            nom_tag_lower(rest, rest, "cards exiled with ")
+                .or_else(|| nom_tag_lower(rest, rest, "the cards exiled with "))?
+        }
         // CR 406.6: "cards they exiled with <self>" — the per-player share of
         // the source's pool, bound to the "each player" subject.
         ExileCastGrantee::EachPlayerOwnExiles => {

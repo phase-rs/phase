@@ -21,6 +21,8 @@ This is the orchestrator for the phase.rs implementation pipeline. It runs as a 
 
 **Spawning by runtime.** Skills are invoked as `/name` under Claude Code and `$name` under Codex; both read `.claude/skills/<name>/SKILL.md` (`.agents/skills` and `.codex/skills` link there). Under Claude Code, spawn `general-purpose` agents for Steps 1, 2 and 6 and the `engine-implementation-executor` agent type for Steps 3 and 4, which loads `executor.md`. Under Codex, spawn a worker agent per step and tell it which skill or file to read first — for Steps 3 and 4, `.claude/skills/engine-implementer/executor.md`. A runtime that cannot spawn agents runs each step in a fresh session and hands every reviewer ONLY the artifact under review (the full plan, or the unified diff), the original task, `CLAUDE.md`, the relevant review skill, the attempt history below, and in chartered runs the charter, phase index and deferral allowlist — never the conversation that produced the artifact. Never degrade to reviewing your own work in the same context; that is the failure this skill exists to prevent. If even a fresh session is impossible, say so in the final report and in the PR body under "Validation Failures"; do not claim the review loop ran clean.
 
+Before Step 1, and before Step 6 when its trigger applies, a read-only [scout](scout.md) locates facts for the planner and reviewers. It is not a step and holds no gate.
+
 The orchestrator never authors content itself. Its only jobs are: spawn agents, route their output to the next step, apply the run limits, own the commit, and close each spawned agent once its output is consumed (under Claude Code, send a `shutdown_request` and wait for the `shutdown_response` ack). The structured report each agent returns is the authoritative step handoff; progress messages are additive.
 
 ## Run ownership and checkpoint identity
@@ -68,9 +70,17 @@ Apply these before every dispatch or verification-tool edit and after every resu
 
 When in doubt, it is `behavior`.
 
+**Pre-existing reports.** A reviewer's Pre-existing list (defects that reproduce at base and that the change does not depend on) is not a finding. It opens no round, counts toward no loop and never blocks. The orchestrator triages each item once, on receipt, reading the card before the code:
+
+- **Fix it in the change** when the change's own claims are false with the defect present: a test or acceptance row it asserts cannot pass, or a card, board or row it names as delivered behaves wrongly because of it. The fix rides the phase's next executor round as a constraint, with a test red at base, recorded as an addendum line in a chartered run, as in the [defective-reference route](#defective-reference-route).
+- **File an issue** on phase-rs/phase, with the Oracle text and the measured evidence, after a duplicate search, when every case the change claims still works. Filing closes the item.
+- **Drop it**, recording the reason, when no printed card's text reaches it.
+
+When the orchestrator cannot reach a verdict, it asks whoever dispatched the run, who decides; only a fix out of proportion to the task goes to the user. The verdict is final for the run unless a test the change asserts fails because of the defect. A filed or dropped item never becomes a phase, a scope extension or a dispatch of its own. A small fix in a file the work already edits may ride an already-scheduled executor round, recorded as an addendum line in a chartered run.
+
 **Design rounds and the loop limit.** A round with a `behavior` finding is a design round: fix it through a fresh planner (Step 2) or fix executor (Step 6), then review afresh. A round without one is closed as Steps 2 and 6 describe. Each return to Step 1 from an executor stop-and-return, and each abandoned or failed review dispatch, also counts as a design round of its loop; these rounds count toward the fifth-round limit only, and the lowering comparison skips them. Each review loop — the sizing audit, the charter, each plan loop, each implementation-review loop, the integration review, and the final PR review ([pr-handoff.md](pr-handoff.md)) — stops at its **fifth design round**, or sooner when **two consecutive design rounds** (counting design rounds only) **fail to lower the behavior-finding count**. A loop restarted, renamed or re-phased for the same work keeps its count, and returning from implementation to planning resumes that plan loop's count. Only accepting a candidate that implements part of the requested behavior resets the counts; a checkpoint, clean plan, helper-only phase or new reviewer does not. If tooling is itself the requested product, its accepted implementation qualifies.
 
-**Budget.** The invocation may name `budget=tight|standard|until-clean`; the default is `standard`. The budget decides who approves spending past a limit — a design round past a loop limit, verification machinery, a `SCOPE_PATHS` extension outside the scope rule's standing classes, or a new phase or restart proposed at a stop:
+**Budget.** The invocation may name `budget=tight|standard|until-clean`; the default is `standard`. The budget decides who approves spending past a limit — a design round past a loop limit, verification machinery, or a new phase or restart proposed at a stop:
 
 - `tight` approves nothing and takes the decline path.
 - `standard` asks the user with an expansion case, and takes the decline path when nobody can answer (an autonomous run).
@@ -92,19 +102,42 @@ Argue from the open item and the prediction record only. Work already spent is n
 
 **At a stop**, report the original goal, completed product work, open items, each loop's round tags and prediction record, and the smallest next action as an expansion case. When behavior findings stayed at or above their prior count across three or more of the layers types / parser / resolver / targeting / frontend / AI / tests, say so and propose a smaller scope or a decomposition ([chartered.md](chartered.md)). No new phase or charter continues the same work without an accepted case. Required checks and clean final review still govern acceptance, and stops take precedence over the decomposition and text-round routes below.
 
+### Process-effort check
+
+The run limits count rounds. They do not see a run that converges slowly, where planning and review take most of the time and little product work lands. This check is how the orchestrator notices that. It is for self-reflection: it adds no gate, delays no dispatch, and never stops a run. Stops come only from the limits above.
+
+**Timings.** Note the start and end of every dispatch and check in the phase-fit record with `date +%s`, in one of four kinds: `planning` (planner and charter dispatches), `review` (every reviewer), `implementation` (implementation and fix executors), `verification` (Step 4 measurement and Step 5 checks). Scout runs are not timed here; each pack carries its own duration. If a time cannot be recorded, note that once and continue. Do not reconstruct times for work already done.
+
+**When to look.** At every review result and every accepted candidate, before choosing the next dispatch. Progress means an accepted candidate, or `behavior` findings retired. Process effort is dominant when planning and review time keeps growing without that progress. Signs include:
+
+- several review results in a row with no newly accepted candidate;
+- design rounds that surface new `behavior` findings instead of converging;
+- review rounds spent on `text` or `machinery` findings;
+- planning plus review time several times the implementation time, with open findings not falling.
+
+A high planning-and-review share is a reason to look and proves nothing by itself. Heavy review that keeps retiring real `behavior` findings and keeps candidates landing is justified. Compare against implementation time; `verification` is its own kind because a cold build is a wait and does not count as process effort. Do not let each round's local justification hide the cumulative cost.
+
+**When it is dominant.** Tell the user in the next progress update, before they ask, with the four totals, the rounds and candidates behind them, and the cause. Then make the cuts this skill already allows:
+
+- close a round without `behavior` findings as Steps 2 and 6 describe, with no further review;
+- narrow intermediate Step 5 runs to the touched surface, and stop repeating green checks absent new evidence;
+- keep fix rounds to the findings supplied, and do not tighten acceptance mid-loop;
+- pass a reviewer's pattern finding, with its predicate and site list verbatim, to later planners and phases as a constraint, so the next reviewer does not find it again;
+- name a smaller scope or a decomposition ([chartered.md](chartered.md)) as an option in the progress update. The check itself files no expansion case.
+
+If the required gates are themselves the floor, say so and ask the user once, in the progress update: a lower budget, a smaller scope, or carry on. Do not wait for the answer: continue with the next dispatch and apply an answer when it arrives. An autonomous run records the note. Record one short evidence-and-action note in the phase-fit record.
+
 ### Defective-reference route
 
 A parity or preservation row takes its expected value from another reading: the prompted route, base, or a sibling route. When that reference is wrong for the card, the defect exists before this work. It can surface in the planner's Reference Readings, in plan review, in an executor stop-and-return, or in any implementation-review finding (codex and CodeRabbit included). The route is fixed, so it is **not a stop and needs no expansion case under any budget**. Shipping the dependent work on the defective reading would be wrong behavior for the card class, which the decline path already refuses. Asking the user would only offer a choice between stopping and this route.
 
 1. **Record** the card, the reading derived from its Oracle text and the CR, the measured reference, and the affected rows in the phase-fit record.
-2. **Fix the reference first**, as its own unit ahead of the dependent work.
-   - It runs the full pipeline (plan, review, implement, review) under fresh loop counts, with tests red at base and its own PR on `origin/main`.
-   - Cover the defect's class (every route that drops the same value), not only the row that exposed it.
-   - In a chartered run, add it as a fix phase before the dependent phase ([chartered.md](chartered.md#the-charter)).
-3. **Hold the dependent work.** Keep its worktree and uncommitted changes. Don't commit or ship it on the defective reading.
-4. **Resume** once the fix lands: rebase the dependent work, re-measure the affected rows, and make them assert the derived reading.
+2. **Fix the reference inside the dependent work**, as the work encounters it.
+   - Cover the defect's class (every route that drops the same value), not only the row that exposed it, with tests red at base.
+   - In a chartered run, record it as one addendum line in the phase's addenda file ([chartered.md](chartered.md#the-charter)).
+3. **Assert the derived reading** in the dependent rows, in the same work.
 
-If the fix-first unit itself sizes above one unit (Sizing T1), or the dependent work cannot be held, it is an ordinary stop with an expansion case.
+A fix that breaks a decision the design rests on, or sizes above one unit (Sizing T1), goes back for design revision: a re-charter in a chartered run, a fresh planner otherwise. Short of that, it never inserts a phase.
 
 ## Phase-fit gate (Step 1a)
 
@@ -119,7 +152,7 @@ A single-phase verdict proceeds through the pipeline below. Re-adjudicate every 
 
 ### Phase-fit record
 
-`<git-common-dir>/engine-implementer-runs/<run-id>/phase-fit`, append-only and numbered, carrying phase indexes only, never a commit SHA. It gets one entry per adjudication (the Sizing values used, per-trigger results, the T2 groups, the verdict), per review round (its finding tags and counts, and for a round closed without a design change, the edits applied with their before/after text), per expansion case and its outcome, and per revision or correction (class, before/after text, and the evidence that authorized it). Keep it out of the plan text reviewers and executors read: recording a verdict there hands the next independent check a prior verdict. It is a working note, not a provenance record.
+`<git-common-dir>/engine-implementer-runs/<run-id>/phase-fit`, append-only and numbered, carrying phase indexes only, never a commit SHA. It gets one entry per adjudication (the Sizing values used, per-trigger results, the T2 groups, the verdict), per review round (its finding tags and counts, and for a round closed without a design change, the edits applied with their before/after text), per expansion case and its outcome, per revision or correction (class, before/after text, and the evidence that authorized it), per dispatch or check (its kind and its start and end time, for the [process-effort check](#process-effort-check)), and per failed [scout](scout.md) run (one line). Keep it out of the plan text reviewers and executors read: recording a verdict there hands the next independent check a prior verdict. It is a working note, not a provenance record.
 
 ## Pipeline
 
@@ -127,7 +160,7 @@ A single-phase verdict proceeds through the pipeline below. Re-adjudicate every 
 
 Spawn a fresh agent and instruct it to invoke `engine-planner`. The agent returns a plan with every mandatory architectural section.
 
-**Spawn inputs:** original task and attempt history; in-scope file/subsystem hints; any prior reviewer findings as constraints (none on first round); the requirement to emit the mandatory Sizing section. In chartered runs, per-phase planners run in phase-plan mode with the inputs [chartered.md](chartered.md) lists.
+**Spawn inputs:** original task and attempt history; in-scope file/subsystem hints; the precedent pack from the [scout](scout.md), when one was produced; any prior reviewer findings as constraints (none on first round); the requirement to emit the mandatory Sizing section. In chartered runs, per-phase planners run in phase-plan mode with the inputs [chartered.md](chartered.md) lists.
 
 Do not author or edit the plan in this thread; applying `text` findings in Step 2 is the one exception. If the returned plan is missing sections or is superficial, send the same inputs plus an explicit "missing sections" note to a **fresh** planning agent — do not patch it yourself.
 
@@ -135,7 +168,7 @@ Do not author or edit the plan in this thread; applying `text` findings in Step 
 
 Spawn a fresh agent and instruct it to invoke `review-engine-plan` against the full plan. Each review runs in a fresh context — never reuse the previous reviewer's.
 
-**Reviewer spawn inputs:** the full plan; attempt history; the original task description; the phase-fit context declaration (all Step 2 reviews in this pipeline declare it, so the Sizing consistency check is blocking); in chartered runs, the phase-plan inputs [chartered.md](chartered.md) lists.
+**Reviewer spawn inputs:** the full plan; attempt history; the original task description; the same precedent pack the planner received, with the [scout](scout.md)'s hand-on sentence; the phase-fit context declaration (all Step 2 reviews in this pipeline declare it, so the Sizing consistency check is blocking); in chartered runs, the phase-plan inputs [chartered.md](chartered.md) lists.
 
 - **A design round** (any `behavior` finding): when the run limits allow, a fresh planner revises the plan with the findings as constraints, then a fresh reviewer reviews the whole revised plan.
 - **A round without `behavior` findings closes the loop:** the orchestrator applies each `text` finding itself (below), closes each `machinery` finding by substituting an existing gate or through an expansion case, and the plan is clean. No review follows. Closing a `text` finding changes nothing the plan decides, and re-reviewing applied wording only mints more wording findings. A review follows a behavior change, never an edit to text.
@@ -171,13 +204,15 @@ If the change touches the parser, find out whether it moves parser output: dispa
 
 ### Step 5 — Verify the committed candidate
 
-Run the checks in a clean worktree at `CANDIDATE_SHA`, not in the implementation worktree — a check that passes against uncommitted edits has told you nothing about what you are shipping. Run every gate the changed surface calls for: formatting for any implementation change, the Rust/engine/parser block, `./scripts/check-interaction-bindings.sh --check`, `cargo coverage` with no card regressed and `cargo semantic-audit` with zero new findings for Rust paths, the frontend block for frontend paths, the parser gate for parser paths. Markdown-only policy changes need scope and diff checks; do not run Cargo or Tilt for them.
+Run the checks in a clean worktree at `CANDIDATE_SHA`, not in the implementation worktree — a check that passes against uncommitted edits has told you nothing about what you are shipping.
 
-The full suite is owed at the tree being shipped. An intermediate fix round may narrow to the touched surface — say so plainly when reporting it, since a narrowed run is not a suite pass — and re-run unfiltered before acceptance.
+**Per-commit candidates** run formatting and the executor's focused set only. Report the result as narrowed; it is not a suite pass.
+
+**The acceptance candidate** — the candidate Step 6 closes on, which in a chartered run is the phase's last commit — runs every gate the changed surface calls for, once: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, the full workspace test suite, `./scripts/check-interaction-bindings.sh --check`, `cargo coverage` with no card regressed and `cargo semantic-audit` with zero new findings for Rust paths, `pnpm run type-check`, `pnpm lint` and the frontend tests for frontend paths, the parser gate for parser paths. A failure goes to a fix executor, and its candidate repeats this full set. A lint failure — rustfmt, a compiler warning, or a clippy lint in the `style`, `complexity` or `perf` group — closes like a `text` finding, with no Step 6 re-review, only when its correction is semantics-neutral: judged by the orchestrator from the committed diff, it changes no drop timing, locking, error handling, control flow or evaluation order. A pure representation change, such as boxing an enum variant's payload, qualifies, as does removing an unused import; handling a `must_use` result does not. The orchestrator applies a fix the tool states verbatim on the candidate, any other such fix goes to a fix executor, and the commit either one makes repeats this full set. A lint in any other clippy group, and a correction that is not neutral or whose neutrality is uncertain, are `behavior`: each goes to a fix executor like any other failure, and its candidate returns to Step 6. Markdown-only policy changes need scope and diff checks; do not run Cargo or Tilt for them.
 
 ### Step 6 — Review the immutable candidate
 
-Spawn a fresh agent to invoke `review-engine-impl` against `BASE_SHA..CANDIDATE_SHA`, with the original task, reviewed plan, in-scope paths, prior findings (including any small-change-lane constraints) and attempt history. It reviews the diff and the checks that were run; additional checks must answer a concrete unresolved claim within the task scope. Missing evidence returns to the orchestrator, not an independent tooling project. After the result, apply the [run limits](#run-limits) before any fix or return to planning.
+Spawn a fresh agent to invoke `review-engine-impl` against `BASE_SHA..CANDIDATE_SHA`, with the original task, reviewed plan, in-scope paths, prior findings (including any small-change-lane constraints), attempt history, and a review pack when the [scout](scout.md)'s trigger applies. It reviews the diff and the checks that were run; additional checks must answer a concrete unresolved claim within the task scope. Missing evidence returns to the orchestrator, not an independent tooling project. After the result, apply the [run limits](#run-limits) before any fix or return to planning.
 
 - **A design round** (any `behavior` finding): a fix executor starts from the reviewed `CANDIDATE_SHA` with the findings as constraints, then Steps 4–6 repeat.
 - **A round without `behavior` findings closes the loop:** comment-only corrections (below) are applied by the orchestrator. Other `text` findings go to a fix executor, which applies the supplied text verbatim, followed by Steps 4–5, with no Step 6 re-review, because closing a `text` finding changes nothing the code does. `machinery` findings close as in Step 2.
@@ -207,5 +242,6 @@ Return after final acceptance:
 11. Self-flagged risks and judgment calls (yours + executor's).
 12. Remaining items, if any, with reasons.
 13. The budget, the phase-fit verdict and record path, every expansion case with its prediction and outcome, and abandoned candidates from approved restarts.
-14. When shipped, the `/ship-commits` final report.
-15. Chartered runs additionally: the items [chartered.md](chartered.md) lists.
+14. The planning / review / implementation / verification time totals, candidates accepted, any process-effort note, and which steps had a scout pack.
+15. When shipped, the `/ship-commits` final report.
+16. Chartered runs additionally: the items [chartered.md](chartered.md) lists.

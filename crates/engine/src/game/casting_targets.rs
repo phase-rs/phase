@@ -218,7 +218,7 @@ pub(crate) fn handle_select_modes(
                 &pending.target_constraints,
             )?;
             let mut resolved = resolved;
-            assign_targets_in_chain(state, &mut resolved, &targets)?;
+            assign_selected_slots_in_chain(state, &mut resolved, &targets)?;
             super::casting::emit_targeting_events(
                 state,
                 &super::ability_utils::declared_targets_in_chain(&resolved),
@@ -238,7 +238,7 @@ pub(crate) fn handle_select_modes(
             &pending.target_constraints,
         )? {
             let mut resolved = resolved;
-            assign_targets_in_chain(state, &mut resolved, &targets)?;
+            assign_selected_slots_in_chain(state, &mut resolved, &targets)?;
             super::casting::emit_targeting_events(
                 state,
                 &super::ability_utils::declared_targets_in_chain(&resolved),

@@ -35072,6 +35072,53 @@ fn bare_subtype_land_cant_tap_excluded_from_legal_mana_actions() {
     );
 }
 
+/// CR 305.6 + CR 602.5 + CR 601.2g: the auto-tap PLANNING pass applies the
+/// same activation-prohibition gate to a bare-subtype artifact land's intrinsic
+/// mana ability as the interactive path does (Collector Ouphe class). Reaches
+/// the `land_mana_options` bare-subtype fallback directly with
+/// `ManaPayabilityMode::Planning`, paired with the identical land and no
+/// prohibition. (Through `CastSpell`, layer evaluation first materializes the
+/// intrinsic ability as an explicit definition, so this fallback is only
+/// reachable on a state whose layers have not run.)
+#[test]
+fn bare_subtype_artifact_land_planning_blocked_by_cant_be_activated() {
+    let mut state = setup_game_at_main_phase();
+    let forest = add_bare_subtype_forest(&mut state, PlayerId(0), 0xF012B);
+    state
+        .objects
+        .get_mut(&forest)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Artifact);
+
+    let aura_sources = crate::game::mana_sources::taps_for_mana_trigger_sources(&state);
+    let planning = |state: &GameState| {
+        crate::game::mana_sources::auto_tap_land_mana_options_indexed(
+            state,
+            forest,
+            PlayerId(0),
+            &aura_sources,
+        )
+    };
+
+    assert!(
+        !planning(&state).is_empty(),
+        "control: without a prohibition the bare-subtype artifact land plans a mana option"
+    );
+
+    add_cant_be_activated_source(
+        &mut state,
+        PlayerId(1),
+        ProhibitionScope::AllPlayers,
+        TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+    );
+    assert!(
+        planning(&state).is_empty(),
+        "Collector Ouphe class: planning must not offer the artifact land's intrinsic mana ability"
+    );
+}
+
 // === CR 605.1a: Pithing Needle mana-ability exemption gate ===
 
 /// Build a Llanowar-Elves-style mana ability: `{T}: Add {G}` (no targets, produces mana).

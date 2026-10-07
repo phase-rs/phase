@@ -5140,13 +5140,12 @@ fn bind_triggering_player_controller(filter: &TargetFilter, player: PlayerId) ->
     }
 }
 
-/// CR 606.2 + CR 109.5 + CR 603.2: Matches when a player activates a loyalty
-/// ability (a planeswalker ability paid with loyalty counters). Listens to
-/// `GameEvent::AbilityActivated` filtered to `ActivatedAbilityKind::Loyalty`.
-/// CR 109.5: the activating player must be the controller of the trigger source
-/// ("Whenever **you** activate a loyalty ability …"). The activated planeswalker
-/// is filtered via `valid_card` ("a Chandra planeswalker", "enchanted
-/// planeswalker"). Modeled on `match_keyword_ability_activated`.
+/// CR 606.2: a loyalty ability has a loyalty symbol in its cost.
+/// CR 603.2: pending activation events trigger when their actor and source match.
+/// CR 109.5: actor scopes are relative to the trigger source's controller;
+/// legacy absent actor scope retains the implicit "you" convention.
+/// Optional `valid_card` independently filters the activated source (for example,
+/// a Chandra planeswalker or the enchanted planeswalker).
 pub(super) fn match_loyalty_ability_activated(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -5166,8 +5165,11 @@ pub(super) fn match_loyalty_ability_activated(
     if !trigger_state.is_pending() {
         return false;
     }
-    // CR 109.5: "you" = the controller of the trigger source.
-    if source_context.source_read(state).controller() != *player_id {
+    let actor_matches = match trigger.valid_target.as_ref() {
+        Some(_) => valid_player_matches(trigger, state, *player_id, source_context),
+        None => source_context.source_read(state).controller() == *player_id,
+    };
+    if !actor_matches {
         return false;
     }
     valid_card_matches(trigger, state, *activated_id, source_context)
@@ -7837,6 +7839,105 @@ mod tests {
         ));
     }
 
+    /// CR 102.3 + CR 109.5: actor filters use controller-relative team relations.
+    #[test]
+    fn loyalty_ability_activation_actor_scopes_and_event_guards() {
+        let mut scenario = crate::game::scenario::GameScenario::new_with_format(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        let source = scenario
+            .add_creature(PlayerId(0), "Scope source", 3, 3)
+            .id();
+        let walker = scenario
+            .add_creature(PlayerId(2), "Walker", 0, 0)
+            .as_planeswalker_with_loyalty("Chandra", 5)
+            .id();
+        let other = scenario
+            .add_creature(PlayerId(2), "Other walker", 0, 0)
+            .as_planeswalker_with_loyalty("Jace", 5)
+            .id();
+        let runner = scenario.build();
+        let state = runner.state();
+        let context = test_trigger_source_context(state, source);
+        let mut trigger = make_trigger(TriggerMode::LoyaltyAbilityActivated);
+        for (scope, expected) in [
+            (Some(TargetFilter::Controller), [true, false, false]),
+            (None, [true, false, false]),
+            (Some(TargetFilter::Player), [true, true, true]),
+            (
+                Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                )),
+                [false, false, true],
+            ),
+        ] {
+            trigger.valid_target = scope;
+            for (actor, wanted) in expected.into_iter().enumerate() {
+                let mut event = GameEvent::AbilityActivated {
+                    player_id: PlayerId(actor as u8),
+                    source_id: walker,
+                    kind: crate::types::events::ActivatedAbilityKind::Loyalty,
+                    departed_source_lki: None,
+                    trigger_state: crate::types::events::ActivationTriggerState::Pending,
+                };
+                assert_eq!(
+                    match_loyalty_ability_activated(&event, &trigger, &context, state),
+                    wanted
+                );
+                if wanted {
+                    trigger.valid_card = Some(TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Planeswalker).subtype("Chandra".to_string()),
+                    ));
+                    assert!(match_loyalty_ability_activated(
+                        &event, &trigger, &context, state
+                    ));
+                    if let GameEvent::AbilityActivated { source_id, .. } = &mut event {
+                        *source_id = other;
+                    }
+                    assert!(!match_loyalty_ability_activated(
+                        &event, &trigger, &context, state
+                    ));
+                    if let GameEvent::AbilityActivated { source_id, .. } = &mut event {
+                        *source_id = walker;
+                    }
+                    trigger.valid_card = None;
+                    // Every guard negative has its matching pending Loyalty positive.
+                    for kind in [
+                        crate::types::events::ActivatedAbilityKind::Normal,
+                        crate::types::events::ActivatedAbilityKind::Mana,
+                    ] {
+                        if let GameEvent::AbilityActivated {
+                            kind: event_kind, ..
+                        } = &mut event
+                        {
+                            *event_kind = kind;
+                        }
+                        assert!(!match_loyalty_ability_activated(
+                            &event, &trigger, &context, state
+                        ));
+                    }
+                    if let GameEvent::AbilityActivated {
+                        kind,
+                        trigger_state,
+                        ..
+                    } = &mut event
+                    {
+                        *kind = crate::types::events::ActivatedAbilityKind::Loyalty;
+                        *trigger_state =
+                            crate::types::events::ActivationTriggerState::CollectedAtActivation {
+                                observers: crate::types::events::ActivationObservers::Bound,
+                            };
+                    }
+                    assert!(!match_loyalty_ability_activated(
+                        &event, &trigger, &context, state
+                    ));
+                }
+            }
+        }
+    }
+
     /// CR 303.4b + CR 303.4m: Elspeth's / Rowan's Talent — the loyalty ability of
     /// the ENCHANTED planeswalker fires; a different (non-host) planeswalker does
     /// not. `valid_card == AttachedTo` resolves against the aura's host.
@@ -7857,32 +7958,31 @@ mod tests {
         let mut trigger = make_trigger(TriggerMode::LoyaltyAbilityActivated);
         trigger.valid_card = Some(TargetFilter::AttachedTo);
 
-        // Loyalty ability of the enchanted host fires.
-        assert!(match_loyalty_ability_activated(
-            &GameEvent::AbilityActivated {
-                player_id: PlayerId(0),
-                source_id: host,
+        for actor_scope in [Some(TargetFilter::Controller), None] {
+            trigger.valid_target = actor_scope;
+            state.objects.get_mut(&host).unwrap().controller = PlayerId(0);
+            let event = |player_id, source_id| GameEvent::AbilityActivated {
+                player_id,
+                source_id,
                 kind: crate::types::events::ActivatedAbilityKind::Loyalty,
                 departed_source_lki: None,
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
-            },
-            &trigger,
-            &test_trigger_source_context(&state, talent),
-            &state
-        ));
-        // Loyalty ability of a different planeswalker does not fire.
-        assert!(!match_loyalty_ability_activated(
-            &GameEvent::AbilityActivated {
-                player_id: PlayerId(0),
-                source_id: other,
-                kind: crate::types::events::ActivatedAbilityKind::Loyalty,
-                departed_source_lki: None,
-                trigger_state: crate::types::events::ActivationTriggerState::Pending,
-            },
-            &trigger,
-            &test_trigger_source_context(&state, talent),
-            &state
-        ));
+            };
+            let matches = |state: &GameState, player, source| {
+                match_loyalty_ability_activated(
+                    &event(player, source),
+                    &trigger,
+                    &test_trigger_source_context(state, talent),
+                    state,
+                )
+            };
+            // CR 303.4b + CR 109.5: the host positive guards both boundaries.
+            assert!(matches(&state, PlayerId(0), host));
+            assert!(!matches(&state, PlayerId(0), other));
+            // Preserve Aura controller and attachment; the actor alone differs.
+            state.objects.get_mut(&host).unwrap().controller = PlayerId(1);
+            assert!(!matches(&state, PlayerId(1), host));
+        }
     }
 
     #[test]

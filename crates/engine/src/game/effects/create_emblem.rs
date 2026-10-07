@@ -653,20 +653,22 @@ mod tests {
             Zone::Battlefield,
         );
         let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&donor]);
-        let copy_id = state.add_transient_continuous_effect(
-            source_id,
-            PlayerId(0),
-            Duration::Permanent,
-            TargetFilter::SpecificObject { id: source_id },
-            vec![ContinuousModification::CopyValues {
-                values: Box::new(values),
-                display_source: crate::game::game_object::DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
-            }],
-            None,
-        );
+        let copy_id = state
+            .add_transient_continuous_effect(
+                source_id,
+                PlayerId(0),
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id: source_id },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(values),
+                    display_source: crate::game::game_object::DisplaySource::Card,
+                    printed_ref: None,
+                    token_image_ref: None,
+                    token_art: None,
+                }],
+                None,
+            )
+            .expect("the fixture's duration begins");
         crate::game::layers::mark_layers_full(&mut state);
         crate::game::layers::flush_layers(&mut state);
         assert_eq!(

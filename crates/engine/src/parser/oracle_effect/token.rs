@@ -4035,9 +4035,13 @@ mod kazar_token_landfall_tests {
     /// `GrantAbility(Unimplemented)`.
     #[test]
     fn catalog_landfall_rules_text_classifies_as_grant_trigger() {
-        let rules_text =
-            "Landfall — Whenever a land you control enters, put a +1/+1 counter on Zabu.";
-        let mods = crate::parser::oracle_static::classify_quoted_inner(rules_text);
+        // Mirror the runtime path (`catalog_rules_text_abilities`), which
+        // normalizes the token's name to `~` before classification (CR 201.5).
+        let rules_text = crate::parser::oracle_util::normalize_card_name_refs(
+            "Landfall — Whenever a land you control enters, put a +1/+1 counter on Zabu.",
+            "Zabu",
+        );
+        let mods = crate::parser::oracle_static::classify_quoted_inner(&rules_text);
         assert!(
             mods.iter()
                 .any(|m| matches!(m, ContinuousModification::GrantTrigger { .. })),

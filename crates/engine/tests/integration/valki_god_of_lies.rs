@@ -2462,20 +2462,23 @@ fn tibalt_later_copy_effect_exile_does_not_feed_emblem() {
     // Copy effect D: Tibalt becomes a copy of the donor (CR 707.2).
     let values =
         engine::game::printed_cards::intrinsic_copiable_values(&runner.state().objects[&donor]);
-    let copy_id = runner.state_mut().add_transient_continuous_effect(
-        tibalt,
-        P0,
-        Duration::Permanent,
-        TargetFilter::SpecificObject { id: tibalt },
-        vec![ContinuousModification::CopyValues {
-            values: Box::new(values),
-            display_source: engine::game::game_object::DisplaySource::Card,
-            printed_ref: None,
-            token_image_ref: None,
-            token_art: None,
-        }],
-        None,
-    );
+    let copy_id = runner
+        .state_mut()
+        .add_transient_continuous_effect(
+            tibalt,
+            P0,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: tibalt },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display_source: engine::game::game_object::DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+                token_art: None,
+            }],
+            None,
+        )
+        .expect("the fixture's duration begins");
     engine::game::layers::mark_layers_full(runner.state_mut());
     engine::game::layers::flush_layers(runner.state_mut());
     let object = &runner.state().objects[&tibalt];
