@@ -3614,8 +3614,9 @@ fn resolve_bulk_members(
     // CR 613.1d + CR 704.5j + CR 704.5k: a continuous effect can make the
     // token legendary or world in layer 4 though its printed spec is neither.
     // Member 1's token alone trips neither rule, but member 2's identical
-    // token would at member 2's checkpoint; the fixed point above gives every
-    // later member's token the layered supertypes member 1's has.
+    // token would at member 2's checkpoint. With the fixed point above and
+    // `entry_perturbs_layer_reads` below, every later member's token gets the
+    // layered supertypes member 1's has.
     if produced.iter().any(|id| {
         bulk.objects.get(id).is_some_and(|obj| {
             effects::token::has_pairwise_sba_supertype(&obj.card_types.supertypes)
