@@ -2233,6 +2233,20 @@ pub(super) fn parse_definite_parent_reference<'a>(
     if !tail.is_empty() && nom_target::parse_type_filter_word(tail).is_ok() {
         return None;
     }
+    // CR 601.2c + CR 608.2c: a controller qualifier belongs to the anaphor's
+    // noun phrase ("the creature you control", "the chosen creature an opponent
+    // controls"). It narrows which declared slot is named, so two same-typed
+    // slots that differ only by controller still resolve to exactly one, and
+    // the qualifier is consumed with the anaphor instead of being left behind.
+    let (rest, controller) = opt(preceded(
+        space1,
+        terminated(
+            nom_filter::parse_zone_controller,
+            not(satisfy(|c: char| c.is_alphanumeric())),
+        ),
+    ))
+    .parse(rest)
+    .ok()?;
     // CR 601.2c: each anaphor names exactly one earlier slot — bind only a
     // UNIQUE match; zero or ≥2 matches fall through as `None`.
     let mut matched: Option<usize> = None;
@@ -2241,7 +2255,10 @@ pub(super) fn parse_definite_parent_reference<'a>(
     // reachable only from the demonstrative-route gate in `conditions.rs`.
     let anaphor_noun = AnaphorNoun::Type(anaphor_type);
     for (index, slot) in slots.iter().enumerate() {
-        if slot_matches_anaphor(&anaphor_noun, zone_class, slot) {
+        let controller_matches = controller.as_ref().is_none_or(
+            |ctrl| matches!(slot, TargetFilter::Typed(tf) if tf.controller.as_ref() == Some(ctrl)),
+        );
+        if controller_matches && slot_matches_anaphor(&anaphor_noun, zone_class, slot) {
             if matched.is_some() {
                 return None;
             }
@@ -14325,6 +14342,53 @@ mod tests {
         ];
         assert_eq!(
             parse_definite_parent_reference("the creature and it fights", &two_creatures),
+            None
+        );
+    }
+
+    #[test]
+    fn definite_reference_controller_qualifier_disambiguates_and_is_consumed() {
+        // CR 601.2c + CR 608.2c: two creature slots that differ only by
+        // controller tie on the bare noun (see the ambiguous test above); the
+        // printed controller qualifier names exactly one and is consumed with
+        // the anaphor.
+        let you_vs_opponent = vec![
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::You),
+                properties: vec![],
+            }),
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::Opponent),
+                properties: vec![],
+            }),
+        ];
+        for (input, index, rest) in [
+            ("the creature you control", 0, ""),
+            (
+                "the chosen creature you control if it fights",
+                0,
+                " if it fights",
+            ),
+            ("the creature an opponent controls", 1, ""),
+            ("the creature you don't control.", 1, "."),
+        ] {
+            assert_eq!(
+                parse_definite_parent_reference(input, &you_vs_opponent),
+                Some((TargetFilter::ParentTargetSlot { index }, rest)),
+                "{input}"
+            );
+        }
+        // A qualifier that names no declared slot never guesses one.
+        let you_only = vec![you_vs_opponent[0].clone()];
+        assert_eq!(
+            parse_definite_parent_reference("the creature an opponent controls", &you_only),
+            None
+        );
+        // A longer word sharing the qualifier's prefix is not the qualifier.
+        assert_eq!(
+            parse_definite_parent_reference("the creature you controlled", &you_vs_opponent),
             None
         );
     }

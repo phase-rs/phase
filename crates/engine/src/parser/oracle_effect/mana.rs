@@ -2499,12 +2499,26 @@ pub(super) fn parse_mana_spell_grant(lower: &str) -> Option<Vec<ManaSpellGrant>>
     None
 }
 
-/// CR 106.6: Parse "If that mana is spent on an instant or sorcery spell,
+/// CR 106.6 + CR 106.6a: an additional effect on the spell the mana is spent on is
+/// created separately for each mana produced, so 'any of that mana' (multi-mana
+/// producers) and 'that mana' name the same per-unit event (Scryfall rulings: split
+/// across two creature spells, each gains haste).
+fn parse_if_that_mana_is_spent_on(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            tag("if "),
+            opt(tag("any of ")),
+            tag("that mana is spent on "),
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 106.6: Parse "If [any of] that mana is spent on an instant or sorcery spell,
 /// that spell can't be countered" (Boseiju, Who Shelters All).
 fn parse_conditional_cant_be_countered_grant(lower: &str) -> Option<ManaSpellGrant> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("if that mana is spent on ")
-        .parse(lower)
-        .ok()?;
+    let (rest, ()) = parse_if_that_mana_is_spent_on(lower).ok()?;
     let (rest, filter_text) = terminated(
         take_until::<_, _, OracleError<'_>>(", that spell can't be countered"),
         tag(", that spell can't be countered"),
@@ -2561,11 +2575,12 @@ fn parse_conditional_enters_with_counters_grant(lower: &str) -> Option<ManaSpell
 /// CR 106.6 + CR 702.10: Parse mana-rider keyword grants:
 /// - "If that mana is spent on a Dragon creature spell, it gains haste until end of turn."
 /// - "If that mana is spent on a creature spell, it gains haste." (Hall of the Bandit Lord)
+/// - "If any of that mana is spent on a creature spell, it gains haste until end of turn."
+///   (Arena of Glory, Generator Servant — CR 106.6a: one effect per mana unit, so spending
+///   any unit on a creature spell grants it)
 fn parse_conditional_keyword_grant(lower: &str) -> Option<ManaSpellGrant> {
     let trimmed = lower.trim().trim_end_matches('.');
-    let (rest, _) = tag::<_, _, OracleError<'_>>("if that mana is spent on ")
-        .parse(trimmed)
-        .ok()?;
+    let (rest, ()) = parse_if_that_mana_is_spent_on(trimmed).ok()?;
     let (rest, _) = opt(alt((tag::<_, _, OracleError<'_>>("a "), tag("an "))))
         .parse(rest)
         .ok()?;
@@ -4019,6 +4034,74 @@ mod tests {
                 duration: Box::new(Duration::Permanent),
             }]
         );
+    }
+
+    /// CR 106.6 + CR 106.6a: Arena of Glory / Generator Servant — "any of that
+    /// mana" opens the same per-unit keyword grant as "that mana". The quantifier
+    /// axis is closed: only "any of" is accepted, so "all of" and the malformed
+    /// "any that" stay unparsed rather than claiming semantics no card defines.
+    #[test]
+    fn parses_any_of_that_mana_keyword_grant() {
+        let grants = parse_mana_spell_grant(
+            "if any of that mana is spent on a creature spell, it gains haste until end of turn.",
+        );
+        assert_eq!(
+            grants,
+            Some(vec![ManaSpellGrant::AddKeywordUntilEndOfTurn {
+                keyword: crate::types::keywords::Keyword::Haste,
+                restriction: Some(ManaRestriction::OnlyForSpellType("Creature".to_string())),
+                duration: Box::new(Duration::UntilEndOfTurn),
+            }])
+        );
+
+        assert_eq!(
+            parse_mana_spell_grant(
+                "if all of that mana is spent on a creature spell, it gains haste until end of turn.",
+            ),
+            None,
+            "only the 'any of' quantifier is accepted"
+        );
+        assert_eq!(
+            parse_mana_spell_grant(
+                "if any that mana is spent on a creature spell, it gains haste until end of turn.",
+            ),
+            None,
+            "the quantifier must be the complete phrase 'any of'"
+        );
+
+        // Reach-guard: the shared opening still serves the unquantified
+        // phrasing (Hall of the Bandit Lord) with its exact current grant.
+        assert_eq!(
+            parse_mana_spell_grant("if that mana is spent on a creature spell, it gains haste."),
+            Some(vec![ManaSpellGrant::AddKeywordUntilEndOfTurn {
+                keyword: crate::types::keywords::Keyword::Haste,
+                restriction: Some(ManaRestriction::OnlyForSpellType("Creature".to_string())),
+                duration: Box::new(Duration::Permanent),
+            }])
+        );
+    }
+
+    /// CR 106.6 + CR 106.6a: the can't-be-countered rider shares the same
+    /// opening, so "any of that mana" yields exactly Boseiju's grant.
+    #[test]
+    fn parses_any_of_that_mana_cant_be_countered_grant() {
+        let boseiju = parse_mana_spell_grant(
+            "if that mana is spent on an instant or sorcery spell, that spell can't be countered",
+        );
+        assert!(
+            matches!(
+                boseiju.as_deref(),
+                Some([ManaSpellGrant::CantBeCountered {
+                    filter: TargetFilter::Or { .. }
+                }])
+            ),
+            "Boseiju's phrasing must keep its instant-or-sorcery grant, got {boseiju:?}"
+        );
+
+        let quantified = parse_mana_spell_grant(
+            "if any of that mana is spent on an instant or sorcery spell, that spell can't be countered",
+        );
+        assert_eq!(quantified, boseiju);
     }
 
     /// CR 106.6 + CR 205.3m + CR 903.3: Path of Ancestry's passive-voice

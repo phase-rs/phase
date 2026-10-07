@@ -1170,10 +1170,16 @@ fn open_resolution_cast_window(
     // concrete member pool already proves it, while re-evaluating it later
     // would read a different linked-exile snapshot.  The residual filter and
     // fixed constraint are the one policy every projected face must satisfy.
+    //
+    // CR 608.2c: a bare `ParentTarget` anaphor ("one of those two cards" —
+    // Invasion of Alara) is discharged the same way: the pool IS the batch the
+    // chain handed over, and the persisted window has no parent to re-read.
     let window_filter = if target_filter.references_exiled_by_source() {
         target_filter
             .without_exile_anaphor()
             .unwrap_or(TargetFilter::Any)
+    } else if matches!(target_filter, TargetFilter::ParentTarget) {
+        TargetFilter::Any
     } else {
         target_filter.clone()
     };
@@ -1869,19 +1875,10 @@ pub(crate) fn graveyard_destination_rider(
             target: TargetFilter::ParentTarget,
             ..
         } => Some(SpellStackToGraveyardReplacement::Exile),
-        // ISSUE #8721, MEASURED AND REJECTED: this arm also swallows Invasion of
-        // Alara's printed "Put one of them into your hand." — an unconditional
-        // move of the OTHER exiled card, not a graveyard replacement. Gating the
-        // arm on the "if you don't cast it" condition (which the four genuine
-        // members carry and Invasion of Alara does not) does let that
-        // instruction run — and it then moves the WRONG object: with no chosen
-        // target on the head, `ParentTarget` binds to the source, and the Siege
-        // returns itself to its owner's hand. Measured end-to-end through
-        // `GameScenario`/`GameRunner`, both accept and decline.
-        //
-        // So the classification stays as it is and the swallowed instruction is
-        // carried as a named gap: repairing it needs the `ParentTarget` binding
-        // fixed first, which is a separate unit with its own gate run.
+        // Invasion of Alara's "Put one of them into your hand." is not such a
+        // rider: it lowers to a choice from the cards its exile loop found
+        // (`ZoneChoiceCandidateSource::ParentTargets`) and never reaches this arm
+        // (issue #8750).
         Effect::ChangeZone {
             destination: Zone::Hand,
             target: TargetFilter::ParentTarget,

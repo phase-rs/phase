@@ -909,6 +909,29 @@ fn forwarded_zone_result_from_events<'a>(
     }
 }
 
+/// CR 400.7j + CR 608.2c: only the producer's immediate grant names its
+/// first result. Later source SelfRefs retain their own source authority.
+fn bind_forwarded_generic_self_ref(child: &mut ResolvedAbility) {
+    if let Effect::GenericEffect {
+        static_abilities,
+        target,
+        ..
+    } = &mut child.effect
+    {
+        for static_def in static_abilities {
+            if matches!(
+                effect::generic_effect_application_filter(
+                    target.as_ref(),
+                    static_def.affected.as_ref()
+                ),
+                Some(TargetFilter::SelfRef)
+            ) {
+                static_def.affected = Some(TargetFilter::ParentTargetSlot { index: 0 });
+            }
+        }
+    }
+}
+
 /// CR 400.7j: point a `forward_result` child at the objects its producer moved,
 /// keeping the producer's pre-move identity where the child names it. Returns
 /// the Attach attachment candidates drawn from the moved set.
@@ -919,6 +942,7 @@ fn rebind_child_to_forwarded_objects(
     producer_targets: &[TargetRef],
     moved: &[ObjectId],
 ) -> Vec<crate::types::identifiers::ObjectIncarnationRef> {
+    bind_forwarded_generic_self_ref(child);
     if moved.is_empty() {
         return Vec::new();
     }
@@ -1059,6 +1083,9 @@ fn park_forwarded_zone_result_on_active_continuation(
     {
         return;
     }
+    if let Some(frame) = state.active_ability_continuation_frame_mut() {
+        bind_forwarded_generic_self_ref(&mut frame.pending.chain);
+    }
     let marker = pending_forwarded_zone_result(state, ability.source_id);
     let result = forwarded_zone_result_from_events(state, None, producer_events.iter());
     if marker.group.is_some()
@@ -1106,6 +1133,7 @@ pub(crate) fn settle_empty_forwarded_zone_result(state: &mut GameState, producer
             .as_ref()
             .is_some_and(|marker| marker.producer == producer)
         {
+            bind_forwarded_generic_self_ref(child);
             child.context.pending_forwarded_zone_result = None;
             child.context.forwarded_result_context = Some(Box::new(ForwardedResultContext {
                 targets: Vec::new(),
@@ -1240,7 +1268,9 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             .map(|ctx| super::triggers::push_resolving_trigger_context(state, ctx));
         let mut chain = chain;
         // An unsettled moved-object referent must never fall back to the original source.
-        if chain.context.pending_forwarded_zone_result.take().is_some() {
+        if chain.context.pending_forwarded_zone_result.is_some() {
+            bind_forwarded_generic_self_ref(&mut chain);
+            chain.context.pending_forwarded_zone_result = None;
             chain.context.forwarded_result_context = Some(Box::new(ForwardedResultContext {
                 targets: Vec::new(),
                 object_incarnations: Vec::new(),
@@ -1250,7 +1280,10 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             if bound_result_is_empty(&chain)
                 && ability_chain_depends_on_missing_forward_result(&chain)
             {
-                if let Some(remaining) = without_missing_forward_result_dependencies(&chain) {
+                if let Some(mut remaining) = without_missing_forward_result_dependencies(&chain) {
+                    // CR 608.2c: Preserve the completed result when pruning resumes at an independent sibling.
+                    remaining.context.forwarded_result_context =
+                        chain.context.forwarded_result_context.clone();
                     let _ = resolve_ability_chain(state, &remaining, events, 1);
                 }
             } else {
@@ -3975,7 +4008,9 @@ fn resolve_sub_with_missing_forward_result(
     events: &mut Vec<GameEvent>,
     depth: u32,
 ) -> Result<(), EffectError> {
-    if let Some(mut remaining) = without_missing_forward_result_dependencies(sub) {
+    let mut bound_sub = sub.clone();
+    bind_forwarded_generic_self_ref(&mut bound_sub);
+    if let Some(mut remaining) = without_missing_forward_result_dependencies(&bound_sub) {
         apply_parent_chain_context(&mut remaining, ability, effect_context_object, state);
         remaining.context.forwarded_result_context = Some(Box::new(
             ForwardedResultContext::from_object_ids(state, &[]),
@@ -14787,23 +14822,19 @@ fn is_bound_attach_remainder_for(pending: &PendingContinuation, ability: &Resolv
 /// - `CreateDelayedTrigger` — Helmut Zemo, driven in
 ///   `cast_this_way_gate_8721::zemo_pays_out_the_counter_once_the_granted_spell_is_actually_cast`.
 ///
-/// Absent on purpose: `PutAtLibraryPosition` (Invasion of Alara) and `CopySpell`
-/// (Finale of Promise). Both are single-link tails, so the rule above would
-/// admit them — and for both, admitting them is measurably WRONG, not merely
-/// unmeasured. That is the first reason and it is stated first, because "no
-/// runtime evidence" alone would be the excuse rule L3 rejects:
+/// Absent on purpose: `PutAtLibraryPosition` and `CopySpell` (Finale of
+/// Promise). Both are single-link tails, so the rule above would admit them:
 ///
-/// - Invasion of Alara's tail is `PutAtLibraryPosition { target: ExiledBySource,
-///   count: Ref(CardsExiledBySource) }` — it names EVERY card the source exiled,
-///   not "the other cards", so running it would also bottom the card the player
-///   may still cast under the permission it just granted.
+/// - `PutAtLibraryPosition`: no card reaches this branch with it. Invasion of
+///   Alara, the one that did, casts from a window over the cards its exile loop
+///   found and bottoms the rest itself (issue #8750), so there is no card to
+///   drive this family with.
 /// - Finale of Promise's tail targets `TrackedSetFiltered { id: 0 }`, the
 ///   parser's sentinel, whose documented fallback in
 ///   `targeting::resolve_tracked_set_id` is the latest non-empty published set —
-///   so it can copy an unrelated set from earlier in the same resolution.
+///   so it can copy an unrelated set from earlier in the same resolution, and
+///   it could not be driven to its tail in a `GameScenario` (issue #8750).
 ///
-/// The second reason is that neither could be driven to its tail in a
-/// `GameScenario`, so neither repair can be measured here either (issue #8750).
 /// Adding a variant to this list without a test that fails when the branch is
 /// reverted is the mistake it was introduced to prevent.
 /// CR 603.7 + CR 608.2g: after a `CastFromZone` head's tail ran inline behind
@@ -18133,6 +18164,7 @@ fn resolve_chain_body(
                 state,
             );
             if forwards_battlefield_move(ability) {
+                bind_forwarded_generic_self_ref(&mut sub_clone);
                 let marker = pending_forwarded_zone_result(state, ability.source_id);
                 let result =
                     forwarded_zone_result_from_events(state, None, events[events_before..].iter());
@@ -18282,6 +18314,13 @@ fn resolve_chain_body(
             }
         }
 
+        let bound_sub = ability.forward_result.then(|| {
+            let mut bound_sub = sub.clone();
+            bind_forwarded_generic_self_ref(&mut bound_sub);
+            bound_sub
+        });
+        let sub = bound_sub.as_ref().unwrap_or(sub);
+
         // CR 608.2c + CR 609.3: A zone-choice partition already bound this sub's
         // complement, and that binding is EMPTY — the pick exhausted the eligible
         // pool, so "the other" names no object at all
@@ -18295,10 +18334,7 @@ fn resolve_chain_body(
         // vec is indistinguishable from "unassigned" and the seams below hand the
         // clause the CHOSEN half (or, once `targets` stays empty, the ability
         // source) as its referent.
-        if sub.targets.is_empty()
-            && bound_result_is_empty(sub)
-            && ability_chain_depends_on_missing_forward_result(sub)
-        {
+        if sub.targets.is_empty() && bound_result_is_empty(sub) {
             return resolve_sub_with_missing_forward_result(
                 state,
                 ability,
@@ -18958,7 +18994,9 @@ fn effect_chain_depends_on_missing_forward_result(effect: &Effect) -> bool {
 /// which filter governs where a static's modifications land — never the outer
 /// `target` slot, because an inherited-reference `affected` overrides that slot.
 ///
-/// Dependency is decided by [`filter_requires_missing_forward_result`]. Every
+/// Exact source SelfRef is independent; an immediate forwarded grant has
+/// already become ParentTargetSlot and depends on that result. Composite
+/// dependency is decided by [`filter_requires_missing_forward_result`]. Every
 /// other effective filter is independent here — the resolution-local inherited
 /// references (`TriggeringSource`, `CostPaidObject`, `AmassedArmy`) bind from
 /// the ability's own event / cost / amass context, and a `ParentTarget` that
@@ -18970,15 +19008,19 @@ fn generic_static_depends_on_missing_forward_result(
     target: Option<&TargetFilter>,
     static_def: &StaticDefinition,
 ) -> bool {
-    effect::generic_effect_application_filter(target, static_def.affected.as_ref())
-        .is_some_and(filter_requires_missing_forward_result)
+    match effect::generic_effect_application_filter(target, static_def.affected.as_ref()) {
+        Some(TargetFilter::SelfRef) => false,
+        Some(TargetFilter::ParentTargetSlot { .. }) => true,
+        Some(filter) => filter_requires_missing_forward_result(filter),
+        None => false,
+    }
 }
 
 /// CR 608.2c: Does this application filter *require* the object the preceding
 /// forward-result instruction failed to produce?
 ///
-/// `SelfRef` is the printed-name anaphor, which in a forward-result
-/// continuation can only mean that object. A conjunction inherits the
+/// Within a composite filter, a SelfRef requirement retains the existing
+/// missing-result dependency contract. A conjunction inherits the
 /// dependency of any member: `And` is satisfied only when EVERY member matches,
 /// so a `SelfRef` member leaves the whole filter unsatisfiable without the
 /// forwarded object. Nesting falls out of the recursion.
@@ -21831,9 +21873,9 @@ mod tests {
         let helmut_zemo = effect(
             r#"{"type":"CreateDelayedTrigger","condition":{"type":"WhenNextEvent","trigger":{"mode":"SpellCast","valid_card":{"type":"ParentTarget"},"valid_target":{"type":"Controller"}},"or_trigger":null},"effect":{"kind":"Spell","effect":{"type":"PutCounter","counter_type":"P1P1","count":{"type":"Fixed","value":1},"target":{"type":"SelfRef"}}},"uses_tracked_set":false}"#,
         );
-        // Invasion of Alara — reaches the branch, but could not be driven to its
-        // tail in a `GameScenario`, so its behaviour must stay as it is on main.
-        let invasion_of_alara = effect(
+        // A bottom-of-library tail: no card reaches the branch with one since
+        // Invasion of Alara's cast became a window (issue #8750).
+        let bottom_of_library = effect(
             r#"{"type":"PutAtLibraryPosition","target":{"type":"ExiledBySource"},"count":{"type":"Ref","qty":{"type":"CardsExiledBySource"}},"position":{"type":"Bottom"}}"#,
         );
         // Finale of Promise — likewise, and its `TrackedSetFiltered` target reads
@@ -21851,9 +21893,8 @@ mod tests {
             "CreateDelayedTrigger is driven end to end and must stay in the allowlist"
         );
         assert!(
-            !tail_family_has_runtime_evidence(&invasion_of_alara),
-            "PutAtLibraryPosition has no test that fails when the branch is reverted — \
-             admitting it would change Invasion of Alara on an unmeasured path (issue #8750)"
+            !tail_family_has_runtime_evidence(&bottom_of_library),
+            "PutAtLibraryPosition has no test that fails when the branch is reverted"
         );
         assert!(
             !tail_family_has_runtime_evidence(&finale_of_promise),
@@ -26952,6 +26993,1171 @@ mod tests {
         .sub_ability(sub_ability);
         ability.forward_result = true;
         ability
+    }
+
+    fn forwarded_test_grant(source: ObjectId, keyword: Keyword) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .modifications(vec![ContinuousModification::AddKeyword { keyword }])],
+                duration: None,
+                target: Some(TargetFilter::SelfRef),
+                end_cost: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+    }
+
+    fn forwarded_test_objects() -> (GameState, ObjectId, ObjectId, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let returned = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Returned".into(),
+            Zone::Graveyard,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(102),
+            PlayerId(0),
+            "Other".into(),
+            Zone::Graveyard,
+        );
+        for id in [source, returned, other] {
+            let object = state.objects.get_mut(&id).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+            object.base_power = Some(2);
+            object.base_toughness = Some(2);
+        }
+        (state, source, returned, other)
+    }
+
+    fn has_forwarded_test_grant(state: &GameState, id: ObjectId, keyword: Keyword) -> bool {
+        state.transient_continuous_effects.iter().any(|effect| {
+            effect.affected == (TargetFilter::SpecificObject { id })
+                && effect
+                    .modifications
+                    .contains(&ContinuousModification::AddKeyword {
+                        keyword: keyword.clone(),
+                    })
+        })
+    }
+
+    fn assert_forwarded_source_frame(state: &GameState, source: ObjectId, result: &[ObjectId]) {
+        let ability = &state
+            .active_optional_effect_frame()
+            .expect("later source grant must reach its actual optional frame")
+            .ability;
+        assert_eq!(ability.source_id, source);
+        assert_eq!(
+            ability.source_incarnation,
+            Some(state.objects[&source].incarnation)
+        );
+        assert!(ability.source_is_current(state));
+        let context = ability
+            .context
+            .forwarded_result_context
+            .as_ref()
+            .expect("completed result is inherited");
+        assert_eq!(
+            context.targets,
+            result
+                .iter()
+                .map(|id| TargetRef::Object(*id))
+                .collect::<Vec<_>>()
+        );
+        assert!(context
+            .object_incarnations
+            .iter()
+            .all(|pin| pin.is_current(state)));
+        let Effect::GenericEffect {
+            target,
+            static_abilities,
+            ..
+        } = &ability.effect
+        else {
+            panic!("later node must remain GenericEffect")
+        };
+        assert_eq!(
+            effect::generic_effect_application_filter(
+                target.as_ref(),
+                static_abilities[0].affected.as_ref()
+            ),
+            Some(&TargetFilter::SelfRef)
+        );
+    }
+
+    #[test]
+    fn forwarded_grant_keeps_independent_original_source_self_ref() {
+        let (mut state, source, returned, _) = forwarded_test_objects();
+        let mut later = forwarded_test_grant(source, Keyword::Flying);
+        later.optional = true;
+        later.sub_link = SubAbilityLink::SequentialSibling;
+        let immediate = forwarded_test_grant(source, Keyword::Haste).sub_ability(later);
+        let mut producer = forwarding_zone_change(
+            source,
+            returned,
+            vec![TargetRef::Object(returned)],
+            immediate,
+        );
+        producer.set_source_incarnation_recursive(Some(state.objects[&source].incarnation));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &producer, &mut events, 0).unwrap();
+        assert_outer_forwarded_result(&events, returned);
+        assert!(has_forwarded_test_grant(&state, returned, Keyword::Haste));
+        assert_forwarded_source_frame(&state, source, &[returned]);
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+        assert!(has_forwarded_test_grant(&state, source, Keyword::Flying));
+        assert!(!has_forwarded_test_grant(&state, returned, Keyword::Flying));
+        assert!(!has_forwarded_test_grant(&state, source, Keyword::Haste));
+    }
+
+    #[test]
+    fn empty_forwarded_generic_grant_keeps_later_source_self_ref() {
+        for delivers in [true, false] {
+            let (mut state, source, returned, _) = forwarded_test_objects();
+            let returned_incarnation = state.objects[&returned].incarnation;
+            let mut later = forwarded_test_grant(source, Keyword::Flying);
+            later.optional = true;
+            later.sub_link = SubAbilityLink::SequentialSibling;
+            let dependent = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 7 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+            .sub_ability(later);
+            let immediate = forwarded_test_grant(source, Keyword::Haste).sub_ability(dependent);
+            let mut producer = forwarding_zone_change(
+                source,
+                returned,
+                if delivers {
+                    vec![TargetRef::Object(returned)]
+                } else {
+                    vec![]
+                },
+                immediate,
+            );
+            if let Effect::ChangeZone { target, .. } = &mut producer.effect {
+                *target = TargetFilter::Typed(TypedFilter::creature());
+            }
+            producer.optional_targeting = true;
+            producer.set_source_incarnation_recursive(Some(state.objects[&source].incarnation));
+            let mut events = Vec::new();
+            resolve_ability_chain(&mut state, &producer, &mut events, 0).unwrap();
+            if delivers {
+                assert_outer_forwarded_result(&events, returned);
+                assert_eq!(state.objects[&returned].zone, Zone::Battlefield);
+                assert!(state.objects[&returned].incarnation > returned_incarnation);
+                assert!(events.iter().any(|event| matches!(
+                    event,
+                    GameEvent::ZoneChanged {
+                        object_id,
+                        from: Some(Zone::Graveyard),
+                        to: Zone::Battlefield,
+                        ..
+                    } if *object_id == returned
+                )));
+            } else {
+                assert_eq!(state.objects[&returned].zone, Zone::Graveyard);
+                assert_eq!(state.objects[&returned].incarnation, returned_incarnation);
+                assert!(!events
+                    .iter()
+                    .any(|event| matches!(event, GameEvent::LifeChanged { .. })));
+            }
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        GameEvent::ZoneChanged { object_id, .. } if *object_id == returned
+                    ))
+                    .count(),
+                usize::from(delivers)
+            );
+            assert_eq!(
+                state
+                    .active_optional_effect_frame()
+                    .unwrap()
+                    .ability
+                    .context
+                    .forwarded_result_context
+                    .as_ref()
+                    .unwrap()
+                    .object_incarnations,
+                if delivers {
+                    vec![ObjectIncarnationRef::of(
+                        returned,
+                        state.objects[&returned].incarnation,
+                    )]
+                } else {
+                    vec![]
+                }
+            );
+            assert_eq!(
+                has_forwarded_test_grant(&state, returned, Keyword::Haste),
+                delivers
+            );
+            assert_eq!(state.players[0].life, if delivers { 27 } else { 20 });
+            assert_forwarded_source_frame(
+                &state,
+                source,
+                if delivers {
+                    std::slice::from_ref(&returned)
+                } else {
+                    &[]
+                },
+            );
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::DecideOptionalEffect { accept: true },
+            )
+            .unwrap();
+            assert!(has_forwarded_test_grant(&state, source, Keyword::Flying));
+            assert!(!has_forwarded_test_grant(&state, source, Keyword::Haste));
+        }
+    }
+
+    #[test]
+    fn forwarded_generic_self_ref_uses_first_result_slot_without_rewriting_provenance() {
+        for same_id in [false, true] {
+            let (mut state, original_source, returned, other) = forwarded_test_objects();
+            let returned_incarnation = state.objects[&returned].incarnation;
+            let other_incarnation = state.objects[&other].incarnation;
+            let mut events = Vec::new();
+            crate::game::zones::move_to_zone(&mut state, returned, Zone::Battlefield, &mut events);
+            crate::game::zones::move_to_zone(&mut state, other, Zone::Battlefield, &mut events);
+            assert_eq!(state.objects[&returned].zone, Zone::Battlefield);
+            assert_eq!(state.objects[&other].zone, Zone::Battlefield);
+            assert!(state.objects[&returned].incarnation > returned_incarnation);
+            assert!(state.objects[&other].incarnation > other_incarnation);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter_map(|event| match event {
+                        GameEvent::ZoneChanged {
+                            object_id,
+                            from,
+                            to,
+                            ..
+                        } if *object_id == returned || *object_id == other =>
+                            Some((*object_id, *from, *to)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                vec![
+                    (returned, Some(Zone::Graveyard), Zone::Battlefield),
+                    (other, Some(Zone::Graveyard), Zone::Battlefield)
+                ]
+            );
+            let source = if same_id { returned } else { original_source };
+            let mut grant = forwarded_test_grant(source, Keyword::Haste);
+            grant.set_test_trigger_source_recursive(900, CardId(100));
+            let source_stamp = grant.source_incarnation;
+            let trigger_source = grant.trigger_source.clone();
+            grant.targets = vec![TargetRef::Object(other)];
+            bind_moved_objects_to_child(
+                &state,
+                &mut grant,
+                source,
+                &[],
+                ForwardedResultContext::from_object_ids(&state, &[returned, other]),
+            );
+            assert_eq!(grant.source_incarnation, source_stamp);
+            assert_eq!(grant.trigger_source, trigger_source);
+            assert!(
+                !grant.source_is_current(&state),
+                "ordinary source currency is deliberately stale"
+            );
+            let Effect::GenericEffect {
+                target,
+                static_abilities,
+                ..
+            } = &grant.effect
+            else {
+                unreachable!()
+            };
+            assert_eq!(target, &Some(TargetFilter::SelfRef));
+            assert_eq!(
+                static_abilities[0].affected,
+                Some(TargetFilter::ParentTargetSlot { index: 0 })
+            );
+            resolve_ability_chain(&mut state, &grant, &mut Vec::new(), 1).unwrap();
+            assert!(has_forwarded_test_grant(&state, returned, Keyword::Haste));
+            assert!(!has_forwarded_test_grant(&state, other, Keyword::Haste));
+        }
+    }
+
+    #[test]
+    fn forwarded_generic_self_ref_rejects_stale_or_empty_result() {
+        for result_kind in 0..3 {
+            let (mut state, source, returned, other) = forwarded_test_objects();
+            let returned_incarnation = state.objects[&returned].incarnation;
+            let other_incarnation = state.objects[&other].incarnation;
+            let mut events = Vec::new();
+            crate::game::zones::move_to_zone(&mut state, returned, Zone::Battlefield, &mut events);
+            crate::game::zones::move_to_zone(&mut state, other, Zone::Battlefield, &mut events);
+            assert_eq!(state.objects[&returned].zone, Zone::Battlefield);
+            assert_eq!(state.objects[&other].zone, Zone::Battlefield);
+            assert!(state.objects[&returned].incarnation > returned_incarnation);
+            assert!(state.objects[&other].incarnation > other_incarnation);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter_map(|event| match event {
+                        GameEvent::ZoneChanged {
+                            object_id,
+                            from,
+                            to,
+                            ..
+                        } if *object_id == returned || *object_id == other =>
+                            Some((*object_id, *from, *to)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                vec![
+                    (returned, Some(Zone::Graveyard), Zone::Battlefield),
+                    (other, Some(Zone::Graveyard), Zone::Battlefield)
+                ]
+            );
+            let mut grant = forwarded_test_grant(source, Keyword::Haste);
+            if let Effect::GenericEffect {
+                static_abilities,
+                target,
+                ..
+            } = &mut grant.effect
+            {
+                *target = None;
+                static_abilities.push(
+                    StaticDefinition::continuous()
+                        .affected(TargetFilter::SpecificObject { id: source })
+                        .modifications(vec![ContinuousModification::AddKeyword {
+                            keyword: Keyword::Vigilance,
+                        }]),
+                );
+            }
+            let produced = [returned, other];
+            let mut result = ForwardedResultContext::from_object_ids(
+                &state,
+                if result_kind == 2 { &[] } else { &produced },
+            );
+            if result_kind == 1 {
+                result.object_incarnations[0].incarnation += 1;
+            }
+            bind_moved_objects_to_child(&state, &mut grant, source, &[], result);
+            grant.source_incarnation = Some(state.objects[&grant.source_id].incarnation);
+            grant.targets = vec![TargetRef::Object(other)];
+            resolve_ability_chain(&mut state, &grant, &mut Vec::new(), 1).unwrap();
+            assert_eq!(
+                has_forwarded_test_grant(&state, returned, Keyword::Haste),
+                result_kind == 0
+            );
+            assert!(!has_forwarded_test_grant(&state, other, Keyword::Haste));
+            assert!(!has_forwarded_test_grant(&state, source, Keyword::Haste));
+            assert!(has_forwarded_test_grant(&state, source, Keyword::Vigilance));
+            let mut later = forwarded_test_grant(source, Keyword::Flying);
+            later.context = grant.context.clone();
+            later.source_incarnation = Some(state.objects[&source].incarnation);
+            resolve_ability_chain(&mut state, &later, &mut Vec::new(), 0).unwrap();
+            assert!(has_forwarded_test_grant(&state, source, Keyword::Flying));
+        }
+    }
+
+    #[test]
+    fn forwarded_generic_self_ref_keeps_event_order_and_nested_result_ownership() {
+        for stale_first in [false, true] {
+            let (mut state, source, returned, other) = forwarded_test_objects();
+            let mut later = forwarded_test_grant(source, Keyword::Flying);
+            later.optional = true;
+            later.sub_link = SubAbilityLink::SequentialSibling;
+            let mut immediate = forwarded_test_grant(source, Keyword::Haste).sub_ability(later);
+            immediate.optional = true;
+            let mut producer = forwarding_zone_change(
+                source,
+                returned,
+                vec![TargetRef::Object(returned), TargetRef::Object(other)],
+                immediate,
+            );
+            if let Effect::ChangeZone { target, .. } = &mut producer.effect {
+                *target = TargetFilter::Any;
+            }
+            producer.set_source_incarnation_recursive(Some(state.objects[&source].incarnation));
+            let mut events = Vec::new();
+            resolve_ability_chain(&mut state, &producer, &mut events, 0).unwrap();
+            assert_outer_forwarded_result(&events, returned);
+            assert_outer_forwarded_result(&events, other);
+            let frame = state
+                .active_optional_effect_frame()
+                .expect("immediate grant owns actual two-result frame");
+            let result = frame
+                .ability
+                .context
+                .forwarded_result_context
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                result.targets,
+                vec![TargetRef::Object(returned), TargetRef::Object(other)]
+            );
+            assert!(result
+                .object_incarnations
+                .iter()
+                .all(|pin| pin.is_current(&state)));
+            if stale_first {
+                state
+                    .active_optional_effect_frame_mut()
+                    .unwrap()
+                    .ability
+                    .context
+                    .forwarded_result_context
+                    .as_mut()
+                    .unwrap()
+                    .object_incarnations[0]
+                    .incarnation += 1;
+            }
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::DecideOptionalEffect { accept: true },
+            )
+            .unwrap();
+            assert_eq!(
+                has_forwarded_test_grant(&state, returned, Keyword::Haste),
+                !stale_first
+            );
+            assert!(!has_forwarded_test_grant(&state, other, Keyword::Haste));
+            let later = &state
+                .active_optional_effect_frame()
+                .expect("independent source instruction still prompts")
+                .ability;
+            assert_eq!(later.source_id, source);
+            assert!(later.source_is_current(&state));
+            assert_eq!(
+                later
+                    .context
+                    .forwarded_result_context
+                    .as_ref()
+                    .unwrap()
+                    .targets,
+                vec![TargetRef::Object(returned), TargetRef::Object(other)]
+            );
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::DecideOptionalEffect { accept: true },
+            )
+            .unwrap();
+            assert!(has_forwarded_test_grant(&state, source, Keyword::Flying));
+        }
+        for nested_delivers in [true, false] {
+            let (mut state, source, returned, other) = forwarded_test_objects();
+            let returned_incarnation = state.objects[&returned].incarnation;
+            let other_incarnation = state.objects[&other].incarnation;
+            let mut later = forwarded_test_grant(source, Keyword::Flying);
+            later.optional = true;
+            later.sub_link = SubAbilityLink::SequentialSibling;
+            let mut nested = forwarding_zone_change(
+                source,
+                other,
+                if nested_delivers {
+                    vec![TargetRef::Object(other)]
+                } else {
+                    vec![]
+                },
+                forwarded_test_grant(source, Keyword::Trample).sub_ability(later),
+            );
+            if let Effect::ChangeZone { target, .. } = &mut nested.effect {
+                *target = TargetFilter::Typed(TypedFilter::creature());
+            }
+            nested.optional_targeting = true;
+            let mut producer = forwarding_zone_change(
+                source,
+                returned,
+                vec![TargetRef::Object(returned)],
+                forwarded_test_grant(source, Keyword::Haste).sub_ability(nested),
+            );
+            producer.set_source_incarnation_recursive(Some(state.objects[&source].incarnation));
+            let mut events = Vec::new();
+            resolve_ability_chain(&mut state, &producer, &mut events, 0).unwrap();
+            assert_outer_forwarded_result(&events, returned);
+            assert_eq!(state.objects[&returned].zone, Zone::Battlefield);
+            assert!(state.objects[&returned].incarnation > returned_incarnation);
+            assert!(events.iter().any(|event| matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Graveyard),
+                    to: Zone::Battlefield,
+                    ..
+                } if *object_id == returned
+            )));
+            if nested_delivers {
+                assert_outer_forwarded_result(&events, other);
+                assert_eq!(state.objects[&other].zone, Zone::Battlefield);
+                assert!(state.objects[&other].incarnation > other_incarnation);
+                assert!(events.iter().any(|event| matches!(
+                    event,
+                    GameEvent::ZoneChanged {
+                        object_id,
+                        from: Some(Zone::Graveyard),
+                        to: Zone::Battlefield,
+                        ..
+                    } if *object_id == other
+                )));
+            } else {
+                assert_eq!(state.objects[&other].zone, Zone::Graveyard);
+                assert_eq!(state.objects[&other].incarnation, other_incarnation);
+            }
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        GameEvent::ZoneChanged { object_id, .. } if *object_id == other
+                    ))
+                    .count(),
+                usize::from(nested_delivers)
+            );
+            assert_eq!(
+                state
+                    .active_optional_effect_frame()
+                    .unwrap()
+                    .ability
+                    .context
+                    .forwarded_result_context
+                    .as_ref()
+                    .unwrap()
+                    .object_incarnations,
+                if nested_delivers {
+                    vec![ObjectIncarnationRef::of(
+                        other,
+                        state.objects[&other].incarnation,
+                    )]
+                } else {
+                    vec![]
+                }
+            );
+            assert!(has_forwarded_test_grant(&state, returned, Keyword::Haste));
+            assert_eq!(
+                has_forwarded_test_grant(&state, other, Keyword::Trample),
+                nested_delivers
+            );
+            assert!(!has_forwarded_test_grant(
+                &state,
+                returned,
+                Keyword::Trample
+            ));
+            assert_forwarded_source_frame(
+                &state,
+                source,
+                if nested_delivers {
+                    std::slice::from_ref(&other)
+                } else {
+                    &[]
+                },
+            );
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::DecideOptionalEffect { accept: true },
+            )
+            .unwrap();
+            assert!(has_forwarded_test_grant(&state, source, Keyword::Flying));
+        }
+    }
+
+    #[test]
+    fn forwarded_generic_self_ref_preserves_inherited_application_authority() {
+        for affected in [TargetFilter::CostPaidObject, TargetFilter::TriggeringSource] {
+            let (mut state, source, returned, other) = forwarded_test_objects();
+            crate::game::zones::move_to_zone(&mut state, other, Zone::Battlefield, &mut Vec::new());
+            state.current_trigger_event = Some(GameEvent::PermanentSacrificed {
+                object_id: other,
+                player_id: PlayerId(0),
+            });
+            let mut immediate = forwarded_test_grant(source, Keyword::Haste);
+            if let Effect::GenericEffect {
+                static_abilities, ..
+            } = &mut immediate.effect
+            {
+                static_abilities[0].affected = Some(affected.clone());
+            }
+            let mut normalized = immediate.clone();
+            bind_forwarded_generic_self_ref(&mut normalized);
+            assert_eq!(normalized.effect, immediate.effect);
+            let mut later = forwarded_test_grant(source, Keyword::Flying);
+            later.optional = true;
+            later.sub_link = SubAbilityLink::SequentialSibling;
+            let mut producer = forwarding_zone_change(
+                source,
+                returned,
+                vec![TargetRef::Object(returned)],
+                immediate.sub_ability(later),
+            );
+            producer.set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
+                &state.objects[&source],
+                state.objects[&source].snapshot_for_mana_spent(),
+            ));
+            producer.set_source_incarnation_recursive(Some(state.objects[&source].incarnation));
+            let mut events = Vec::new();
+            resolve_ability_chain(&mut state, &producer, &mut events, 0).unwrap();
+            assert_outer_forwarded_result(&events, returned);
+            let recipient = if affected == TargetFilter::CostPaidObject {
+                source
+            } else {
+                other
+            };
+            assert!(has_forwarded_test_grant(&state, recipient, Keyword::Haste));
+            assert!(!has_forwarded_test_grant(&state, returned, Keyword::Haste));
+            assert_forwarded_source_frame(&state, source, &[returned]);
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::DecideOptionalEffect { accept: true },
+            )
+            .unwrap();
+            assert!(has_forwarded_test_grant(&state, source, Keyword::Flying));
+        }
+    }
+
+    #[test]
+    fn parked_forwarded_generic_zone_choice_settles_empty_selection() {
+        for choose_returned in [true, false] {
+            let (mut state, source, returned, _) = forwarded_test_objects();
+            let mut later = forwarded_test_grant(source, Keyword::Flying);
+            later.optional = true;
+            later.sub_link = SubAbilityLink::SequentialSibling;
+            let mut producer = forwarding_zone_change(
+                source,
+                returned,
+                vec![],
+                forwarded_test_grant(source, Keyword::Haste).sub_ability(later),
+            );
+            if let Effect::ChangeZone { target, up_to, .. } = &mut producer.effect {
+                *target = TargetFilter::Typed(TypedFilter::creature());
+                *up_to = true;
+            }
+            producer.target_choice_timing = TargetChoiceTiming::Resolution;
+            producer.set_source_incarnation_recursive(Some(state.objects[&source].incarnation));
+            resolve_ability_chain(&mut state, &producer, &mut Vec::new(), 0).unwrap();
+            let WaitingFor::EffectZoneChoice { cards, up_to, .. } = &state.waiting_for else {
+                panic!(
+                    "producer must open actual zone choice, got {:?}",
+                    state.waiting_for
+                )
+            };
+            assert!(*up_to);
+            assert!(cards.contains(&returned));
+            let pending = state.active_ability_continuation().unwrap();
+            assert!(pending
+                .chain
+                .context
+                .pending_forwarded_zone_result
+                .is_some());
+            let Effect::GenericEffect {
+                static_abilities, ..
+            } = &pending.chain.effect
+            else {
+                unreachable!()
+            };
+            assert_eq!(
+                static_abilities[0].affected,
+                Some(TargetFilter::ParentTargetSlot { index: 0 })
+            );
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::SelectCards {
+                    cards: if choose_returned {
+                        vec![returned]
+                    } else {
+                        vec![]
+                    },
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                has_forwarded_test_grant(&state, returned, Keyword::Haste),
+                choose_returned
+            );
+            assert_forwarded_source_frame(
+                &state,
+                source,
+                if choose_returned {
+                    std::slice::from_ref(&returned)
+                } else {
+                    &[]
+                },
+            );
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::DecideOptionalEffect { accept: true },
+            )
+            .unwrap();
+            assert!(has_forwarded_test_grant(&state, source, Keyword::Flying));
+            assert!(!has_forwarded_test_grant(&state, source, Keyword::Haste));
+        }
+    }
+
+    #[test]
+    fn parked_forwarded_generic_grant_keeps_later_source_self_ref() {
+        for optional_producer in [false, true] {
+            for replace_with_exile in [false, true] {
+                let (mut state, source, returned, _) = forwarded_test_objects();
+                let returned_incarnation = state.objects[&returned].incarnation;
+                let source_stamp = Some(state.objects[&source].incarnation);
+                let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .mode(crate::types::ability::ReplacementMode::Optional { decline: None })
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination_zone(Zone::Battlefield)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            origin: None,
+                            destination: Zone::Exile,
+                            target: TargetFilter::SelfRef,
+                            owner_library: false,
+                            enter_transformed: false,
+                            enters_under: None,
+                            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: Vec::new(),
+                            conditional_enter_with_counters: vec![],
+                            face_down_profile: None,
+                            enters_modified_if: None,
+                        },
+                    ));
+                state
+                    .objects
+                    .get_mut(&returned)
+                    .unwrap()
+                    .replacement_definitions
+                    .push(replacement);
+                let mut later = forwarded_test_grant(source, Keyword::Flying);
+                later.optional = true;
+                later.sub_link = SubAbilityLink::SequentialSibling;
+                let mut producer = forwarding_zone_change(
+                    source,
+                    returned,
+                    vec![TargetRef::Object(returned)],
+                    forwarded_test_grant(source, Keyword::Haste).sub_ability(later),
+                );
+                producer.optional = optional_producer;
+                producer.set_source_incarnation_recursive(source_stamp);
+                let mut events = Vec::new();
+                resolve_ability_chain(&mut state, &producer, &mut events, 0).unwrap();
+                if optional_producer {
+                    assert!(state.active_optional_effect_frame().is_some());
+                    let action_result = crate::game::engine::apply_as_current(
+                        &mut state,
+                        GameAction::DecideOptionalEffect { accept: true },
+                    )
+                    .unwrap();
+                    events.extend(action_result.events);
+                }
+                assert!(matches!(
+                    state.waiting_for,
+                    WaitingFor::ReplacementChoice { .. }
+                ));
+                let WaitingFor::ReplacementChoice {
+                    player,
+                    candidate_count,
+                    candidates,
+                    kind,
+                    ..
+                } = &state.waiting_for
+                else {
+                    unreachable!()
+                };
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(
+                    *kind,
+                    crate::types::game_state::ReplacementChoiceKind::OptionalBranch
+                );
+                assert_eq!(*candidate_count, 2);
+                assert_eq!(candidates.len(), 2);
+                assert!(candidates
+                    .iter()
+                    .all(|candidate| candidate.source_id == returned));
+                assert_eq!(candidates[0].description, "Accept");
+                assert_eq!(candidates[1].description, "Decline");
+                assert_eq!(state.objects[&returned].zone, Zone::Graveyard);
+                assert_eq!(state.objects[&returned].incarnation, returned_incarnation);
+                assert!(!has_forwarded_test_grant(&state, returned, Keyword::Haste));
+                assert!(!events.iter().any(|event| matches!(
+                    event,
+                    GameEvent::ZoneChanged { object_id, .. } if *object_id == returned
+                )));
+                let frames = state.resolution_stack.iter().collect::<Vec<_>>();
+                let [ResolutionFrame::AbilityContinuation(continuation), ResolutionFrame::ChangeZone(zone)] =
+                    frames.as_slice()
+                else {
+                    panic!("move must park its immediate child below ChangeZone, got {frames:?}")
+                };
+                let chain = &continuation.pending.chain;
+                assert_eq!(chain.source_id, source);
+                assert_eq!(chain.source_incarnation, source_stamp);
+                assert!(chain.source_is_current(&state));
+                assert!(chain.context.pending_forwarded_zone_result.is_some());
+                let marker = chain
+                    .context
+                    .pending_forwarded_zone_result
+                    .as_ref()
+                    .unwrap();
+                let pending = zone
+                    .pending
+                    .as_ref()
+                    .expect("active zone operation must be pending");
+                assert_eq!(pending.source_id, source);
+                assert_eq!(marker.producer, source);
+                assert_eq!(
+                    marker.group,
+                    Some(pending.logical_zone_change_group.logical_group_id)
+                );
+                assert!(marker.selected.is_none());
+                let paused = pending
+                    .paused_current
+                    .as_ref()
+                    .expect("returned object must be paused");
+                assert_eq!(
+                    paused.member,
+                    ObjectIncarnationRef::of(returned, returned_incarnation)
+                );
+                assert!(matches!(
+                    &paused.expected_event,
+                    crate::types::proposed_event::ProposedEvent::ZoneChange {
+                        object_id,
+                        from: Zone::Graveyard,
+                        to: Zone::Battlefield,
+                        cause: Some(cause),
+                        ..
+                    } if *object_id == returned && *cause == source
+                ));
+                assert!(paused.terminal_completion.is_none());
+                assert!(chain.context.forwarded_result_context.is_none());
+                let Effect::GenericEffect {
+                    target,
+                    static_abilities,
+                    ..
+                } = &chain.effect
+                else {
+                    unreachable!()
+                };
+                assert_eq!(target, &Some(TargetFilter::SelfRef));
+                assert_eq!(
+                    static_abilities[0].affected,
+                    Some(TargetFilter::ParentTargetSlot { index: 0 })
+                );
+                let later = chain
+                    .sub_ability
+                    .as_ref()
+                    .expect("later source instruction remains");
+                assert_eq!(later.sub_link, SubAbilityLink::SequentialSibling);
+                assert_eq!(later.source_id, source);
+                assert_eq!(later.source_incarnation, source_stamp);
+                assert!(later.source_is_current(&state));
+                let Effect::GenericEffect {
+                    target,
+                    static_abilities,
+                    ..
+                } = &later.effect
+                else {
+                    unreachable!()
+                };
+                assert_eq!(
+                    effect::generic_effect_application_filter(
+                        target.as_ref(),
+                        static_abilities[0].affected.as_ref()
+                    ),
+                    Some(&TargetFilter::SelfRef)
+                );
+                let action_result = crate::game::engine::apply_as_current(
+                    &mut state,
+                    GameAction::ChooseReplacement {
+                        index: if replace_with_exile { 0 } else { 1 },
+                    },
+                )
+                .unwrap();
+                let destination = if replace_with_exile {
+                    Zone::Exile
+                } else {
+                    Zone::Battlefield
+                };
+                assert_eq!(
+                    action_result
+                        .events
+                        .iter()
+                        .filter_map(|event| match event {
+                            GameEvent::ZoneChanged {
+                                object_id,
+                                from,
+                                to,
+                                ..
+                            } if *object_id == returned => Some((*from, *to)),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                    vec![(Some(Zone::Graveyard), destination)]
+                );
+                assert!(state.objects[&returned].incarnation > returned_incarnation);
+                assert_eq!(
+                    state
+                        .active_optional_effect_frame()
+                        .unwrap()
+                        .ability
+                        .context
+                        .forwarded_result_context
+                        .as_ref()
+                        .unwrap()
+                        .object_incarnations,
+                    if replace_with_exile {
+                        vec![]
+                    } else {
+                        vec![ObjectIncarnationRef::of(
+                            returned,
+                            state.objects[&returned].incarnation,
+                        )]
+                    }
+                );
+                assert_eq!(
+                    state.objects[&returned].zone,
+                    if replace_with_exile {
+                        Zone::Exile
+                    } else {
+                        Zone::Battlefield
+                    }
+                );
+                assert_eq!(
+                    has_forwarded_test_grant(&state, returned, Keyword::Haste),
+                    !replace_with_exile
+                );
+                assert_forwarded_source_frame(
+                    &state,
+                    source,
+                    if replace_with_exile {
+                        &[]
+                    } else {
+                        std::slice::from_ref(&returned)
+                    },
+                );
+                crate::game::engine::apply_as_current(
+                    &mut state,
+                    GameAction::DecideOptionalEffect { accept: true },
+                )
+                .unwrap();
+                assert!(has_forwarded_test_grant(&state, source, Keyword::Flying));
+                assert!(!has_forwarded_test_grant(&state, source, Keyword::Haste));
+            }
+        }
+    }
+
+    #[test]
+    fn empty_forwarded_generic_pruning_preserves_composite_filter_contract() {
+        for delivers in [true, false] {
+            let (mut state, source, returned, other) = forwarded_test_objects();
+            let returned_incarnation = state.objects[&returned].incarnation;
+            crate::game::zones::move_to_zone(&mut state, other, Zone::Battlefield, &mut Vec::new());
+            state.current_trigger_event = Some(GameEvent::PermanentSacrificed {
+                object_id: other,
+                player_id: PlayerId(0),
+            });
+            let filters = [
+                TargetFilter::SelfRef,
+                TargetFilter::And {
+                    filters: vec![TargetFilter::And {
+                        filters: vec![TargetFilter::SelfRef, TargetFilter::Any],
+                    }],
+                },
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::SelfRef,
+                        TargetFilter::SpecificObject { id: source },
+                    ],
+                },
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::SelfRef),
+                },
+                TargetFilter::CostPaidObject,
+                TargetFilter::TriggeringSource,
+            ];
+            let keywords = [
+                Keyword::Haste,
+                Keyword::Trample,
+                Keyword::Flying,
+                Keyword::Vigilance,
+                Keyword::FirstStrike,
+                Keyword::Reach,
+            ];
+            let mut grant = forwarded_test_grant(source, Keyword::Haste);
+            if let Effect::GenericEffect {
+                static_abilities,
+                target,
+                ..
+            } = &mut grant.effect
+            {
+                *target = None;
+                *static_abilities = filters
+                    .iter()
+                    .cloned()
+                    .zip(keywords)
+                    .map(|(filter, keyword)| {
+                        StaticDefinition::continuous()
+                            .affected(filter)
+                            .modifications(vec![ContinuousModification::AddKeyword { keyword }])
+                    })
+                    .collect();
+            }
+            let mut bound = grant.clone();
+            bind_forwarded_generic_self_ref(&mut bound);
+            let Effect::GenericEffect {
+                static_abilities, ..
+            } = &bound.effect
+            else {
+                unreachable!()
+            };
+            assert_eq!(
+                static_abilities[0].affected,
+                Some(TargetFilter::ParentTargetSlot { index: 0 })
+            );
+            for (definition, expected) in static_abilities[1..].iter().zip(&filters[1..]) {
+                assert_eq!(definition.affected.as_ref(), Some(expected));
+            }
+            let remaining = without_missing_forward_result_dependencies(&bound).unwrap();
+            let Effect::GenericEffect {
+                static_abilities, ..
+            } = &remaining.effect
+            else {
+                unreachable!()
+            };
+            assert_eq!(
+                static_abilities
+                    .iter()
+                    .map(|definition| definition.affected.clone().unwrap())
+                    .collect::<Vec<_>>(),
+                filters[2..]
+            );
+            let mut later = forwarded_test_grant(source, Keyword::Deathtouch);
+            later.optional = true;
+            later.sub_link = SubAbilityLink::SequentialSibling;
+            let mut producer = forwarding_zone_change(
+                source,
+                returned,
+                if delivers {
+                    vec![TargetRef::Object(returned)]
+                } else {
+                    vec![]
+                },
+                grant.sub_ability(later),
+            );
+            if let Effect::ChangeZone { target, .. } = &mut producer.effect {
+                *target = TargetFilter::Typed(TypedFilter::creature());
+            }
+            producer.optional_targeting = true;
+            producer.set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
+                &state.objects[&source],
+                state.objects[&source].snapshot_for_mana_spent(),
+            ));
+            producer.set_source_incarnation_recursive(Some(state.objects[&source].incarnation));
+            let mut events = Vec::new();
+            resolve_ability_chain(&mut state, &producer, &mut events, 0).unwrap();
+            if delivers {
+                assert_outer_forwarded_result(&events, returned);
+                assert_eq!(state.objects[&returned].zone, Zone::Battlefield);
+                assert!(state.objects[&returned].incarnation > returned_incarnation);
+                assert!(events.iter().any(|event| matches!(
+                    event,
+                    GameEvent::ZoneChanged {
+                        object_id,
+                        from: Some(Zone::Graveyard),
+                        to: Zone::Battlefield,
+                        ..
+                    } if *object_id == returned
+                )));
+            } else {
+                assert_eq!(state.objects[&returned].zone, Zone::Graveyard);
+                assert_eq!(state.objects[&returned].incarnation, returned_incarnation);
+            }
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        GameEvent::ZoneChanged { object_id, .. } if *object_id == returned
+                    ))
+                    .count(),
+                usize::from(delivers)
+            );
+            assert_eq!(
+                state
+                    .active_optional_effect_frame()
+                    .unwrap()
+                    .ability
+                    .context
+                    .forwarded_result_context
+                    .as_ref()
+                    .unwrap()
+                    .object_incarnations,
+                if delivers {
+                    vec![ObjectIncarnationRef::of(
+                        returned,
+                        state.objects[&returned].incarnation,
+                    )]
+                } else {
+                    vec![]
+                }
+            );
+            assert_eq!(
+                has_forwarded_test_grant(&state, returned, Keyword::Haste),
+                delivers
+            );
+            assert_eq!(
+                has_forwarded_test_grant(&state, returned, Keyword::Trample),
+                delivers
+            );
+            assert!(!has_forwarded_test_grant(&state, source, Keyword::Trample));
+            assert!(has_forwarded_test_grant(&state, source, Keyword::Flying));
+            assert!(has_forwarded_test_grant(&state, other, Keyword::Vigilance));
+            assert!(has_forwarded_test_grant(
+                &state,
+                source,
+                Keyword::FirstStrike
+            ));
+            assert!(has_forwarded_test_grant(&state, other, Keyword::Reach));
+            assert_forwarded_source_frame(
+                &state,
+                source,
+                if delivers {
+                    std::slice::from_ref(&returned)
+                } else {
+                    &[]
+                },
+            );
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::DecideOptionalEffect { accept: true },
+            )
+            .unwrap();
+            assert!(has_forwarded_test_grant(
+                &state,
+                source,
+                Keyword::Deathtouch
+            ));
+        }
     }
 
     fn empty_forwarding_zone_change(
@@ -32955,6 +34161,7 @@ mod tests {
             Effect::ExileFromTopUntil {
                 player: TargetFilter::Controller,
                 until: UntilCondition::NextMatches {
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                     filter: TargetFilter::Any,
                 },
             },
@@ -40487,9 +41694,12 @@ mod tests {
     /// resolver (`resolve_ability_chain`) with the crewing creature as the chosen
     /// target.
     ///
-    /// Helper returns the crewing creature's final +1/+1 counter total after the
-    /// chain resolves. `subtype` selects whether the conditional doubling fires.
-    fn run_turtle_van_chain(subtype: &str, starting_counters: u32) -> u32 {
+    /// The placement head is an explicit parser gap (no filter expresses "that
+    /// crewed it this turn"), so this resolves the parsed conditional-doubling
+    /// sentence on its own. `counters_after_placement` is the crewer's +1/+1
+    /// count once the head's counter is on it. Returns the final +1/+1 total;
+    /// `subtype` selects whether the conditional doubling fires.
+    fn run_turtle_van_chain(subtype: &str, counters_after_placement: u32) -> u32 {
         use crate::parser::oracle::parse_oracle_text;
 
         let mut state = GameState::new_two_player(11);
@@ -40507,9 +41717,9 @@ mod tests {
             obj.card_types.subtypes.push(subtype.to_string());
             obj.power = Some(2);
             obj.toughness = Some(2);
-            if starting_counters > 0 {
+            if counters_after_placement > 0 {
                 obj.counters
-                    .insert(CounterType::Plus1Plus1, starting_counters);
+                    .insert(CounterType::Plus1Plus1, counters_after_placement);
             }
         }
         // The Vehicle is the ability source.
@@ -40539,13 +41749,16 @@ mod tests {
             .triggers
             .first()
             .expect("Turtle Van must parse an attack trigger");
-        let execute = trigger
+        let doubling = trigger
             .execute
             .as_deref()
-            .expect("attack trigger must carry an execute ability");
+            .expect("attack trigger must carry an execute ability")
+            .sub_ability
+            .as_deref()
+            .expect("the doubling sentence chains after the placement head");
 
         let ability = crate::game::ability_utils::build_resolved_from_def_with_targets(
-            execute,
+            doubling,
             vehicle,
             PlayerId(0),
             vec![TargetRef::Object(crewer)],
@@ -40563,36 +41776,32 @@ mod tests {
 
     #[test]
     fn turtle_van_doubles_counters_on_matching_crewer() {
-        // Turtle crewer starting with 2 counters: PutCounter → 3, then double → 6.
-        // 6 is distinct from the no-double result (3) AND a no-op (2), so reverting
-        // either the condition wiring or the MultiplyCounter→ParentTarget rewrite
-        // flips this assertion.
+        // Turtle crewer with 3 counters after placement: doubled → 6. 6 is
+        // distinct from the no-double result (3), so reverting either the
+        // condition wiring or the MultiplyCounter→ParentTarget rewrite flips
+        // this assertion.
         assert_eq!(
-            run_turtle_van_chain("Turtle", 2),
+            run_turtle_van_chain("Turtle", 3),
             6,
-            "Turtle crewer: 2 + 1 = 3, doubled to 6"
+            "Turtle crewer: 3 doubled to 6"
         );
         // Ninja and Mutant must match the same subtype disjunction.
+        assert_eq!(run_turtle_van_chain("Ninja", 1), 2, "Ninja: 1 doubled to 2");
         assert_eq!(
-            run_turtle_van_chain("Ninja", 0),
-            2,
-            "Ninja: 0 + 1 = 1, doubled to 2"
-        );
-        assert_eq!(
-            run_turtle_van_chain("Mutant", 1),
+            run_turtle_van_chain("Mutant", 2),
             4,
-            "Mutant: 1 + 1 = 2, doubled to 4"
+            "Mutant: 2 doubled to 4"
         );
     }
 
     #[test]
     fn turtle_van_does_not_double_counters_on_nonmatching_crewer() {
         // A Wizard is none of Mutant/Ninja/Turtle: the conditional doubling must
-        // NOT fire. Only the PutCounter applies: 2 + 1 = 3 (no double to 6).
+        // NOT fire, so the 3 counters stay 3 (no double to 6).
         assert_eq!(
-            run_turtle_van_chain("Wizard", 2),
+            run_turtle_van_chain("Wizard", 3),
             3,
-            "non-matching crewer: only the +1/+1 counter is added, no doubling"
+            "non-matching crewer: no doubling"
         );
     }
 

@@ -659,6 +659,19 @@ pub(crate) struct ParseContext {
     /// lingering path. Mirrors `chain_has_prior_exile_producer`.
     // CR 608.2g + CR 701.20e
     pub chain_prior_self_library_peek: bool,
+    /// CR 608.2c: the stop filter of the most recent earlier same-chain
+    /// `ExileFromTopUntil { NextMatches }` loop. The loop ends on its last
+    /// match, so the cards it exiled that match this filter are exactly the
+    /// ones it found, and "the other cards exiled this way" are the rest
+    /// (Invasion of Alara). `None` when the chain has no such loop.
+    pub chain_prior_exile_until_match: Option<TargetFilter>,
+    /// CR 608.2c: the candidate source for cards the `NextMatches` loop found.
+    /// `Some(ParentTargets)` only when every
+    /// clause after the loop is the one-cast window over its batch (Invasion
+    /// of Alara's "You may cast one of those two cards …"), which hands those
+    /// targets on unchanged. Any other clause in between may target or choose
+    /// its own objects, so "put one of them into your hand" stays unbound.
+    pub chain_exile_until_hits_source: Option<ZoneChoiceCandidateSource>,
     /// CR 400.7j + CR 608.2c + CR 608.2d: the NEAREST earlier single-card exile
     /// partition in this same effect chain, carrying that pile's
     /// [`ZoneChoiceCandidateSource`] — `None` when the chain has none.

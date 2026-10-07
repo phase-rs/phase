@@ -6035,10 +6035,11 @@ mod tests {
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, CardSelectionMode, ChooseFromZoneConstraint, Chooser,
-        ContinuousModification, CopyRetargetPermission, DamageModification, Effect, ManaProduction,
-        OutsideGameSourcePool, PlayerFilter, QuantityExpr, SpellStackToGraveyardReplacement,
-        StaticCondition, StaticDefinition, TargetFilter, TriggerCondition,
-        ZoneChoiceCandidateSource, ZoneOwner,
+        Comparator, ContinuousModification, CopyRetargetPermission, DamageModification, Effect,
+        FilterProp, ManaProduction, OutsideGameSourcePool, ParsedCondition, PlayerFilter,
+        QuantityExpr, QuantityRef, SpellStackToGraveyardReplacement, StaticCondition,
+        StaticDefinition, TargetFilter, TriggerCondition, TypedFilter, ZoneChoiceCandidateSource,
+        ZoneOwner,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::TrackedSetId;
@@ -6454,7 +6455,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
             ("Perch Protection", "Gift an extra turn (You may promise an opponent a gift as you cast this spell. If you do, they take an extra turn after this one.)\nCreate four 2/2 blue Bird creature tokens with flying. If the gift was promised, all permanents you control phase out, and until your next turn, your life total can't change and you gain protection from everything.\nExile Perch Protection.", &["Instant"]),
             ("Jandor's Ring", "{2}, {T}, Discard the last card you drew this turn: Draw a card.", &["Artifact"]),
             ("Dragon Egg", "Defender\nWhen this creature dies, create a 2/2 red Dragon creature token with flying and \"{R}: This token gets +1/+0 until end of turn.\"", &["Creature"]),
-            ("Siege Behemoth", "Hexproof\nAs long as this creature is attacking, for each creature you control, you may have that creature assign its combat damage as though it weren't blocked.", &["Creature"]),
+            ("The Legend of Yangchen", "(As this Saga enters and after your draw step, add a lore counter.)\nI — Starting with you, each player chooses up to one permanent with mana value 3 or greater from among permanents your opponents control. Exile those permanents.\nII — You may have target opponent draw three cards. If you do, draw three cards.\nIII — Exile this Saga, then return it to the battlefield transformed under your control.", &["Enchantment"]),
             ("Ballot Broker", "While voting, you may vote an additional time. (The votes can be for different choices or for the same choice.)", &["Creature"]),
             ("Mikey & Don, Party Planners", "Ward {2}\nYou may look at the top card of your library any time.\nYou may play lands and cast Mutant, Ninja, or Turtle spells from the top of your library. If you cast a creature spell this way, that creature enters with an additional +1/+1 counter on it.", &["Creature"]),
         ];
@@ -9583,6 +9584,71 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         );
     }
 
+    /// CR 508.1k + CR 118.9 + CR 701.8a: Pitfall Trap — the "exactly one
+    /// creature is attacking" gate binds the {W} alternative cost to
+    /// `casting_options`, so the spell line is the Destroy alone (no on-resolution
+    /// `PayCost` chain) and no Condition_If is reported.
+    #[test]
+    fn condition_if_accepts_pitfall_trap_alt_cost_gate() {
+        let parsed = parse_named(
+            "If exactly one creature is attacking, you may pay {W} rather than pay \
+this spell's mana cost.\nDestroy target attacking creature without flying.",
+            "Pitfall Trap",
+            &["Instant"],
+        );
+        assert_eq!(
+            parsed.casting_options.len(),
+            1,
+            "expected one alternative casting option, got {:?}",
+            parsed.casting_options
+        );
+        assert_eq!(
+            parsed.casting_options[0].condition,
+            Some(ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .properties(vec![FilterProp::Attacking { defender: None }]),
+                        ),
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            })
+        );
+        assert_eq!(
+            parsed.abilities.len(),
+            1,
+            "expected only the Destroy spell ability, got {:?}",
+            parsed.abilities
+        );
+        let spell = &parsed.abilities[0];
+        assert!(
+            spell.sub_ability.is_none(),
+            "the alt-cost line must not chain onto the spell, got {spell:?}"
+        );
+        let Effect::Destroy {
+            target: TargetFilter::Typed(typed),
+            ..
+        } = spell.effect.as_ref()
+        else {
+            panic!("expected Destroy of a typed target, got {:?}", spell.effect);
+        };
+        assert!(typed
+            .properties
+            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(typed.properties.contains(&FilterProp::WithoutKeyword {
+            value: Keyword::Flying
+        }));
+        assert!(!any_ability_has_unimplemented(&parsed));
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "alt-cost exactly-one gate must bind to casting_options: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
     /// CR 115.7d: Standalone retarget spells (Deflecting Swat, Redirect) lower
     /// to `ChangeTargets { scope: All }` with the full `you may choose new
     /// targets` surface preserved — not `def.optional`.
@@ -11716,17 +11782,12 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         assert!(!has_swallowed_detector(&parsed, "Optional_MayHave"));
     }
 
-    /// KNOWN GAP, pinned deliberately — see `condition_as_long_as_accepts_bronze_horse_
-    /// and_champions_helm` for the full explanation of the vacuity this replaces.
-    ///
-    /// Siege Behemoth reports `Optional_MayHave`, `Optional_YouMay` and `DynamicQty` as
-    /// swallowed, and reported all three in the shipped card data long before this
-    /// change (verified against the pre-cutover full-pool export). This test asserted
-    /// the opposite and passed only because its empty MTGJSON keyword list turned the
-    /// "Hexproof" line into an `Effect::Unimplemented`, tripping the card-wide gate that
-    /// silenced every detector on the card.
+    /// Siege Behemoth's per-creature "you may have that creature assign its combat damage
+    /// as though it weren't blocked" is typed (`AssignDamageAsThoughUnblocked` on a gated
+    /// class static), so the optionality detectors no longer report it as swallowed. This
+    /// replaces the former known-gap pin. Reach guard: the typed grant is present.
     #[test]
-    fn optional_may_have_siege_behemoth_reports_known_gap() {
+    fn optional_may_have_siege_behemoth_is_typed() {
         let parsed = parse_named(
             "Hexproof\nAs long as this creature is attacking, for each creature you control, \
              you may have that creature assign its combat damage as though it weren't blocked.",
@@ -11734,11 +11795,24 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             &["Creature"],
         );
         assert!(
-            has_swallowed_detector(&parsed, "Optional_MayHave"),
-            "pre-existing gap: the per-creature 'you may have' optionality is not typed. \
-             Warnings: {:?}",
+            parsed.statics.iter().any(|d| d
+                .modifications
+                .contains(&ContinuousModification::AssignDamageAsThoughUnblocked)),
+            "reach guard: typed grant missing: {:?}",
+            parsed.statics
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Optional_MayHave"),
+            "Warnings: {:?}",
             parsed.parse_warnings
         );
+        for detector in ["Optional_YouMay", "DynamicQty"] {
+            assert!(
+                !has_swallowed_detector(&parsed, detector),
+                "{detector} must not fire: {:?}",
+                parsed.parse_warnings
+            );
+        }
     }
 
     #[test]

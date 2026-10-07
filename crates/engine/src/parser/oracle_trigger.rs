@@ -6217,12 +6217,19 @@ fn graveyard_origin_or_condition(
 /// matched clause from the effect text.
 ///
 /// Grammar (subject anaphor × graveyard-origin disjunction):
-///   "if " ( "it " | "they " | "that creature " )
-///   ( <compact-form> | <split-your-form> | <split-a-form> )
+///   "if " ( "it " | "they " | "that creature " | "one or more of them " )
+///   ( <compact-form> | <split-form> | <bare-cast-form> ) ( "," | end of input )
 /// where
 ///   <compact-form>     = "entered or " ( "was" | "were" ) " cast from a graveyard"
-///   <split-your-form>  = "entered from your graveyard or you cast it from your graveyard"
-///   <split-a-form>     = "entered from a graveyard or you cast it from a graveyard"
+///   <split-form>       = "entered from " <gy> " or " ( "you cast it" | "was" | "were" ) " cast from " <gy>
+///                        (the active "you cast it from" form scopes the caster to You;
+///                        the passive form carries no caster clause)
+///   <gy>               = "your graveyard" | "a graveyard"
+/// The trailing anchor keeps a longer tail ("... from a graveyard card, ...")
+/// from being half-consumed: it falls through to the unparsed-condition path.
+///
+/// CR 603.2c: "one or more of them" is the batch partitive anaphor; the
+/// batched trigger path evaluates this condition per entering object.
 /// CR 701.54a + CR 603.4: "if you chose a creature other than ~ as your
 /// ring-bearer, " — Aragorn, Company Leader's intervening-if. The card name is
 /// already normalized to `~` at the parser entry point (CR 201.5: a name in an
@@ -6240,7 +6247,14 @@ fn parse_graveyard_origin_intervening_if(input: &str) -> OracleResult<'_, Trigge
     // "that creature" (Breathless Knight: "Whenever ~ or another creature you
     // control enters, if that creature entered from a graveyard or you cast it
     // from a graveyard") is the same anaphor as "it": the entering object.
-    let (rest, _) = alt((tag("it "), tag("they "), tag("that creature "))).parse(rest)?;
+    // "one or more of them" (Kotis, Celes) is the batched-trigger partitive form.
+    let (rest, _) = alt((
+        tag("it "),
+        tag("they "),
+        tag("that creature "),
+        tag("one or more of them "),
+    ))
+    .parse(rest)?;
     // Compact "a graveyard" form: "entered or (was|were) cast from a graveyard".
     let compact = map(
         (
@@ -6259,15 +6273,21 @@ fn parse_graveyard_origin_intervening_if(input: &str) -> OracleResult<'_, Trigge
                 value(Some(ControllerRef::You), tag("your ")),
                 value(None, tag("a ")),
             )),
-            tag("graveyard or you cast it from "),
+            tag("graveyard or "),
+            // Caster axis: the active "you cast it from" scopes the caster to
+            // You; the passive "(was|were) cast from" carries no caster clause.
+            alt((
+                value(Some(ControllerRef::You), tag("you cast it from ")),
+                value(None, (alt((tag("was"), tag("were"))), tag(" cast from "))),
+            )),
             alt((
                 value(Some(ControllerRef::You), tag("your ")),
                 value(None, tag("a ")),
             )),
             tag("graveyard"),
         ),
-        |(_, entered_owner, _, cast_owner, _)| {
-            graveyard_origin_or_condition(entered_owner, cast_owner, Some(ControllerRef::You))
+        |(_, entered_owner, _, caster, cast_owner, _)| {
+            graveyard_origin_or_condition(entered_owner, cast_owner, caster)
         },
     );
     // CR 601.2 + CR 603.4: bare "(was|were) cast from [a|your] graveyard" with no
@@ -6293,7 +6313,8 @@ fn parse_graveyard_origin_intervening_if(input: &str) -> OracleResult<'_, Trigge
             owner,
         },
     );
-    alt((compact, split, bare_cast)).parse(rest)
+    // Trailing anchor: the clause must end at the clause comma or end of input.
+    terminated(alt((compact, split, bare_cast)), peek(alt((tag(","), eof)))).parse(rest)
 }
 
 /// CR 701.26 + CR 603.4: "if it's the first time that creature/permanent has become

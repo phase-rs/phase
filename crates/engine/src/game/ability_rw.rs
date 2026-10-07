@@ -3842,7 +3842,8 @@ fn zone_choice_candidate_source_read(source: ZoneChoiceCandidateSource) -> RwPro
         ZoneChoiceCandidateSource::Direct => reads_zone_membership(),
         ZoneChoiceCandidateSource::Tracked
         | ZoneChoiceCandidateSource::Legacy
-        | ZoneChoiceCandidateSource::CostPaidObjects => {
+        | ZoneChoiceCandidateSource::CostPaidObjects
+        | ZoneChoiceCandidateSource::ParentTargets => {
             let mut p = reads_zone_membership();
             p.merge(member_bound_read());
             p

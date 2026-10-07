@@ -4252,14 +4252,43 @@ fn try_parse_inline_delayed_trigger(
 /// "it"/"this creature"/"this permanent"/"this artifact" → SelfRef (source object).
 /// "target creature" → ParentTarget (named target in the condition).
 fn parse_delayed_subject_filter(condition_text: &str, ctx: &mut ParseContext) -> TargetFilter {
-    scan_delayed_subject(condition_text).unwrap_or_else(|| {
+    let subject = scan_delayed_subject(condition_text).unwrap_or_else(|| {
         ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
             context: "unrecognized delayed subject".into(),
             text: condition_text.trim().into(),
             line_index: 0,
         });
         TargetFilter::Any
-    })
+    });
+
+    // CR 109.5 + CR 603.7e: "your" names the delayed ability's controller,
+    // fixed when its creating ability resolves. Keep that predicate alongside
+    // the subject so the tracked-set binder can still bind the latter.
+    if matches!(subject, TargetFilter::ParentTarget)
+        && (nom_primitives::scan_at_word_boundaries(condition_text, |input| {
+            verify(parse_control_clause, |possessor| {
+                *possessor == ControlClausePossessor::You
+            })
+            .parse(input)
+        })
+        .is_some()
+            || nom_primitives::scan_at_word_boundaries(condition_text, |input| {
+                verify(nom_filter::parse_zone_controller, |controller| {
+                    *controller == ControllerRef::You
+                })
+                .parse(input)
+            })
+            .is_some())
+    {
+        TargetFilter::And {
+            filters: vec![
+                subject,
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+            ],
+        }
+    } else {
+        subject
+    }
 }
 
 /// CR 601.2f: Parse "the next spell you cast this turn costs {N} less to cast".
@@ -14574,8 +14603,9 @@ fn try_parse_exile_from_top_until(
     // families:
     //
     // * `NextMatches` (CR 701.57a / CR 702.85a) — Discover / Cascade /
-    //   Etali-shape: "until <pronoun> exile[s] a/an {filter} card". Stops on
-    //   the first hit; the hit card is exposed to the sub_ability chain.
+    //   Etali-shape: "until <pronoun> exile[s] a/an {filter} card" or "<N>
+    //   {filter} cards". Stops on the Nth hit; the hit cards are exposed to the
+    //   sub_ability chain.
     //
     // * `CumulativeThreshold` (CR 202.3 + CR 107.3e) — Tasha's Hideous
     //   Laughter / Dream Harvest / Improvisation Capstone: "until <subject>
@@ -14621,8 +14651,9 @@ fn try_parse_exile_from_top_until(
 /// until-clause of an `exile cards from the top of <library> until …` body
 /// into a typed [`UntilCondition`]. The two recognised shapes are:
 ///
-/// * `NextMatches` — `<pronoun> exile[s] a/an {filter} card`
-///   (e.g. "you exile a nonland card", "they exile a creature card").
+/// * `NextMatches` — `<pronoun> exile[s] a/an {filter} card` or
+///   `<pronoun> exile[s] <N> {filter} cards` (e.g. "you exile a nonland card",
+///   "you exile two nonland cards with mana value 4 or less").
 ///
 /// * `CumulativeThreshold` — `<subject> <verb> exiled cards with total mana
 ///   value N <comparator>` (e.g. "you exile cards with total mana value 4 or
@@ -14647,20 +14678,29 @@ fn parse_until_condition(input: &str) -> Option<UntilCondition> {
     try_parse_next_matches_until(input)
 }
 
-/// CR 701.57a / CR 702.85a: Parse `<pronoun> exile[s] a/an {filter} card.`
-/// Returns the typed `UntilCondition::NextMatches { filter }`.
+/// CR 701.57a / CR 702.85a / CR 608.2c: Parse `<pronoun> exile[s] a/an
+/// {filter} card.` or `<pronoun> exile[s] <N> {filter} cards.` (Invasion of
+/// Alara: "until you exile two nonland cards with mana value 4 or less").
+/// Returns the typed `UntilCondition::NextMatches { filter, count }`.
 fn try_parse_next_matches_until(input: &str) -> Option<UntilCondition> {
-    let (_, rest) = nom_on_lower(input, input, |i| {
-        let (i, _) = alt((
-            tag("you exile "),
-            tag("they exile "),
-            tag("he exiles "),
-            tag("she exiles "),
-            tag("it exiles "),
-        ))
-        .parse(i)?;
-        nom_primitives::parse_article(i)
+    let ((), rest) = nom_on_lower(input, input, |i| {
+        value(
+            (),
+            alt((
+                tag("you exile "),
+                tag("they exile "),
+                tag("he exiles "),
+                tag("she exiles "),
+                tag("it exiles "),
+            )),
+        )
+        .parse(i)
     })?;
+    // "a/an" is one card; any other count ("two", "X") is an effect quantity.
+    let (count, rest) = match nom_on_lower(rest, rest, nom_primitives::parse_article) {
+        Some((_, after_article)) => (QuantityExpr::Fixed { value: 1 }, after_article),
+        None => crate::parser::oracle_util::parse_count_expr(rest)?,
+    };
 
     // Extract the filter from "nonland card", "creature card", etc. The
     // downstream `parse_target` call does the actual filter parsing with
@@ -14687,7 +14727,7 @@ fn try_parse_next_matches_until(input: &str) -> Option<UntilCondition> {
         parsed
     };
 
-    Some(UntilCondition::NextMatches { filter })
+    Some(UntilCondition::NextMatches { filter, count })
 }
 
 /// CR 202.3 + CR 107.3e: Parse the cumulative-threshold until-clause shape.
@@ -19094,9 +19134,15 @@ fn parse_exiled_cards_not_cast_cleanup(input: &str) -> Option<()> {
     let (input, _) = tag::<_, _, OracleError<'_>>("put the exiled cards")
         .parse(input)
         .ok()?;
-    let (input, _) = opt(tag::<_, _, OracleError<'_>>(" that weren't cast this way"))
-        .parse(input)
-        .ok()?;
+    // "that weren't cast this way" (Gríma, Saruman's Footman) and "not cast
+    // this way" (Ryan Sinclair) name the same cards: a card cast from exile has
+    // left it.
+    let (input, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>(" that weren't cast this way"),
+        tag(" not cast this way"),
+    )))
+    .parse(input)
+    .ok()?;
     let (input, _) = tag::<_, _, OracleError<'_>>(" on the bottom of ")
         .parse(input)
         .ok()?;
@@ -19167,6 +19213,29 @@ fn refine_put_at_library_position(
             return placement_target_set;
         }
         let lower_put = text.to_lowercase();
+        // CR 608.2c: after an "exile cards … until you exile <N> <filter> cards"
+        // loop, "the OTHER cards exiled this way" (Invasion of Alara) and "each
+        // other card exiled this way" (Codie, Vociferous Codex) are the cards it
+        // exiled that are not among the ones it found. The loop stops on its last
+        // match, so those are the exiled cards NOT matching its filter; a found
+        // card that was neither cast nor put into hand stays in exile.
+        if let Some(found) = ctx.chain_prior_exile_until_match.clone() {
+            if matches!(*target, TargetFilter::Any | TargetFilter::ParentTarget)
+                && (nom_primitives::scan_contains(&lower_put, "the other cards exiled this way")
+                    || nom_primitives::scan_contains(&lower_put, "each other card exiled this way"))
+            {
+                *target = TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::ExiledBySource,
+                        TargetFilter::Not {
+                            filter: Box::new(found),
+                        },
+                    ],
+                };
+                *count = QuantityExpr::Fixed { value: 0 };
+                return placement_target_set;
+            }
+        }
         if matches!(*target, TargetFilter::Any | TargetFilter::ParentTarget)
             && (nom_primitives::scan_contains(&lower_put, "put them on top")
                 || nom_primitives::scan_contains(&lower_put, "put the exiled cards on top")
@@ -19556,6 +19625,10 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
         return clause;
     }
 
+    if let Some(clause) = try_parse_put_one_exiled_card_into_hand(text, ctx) {
+        return clause;
+    }
+
     // CR 106.1 + CR 109.1: "For each color among [X], add one mana of that color"
     // (Faeburrow Elder). Must run before the generic for-each-prefix strip path,
     // because "that color" anaphors a per-iteration color rather than the
@@ -19878,6 +19951,78 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
         clause.multi_target = extract_double_counter_multi_target(text);
     }
     clause
+}
+
+/// CR 608.2c + CR 608.2d: "Put one of them into your hand." after an earlier
+/// instruction of the same chain exiled a batch (Invasion of Alara: "exile
+/// cards … until you exile two nonland cards …. You may cast one of those two
+/// cards …. Put one of them into your hand."). The controller chooses ONE card
+/// of that batch still in exile — a card cast from it is on the stack and no
+/// longer a candidate — and that card goes to hand.
+///
+/// Gated on a same-chain exile-until loop (`chain_prior_exile_until_match`):
+/// that loop hands its found cards on as targets, which is the batch "one of
+/// them" names. When a clause between the loop and this one may replace those
+/// targets (`chain_exile_until_hits_source` is unbound), the clause
+/// fails closed as unimplemented. Without a loop it is left to the general
+/// parse.
+fn try_parse_put_one_exiled_card_into_hand(
+    text: &str,
+    ctx: &ParseContext,
+) -> Option<ParsedEffectClause> {
+    ctx.chain_prior_exile_until_match.as_ref()?;
+    let lower = text.to_lowercase();
+    (
+        multispace0::<_, OracleError<'_>>,
+        tag("put one of "),
+        alt((tag("them"), tag("those cards"))),
+        tag(" into your hand"),
+        opt(tag(".")),
+        multispace0,
+        eof,
+    )
+        .parse(lower.as_str())
+        .ok()?;
+    let Some(candidate_source @ ZoneChoiceCandidateSource::ParentTargets) =
+        ctx.chain_exile_until_hits_source
+    else {
+        return Some(parsed_clause(Effect::unimplemented(
+            "put_one_of_exile_until_batch_into_hand",
+            text,
+        )));
+    };
+    let mut clause = parsed_clause(Effect::ChooseFromZone {
+        count: 1,
+        zone: Zone::Exile,
+        additional_zones: Vec::new(),
+        zone_owner: ZoneOwner::Controller,
+        filter: None,
+        chooser: crate::types::ability::Chooser::Controller.into(),
+        candidate_source,
+        reciprocal_role: None,
+        up_to: false,
+        selection: crate::types::ability::CardSelectionMode::Chosen,
+        constraint: None,
+    });
+    clause.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            origin: Some(Zone::Exile),
+            destination: Zone::Hand,
+            target: TargetFilter::Any,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+    )));
+    Some(clause)
 }
 
 fn try_parse_return_opponent_choice_from_graveyard(text: &str) -> Option<ParsedEffectClause> {
@@ -30007,6 +30152,12 @@ enum CastAnaphor {
     /// "cards exiled …" — splits further on its tail (see
     /// `parse_host_anchored_exiled_cards_tail`).
     PluralCardsExiled,
+    /// "one of those N cards" — ONE card chosen from the batch the chain
+    /// handed over (Invasion of Alara: "one of those two cards"). Only the
+    /// free, immediate cast keeps that one-card bound (a one-cast resolution
+    /// window); any other form fails closed. The unnumbered "one of those
+    /// cards" stays `Other`, as before.
+    OneOfBatch,
     /// Every other anaphor; keeps `TargetFilter::ParentTarget`.
     Other,
 }
@@ -30105,7 +30256,15 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     // before "those cards") so the prefix-match doesn't shadow the longer
     // anaphor.
     if let Ok((after_anaphor, matched_anaphor)) = alt((
-        value(CastAnaphor::Other, tag::<_, _, E>("one of those cards")),
+        value(
+            CastAnaphor::OneOfBatch,
+            (
+                tag::<_, _, E>("one of those "),
+                terminated(nom_primitives::parse_number, tag(" ")),
+                tag("cards"),
+            ),
+        ),
+        value(CastAnaphor::Other, tag("one of those cards")),
         value(CastAnaphor::SingularExiledCard, tag("the exiled card")),
         value(CastAnaphor::Other, tag("those cards")),
         value(CastAnaphor::PluralCardsExiled, tag("cards exiled")),
@@ -30162,12 +30321,33 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         // NOT the target's zone: an impulse/tracked-set anaphor
         // (`ExiledBySource`/`TrackedSet`, `parent_target_is_chosen == false`)
         // still keeps `LingeringPermission`.
-        let driver = if mode == CardPlayMode::Cast
+        //
+        // CR 608.2g + CR 608.2c: "one of those [N] cards" picks ONE card from the
+        // batch an earlier instruction of this resolution produced (Invasion of
+        // Alara's two exiled cards). The same during-resolution cast, offered as a
+        // one-cast window over that batch rather than as a cast of each member.
+        let resolves_now = mode == CardPlayMode::Cast
             && alt_ability_cost.is_none()
             && duration.is_none()
             && constraint.is_none()
-            && (without_paying || ctx.parent_target_is_chosen)
-        {
+            && (without_paying || ctx.parent_target_is_chosen);
+        let one_cast_window = resolves_now && without_paying;
+        // CR 608.2g: only the one-cast window carries "one of those N cards"'s
+        // one-card bound. A paid or Play form (or a duration that reaches this
+        // parser; printed leading and trailing durations are refused earlier
+        // by the duration seam) would fall back to a permission per card, so
+        // it fails closed instead.
+        if matches!(matched_anaphor, CastAnaphor::OneOfBatch) && !one_cast_window {
+            return Some(Effect::unimplemented("bounded_batch_cast", lower));
+        }
+        let driver = if one_cast_window && matches!(matched_anaphor, CastAnaphor::OneOfBatch) {
+            crate::types::ability::CastFromZoneDriver::ResolutionWindow {
+                bounds: crate::types::ability::ResolutionCastWindow {
+                    max_casts: Some(1),
+                    max_total_mv: None,
+                },
+            }
+        } else if resolves_now {
             crate::types::ability::CastFromZoneDriver::DuringResolution
         } else {
             crate::types::ability::CastFromZoneDriver::LingeringPermission
@@ -30199,7 +30379,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             CastAnaphor::PluralCardsExiled => {
                 parse_host_anchored_exiled_cards_tail(after_anaphor).is_ok()
             }
-            CastAnaphor::Other => false,
+            CastAnaphor::OneOfBatch | CastAnaphor::Other => false,
         };
         let target = if anchors_to_source_exile_ledger {
             resolve_singular_exiled_card_target(
@@ -33412,6 +33592,44 @@ fn clause_ir_is_self_library_peek(clause: &ClauseIr) -> bool {
                 ..
             } if source.is_library()
         )
+}
+
+/// CR 608.2c: whether the cards found by an earlier same-chain
+/// `NextMatches` loop still arrive at the next clause as its parent targets.
+/// The loop hands its matches on as targets, and only the one-cast window over
+/// that batch ("You may cast one of those two cards without paying its mana
+/// cost", Invasion of Alara) passes them on unchanged. Any other clause after
+/// the loop — or a loop carried by a delayed trigger — fails closed.
+fn chain_exile_until_hits_source(clauses: &[ClauseIr]) -> Option<ZoneChoiceCandidateSource> {
+    for clause in clauses.iter().rev() {
+        if clause.delayed_condition.is_some()
+            || clause.prefix_delayed_condition.is_some()
+            || clause.repeat_for.is_some()
+            || clause.player_scope.is_some()
+            || clause.parsed.sub_ability.is_some()
+        {
+            return None;
+        }
+        match &clause.parsed.effect {
+            Effect::ExileFromTopUntil {
+                until: UntilCondition::NextMatches { .. },
+                ..
+            } => return Some(ZoneChoiceCandidateSource::ParentTargets),
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                driver:
+                    CastFromZoneDriver::ResolutionWindow {
+                        bounds:
+                            ResolutionCastWindow {
+                                max_casts: Some(1), ..
+                            },
+                    },
+                ..
+            } => {}
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// CR 400.1/400.2 + CR 608.2c: If this clause is an `Effect::RevealHand`
@@ -41991,6 +42209,22 @@ fn parse_effect_chain_ir_body(
                 .clauses()
                 .iter()
                 .any(clause_ir_is_self_library_peek),
+            // CR 603.7a: a delayed trigger's loop (Codie, Vociferous Codex) counts
+            // too; the clauses after it are relocated into its payload.
+            chain_prior_exile_until_match: builder.clauses().iter().rev().find_map(|clause| {
+                let payload = clause_delayed_payload(clause, kind);
+                match payload
+                    .as_ref()
+                    .map_or(&clause.parsed.effect, |payload| &*payload.effect)
+                {
+                    Effect::ExileFromTopUntil {
+                        until: UntilCondition::NextMatches { filter, .. },
+                        ..
+                    } => Some(filter.clone()),
+                    _ => None,
+                }
+            }),
+            chain_exile_until_hits_source: chain_exile_until_hits_source(builder.clauses()),
             // CR 400.7j + CR 608.2c + CR 608.2d: the nearest earlier single-card
             // exile partition of this chain, with its candidate provenance. When
             // that provenance is the source-bound cost-paid pile (Coin of Fate),
@@ -46968,7 +47202,10 @@ fn dichotomancy_searches_target_players_library_per_iterated_permanent() {
     let TargetFilter::Typed(repeat_filter) = filter else {
         panic!("expected typed repeat filter, got {filter:?}");
     };
-    assert_eq!(repeat_filter.controller, Some(ControllerRef::TargetPlayer));
+    assert_eq!(
+        repeat_filter.controller,
+        Some(ControllerRef::TargetOpponent)
+    );
 
     let Effect::SearchLibrary {
         filter,

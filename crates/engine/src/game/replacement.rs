@@ -2271,10 +2271,10 @@ fn shield_rider_reflects_per_event(state: &GameState, rid: ReplacementId) -> boo
         .is_some_and(rider_reflects_per_event_damage_source)
 }
 
-/// CR 614.9: Read back the captured chosen recipient (an object or a player)
+/// CR 614.9: Read back the captured concrete recipient (an object or a player)
 /// stashed in the matched replacement's `redirect_target` field (set at
 /// resolution time for `DamageRedirectTarget::ChosenTarget` — "to target
-/// creature" / "to any target").
+/// creature" / "to any target", or the creating ability's implicit "you").
 fn redirect_chosen_target_for_rid(state: &GameState, rid: ReplacementId) -> Option<TargetRef> {
     let repl = if rid.source == ObjectId(0) {
         state.pending_damage_replacements.get(rid.index)
@@ -6451,6 +6451,9 @@ fn replacement_condition_quantity_ctx(
     // draws — its `EventContextAmount` is this event's own count.
     let event_amount = match event {
         ProposedEvent::Draw { count, .. } => Some(u32_to_i32_saturating(*count)),
+        // CR 120.4b + CR 616.1f: damage thresholds read the current proposal,
+        // including changes made by a previously applied replacement.
+        ProposedEvent::Damage { amount, .. } => Some(u32_to_i32_saturating(*amount)),
         _ => None,
     };
     crate::game::quantity::QuantityContext {
@@ -15874,6 +15877,50 @@ mod tests {
             1
         );
         assert!(find_applicable_replacements(&state, &opponent_event, &registry).is_empty());
+    }
+
+    #[test]
+    fn fixed_damage_threshold_reads_current_event_before_ambient_amounts() {
+        let replacement = crate::parser::oracle_replacement::parse_replacement_line(
+            "If a source would deal 4 or more damage to a permanent or player, that source deals 3 damage to that permanent or player instead.",
+            "Divine Presence",
+        )
+        .expect("the printed fixed damage replacement must parse");
+        assert_eq!(
+            replacement.damage_modification,
+            Some(DamageModification::SetTo { value: 3 })
+        );
+        let registry = build_replacement_registry();
+        for (amount, ambient, expected) in [(3, 20, 0), (4, 0, 1), (u32::MAX, 0, 1)] {
+            let mut state =
+                test_state_with_object(ObjectId(10), Zone::Battlefield, vec![replacement.clone()]);
+            state.last_effect_count = Some(ambient);
+            state.last_effect_amount = Some(ambient);
+            state.current_trigger_event = Some(GameEvent::DamageDealt {
+                source_id: ObjectId(11),
+                target: TargetRef::Player(PlayerId(1)),
+                amount: ambient as u32,
+                is_combat: false,
+                excess: 0,
+            });
+            let event = ProposedEvent::Damage {
+                source_id: ObjectId(11),
+                target: TargetRef::Player(PlayerId(1)),
+                amount,
+                is_combat: false,
+                applied: HashSet::new(),
+            };
+            // CR 120.4b + CR 616.1f: only the current proposed damage amount
+            // determines applicability, including after other replacements.
+            assert_eq!(
+                find_applicable_replacements(&state, &event, &registry).len(),
+                expected
+            );
+            assert_eq!(
+                replacement_condition_quantity_ctx(&state, ObjectId(10), None, &event).event_amount,
+                Some(i32::try_from(amount).unwrap_or(i32::MAX)),
+            );
+        }
     }
 
     #[test]

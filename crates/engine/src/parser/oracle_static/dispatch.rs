@@ -940,6 +940,15 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 510.1c + CR 609.4 + CR 611.3a: "[As long as <cond>, ]for each <creature class>
+    // you control, you may have that creature assign its combat damage as though it
+    // weren't blocked" (Siege Behemoth, Zilortha, Ruxa). Must run before the inverted
+    // "As long as" split below, which would otherwise cut the line at the first
+    // effect-subject comma and leave an `Unrecognized` gate.
+    if let Some(def) = parse_for_each_assign_damage_as_though_unblocked(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 611.3a: An inverted static of the form "As long as <condition>, <effect>"
     // is semantically equivalent to the canonical "<effect> as long as <condition>".
     // Rewrite to canonical form and re-dispatch so the existing conditional-continuous

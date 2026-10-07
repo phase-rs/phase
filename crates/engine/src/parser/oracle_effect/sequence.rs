@@ -4047,6 +4047,17 @@ fn next_token_is_player_action_count(s: &str) -> bool {
 /// Used by `starts_bare_and_clause` to split patterns like
 /// "sacrifice ~ and it deals 3 damage to target player".
 fn starts_with_damage_clause(lower: &str) -> bool {
+    // CR 608.2c: a source-pronoun damage instruction follows the earlier effect in order.
+    if (
+        alt((tag::<_, _, OracleError<'_>>("he"), tag("she"))),
+        multispace1,
+        alt((tag("deals "), tag("deal "))),
+    )
+        .parse(lower)
+        .is_ok()
+    {
+        return true;
+    }
     if let Ok((_, before)) = take_until::<_, _, OracleError<'_>>("deals ")
         .parse(lower)
         .or_else(|_| take_until::<_, _, OracleError<'_>>("deal ").parse(lower))
@@ -5130,7 +5141,8 @@ pub(super) fn apply_clause_continuation(
             ));
         }
         ContinuationAst::GoadLastCreated { duration } => {
-            // CR 701.15b: Goaded is a static ability on the just-created tokens.
+            // CR 701.15b: Goaded is a designation on the created tokens. The
+            // static-mode modification is an intermediate resolution encoding.
             defs.push(AbilityDefinition::new(
                 kind,
                 Effect::GenericEffect {
@@ -9925,6 +9937,64 @@ pub(super) fn try_parse_scoped_does_the_same(text: &str) -> Option<PlayerFilter>
 mod tests {
     use super::*;
     use crate::types::ability::{QuantityExpr, SearchSelectionConstraint, ZoneChoiceChooser};
+
+    #[test]
+    fn source_pronoun_damage_boundaries_compose_pronoun_verb_and_connector() {
+        for pronoun in ["he", "she"] {
+            for verb in ["deal", "deals"] {
+                for connector in [", and ", " and "] {
+                    let tail = format!("{pronoun} {verb} 4 damage to each opponent");
+                    assert!(starts_with_damage_clause(&tail), "{tail}");
+                    let text = format!("put four +1/+1 counters on ~{connector}{tail}");
+                    let chunks = split_clause_sequence(&text);
+                    assert_eq!(chunks.len(), 2, "{text}: {chunks:?}");
+                    assert_eq!(chunks[0].text, "put four +1/+1 counters on ~");
+                    let raw_tail = if connector == ", and " {
+                        format!("and {tail}")
+                    } else {
+                        tail.clone()
+                    };
+                    assert_eq!(chunks[1].text, raw_tail, "{text}");
+                    assert_eq!(
+                        super::super::lower::strip_leading_sequence_connector(&chunks[1].text)
+                            .trim(),
+                        tail,
+                        "{text}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn source_pronoun_damage_boundary_requires_an_immediate_whole_verb() {
+        assert!(starts_with_damage_clause(
+            "she deals 4 damage to each opponent"
+        ));
+        for tail in [
+            "shell deals 4 damage to each opponent",
+            "he dealing 4 damage to each opponent",
+            "she eventually deals 4 damage to each opponent",
+            "they deal 4 damage to each opponent",
+        ] {
+            assert!(!starts_with_damage_clause(tail), "{tail}");
+            let text = format!("put four +1/+1 counters on ~ and {tail}");
+            assert_eq!(split_clause_sequence(&text).len(), 1, "{text}");
+        }
+    }
+
+    #[test]
+    fn source_pronoun_damage_boundaries_do_not_escape_quoted_abilities() {
+        let text = "target creature gains \"{T}: Put a +1/+1 counter on this creature and he deals 1 damage to each opponent.\" until end of turn";
+        assert_eq!(split_clause_sequence(text).len(), 1);
+        assert_eq!(
+            split_clause_sequence(
+                "put a +1/+1 counter on ~ and he deals 1 damage to each opponent"
+            )
+            .len(),
+            2,
+        );
+    }
 
     // CR 401.4: unspecified library placement preserves the owner's choice;
     // explicit randomization and non-library destinations retain their modes.
@@ -14929,10 +14999,14 @@ mod tests {
         assert!(starts_bare_and_clause(
             "she doesn't untap during her next untap step"
         ));
+        // CR 608.2c: a source-pronoun damage instruction is its own clause
+        // (Aang, Master of Elements: "... counters on him, and he deals 4
+        // damage to each opponent").
+        assert!(starts_bare_and_clause("she deals 2 damage to any target"));
         // Guard: a gendered pronoun WITHOUT a recognized continuous/restriction
-        // verb must NOT split (no false clause boundary).
+        // or damage verb must NOT split (no false clause boundary).
         assert!(!starts_bare_and_clause("he attacks this turn"));
-        assert!(!starts_bare_and_clause("she deals 2 damage to any target"));
+        assert!(!starts_bare_and_clause("she eventually deals 2 damage"));
     }
 
     /// CR 104.2b + CR 104.3e + CR 119.7 + CR 119.8: plural-player subject +

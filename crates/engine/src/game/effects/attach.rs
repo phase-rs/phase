@@ -1882,12 +1882,17 @@ pub(crate) fn attach_to_with_authority(
     }
 
     crate::game::layers::mark_layers_full(state);
-    crate::game::layers::flush_layers(state);
+    let recorded_reference = reference.filter(|_| moving_to_new_host);
+    if recorded_reference.is_some() {
+        crate::game::layers::flush_layers_for_attachment_command(state);
+    } else {
+        crate::game::layers::flush_layers(state);
+    }
 
     // CR 733: journal the settled edit through its owning family. A same-host
     // re-attach (CR 701.3b) leaves every field above unchanged, so only a real
     // host transition is recorded.
-    if let Some(reference) = reference.filter(|_| moving_to_new_host) {
+    if let Some(reference) = recorded_reference {
         record_attachment_edit(
             state,
             reference,
@@ -2609,12 +2614,17 @@ pub(crate) fn attach_to_player_with_authority(
     });
 
     crate::game::layers::mark_layers_full(state);
-    crate::game::layers::flush_layers(state);
+    let recorded_reference = reference.filter(|_| moving_to_new_host);
+    if recorded_reference.is_some() {
+        crate::game::layers::flush_layers_for_attachment_command(state);
+    } else {
+        crate::game::layers::flush_layers(state);
+    }
 
     // CR 733: journal the settled edit through its owning family, on the same
     // terms as the object-host authority — a same-player re-attach (CR 701.3b)
     // changed nothing and is not recorded.
-    if let Some(reference) = reference.filter(|_| moving_to_new_host) {
+    if let Some(reference) = recorded_reference {
         record_attachment_edit(
             state,
             reference,
@@ -2648,7 +2658,7 @@ pub(crate) fn unattach(state: &mut GameState, attachment_id: ObjectId) -> Option
         attachment.attached_to = None;
     }
     crate::game::layers::mark_layers_full(state);
-    crate::game::layers::flush_layers(state);
+    crate::game::layers::flush_layers_for_attachment_command(state);
 
     // CR 733 + CR 701.3d: an unattach installs no host and, unlike an attach,
     // draws no new timestamp (CR 613.7e applies to attaching to a new host).
@@ -2724,7 +2734,7 @@ pub fn apply_resolved_attachment(
     }
 
     crate::game::layers::mark_layers_full(state);
-    crate::game::layers::flush_layers(state);
+    crate::game::layers::flush_layers_for_attachment_command(state);
     Ok(())
 }
 
@@ -5550,5 +5560,198 @@ mod tests {
             None,
             "opponent-controlled matching Equipment must unattach"
         );
+    }
+}
+
+#[cfg(test)]
+mod retirement_ownership_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::ability::{ContinuousModification, Duration, ObjectScope, StaticCondition};
+    use crate::types::game_state::{LayersDirty, TransientContinuousEffectBindings};
+    use crate::types::phase::Phase;
+    use crate::types::resolved_commands::{ResolvedContinuousEffectEdit, ResolvedRulesCommand};
+
+    #[test]
+    fn same_host_object_and_player_flushes_keep_standalone_retirement_ownership() {
+        for player_host in [false, true] {
+            for real_transition in [false, true] {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                let first = scenario.add_vanilla(P0, 2, 2);
+                let second = scenario.add_vanilla(P0, 2, 2);
+                let subject = scenario.add_vanilla(P0, 2, 2);
+                // A typed unrestricted Aura isolates graph ownership from
+                // printed enchant restrictions in these authority-level tests.
+                let aura = scenario
+                    .add_enchantment_from_oracle(P0, "Typed Aura", "")
+                    .with_subtypes(vec!["Aura"])
+                    .id();
+                let mut runner = scenario.build();
+                let state = runner.state_mut();
+                if player_host {
+                    attach_to_player(state, aura, P0);
+                } else {
+                    attach_to(state, aura, first);
+                }
+                let expected = if player_host {
+                    AttachTarget::Player(P0)
+                } else {
+                    AttachTarget::Object(first)
+                };
+                assert_eq!(state.objects[&aura].attached_to, Some(expected));
+                state.objects.get_mut(&subject).unwrap().tapped = true;
+                let reference = ObjectIncarnationRef::from_object(&state.objects[&subject]);
+                let id = state
+                    .add_transient_continuous_effect_with_bindings(
+                        subject,
+                        P0,
+                        Duration::ForAsLongAs {
+                            condition: StaticCondition::IsTapped {
+                                scope: ObjectScope::Recipient,
+                            },
+                        },
+                        TargetFilter::SpecificObject { id: subject },
+                        vec![ContinuousModification::AddPower { value: 1 }],
+                        None,
+                        TransientContinuousEffectBindings {
+                            affected_recipient: Some(reference),
+                            duration_subject: Some(reference),
+                        },
+                    )
+                    .expect("the fixture's duration begins");
+                crate::game::layers::flush_layers(state);
+                assert_eq!(state.objects[&subject].power, Some(3));
+                let installed = state
+                    .transient_continuous_effects
+                    .iter()
+                    .find(|e| e.id == id)
+                    .unwrap()
+                    .clone();
+                state.objects.get_mut(&subject).unwrap().tapped = false;
+                let prefix = state.clone();
+                let start = state.resolved_rules_journal.entries().len();
+                if player_host {
+                    attach_to_player(state, aura, if real_transition { P1 } else { P0 });
+                } else {
+                    attach_to(state, aura, if real_transition { second } else { first });
+                }
+                assert_eq!(state.objects[&subject].power, Some(2));
+                assert_eq!(state.layers_dirty, LayersDirty::Clean);
+                assert!(!state
+                    .transient_continuous_effects
+                    .iter()
+                    .any(|e| e.id == id));
+                let commands: Vec<_> = state
+                    .resolved_rules_journal
+                    .entries()
+                    .iter()
+                    .skip(start)
+                    .filter_map(|e| e.command.as_ref())
+                    .collect();
+                assert_eq!(commands.len(), 1);
+                let mut replay = prefix;
+                let journal = replay.resolved_rules_journal.clone();
+                match commands[0] {
+                    ResolvedRulesCommand::Attachment(command) => {
+                        assert!(real_transition);
+                        for invalidation in ["missing", "stale", "old_host"] {
+                            let mut rejected = replay.clone();
+                            match invalidation {
+                                "missing" => {
+                                    rejected.objects.remove(&aura);
+                                }
+                                "stale" => {
+                                    rejected.objects.get_mut(&aura).unwrap().bump_incarnation();
+                                }
+                                "old_host" => {
+                                    rejected.objects.get_mut(&aura).unwrap().attached_to = None;
+                                }
+                                _ => unreachable!(),
+                            }
+                            let before = rejected.clone();
+                            assert!(apply_resolved_attachment(&mut rejected, command).is_err());
+                            assert_eq!(
+                                serde_json::to_value(&rejected).unwrap(),
+                                serde_json::to_value(&before).unwrap()
+                            );
+                            assert_eq!(rejected.layers_dirty, before.layers_dirty);
+                            assert_eq!(
+                                rejected.resolved_rules_journal,
+                                before.resolved_rules_journal
+                            );
+                        }
+                        apply_resolved_attachment(&mut replay, command).unwrap();
+                        assert_eq!(replay.layers_dirty, LayersDirty::Clean);
+                    }
+                    ResolvedRulesCommand::ContinuousEffect(edit) => {
+                        assert!(!real_transition);
+                        assert!(
+                            matches!(edit.as_ref(), ResolvedContinuousEffectEdit::Retire(command) if command.effects == vec![installed])
+                        );
+                        replay.apply_resolved_continuous_effect_edit(edit).unwrap();
+                    }
+                    other => panic!("unexpected owner: {other:?}"),
+                }
+                assert!(!replay
+                    .transient_continuous_effects
+                    .iter()
+                    .any(|e| e.id == id));
+                assert_eq!(replay.resolved_rules_journal, journal);
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_attachment_and_unattached_early_return_do_not_settle_unowned_work() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let subject = scenario.add_vanilla(P0, 2, 2);
+        let equipment = scenario
+            .add_artifact_from_oracle(P0, "Typed Equipment", "")
+            .with_subtypes(vec!["Equipment"])
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.objects.get_mut(&subject).unwrap().tapped = true;
+        let reference = ObjectIncarnationRef::from_object(&state.objects[&subject]);
+        let id = state
+            .add_transient_continuous_effect_with_bindings(
+                subject,
+                P0,
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::IsTapped {
+                        scope: ObjectScope::Recipient,
+                    },
+                },
+                TargetFilter::SpecificObject { id: subject },
+                vec![ContinuousModification::AddPower { value: 1 }],
+                None,
+                TransientContinuousEffectBindings {
+                    affected_recipient: Some(reference),
+                    duration_subject: Some(reference),
+                },
+            )
+            .expect("the fixture's duration begins");
+        crate::game::layers::flush_layers(state);
+        assert_eq!(state.objects[&subject].power, Some(3));
+        state.objects.get_mut(&subject).unwrap().tapped = false;
+        let before = state.clone();
+        assert_eq!(attach_to_player(state, equipment, P0), None);
+        assert_eq!(unattach(state, equipment), None);
+        assert_eq!(unattach(state, ObjectId(u64::MAX)), None);
+        assert_eq!(state.resolved_rules_journal, before.resolved_rules_journal);
+        assert_eq!(state.layers_dirty, before.layers_dirty);
+        assert_eq!(state.next_timestamp, before.next_timestamp);
+        assert!(state
+            .transient_continuous_effects
+            .iter()
+            .any(|e| e.id == id));
+        crate::game::layers::mark_layers_full(state);
+        crate::game::layers::flush_layers(state);
+        assert!(!state
+            .transient_continuous_effects
+            .iter()
+            .any(|e| e.id == id));
     }
 }

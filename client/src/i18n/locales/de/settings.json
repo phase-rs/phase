@@ -127,7 +127,9 @@
     "cardAnimationStyleOptions": {
       "webgl": "Neu",
       "classic": "Klassisch"
-    }
+    },
+    "cardAnimationPreviewHintHover": "Zum Ansehen darüberfahren",
+    "cardAnimationPreviewHintTap": "Zum Ansehen tippen"
   },
   "flexLayout": {
     "title": "Flexibles Layout",
@@ -506,11 +508,23 @@
     "apiKey": "API-Schlüssel",
     "apiKeyPlaceholder": "API-Schlüssel einfügen",
     "apiKeyOptional": "Bei lokalen Servern optional",
+    "apiKeyMissing": "Gib deinen API-Schlüssel erneut ein. Schlüssel bleiben nach einem Neuladen nicht erhalten, und dieser Anbieter wird erst danach für KI-Plätze oder Draft-Bots verwendet.",
     "apiKeyStorage": "Nur für diese Browsersitzung im Arbeitsspeicher. API-Schlüssel werden nie auf die Festplatte geschrieben und sind vom Backup-Export und der Cloud-Synchronisierung ausgenommen — nach einem Neuladen gibst du ihn erneut ein. Ein API-Schlüssel verlangt außerdem einen https://-Endpunkt, sofern der Server nicht auf localhost läuft.",
     "apiKeyGet": "Schlüssel holen",
     "test": "Verbindung testen",
     "testing": "Test läuft …",
     "testOk": "Verbunden.",
+    "defaultPrompt": {
+      "connected": "Verbunden. Als Standard-Gegner verwenden?",
+      "ready": "Diesen Anbieter als Standard-Gegner verwenden?",
+      "action": "Als Standard verwenden",
+      "badge": "Standard-Gegner"
+    },
+    "defaultOpponent": {
+      "label": "Standard-Gegner",
+      "hint": "KI-Gegner nutzen diesen Anbieter, sofern du beim Einrichten einer Partie für einen Platz keinen anderen wählst. Das gilt auch für den Gegner in Draft-Partien.",
+      "engine": "Integrierte Engine-KI"
+    },
     "draftToggle": {
       "label": "Für Draft-Bots verwenden",
       "hint": "Bot-Plätze in einem Draft wählen mit dem Modell, samt Set-Kontext des Formats.",

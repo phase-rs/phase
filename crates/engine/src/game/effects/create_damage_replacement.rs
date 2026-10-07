@@ -313,53 +313,67 @@ pub fn resolve(
             // CR 614.9: redirection shield (Soltari Guerrillas, Beacon of
             // Destiny, Jade Monolith, Goblin Psychopath, and the CR 611.2a
             // duration-bound class — Heroic Sacrifice, Gideon's Sacrifice).
-            // `Controller` and `SourceObject` resolve from the shield host at
-            // damage-apply time; `ChosenTarget` ("to target creature instead",
-            // "…to any target instead", "…to the chosen creature instead")
-            // captures the chosen object or player now into the shield's
-            // `redirect_target` field for the applier to read back; `AttachedToSource` reads the host's live
-            // `attached_to` on every event.
-            //
-            // CR 614.5 vs CR 611.2a: `redirect_lifetime` rides onto the shield so
-            // `damage_done_applier` knows whether this shield is spent by its
-            // first event or keeps applying until cleanup.
+            // Materialize relative and declared destinations independently:
+            // Controller must not borrow the original-recipient target slot.
+            let (runtime_recipient, redirect_target) = match recipient {
+                // CR 109.5 + CR 113.8: "you" belongs to the creating ability's
+                // controller, not its source's or storage host's later controller.
+                // Reuse the concrete-destination carrier without declaring a target.
+                DamageRedirectTarget::Controller => (
+                    DamageRedirectTarget::ChosenTarget,
+                    Some(TargetFilter::SpecificPlayer {
+                        id: ability.controller,
+                    }),
+                ),
+                DamageRedirectTarget::ChosenTarget => {
+                    // The redirect target is the LAST declared object slot — the
+                    // original-recipient slot (Jade Monolith) is declared first when
+                    // both are present, though no single card has both today. The
+                    // CR 611.2a class declares NO slot of its own: its recipient is
+                    // the target its parent instruction already chose ("Choose target
+                    // creature you control. …to the chosen creature instead"), which
+                    // reaches this resolver through the propagated parent targets.
+                    // A declared redirect recipient has its own role slot. The
+                    // continuous "the chosen creature" grammar instead reuses an
+                    // already propagated parent target and deliberately declares no
+                    // new role; retain that target as the redirect recipient. The
+                    // source-role offset keeps a future source-targeted version of
+                    // that grammar from borrowing the source as its destination.
+                    let chosen_redirect: Option<TargetRef> = match redirect_slot {
+                        // Declared RedirectRecipient role: positional read, so a player
+                        // target isn't skipped.
+                        Some(slot) => ability.targets.get(slot).cloned(),
+                        // CR 611.2a parent-propagated class (Heroic/Gideon's Sacrifice):
+                        // unchanged object read.
+                        None => {
+                            chosen_target_object(ability, source_slot_count).map(TargetRef::Object)
+                        }
+                    };
+                    let latched = chosen_redirect.map(|chosen| {
+                        // CR 614.9: a redirection may name a player recipient; latch the
+                        // target declared at cast or activation (CR 601.2c / CR 602.2b)
+                        // and legal on resolution (CR 608.2b).
+                        match chosen {
+                            TargetRef::Object(id) => TargetFilter::SpecificObject { id },
+                            TargetRef::Player(id) => TargetFilter::SpecificPlayer { id },
+                        }
+                    });
+                    (recipient, latched)
+                }
+                // These destinations retain their existing damage-time identities.
+                DamageRedirectTarget::DamageSourceController
+                | DamageRedirectTarget::SourceObject
+                | DamageRedirectTarget::AttachedToSource => (recipient, None),
+            };
+            // CR 614.5 vs CR 611.2a: preserve the amount and lifetime while
+            // storing the concrete destination for the damage-time applier.
             shield = shield.redirection_shield(
-                recipient,
+                runtime_recipient,
                 redirect_amount.unwrap_or(PreventionAmount::All),
                 redirect_lifetime,
             );
-            if recipient == DamageRedirectTarget::ChosenTarget {
-                // The redirect target is the LAST declared object slot — the
-                // original-recipient slot (Jade Monolith) is declared first when
-                // both are present, though no single card has both today. The
-                // CR 611.2a class declares NO slot of its own: its recipient is
-                // the target its parent instruction already chose ("Choose target
-                // creature you control. …to the chosen creature instead"), which
-                // reaches this resolver through the propagated parent targets.
-                // A declared redirect recipient has its own role slot. The
-                // continuous "the chosen creature" grammar instead reuses an
-                // already propagated parent target and deliberately declares no
-                // new role; retain that target as the redirect recipient. The
-                // source-role offset keeps a future source-targeted version of
-                // that grammar from borrowing the source as its destination.
-                let chosen_redirect: Option<TargetRef> = match redirect_slot {
-                    // Declared RedirectRecipient role: positional read, so a player
-                    // target isn't skipped.
-                    Some(slot) => ability.targets.get(slot).cloned(),
-                    // CR 611.2a parent-propagated class (Heroic/Gideon's Sacrifice):
-                    // unchanged object read.
-                    None => chosen_target_object(ability, source_slot_count).map(TargetRef::Object),
-                };
-                if let Some(chosen) = chosen_redirect {
-                    // CR 614.9: a redirection may name a player recipient; latch the
-                    // target declared at cast or activation (CR 601.2c / CR 602.2b)
-                    // and legal on resolution (CR 608.2b).
-                    let latched = match chosen {
-                        TargetRef::Object(id) => TargetFilter::SpecificObject { id },
-                        TargetRef::Player(id) => TargetFilter::SpecificPlayer { id },
-                    };
-                    shield = shield.redirect_target(latched);
-                }
+            if let Some(target) = redirect_target {
+                shield = shield.redirect_target(target);
             }
         }
         (Some(_), Some(_)) | (None, None) => {
@@ -426,9 +440,9 @@ pub fn resolve(
                 // change, and CR 702.26b still gates it off while the host is phased
                 // out: for a `SourceObject` recipient that is vacuous
                 // (`redirect_recipient_is_legal` requires a battlefield permanent), and
-                // for `Controller` / `AttachedToSource` recipients it is a PRE-EXISTING
-                // CR 113.7a divergence that cannot be fixed without the registry move
-                // the sentinel-blind `resolve_redirect_recipient` forbids.
+                // for an implicit player or `AttachedToSource` recipient it is a
+                // PRE-EXISTING CR 113.7a divergence. Latching the player destination
+                // does not repair this object-hosted lifetime limitation.
                 if let Some(obj) = state.objects.get_mut(&ability.source_id) {
                     obj.install_resolution_replacement(shield);
                 }
@@ -451,9 +465,8 @@ pub fn resolve(
                 // CR 113.7a: the battlefield arm above deliberately stays object-hosted
                 // and is NOT moved here. `replacement.rs::redirect_damage_event` passes
                 // `rid.source` to `resolve_redirect_recipient`, which has no
-                // `ObjectId(0)` sentinel arm: `DamageRedirectTarget::Controller` would
-                // look up the sentinel in `state.objects` and find nothing,
-                // `SourceObject` would build `TargetRef::Object(ObjectId(0))` and be
+                // `ObjectId(0)` sentinel arm: `SourceObject` would build
+                // `TargetRef::Object(ObjectId(0))` and be
                 // rejected by `redirect_recipient_is_legal`, and `AttachedToSource`
                 // resolves `attached_to` live and is not concretizable at install time at
                 // all. That is an `rid.source` (storage-discriminator) failure, which the
@@ -495,7 +508,7 @@ fn chosen_target_object(ability: &ResolvedAbility, skip: usize) -> Option<Object
 /// CR 614.9: Resolve a redirection recipient to a concrete `TargetRef` against
 /// the live game state, at damage-apply time. `Controller` → the replacement
 /// source's controller; `SourceObject` → the source object itself;
-/// `ChosenTarget` → `chosen` (an object or a player), captured at resolution
+/// `ChosenTarget` → `chosen` (a declared destination or implicit player), captured at resolution
 /// time into the shield's `redirect_target` field (the shield host does not
 /// retain the creating ability's targets, so the applier reads them back from
 /// there);
@@ -592,6 +605,8 @@ mod tests {
 
     #[test]
     fn damage_source_controller_uses_prospective_source_not_replacement_host() {
+        // Typed internal seam control: the durable parser currently has no
+        // printed Controller producer. This does not model a fabricated card.
         let mut state = GameState::new_two_player(42);
         let replacement_host = create_creature(&mut state, PlayerId(0), "Replacement Host");
         let damage_source = create_creature(&mut state, PlayerId(1), "Damage Source");
@@ -618,6 +633,24 @@ mod tests {
             Some(TargetRef::Player(PlayerId(0))),
             "legacy Controller remains the replacement host's controller"
         );
+        state.objects.get_mut(&replacement_host).unwrap().controller = PlayerId(1);
+        state.objects.get_mut(&damage_source).unwrap().controller = PlayerId(0);
+        for (recipient, expected) in [
+            (DamageRedirectTarget::Controller, PlayerId(1)),
+            (DamageRedirectTarget::DamageSourceController, PlayerId(0)),
+        ] {
+            assert_eq!(
+                resolve_redirect_recipient(
+                    &state,
+                    recipient,
+                    replacement_host,
+                    damage_source,
+                    None,
+                ),
+                Some(TargetRef::Player(expected)),
+                "live identity follows its own authority after controllers change"
+            );
+        }
     }
 
     fn amount_oneshot_ability(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
@@ -717,7 +750,7 @@ mod tests {
     /// This arm is deliberately left OBJECT-hosted — `resolve_redirect_recipient`
     /// reads `rid.source`, and it has no `ObjectId(0)` sentinel arm, so moving it to
     /// the floating registry would silently no-op `DamageRedirectTarget::
-    /// {Controller, SourceObject, AttachedToSource}`. But object-hosting made it
+    /// {SourceObject, AttachedToSource}`. But object-hosting made it
     /// layer-fragile, which is what routing through
     /// `GameObject::install_resolution_replacement` fixes (CR 611.2c: the shield is
     /// not one of the source's characteristics, so the CR 613.1 reseed carries it).
@@ -781,8 +814,8 @@ mod tests {
         );
         assert_eq!(state.players[0].life, 16);
 
-        // NEGATIVE SIBLING (CR 614.9): once the SOURCE is gone the object-hosted
-        // shield correctly stops applying — this arm is host-bound by design.
+        // Known CR 113.7a limitation: once the SOURCE is gone the object-hosted
+        // shield stops applying. This records storage behavior, not a rules oracle.
         let mut state2 = GameState::new_two_player(42);
         let source2 = create_creature(&mut state2, PlayerId(0), "Redirector");
         let victim2 = create_creature(&mut state2, PlayerId(1), "Victim");
@@ -931,11 +964,16 @@ mod tests {
         assert!(matches!(
             state.objects.get(&source).unwrap().replacement_definitions[0].shield_kind,
             ShieldKind::Redirection {
-                recipient: DamageRedirectTarget::Controller,
+                recipient: DamageRedirectTarget::ChosenTarget,
                 amount: PreventionAmount::All,
                 lifetime: RedirectionLifetime::OneOpportunity
             }
         ));
+
+        assert_eq!(
+            state.objects[&source].replacement_definitions[0].redirect_target,
+            Some(TargetFilter::SpecificPlayer { id: PlayerId(0) })
+        );
 
         // Damage 4 aimed at the opponent's creature is redirected to player 0
         // (the source's controller): the creature takes 0, player 0 loses 4.
@@ -1938,11 +1976,16 @@ mod tests {
         assert!(matches!(
             shield.shield_kind,
             ShieldKind::Redirection {
-                recipient: DamageRedirectTarget::Controller,
+                recipient: DamageRedirectTarget::ChosenTarget,
                 amount: PreventionAmount::All,
                 lifetime: RedirectionLifetime::OneOpportunity
             }
         ));
+
+        assert_eq!(
+            shield.redirect_target,
+            Some(TargetFilter::SpecificPlayer { id: PlayerId(0) })
+        );
 
         let ctx = deal_damage::DamageContext::from_source(&state, chosen_source).unwrap();
 

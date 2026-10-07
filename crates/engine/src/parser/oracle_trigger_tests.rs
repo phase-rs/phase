@@ -26835,11 +26835,17 @@ fn managorger_phoenix_perpetual_clause_fails_closed_instead_of_pumping() {
     );
 
     let execute = def.execute.as_ref().expect("trigger must execute");
-    // Reach guard: the counter clause still parses, so the gap below is the
-    // conditional sibling and not a wholesale parse failure.
+    // Reach guard: the counter clause is recognized, and its unsupported
+    // "for each {R} in that spell's mana cost" count is an explicit counter-tail
+    // gap rather than a silent one-counter placement (CR 608.2c), so the gap
+    // below is the conditional sibling and not a wholesale parse failure.
     assert!(
-        matches!(&*execute.effect, Effect::PutCounter { .. }),
-        "the flame-counter clause must still lower, got {:?}",
+        matches!(
+            &*execute.effect,
+            Effect::Unimplemented { name, description: Some(fragment) }
+                if name == "put_counter_tail" && fragment.contains("for each {R}")
+        ),
+        "the flame-counter clause must surface its count tail, got {:?}",
         execute.effect
     );
     let perpetual_branch = execute
@@ -36498,6 +36504,165 @@ fn split_graveyard_origin_owner_axes() {
         );
     }
 }
+/// Expected `Or[entered-from-graveyard, was-cast-from-graveyard]` for the
+/// graveyard-origin intervening-if (owner/caster axes explicit).
+fn graveyard_origin_or(
+    entered_owner: Option<ControllerRef>,
+    cast_owner: Option<ControllerRef>,
+    caster: Option<ControllerRef>,
+) -> TriggerCondition {
+    TriggerCondition::Or {
+        conditions: vec![
+            TriggerCondition::ZoneChangeObjectMatchesFilter {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                filter: entered_owner.map_or(TargetFilter::Any, |owner| {
+                    with_owner_scope(TargetFilter::Any, owner)
+                }),
+            },
+            TriggerCondition::WasCast {
+                zone: Some(Zone::Graveyard),
+                controller: caster,
+                owner: cast_owner,
+            },
+        ],
+    }
+}
+
+/// SHAPE: the batch partitive subject "one or more of them" and the passive
+/// "(was|were) cast from" split-form cast clause (Kotis, Celes) parse to the
+/// same typed `Or`, with no caster scope for the passive wording. The active
+/// "you cast it" form still scopes the caster (reach-guard on the caster axis).
+#[test]
+fn batched_partitive_graveyard_origin_positive_matrix() {
+    let owners = [("a", None), ("your", Some(ControllerRef::You))];
+    for (entered_phrase, entered_owner) in &owners {
+        for (cast_phrase, cast_owner) in &owners {
+            for verb in ["was", "were"] {
+                let text = format!(
+                    "if one or more of them entered from {entered_phrase} graveyard or {verb} cast from {cast_phrase} graveyard"
+                );
+                let (rest, condition) = parse_graveyard_origin_intervening_if(&text)
+                    .unwrap_or_else(|_| panic!("must parse: {text}"));
+                assert!(rest.is_empty(), "{text}");
+                assert_eq!(
+                    condition,
+                    graveyard_origin_or(entered_owner.clone(), cast_owner.clone(), None),
+                    "{text}"
+                );
+            }
+            // Active form behind the same subject keeps Some(You) as caster.
+            let text = format!(
+                "if one or more of them entered from {entered_phrase} graveyard or you cast it from {cast_phrase} graveyard"
+            );
+            let (_, condition) = parse_graveyard_origin_intervening_if(&text).unwrap();
+            assert_eq!(
+                condition,
+                graveyard_origin_or(
+                    entered_owner.clone(),
+                    cast_owner.clone(),
+                    Some(ControllerRef::You)
+                ),
+                "{text}"
+            );
+        }
+    }
+    // The comma-terminated clause (the printed shape) stops before the comma.
+    let (rest, condition) = parse_graveyard_origin_intervening_if(
+        "if one or more of them entered from a graveyard or was cast from a graveyard, put two +1/+1 counters on ~.",
+    )
+    .unwrap();
+    assert_eq!(rest, ", put two +1/+1 counters on ~.");
+    assert_eq!(condition, graveyard_origin_or(None, None, None));
+    // Subject axis on the compact and bare-cast arms.
+    let (rest, condition) = parse_graveyard_origin_intervening_if(
+        "if one or more of them entered or were cast from a graveyard",
+    )
+    .unwrap();
+    assert!(rest.is_empty());
+    assert_eq!(condition, graveyard_origin_or(None, None, None));
+    let (rest, condition) =
+        parse_graveyard_origin_intervening_if("if one or more of them was cast from a graveyard")
+            .unwrap();
+    assert!(rest.is_empty());
+    assert_eq!(
+        condition,
+        TriggerCondition::WasCast {
+            zone: Some(Zone::Graveyard),
+            controller: None,
+            owner: None,
+        }
+    );
+}
+
+/// Hostile inputs for the graveyard-origin intervening-if. Every decline is
+/// paired with the positive control it was mutated from.
+#[test]
+fn batched_partitive_graveyard_origin_hostile_declines() {
+    let positive = "if one or more of them entered from a graveyard or was cast from a graveyard";
+    assert!(
+        parse_graveyard_origin_intervening_if(positive).is_ok(),
+        "positive control must parse"
+    );
+    for hostile in [
+        // N1: "and" for "or".
+        "if one or more of them entered from a graveyard and was cast from a graveyard",
+        // N2: wrong zone on either leg.
+        "if one or more of them entered from exile or was cast from a graveyard",
+        "if one or more of them entered from a graveyard or was cast from exile",
+        // N3: trailing garbage after an otherwise valid clause.
+        "if one or more of them entered from a graveyard or was cast from a graveyard card",
+        "if one or more of them entered from a graveyard or was cast from a graveyard and ~ is tapped",
+        "if one or more of them entered or were cast from a graveyard card",
+        "if one or more of them was cast from a graveyard card",
+        "if it entered from a graveyard or you cast it from a graveyard card",
+        // N4: owner phrase mixed with the wrong zone.
+        "if one or more of them entered from your exile or was cast from a graveyard",
+        // N5: mixed caster clause.
+        "if one or more of them entered from a graveyard or you were cast from a graveyard",
+        // N6: truncated disjunction / missing leg.
+        "if one or more of them entered from a graveyard or",
+        "if one or more of them entered from a graveyard",
+        // Partitive misspelled / different quantifier.
+        "if none of them entered from a graveyard or was cast from a graveyard",
+        "if one or more entered from a graveyard or was cast from a graveyard",
+    ] {
+        assert!(
+            parse_graveyard_origin_intervening_if(hostile).is_err(),
+            "must decline: {hostile}"
+        );
+    }
+}
+
+/// Kotis / Celes Oracle clause through the full trigger-line pipeline: the
+/// intervening-if is a typed condition, is excised from the effect text, and
+/// a trailing-garbage mutation of the same line is NOT mis-scoped into one.
+#[test]
+fn batched_partitive_graveyard_origin_trigger_line_scoping() {
+    let kotis = parse_trigger_line(
+        "Whenever one or more creatures you control enter, if one or more of them entered from a graveyard or was cast from a graveyard, put two +1/+1 counters on Kotis.",
+        "Kotis, Sibsig Champion",
+    );
+    assert!(kotis.batched);
+    assert_eq!(kotis.condition, Some(graveyard_origin_or(None, None, None)));
+    let execute = kotis.execute.as_deref().expect("Kotis body");
+    assert!(
+        matches!(&*execute.effect, Effect::PutCounter { .. }),
+        "got {:?}",
+        execute.effect
+    );
+
+    let hostile = parse_trigger_line(
+        "Whenever one or more creatures you control enter, if one or more of them entered from a graveyard or was cast from a graveyard card, put two +1/+1 counters on Kotis.",
+        "Kotis, Sibsig Champion",
+    );
+    assert_ne!(
+        hostile.condition,
+        Some(graveyard_origin_or(None, None, None)),
+        "trailing garbage must not be accepted as the graveyard-origin Or"
+    );
+}
+
 /// CR 120.3a + CR 109.4 + CR 603.2: Emissary of Despair and Emissary of Hope
 /// combat-damage triggers establish TriggeringPlayer as the relative player
 /// scope for "that player" / "they" references in their effect bodies.
