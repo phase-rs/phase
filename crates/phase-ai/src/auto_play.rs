@@ -498,6 +498,13 @@ mod tests {
     use engine::types::zones::Zone;
 
     fn recheck_priority_state() -> GameState {
+        recheck_priority_state_with_top_controller(PlayerId(0))
+    }
+
+    /// P0 is active and holds priority over one NoOp activated ability
+    /// (70_001) controlled by `top_controller`; P1 controls "AI Recheck
+    /// Action", a free activated draw.
+    fn recheck_priority_state_with_top_controller(top_controller: PlayerId) -> GameState {
         let mut state = GameState::new_two_player(1);
         state.phase = Phase::PreCombatMain;
         state.active_player = PlayerId(0);
@@ -508,14 +515,14 @@ mod tests {
         state.stack.push_back(StackEntry {
             id: ObjectId(70_001),
             source_id: ObjectId(70_001),
-            controller: PlayerId(1),
+            controller: top_controller,
             kind: StackEntryKind::ActivatedAbility {
                 source_id: ObjectId(70_001),
                 ability: Box::new(engine::types::ability::ResolvedAbility::new(
                     Effect::NoOp,
                     Vec::new(),
                     ObjectId(70_001),
-                    PlayerId(1),
+                    top_controller,
                 )),
             },
         });
@@ -705,6 +712,81 @@ mod tests {
         );
     }
 
+    /// Adjudication (b) pin: an AI representative that has not verified a pass
+    /// in the Recheck cohort is engine-passed over its own top entry by its
+    /// standing pass (`priority::standing_priority_pass`), although it holds a
+    /// meaningful activated ability, so it gets no decision before that entry
+    /// resolves.
+    #[test]
+    fn unverified_ai_representative_is_standing_passed_over_its_own_top() {
+        let ai_players = HashSet::from([PlayerId(0), PlayerId(1)]);
+        let ai_configs = HashMap::from([
+            (PlayerId(0), AiConfig::default()),
+            (PlayerId(1), AiConfig::default()),
+        ]);
+        let mut rng = rand::rng();
+
+        // Paired positive control: with the top under P0, P1 has no standing
+        // pass, and the same one-action run stops at P1's window.
+        let mut control = recheck_priority_state_with_top_controller(PlayerId(0));
+        let control_session = AiSession::arc_from_game(&control);
+        let control_run = run_ai_actions_bounded(
+            &mut control,
+            &ai_players,
+            &ai_configs,
+            &mut rng,
+            &control_session,
+            1,
+        );
+        assert!(matches!(
+            control_run.results.as_slice(),
+            [AiActionResult {
+                action: GameAction::PassPriority,
+                ..
+            }]
+        ));
+        assert!(matches!(
+            control.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(1)
+            }
+        ));
+        assert_eq!(
+            control.stack.len(),
+            1,
+            "reach guard: P1's window is offered"
+        );
+        assert!(
+            engine::ai_support::legal_actions(&control)
+                .iter()
+                .any(|action| matches!(action, GameAction::ActivateAbility { .. })),
+            "reach guard: P1 holds a meaningful activated ability at its window"
+        );
+
+        let mut state = recheck_priority_state_with_top_controller(PlayerId(1));
+        let session = AiSession::arc_from_game(&state);
+        let run =
+            run_ai_actions_bounded(&mut state, &ai_players, &ai_configs, &mut rng, &session, 1);
+        let [AiActionResult {
+            action: GameAction::PassPriority,
+            events,
+            ..
+        }] = run.results.as_slice()
+        else {
+            panic!("only P0's verified pass is taken");
+        };
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::StackResolved {
+                    object_id: ObjectId(70_001)
+                }
+            )),
+            "P1 is standing-passed over its own entry inside P0's dispatch"
+        );
+        assert!(state.stack.is_empty());
+    }
+
     #[test]
     fn verified_pass_cache_drains_a_large_ai_stack_without_action_cap() {
         let mut state = recheck_priority_state();
@@ -742,9 +824,10 @@ mod tests {
         );
     }
 
-    /// CR 117.3b + CR 117.4 + CR 732.2b: once both AI seats have verified a
-    /// pass in the cohort, every skipped window is authorized, so the declined
-    /// trigger run resolves as one proven inert batch.
+    /// CR 117.3b + CR 117.4 + CR 732.2b: P0's verified pass and P1's standing
+    /// pass over its own triggers (`priority::standing_priority_pass`) authorize
+    /// every skipped window over P1's run, so the declined trigger run resolves
+    /// as one proven inert batch.
     #[test]
     fn verified_pass_cohort_batches_a_declined_trigger_stack() {
         let mut state = recheck_priority_state();

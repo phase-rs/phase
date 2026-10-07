@@ -21,6 +21,7 @@ use crate::game::layers;
 use crate::game::mana_abilities;
 use crate::game::mana_payment;
 use crate::game::mana_sources;
+use crate::game::priority::{standing_priority_pass, StandingPriorityPass};
 use crate::game::restrictions;
 use crate::game::triggers;
 use crate::types::ability::{
@@ -2003,28 +2004,17 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
         return false;
     }
 
-    // CR 117.1: Full Control is a standing refusal to give up ANY window, so no
-    // recommendation is ever issued. Deliberately ABOVE the CR 117.3d yield rung
-    // below — that rung is the one other place this function can answer `true`
-    // over a hold, and the engine-side gates in `game::engine` (which cover
-    // passes that never reach a frontend) do not consult yields. Ordering Full
-    // Control first is what keeps the recommendation and the authoritative loop
-    // from disagreeing about the same window.
-    if state.priority_passing_mode(mode_owner) == PriorityPassingMode::FullControl {
-        return false;
-    }
-
-    // CR 117.3d: A standing priority yield for the top-of-stack trigger is an
-    // explicit pre-commitment to pass. It deliberately overrides the castability
-    // and meaningful-action holds below (including the issue #4388 opponent-turn
-    // mana window) — the player has already decided not to interact with this
-    // trigger class, so recommend auto-pass regardless of what they could cast.
-    if state
-        .stack
-        .back()
-        .is_some_and(|top| state.is_priority_yielded(player, top))
-    {
-        return true;
+    // CR 117.1 + CR 117.3d: the ladder's standing rungs — Full Control refuses,
+    // a yield to the top trigger or the player's own object on top passes —
+    // decided by the one authority the stack-resolution session also executes,
+    // so the recommendation and the engine-side pass cannot disagree about the
+    // same window. A yield or own object outranks every castability and
+    // meaningful-action hold below, including the issue #4388 opponent-turn
+    // mana-window hold (MTGA parity).
+    match standing_priority_pass(state, player, state.stack.back()) {
+        StandingPriorityPass::Withheld => return false,
+        StandingPriorityPass::Granted => return true,
+        StandingPriorityPass::Undecided => {}
     }
 
     if state.priority_passing_mode(mode_owner) == PriorityPassingMode::SkipLowUseWindows {
@@ -2038,21 +2028,6 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
             && player == state.active_player
             && matches!(state.phase, Phase::Upkeep | Phase::Draw | Phase::End)
         {
-            return true;
-        }
-    }
-
-    // Rung 4 — MTGA-style: auto-pass when the player's own spell/ability is on
-    // top of the stack. The player almost never wants to respond to their own
-    // spell — let it resolve. Hoisted above the castability holds (G3): accepted
-    // MTGA parity means an own object on top outranks "you could still cast
-    // something", including the case where the top object is your own triggered
-    // ability (own triggers lose their implicit stop). Kept BELOW the CR 117.3d
-    // yield rung so an explicit yield still wins, and disjoint from the G1 rung
-    // below (that requires an empty stack; this requires a non-empty one).
-    // Full control mode (checked by the frontend) overrides this.
-    if let Some(top) = state.stack.back() {
-        if top.controller == player {
             return true;
         }
     }
@@ -3004,6 +2979,7 @@ mod tests {
     };
     use crate::game::engine::apply_as_current;
     use crate::game::mana_sources;
+    use crate::game::priority::{standing_priority_pass, StandingPriorityPass};
     use crate::game::zones::create_object;
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::EffectKind;
@@ -7534,6 +7510,103 @@ mod tests {
             super::auto_pass_recommended(&state, &actions),
             "CR 117.3d: a matching yield overrides the meaningful-action hold"
         );
+    }
+
+    /// CR 117.1 + CR 117.3d: the recommendation's standing rungs are the shared
+    /// authority's verdict. `Granted` recommends a pass and `Withheld` refuses
+    /// one whatever the player could do; `Undecided` leaves the window to the
+    /// meaningful-action ladder below.
+    #[test]
+    fn auto_pass_recommendation_takes_the_standing_rungs_from_the_shared_authority() {
+        let trigger_top = |controller: PlayerId| {
+            let mut state = setup_priority();
+            let source = ObjectId(500);
+            let mut ability = ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                controller,
+            );
+            ability.set_test_trigger_source_recursive(2, CardId(77));
+            state.stack.push_back(StackEntry {
+                id: ObjectId(600),
+                source_id: source,
+                controller,
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: source,
+                    ability: Box::new(ability),
+                    condition: None,
+                    trigger_event: None,
+                    description: None,
+                    source_name: "Token".to_string(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+            state
+        };
+        let own_top = trigger_top(PlayerId(0));
+        let mut yielded_opponent_top = trigger_top(PlayerId(1));
+        yielded_opponent_top.add_priority_yield(
+            PlayerId(0),
+            crate::types::game_state::YieldTarget::AllCopies {
+                card_id: CardId(77),
+                trigger_description: None,
+            },
+        );
+        let opponent_top = trigger_top(PlayerId(1));
+        let mut full_control_own_top = trigger_top(PlayerId(0));
+        full_control_own_top
+            .priority_passing_modes
+            .insert(PlayerId(0), PriorityPassingMode::FullControl);
+
+        let meaningful = vec![GameAction::PlayLand {
+            object_id: ObjectId(700),
+            card_id: CardId(1),
+        }];
+        let pass_only = vec![GameAction::PassPriority];
+        for (label, state, verdict) in [
+            ("own top", own_top, StandingPriorityPass::Granted),
+            (
+                "yielded opponent top",
+                yielded_opponent_top,
+                StandingPriorityPass::Granted,
+            ),
+            // Reach guard: the ladder below the standing rungs still runs.
+            (
+                "opponent top",
+                opponent_top,
+                StandingPriorityPass::Undecided,
+            ),
+            (
+                "Full Control own top",
+                full_control_own_top,
+                StandingPriorityPass::Withheld,
+            ),
+        ] {
+            assert_eq!(
+                standing_priority_pass(&state, PlayerId(0), state.stack.back()),
+                verdict,
+                "{label}"
+            );
+            let expected = match verdict {
+                StandingPriorityPass::Granted => (true, true),
+                StandingPriorityPass::Withheld => (false, false),
+                StandingPriorityPass::Undecided => (false, true),
+            };
+            assert_eq!(
+                (
+                    super::auto_pass_recommended(&state, &meaningful),
+                    super::auto_pass_recommended(&state, &pass_only),
+                ),
+                expected,
+                "{label}"
+            );
+        }
     }
 
     /// State-shape tests for the engine-owned phase-stop gate migrated out of the

@@ -17692,8 +17692,9 @@ pub enum AutoPassRequest {
 /// `Committed` is the historical `UntilStackEmpty` meaning: once a player has
 /// armed it, the engine keeps passing until the stack empties or grows beyond
 /// the captured baseline. `RecheckNoMeaningfulPriorityAction` is reserved for
-/// an AI continuation that reuses a representative's own verified pass while
-/// the exact fenced stack cohort remains active. This is an AI policy choice,
+/// an AI continuation that passes a representative on its own verified pass, or
+/// on its standing pass for the window (`priority::standing_priority_pass`),
+/// while the exact fenced stack cohort remains active. This is an AI policy choice,
 /// not an inference that the player lacks another legal action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum StackResolutionPolicy {
@@ -17933,7 +17934,9 @@ pub struct StackResolutionSession {
     pub representatives: BTreeSet<PlayerId>,
     /// AI representatives whose verified pass is a policy authorization for
     /// later priority windows in this exact fenced cohort. Absence is
-    /// conservative: that representative must receive an explicit decision.
+    /// conservative: that representative must receive an explicit decision
+    /// unless its standing pass covers the window
+    /// (`priority::standing_priority_pass`).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub verified_pass_representatives: BTreeSet<PlayerId>,
     #[serde(default)]
@@ -17984,7 +17987,11 @@ pub enum AutoPassMode {
 ///   never reach a client, which is why `FullControl` has to live in engine
 ///   state rather than in a frontend toggle: an auto-pass session installed by
 ///   another player (Resolve All, CR 117.3d) drives this loop, and a
-///   client-only preference is invisible to it.
+///   client-only preference is invisible to it. Inside a stack-resolution
+///   session that loop also executes the ladder's standing rungs (Full
+///   Control, yields, own object on top) through
+///   `priority::standing_priority_pass`, the same authority the recommendation
+///   uses.
 ///
 /// `Standard` is the meaningful-action-aware ladder. `SkipLowUseWindows` adds a
 /// narrow fast path for the active player's empty-stack Upkeep, Draw, and End

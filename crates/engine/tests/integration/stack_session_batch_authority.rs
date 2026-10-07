@@ -2,8 +2,12 @@
 //! stack-resolution session may consume several fenced stack entries only when
 //! every priority participant authorized the windows that boundary skips.
 //! Consuming K entries skips each participant's window after each of the first
-//! K − 1 resolutions, so a verified AI cohort collapses its run while an
-//! unverified or Full Control participant keeps one entry per boundary.
+//! K − 1 resolutions, so a verified AI cohort collapses its run while a
+//! participant with neither a verified nor a standing pass, or with Full
+//! Control, keeps one entry per boundary. A Recheck participant also authorizes
+//! a window by its standing pass over that window's top
+//! (`priority::standing_priority_pass`: its own object, or a trigger it yielded
+//! to), unless it holds Full Control.
 //!
 //! Every row drives the real priority pipeline: AI seats through
 //! `engine::apply_verified_ai_priority_pass`, human seats through `apply`.
@@ -14,12 +18,12 @@ use engine::ai_support::AiDecisionContract;
 use engine::game::engine::{apply, apply_verified_ai_priority_pass};
 use engine::game::perf_counters;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::actions::GameAction;
+use engine::types::actions::{GameAction, PriorityYieldOp};
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
     AutoPassMode, AutoPassRequest, GameState, PriorityPassingMode, StackResolutionAutoPassOverlay,
     StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
-    StackResolutionSession, WaitingFor,
+    StackResolutionSession, WaitingFor, YieldScope,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
@@ -31,6 +35,10 @@ const P3: PlayerId = PlayerId(3);
 const SCUTE_SWARM_ORACLE: &str = "Landfall — Whenever a land you control enters, create a 1/1 green Insect creature token. If you control six or more lands, create a token that's a copy of this creature instead.";
 
 const SOUL_WARDEN_ORACLE: &str = "Whenever another creature enters, you gain 1 life.";
+
+const BRISTLY_BILL_ORACLE: &str = "Landfall — Whenever a land you control enters, put a +1/+1 counter on target creature.\n{3}{G}{G}: Double the number of +1/+1 counters on each creature you control.";
+
+const AUTHORITY_OF_THE_CONSULS_ORACLE: &str = "Creatures your opponents control enter tapped.\nWhenever a creature an opponent controls enters, you gain 1 life.";
 
 const SCUTE_COUNT: usize = 6;
 
@@ -187,20 +195,22 @@ fn verified_ai_cohort_resolves_the_fenced_run_in_one_boundary() {
 
 /// A1-A: the cohort also collapses when the round closes on an AUTOMATIC pass
 /// by a seat whose verified pass was recorded in an earlier window of the
-/// same fenced run.
+/// same fenced run. P1 is the ordinary seat: P0 owns the run, so P0's standing
+/// pass would authorize every window over it without a verified pass.
 #[test]
 fn verified_ai_cohort_collapses_on_an_automatic_close() {
     let mut board = four_seat_scute_board(P0, None, &[]);
     let state = board.runner.state_mut();
 
-    // P0 passes as an ordinary seat; the cohort installs on P1's verified pass
-    // without P0, so P3's explicit close resolves exactly one entry.
-    apply(state, P0, GameAction::PassPriority).expect("P0 may pass");
-    for player in [P1, P2, P3] {
+    // P1 passes as an ordinary seat and has no standing pass over P0's run, so
+    // P3's explicit close resolves exactly one entry.
+    verified_ai_pass(state, P0);
+    apply(state, P1, GameAction::PassPriority).expect("P1 may pass");
+    for player in [P2, P3] {
         verified_ai_pass(state, player);
     }
     // Reach guards: the cohort survived its first close, holds every seat but
-    // P0 as verified, and P0 holds the next window.
+    // P1 as verified, and P1 holds the next window.
     assert_eq!(state.stack.len(), SCUTE_COUNT - 1);
     assert_eq!(insects(state), 1);
     let cohort = session(state);
@@ -211,16 +221,16 @@ fn verified_ai_cohort_collapses_on_an_automatic_close() {
     assert_eq!(cohort.representatives, all_seats());
     assert_eq!(
         cohort.verified_pass_representatives,
-        BTreeSet::from([P1, P2, P3])
+        BTreeSet::from([P0, P2, P3])
     );
     assert_eq!((cohort.cursor, cohort.entries.len()), (1, SCUTE_COUNT));
-    assert_eq!(priority_holder(state), P0);
+    assert_eq!(priority_holder(state), P1);
     perf_counters::reset();
 
-    // P0's verified pass opens the round; P1, P2 and P3 already verified, so
-    // the session passes each of them automatically and P3's automatic pass
-    // closes the round.
-    verified_ai_pass(state, P0);
+    // P1's verified pass opens the round; P2 and P3 already verified, so the
+    // session passes each of them automatically and P3's automatic pass closes
+    // the round.
+    verified_ai_pass(state, P1);
 
     assert!(state.stack.is_empty());
     assert_eq!(insects(state), SCUTE_COUNT);
@@ -461,4 +471,423 @@ fn full_control_representative_resolves_one_entry_per_pass() {
 
     assert_eq!(state.stack.len(), SCUTE_COUNT - 2);
     assert_eq!(perf_counters::snapshot().stack_batched_entries, 0);
+}
+
+/// Drives priority until the stack empties or a non-priority prompt is up:
+/// `human` passes through `apply`, every other seat through a verified AI pass.
+/// Returns `(human_dispatches, ai_dispatches)`.
+fn drive_with_human(state: &mut GameState, human: PlayerId, cap: usize) -> (usize, usize) {
+    let mut human_dispatches = 0;
+    let mut ai_dispatches = 0;
+    while !state.stack.is_empty() {
+        assert!(
+            human_dispatches + ai_dispatches < cap,
+            "the drive terminates"
+        );
+        let WaitingFor::Priority { player } = state.waiting_for else {
+            break;
+        };
+        if player == human {
+            apply(state, human, GameAction::PassPriority).expect("the human seat may pass");
+            human_dispatches += 1;
+        } else {
+            verified_ai_pass(state, player);
+            ai_dispatches += 1;
+        }
+    }
+    (human_dispatches, ai_dispatches)
+}
+
+/// P0 yields (CR 117.3d) to each source's triggers through the production
+/// `SetPriorityYield` action.
+fn yield_to(state: &mut GameState, sources: &[ObjectId]) {
+    for &source_id in sources {
+        apply(
+            state,
+            P0,
+            GameAction::SetPriorityYield {
+                op: PriorityYieldOp::Add {
+                    source_id,
+                    scope: YieldScope::ThisObject,
+                },
+            },
+        )
+        .expect("P0 may yield to a trigger on the stack");
+    }
+}
+
+fn stack_resolved_count(events: &[GameEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| matches!(event, GameEvent::StackResolved { .. }))
+        .count()
+}
+
+/// A1: the human run owner's standing pass authorizes every window over its
+/// own run, so the cohort collapses the run and P0 dispatches only its opening
+/// pass.
+#[test]
+fn standing_pass_collapses_the_human_owners_run() {
+    let mut board = four_seat_scute_board(P0, None, &[]);
+    let state = board.runner.state_mut();
+    perf_counters::reset();
+
+    apply(state, P0, GameAction::PassPriority).expect("P0 may pass");
+    verified_ai_pass(state, P1);
+    // Reach guard: the installer verified only itself, so the run is intact.
+    assert_eq!(state.stack.len(), SCUTE_COUNT);
+    assert_eq!(
+        session(state).verified_pass_representatives,
+        BTreeSet::from([P1])
+    );
+    let (later_human_dispatches, later_ai_dispatches) = drive_with_human(state, P0, 40);
+
+    assert_eq!(
+        1 + later_human_dispatches,
+        1,
+        "P0's opening pass is its only dispatch"
+    );
+    assert_eq!(1 + later_ai_dispatches, 3);
+    assert!(state.stack.is_empty());
+    assert_eq!(insects(state), SCUTE_COUNT);
+    let counters = perf_counters::snapshot();
+    assert_eq!(counters.stack_batch_plans, 1);
+    assert_eq!(counters.stack_batched_entries, SCUTE_COUNT as u64);
+}
+
+/// A1-S: the snapshot's topology. P3 is active and already passed, P1–P3 are
+/// verified, and P0, the unverified run owner, holds priority. One P0 pass
+/// consumes the whole run; P2's automatic pass closes the round.
+#[test]
+fn snapshot_topology_one_human_pass_consumes_the_owned_run() {
+    let mut board = four_seat_scute_board(P0, None, &[]);
+    let state = board.runner.state_mut();
+    let entries: Vec<_> = state
+        .stack
+        .iter()
+        .rev()
+        .map(StackResolutionEntryFence::capture)
+        .collect();
+    for player in all_seats() {
+        state.auto_pass.insert(
+            player,
+            AutoPassMode::UntilStackEmpty {
+                initial_stack_len: state.stack.len(),
+                policy: StackResolutionPolicy::RecheckNoMeaningfulPriorityAction,
+            },
+        );
+    }
+    state.stack_resolution_session = Some(StackResolutionSession {
+        entries,
+        cursor: 0,
+        representatives: all_seats(),
+        verified_pass_representatives: BTreeSet::from([P1, P2, P3]),
+        budget: StackResolutionBudget::Unlimited,
+        policy: StackResolutionPolicy::RecheckNoMeaningfulPriorityAction,
+        auto_pass_overlay: StackResolutionAutoPassOverlay {
+            baseline: BTreeMap::new(),
+        },
+    });
+    state.active_player = P3;
+    state.priority_passes = BTreeSet::from([P3]);
+    state.priority_player = P0;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+    // Reach guards: the snapshot's session fields.
+    assert_eq!(
+        session(state).verified_pass_representatives,
+        BTreeSet::from([P1, P2, P3])
+    );
+    assert_eq!(priority_holder(state), P0);
+    perf_counters::reset();
+
+    let result = apply(state, P0, GameAction::PassPriority).expect("P0 may pass");
+
+    assert_eq!(stack_resolved_count(&result.events), SCUTE_COUNT);
+    assert!(state.stack.is_empty());
+    assert_eq!(insects(state), SCUTE_COUNT);
+    assert_eq!(
+        perf_counters::snapshot().stack_batched_entries,
+        SCUTE_COUNT as u64
+    );
+}
+
+/// A2 (preservation, positive control A1): a Full Control owner is never
+/// standing-passed, so each of its windows is offered.
+#[test]
+fn full_control_owner_is_never_standing_passed() {
+    let mut board = four_seat_scute_board(P0, None, &[P0]);
+    let state = board.runner.state_mut();
+    perf_counters::reset();
+
+    let (human_dispatches, _) = drive_with_human(state, P0, 80);
+
+    assert_eq!(human_dispatches, SCUTE_COUNT);
+    assert!(state.stack.is_empty());
+    assert_eq!(insects(state), SCUTE_COUNT);
+    assert_eq!(perf_counters::snapshot().stack_batched_entries, 0);
+}
+
+/// P1 owns the Scute run; P0 yields to the `yielded` top-most entries'
+/// sources, then P1 and P2 pass as verified AI seats.
+fn opponent_run_after_two_ai_passes(yielded: usize) -> ScuteBoard {
+    let mut board = four_seat_scute_board(P1, None, &[]);
+    let state = board.runner.state_mut();
+    let sources: Vec<ObjectId> = state
+        .stack
+        .iter()
+        .rev()
+        .take(yielded)
+        .map(|entry| entry.source_id)
+        .collect();
+    yield_to(state, &sources);
+    assert_eq!(state.priority_yields.len(), yielded);
+    for player in [P1, P2] {
+        verified_ai_pass(state, player);
+    }
+    // Reach guard: no entry resolved before P3's pass.
+    assert_eq!(state.stack.len(), SCUTE_COUNT);
+    assert_eq!(
+        session(state).verified_pass_representatives,
+        BTreeSet::from([P1, P2])
+    );
+    perf_counters::reset();
+    board
+}
+
+/// A3: P0's yields to every source of P1's run are standing passes, so P0's
+/// automatic pass closes the round and the run collapses without a P0
+/// dispatch.
+#[test]
+fn yield_lets_the_session_pass_an_opponents_run() {
+    let mut board = opponent_run_after_two_ai_passes(SCUTE_COUNT);
+    let state = board.runner.state_mut();
+
+    verified_ai_pass(state, P3);
+
+    assert!(state.stack.is_empty());
+    assert_eq!(insects(state), SCUTE_COUNT);
+    assert_eq!(
+        perf_counters::snapshot().stack_batched_entries,
+        SCUTE_COUNT as u64
+    );
+}
+
+/// A3-ctl (preservation): without a yield P0 has no standing pass over P1's
+/// run, so the session pauses at P0's window.
+#[test]
+fn unyielded_opponent_run_pauses_the_human() {
+    let mut board = opponent_run_after_two_ai_passes(0);
+    let state = board.runner.state_mut();
+
+    verified_ai_pass(state, P3);
+
+    assert_eq!(priority_holder(state), P0);
+    assert_eq!(state.stack.len(), SCUTE_COUNT);
+    let cohort = session(state);
+    assert_eq!(
+        cohort.policy,
+        StackResolutionPolicy::RecheckNoMeaningfulPriorityAction
+    );
+    assert_eq!(
+        cohort.verified_pass_representatives,
+        BTreeSet::from([P1, P2, P3])
+    );
+    assert_eq!(cohort.cursor, 0);
+}
+
+/// A4-Y: each skipped window is judged against its own top. P0 yielded to the
+/// top three sources only, so the boundary stops before the first window over
+/// an unyielded source.
+#[test]
+fn partial_yield_stops_at_the_first_unyielded_window() {
+    const YIELDED: usize = 3;
+    let mut board = opponent_run_after_two_ai_passes(YIELDED);
+    let state = board.runner.state_mut();
+    let unyielded_source = state.stack[SCUTE_COUNT - YIELDED - 1].source_id;
+    // Reach guard: the next top after the yielded prefix is not yielded.
+    assert!(state
+        .stack
+        .iter()
+        .rev()
+        .take(YIELDED)
+        .all(|entry| entry.source_id != unyielded_source));
+
+    verified_ai_pass(state, P3);
+
+    assert_eq!(state.stack.len(), SCUTE_COUNT - YIELDED);
+    assert_eq!(insects(state), YIELDED);
+    assert_eq!(
+        perf_counters::snapshot().stack_batched_entries,
+        YIELDED as u64
+    );
+    assert_eq!(priority_holder(state), P0);
+    let cohort = session(state);
+    assert_eq!(
+        (cohort.cursor, cohort.entries.len()),
+        (YIELDED, SCUTE_COUNT)
+    );
+}
+
+/// A4: P0's own run above P1's entry. P1 is active with Scute Swarm and Soul
+/// Warden; P0 controls six Authority of the Consuls. The Insect entering under
+/// P1 triggers Soul Warden (P1, active player, bottom) and the six Authority
+/// triggers (P0, top) per CR 603.3b. The boundary consumes exactly P0's run and
+/// stops with priority at P0's window over P1's entry.
+#[test]
+fn own_run_stops_at_an_opponent_entry() {
+    let mut scenario = GameScenario::new_n_player(4, 0x5C07E);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature_from_oracle(P1, "Scute Swarm", 1, 1, SCUTE_SWARM_ORACLE)
+        .with_subtypes(vec!["Insect"]);
+    let soul_warden = scenario
+        .add_creature_from_oracle(P1, "Soul Warden", 1, 1, SOUL_WARDEN_ORACLE)
+        .with_subtypes(vec!["Human", "Cleric"])
+        .id();
+    for _ in 0..SCUTE_COUNT {
+        scenario.add_enchantment_from_oracle(
+            P0,
+            "Authority of the Consuls",
+            AUTHORITY_OF_THE_CONSULS_ORACLE,
+        );
+    }
+    let forest = scenario.add_land_to_hand(P1, "Forest").id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.waiting_for = WaitingFor::Priority { player: P1 };
+    }
+    let card_id = runner.state().objects[&forest].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: forest,
+            card_id,
+        })
+        .expect("playing the Forest is legal");
+    for player in [P1, P2, P3] {
+        verified_ai_pass(runner.state_mut(), player);
+    }
+    assert_eq!(priority_holder(runner.state()), P0);
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 may pass the Scute trigger");
+    // CR 603.3b: P0 orders its own simultaneous Authority triggers.
+    if let WaitingFor::OrderTriggers { triggers, .. } = runner.state().waiting_for.clone() {
+        runner
+            .act(GameAction::OrderTriggers {
+                order: (0..triggers.len()).collect(),
+            })
+            .expect("the identity order is legal");
+    }
+    let state = runner.state_mut();
+    // Reach guard: Soul Warden's trigger at the bottom, P0's six above it.
+    let controllers: Vec<PlayerId> = state.stack.iter().map(|entry| entry.controller).collect();
+    assert_eq!(
+        controllers,
+        [vec![P1], vec![P0; SCUTE_COUNT]].concat(),
+        "stack controllers bottom to top"
+    );
+    assert_eq!(state.stack[0].source_id, soul_warden);
+    perf_counters::reset();
+
+    let mut ai_dispatches = 0;
+    while priority_holder(state) != P0 {
+        assert!(ai_dispatches < 40, "the AI seats reach P0's window");
+        let holder = priority_holder(state);
+        verified_ai_pass(state, holder);
+        ai_dispatches += 1;
+    }
+
+    assert_eq!(priority_holder(state), P0);
+    assert_eq!(state.stack.len(), 1);
+    assert_eq!(state.stack.back().map(|entry| entry.controller), Some(P1));
+    assert_eq!(state.players[0].life, 20 + SCUTE_COUNT as i32);
+    assert_eq!(
+        perf_counters::snapshot().stack_batched_entries,
+        SCUTE_COUNT as u64
+    );
+    let cohort = session(state);
+    assert_eq!(
+        (cohort.cursor, cohort.entries.len()),
+        (SCUTE_COUNT, SCUTE_COUNT + 1)
+    );
+}
+
+/// A8: the realistic composition. A land enters under P0 with Bristly Bill and
+/// six Scute Swarm (fewer than six lands, so each Scute trigger takes the
+/// Insect branch). P0 orders Bristly Bill's trigger first (bottom, CR 603.3b)
+/// through the engine-issued prompt and targets from its legal targets; then
+/// one P0 pass collapses the Scute run.
+#[test]
+fn realistic_composition_targeted_landfall_then_scute_run() {
+    let mut scenario = GameScenario::new_n_player(4, 0x5C07E);
+    scenario.at_phase(Phase::PreCombatMain);
+    let bristly = scenario
+        .add_creature_from_oracle(P0, "Bristly Bill, Spine Sower", 2, 2, BRISTLY_BILL_ORACLE)
+        .with_subtypes(vec!["Plant", "Druid"])
+        .as_legendary()
+        .id();
+    for _ in 0..SCUTE_COUNT {
+        scenario
+            .add_creature_from_oracle(P0, "Scute Swarm", 1, 1, SCUTE_SWARM_ORACLE)
+            .with_subtypes(vec!["Insect"]);
+    }
+    let forest = scenario.add_land_to_hand(P0, "Forest").id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&forest].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: forest,
+            card_id,
+        })
+        .expect("playing the Forest is legal");
+    let WaitingFor::OrderTriggers { triggers, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "seven landfall triggers must raise the CR 603.3b order prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let bristly_index = triggers
+        .iter()
+        .position(|trigger| trigger.source_id == bristly)
+        .expect("Bristly Bill's trigger is in the order prompt");
+    let order = std::iter::once(bristly_index)
+        .chain((0..triggers.len()).filter(|&index| index != bristly_index))
+        .collect();
+    runner
+        .act(GameAction::OrderTriggers { order })
+        .expect("the engine-issued order is legal");
+    let WaitingFor::TriggerTargetSelection { target_slots, .. } =
+        runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "Bristly Bill's trigger must pause for its target, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let target = target_slots[0].legal_targets[0].clone();
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(target),
+        })
+        .expect("the engine-issued target is legal");
+    let state = runner.state_mut();
+    // Reach guards: Bristly Bill's entry at the bottom, six Scute triggers
+    // above it, and the construction carrier released.
+    assert_eq!(state.stack.len(), SCUTE_COUNT + 1);
+    assert_eq!(state.stack[0].source_id, bristly);
+    assert!(state.pending_trigger_event_batch.is_empty());
+    perf_counters::reset();
+
+    let (human_dispatches, _) = drive_with_human(state, P0, 80);
+
+    assert_eq!(human_dispatches, 1);
+    assert!(state.stack.is_empty());
+    assert_eq!(insects(state), SCUTE_COUNT);
+    assert_eq!(
+        perf_counters::snapshot().stack_batched_entries,
+        SCUTE_COUNT as u64
+    );
 }

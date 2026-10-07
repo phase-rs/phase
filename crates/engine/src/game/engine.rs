@@ -18,10 +18,10 @@ use crate::types::game_state::{
     CastingVariant, ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode,
     ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveCompletion,
     PendingCostMoveResume, PendingCounterPostAction, PendingEffectResolved, PersistedRestoreError,
-    PriorityPassingMode, ResolveAllConsentParticipant, ResolveAllConsentRun,
-    ResolveAllPrioritySnapshot, RetargetScope, RetargetSlotAddress, StackEntry, StackEntryKind,
-    StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
-    StackResolutionPolicy, StackResolutionSession, WaitingFor,
+    ResolveAllConsentParticipant, ResolveAllConsentRun, ResolveAllPrioritySnapshot, RetargetScope,
+    RetargetSlotAddress, StackEntry, StackEntryKind, StackResolutionAutoPassOverlay,
+    StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
+    StackResolutionSession, WaitingFor,
 };
 use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
 use crate::types::match_config::MatchType;
@@ -1068,9 +1068,10 @@ pub fn apply_interaction_with_rejection(
 /// session; ordinary `PassPriority` remains an ordinary player pass.
 ///
 /// The retained session is intentionally stack-local: it fences the stack as
-/// it exists now and may reuse only the verified representative's own pass at
-/// later priority windows. It never infers a pass for an unverified
-/// representative and never authorizes a new stack entry.
+/// it exists now and may reuse the verified representative's own pass at later
+/// priority windows. A representative without a verified pass is passed only on
+/// its standing pass over the window's top (`priority::standing_priority_pass`);
+/// the session never authorizes a new stack entry.
 /// The priority player for whom `action` is a verified AI stack-continuation
 /// pass, or `None` when it is not one.
 ///
@@ -8931,15 +8932,6 @@ enum AutoPassDecision {
     Pass,
 }
 
-/// CR 117.1 + CR 723.5: whether `player` has set Full Control, a standing
-/// refusal to have any priority window passed for them. Preference ownership
-/// follows the authorized submitter, as it does in `auto_pass_recommended`, so
-/// a controlled seat answers with its controller's preference.
-fn holds_full_control(state: &GameState, player: PlayerId) -> bool {
-    state.priority_passing_mode(turn_control::authorized_submitter_for_player(state, player))
-        == PriorityPassingMode::FullControl
-}
-
 /// Classify what the auto-pass loop should do for `player` at the current
 /// priority window.
 ///
@@ -8956,7 +8948,7 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
     // without ever consulting the frontend. Checked BEFORE the no-session `Exit`
     // arm because `Exit` itself falls through to a pass when someone else holds
     // a live `UntilStackEmpty` session.
-    if holds_full_control(state, player) {
+    if priority::holds_full_control(state, player) {
         // `Finish` also drops a stale session this player owns; both variants
         // break the loop, so either way the window is theirs.
         return if state.auto_pass.contains_key(&player) {
@@ -8982,9 +8974,12 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
             // CR 117.3d: An opponent-controlled top-of-stack normally ends the
             // session so the player can respond — unless they have pre-committed
             // to yield priority for that exact triggered ability, in which case
-            // the session keeps auto-passing through it.
+            // the session keeps auto-passing through it. The standing rungs are
+            // `priority::standing_priority_pass`'s; Full Control already returned
+            // above, so `Withheld` cannot reach this arm.
             let opponent_on_stack = state.stack.last().is_some_and(|top| {
-                top.controller != player && !state.is_priority_yielded(player, top)
+                priority::standing_priority_pass(state, player, Some(top))
+                    == priority::StandingPriorityPass::Undecided
             });
             if opponent_on_stack {
                 AutoPassDecision::Break
@@ -9390,9 +9385,10 @@ pub(crate) fn resume_stack_resolution_session_runner(state: &mut GameState) -> A
 
 #[derive(Clone, Copy)]
 enum StackResolutionSessionPassKind {
-    /// The session runner is considering an implicit pass. A rechecking AI
-    /// session may reuse only a representative who already supplied a verified
-    /// pass within this fenced stack cohort.
+    /// The session runner is considering an implicit pass. A rechecking session
+    /// passes a representative only with its verified pass within this fenced
+    /// cohort or its standing pass over the window's top
+    /// (`priority::standing_priority_pass`).
     Automatic,
     /// A player explicitly submitted `PassPriority`. That choice is itself the
     /// fresh decision, so it may consume the session's next authorized entry.
@@ -9402,7 +9398,8 @@ enum StackResolutionSessionPassKind {
 enum StackResolutionSessionPriorityDecision {
     NotActive,
     Pause,
-    /// A rechecking AI session is waiting on an unverified representative.
+    /// A rechecking session is waiting on a representative with neither a
+    /// verified nor a standing pass for this window.
     /// Keep it intact so that representative's explicit decision can continue
     /// its fenced cohort.
     PauseRetained,
@@ -9429,7 +9426,7 @@ fn stack_resolution_session_priority_decision(
         // answer for every window a multi-entry boundary skips. (The no-session
         // case is handled one layer out, by `priority_auto_pass_decision`.)
         if matches!(pass_kind, StackResolutionSessionPassKind::Automatic)
-            && holds_full_control(state, holder)
+            && priority::holds_full_control(state, holder)
         {
             return StackResolutionSessionPriorityDecision::Pause;
         }
@@ -9438,11 +9435,14 @@ fn stack_resolution_session_priority_decision(
         if limit.is_some() && matches!(pass_kind, StackResolutionSessionPassKind::Automatic) {
             match session.policy {
                 StackResolutionPolicy::RecheckNoMeaningfulPriorityAction => {
-                    if !stack_resolution_session_participant_authorizes_pass(
-                        state,
-                        session,
-                        canonical_holder,
-                    ) {
+                    if !state.stack.back().is_some_and(|window_top| {
+                        stack_resolution_session_participant_authorizes_pass(
+                            state,
+                            session,
+                            canonical_holder,
+                            window_top,
+                        )
+                    }) {
                         return StackResolutionSessionPriorityDecision::PauseRetained;
                     }
                 }
@@ -9468,8 +9468,8 @@ fn stack_resolution_session_priority_decision(
 }
 
 /// CR 117.3b + CR 117.3d + CR 117.4 + CR 732.2b: whether `participant` has
-/// authorized this stack-resolution session to pass a priority window it would
-/// receive inside the fenced cohort without a fresh decision. The single
+/// authorized this stack-resolution session to pass its priority window over
+/// `window_top` inside the fenced cohort without a fresh decision. The single
 /// per-participant authority for both the live window
 /// (`stack_resolution_session_priority_decision`) and every window a
 /// multi-entry boundary skips (`stack_resolution_session_authorized_limit`).
@@ -9477,18 +9477,23 @@ fn stack_resolution_session_participant_authorizes_pass(
     state: &GameState,
     session: &StackResolutionSession,
     participant: PlayerId,
+    window_top: &StackEntry,
 ) -> bool {
-    // CR 117.1: Full Control is a standing refusal to give up any window — the
-    // session's own representative's included.
-    if holds_full_control(state, participant) {
-        return false;
-    }
+    let standing_pass = match priority::standing_priority_pass(state, participant, Some(window_top))
+    {
+        // CR 117.1: Full Control is a standing refusal to give up any window —
+        // the session's own representative's included.
+        priority::StandingPriorityPass::Withheld => return false,
+        priority::StandingPriorityPass::Granted => true,
+        priority::StandingPriorityPass::Undecided => false,
+    };
     match session.policy {
-        // A verified AI pass is the policy authorization for later priority
-        // windows in this exact fenced cohort.
+        // A verified AI pass authorizes later windows in this exact fenced
+        // cohort; CR 117.3d + CR 732.2b: a representative's standing pass over
+        // this window's top authorizes this window.
         StackResolutionPolicy::RecheckNoMeaningfulPriorityAction => {
             session.representatives.contains(&participant)
-                && session.verified_pass_representatives.contains(&participant)
+                && (standing_pass || session.verified_pass_representatives.contains(&participant))
         }
         // A representative consented to the session. A non-representative's
         // skipped windows are not rechecked for a meaningful action (only its
@@ -9500,9 +9505,10 @@ fn stack_resolution_session_participant_authorizes_pass(
 
 /// CR 117.3b + CR 117.4 + CR 608.1: how many fenced stack entries one all-pass
 /// boundary may consume. Consuming K > 1 entries skips every participant's
-/// priority window after each of the first K − 1 resolutions, so K > 1 needs
-/// every participant's authorization (CR 117.3d + CR 732.2b); otherwise exactly
-/// one entry resolves. `None` when the session no longer authorizes the current
+/// priority window after each of the first K − 1 resolutions, so each extra
+/// entry needs every participant's authorization of the window over it
+/// (CR 117.3d + CR 732.2b); the boundary stops before the first window someone
+/// has not authorized. `None` when the session no longer authorizes the current
 /// top: changed or departed representatives, an exhausted cursor or budget, an
 /// empty stack, or a top entry outside the fence.
 pub(crate) fn stack_resolution_session_authorized_limit(state: &GameState) -> Option<u32> {
@@ -9542,16 +9548,28 @@ pub(crate) fn stack_resolution_session_authorized_limit(state: &GameState) -> Op
         .iter()
         .rev()
         .zip(session.entries.iter().skip(session.cursor))
-        .take_while(|(entry, fence)| fence.matches_captured_entry(entry));
+        .take_while(|(entry, fence)| fence.matches_captured_entry(entry))
+        .map(|(entry, _)| entry);
     // `None` when the top entry is outside the fence.
     fenced_prefix.next()?;
-    if !participants.iter().all(|&participant| {
-        stack_resolution_session_participant_authorizes_pass(state, session, participant)
-    }) {
-        return Some(1);
-    }
-    let fenced_len = u32::try_from(1 + fenced_prefix.count()).unwrap_or(u32::MAX);
-    Some(fenced_len.min(remaining_budget))
+    // CR 117.3b + CR 117.4: resolving K entries skips every participant's
+    // window over each of the next K − 1 entries, each with its own top; the
+    // boundary ends before the first window a participant has not authorized
+    // (CR 732.2b), so K = 1 + the authorized prefix of those windows.
+    let authorized_skipped_windows = fenced_prefix
+        .take_while(|window_top| {
+            participants.iter().all(|&participant| {
+                stack_resolution_session_participant_authorizes_pass(
+                    state,
+                    session,
+                    participant,
+                    window_top,
+                )
+            })
+        })
+        .count();
+    let limit = u32::try_from(1 + authorized_skipped_windows).unwrap_or(u32::MAX);
+    Some(limit.min(remaining_budget))
 }
 
 fn advance_stack_resolution_session_after_priority_pass(
