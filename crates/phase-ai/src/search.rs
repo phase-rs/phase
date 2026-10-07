@@ -8099,6 +8099,163 @@ mod tests {
         );
     }
 
+    const PREDICT_POOL: [(&str, u32); 5] = [
+        ("Brainstorm", 2),
+        ("Island", 1),
+        ("Opt", 1),
+        ("Memory Lapse", 1),
+        ("Control Magic", 1),
+    ];
+
+    /// Dandan: P0 resolves Predict up to its card-name prompt, with the registered pool
+    /// `PREDICT_POOL`, P1 holding `opp_hand` and the shared pile `pile`.
+    fn predict_card_name_prompt(opp_hand: &[&str], pile: &[&str]) -> GameState {
+        use engine::types::format::FormatConfig;
+        use engine::types::game_state::PlayerDeckPool;
+
+        let db = integration_card_db();
+        let mut scenario = GameScenario::new_with_format(FormatConfig::dandan(), 2, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        let predict = scenario.add_real_card(P0, "Predict", Zone::Hand, &db);
+        scenario.with_mana_pool(
+            P0,
+            [ManaType::Blue, ManaType::Colorless]
+                .into_iter()
+                .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        for (i, name) in opp_hand.iter().enumerate() {
+            create_object(
+                state,
+                CardId(2000 + i as u64),
+                P1,
+                name.to_string(),
+                Zone::Hand,
+            );
+        }
+        for (i, name) in pile.iter().enumerate() {
+            create_object(
+                state,
+                CardId(3000 + i as u64),
+                P1,
+                name.to_string(),
+                Zone::Library,
+            );
+        }
+        state.deck_pools.push(PlayerDeckPool {
+            player: P0,
+            current_main: Arc::new(
+                PREDICT_POOL
+                    .iter()
+                    .map(|(name, count)| engine::game::deck_loading::DeckEntry {
+                        card: engine::types::card::CardFace {
+                            name: name.to_string(),
+                            mana_cost: ManaCost::zero(),
+                            ..Default::default()
+                        },
+                        count: *count,
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        });
+        state.all_card_names = PREDICT_POOL
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .chain(["Predict".to_string()])
+            .collect::<Vec<_>>()
+            .into();
+        runner.cast(predict).target_player(P0).resolve();
+        let state = runner.state().clone();
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::NamedChoice { player: P0, .. }
+            ),
+            "reach: Predict's card-name prompt, got {:?}",
+            state.waiting_for
+        );
+        assert!(state.players[1].library.is_empty(), "reach: shared pile");
+        state
+    }
+
+    fn issued_card_names(state: &GameState) -> Vec<String> {
+        engine::ai_support::candidate_actions(state)
+            .into_iter()
+            .filter_map(|c| match c.action {
+                GameAction::ChooseOption { choice } => Some(choice),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn predict_card_name_domain_is_constant_across_determinized_worlds() {
+        // Unobserved two-copy name Brainstorm: one copy in P1's hand and one in the pile,
+        // or both in the pile.
+        let split = predict_card_name_prompt(
+            &["Brainstorm", "Island", "Opt"],
+            &["Brainstorm", "Memory Lapse", "Control Magic"],
+        );
+        let pooled = predict_card_name_prompt(
+            &["Island", "Opt", "Memory Lapse"],
+            &["Brainstorm", "Brainstorm", "Control Magic"],
+        );
+        let reference = issued_card_names(&split);
+        assert!(
+            reference.len() > 1 && reference.iter().any(|n| n == "Brainstorm"),
+            "reach: the domain is a real choice containing the unobserved name: {reference:?}"
+        );
+        assert_eq!(issued_card_names(&pooled), reference, "actual states agree");
+
+        let mut redistributed = 0;
+        for seed in 0..16 {
+            let mut rng = ChaCha20Rng::seed_from_u64(seed);
+            let sampled = crate::determinize::determinize_opponents(&split, P0, &mut rng);
+            let pile_names = |s: &GameState| -> std::collections::BTreeSet<String> {
+                s.library_of(P0)
+                    .iter()
+                    .map(|id| s.objects[id].name.clone())
+                    .collect()
+            };
+            if pile_names(&sampled) != pile_names(&split) {
+                redistributed += 1;
+            }
+            assert_eq!(issued_card_names(&sampled), reference, "seed {seed}");
+        }
+        assert!(redistributed > 0, "reach: determinization moved pile names");
+    }
+
+    #[test]
+    fn predict_card_name_choice_is_issued_under_k2() {
+        let state = predict_card_name_prompt(
+            &["Brainstorm", "Island", "Opt"],
+            &["Brainstorm", "Memory Lapse", "Control Magic"],
+        );
+        let contract = AiDecisionContract::issue(&state, P0);
+        assert!(contract.candidates.len() > 1, "reach: a real domain");
+        let session = AiSession::arc_from_game(&state);
+        let mut config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(2);
+        config.search.determinization_samples = 2;
+        let scored = score_candidates_with_session(&state, P0, &config, &session);
+        assert!(
+            !scored.is_empty(),
+            "reach: the K=2 ensemble scored the domain"
+        );
+        assert!(scored
+            .iter()
+            .all(|(a, _)| contract.contains_action(&state, a)));
+        let mut rng = SmallRng::seed_from_u64(1);
+        let chosen = choose_action_with_session(&state, P0, &config, &mut rng, &session)
+            .expect("an issued card name");
+        assert!(contract.contains_action(&state, &chosen));
+    }
+
     #[test]
     fn returns_none_for_no_legal_actions() {
         let mut state = make_state();

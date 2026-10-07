@@ -5580,32 +5580,39 @@ fn card_name_choice_candidates(
         push_name(source_display_name, &legal_names, &mut seen, &mut choices);
     }
 
-    let mut push_object_name = |id: ObjectId| {
-        if choices.len() >= MAX_CARD_NAME_CANDIDATES {
-            return;
-        }
-        if let Some(obj) = state.objects.get(&id) {
-            push_name(&obj.name, &legal_names, &mut seen, &mut choices);
+    fn object_names<'a>(
+        state: &'a GameState,
+        ids: &'a im::Vector<ObjectId>,
+    ) -> impl Iterator<Item = &'a str> {
+        ids.iter()
+            .filter_map(|id| state.objects.get(id))
+            .map(|obj| obj.name.as_str())
+    }
+
+    let mut push_candidate = |name: &str| {
+        if choices.len() < MAX_CARD_NAME_CANDIDATES {
+            push_name(name, &legal_names, &mut seen, &mut choices);
         }
     };
 
-    for &id in &state.battlefield {
-        push_object_name(id);
-    }
+    object_names(state, &state.battlefield).for_each(&mut push_candidate);
     if let Some(controller) = state.players.iter().find(|p| p.id == player) {
-        for &id in controller.hand.iter() {
-            push_object_name(id);
-        }
-        for &id in state.graveyard_of(controller.id) {
-            push_object_name(id);
-        }
-        for &id in state.library_of(controller.id) {
-            push_object_name(id);
+        object_names(state, &controller.hand).for_each(&mut push_candidate);
+        object_names(state, state.graveyard_of(controller.id)).for_each(&mut push_candidate);
+        // CR 400.2: the library is a hidden zone, so the chooser's domain is the pile's
+        // registered pool names, not its live identities.
+        match state.shared_zone_holder(Zone::Library) {
+            Some(_) => state
+                .deck_pool_of(controller.id)
+                .into_iter()
+                .flat_map(|pool| pool.current_main.iter())
+                .for_each(|entry| push_candidate(&entry.card.name)),
+            None => {
+                object_names(state, state.library_of(controller.id)).for_each(&mut push_candidate)
+            }
         }
     }
-    for &id in &state.exile {
-        push_object_name(id);
-    }
+    object_names(state, &state.exile).for_each(&mut push_candidate);
 
     if choices.is_empty() {
         let fallback = state
@@ -7737,6 +7744,112 @@ mod tests {
             actions[1].action,
             GameAction::ChooseOption { ref choice } if choice == "Forest"
         ));
+    }
+
+    fn card_name_prompt(mut state: GameState, names: Vec<String>) -> GameState {
+        state.all_card_names = names.into();
+        state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
+            player: PlayerId(0),
+            choice_type: ChoiceType::CardName,
+            options: Vec::new(),
+            source: None,
+            persist_player: None,
+        };
+        state
+    }
+
+    fn issued_names(state: &GameState) -> Vec<String> {
+        candidate_actions(state)
+            .into_iter()
+            .filter_map(|c| match c.action {
+                GameAction::ChooseOption { choice } => Some(choice),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn register_pool(state: &mut GameState, names: &[String]) {
+        state
+            .deck_pools
+            .push(crate::types::game_state::PlayerDeckPool {
+                player: PlayerId(0),
+                current_main: Arc::new(
+                    names
+                        .iter()
+                        .map(|name| crate::game::deck_loading::DeckEntry {
+                            card: crate::types::card::CardFace {
+                                name: name.clone(),
+                                ..Default::default()
+                            },
+                            count: 1,
+                        })
+                        .collect(),
+                ),
+                ..Default::default()
+            });
+    }
+
+    #[test]
+    fn card_name_candidates_in_a_per_seat_format_read_the_own_library() {
+        let mut state = GameState::new_two_player(42);
+        for (zone, name) in [
+            (Zone::Battlefield, "Field"),
+            (Zone::Hand, "Held"),
+            (Zone::Graveyard, "Grave"),
+            (Zone::Library, "Deep"),
+            (Zone::Exile, "Exiled"),
+        ] {
+            create_object(&mut state, CardId(1), PlayerId(0), name.to_string(), zone);
+        }
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Theirs".to_string(),
+            Zone::Library,
+        );
+        let names = ["Field", "Held", "Grave", "Deep", "Exiled", "Theirs"].map(String::from);
+        let state = card_name_prompt(state, names.to_vec());
+        assert_eq!(
+            issued_names(&state),
+            ["Field", "Held", "Grave", "Deep", "Exiled"].map(String::from)
+        );
+    }
+
+    #[test]
+    fn shared_pile_card_name_domain_is_the_registered_pool_whatever_the_pile_holds() {
+        let pool: Vec<String> = (0..30).map(|i| format!("Pool {i}")).collect();
+        let build = |opp_hand: &[usize], pile: &[usize]| {
+            let mut state = GameState::new(FormatConfig::dandan(), 2, 42);
+            register_pool(&mut state, &pool);
+            for &i in opp_hand {
+                create_object(
+                    &mut state,
+                    CardId(100 + i as u64),
+                    PlayerId(1),
+                    pool[i].clone(),
+                    Zone::Hand,
+                );
+            }
+            for &i in pile {
+                create_object(
+                    &mut state,
+                    CardId(200 + i as u64),
+                    PlayerId(1),
+                    pool[i].clone(),
+                    Zone::Library,
+                );
+            }
+            assert!(
+                state.players[1].library.is_empty() && !state.library_of(PlayerId(1)).is_empty()
+            );
+            card_name_prompt(state, pool.clone())
+        };
+        let a = issued_names(&build(&[0, 1, 2], &[3, 4, 5, 6]));
+        let b = issued_names(&build(&[3, 4, 5], &[0, 1, 2, 6]));
+        assert_eq!(a, b);
+        assert_eq!(a, pool[..24].to_vec(), "registered-pool order, capped");
     }
 
     #[test]

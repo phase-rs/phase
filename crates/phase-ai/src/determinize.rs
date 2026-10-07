@@ -24,7 +24,10 @@
 //! cast-from-hand enumeration) see exactly the real cards, so the K sampled
 //! worlds share an identical AI-legal-action set. Only cards the AI cannot
 //! legitimately know are swapped, which is precisely the set no AI candidate can
-//! reference by identity (see the pin-invariant in `search.rs`).
+//! reference by identity (see the pin-invariant in `search.rs`). A shared
+//! library is the exception: it is resampled whole for the opponent, so
+//! `card_name_choice_candidates` keys it by the registered pool, never by live
+//! identities.
 //!
 //! # Identity-swap caveat (residual fields not rewritten by the primitive)
 //!

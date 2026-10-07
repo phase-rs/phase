@@ -185,6 +185,26 @@ fn v8_card_name_candidates_come_from_the_pile() {
             "Brainstorm".to_string(),
             "Memory Lapse".to_string(),
         ]);
+        if shared {
+            runner
+                .state_mut()
+                .deck_pools
+                .push(engine::types::game_state::PlayerDeckPool {
+                    player: P0,
+                    current_main: std::sync::Arc::new(
+                        ["Control Magic", "Island", "Brainstorm", "Memory Lapse"]
+                            .map(|name| engine::game::deck_loading::DeckEntry {
+                                card: engine::types::card::CardFace {
+                                    name: name.to_string(),
+                                    ..Default::default()
+                                },
+                                count: 1,
+                            })
+                            .to_vec(),
+                    ),
+                    ..Default::default()
+                });
+        }
 
         runner.cast(spell).target_player(actor).resolve();
 
@@ -202,14 +222,15 @@ fn v8_card_name_candidates_come_from_the_pile() {
                 _ => None,
             })
             .collect();
+        let expected: &[&str] = if shared {
+            &["Memory Lapse", "Control Magic", "Island", "Brainstorm"]
+        } else {
+            &["Memory Lapse", "Island", "Brainstorm"]
+        };
         assert_eq!(
             names,
-            vec![
-                "Memory Lapse".to_string(),
-                "Island".to_string(),
-                "Brainstorm".to_string()
-            ],
-            "{shared} {actor:?}: the pile's graveyard then library names, not the fallback"
+            expected.iter().map(|n| n.to_string()).collect::<Vec<_>>(),
+            "{shared} {actor:?}"
         );
     }
 }
