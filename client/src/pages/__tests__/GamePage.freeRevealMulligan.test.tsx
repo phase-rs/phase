@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router";
 
@@ -203,10 +203,13 @@ describe("GamePage free-reveal mulligan", () => {
   });
 
   it("shows a seat that already declared no prompt at all", async () => {
-    showMulligan(VIEWER_DECLARED, [FREE_REVEAL]);
+    showMulligan(OPEN_ROUND, [KEEP, MULLIGAN, FREE_REVEAL]);
     renderGamePage();
+    expect(await screen.findByRole("button", { name: "Keep Hand" })).toBeInTheDocument();
 
+    showMulligan(VIEWER_DECLARED, [FREE_REVEAL]);
+
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Keep Hand" })).toBeNull());
     expect(screen.queryByRole("button", { name: "Reveal and redraw (free)" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Keep Hand" })).toBeNull();
   });
 });

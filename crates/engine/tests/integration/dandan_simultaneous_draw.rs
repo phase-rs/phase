@@ -3,10 +3,9 @@
 //! shared pile, active player first (CR 121.2a, CR 121.2c as modified by the
 //! format's `DealOrder`).
 //!
-//! S6 scope limit: no card on the Dandân decklist has a draw replacement, so a
-//! prompt between two empty-pile attempts cannot occur for that list. V7 pins
-//! that for the list only; it is not a general pause-safety proof, and V5 is the
-//! positive control that a prompt is reachable inside the dealer.
+//! A prompt between two empty-pile attempts needs a draw replacement; V5 is the
+//! positive control that a prompt is reachable inside the dealer, and V7 covers a
+//! board with none.
 
 use std::collections::HashMap;
 
@@ -400,7 +399,7 @@ fn v5_a_replacement_prompt_parks_the_dealer_and_keeps_every_seats_count() {
 }
 
 // ---------------------------------------------------------------------------
-// V6 / V7: deck-out under the dealer (S6, verification only)
+// V6 / V7: deck-out under the dealer
 // ---------------------------------------------------------------------------
 
 fn deck_out(pile_len: usize) -> (GameRunner, Outcome) {
@@ -469,7 +468,7 @@ fn v7_no_prompt_opens_between_the_two_empty_draws() {
             outcome.final_waiting_for(),
             WaitingFor::ReplacementChoice { .. }
         ),
-        "the Dandân list has no draw replacement"
+        "no draw replacement is on the board"
     );
     assert!(runner.state().active_draw_sequence().is_none());
     assert!(matches!(

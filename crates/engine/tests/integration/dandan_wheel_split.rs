@@ -249,7 +249,7 @@ fn w1e_end_the_turn_follows_the_last_dealt_card() {
     assert_eq!(ends.len(), 1, "reach: the tail resolved");
     assert!(
         ends[0] > *draw_positions(events).last().expect("draws"),
-        "CR 724.1: the turn ends after the draw"
+        "CR 608.2c: the turn ends after the draw"
     );
 }
 

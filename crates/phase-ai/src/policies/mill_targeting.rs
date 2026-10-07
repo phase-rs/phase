@@ -84,7 +84,7 @@ impl TacticalPolicy for MillTargetingPolicy {
                 delta += TARGET_BONUS;
             }
 
-            // CR 401.3 + CR 400.1: library size is public; read the library library_of resolves, shared or the seat's own.
+            // CR 401.3 + CR 400.1: library size is public; read it from `library_of`, which resolves a shared pile.
             if ctx.state.players.get(player.0 as usize).is_some()
                 && ctx.state.library_of(*player).is_empty()
             {

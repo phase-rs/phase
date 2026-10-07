@@ -233,7 +233,7 @@ describe("shared pile anchors", () => {
   const share = (derived: GameState["derived"]) =>
     useGameStore.setState({ gameState: buildGameState({ derived }) });
 
-  it("V16-r2: a card owned by a non-holder seat resolves to the holder's pile in every pile selector", () => {
+  it("a card owned by a non-holder seat resolves to the holder's pile in every pile selector", () => {
     share({ shared_piles: { library: 0, graveyard: 0 } });
     const gyHolder = mount({ "data-graveyard-pile": "0", "data-grouped-ids": String(X) });
     const gyOwner = mount({ "data-graveyard-pile": "1", "data-grouped-ids": String(X) });
@@ -250,7 +250,7 @@ describe("shared pile anchors", () => {
     expect(provisionalNode({ from: "Stack", to: "Graveyard", ownerId: 1 })).toBe(gyHolder);
   });
 
-  it("V16-r2: a per-player format keeps each owner's own pile", () => {
+  it("a per-player format keeps each owner's own pile", () => {
     share({});
     mount({ "data-graveyard-pile": "0", "data-grouped-ids": String(X) });
     const gyOwner = mount({ "data-graveyard-pile": "1", "data-grouped-ids": String(X) });

@@ -337,7 +337,7 @@ pub(crate) fn serum_powders_in_hand(state: &GameState, player: PlayerId) -> Vec<
             state
                 .objects
                 .get(oid)
-                .is_some_and(|o| o.name.eq_ignore_ascii_case("Serum Powder"))
+                .is_some_and(|o| o.name.eq_ignore_ascii_case(SERUM_POWDER_NAME))
         })
         .collect()
 }

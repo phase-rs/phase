@@ -378,10 +378,11 @@ fn flip_comparator(comparator: Comparator) -> Comparator {
 ///
 /// Only own-graveyard scopes qualify. `CountScope::All` is deliberately
 /// excluded: the policy's `distinct_graveyard_types` counts only the AI's own
-/// graveyard (the shared pile, in a shared-zone format), so classifying an all-graveyards payoff (Tarmogoyf-class) as an
-/// own-graveyard plan would let an opponent satisfy it while the policy keeps
-/// rewarding self-mill against a different quantity. Opponent- and
-/// iterated-player scopes are likewise not this deck's own plan.
+/// graveyard (the shared pile, in a shared-zone format), so classifying an
+/// all-graveyards payoff (Tarmogoyf-class) as an own-graveyard plan would let
+/// an opponent satisfy it while the policy keeps rewarding self-mill against a
+/// different quantity. Opponent- and iterated-player scopes are likewise not
+/// this deck's own plan.
 fn quantity_reads_own_graveyard_types(expr: &QuantityExpr) -> bool {
     match expr {
         QuantityExpr::Ref { qty } => matches!(

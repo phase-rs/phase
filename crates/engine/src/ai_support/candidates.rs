@@ -9609,6 +9609,11 @@ mod tests {
 
     #[test]
     fn free_reveal_is_not_issued_after_a_regular_mulligan_or_while_bottoming() {
+        assert_eq!(
+            free_reveal_actors(&dandan_mulligan(MulliganDecisionPhase::Declare, 0)).len(),
+            1,
+            "reach: the same hand is offered the free reveal before a mulligan"
+        );
         let state = dandan_mulligan(MulliganDecisionPhase::Declare, 1);
         assert!(free_reveal_actors(&state).is_empty());
         let state = dandan_mulligan(

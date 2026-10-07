@@ -44663,5 +44663,17 @@ mod shared_zone_storage_tests {
             buried.loop_fingerprint(),
             "reach: the pile's graveyard length is hashed"
         );
+        assert_eq!(
+            dandan.library_of(P1).len(),
+            3,
+            "the pile reads through seat 1"
+        );
+        let mut stray = dandan.clone();
+        stray.players[1].library.push_back(ObjectId(7));
+        assert_ne!(
+            dandan.loop_fingerprint(),
+            stray.loop_fingerprint(),
+            "the non-canonical seat's own container is hashed too"
+        );
     }
 }

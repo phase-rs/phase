@@ -120,7 +120,7 @@ fn public_account_object_ids(
     };
     let mut object_ids = Vec::new();
 
-    // CR 400.2 + CR 400.3: a card goes to its owner's corresponding zone, so ownership does not
+    // CR 400.3: a card goes to its owner's corresponding zone, so ownership does not
     // say where it sits: the graveyard is read once, as `graveyard_of` resolves it.
     object_ids.extend(state.graveyard_of(player).iter().copied());
     object_ids.extend(state.battlefield.iter().filter(owned_by_pool).copied());

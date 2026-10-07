@@ -176,7 +176,7 @@ fn unknown_slots(
                     .get(id)
                     .is_some_and(|obj| !obj.is_token && obj.owner == opponent)
         });
-    // CR 401.2 + CR 401.3: a library's contents are hidden whoever owns each card, so a
+    // CR 400.2 + CR 401.2: a library's contents are hidden whoever owns each card, so a
     // shared pile is selected by storage, not by owner.
     let library =
         state.library_of(opponent).iter().copied().filter(|id| {

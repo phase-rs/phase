@@ -97,8 +97,7 @@ const FILLER: [(PlayerId, &str); 6] = [
     (P1, "Island"),
 ];
 
-/// An opponent-targeting card is cast by `P0` against the pile (red before the
-/// sweep), by `P1` (the canonical seat: the control) and in Standard.
+/// An opponent-targeting card is cast by `P0` against the pile, by `P1` (the canonical seat: the control) and in Standard.
 const OPPONENT_CASES: [(bool, PlayerId); 3] = [(true, P0), (true, P1), (false, P0)];
 
 fn owned_by(owner: PlayerId) -> Vec<(PlayerId, &'static str)> {
@@ -275,7 +274,7 @@ fn v2_predict_mills_the_pile_for_either_target_and_counts_the_name() {
 }
 
 // ---------------------------------------------------------------------------
-// V3 pile-side positive controls (Phase 6 code; green before the sweep)
+// V3 pile-side positive controls
 // ---------------------------------------------------------------------------
 
 #[test]

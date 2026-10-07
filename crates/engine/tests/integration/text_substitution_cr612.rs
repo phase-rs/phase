@@ -789,9 +789,27 @@ fn crystal_spray_prompts_both_domains_then_draws() {
     let db = db!();
     let mut scenario = new_scenario();
     let spray = scenario.add_real_card(P0, "Crystal Spray", Zone::Hand, db);
-    let sleight = scenario.add_real_card(P0, "Sleight of Mind", Zone::Hand, db);
     let moon = scenario.add_real_card(P0, "Bad Moon", Zone::Battlefield, db);
+    let black = scenario
+        .add_creature(P0, "Black Guy", 2, 2)
+        .with_color(vec![ManaColor::Black])
+        .id();
+    let red = scenario
+        .add_creature(P0, "Red Guy", 2, 2)
+        .with_color(vec![ManaColor::Red])
+        .id();
     let mut runner = build(scenario, db);
+    let pt = |runner: &GameRunner, id: ObjectId| {
+        let o = &runner.state().objects[&id];
+        (o.power.unwrap(), o.toughness.unwrap())
+    };
+    let hand_size = |runner: &GameRunner| runner.state().players[P0.0 as usize].hand.len();
+    assert_eq!(
+        pt(&runner, black),
+        (3, 3),
+        "reach-guard: the anthem is live"
+    );
+    assert_eq!(pt(&runner, red), (2, 2));
     give(
         &mut runner,
         P0,
@@ -826,9 +844,19 @@ fn crystal_spray_prompts_both_domains_then_draws() {
     }
     assert!(
         runner.state().last_named_choice.is_none(),
-        "the answer was consumed by the latch (F7)"
+        "the answer was consumed by the latch"
     );
-    let _ = sleight;
+    assert_eq!(
+        pt(&runner, red),
+        (3, 3),
+        "Bad Moon now reads \"Red creatures\""
+    );
+    assert_eq!(pt(&runner, black), (2, 2));
+    assert_eq!(
+        hand_size(&runner),
+        1,
+        "Crystal Spray drew a card after the change"
+    );
 }
 
 /// Out-of-domain and same-word answers are rejected by the latch rather than applied (CR 608.2d).
@@ -895,7 +923,7 @@ fn crystal_spray_change_ends_at_end_of_turn() {
     assert_eq!(walks(&runner, wraith), ["Swamp"], "reverted at cleanup");
 }
 
-/// The non-`effect` fields of a resolving ability are rewritten while its runtime state stays bit-identical (CR 601.2b).
+/// The non-`effect` fields of a resolving ability are rewritten while its runtime state stays bit-identical (CR 612.1).
 #[test]
 fn restamp_rewrites_repeat_for_and_leaves_runtime_state_alone() {
     let db = db!();
