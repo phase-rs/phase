@@ -3346,6 +3346,10 @@ mod tests {
         }
     }
 
+    /// `ManaColorSpent` on `AbilityCondition` and `TriggerCondition` retypes `color`
+    /// to `SpentColor` (word versus symbol provenance, CR 612.2); a v116 peer cannot
+    /// deserialize the tagged color, so it must be refused before it receives v117
+    /// state.
     /// `DerivedViews` gains `shared_piles` (the seat storing a shared library and
     /// graveyard); a v115 peer drops the key and renders per-seat piles for a
     /// state whose other seat's containers are empty, so it must be refused before
@@ -3451,8 +3455,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_116_for_shared_piles_view() {
-        assert_eq!(PROTOCOL_VERSION, 116);
+    fn protocol_version_is_117_for_spent_color_provenance() {
+        assert_eq!(PROTOCOL_VERSION, 117);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3463,7 +3467,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_116_for_shared_piles_view` stays
+    /// `protocol_version_is_117_for_spent_color_provenance` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

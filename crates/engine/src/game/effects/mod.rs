@@ -19901,7 +19901,7 @@ pub(crate) fn evaluate_condition(
         AbilityCondition::ManaColorSpent { color, minimum } => state
             .objects
             .get(&ability.source_id)
-            .is_some_and(|obj| obj.colors_spent_to_cast.get(*color) >= *minimum),
+            .is_some_and(|obj| obj.colors_spent_to_cast.get(color.color()) >= *minimum),
         AbilityCondition::HasMaxSpeed => has_max_speed(state, ability.controller),
         // CR 103.1: True when the scoped player took the first turn of the
         // game. The parser only emits `ControllerRef::You` (Radiant Smite,
@@ -20893,6 +20893,7 @@ fn resolve_add_pending_enters_modifications(
 mod tests {
     use super::*;
     use crate::database::synthesis::synthesize_extort;
+    use crate::types::ability::SpentColor;
 
     /// CR 608.2c: the pile placement after a reveal-only until-loop is bound to the
     /// exact cards that reveal looked at, on the continuation itself — so an
@@ -36032,7 +36033,9 @@ mod tests {
             PlayerId(0),
         )
         .condition(AbilityCondition::ManaColorSpent {
-            color: ManaColor::Black,
+            color: SpentColor::ManaSymbol {
+                color: ManaColor::Black,
+            },
             minimum: 1,
         });
 

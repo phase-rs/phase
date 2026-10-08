@@ -77,6 +77,7 @@ pub const WORD_CARRIERS: &[WordCarrier] = &[
     carrier(Some("Choose"), "options[]", COLOR, W),
     carrier(Some("ChosenColor"), "fixed_alternative", COLOR, SYMBOL),
     carrier(Some("Color"), "data", COLOR, W),
+    carrier(Some("ColorWord"), "color", COLOR, W),
     carrier(Some("Cost"), "shards[]", COLOR, SYMBOL),
     carrier(Some("DevotionGE"), "colors[]", COLOR, W),
     carrier(Some("ExileWithAggregate"), "ManaSymbolCount", COLOR, SYMBOL),
@@ -84,7 +85,7 @@ pub const WORD_CARRIERS: &[WordCarrier] = &[
     carrier(Some("Fixed"), "value[]", COLOR, SYMBOL),
     carrier(Some("GenericEffect"), "filter", COLOR, W),
     carrier(Some("HasColor"), "color", COLOR, W),
-    carrier(Some("ManaColorSpent"), "color", COLOR, W),
+    carrier(Some("ManaSymbol"), "color", COLOR, SYMBOL),
     carrier(Some("ManaSymbolCount"), "color", COLOR, SYMBOL),
     carrier(Some("ManaSymbolsInManaCost"), "color", COLOR, SYMBOL),
     carrier(Some("Mixed"), "colors[]", COLOR, SYMBOL),
@@ -559,7 +560,7 @@ fn rewrite_resolved_ability(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::BasicLandType;
+    use crate::types::ability::{AbilityCondition, BasicLandType, SpentColor, TriggerCondition};
     use crate::types::mana::ManaColor;
     use serde_json::json;
 
@@ -609,6 +610,76 @@ mod tests {
         assert_eq!(
             rewritten["filter"]["properties"][0]["color"], "Blue",
             "the color word changes"
+        );
+    }
+
+    #[test]
+    fn spent_color_rewrites_the_word_form_and_spares_the_symbol_form() {
+        let substitution =
+            TextSubstitution::color(ManaColor::Red, ManaColor::Blue).expect("from != to");
+        let word = AbilityCondition::ManaColorSpent {
+            color: SpentColor::ColorWord {
+                color: ManaColor::Red,
+            },
+            minimum: 3,
+        };
+        let symbol = AbilityCondition::ManaColorSpent {
+            color: SpentColor::ManaSymbol {
+                color: ManaColor::Red,
+            },
+            minimum: 1,
+        };
+        assert_eq!(
+            substitution.rewrite(&word),
+            Some(AbilityCondition::ManaColorSpent {
+                color: SpentColor::ColorWord {
+                    color: ManaColor::Blue,
+                },
+                minimum: 3,
+            }),
+            "CR 612.2: a color word changes"
+        );
+        assert_eq!(
+            substitution.rewrite(&symbol),
+            None,
+            "CR 107.4: {{R}} is a symbol"
+        );
+
+        let both = AbilityCondition::And {
+            conditions: vec![word, symbol.clone()],
+        };
+        let Some(AbilityCondition::And { conditions }) = substitution.rewrite(&both) else {
+            panic!("the word leaf of the conjunction changes");
+        };
+        assert_eq!(
+            conditions,
+            [
+                AbilityCondition::ManaColorSpent {
+                    color: SpentColor::ColorWord {
+                        color: ManaColor::Blue,
+                    },
+                    minimum: 3,
+                },
+                symbol
+            ]
+        );
+
+        let trigger = |color| TriggerCondition::ManaColorSpent { color, minimum: 3 };
+        assert_eq!(
+            substitution.rewrite(&trigger(SpentColor::ColorWord {
+                color: ManaColor::Red,
+            })),
+            Some(trigger(SpentColor::ColorWord {
+                color: ManaColor::Blue,
+            }))
+        );
+        assert_eq!(
+            substitution.rewrite(&TriggerCondition::Not {
+                condition: Box::new(trigger(SpentColor::ManaSymbol {
+                    color: ManaColor::Red,
+                })),
+            }),
+            None
         );
     }
 

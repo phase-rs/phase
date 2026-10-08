@@ -9393,7 +9393,9 @@ mod tests {
         // Pin the legacy shape's classification so the delta is explicit and a
         // future retirement of `ManaColorSpent` cannot silently change it.
         let legacy = AbilityCondition::ManaColorSpent {
-            color: ManaColor::Red,
+            color: crate::types::ability::SpentColor::ColorWord {
+                color: ManaColor::Red,
+            },
             minimum: 3,
         };
         let legacy_axes = scan_ability_condition(&legacy, ScanMode::Conservative);

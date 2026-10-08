@@ -9709,7 +9709,9 @@ mod tests {
             rhs: qfix(3),
         };
         let legacy = AbilityCondition::ManaColorSpent {
-            color: ManaColor::Red,
+            color: crate::types::ability::SpentColor::ColorWord {
+                color: ManaColor::Red,
+            },
             minimum: 3,
         };
 

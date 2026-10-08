@@ -8900,6 +8900,26 @@ pub enum CastManaSpentMetric {
     FromSource { source_filter: TargetFilter },
 }
 
+/// CR 612.2 + CR 107.4: How a mana-spent condition's color was written. A
+/// text-changing effect changes only color WORDS, so a `ManaSymbol` color is
+/// never rewritten while a `ColorWord` color is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum SpentColor {
+    /// The color word of "at least three red mana was spent to cast this spell".
+    ColorWord { color: ManaColor },
+    /// The printed mana symbol of "{R} was spent to cast this spell".
+    ManaSymbol { color: ManaColor },
+}
+
+impl SpentColor {
+    pub fn color(self) -> ManaColor {
+        match self {
+            SpentColor::ColorWord { color } | SpentColor::ManaSymbol { color } => color,
+        }
+    }
+}
+
 /// A validated numeric reduction over one characteristic-bearing population.
 ///
 /// CR 202.3 + CR 208.1 + CR 209.1: the source must carry enough snapshot data
@@ -27539,12 +27559,13 @@ pub enum AbilityCondition {
     /// `QuantityCheck { lhs: ManaSpentToCast { scope, OfColor { color } }, GE, Fixed(minimum) }`,
     /// which carries the CR 400.7d subject anaphora as an explicit
     /// `CastManaObjectScope` that this variant cannot express. The leading-word
-    /// Adamant grammar already emits the generic form; this variant survives
-    /// only for the symbolic `{W}{W}` phrasing, which has no
-    /// `parse_inner_condition` grammar and fans into `And`/`Not` compositions.
+    /// Adamant grammar lowers to that generic form, so this variant is the
+    /// symbolic `{W}{W}` phrasing (no `parse_inner_condition` grammar; it fans
+    /// into `And`/`Not` compositions) plus the shadowed word fallback, and
+    /// `SpentColor` is how CR 612.2 tells the two apart.
     /// Retiring it is a semantic migration (per-card scope decision), not a
     /// rename — see `TriggerCondition::ManaColorSpent` for the sibling case.
-    ManaColorSpent { color: ManaColor, minimum: u32 },
+    ManaColorSpent { color: SpentColor, minimum: u32 },
     /// CR 608.2c: "If it's a [type] card" — gates sub_ability on the last
     /// revealed card's type, or on the just-moved card when the parent effect
     /// changed zones without revealing.
@@ -29146,13 +29167,14 @@ pub enum TriggerCondition {
     /// CR 207.2c: "if at least N mana of [color] was spent to cast this spell" — Adamant.
     ///
     /// LEGACY SHAPE, produced by the independent trigger-side grammar in
-    /// `parser::oracle_trigger`. The canonical generic form is
+    /// `parser::oracle_trigger`: the word form by `try_extract_adamant_condition`,
+    /// the symbol form by `SymbolicManaSpentIntro`. The canonical generic form is
     /// `QuantityCheck { lhs: ManaSpentToCast { scope, OfColor { color } }, GE, Fixed(minimum) }`
     /// (see `AbilityCondition::ManaColorSpent`). Converging this one is a
     /// SEMANTIC migration, not a rename: the producer accepts both "this spell"
     /// and "that spell" and records neither, so lowering requires a per-card
     /// CR 400.7d `CastManaObjectScope` decision.
-    ManaColorSpent { color: ManaColor, minimum: u32 },
+    ManaColorSpent { color: SpentColor, minimum: u32 },
     /// CR 601.2b: "if no mana was spent to cast it" / "if mana from a [source] was spent"
     ManaSpentCondition { text: String },
     /// CR 400.7: "if it had a +1/+1 counter on it" / "if it had counters on it"

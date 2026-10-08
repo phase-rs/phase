@@ -55,6 +55,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // v115 adds the simultaneous-draw dealer to the multi-draw resolution frame
 // (`RESOLUTION_STATE_WIRE_VERSION` 5).
 // v116 adds `DerivedViews.shared_piles` (the shared-pile holder seat).
+// v117 retypes the `ManaColorSpent` color of `AbilityCondition` and `TriggerCondition`
+// to `SpentColor` (word versus symbol provenance, CR 612.2).
 // Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
@@ -104,7 +106,8 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +43: v114 adds `MulliganChoice::FreeReveal` and `MulliganDeclaration.kind`.
 // +44: v115 adds the simultaneous-draw dealer to the multi-draw resolution frame.
 // +45: v116 adds `DerivedViews.shared_piles` (the shared-pile holder seat).
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 45;
+// +46: v117 retypes the `ManaColorSpent` color to `SpentColor` (word versus symbol).
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 46;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -174,7 +177,8 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +42: wire 96 moves with full-game v114 for the free reveal mulligan.
 // +43: wire 97 moves with full-game v115 for the simultaneous-draw dealer.
 // +44: wire 98 moves with full-game v116 for `DerivedViews.shared_piles`.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 44;
+// +45: wire 99 moves with full-game v117 for `SpentColor` on `ManaColorSpent`.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 45;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

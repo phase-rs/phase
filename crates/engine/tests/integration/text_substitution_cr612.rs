@@ -3,24 +3,25 @@
 use std::collections::BTreeSet;
 
 use engine::game::ability_utils::build_resolved_from_def;
-use engine::game::combat::can_block_pair;
+use engine::game::combat::{can_block_pair, AttackTarget};
 use engine::game::layers::{evaluate_layers, flush_layers};
 use engine::game::perf_counters;
 use engine::game::rehydrate_game_from_card_db;
-use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario::{GameRunner, GameScenario, SpellCast, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::text_substitution::{
     active_text_substitutions, classified_word_occurrences, restamp_resolving_spell_text,
     unclassified_word_positions,
 };
 use engine::types::ability::{
-    ChoiceType, ContinuousModification, TextSubstitution, TextSubstitutionSpec, TextWordDomain,
+    ChoiceType, ContinuousModification, SpentColor, TextSubstitution, TextSubstitutionSpec,
+    TextWordDomain, TriggerCondition,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
-use engine::types::mana::{ManaColor, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -1591,4 +1592,488 @@ fn entwined_spectral_shift_latches_each_modes_own_answer() {
         runner.state().last_named_choice.is_none(),
         "both answers were consumed"
     );
+}
+
+/// A text change P1 casts in response, as (changing card, option label).
+type Change = Option<(&'static str, &'static str)>;
+
+/// P0 casts `spell`; P1 answers with `change` aimed at it; the stack then drains.
+fn cast_and_respond(
+    runner: &mut GameRunner,
+    spell: ObjectId,
+    changer: Option<ObjectId>,
+    change: Change,
+    aim: impl for<'a> FnOnce(SpellCast<'a>) -> SpellCast<'a>,
+) {
+    if let (Some(_), Some((card, _))) = (changer, change) {
+        give(runner, P1, text_change_mana(card));
+    }
+    let mut committed = aim(runner.cast(spell)).commit();
+    match (changer, change) {
+        (Some(changer), Some((_, label))) => {
+            committed.act(GameAction::PassPriority).expect("P0 passes");
+            committed
+                .cast(changer)
+                .target_objects(&[spell])
+                .choose_option(label)
+                .commit()
+                .resolve();
+        }
+        _ => {
+            committed.resolve();
+        }
+    }
+}
+
+fn alive(runner: &GameRunner, id: ObjectId) -> bool {
+    runner.state().objects[&id].zone == Zone::Battlefield
+}
+
+const ROW_RED: &[ManaType] = &[ManaType::Colorless, ManaType::Colorless, ManaType::Red];
+const ROW_GREEN: &[ManaType] = &[ManaType::Colorless, ManaType::Colorless, ManaType::Green];
+
+/// Firespout paid as `paid`, optionally answered by `change`: (ground creature alive, flyer alive).
+fn firespout(
+    db: &engine::database::CardDatabase,
+    paid: &[ManaType],
+    change: Change,
+) -> (bool, bool) {
+    let mut scenario = new_scenario();
+    let spell = scenario.add_real_card(P0, "Firespout", Zone::Hand, db);
+    let ground = scenario.add_creature(P1, "Ground", 2, 2).id();
+    let flyer = scenario.add_creature(P1, "Flyer", 2, 2).flying().id();
+    let changer = change.map(|(card, _)| scenario.add_real_card(P1, card, Zone::Hand, db));
+    let mut runner = build(scenario, db);
+    give(&mut runner, P0, paid);
+    cast_and_respond(&mut runner, spell, changer, change, |cast| cast);
+    (alive(&runner, ground), alive(&runner, flyer))
+}
+
+/// R1. CR 612.2 + CR 107.4: a color-word change never reaches "{R} was spent to cast this spell".
+#[test]
+fn firespout_symbol_riders_survive_color_word_changes() {
+    let db = db!();
+    assert_eq!(
+        firespout(db, ROW_RED, None),
+        (false, true),
+        "baseline: {{R}} kills the ground creature only"
+    );
+    assert_eq!(
+        firespout(db, ROW_GREEN, None),
+        (true, false),
+        "baseline: {{G}} kills the flyer only"
+    );
+    for change in [
+        (SLEIGHT, "Red -> Blue"),
+        (SLEIGHT, "Red -> Green"),
+        (SPRAY, "Red -> Blue"),
+        (SLEIGHT, "Green -> Blue"),
+    ] {
+        assert_eq!(
+            firespout(db, ROW_RED, Some(change)),
+            (false, true),
+            "{{R}} paid under {change:?}"
+        );
+    }
+    for change in [
+        (SLEIGHT, "Green -> Blue"),
+        (SLEIGHT, "Green -> Red"),
+        (SPRAY, "Green -> Blue"),
+    ] {
+        assert_eq!(
+            firespout(db, ROW_GREEN, Some(change)),
+            (true, false),
+            "{{G}} paid under {change:?}"
+        );
+    }
+}
+
+/// The tokens Seed Spark made, as their colors, for a payment and an optional change.
+fn seed_spark_tokens(
+    db: &engine::database::CardDatabase,
+    paid: &[ManaType],
+    change: Change,
+) -> Vec<Vec<ManaColor>> {
+    let mut scenario = new_scenario();
+    let spell = scenario.add_real_card(P0, "Seed Spark", Zone::Hand, db);
+    let artifact = scenario.add_real_card(P1, "Sol Ring", Zone::Battlefield, db);
+    let changer = change.map(|(card, _)| scenario.add_real_card(P1, card, Zone::Hand, db));
+    let mut runner = build(scenario, db);
+    give(&mut runner, P0, paid);
+    cast_and_respond(&mut runner, spell, changer, change, |cast| {
+        cast.target_objects(&[artifact])
+    });
+    assert!(
+        !alive(&runner, artifact),
+        "reach-guard: Seed Spark resolved and destroyed its target"
+    );
+    runner
+        .state()
+        .objects
+        .values()
+        .filter(|o| o.is_token && o.zone == Zone::Battlefield && o.controller == P0)
+        .map(|o| o.color.clone())
+        .collect()
+}
+
+/// R2. One card holding a color-word token leaf and a symbol rider: only the word changes.
+#[test]
+fn seed_spark_rewrites_the_token_word_but_keeps_the_symbol_rider() {
+    let db = db!();
+    let wg = &[
+        ManaType::White,
+        ManaType::Green,
+        ManaType::Colorless,
+        ManaType::Colorless,
+    ];
+    let wr = &[
+        ManaType::White,
+        ManaType::Red,
+        ManaType::Colorless,
+        ManaType::Colorless,
+    ];
+    let green = vec![ManaColor::Green];
+    let blue = vec![ManaColor::Blue];
+    assert_eq!(
+        seed_spark_tokens(db, wg, None),
+        [green.clone(), green.clone()],
+        "baseline: {{G}} spent makes two green Saprolings"
+    );
+    assert!(
+        seed_spark_tokens(db, wr, None).is_empty(),
+        "baseline: no green spent, no tokens"
+    );
+    assert_eq!(
+        seed_spark_tokens(db, wg, Some((SLEIGHT, "Green -> Blue"))),
+        [blue.clone(), blue],
+        "the rider still reads {{G}}; the token color word became blue"
+    );
+    assert_eq!(
+        seed_spark_tokens(db, wr, Some((SLEIGHT, "Red -> Green"))),
+        Vec::<Vec<ManaColor>>::new(),
+        "a word change cannot conjure the {{G}} the payment lacks"
+    );
+}
+
+/// Batwing Brume's table: (P0 life, P1 life) after combat for a payment and an optional change.
+fn batwing_brume(
+    db: &engine::database::CardDatabase,
+    paid: &[ManaType],
+    change: Change,
+) -> (i32, i32) {
+    let mut scenario = new_scenario();
+    let spell = scenario.add_real_card(P0, "Batwing Brume", Zone::Hand, db);
+    let attacker = scenario.add_creature(P0, "Attacker", 3, 3).id();
+    let changer = change.map(|(card, _)| scenario.add_real_card(P1, card, Zone::Hand, db));
+    let mut runner = build(scenario, db);
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+        .expect("declare the attacker");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player, .. } if player == P0),
+        "reach-guard: P0 holds priority with the attacker declared, got {:?}",
+        runner.state().waiting_for
+    );
+    give(&mut runner, P0, paid);
+    cast_and_respond(&mut runner, spell, changer, change, |cast| cast);
+    for _ in 0..8 {
+        match runner.state().waiting_for {
+            WaitingFor::DeclareBlockers { .. } => {
+                runner.declare_blockers(&[]).expect("no blockers");
+                break;
+            }
+            WaitingFor::Priority { .. } => runner.pass_both_players(),
+            _ => break,
+        }
+    }
+    runner.combat_damage();
+    assert!(
+        matches!(
+            runner.state().phase,
+            Phase::EndCombat | Phase::PostCombatMain
+        ),
+        "reach-guard: combat damage was dealt, phase {:?}",
+        runner.state().phase
+    );
+    (runner.life(P0), runner.life(P1))
+}
+
+/// R3. Two symbol riders on one card, each under a word change of its own color.
+#[test]
+fn batwing_brume_symbol_riders_survive_color_word_changes() {
+    let db = db!();
+    let black = &[ManaType::Colorless, ManaType::Black];
+    let white = &[ManaType::Colorless, ManaType::White];
+    assert_eq!(
+        batwing_brume(db, black, None),
+        (19, 17),
+        "baseline: {{B}} costs P0 1 life, damage goes through"
+    );
+    assert_eq!(
+        batwing_brume(db, white, None),
+        (20, 20),
+        "baseline: {{W}} prevents all combat damage"
+    );
+    assert_eq!(
+        batwing_brume(db, black, Some((SLEIGHT, "Black -> Blue"))),
+        (19, 17)
+    );
+    assert_eq!(
+        batwing_brume(db, white, Some((SLEIGHT, "White -> Black"))),
+        (20, 20)
+    );
+}
+
+/// Gruul Scrapper's haste after a payment and an optional change.
+fn gruul_scrapper_hasty(
+    db: &engine::database::CardDatabase,
+    paid: &[ManaType],
+    change: Change,
+) -> bool {
+    let mut scenario = new_scenario();
+    let spell = scenario.add_real_card(P0, "Gruul Scrapper", Zone::Hand, db);
+    let changer = change.map(|(card, _)| scenario.add_real_card(P1, card, Zone::Hand, db));
+    let mut runner = build(scenario, db);
+    give(&mut runner, P0, paid);
+    cast_and_respond(&mut runner, spell, changer, change, |cast| cast);
+    assert!(
+        alive(&runner, spell),
+        "reach-guard: the creature spell resolved onto the battlefield"
+    );
+    runner.state().objects[&spell].has_keyword(&Keyword::Haste)
+}
+
+/// R4. The permanent-trigger side: the same rule through `TriggerCondition::ManaColorSpent`.
+#[test]
+fn gruul_scrapper_symbol_rider_survives_color_word_changes() {
+    let db = db!();
+    let gr = &[
+        ManaType::Green,
+        ManaType::Red,
+        ManaType::Colorless,
+        ManaType::Colorless,
+    ];
+    let g = &[
+        ManaType::Green,
+        ManaType::Colorless,
+        ManaType::Colorless,
+        ManaType::Colorless,
+    ];
+    assert!(gruul_scrapper_hasty(db, gr, None), "baseline: {{R}} spent");
+    assert!(
+        !gruul_scrapper_hasty(db, g, None),
+        "baseline: no {{R}} spent"
+    );
+    assert!(gruul_scrapper_hasty(db, gr, Some((SLEIGHT, "Red -> Blue"))));
+    assert!(
+        !gruul_scrapper_hasty(db, g, Some((SLEIGHT, "Red -> Green"))),
+        "a word change cannot conjure the {{R}} the payment lacks"
+    );
+}
+
+/// Damage Slaying Fire dealt to P1 for a payment and an optional change.
+fn slaying_fire_damage(
+    db: &engine::database::CardDatabase,
+    paid: &[ManaType],
+    change: Change,
+) -> i32 {
+    let mut scenario = new_scenario();
+    let spell = scenario.add_real_card(P0, "Slaying Fire", Zone::Hand, db);
+    let changer = change.map(|(card, _)| scenario.add_real_card(P1, card, Zone::Hand, db));
+    let mut runner = build(scenario, db);
+    give(&mut runner, P0, paid);
+    let before = runner.life(P1);
+    cast_and_respond(&mut runner, spell, changer, change, |cast| {
+        cast.target_players(&[P1])
+    });
+    before - runner.life(P1)
+}
+
+/// R5. The word-form spell rider is rewritten, which also proves the change reaches the stack object.
+#[test]
+fn slaying_fire_word_rider_is_rewritten_by_a_color_word_change() {
+    let db = db!();
+    let rrr = &[ManaType::Red, ManaType::Red, ManaType::Red];
+    assert_eq!(slaying_fire_damage(db, rrr, None), 4);
+    assert_eq!(
+        slaying_fire_damage(db, rrr, Some((SLEIGHT, "Red -> Blue"))),
+        3
+    );
+    assert_eq!(
+        slaying_fire_damage(db, rrr, Some((SLEIGHT, "Red -> Green"))),
+        3
+    );
+    assert_eq!(
+        slaying_fire_damage(db, rrr, Some((SLEIGHT, "Green -> Blue"))),
+        4
+    );
+}
+
+const WORD_ETB: &str =
+    "When this creature enters, if at least three red mana was spent to cast it, draw a card.";
+const SYMBOL_ETB: &str = "When this creature enters, if {R} was spent to cast it, draw a card.";
+
+/// Cards P0 drew from an oracle-built creature's ETB for a payment and an optional change.
+fn etb_draws(
+    db: &engine::database::CardDatabase,
+    oracle: &str,
+    paid: &[ManaType],
+    change: Change,
+) -> usize {
+    let mut scenario = new_scenario();
+    let spell = scenario
+        .add_creature_to_hand_from_oracle(P0, "Rider Guy", 2, 2, oracle)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Red],
+        })
+        .id();
+    let changer = change.map(|(card, _)| scenario.add_real_card(P1, card, Zone::Hand, db));
+    let mut runner = build(scenario, db);
+    let parsed = runner.state().objects[&spell]
+        .trigger_definitions
+        .first()
+        .and_then(|t| match t.definition.condition {
+            Some(TriggerCondition::ManaColorSpent { color, .. }) => Some(color),
+            _ => None,
+        });
+    let expected = if oracle == WORD_ETB {
+        SpentColor::ColorWord {
+            color: ManaColor::Red,
+        }
+    } else {
+        SpentColor::ManaSymbol {
+            color: ManaColor::Red,
+        }
+    };
+    assert_eq!(
+        parsed,
+        Some(expected),
+        "reach-guard: the rider parsed to the form its text was written in"
+    );
+    give(&mut runner, P0, paid);
+    cast_and_respond(&mut runner, spell, changer, change, |cast| cast);
+    assert!(
+        alive(&runner, spell),
+        "reach-guard: the creature spell resolved onto the battlefield"
+    );
+    runner.state().players[0].hand.len()
+}
+
+/// R6. The `ColorWord` producer is rewritten, its `ManaSymbol` sibling is not.
+#[test]
+fn trigger_side_word_form_is_rewritten_and_symbol_form_is_not() {
+    let db = db!();
+    let rrr = &[ManaType::Red, ManaType::Red, ManaType::Red];
+    let rgg = &[ManaType::Red, ManaType::Green, ManaType::Green];
+    assert_eq!(etb_draws(db, WORD_ETB, rrr, None), 1);
+    assert_eq!(etb_draws(db, WORD_ETB, rgg, None), 0);
+    assert_eq!(
+        etb_draws(db, WORD_ETB, rrr, Some((SLEIGHT, "Red -> Blue"))),
+        0,
+        "\"red\" became \"blue\""
+    );
+    assert_eq!(
+        etb_draws(db, WORD_ETB, rrr, Some((SLEIGHT, "Green -> Blue"))),
+        1
+    );
+    assert_eq!(etb_draws(db, SYMBOL_ETB, rrr, None), 1);
+    assert_eq!(
+        etb_draws(db, SYMBOL_ETB, rrr, Some((SLEIGHT, "Red -> Blue"))),
+        1,
+        "{{R}} is a symbol"
+    );
+}
+
+/// Every `ManaColorSpent` condition object under `value`.
+fn spent_color_conditions<'v>(value: &'v serde_json::Value, out: &mut Vec<&'v serde_json::Value>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.get("type").and_then(|t| t.as_str()) == Some("ManaColorSpent") {
+                out.push(value);
+            }
+            map.values().for_each(|v| spent_color_conditions(v, out));
+        }
+        serde_json::Value::Array(items) => {
+            items.iter().for_each(|v| spent_color_conditions(v, out))
+        }
+        _ => {}
+    }
+}
+
+/// R8. Over the card database, a condition's provenance agrees with how its card writes the color, and no word change touches a symbol.
+#[test]
+fn spent_color_provenance_matches_oracle_text_and_symbols_never_rewrite() {
+    let db = db!();
+    let all_colors = [
+        ManaColor::White,
+        ManaColor::Blue,
+        ManaColor::Black,
+        ManaColor::Red,
+        ManaColor::Green,
+    ];
+    let mut tagged_faces = 0usize;
+    let mut symbol_leaves = 0usize;
+    for (name, face) in db.face_iter() {
+        let value = serde_json::json!({
+            "abilities": face.abilities,
+            "triggers": face.triggers,
+            "static_abilities": face.static_abilities,
+            "replacements": face.replacements,
+        });
+        let mut conditions = Vec::new();
+        spent_color_conditions(&value, &mut conditions);
+        if conditions.is_empty() {
+            continue;
+        }
+        tagged_faces += 1;
+        let text = face.oracle_text.clone().unwrap_or_default().to_lowercase();
+        for condition in &conditions {
+            let color = condition["color"]["color"].as_str().expect("a color");
+            let lower = color.to_lowercase();
+            match condition["color"]["type"].as_str() {
+                Some("ManaSymbol") => {
+                    symbol_leaves += 1;
+                    let symbol = match color {
+                        "White" => "{w}",
+                        "Blue" => "{u}",
+                        "Black" => "{b}",
+                        "Red" => "{r}",
+                        "Green" => "{g}",
+                        other => panic!("{name}: unexpected color {other}"),
+                    };
+                    assert!(text.contains(symbol), "{name}: {symbol} not in its text");
+                }
+                Some("ColorWord") => assert!(
+                    text.contains(&format!("{lower} mana")),
+                    "{name}: \"{lower} mana\" not in its text"
+                ),
+                other => panic!("{name}: unprovenanced ManaColorSpent color {other:?}"),
+            }
+        }
+        for from in all_colors {
+            for to in all_colors.into_iter().filter(|c| *c != from) {
+                let substitution = TextSubstitution::color(from, to).expect("from != to");
+                let Some(rewritten) = substitution.rewrite(&value) else {
+                    continue;
+                };
+                let mut after = Vec::new();
+                spent_color_conditions(&rewritten, &mut after);
+                let symbols = |list: &[&serde_json::Value]| -> Vec<serde_json::Value> {
+                    list.iter()
+                        .filter(|c| c["color"]["type"] == "ManaSymbol")
+                        .map(|c| (*c).clone())
+                        .collect()
+                };
+                assert_eq!(
+                    symbols(&conditions),
+                    symbols(&after),
+                    "{name}: {from:?} -> {to:?} rewrote a symbol"
+                );
+            }
+        }
+    }
+    assert!(tagged_faces > 0, "reach-guard: tagged faces visited");
+    assert!(symbol_leaves > 0, "reach-guard: symbol leaves visited");
 }

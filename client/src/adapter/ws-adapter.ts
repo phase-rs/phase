@@ -210,6 +210,10 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 117 — ManaColorSpent on AbilityCondition and TriggerCondition retypes `color` from a
+ *      bare ManaColor to SpentColor (ColorWord or ManaSymbol), serialized in the ability
+ *      and trigger definitions of GameState. A v116 peer cannot deserialize the tagged
+ *      color. Wire 99 moves with it; no lobby frame names it.
  * 116 — DerivedViews gains `shared_piles`, the seat whose Player container stores a
  *      shared library and graveyard, omitted for a per-player format. A v115 peer
  *      drops the key and renders per-seat piles for a state whose other seat's
@@ -738,7 +742,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 116;
+export const PROTOCOL_VERSION = 117;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

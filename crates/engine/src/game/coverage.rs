@@ -4607,7 +4607,7 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         }
         AbilityCondition::CastTimingPermission { .. } => "cast with timing permission".into(),
         AbilityCondition::ManaColorSpent { color, minimum } => {
-            format!("{}+ {} spent", minimum, fmt_mana_color_full(color))
+            format!("{}+ {} spent", minimum, fmt_mana_color_full(&color.color()))
         }
         AbilityCondition::RevealedHasCardType { card_types, .. } => {
             let parts: Vec<&str> = card_types.iter().map(fmt_core_type).collect();
@@ -4853,7 +4853,7 @@ fn fmt_trigger_condition(
         }
         TC::CastTimingPermission { .. } => "cast with timing permission".into(),
         TC::ManaColorSpent { color, minimum } => {
-            format!("{}+ {} spent", minimum, fmt_mana_color_full(color))
+            format!("{}+ {} spent", minimum, fmt_mana_color_full(&color.color()))
         }
         TC::ManaSpentCondition { .. } => "mana spent condition".into(),
         TC::HadCounters { .. } => "had counters".into(),

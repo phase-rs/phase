@@ -106,6 +106,10 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  99 — game_setup and state_update carry GameState, whose ability and trigger
+ *       conditions now carry a ManaColorSpent color as SpentColor (word or symbol
+ *       provenance). A v98 peer cannot deserialize the tagged color, so first
+ *       contact rejects the skew. Bumped with full-game protocol 117.
  *  98 — game_setup and state_update carry GameState, whose derived views can now
  *       carry shared_piles (the seat storing a shared library and graveyard). A v97
  *       peer drops the key and renders per-seat piles for a state whose other
@@ -585,7 +589,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 98 as const;
+export const WIRE_PROTOCOL_VERSION = 99 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {
