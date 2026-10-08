@@ -1884,8 +1884,12 @@ fn object_ids_in_player_zone(state: &GameState, player: PlayerId, zone: Zone) ->
 
     match zone {
         Zone::Hand => player_state.hand.iter().copied().collect(),
-        Zone::Library => player_state.library.iter().copied().collect(),
-        Zone::Graveyard => player_state.graveyard.iter().copied().collect(),
+        Zone::Library => state.library_of(player_state.id).iter().copied().collect(),
+        Zone::Graveyard => state
+            .graveyard_of(player_state.id)
+            .iter()
+            .copied()
+            .collect(),
         Zone::Exile => state
             .exile
             .iter()

@@ -13,6 +13,7 @@ mod per_opponent_choice;
 mod search;
 pub(crate) mod sequence;
 pub(crate) mod subject;
+mod text_change;
 pub(crate) mod token;
 
 pub(crate) use search::parse_search_name_reference_suffix;
@@ -616,40 +617,140 @@ fn condition_refs_source_object(condition: &AbilityCondition) -> bool {
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
             conditions.iter().any(condition_refs_source_object)
         }
-        _ => false,
+        AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::TriggerEventTargetExploitedBySource
+        | AbilityCondition::AdditionalCostPaid { .. }
+        | AbilityCondition::AdditionalCostPaidInstead
+        | AbilityCondition::AlternativeManaCostPaid
+        | AbilityCondition::EffectOutcome { .. }
+        | AbilityCondition::EventOutcomeWon
+        | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::WhenYouDo
+        | AbilityCondition::WasCast { .. }
+        | AbilityCondition::CastDuringPhase { .. }
+        | AbilityCondition::CurrentPhaseIs { .. }
+        | AbilityCondition::CastTimingPermission { .. }
+        | AbilityCondition::ManaColorSpent { .. }
+        | AbilityCondition::RevealedHasCardType { .. }
+        | AbilityCondition::ObjectsShareQuality { .. }
+        | AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. }
+        | AbilityCondition::CastVariantPaid { .. }
+        | AbilityCondition::CastVariantPaidInstead { .. }
+        | AbilityCondition::PreviousEffectAmount { .. }
+        | AbilityCondition::HasMaxSpeed
+        | AbilityCondition::IsMonarch
+        | AbilityCondition::IsInitiative
+        | AbilityCondition::HasCityBlessing
+        | AbilityCondition::HasEnduringStory
+        | AbilityCondition::ControlsCommander { .. }
+        | AbilityCondition::DiscardedCardMatchesFilter { .. }
+        | AbilityCondition::IsRingBearer
+        | AbilityCondition::CompletedDungeon { .. }
+        | AbilityCondition::TargetHasKeywordInstead { .. }
+        | AbilityCondition::TargetMatchesFilter { .. }
+        | AbilityCondition::HasObjectTarget
+        | AbilityCondition::TriggeringSpellTargetsFilter { .. }
+        | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
+        | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
+        | AbilityCondition::ControllerControlsMatching { .. }
+        | AbilityCondition::ControllerControlledMatchingAsCast { .. }
+        | AbilityCondition::IsYourTurn
+        | AbilityCondition::WasStartingPlayer { .. }
+        | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+        | AbilityCondition::FirstCombatPhaseOfTurn
+        | AbilityCondition::FirstEndStepOfTurn
+        | AbilityCondition::ZoneChangedThisWay { .. }
+        | AbilityCondition::CostPaidObjectMatchesFilter { .. }
+        | AbilityCondition::DayNightIsNeither
+        | AbilityCondition::DayNightIs { .. }
+        | AbilityCondition::AbilityUseCountThisTurn { .. }
+        | AbilityCondition::SourceLacksKeyword { .. }
+        | AbilityCondition::ScopedPlayerMatches { .. } => false,
     }
 }
 
-/// CR 122.1 + CR 608.2c: Bind a source-defaulted counter condition to the
-/// prior chosen target only for the leading bare-pronoun grammar. Conditions
-/// belong to `ClauseIr` until lowering, so this is the single authority before
-/// a continuous grant receives its final `StaticCondition`.
-fn rebind_source_counter_condition_to_recipient(condition: &mut AbilityCondition) {
+/// CR 122.1 + CR 608.2c: Rebind a source-defaulted counter condition's
+/// `Source` counter reads to `to`, the antecedent of the leading bare pronoun.
+/// Conditions belong to `ClauseIr` until lowering, so this is the single
+/// authority before a continuous grant receives its final `StaticCondition`.
+fn rebind_source_counter_condition(condition: &mut AbilityCondition, to: ObjectScope) {
     match condition {
         AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
-            rebind_source_counter_quantity_expr_to_recipient(lhs);
-            rebind_source_counter_quantity_expr_to_recipient(rhs);
+            rebind_source_counter_quantity_expr(lhs, to);
+            rebind_source_counter_quantity_expr(rhs, to);
         }
         AbilityCondition::Not { condition }
         | AbilityCondition::ConditionInstead { inner: condition } => {
-            rebind_source_counter_condition_to_recipient(condition);
+            rebind_source_counter_condition(condition, to);
         }
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
             for condition in conditions {
-                rebind_source_counter_condition_to_recipient(condition);
+                rebind_source_counter_condition(condition, to);
             }
         }
-        _ => {}
+        AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::TriggerEventTargetExploitedBySource
+        | AbilityCondition::AdditionalCostPaid { .. }
+        | AbilityCondition::AdditionalCostPaidInstead
+        | AbilityCondition::AlternativeManaCostPaid
+        | AbilityCondition::EffectOutcome { .. }
+        | AbilityCondition::EventOutcomeWon
+        | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::WhenYouDo
+        | AbilityCondition::WasCast { .. }
+        | AbilityCondition::CastDuringPhase { .. }
+        | AbilityCondition::CurrentPhaseIs { .. }
+        | AbilityCondition::CastTimingPermission { .. }
+        | AbilityCondition::ManaColorSpent { .. }
+        | AbilityCondition::RevealedHasCardType { .. }
+        | AbilityCondition::ObjectsShareQuality { .. }
+        | AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. }
+        | AbilityCondition::SourceEnteredThisTurn
+        | AbilityCondition::CastVariantPaid { .. }
+        | AbilityCondition::CastVariantPaidInstead { .. }
+        | AbilityCondition::PreviousEffectAmount { .. }
+        | AbilityCondition::HasMaxSpeed
+        | AbilityCondition::IsMonarch
+        | AbilityCondition::IsInitiative
+        | AbilityCondition::HasCityBlessing
+        | AbilityCondition::HasEnduringStory
+        | AbilityCondition::ControlsCommander { .. }
+        | AbilityCondition::DiscardedCardMatchesFilter { .. }
+        | AbilityCondition::IsRingBearer
+        | AbilityCondition::CompletedDungeon { .. }
+        | AbilityCondition::TargetHasKeywordInstead { .. }
+        | AbilityCondition::TargetMatchesFilter { .. }
+        | AbilityCondition::HasObjectTarget
+        | AbilityCondition::TriggeringSpellTargetsFilter { .. }
+        | AbilityCondition::SourceMatchesFilter { .. }
+        | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
+        | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
+        | AbilityCondition::ControllerControlsMatching { .. }
+        | AbilityCondition::ControllerControlledMatchingAsCast { .. }
+        | AbilityCondition::IsYourTurn
+        | AbilityCondition::WasStartingPlayer { .. }
+        | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+        | AbilityCondition::FirstCombatPhaseOfTurn
+        | AbilityCondition::FirstEndStepOfTurn
+        | AbilityCondition::ZoneChangedThisWay { .. }
+        | AbilityCondition::CostPaidObjectMatchesFilter { .. }
+        | AbilityCondition::SourceIsTapped
+        | AbilityCondition::SourceAttachedToCreature
+        | AbilityCondition::DayNightIsNeither
+        | AbilityCondition::DayNightIs { .. }
+        | AbilityCondition::AbilityUseCountThisTurn { .. }
+        | AbilityCondition::SourceLacksKeyword { .. }
+        | AbilityCondition::ScopedPlayerMatches { .. } => {}
     }
 }
 
-fn rebind_source_counter_quantity_expr_to_recipient(expr: &mut QuantityExpr) {
+fn rebind_source_counter_quantity_expr(expr: &mut QuantityExpr, to: ObjectScope) {
     match expr {
         QuantityExpr::Fixed { .. } => {}
         QuantityExpr::Ref { qty } => {
             if let QuantityRef::CountersOn { scope, .. } = qty {
                 if *scope == ObjectScope::Source {
-                    *scope = ObjectScope::Recipient;
+                    *scope = to;
                 }
             }
         }
@@ -657,20 +758,20 @@ fn rebind_source_counter_quantity_expr_to_recipient(expr: &mut QuantityExpr) {
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. } => {
-            rebind_source_counter_quantity_expr_to_recipient(inner);
+            rebind_source_counter_quantity_expr(inner, to);
         }
         QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
             for expr in exprs {
-                rebind_source_counter_quantity_expr_to_recipient(expr);
+                rebind_source_counter_quantity_expr(expr, to);
             }
         }
-        QuantityExpr::UpTo { max } => rebind_source_counter_quantity_expr_to_recipient(max),
+        QuantityExpr::UpTo { max } => rebind_source_counter_quantity_expr(max, to),
         QuantityExpr::Power { exponent, .. } => {
-            rebind_source_counter_quantity_expr_to_recipient(exponent);
+            rebind_source_counter_quantity_expr(exponent, to);
         }
         QuantityExpr::Difference { left, right } => {
-            rebind_source_counter_quantity_expr_to_recipient(left);
-            rebind_source_counter_quantity_expr_to_recipient(right);
+            rebind_source_counter_quantity_expr(left, to);
+            rebind_source_counter_quantity_expr(right, to);
         }
     }
 }
@@ -8309,6 +8410,16 @@ pub(crate) fn is_for_each_opponent_choose_controlled(lower: &str) -> bool {
 }
 
 pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
+    // CR 612.1: "Change the text of <target> by replacing all instances of ..." owns its
+    // own duration, so it must run before the clause shell peels a trailing one.
+    {
+        let text_change_lower = text.to_lowercase();
+        if let Some(clause) =
+            text_change::try_parse_text_change_clause(TextPair::new(text, &text_change_lower))
+        {
+            return clause;
+        }
+    }
     // CR 611.2a + CR 611.2c + CR 701.26a + CR 508.1f: "Until your next turn, those
     // creatures can't become tapped unless they're being declared as attackers."
     // Must run BEFORE the unless-suffix stripper below, which would otherwise
@@ -10027,7 +10138,7 @@ fn rebind_controller_scope(filter: &mut TargetFilter, from: ControllerRef, to: C
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
@@ -14195,7 +14306,8 @@ fn player_filter_reads_chain_local_result(filter: &PlayerFilter) -> bool {
         | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
-        | PlayerFilter::ParentObjectTargetOwner => false,
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::GrantingObjectCaster => false,
     }
 }
 
@@ -21326,7 +21438,16 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         replace_target_with_parent(&mut sub_clause.effect);
     }
 
+    // CR 115.10a + CR 608.2d: the continuation is its own instruction, so an untargeted
+    // choice in it is made while it resolves, by the same classifier as a standalone clause.
+    let continuation_timing = lower::target_choice_timing_for_parsed(
+        &sub_clause,
+        sub_text,
+        continuation_ctx.declared_target_choice_timing,
+        sub_clause.multi_target.is_some(),
+    );
     let mut sub_ability = AbilityDefinition::new(AbilityKind::Spell, sub_clause.effect);
+    sub_ability.target_choice_timing = continuation_timing;
     sub_ability.sub_ability = sub_clause.sub_ability;
     // CR 601.2c + CR 115.1: the continuation's opponent-choice announcer belongs
     // to this chained link rather than the primary target.
@@ -25152,6 +25273,21 @@ fn has_typed_target_widened(effect: &Effect) -> bool {
         _ => return false,
     };
     filter_introduces_typed_object(target)
+}
+
+/// CR 608.2c + CR 201.5a: when the immediately prior clause names the granter,
+/// the bare "it" of a leading counter gate reads the granter, whether or not
+/// that clause ran.
+fn prior_clause_granter_referent(clauses: &[ClauseIr]) -> Option<ObjectScope> {
+    clauses
+        .last()
+        .filter(|prev| {
+            matches!(
+                prev.parsed.effect.target_filter(),
+                Some(TargetFilter::GrantingObject { .. })
+            )
+        })
+        .map(|_| ObjectScope::GrantingObject)
 }
 
 /// CR 608.2c: Does an earlier clause in the chain establish a typed (chosen)
@@ -29936,6 +30072,116 @@ enum CastAnaphor {
     Other,
 }
 
+/// CR 707.10 + CR 608.2c: "copy each of those spells [twice]" (Finale of
+/// Promise) copies every spell of the set an earlier instruction of this
+/// resolution published, each the printed number of times. The target parser
+/// reads "each of those spells" as the chain's tracked-set anaphor, but a copy
+/// resolves one source at a time, so the clause becomes a member-driven loop
+/// over the set (`Multiply` over `TrackedSetSize`): each member, bound as the
+/// copy's parent target, is copied the printed number of times. The rulings
+/// let those copies go on the stack in any order.
+///
+/// Only the distributive "each of those" reads this way: "copy the other" /
+/// "copy the exiled card" name one card of the set and stay with their own
+/// copy-then-cast lowering.
+fn lower_copy_each_tracked_spell(
+    text: &str,
+    mut clause: ParsedEffectClause,
+    repeat_for: Option<QuantityExpr>,
+) -> (ParsedEffectClause, Option<QuantityExpr>) {
+    let lower = text.to_lowercase();
+    let distributive = preceded(
+        opt(tag::<_, _, OracleError<'_>>("you may ")),
+        tag("copy each of those "),
+    )
+    .parse(lower.as_str())
+    .is_ok();
+    let Effect::CopySpell { target, .. } = &mut clause.effect else {
+        return (clause, repeat_for);
+    };
+    if !distributive {
+        return (clause, repeat_for);
+    }
+    if !matches!(
+        target,
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0)
+        } | TargetFilter::TrackedSetFiltered {
+            id: TrackedSetId(0),
+            ..
+        }
+    ) {
+        return (clause, repeat_for);
+    }
+    let factor = match repeat_for {
+        None => 1,
+        Some(QuantityExpr::Fixed { value }) if value > 0 => value,
+        other => return (clause, other),
+    };
+    *target = TargetFilter::ParentTarget;
+    let members = QuantityExpr::Ref {
+        qty: QuantityRef::TrackedSetSize,
+    };
+    let count = if factor == 1 {
+        members
+    } else {
+        QuantityExpr::Multiply {
+            factor,
+            inner: Box::new(members),
+        }
+    };
+    (clause, Some(count))
+}
+
+/// CR 115.6 + CR 601.2c: "cast up to one target <card> …" (Finale of Promise,
+/// Gale, Waterdeep Prodigy). "Up to one" is the variable target count of a
+/// single targeted cast — announced as zero or one object — not a cast budget,
+/// so it is stripped and carried as the clause's `MultiTargetSpec` while the
+/// remaining "cast target <card> …" goes through the ordinary cast parser.
+/// It only fills that gap: a clause the cast parser already lowers (the
+/// per-opponent fanout's "up to one target … from that player's graveyard" —
+/// Diluvian Primordial) keeps its own lowering, and only a cast that keeps a
+/// typed target is accepted; anything else keeps the refusal.
+fn try_parse_up_to_one_target_cast(lower: &str, ctx: &ParseContext) -> Option<ParsedEffectClause> {
+    type E<'a> = OracleError<'a>;
+    if !matches!(
+        try_parse_cast_effect(lower, ctx),
+        Some(Effect::Unimplemented { ref name, .. }) if name == CAST_TARGET_UNTYPED_GAP
+    ) {
+        return None;
+    }
+    let (after_verb, _) = preceded(opt(tag::<_, _, E>("you may ")), tag("cast "))
+        .parse(lower)
+        .ok()?;
+    let (rest, spec) = strip_optional_target_prefix(after_verb);
+    let spec = spec.filter(|spec| {
+        spec.min_is_fixed_zero() && matches!(spec.max, Some(QuantityExpr::Fixed { value: 1 }))
+    })?;
+    // The target phrase must be read whole: a qualifier the target reader
+    // leaves behind ("card of the other type" — Gale, Waterdeep Prodigy) or a
+    // further slot ("… and/or up to one target sorcery card") would otherwise
+    // be dropped from the cast. Only the cast riders may follow it.
+    let (_, after_target) = crate::parser::oracle_target::parse_target(rest);
+    preceded(
+        multispace0::<_, E>,
+        alt((
+            value((), eof),
+            value((), tag(".")),
+            value((), tag("without paying ")),
+            value((), preceded(opt(tag("each ")), tag("with mana value "))),
+        )),
+    )
+    .parse(after_target)
+    .ok()?;
+    let effect = try_parse_cast_effect(&format!("cast {rest}"), ctx)?;
+    if !matches!(&effect, Effect::CastFromZone { target, .. } if *target != TargetFilter::Any) {
+        return None;
+    }
+    let mut clause = parsed_clause(effect);
+    clause.multi_target = Some(spec);
+    Some(clause)
+}
+
 /// 1. Anaphoric — "cast it", "cast that spell", "cast those cards" — target is
 ///    `ParentTarget` (refers to the cards exiled / chosen by a prior effect).
 /// 2. Constrained — "cast a [type-phrase] [from <zone>] [with mana value <bound>]
@@ -31918,6 +32164,10 @@ fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> Parsed
     // "up to N" cap and the copies anaphor onto a `CastFromZone { Any }`).
     if let Some(effect) = try_parse_cast_copies_with_count(tp.lower) {
         return parsed_clause(effect);
+    }
+
+    if let Some(clause) = try_parse_up_to_one_target_cast(tp.lower, ctx) {
+        return clause;
     }
 
     // CR 601.2a + CR 118.9: "cast it/that card without paying its mana cost"
@@ -41307,13 +41557,18 @@ fn parse_effect_chain_ir_body(
                 (None, text)
             };
         let prior_typed_referent = chain_has_prior_typed_referent(builder.clauses(), false);
-        if prior_typed_referent
-            && has_bare_recipient_counter_gate
-            && condition.as_ref().is_some_and(condition_refs_source_object)
-        {
-            rebind_source_counter_condition_to_recipient(
-                condition.as_mut().expect("condition checked above"),
-            );
+        let bare_gate_referent = prior_typed_referent
+            .then_some(ObjectScope::Recipient)
+            .or_else(|| prior_clause_granter_referent(builder.clauses()));
+        if let Some(scope) = bare_gate_referent {
+            if has_bare_recipient_counter_gate
+                && condition.as_ref().is_some_and(condition_refs_source_object)
+            {
+                rebind_source_counter_condition(
+                    condition.as_mut().expect("condition checked above"),
+                    scope,
+                );
+            }
         }
         // CR 701.34a + CR 122.1: keep the whole "for each kind of counter on
         // target permanent or player, give … another counter of that kind"
@@ -42531,6 +42786,7 @@ fn parse_effect_chain_ir_body(
                 (parse_effect_clause(&text_no_qty, ctx), repeat_for)
             }
         };
+        let (clause, repeat_for) = lower_copy_each_tracked_spell(&text_no_qty, clause, repeat_for);
 
         // CR 608.2c + CR 109.4: After a `Choose(Player)` clause is finalized,
         // advance the chain's chosen-player counter exactly once. The index is
@@ -43852,10 +44108,19 @@ fn parse_effect_chain_ir_body(
             );
 
         // CR 601.2c + CR 608.2d: a multi-slot target list is one link per slot,
-        // and a shared "you may" over it has no per-link form.
-        if is_optional && multi_target_list::is_multi_slot_list(multi_target.as_ref(), &clause) {
+        // and a shared "you may" over it has no per-link form — unless the
+        // resolver folds the slots into one cast window (CR 608.2g), whose
+        // decline already is that "you may", so the head asks nothing first.
+        let free_cast_slot_list =
+            multi_target_list::is_multi_slot_list(multi_target.as_ref(), &clause)
+                && multi_target_list::is_free_cast_slot_list(&clause);
+        if is_optional
+            && multi_target_list::is_multi_slot_list(multi_target.as_ref(), &clause)
+            && !free_cast_slot_list
+        {
             multi_target_list::fail_closed_optional_list(&mut clause, normalized_text);
         }
+        let is_optional = is_optional && !free_cast_slot_list;
 
         // CR 603.6 + CR 608.2k: A reflexive zone-change trigger body ("When a
         // creature is put onto the battlefield this way, it deals damage equal to

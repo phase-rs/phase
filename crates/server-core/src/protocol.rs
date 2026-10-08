@@ -3348,14 +3348,62 @@ mod tests {
 
     /// `FilterProp::PrepareSpell` (CR 722.3d) and the `scope` field on
     /// `Effect::BecomePrepared` / `BecomeUnprepared` (CR 722.3a + CR 115.10a)
-    /// are new in serialized full-game state; a v107 peer cannot parse the new
+    /// are new in serialized full-game state; a v118 peer cannot parse the new
     /// `FilterProp` tag and would read a mass prepare as a single-target one, so
-    /// it must be refused before it receives v108 state.
+    /// it must be refused before it receives v119 state.
+    /// `ManaColorSpent` on `AbilityCondition` and `TriggerCondition` retypes `color`
+    /// to `SpentColor` (word versus symbol provenance, CR 612.2); a v117 peer cannot
+    /// deserialize the tagged color, so it must be refused before it receives v118
+    /// state.
+    /// `DerivedViews` gains `shared_piles` (the seat storing a shared library and
+    /// graveyard); a v116 peer drops the key and renders per-seat piles for a
+    /// state whose other seat's containers are empty, so it must be refused before
+    /// it receives v117 state.
+    /// `DrawSequenceFrame` gains `dealer` (the in-game simultaneous-draw dealer),
+    /// serialized in the resolution frames behind `RESOLUTION_STATE_WIRE_VERSION`
+    /// 5; a v115 peer refuses that resolution state, so it must be refused before it
+    /// receives v116 state.
+    /// `MulliganChoice` gains `FreeReveal` and `MulliganDeclaration` gains `kind`
+    /// (the Dandân free reveal mulligan); a v114 peer cannot deserialize the
+    /// choice and would carry out a held free reveal as a regular mulligan, so it
+    /// must be refused before it receives v115 state.
+    /// `WaitingFor::MulliganDecision` gains `declared` (CR 103.5 declare round),
+    /// serialized in `GameState.waiting_for`; a v113 peer would drop it silently,
+    /// so it must be refused before it receives v114 state.
+    /// `ResolvedZoneChangeCommand` gains `rebound_from` (CR 108.3 as modified by
+    /// the Dandân hand-entry rebind), serialized inside
+    /// `GameState.resolved_rules_journal`; a v112 peer would drop it silently,
+    /// so it must be refused before it receives v113 state.
+    /// `ContinuousModification` gains `SubstituteTextWord` (CR 612.1), serialized
+    /// inside `GameState`'s transient continuous effects; a v111 peer cannot parse
+    /// the tag, so it must be refused before it receives v112 state.
+    /// `GameFormat` gains `Dandan`, which serializes as its `Display` string and
+    /// deserializes through `FromStr`; a v110 peer cannot parse a `GameState`
+    /// whose format names it, so it must be refused before it receives v111
+    /// state.
+    /// `GameState.deferred_spell_delivery` (CR 608.2n + CR 608.2g) is new in
+    /// serialized state. A v109 peer would leave a spell paused on its own
+    /// free-cast window on the stack in no zone, so the handshake must refuse
+    /// the mismatch before it receives v110 state. The same version adds
+    /// `WaitingFor::SpellCopyOrderChoice` and
+    /// `PendingRepeatIteration.copy_order_fixed` (CR 405.3).
+    /// The CR 201.5a granter binding adds `ObjectScope::GrantingObject` /
+    /// `ObjectScope::SpecificObject`, `TargetFilter::GrantingObject { bound }`,
+    /// `PlayerFilter::GrantingObjectCaster` and the `granting_object` stamp; v108 state
+    /// cannot decode as v109 state, so it must be refused before state delivery.
+    /// `IllegalTargetsDisposition::StillResolves` is serialized on the root
+    /// ability. A v107 peer would silently apply ordinary non-resolution
+    /// after target invalidation, so the handshake must refuse the mismatch
+    /// before it receives v108 state.
     /// `UntilCondition::NextMatches.count` (CR 608.2c), the paused loop's `hits`,
     /// `ZoneChoiceCandidateSource::ParentTargets` and
     /// `SpellContext.exile_until_batch` are new in serialized
     /// full-game state; a v106 peer would run a counted loop as a one-card loop,
     /// so it must be refused before it receives v107 state.
+    /// `PendingCast` gains `delved_cards` and the pending cost-move resume swaps
+    /// `DelveManaPayment` for `FinalizeDelvedCast` (#9400); a v103 peer cannot
+    /// parse the parked delve commit, so it must be refused before it receives
+    /// v104 state.
     /// `GameEvent::AbilityActivated` now carries `kind: "Mana"` for mana-ability
     /// activations and an optional `departed_source_lki`; a v100 peer cannot
     /// parse the `Mana` kind, so it must be refused before it receives v101 state.
@@ -3418,8 +3466,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_108_for_prepared_spell_and_mass_prepare() {
-        assert_eq!(PROTOCOL_VERSION, 108);
+    fn protocol_version_is_119_for_prepared_spell_and_mass_prepare() {
+        assert_eq!(PROTOCOL_VERSION, 119);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3430,7 +3478,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_108_for_prepared_spell_and_mass_prepare` stays
+    /// `protocol_version_is_119_for_prepared_spell_and_mass_prepare` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

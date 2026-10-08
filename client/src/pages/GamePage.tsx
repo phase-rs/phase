@@ -194,7 +194,9 @@ import {
   getBoardChoiceView,
   getOpponentIds,
   getSeatCount,
+  getSharedPileHolder,
   getWaitingForObjectChoiceIds,
+  getZoneViewerPile,
   isSplitBoardActive,
   resolveMultiplayerBoardLayout,
   resolveFocusedOpponent,
@@ -1244,10 +1246,10 @@ function GamePageContent({
     for (const objectId of getWaitingForObjectChoiceIds(wf)) {
       const obj = objects[objectId];
       if (!obj) continue;
-      if (obj.zone !== "Graveyard" && obj.zone !== "Exile") continue;
-      const zone: "graveyard" | "exile" = obj.zone === "Graveyard" ? "graveyard" : "exile";
-      groups.add(`${zone}:${obj.owner}`);
-      if (!firstHit) firstHit = { zone, playerId: obj.owner };
+      const pile = getZoneViewerPile(gameState, obj);
+      if (!pile) continue;
+      groups.add(`${pile.zone}:${pile.playerId}`);
+      if (!firstHit) firstHit = pile;
     }
     // Only auto-open when there's a single zone+owner to open. Otherwise the
     // zone control glow prompts the user to pick.
@@ -1255,7 +1257,7 @@ function GamePageContent({
       zoneViewerReturnFocusRef.current = gameMenuTriggerRef.current;
       setViewingZone(firstHit);
     }
-  }, [canActForWaitingState, engineWaitingFor, objects]);
+  }, [canActForWaitingState, engineWaitingFor, objects, gameState]);
 
   const handleZoneViewerClose = useCallback(() => {
     setViewingZone(null);
@@ -1282,12 +1284,20 @@ function GamePageContent({
     [dispatch],
   );
 
-  // CR 103.5 + 103.5b: `id` encodes the three branches of MulliganChoice.
+  // CR 103.5 + 103.5b: `id` encodes the four branches of MulliganChoice.
   // "keep"           → MulliganChoice::Keep
   // "mulligan"       → MulliganChoice::Mulligan
+  // "freeReveal"     → MulliganChoice::FreeReveal
   // "powder:<oid>"   → MulliganChoice::UseSerumPowder { object_id: <oid> }
   const handleMulliganChoice = useCallback(
     (id: string) => {
+      if (id === "freeReveal") {
+        dispatch({
+          type: "MulliganDecision",
+          data: { choice: { type: "FreeReveal" } },
+        });
+        return;
+      }
       if (id.startsWith("powder:")) {
         const objectId = Number(id.slice("powder:".length));
         dispatch({
@@ -1546,20 +1556,24 @@ function GamePageContent({
                         handleViewZone("exile", activeOpponentId, launcher)
                       }
                     />
-                    <LibraryPile
-                      playerId={activeOpponentId}
-                      size={pileSize}
-                      onView={(launcher) =>
-                        handleViewZone("library", activeOpponentId, launcher)
-                      }
-                    />
-                    <GraveyardPile
-                      playerId={activeOpponentId}
-                      size={pileSize}
-                      onClick={(launcher) =>
-                        handleViewZone("graveyard", activeOpponentId, launcher)
-                      }
-                    />
+                    {getSharedPileHolder(gameState, "library") == null && (
+                      <LibraryPile
+                        playerId={activeOpponentId}
+                        size={pileSize}
+                        onView={(launcher) =>
+                          handleViewZone("library", activeOpponentId, launcher)
+                        }
+                      />
+                    )}
+                    {getSharedPileHolder(gameState, "graveyard") == null && (
+                      <GraveyardPile
+                        playerId={activeOpponentId}
+                        size={pileSize}
+                        onClick={(launcher) =>
+                          handleViewZone("graveyard", activeOpponentId, launcher)
+                        }
+                      />
+                    )}
                   </>
                 ) : null}
               </DraggableWidget>
@@ -2464,6 +2478,13 @@ function MulliganDecisionPrompt({
     )
     .filter((oid): oid is number => oid !== null);
 
+  // CR 103.5 as modified by the Dandan free-reveal rule: the engine
+  // (`mulligan::free_reveal_offered`) decides whether the hand qualifies and
+  // enumerates the action; the FE only shows the button for an issued action.
+  const freeRevealOffered = legalActions.some(
+    (a) => a.type === "MulliganDecision" && a.data.choice.type === "FreeReveal",
+  );
+
   if (!player || !objects) {
     const fallbackOptions = [
       {
@@ -2483,6 +2504,15 @@ function MulliganDecisionPrompt({
           ? t("gamePage.mulligan.shuffleDrawSevenFree")
           : t("gamePage.mulligan.shuffleDrawSevenAgain"),
       },
+      ...(freeRevealOffered
+        ? [
+            {
+              id: "freeReveal",
+              label: t("gamePage.mulligan.freeReveal"),
+              description: t("gamePage.mulligan.freeRevealDescription"),
+            },
+          ]
+        : []),
       // CR 103.5b: A Powder option per legal `UseSerumPowder` candidate the
       // engine emitted. The button label uses the object's engine-provided
       // name so the FE never re-evaluates which hand objects qualify.
@@ -2538,6 +2568,15 @@ function MulliganDecisionPrompt({
                   ? t("gamePage.mulligan.freeMulligan")
                   : t("gamePage.mulligan.mulliganTo", { count: nextHandSize })}
               </button>
+              {freeRevealOffered && (
+                <button
+                  onClick={() => onChoose("freeReveal")}
+                  className="rounded-[10px] border border-white/12 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:bg-white/8 hover:text-white lg:min-h-11 lg:rounded-[16px] lg:px-5 lg:py-3 lg:text-base"
+                  title={t("gamePage.mulligan.freeRevealDescription")}
+                >
+                  {t("gamePage.mulligan.freeReveal")}
+                </button>
+              )}
               {/* CR 103.5b: One button per legal `UseSerumPowder` candidate
                   the engine surfaced. Name comes from engine-provided state. */}
               {serumPowderIds.map((oid) => (

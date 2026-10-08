@@ -27,6 +27,7 @@ use engine::ai_support::{
     end_continuous_effect_offers as engine_end_continuous_effect_offers,
     legal_actions_full as engine_legal_actions_full,
     mana_payment_shortcut_actions as engine_mana_payment_shortcut_actions,
+    with_viewer_actions as engine_with_viewer_actions,
 };
 use engine::database::CardDatabase;
 use engine::game::derived_views::derive_filtered_views;
@@ -514,6 +515,20 @@ fn derive_transport_views(
     derive_filtered_views(authoritative_state, filtered_state, viewer)
 }
 
+/// The `legal_actions` payload for one seat: empty unless the seat is acting,
+/// otherwise the all-seat enumeration plus the actions only that seat is offered.
+fn legal_actions_for_seat(
+    state: &GameState,
+    player: PlayerId,
+    legal_actions: &[GameAction],
+) -> Vec<GameAction> {
+    if server_core::is_acting(state, player) {
+        engine_with_viewer_actions(state, player, legal_actions.to_vec())
+    } else {
+        Vec::new()
+    }
+}
+
 /// Build the `GameStarted` message for a single seat.
 ///
 /// `events` carries the engine's start-of-game events (the d20 first-player
@@ -572,7 +587,7 @@ fn build_game_started_message(
         your_player: player,
         opponent_name,
         player_names: session.display_names.clone(),
-        legal_actions: if is_actor { legal_actions } else { Vec::new() },
+        legal_actions: legal_actions_for_seat(&session.state, player, &legal_actions),
         auto_pass_recommended: auto_pass,
         end_continuous_effect_offers,
         mana_payment_shortcut_actions,
@@ -686,11 +701,7 @@ fn build_state_update_message(
         state_revision,
         state: filtered,
         events: server_core::filter_events_for_player(events, raw_state, player),
-        legal_actions: if is_actor {
-            legal_actions.clone()
-        } else {
-            Vec::new()
-        },
+        legal_actions: legal_actions_for_seat(raw_state, player, legal_actions),
         auto_pass_recommended: engine_auto_pass_for_viewer(raw_state, player, legal_actions),
         end_continuous_effect_offers,
         mana_payment_shortcut_actions,
@@ -7189,8 +7200,8 @@ async fn broadcast_ai_results(
             for (pid, pstate) in &ai_filtered {
                 if let Some(s) = players.get(pid) {
                     let is_actor = server_core::is_acting(ai_raw_state, *pid);
-                    let player_legals = if is_last && is_actor {
-                        ai_legal.clone()
+                    let player_legals = if is_last {
+                        legal_actions_for_seat(ai_raw_state, *pid, ai_legal)
                     } else {
                         vec![]
                     };
@@ -7328,11 +7339,7 @@ async fn broadcast_takeback_approved(
         for (pid, pstate) in &filtered_states {
             if let Some(s) = players.get(pid) {
                 let is_actor = server_core::is_acting(&raw_state, *pid);
-                let player_legals = if is_actor {
-                    legal_actions.clone()
-                } else {
-                    vec![]
-                };
+                let player_legals = legal_actions_for_seat(&raw_state, *pid, &legal_actions);
                 let p_auto_pass = engine_auto_pass_for_viewer(&raw_state, *pid, &legal_actions);
                 let p_end_continuous_effect_offers =
                     engine_end_continuous_effect_offers(&player_legals);
@@ -7895,8 +7902,8 @@ async fn handle_full_game_submission(
                     for (pid, pstate) in &filtered_states {
                         if let Some(s) = players.get(pid) {
                             let is_actor = server_core::is_acting(&raw_state, *pid);
-                            let player_legals = if ai_results.is_empty() && is_actor {
-                                legal_actions.clone()
+                            let player_legals = if ai_results.is_empty() {
+                                legal_actions_for_seat(&raw_state, *pid, &legal_actions)
                             } else {
                                 // AI will act next — don't send legal actions yet
                                 vec![]
@@ -12364,6 +12371,98 @@ mod state_transport_derived_tests {
             } => (legal_actions.len(), auto_pass_recommended),
             other => panic!("expected StateUpdate, got {other:?}"),
         }
+    }
+
+    /// Dandan mulligan prompt: P0 holds seven nonland cards (qualifies for the
+    /// free reveal), P1 three lands and four nonland cards (does not).
+    fn dandan_mulligan_result() -> ActionResult {
+        use engine::game::create_object;
+        use engine::types::card_type::CoreType;
+        use engine::types::format::FormatConfig;
+        use engine::types::game_state::{MulliganDecisionEntry, MulliganDecisionPhase};
+        use engine::types::identifiers::CardId;
+        use engine::types::zones::Zone;
+
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 7);
+        for (seat, lands) in [(PlayerId(0), 0), (PlayerId(1), 3)] {
+            for i in 0..7u64 {
+                let id = create_object(
+                    &mut state,
+                    CardId(u64::from(seat.0) * 100 + i),
+                    seat,
+                    format!("Card {i}"),
+                    Zone::Hand,
+                );
+                if i < lands {
+                    state
+                        .objects
+                        .get_mut(&id)
+                        .unwrap()
+                        .card_types
+                        .core_types
+                        .push(CoreType::Land);
+                }
+            }
+        }
+        state.waiting_for = WaitingFor::MulliganDecision {
+            pending: [PlayerId(0), PlayerId(1)]
+                .map(|player| MulliganDecisionEntry {
+                    player,
+                    mulligan_count: 0,
+                    phase: MulliganDecisionPhase::Declare,
+                })
+                .to_vec(),
+            free_first_mulligan: false,
+            declared: Vec::new(),
+        };
+        let (legal_actions, spell_costs, by_object) = engine_legal_actions_full(&state);
+        (
+            state,
+            Vec::new(),
+            legal_actions,
+            Vec::new(),
+            false,
+            spell_costs,
+            by_object,
+        )
+    }
+
+    fn state_update_legal_actions(result: &ActionResult, viewer: PlayerId) -> Vec<GameAction> {
+        let full_key = server_core::FullSessionKey {
+            game_code: "ABC123".to_string(),
+            generation: 1,
+        };
+        match build_state_update_message(result, 1, &full_key, viewer, Vec::new())
+            .expect("fixture state update")
+        {
+            ServerMessage::StateUpdate { legal_actions, .. } => legal_actions,
+            other => panic!("expected StateUpdate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn free_reveal_reaches_only_the_seat_whose_hand_qualifies() {
+        use engine::types::actions::MulliganChoice;
+
+        let result = dandan_mulligan_result();
+        let free_reveal = GameAction::MulliganDecision {
+            choice: MulliganChoice::FreeReveal,
+        };
+        let keep = GameAction::MulliganDecision {
+            choice: MulliganChoice::Keep,
+        };
+        assert!(
+            result.2.contains(&keep) && !result.2.contains(&free_reveal),
+            "the all-seat enumeration holds Keep and never FreeReveal"
+        );
+        for seat in [PlayerId(0), PlayerId(1)] {
+            assert!(state_update_legal_actions(&result, seat).contains(&keep));
+            assert!(legal_actions_for_seat(&result.0, seat, &result.2).contains(&keep));
+        }
+        assert!(state_update_legal_actions(&result, PlayerId(0)).contains(&free_reveal));
+        assert!(!state_update_legal_actions(&result, PlayerId(1)).contains(&free_reveal));
+        assert!(legal_actions_for_seat(&result.0, PlayerId(0), &result.2).contains(&free_reveal));
+        assert!(!legal_actions_for_seat(&result.0, PlayerId(1), &result.2).contains(&free_reveal));
     }
 
     #[cfg(any())]

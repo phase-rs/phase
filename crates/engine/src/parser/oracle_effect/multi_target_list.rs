@@ -246,6 +246,31 @@ pub(super) fn is_multi_slot_list(
             .is_some_and(every_link_is_a_slot)
 }
 
+/// CR 608.2g: true when every slot of the multi-slot list `clause` is a free
+/// resolution cast ("you may cast up to one target instant card and/or up to
+/// one target sorcery card … without paying their mana costs" — Finale of
+/// Promise). The resolver folds such a list into ONE cast window over the
+/// chosen targets (`cast_from_zone::cast_slot_group`), where the player casts
+/// any of them in either order or none. That window's decline is the shared
+/// "you may", so the list neither fails closed nor asks again before it.
+pub(super) fn is_free_cast_slot_list(clause: &ParsedEffectClause) -> bool {
+    fn is_free_cast(effect: &Effect) -> bool {
+        matches!(
+            effect,
+            Effect::CastFromZone {
+                without_paying_mana_cost: true,
+                alt_ability_cost: None,
+                duration: None,
+                ..
+            }
+        )
+    }
+    fn every_link_casts(link: &AbilityDefinition) -> bool {
+        is_free_cast(&link.effect) && link.sub_ability.as_deref().is_none_or(every_link_casts)
+    }
+    is_free_cast(&clause.effect) && clause.sub_ability.as_deref().is_some_and(every_link_casts)
+}
+
 /// CR 608.2d: a "you may" printed before the list is one choice over the whole
 /// instruction. Per-link `optional` would let a player accept one slot and
 /// decline another, and the head alone cannot gate its links, so an optional

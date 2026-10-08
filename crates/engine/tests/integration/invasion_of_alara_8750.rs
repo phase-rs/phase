@@ -707,8 +707,9 @@ two sorcery spells with mana value 3 or less from among them without paying thei
 Put the exiled cards not cast this way on the bottom of your library in a random order.";
 
 /// Collected Conjuring with its top six cards exiled; the sixth (top) card is
-/// a castable sorcery.
-fn collected_conjuring() -> (GameRunner, ObjectId, Vec<ObjectId>, ObjectId) {
+/// a castable sorcery. Returns the runner, the unreached card, the lands, the
+/// sorcery and Collected Conjuring itself.
+fn collected_conjuring() -> (GameRunner, ObjectId, Vec<ObjectId>, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_mana_pool(
@@ -756,14 +757,16 @@ fn collected_conjuring() -> (GameRunner, ObjectId, Vec<ObjectId>, ObjectId) {
         "reach guard: the cast window, got {:?}",
         runner.state().waiting_for
     );
-    (runner, unreached, lands, sorcery)
+    // CR 608.2g: the spell is still resolving while its window is open.
+    assert_eq!(zone(&runner, spell), Zone::Stack);
+    (runner, unreached, lands, sorcery, spell)
 }
 
 /// CR 608.2c: "the exiled cards not cast this way" is every card the spell
 /// exiled that was not cast. On main its tracked-set reading moved none.
 #[test]
 fn collected_conjuring_bottoms_the_exiled_cards_not_cast() {
-    let (mut runner, unreached, lands, sorcery) = collected_conjuring();
+    let (mut runner, unreached, lands, sorcery, spell) = collected_conjuring();
     runner
         .act(GameAction::FreeCastWindowChoice { selection: None })
         .expect("declining the cast must succeed");
@@ -774,18 +777,24 @@ fn collected_conjuring_bottoms_the_exiled_cards_not_cast() {
     for card in lands.iter().copied().chain([sorcery]) {
         assert!(library[1..].contains(&card), "goes to the bottom");
     }
+    // CR 608.2n (issue #9503): as the final part of its resolution the spell
+    // is put into its owner's graveyard, not left on the stack in no zone.
+    assert_eq!(zone(&runner, spell), Zone::Graveyard);
 }
 
 /// The cast sorcery is not "not cast this way": it resolves into the graveyard
 /// while the rest goes to the bottom.
 #[test]
 fn collected_conjuring_keeps_the_cast_sorcery_out_of_the_library() {
-    let (mut runner, unreached, lands, sorcery) = collected_conjuring();
+    let (mut runner, unreached, lands, sorcery, spell) = collected_conjuring();
     runner
         .act(GameAction::FreeCastWindowChoice {
             selection: Some(sorcery),
         })
         .expect("casting the free sorcery must succeed");
+    // CR 608.2n: Collected Conjuring finished resolving as the window closed,
+    // while the sorcery it cast still waits on the stack.
+    assert_eq!(zone(&runner, spell), Zone::Graveyard);
     runner.advance_until_stack_empty();
 
     let library: Vec<ObjectId> = runner.state().players[0].library.iter().copied().collect();
@@ -794,6 +803,7 @@ fn collected_conjuring_keeps_the_cast_sorcery_out_of_the_library() {
         assert!(library[1..].contains(&land), "a land goes to the bottom");
     }
     assert_eq!(zone(&runner, sorcery), Zone::Graveyard);
+    assert_eq!(zone(&runner, spell), Zone::Graveyard, "issue #9503");
 }
 
 /// CR 607.2a: with no card sharing a type, the loop exiles the whole library

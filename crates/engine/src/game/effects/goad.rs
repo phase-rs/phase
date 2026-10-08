@@ -181,6 +181,7 @@ mod tests {
             TransientContinuousEffectBindings {
                 affected_recipient: Some(recipient),
                 duration_subject: None,
+                granting_object: None,
             },
         );
         assert!(

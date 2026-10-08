@@ -256,6 +256,7 @@ pub(crate) fn apply_precomputed_copy_values(
         TransientContinuousEffectBindings {
             affected_recipient: Some(recipient),
             duration_subject: Some(duration_subject),
+            granting_object: None,
         },
     );
 
@@ -430,7 +431,8 @@ impl<'a> CopyExceptionOperation<'a> {
             | ContinuousModification::ChangeController
             | ContinuousModification::SetBasicLandType { .. }
             | ContinuousModification::SetChosenBasicLandType
-            | ContinuousModification::SetChosenName => Self::Layered(modification),
+            | ContinuousModification::SetChosenName
+            | ContinuousModification::SubstituteTextWord { .. } => Self::Layered(modification),
             ContinuousModification::SetName { name } => {
                 Self::Fold(FoldableCopyException::SetName { name })
             }

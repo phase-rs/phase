@@ -30491,7 +30491,7 @@ fn you_attack_trigger_binds_its_attacked_player_object() {
 /// Revert-to-red: removing the `GrantReplacement` arm (falling through to the
 /// wildcard `_ => {}`) leaves the raw placeholder character in the nested
 /// definition's description, so the `assert_eq!` below prints the escaped
-/// `\u{e0002}` where the granting card's printed name belongs.
+/// `\u{e0004}` where the granting card's printed name belongs.
 #[test]
 fn render_modification_descriptions_reaches_grant_replacement() {
     let mut replacement = ReplacementDefinition::new(ReplacementEvent::Moved);
@@ -31414,16 +31414,16 @@ fn guard_walk_reaches_every_continuous_modification_carrier() {
 /// resolution-time grant onto a target. This route is a PRE-EXISTING PARSER
 /// LEAK at BASE_SHA: `try_parse_gain_quoted_ability` sets the description
 /// directly and never went through `parse_quoted_ability`'s old sanitizer, so
-/// the parser would emit a raw U+E0002 into `client/public/card-data.json` for
+/// the parser would emit a raw U+E0004 into `client/public/card-data.json` for
 /// any card with this shape. MEASURED: no card in the current corpus parses to
-/// that shape — a scan of the exported `card-data.json` finds zero U+E0002,
+/// that shape — a scan of the exported `card-data.json` finds zero U+E0004,
 /// raw or escaped, on either side of the change — so the leak is LATENT IN
 /// THE PARSER, not shipped. The `GenericEffect | Token` arm is what closes it;
 /// the arm is load-bearing for this fixture regardless of corpus coverage.
 ///
 /// Revert-to-red: delete the `GenericEffect | Token` arm from
 /// `render_effect_descriptions` — the outer description reverts to
-/// `gain "{T}, Sacrifice \u{e0002}: Draw a card."`.
+/// `gain "{T}, Sacrifice \u{e0004}: Draw a card."`.
 #[test]
 fn resolution_time_grant_renders_the_granter_in_both_descriptions() {
     let parsed = parse(
@@ -31482,7 +31482,7 @@ fn resolution_time_grant_renders_the_granter_in_both_descriptions() {
 /// leaking.
 ///
 /// Revert-to-red: delete that arm — the token static's description reverts to
-/// `Sacrifice \u{e0002}: Draw a card.`.
+/// `Sacrifice \u{e0004}: Draw a card.`.
 #[test]
 fn token_body_grant_renders_the_granter() {
     let parsed = parse(
@@ -31523,7 +31523,7 @@ fn token_body_grant_renders_the_granter() {
 ///
 /// Revert-to-red: delete the `render_modal_descriptions` call from
 /// `render_granting_self_descriptions` — `mode_descriptions[0]` reverts to
-/// `Target creature gains "Sacrifice \u{e0002}: Draw a card." until end of turn.`
+/// `Target creature gains "Sacrifice \u{e0004}: Draw a card." until end of turn.`
 #[test]
 fn modal_mode_description_renders_the_granter() {
     let parsed = parse(
@@ -33362,4 +33362,27 @@ fn lich_as_enters_life_loss_parses_as_moved_self_replacement() {
         .statics
         .iter()
         .any(|def| matches!(def.mode, StaticMode::CantLoseTheGame)));
+}
+
+/// CR 201.5a: the two-layer IR facade lowers a refused quoted granter name to the same
+/// unsupported residual as the production pipeline.
+#[test]
+fn ir_facade_demotes_a_refused_granter_name() {
+    let mut ir = parse_oracle_ir(
+        "Equipped creature gets +2/+1 and has \"{T}, Unattach Heartseeker: Destroy target creature.\"\nEquip {5}",
+        "Heartseeker",
+        &[],
+        &["Artifact".to_string()],
+        &["Equipment".to_string()],
+    );
+    assert!(
+        ir.granter_name_refusals.contains(&0),
+        "reach-guard: {ir:#?}"
+    );
+    let parsed = lower_oracle_ir(&mut ir);
+    assert!(parsed.statics.is_empty(), "{parsed:#?}");
+    assert!(parsed.abilities.iter().any(|def| matches!(
+        &*def.effect,
+        Effect::Unimplemented { name, .. } if name == "granter_reference_unreached"
+    )));
 }

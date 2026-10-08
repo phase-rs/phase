@@ -61,13 +61,14 @@ pub fn resolve(
         .iter()
         .find(|p| p.id == target_player)
         .ok_or(EffectError::PlayerNotFound)?;
-    let count = count.min(player.library.len());
+    let library = state.library_of(player.id);
+    let count = count.min(library.len());
     let top_cards: Vec<_> = match position {
         // CR 401.2 + CR 701.13a: top/bottom are the two library edges an
         // exile instruction may name. Bottom iteration is bottommost-first,
         // preserving selected-pile order through the zone pipeline.
-        LibraryPosition::Top => player.library.iter().take(count).copied().collect(),
-        LibraryPosition::Bottom => player.library.iter().rev().take(count).copied().collect(),
+        LibraryPosition::Top => library.iter().take(count).copied().collect(),
+        LibraryPosition::Bottom => library.iter().rev().take(count).copied().collect(),
         LibraryPosition::NthFromTop { .. }
         | LibraryPosition::BeneathTop { .. }
         | LibraryPosition::RandomWithinTop { .. } => {

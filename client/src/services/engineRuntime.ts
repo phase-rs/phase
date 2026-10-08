@@ -2,6 +2,7 @@ import type {
   DeckCopyLimit,
   FormatConfig,
   GameFormat,
+  MatchType,
   SideboardPolicy,
   TokenCharacteristics,
   TokenImageRef,
@@ -255,6 +256,13 @@ export async function isCardCommanderEligibleForFormat(
   await ensureCardDatabase();
   const engine = await loadEngineModule();
   return engine.isCardCommanderEligibleForFormat(name, format);
+}
+
+/** The engine's longest match structure for `format`; Bo3 must never be offered above it. */
+export async function bestOfThreeCeilingForFormat(format: GameFormat): Promise<MatchType> {
+  await ensureWasmInit();
+  const engine = await loadEngineModule();
+  return engine.bestOfThreeCeilingForFormat(format) as MatchType;
 }
 
 /**

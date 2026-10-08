@@ -1,8 +1,9 @@
 use crate::types::ability::{
     cost_paid_object_snapshot_ids_eq, AbilityKind, ContinuousModification, CopyCountStatus,
-    DetachedRemainder, Duration, Effect, EffectKind, KeywordAction, PlayerFilter, QuantityExpr,
-    ResolvedAbility, SiblingCondition, SpellContext, SubAbilityLink, TargetChoiceTiming,
-    TargetFilter, TargetReadOrigin, TargetRef, TargetSelectionMode, TriggerCondition,
+    DetachedRemainder, Duration, Effect, EffectKind, IllegalTargetsDisposition, KeywordAction,
+    PlayerFilter, QuantityExpr, ResolvedAbility, SiblingCondition, SpellContext, SubAbilityLink,
+    TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef, TargetSelectionMode,
+    TriggerCondition,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -121,6 +122,8 @@ pub(super) fn abandon_active_resolution_carrier(
         .expect("resolution abandonment cannot clear a buried ability continuation");
     finish_resolving_stack_entry(state, disposition);
     state.resolution_source_relatch = None;
+    // CR 608.2n: an abandoned resolution owes no final move any more.
+    state.deferred_spell_delivery = None;
     state.deferred_entry_events.clear();
     state.pending_token_battlefield_entry = None;
 }
@@ -912,6 +915,175 @@ pub(crate) fn restore_alternative_spell_normal_face(
     }
 }
 
+/// CR 608.2n + CR 614.6: put a resolved instant or sorcery that is still on the
+/// stack into `dest` through the zone-change pipeline, so self-scoped `Moved`
+/// redirects (the Invoke Calamity rider) and board-wide RIP/Leyline redirects
+/// fire, then record a Rod of Absorption link and apply an exile-instead
+/// consequence rider when the spell landed in exile. Shared by `resolve_top`
+/// and the deferred delivery after a free-cast window
+/// (`deliver_deferred_spell`). A `NeedsChoice` result means the move is parked
+/// for a CR 616.1 ordering choice.
+fn deliver_resolved_spell_off_stack(
+    state: &mut GameState,
+    spell_id: ObjectId,
+    spell_controller: PlayerId,
+    dest: Zone,
+    events: &mut Vec<GameEvent>,
+) -> ZoneMoveResult {
+    let stack_exile_link_source = stack_exile_linked_source(state, spell_id);
+    // CR 603.7a + CR 702.170c: snapshot the exile-instead
+    // consequence rider BEFORE the move — every zone exit clears the
+    // transient rider fields (zones.rs), so the post-move apply site
+    // below must read the pre-move value.
+    let exile_rider = state
+        .objects
+        .get(&spell_id)
+        .and_then(|o| o.exile_from_stack_rider.clone());
+    let req = ZoneMoveRequest::spell_resolution_default(spell_id, dest);
+    let result = zone_pipeline::move_object(state, req, events);
+    if matches!(result, ZoneMoveResult::Done) {
+        // CR 607.2b + CR 406.6: a spell exiled by Rod of
+        // Absorption's per-object linked-source rider is "exiled
+        // with" the trigger source that stamped it. Now that the
+        // pipeline has delivered the move, record the linked-exile
+        // association so the source's linked ability ("cast any
+        // number of cards exiled with this artifact") sees the
+        // accumulating set.
+        // Gate on the object's ACTUAL post-move zone (not the
+        // requested `dest`) so a redirect that diverted the card
+        // away from exile never records a spurious link, while a
+        // redirect INTO exile still records correctly.
+        if spell_in_zone(state, spell_id, Zone::Exile) {
+            if let Some(link_source) = stack_exile_link_source {
+                super::exile_links::push_tracked_by_source(state, spell_id, link_source);
+            }
+            // CR 603.7a + CR 702.170c: the exile-instead
+            // replacement has now actually been APPLIED (the
+            // spell landed in exile), so this is the moment the
+            // "If you do, ..." consequence is applied — Feather's
+            // return-to-hand delayed trigger, or Lilah's plotted
+            // grant — never earlier (a countered or fizzled
+            // spell's marker was cleared on its stack exit and
+            // never reaches here).
+            // CR 603.7a + CR 603.7e (r5: was 603.7d — the rider is created
+            // by a TRIGGERED ability's replacement, so CR 603.7e is the
+            // rule and CR 603.7d, the spell-created case, is not;
+            // `exile_resolving_spell::arm_return_to` already cites CR
+            // 603.7e, and this annotation now agrees with it rather than
+            // contradicting it three frames away). Chooser: the controller
+            // of the REPLACEMENT EFFECT'S SOURCE (Feather, Lilah) — whose
+            // id this call already carries as the fourth argument — NOT
+            // the resolving spell's controller. `spell_controller`
+            // approximates it correctly, because those sources trigger on
+            // "whenever YOU cast", so the caster IS the source's
+            // controller. Routing this to `live_controller` would hand a
+            // stolen spell's Feather-return to the THIEF, which is wrong.
+            // KNOWN LIMITATION (CR 603.7e): the exact authority is that
+            // source's controller; deriving it here means resolving the
+            // link source's controller at rider-apply time.
+            if let Some(rider) = exile_rider {
+                effects::exile_resolving_spell::apply_exile_rider(
+                    state,
+                    spell_id,
+                    spell_controller,
+                    stack_exile_link_source.unwrap_or(spell_id),
+                    rider,
+                    events,
+                );
+            }
+        }
+    }
+    result
+}
+
+/// CR 400.7 + CR 712.11a + CR 715.3d + CR 720.3d: the bookkeeping a spell's
+/// stack exit owes by how it was cast: a face-swapped spell reverts to its
+/// front face unless it resolved onto the battlefield, an Adventure exiled
+/// this way may be cast as its creature, and an Omen's owner shuffles.
+fn finish_spell_stack_exit(
+    state: &mut GameState,
+    spell_id: ObjectId,
+    casting_variant: CastingVariant,
+    events: &mut Vec<GameEvent>,
+) {
+    // CR 400.7 + CR 712.11a: face-swapped stack spells revert to front
+    // face when leaving the stack unless they resolved as that face onto
+    // the battlefield.
+    if casting_variant.restores_front_face_after_stack_exit()
+        && !spell_in_zone(state, spell_id, Zone::Battlefield)
+    {
+        restore_alternative_spell_normal_face(state, spell_id, casting_variant);
+    }
+
+    // CR 715.3d: When an Adventure spell resolves to exile, grant
+    // AdventureCreature permission so it can be cast from exile.
+    if casting_variant == CastingVariant::Adventure {
+        if let Some(obj) = state.objects.get_mut(&spell_id) {
+            obj.casting_permissions
+                .push(crate::types::ability::CastingPermission::AdventureCreature);
+        }
+    }
+    if casting_variant == CastingVariant::Omen {
+        if let Some(owner) = state
+            .objects
+            .get(&spell_id)
+            .filter(|obj| obj.zone == Zone::Library)
+            .map(|obj| obj.owner)
+        {
+            effects::change_zone::shuffle_library(state, owner, events);
+        }
+    }
+}
+
+/// CR 608.2n + CR 608.2g: deliver a spell whose move was held back while it was
+/// paused on its own free-cast window (`DeferredSpellDelivery`), once that
+/// window and the instructions behind it are done and its carrier is about to
+/// settle. A spell its own instructions already moved off the stack ("Exile
+/// Invoke Calamity") stays where they put it; its stack-exit bookkeeping still
+/// runs, as in `resolve_top`.
+pub(super) fn deliver_deferred_spell(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    let Some(pending) = state.deferred_spell_delivery.clone() else {
+        return;
+    };
+    // Only the deferring spell's own carrier consumes the record; any other
+    // carrier leaves it in place.
+    let Some((controller, casting_variant)) = state
+        .resolving_stack_entry
+        .as_ref()
+        .filter(|entry| entry.id == pending.object_id)
+        .and_then(|entry| match &entry.kind {
+            StackEntryKind::Spell {
+                casting_variant, ..
+            } => Some((entry.controller, *casting_variant)),
+            StackEntryKind::ActivatedAbility { .. }
+            | StackEntryKind::TriggeredAbility { .. }
+            | StackEntryKind::KeywordAction { .. }
+            | StackEntryKind::CombatDamage { .. } => None,
+        })
+    else {
+        return;
+    };
+    state.deferred_spell_delivery = None;
+    // As in `resolve_top`: the default move is skipped for a spell its own
+    // instructions already moved, and a parked move returns before the
+    // stack-exit bookkeeping.
+    if spell_still_on_stack(state, pending.object_id)
+        && !matches!(
+            deliver_resolved_spell_off_stack(
+                state,
+                pending.object_id,
+                controller,
+                pending.destination,
+                events,
+            ),
+            ZoneMoveResult::Done
+        )
+    {
+        return;
+    }
+    finish_spell_stack_exit(state, pending.object_id, casting_variant, events);
+}
+
 /// CR 608.2n / CR 608.3 / CR 608.3e: Predicate guard for post-resolution
 /// default-zone moves on a resolving spell.
 ///
@@ -1478,6 +1650,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // boundary must settle its exact carrier before another stack object can
     // begin resolving. A parked continuation remains live and therefore still
     // fails the invariant below rather than being silently cleared.
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && super::engine::resolution_instructions_are_done(state)
+    {
+        deliver_deferred_spell(state, events);
+    }
     super::engine::settle_resolving_stack_entry_after_continuation_resume(state);
     // CR 608.2c + CR 608.2m: A prior resolution must finish its instructions
     // before another stack object begins resolving. A parked continuation owns
@@ -1649,6 +1826,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             if ability.controller != live_controller {
                 ability.set_controller_recursive(live_controller);
             }
+        }
+    }
+
+    // CR 612.1 + CR 608.2b + CR 113.1c: a text change on a spell applies before the legality recheck and target binding below, and an ability on the stack is not a spell so only spell entries are rewritten.
+    if is_spell {
+        if let Some(ability) = ability.as_mut() {
+            super::text_substitution::restamp_resolving_spell_text(state, entry.id, ability);
         }
     }
 
@@ -1867,7 +2051,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         {
             let mut validated = validate_targets_in_chain(state, ability);
             let legal_targets = flatten_specified_targets_in_chain(&validated);
-            if targeting::check_fizzle(&original_targets, &legal_targets) {
+            // CR 608.2b + CR 101.1: the ability's own text ("This ability still resolves if
+            // its target becomes illegal") can override non-resolution. Targets are still
+            // pruned by validate_targets_in_chain above, so illegal targets stay unaffected.
+            let fizzle_applies = match ability.illegal_targets_disposition {
+                IllegalTargetsDisposition::DoesNotResolve => true,
+                IllegalTargetsDisposition::StillResolves => false,
+            };
+            if fizzle_applies && targeting::check_fizzle(&original_targets, &legal_targets) {
                 // CR 608.2b: Fizzle — all targets illegal, spell is countered on resolution.
                 if is_spell {
                     // CR 702.34a / CR 702.127a / CR 702.180a: Flashback,
@@ -2065,15 +2256,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
     // CR 608.2g + CR 608.3: A spell paused on a during-resolution free-cast
     // window remains on the stack and targetable until its continuation ends.
-    if is_spell
-        && !matches!(
-            state.waiting_for,
-            WaitingFor::CastOffer {
-                kind: CastOfferKind::FreeCastWindow { .. },
-                ..
-            }
-        )
-    {
+    let paused_on_free_cast_window = matches!(
+        state.waiting_for,
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::FreeCastWindow { .. },
+            ..
+        }
+    );
+    if is_spell {
         let end_procedure_exiles_resolving_object = ability.as_ref().is_some_and(|ability| {
             matches!(ability.effect, Effect::EndTheTurn)
                 || (matches!(ability.effect, Effect::EndCombatPhase)
@@ -2154,7 +2344,19 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // CR 608.2n: Non-permanent spells are put into owner's graveyard.
             Zone::Graveyard
         };
-        if dest == Zone::Battlefield {
+        // CR 608.2n + CR 608.2g: the spell is put into its zone "as the final
+        // part" of its resolution, which its open free-cast window and the
+        // instructions parked behind it have not reached. Record the
+        // destination selected above; the continuation's completion delivers
+        // it (`deliver_deferred_spell`). A permanent spell keeps its earlier
+        // handling: it stays where it is.
+        if paused_on_free_cast_window && dest != Zone::Battlefield {
+            state.deferred_spell_delivery = Some(crate::types::game_state::DeferredSpellDelivery {
+                object_id: entry.id,
+                destination: dest,
+            });
+        }
+        if dest == Zone::Battlefield && !paused_on_free_cast_window {
             // CR 707.10f + CR 608.3f: A copy of a permanent spell becomes a token
             // permanent AS it resolves onto the battlefield — BEFORE the ETB
             // replacement pipeline matches the ZoneChange and before the
@@ -2679,89 +2881,18 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // the source via `SelfRef`), the post-resolution default move must
             // be skipped — otherwise the spell card travels exile→graveyard
             // and undoes its own self-exile clause (issue #323).
-            if spell_still_on_stack(state, entry.id) {
+            if !paused_on_free_cast_window && spell_still_on_stack(state, entry.id) {
                 // CR 608.2n + CR 614.6: route the spell's stack → graveyard/exile
-                // default move through the pipeline so self-scoped `Moved`
-                // redirects (the Invoke Calamity rider) and board-wide
-                // RIP/Leyline redirects fire (PLAN §8 Risk #2 — confirmed bug on
-                // the old raw-move path). A redirect only matches a Graveyard
-                // destination, so flashback/adventure/omen spells (dest already
-                // Exile/Library) never engage it. On a CR 616.1 ordering choice
-                // (two simultaneous Graveyard→Exile redirects on the same spell),
-                // `move_object` parks the prompt; the spell is already off the
-                // stack and the dest is Graveyard, so every post-move bookkeeping
-                // step below is a no-op (front-face restore / Adventure / Omen /
-                // battlefield-entry tail all gate on non-graveyard zones). Mirror
-                // the permanent-spell NeedsChoice arm: emit StackResolved + clear
-                // trigger context, then bail so the replacement-choice resume
-                // path delivers the redirected move.
-                let stack_exile_link_source = stack_exile_linked_source(state, entry.id);
-                // CR 603.7a + CR 702.170c: snapshot the exile-instead
-                // consequence rider BEFORE the move — every zone exit clears the
-                // transient rider fields (zones.rs), so the post-move apply site
-                // below must read the pre-move value.
-                let exile_rider = state
-                    .objects
-                    .get(&entry.id)
-                    .and_then(|o| o.exile_from_stack_rider.clone());
-                let req = ZoneMoveRequest::spell_resolution_default(entry.id, dest);
-                match zone_pipeline::move_object(state, req, events) {
-                    ZoneMoveResult::Done => {
-                        // CR 607.2b + CR 406.6: a spell exiled by Rod of
-                        // Absorption's per-object linked-source rider is "exiled
-                        // with" the trigger source that stamped it. Now that the
-                        // pipeline has delivered the move, record the linked-exile
-                        // association so the source's linked ability ("cast any
-                        // number of cards exiled with this artifact") sees the
-                        // accumulating set.
-                        // Gate on the object's ACTUAL post-move zone (not the
-                        // requested `dest`) so a redirect that diverted the card
-                        // away from exile never records a spurious link, while a
-                        // redirect INTO exile still records correctly.
-                        if spell_in_zone(state, entry.id, Zone::Exile) {
-                            if let Some(link_source) = stack_exile_link_source {
-                                super::exile_links::push_tracked_by_source(
-                                    state,
-                                    entry.id,
-                                    link_source,
-                                );
-                            }
-                            // CR 603.7a + CR 702.170c: the exile-instead
-                            // replacement has now actually been APPLIED (the
-                            // spell landed in exile), so this is the moment the
-                            // "If you do, ..." consequence is applied — Feather's
-                            // return-to-hand delayed trigger, or Lilah's plotted
-                            // grant — never earlier (a countered or fizzled
-                            // spell's marker was cleared on its stack exit and
-                            // never reaches here).
-                            // CR 603.7a + CR 603.7e (r5: was 603.7d — the rider is created
-                            // by a TRIGGERED ability's replacement, so CR 603.7e is the
-                            // rule and CR 603.7d, the spell-created case, is not;
-                            // `exile_resolving_spell::arm_return_to` already cites CR
-                            // 603.7e, and this annotation now agrees with it rather than
-                            // contradicting it three frames away). Chooser: the controller
-                            // of the REPLACEMENT EFFECT'S SOURCE (Feather, Lilah) — whose
-                            // id this call already carries as the fourth argument — NOT
-                            // the resolving spell's controller. `entry.controller`
-                            // approximates it correctly, because those sources trigger on
-                            // "whenever YOU cast", so the caster IS the source's
-                            // controller. Routing this to `live_controller` would hand a
-                            // stolen spell's Feather-return to the THIEF, which is wrong.
-                            // KNOWN LIMITATION (CR 603.7e): the exact authority is that
-                            // source's controller; deriving it here means resolving the
-                            // link source's controller at rider-apply time.
-                            if let Some(rider) = exile_rider {
-                                effects::exile_resolving_spell::apply_exile_rider(
-                                    state,
-                                    entry.id,
-                                    entry.controller,
-                                    stack_exile_link_source.unwrap_or(entry.id),
-                                    rider,
-                                    events,
-                                );
-                            }
-                        }
-                    }
+                // default move through the pipeline — see
+                // `deliver_resolved_spell_off_stack`.
+                match deliver_resolved_spell_off_stack(
+                    state,
+                    entry.id,
+                    entry.controller,
+                    dest,
+                    events,
+                ) {
+                    ZoneMoveResult::Done => {}
                     ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
                         // NOTE: the `exile_rider` snapshot is intentionally
                         // dropped on this bail — a parked move here can only be
@@ -2784,32 +2915,8 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             }
         }
 
-        // CR 400.7 + CR 712.11a: face-swapped stack spells revert to front
-        // face when leaving the stack unless they resolved as that face onto
-        // the battlefield.
-        if casting_variant.restores_front_face_after_stack_exit()
-            && !spell_in_zone(state, entry.id, Zone::Battlefield)
-        {
-            restore_alternative_spell_normal_face(state, entry.id, casting_variant);
-        }
-
-        // CR 715.3d: When an Adventure spell resolves to exile, grant
-        // AdventureCreature permission so it can be cast from exile.
-        if casting_variant == CastingVariant::Adventure {
-            if let Some(obj) = state.objects.get_mut(&entry.id) {
-                obj.casting_permissions
-                    .push(crate::types::ability::CastingPermission::AdventureCreature);
-            }
-        }
-        if casting_variant == CastingVariant::Omen {
-            if let Some(owner) = state
-                .objects
-                .get(&entry.id)
-                .filter(|obj| obj.zone == Zone::Library)
-                .map(|obj| obj.owner)
-            {
-                effects::change_zone::shuffle_library(state, owner, events);
-            }
+        if !paused_on_free_cast_window {
+            finish_spell_stack_exit(state, entry.id, casting_variant, events);
         }
 
         // CR 608.3c: An Aura spell resolving becomes a permanent put onto the
@@ -3860,6 +3967,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         min_x_value,
         announced_x,
         cant_be_copied,
+        illegal_targets_disposition,
         copy_count_status,
         forward_result,
         unless_pay,
@@ -3939,6 +4047,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         // it is not the vanilla self-counter shape this batch path proves safe.
         && announced_x.is_none()
         && !*cant_be_copied
+        && *illegal_targets_disposition == IllegalTargetsDisposition::DoesNotResolve
         && *copy_count_status == CopyCountStatus::Pending
         && !*forward_result
         && unless_pay.is_none()
@@ -4104,6 +4213,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         min_x_value,
         announced_x,
         cant_be_copied,
+        illegal_targets_disposition,
         copy_count_status,
         forward_result,
         unless_pay,
@@ -4175,6 +4285,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         && *min_x_value == 0
         && announced_x.is_none()
         && !*cant_be_copied
+        && *illegal_targets_disposition == IllegalTargetsDisposition::DoesNotResolve
         && *copy_count_status == CopyCountStatus::Pending
         && !*forward_result
         && unless_pay.is_none()
@@ -4328,6 +4439,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         min_x_value,
         announced_x,
         cant_be_copied,
+        illegal_targets_disposition,
         copy_count_status,
         forward_result,
         unless_pay,
@@ -4403,6 +4515,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         && *min_x_value == 0
         && announced_x.is_none()
         && !*cant_be_copied
+        && *illegal_targets_disposition == IllegalTargetsDisposition::DoesNotResolve
         && *copy_count_status == CopyCountStatus::Pending
         && !*forward_result
         && unless_pay.is_none()
@@ -4820,6 +4933,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         min_x_value: a_min_x_value,
         announced_x: a_announced_x,
         cant_be_copied: a_cant_be_copied,
+        illegal_targets_disposition: a_illegal_targets_disposition,
         copy_count_status: a_copy_count_status,
         forward_result: a_forward_result,
         unless_pay: a_unless_pay,
@@ -4902,6 +5016,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         min_x_value: b_min_x_value,
         announced_x: b_announced_x,
         cant_be_copied: b_cant_be_copied,
+        illegal_targets_disposition: b_illegal_targets_disposition,
         copy_count_status: b_copy_count_status,
         forward_result: b_forward_result,
         unless_pay: b_unless_pay,
@@ -4986,6 +5101,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_min_x_value == b_min_x_value
         && a_announced_x == b_announced_x
         && a_cant_be_copied == b_cant_be_copied
+        && a_illegal_targets_disposition == b_illegal_targets_disposition
         && a_copy_count_status == b_copy_count_status
         && a_forward_result == b_forward_result
         && a_unless_pay == b_unless_pay
@@ -5804,6 +5920,47 @@ mod tests {
                 actual_mana_spent: 0,
             },
         }
+    }
+
+    /// CR 608.2n + CR 608.2g: a spell held on the stack by its own free-cast
+    /// window owes its final move. A settle site without the event stream
+    /// cannot retire its carrier while that move is owed; the next resolution
+    /// delivers it first, and only then is the carrier retired.
+    #[test]
+    fn an_owed_spell_move_blocks_settling_until_it_is_delivered() {
+        let mut state = setup();
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Window Sorcery".to_string(),
+            Zone::Stack,
+        );
+        state.resolving_stack_entry = Some(pending_spell_entry(spell));
+        state.deferred_spell_delivery = Some(crate::types::game_state::DeferredSpellDelivery {
+            object_id: spell,
+            destination: Zone::Graveyard,
+        });
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        super::super::engine::settle_resolving_stack_entry_after_continuation_resume(&mut state);
+        assert!(
+            state.resolving_stack_entry.is_some(),
+            "the carrier stays while its spell's move is owed"
+        );
+        assert_eq!(state.objects[&spell].zone, Zone::Stack);
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+        assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+        assert!(state.players[0].graveyard.contains(&spell));
+        assert!(state.deferred_spell_delivery.is_none());
+        assert!(
+            state.resolving_stack_entry.is_none(),
+            "then the carrier settles"
+        );
     }
 
     #[test]
@@ -14276,11 +14433,14 @@ mod tests {
         /// the (3.3)/(3.4) boards.
         const OVERRIDDEN_NAME: &str = "Cloned Bear";
 
-        /// "Three or more permanents named `OVERRIDDEN_NAME`", counted
+        /// "`comparator` `count` permanents named `OVERRIDDEN_NAME`", counted
         /// board-wide. Same shape as (3.1)'s gate minus the recipient context:
         /// no `FilterProp::Another`, so `condition_uses_recipient_context` is
         /// false and every gather strips it off the effect it pushes.
-        fn overridden_name_count_at_least(count: i32) -> crate::types::ability::StaticCondition {
+        fn overridden_name_count(
+            comparator: Comparator,
+            count: i32,
+        ) -> crate::types::ability::StaticCondition {
             crate::types::ability::StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::ObjectCount {
@@ -14289,7 +14449,7 @@ mod tests {
                         },
                     },
                 },
-                comparator: Comparator::GE,
+                comparator,
                 rhs: QuantityExpr::Fixed { value: count },
             }
         }
@@ -14299,19 +14459,21 @@ mod tests {
         /// `install_gate`.
         ///
         /// WHY LAYER 1 and not the layer-4 rewrite (3.1) uses: a source-level
-        /// condition and a `ForAsLongAs` duration are both evaluated inside
-        /// `gather_transient_continuous_effects`, and `evaluate_layers` gathers
-        /// at Step 3 — after layer 1 has been applied and before layers 2-7.
-        /// Layer 1 is therefore the ONLY layer whose writes such a gate can see
-        /// within one pass. (A retained recipient-context condition is instead
-        /// re-checked at APPLY time, which is why (3.1) can use layer 4.)
-        /// `prepare_incremental_flush` gathers with NO layer applied at all, so
-        /// the entrant is still printed-named there — that divergence is exactly
-        /// the staleness these boards catch.
+        /// condition is evaluated inside `gather_transient_continuous_effects`,
+        /// and `evaluate_layers` gathers at Step 3 — after layer 1 has been
+        /// applied and before layers 2-7. Layer 1 is therefore the ONLY layer
+        /// whose writes such a gate can see within one pass. (A retained
+        /// recipient-context condition is instead re-checked at APPLY time,
+        /// which is why (3.1) can use layer 4; a `ForAsLongAs` duration is
+        /// checked on the settled board, CR 611.2b.) `prepare_incremental_flush`
+        /// gathers with NO layer applied at all, so the entrant is still
+        /// printed-named there — that divergence is exactly the staleness these
+        /// boards catch.
         ///
         /// Nothing else on the board is a creature, so the overridden-name
         /// population is exactly the creature count: 2 before the entry, 3
-        /// after, which moves a `GE 3` gate from OFF to ON.
+        /// after, which moves a `GE 3` gate from OFF to ON (and ends a `LT 3`
+        /// duration).
         fn transient_name_count_gate_board(
             install_gate: impl Fn(&mut GameState, ObjectId, &[ObjectId]),
         ) -> GameState {
@@ -14368,7 +14530,7 @@ mod tests {
                         ContinuousModification::AddToughness { value: 1 },
                     ],
                     Duration::UntilEndOfTurn,
-                    Some(overridden_name_count_at_least(3)),
+                    Some(overridden_name_count(Comparator::GE, 3)),
                 )
             })
         }
@@ -14392,7 +14554,8 @@ mod tests {
                 !forced.transient_continuous_effects.is_empty()
                     && forced.transient_continuous_effects.iter().all(|tce| {
                         matches!(tce.affected, TargetFilter::SpecificObject { .. })
-                            && tce.condition.as_ref() == Some(&overridden_name_count_at_least(3))
+                            && tce.condition.as_ref()
+                                == Some(&overridden_name_count(Comparator::GE, 3))
                     }),
                 "the fixture must install SpecificObject-bound transients whose gate is \
                  source-level, or the `e.condition` channel would cover this board"
@@ -14429,17 +14592,20 @@ mod tests {
             assert_pt_identical(&normal, &forced, "transient source-level condition reads");
         }
 
-        /// (3.4) `ForAsLongAs` DURATION, READ CHANNEL. Identical board to (3.3)
-        /// with the gate moved from `tce.condition` into
-        /// `Duration::ForAsLongAs` (CR 611.2b — the effect lasts exactly as
-        /// long as its stated condition holds). `transient_effect_is_live`
-        /// evaluates it in the same gather, and no gather ever copies a
-        /// duration's condition onto an `ActiveContinuousEffect`, so this gate
-        /// is invisible to every channel except the transient walk.
+        /// (3.4) `ForAsLongAs` DURATION, READ CHANNEL. The (3.3) board with the
+        /// gate moved from `tce.condition` into `Duration::ForAsLongAs` and its
+        /// comparator inverted to "fewer than three". CR 611.2b: a duration that
+        /// is false when the effect begins never starts, and one that ends
+        /// never restarts — so the only flip an entry can cause is an END. Pre-
+        /// entry two permanents carry the overridden name (duration holds,
+        /// 3/3); the renamed entrant makes three and ends it for good (2/2). No
+        /// gather ever copies a duration's condition onto an
+        /// `ActiveContinuousEffect`, so this gate is invisible to every channel
+        /// except the transient walk.
         ///
         /// DISCRIMINATING: drop `transient_duration_condition` from
         /// `transient_gate_conditions` and `ReadKinds` loses NameText exactly
-        /// as in (3.3) — recipients keep a stale 2/2.
+        /// as in (3.3), so the entry no longer escalates.
         fn transient_duration_gate_read_board() -> GameState {
             use crate::types::ability::ContinuousModification;
             transient_name_count_gate_board(|state, source, bears| {
@@ -14452,7 +14618,7 @@ mod tests {
                         ContinuousModification::AddToughness { value: 1 },
                     ],
                     Duration::ForAsLongAs {
-                        condition: overridden_name_count_at_least(3),
+                        condition: overridden_name_count(Comparator::LT, 3),
                     },
                     None,
                 )
@@ -14469,30 +14635,36 @@ mod tests {
                 escalated,
                 "CR 611.2b makes a `for as long as` duration a live gate, so the kinds \
                  it reads are live reads — a layer-1 name override reaching the entrant \
-                 must escalate"
+                 can end it and must escalate"
             );
+            let mut pre = transient_duration_gate_read_board();
+            flush_layers(&mut pre);
             // Non-vacuity: the gate lives in the DURATION, not in `condition`,
             // so no `tce.condition` channel could have covered this board.
             assert!(
-                !forced.transient_continuous_effects.is_empty()
-                    && forced.transient_continuous_effects.iter().all(|tce| {
+                pre.transient_continuous_effects.len() == 2
+                    && pre.transient_continuous_effects.iter().all(|tce| {
                         tce.condition.is_none()
                             && matches!(tce.duration, Duration::ForAsLongAs { .. })
                     }),
                 "the fixture must gate purely through `Duration::ForAsLongAs`"
             );
-            let mut pre = transient_duration_gate_read_board();
-            flush_layers(&mut pre);
             assert_eq!(
                 pts_base_named(&pre, "NameBear"),
-                vec![(Some(2), Some(2)); 2],
+                vec![(Some(3), Some(3)); 2],
                 "pre-entry only 2 permanents carry the overridden name, so the \
-                 duration has not started"
+                 duration holds"
             );
             assert_eq!(
                 pts_base_named(&forced, "NameBear"),
-                vec![(Some(3), Some(3)); 2],
-                "layer 1 renames the entrant too, making it the third — the duration holds"
+                vec![(Some(2), Some(2)); 2],
+                "layer 1 renames the entrant too, making it the third — the duration ends"
+            );
+            // CR 611.2b: an ended duration is retired, never merely suppressed.
+            assert!(
+                normal.transient_continuous_effects.is_empty()
+                    && forced.transient_continuous_effects.is_empty(),
+                "the ended duration's effects must be retired on both paths"
             );
             assert_eq!(
                 pts_base_named(&normal, "NameBear"),
@@ -14504,18 +14676,17 @@ mod tests {
 
         /// (3.5) `ForAsLongAs` DURATION, PERTURBATION-PROBE CHANNEL. The twin
         /// of (3.2) with the gate moved into the duration: Master Thief's "for
-        /// as long as you control this creature" shape, inverted to an
-        /// opponent-presence check so an entry can start it. NOTHING on this
+        /// as long as you control this creature" shape, recast as an
+        /// opponent-ABSENCE check so an entry can end it. CR 611.2b: the
+        /// duration holds when the effect begins (no opponent creature, 5/5);
+        /// the opponent's entrant ends it permanently (2/2). NOTHING on this
         /// board writes the kinds the gate reads, so the read union cannot see
-        /// the flip — while the duration is unmet the effect is not gathered at
-        /// all and `all_writes` is empty, which exits the kind relation at
-        /// stage 1.
+        /// the flip.
         ///
         /// DISCRIMINATING: drop `transient_duration_condition` from
         /// `transient_gate_conditions` and the probe's transient arm sees only
-        /// `tce.condition`, which is `None` here — no disjunct fires, the entry
-        /// stays incremental, and the frozen recipients keep a stale 2/2 while
-        /// a full pass says 5/5.
+        /// `tce.condition`, which is `None` here — no disjunct fires and the
+        /// entry no longer escalates.
         fn transient_duration_gate_probe_board() -> GameState {
             use crate::types::ability::{ContinuousModification, StaticCondition};
             use crate::types::ControllerRef;
@@ -14542,12 +14713,14 @@ mod tests {
                 // CR 611.2b + CR 109.5: the duration is re-read every pass and
                 // "an opponent" stays bound to the resolver, P0.
                 Duration::ForAsLongAs {
-                    condition: StaticCondition::IsPresent {
-                        filter: Some(TargetFilter::Typed(TypedFilter {
-                            type_filters: vec![TypeFilter::Creature],
-                            controller: Some(ControllerRef::Opponent),
-                            ..Default::default()
-                        })),
+                    condition: StaticCondition::Not {
+                        condition: Box::new(StaticCondition::IsPresent {
+                            filter: Some(TargetFilter::Typed(TypedFilter {
+                                type_filters: vec![TypeFilter::Creature],
+                                controller: Some(ControllerRef::Opponent),
+                                ..Default::default()
+                            })),
+                        }),
                     },
                 },
                 None,
@@ -14565,29 +14738,35 @@ mod tests {
             assert!(
                 escalated,
                 "CR 611.2c freezes a resolved effect's affected SET, not its duration — \
-                 an entry that starts a `for as long as` duration must escalate or every \
+                 an entry that ends a `for as long as` duration must escalate or every \
                  frozen recipient keeps a stale board"
             );
+            let mut pre = transient_duration_gate_probe_board();
+            flush_layers(&mut pre);
             // Non-vacuity: the gate lives in the DURATION only.
             assert!(
-                !forced.transient_continuous_effects.is_empty()
-                    && forced.transient_continuous_effects.iter().all(|tce| {
+                pre.transient_continuous_effects.len() == 2
+                    && pre.transient_continuous_effects.iter().all(|tce| {
                         tce.condition.is_none()
                             && matches!(tce.duration, Duration::ForAsLongAs { .. })
                     }),
                 "the fixture must gate purely through `Duration::ForAsLongAs`"
             );
-            let mut pre = transient_duration_gate_probe_board();
-            flush_layers(&mut pre);
             assert_eq!(
                 pts_named(&pre, "DurationBear"),
-                vec![(Some(2), Some(2)); 2],
-                "pre-entry no opponent controls a creature, so the duration never started"
+                vec![(Some(5), Some(5)); 2],
+                "pre-entry no opponent controls a creature, so the duration holds"
             );
             assert_eq!(
                 pts_named(&forced, "DurationBear"),
-                vec![(Some(5), Some(5)); 2],
-                "the opponent's entrant starts the duration for every frozen recipient"
+                vec![(Some(2), Some(2)); 2],
+                "the opponent's entrant ends the duration for every frozen recipient"
+            );
+            // CR 611.2b: an ended duration is retired, never merely suppressed.
+            assert!(
+                normal.transient_continuous_effects.is_empty()
+                    && forced.transient_continuous_effects.is_empty(),
+                "the ended duration's effects must be retired on both paths"
             );
             assert_eq!(
                 pts_named(&normal, "DurationBear"),

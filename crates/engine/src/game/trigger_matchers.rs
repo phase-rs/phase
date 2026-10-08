@@ -813,6 +813,8 @@ fn is_player_scope_damage_filter(filter: &TargetFilter) -> bool {
         // filter. Cartographer's Hawk exercises this event-time player-relative
         // damage-recipient shape; the unit test keeps future changes deliberate.
         TargetFilter::PlayerMatching { .. } => true,
+        // CR 120.3: a latched player recipient ("the player who cast <granter>").
+        TargetFilter::SpecificPlayer { .. } => true,
         _ => false,
     }
 }
@@ -900,9 +902,8 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::Owner => false,
         TargetFilter::Any
         | TargetFilter::SelfRef
-        // CR 201.5a: a source-relative object ref, concretized to SpecificObject
-        // before any trigger evaluates; delegates like the other object refs.
-        | TargetFilter::GrantingObject
+        // CR 201.5a: a source-relative object ref; delegates like the other object refs.
+        | TargetFilter::GrantingObject { .. }
         | TargetFilter::OriginalSource
         | TargetFilter::SourceOrPaired
         | TargetFilter::Typed(_)
@@ -1167,6 +1168,28 @@ fn usize_to_u32_saturating(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
+fn destination_constraint_names(
+    destination: Option<&Zone>,
+    constraint: &DestinationConstraint,
+    zone: Zone,
+) -> bool {
+    destination == Some(&zone)
+        || match constraint {
+            DestinationConstraint::Equals(expected) => *expected == zone,
+            DestinationConstraint::OneOf(zones) => zones.contains(&zone),
+            DestinationConstraint::Any | DestinationConstraint::NotEquals(_) => false,
+        }
+}
+
+/// The zone a card left when the trigger names its origin (CR 603.10a for a graveyard, CR 400.1
+/// as the format modifies it for a library); a trigger naming none states no zone.
+fn named_origin_zone(origin: &OriginConstraint, from: Option<Zone>) -> Option<Zone> {
+    match origin {
+        OriginConstraint::Equals(_) | OriginConstraint::OneOf(_) => from,
+        OriginConstraint::Any | OriginConstraint::NotEquals(_) => None,
+    }
+}
+
 fn destination_matches_constraint(zone: Zone, constraint: &DestinationConstraint) -> bool {
     match constraint {
         DestinationConstraint::Any => true,
@@ -1213,10 +1236,31 @@ fn zone_change_clause_matches(
     }
     if let Some(filter) = valid_card {
         let ctx = super::filter::FilterContext::from_trigger_source(source_context);
-        let matches = if *to == Zone::Battlefield && state.objects.contains_key(&record.object_id) {
-            super::filter::matches_target_filter(state, record.object_id, filter, &ctx)
-        } else {
-            super::filter::matches_target_filter_on_zone_change_record(state, record, filter, &ctx)
+        let live_entrant =
+            *to == Zone::Battlefield && state.objects.contains_key(&record.object_id);
+        let departed = named_origin_zone(origin, record.from_zone);
+        let matches = match (live_entrant, departed) {
+            // CR 603.6a: an enters trigger reads the permanent as it exists on the battlefield,
+            // so a named battlefield destination leaves the pile unlicensed.
+            (true, Some(from))
+                if !destination_constraint_names(destination, destination_constraint, *to) =>
+            {
+                super::filter::matches_target_filter_on_departure(
+                    state,
+                    record.object_id,
+                    from,
+                    filter,
+                    &ctx,
+                )
+            }
+            (true, _) => {
+                super::filter::matches_target_filter(state, record.object_id, filter, &ctx)
+            }
+            (false, departed) => {
+                super::filter::matches_target_filter_on_zone_change_record_licensed(
+                    state, record, departed, filter, &ctx,
+                )
+            }
         };
         if !matches {
             return false;
@@ -18503,6 +18547,86 @@ mod tests {
                 &state
             ),
             "a non-artifact token must fail the Artifact type filter even via LKI"
+        );
+    }
+
+    /// A card reanimated from the shared graveyard by `reanimator`, judged by P0's creature-you-
+    /// control trigger over `origin`/`destination`; returns whether the trigger matches.
+    fn reanimation_matches(
+        format: crate::types::format::FormatConfig,
+        pile_owner: PlayerId,
+        reanimator: PlayerId,
+        destination: Option<Zone>,
+    ) -> bool {
+        let mut state = GameState::new(format, 2, 1);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        let entrant = create_object(
+            &mut state,
+            CardId(2),
+            pile_owner,
+            "Entrant".to_string(),
+            Zone::Battlefield,
+        );
+        make_creature(&mut state, entrant);
+        state.objects.get_mut(&entrant).unwrap().controller = reanimator;
+        let mut trigger = make_trigger(TriggerMode::ChangesZone);
+        trigger.origin = Some(Zone::Graveyard);
+        trigger.destination = destination;
+        trigger.valid_card = Some(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        }));
+        let event = GameEvent::ZoneChanged {
+            object_id: entrant,
+            from: Some(Zone::Graveyard),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord {
+                core_types: vec![CoreType::Creature],
+                owner: pile_owner,
+                controller: reanimator,
+                ..ZoneChangeRecord::test_minimal(entrant, Some(Zone::Graveyard), Zone::Battlefield)
+            }),
+        };
+        match_changes_zone(
+            &event,
+            &trigger,
+            &test_trigger_source_context(&state, source),
+            &state,
+        )
+    }
+
+    /// CR 603.6a: a trigger naming the battlefield as destination reads the permanent, so only
+    /// its controller counts; without a named destination it reads the departed pile.
+    #[test]
+    fn a_named_battlefield_destination_judges_the_permanent_not_the_pile() {
+        use crate::types::format::FormatConfig;
+        let (p0, p1) = (PlayerId(0), PlayerId(1));
+        let named = Some(Zone::Battlefield);
+        for format in [FormatConfig::dandan(), FormatConfig::standard()] {
+            assert!(
+                reanimation_matches(format.clone(), p1, p0, named),
+                "reach: P0's own permanent matches"
+            );
+            assert!(
+                !reanimation_matches(format.clone(), p0, p1, named),
+                "P1's permanent is not a creature P0 controls"
+            );
+            assert!(reanimation_matches(format, p1, p0, None));
+        }
+        assert!(
+            reanimation_matches(FormatConfig::dandan(), p0, p1, None),
+            "paired: the pile reading"
+        );
+        assert!(
+            !reanimation_matches(FormatConfig::standard(), p0, p1, None),
+            "Standard has no shared pile"
         );
     }
 }

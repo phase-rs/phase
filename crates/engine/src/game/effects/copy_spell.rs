@@ -497,7 +497,7 @@ fn copy_controller(ability: &ResolvedAbility) -> PlayerId {
 /// 702.144a (Demonstrate) sets `copier: Opponent` so a chosen opponent copies.
 /// With no target and no copier, the effect's controller copies
 /// (Twincast/Casualty/Replicate).
-fn resolve_copy_controller(state: &GameState, ability: &ResolvedAbility) -> PlayerId {
+pub(crate) fn resolve_copy_controller(state: &GameState, ability: &ResolvedAbility) -> PlayerId {
     if let Effect::CopySpell {
         copier: Some(cref), ..
     } = &ability.effect

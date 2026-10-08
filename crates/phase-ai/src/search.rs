@@ -698,8 +698,9 @@ fn large_board_main_phase_has_no_development_sources(
         return false;
     }
 
+    // CR 404.1: the graveyard `graveyard_of` resolves, shared or the seat's own.
     let player = &state.players[ai_player.0 as usize];
-    if !player.hand.is_empty() || !player.graveyard.is_empty() {
+    if !player.hand.is_empty() || !state.graveyard_of(ai_player).is_empty() {
         return false;
     }
     if engine::game::planechase::can_roll_planar_die(state, ai_player) {
@@ -1269,8 +1270,13 @@ pub fn fallback_action(
     // Pending-cast states can always be escaped with CancelCast (CR 601.2).
     // Check this before the exhaustive match so every pending-cast variant
     // is covered without repeating CancelCast per-arm.
-    if state.waiting_for.allows_cancel_cast()
-        || state.allows_cancel_cast
+    //
+    // Pending-cast-only by construction (`has`, not `allows`): pre-cost
+    // keyword-activation announcements (CR 602.2b) allow cancel without a
+    // pending cast and fall through to the dedicated silent arms below. This
+    // keeps the gap-error signal pure for genuine castability dead-ends.
+    if state.waiting_for.has_pending_cast()
+        || state.has_pending_cast
         || (matches!(state.waiting_for, WaitingFor::DistributeAmong { .. })
             && state.pending_cast.is_some())
     {
@@ -1501,6 +1507,10 @@ pub fn fallback_action(
         // CR 701.71a + CR 608.2d: empower Jace chooses exactly one Jace token;
         // every candidate is legal, so take the first.
         WaitingFor::EmpowerJaceChoice { choices, .. } => choices
+            .first()
+            .map(|&id| GameAction::SelectCards { cards: vec![id] }),
+        // CR 405.3 + CR 707.10: any offered spell may supply the next copy.
+        WaitingFor::SpellCopyOrderChoice { choices, .. } => choices
             .first()
             .map(|&id| GameAction::SelectCards { cards: vec![id] }),
         // CR 705.1 + CR 614.1a: Krark's Thumb keep choice — keep the first
@@ -1735,13 +1745,25 @@ pub fn fallback_action(
                 .find(|entry| entry.player == contract.semantic_owner)?;
             match &entry.phase {
                 MulliganDecisionPhase::Declare => {
-                    Some(match first_serum_powder_in_hand(state, entry.player) {
-                        Some(object_id) => GameAction::MulliganDecision {
-                            choice: MulliganChoice::UseSerumPowder { object_id },
-                        },
-                        None => GameAction::MulliganDecision {
-                            choice: MulliganChoice::Keep,
-                        },
+                    // CR 103.5: the engine-issued free reveal takes precedence
+                    // over a Powder, which is a one-shot card.
+                    let free_reveal = issued(|action| {
+                        matches!(
+                            action,
+                            GameAction::MulliganDecision {
+                                choice: MulliganChoice::FreeReveal
+                            }
+                        )
+                    });
+                    free_reveal.or_else(|| {
+                        Some(match first_serum_powder_in_hand(state, entry.player) {
+                            Some(object_id) => GameAction::MulliganDecision {
+                                choice: MulliganChoice::UseSerumPowder { object_id },
+                            },
+                            None => GameAction::MulliganDecision {
+                                choice: MulliganChoice::Keep,
+                            },
+                        })
                     })
                 }
                 MulliganDecisionPhase::BottomCards { .. } => issued_selection(contract),
@@ -2802,7 +2824,7 @@ fn demand_saturating_mana_combination(
 
 fn deck_color_demand(state: &GameState, player: PlayerId) -> [u32; 5] {
     let mut demand = [0; 5];
-    let Some(pool) = state.deck_pools.iter().find(|pool| pool.player == player) else {
+    let Some(pool) = state.deck_pool_of(player) else {
         return demand;
     };
     for entry in pool.current_main.iter() {
@@ -3758,8 +3780,21 @@ pub(crate) fn deterministic_choice(
                 // strictly better action than a mulligan (no mulligan count
                 // increment). When the registry says keep, take the keep — don't
                 // burn a Powder on a hand the policies already endorsed.
+                // CR 103.5: a free reveal the engine issued is free and
+                // repeatable while the hand qualifies, so it precedes the
+                // one-shot Powder; the AI never re-derives the hand predicate.
+                let free_reveal_issued = actions.iter().any(|action| {
+                    matches!(
+                        action,
+                        GameAction::MulliganDecision {
+                            choice: MulliganChoice::FreeReveal
+                        }
+                    )
+                });
                 let choice = if decision.keep {
                     MulliganChoice::Keep
+                } else if free_reveal_issued {
+                    MulliganChoice::FreeReveal
                 } else if let Some(object_id) = first_serum_powder_in_hand(state, player) {
                     MulliganChoice::UseSerumPowder { object_id }
                 } else {
@@ -6256,6 +6291,146 @@ mod tests {
         ));
     }
 
+    /// Cancel-01: `fallback_action` in a keyword-activation selection state
+    /// returns the engine-issued `CancelCast` WITHOUT the pending-cast gap
+    /// error — the dead-end branch is pending-cast-only, so keyword states
+    /// fall through to their dedicated silent arms. The paired positive
+    /// control proves the capture instrument fires on a genuine dead-end.
+    /// Fails if the branch still keys on `allows_cancel_cast` (the keyword
+    /// case then routes through the gap-error log) or if the harness is
+    /// vacuous (the control captures nothing).
+    #[test]
+    fn fallback_keyword_cancel_stays_silent_while_dead_end_logs_gap() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone, Default)]
+        struct EventSink(Arc<Mutex<Vec<String>>>);
+        impl<S> tracing_subscriber::Layer<S> for EventSink
+        where
+            S: tracing::Subscriber,
+        {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                struct Visitor<'a>(&'a mut String);
+                impl tracing::field::Visit for Visitor<'_> {
+                    fn record_debug(
+                        &mut self,
+                        _field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        use std::fmt::Write;
+                        let _ = write!(self.0, "{value:?} ");
+                    }
+                }
+                let mut text = String::new();
+                event.record(&mut Visitor(&mut text));
+                self.0.lock().expect("sink lock").push(text);
+            }
+        }
+
+        fn captured_events(f: impl FnOnce()) -> Vec<String> {
+            let sink = EventSink::default();
+            let subscriber = tracing_subscriber::registry().with(sink.clone());
+            tracing::subscriber::with_default(subscriber, f);
+            let events = sink.0.lock().expect("sink lock").clone();
+            events
+        }
+
+        // Keyword case: a real CrewVehicle prompt reached through production.
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let vehicle = {
+            let mut builder = scenario.add_creature(P0, "Silent Test Vehicle", 6, 5);
+            builder
+                .as_artifact()
+                .with_subtypes(vec!["Vehicle"])
+                .with_keyword(Keyword::Crew {
+                    power: 3,
+                    once_per_turn: None,
+                });
+            builder.id()
+        };
+        scenario.add_creature(P0, "Pilot A", 2, 2);
+        scenario.add_creature(P0, "Pilot B", 2, 2);
+        let mut runner = scenario.build();
+        runner
+            .act(GameAction::CrewVehicle {
+                vehicle_id: vehicle,
+                creature_ids: vec![],
+            })
+            .expect("crew entry must reach its selection prompt");
+        let state = runner.state().clone();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::CrewVehicle { .. }),
+            "reach guard: the real prompt must be pending, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            test_contract(&state).contains_action(&state, &GameAction::CancelCast),
+            "reach guard: the contract domain must contain the CancelCast exit"
+        );
+
+        let events = captured_events(|| {
+            let action = fallback_action_default(&state).expect("keyword fallback must be issued");
+            assert_eq!(
+                action,
+                GameAction::CancelCast,
+                "keyword fallback must take the CancelCast exit"
+            );
+        });
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.contains("can_cast_object_now has a gap")),
+            "keyword fallback must not log the pending-cast gap error; got {events:?}"
+        );
+
+        // Positive control: a genuine pending-cast dead-end MUST log the gap.
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = scenario
+            .add_spell_to_hand(P0, "Control Spell", true)
+            .with_mana_cost(ManaCost::generic(1))
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            )],
+        );
+        let mut runner = scenario.build();
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(spell.0),
+                targets: vec![],
+                payment_mode: CastPaymentMode::Manual,
+            })
+            .expect("manual cast must enter its mana-payment step");
+        let state = runner.state().clone();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ManaPayment { .. }),
+            "reach guard: the control must park in a pending-cast state, got {:?}",
+            state.waiting_for
+        );
+        let events = captured_events(|| {
+            let _ = fallback_action_default(&state);
+        });
+        assert!(
+            events
+                .iter()
+                .any(|event| event.contains("can_cast_object_now has a gap")),
+            "positive control must capture the gap error; got {events:?}"
+        );
+    }
+
     #[test]
     fn chooser_keeps_historical_return_behavior_with_complete_domain() {
         let mut scenario = GameScenario::new();
@@ -8073,6 +8248,163 @@ mod tests {
         );
     }
 
+    const PREDICT_POOL: [(&str, u32); 5] = [
+        ("Brainstorm", 2),
+        ("Island", 1),
+        ("Opt", 1),
+        ("Memory Lapse", 1),
+        ("Control Magic", 1),
+    ];
+
+    /// Dandan: P0 resolves Predict up to its card-name prompt, with the registered pool
+    /// `PREDICT_POOL`, P1 holding `opp_hand` and the shared pile `pile`.
+    fn predict_card_name_prompt(opp_hand: &[&str], pile: &[&str]) -> GameState {
+        use engine::types::format::FormatConfig;
+        use engine::types::game_state::PlayerDeckPool;
+
+        let db = integration_card_db();
+        let mut scenario = GameScenario::new_with_format(FormatConfig::dandan(), 2, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        let predict = scenario.add_real_card(P0, "Predict", Zone::Hand, &db);
+        scenario.with_mana_pool(
+            P0,
+            [ManaType::Blue, ManaType::Colorless]
+                .into_iter()
+                .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        for (i, name) in opp_hand.iter().enumerate() {
+            create_object(
+                state,
+                CardId(2000 + i as u64),
+                P1,
+                name.to_string(),
+                Zone::Hand,
+            );
+        }
+        for (i, name) in pile.iter().enumerate() {
+            create_object(
+                state,
+                CardId(3000 + i as u64),
+                P1,
+                name.to_string(),
+                Zone::Library,
+            );
+        }
+        state.deck_pools.push(PlayerDeckPool {
+            player: P0,
+            current_main: Arc::new(
+                PREDICT_POOL
+                    .iter()
+                    .map(|(name, count)| engine::game::deck_loading::DeckEntry {
+                        card: engine::types::card::CardFace {
+                            name: name.to_string(),
+                            mana_cost: ManaCost::zero(),
+                            ..Default::default()
+                        },
+                        count: *count,
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        });
+        state.all_card_names = PREDICT_POOL
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .chain(["Predict".to_string()])
+            .collect::<Vec<_>>()
+            .into();
+        runner.cast(predict).target_player(P0).resolve();
+        let state = runner.state().clone();
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::NamedChoice { player: P0, .. }
+            ),
+            "reach: Predict's card-name prompt, got {:?}",
+            state.waiting_for
+        );
+        assert!(state.players[1].library.is_empty(), "reach: shared pile");
+        state
+    }
+
+    fn issued_card_names(state: &GameState) -> Vec<String> {
+        engine::ai_support::candidate_actions(state)
+            .into_iter()
+            .filter_map(|c| match c.action {
+                GameAction::ChooseOption { choice } => Some(choice),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn predict_card_name_domain_is_constant_across_determinized_worlds() {
+        // Unobserved two-copy name Brainstorm: one copy in P1's hand and one in the pile,
+        // or both in the pile.
+        let split = predict_card_name_prompt(
+            &["Brainstorm", "Island", "Opt"],
+            &["Brainstorm", "Memory Lapse", "Control Magic"],
+        );
+        let pooled = predict_card_name_prompt(
+            &["Island", "Opt", "Memory Lapse"],
+            &["Brainstorm", "Brainstorm", "Control Magic"],
+        );
+        let reference = issued_card_names(&split);
+        assert!(
+            reference.len() > 1 && reference.iter().any(|n| n == "Brainstorm"),
+            "reach: the domain is a real choice containing the unobserved name: {reference:?}"
+        );
+        assert_eq!(issued_card_names(&pooled), reference, "actual states agree");
+
+        let mut redistributed = 0;
+        for seed in 0..16 {
+            let mut rng = ChaCha20Rng::seed_from_u64(seed);
+            let sampled = crate::determinize::determinize_opponents(&split, P0, &mut rng);
+            let pile_names = |s: &GameState| -> std::collections::BTreeSet<String> {
+                s.library_of(P0)
+                    .iter()
+                    .map(|id| s.objects[id].name.clone())
+                    .collect()
+            };
+            if pile_names(&sampled) != pile_names(&split) {
+                redistributed += 1;
+            }
+            assert_eq!(issued_card_names(&sampled), reference, "seed {seed}");
+        }
+        assert!(redistributed > 0, "reach: determinization moved pile names");
+    }
+
+    #[test]
+    fn predict_card_name_choice_is_issued_under_k2() {
+        let state = predict_card_name_prompt(
+            &["Brainstorm", "Island", "Opt"],
+            &["Brainstorm", "Memory Lapse", "Control Magic"],
+        );
+        let contract = AiDecisionContract::issue(&state, P0);
+        assert!(contract.candidates.len() > 1, "reach: a real domain");
+        let session = AiSession::arc_from_game(&state);
+        let mut config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(2);
+        config.search.determinization_samples = 2;
+        let scored = score_candidates_with_session(&state, P0, &config, &session);
+        assert!(
+            !scored.is_empty(),
+            "reach: the K=2 ensemble scored the domain"
+        );
+        assert!(scored
+            .iter()
+            .all(|(a, _)| contract.contains_action(&state, a)));
+        let mut rng = SmallRng::seed_from_u64(1);
+        let chosen = choose_action_with_session(&state, P0, &config, &mut rng, &session)
+            .expect("an issued card name");
+        assert!(contract.contains_action(&state, &chosen));
+    }
+
     #[test]
     fn returns_none_for_no_legal_actions() {
         let mut state = make_state();
@@ -8503,6 +8835,130 @@ mod tests {
         );
     }
 
+    fn colored_list(
+        name: &str,
+        shard: ManaCostShard,
+    ) -> Vec<engine::game::deck_loading::DeckEntry> {
+        vec![engine::game::deck_loading::DeckEntry {
+            card: engine::types::card::CardFace {
+                name: name.to_string(),
+                mana_cost: ManaCost::Cost {
+                    shards: vec![shard],
+                    generic: 0,
+                },
+                ..Default::default()
+            },
+            count: 4,
+        }]
+    }
+
+    fn loaded_state(
+        format: engine::types::format::FormatConfig,
+        mine: Vec<engine::game::deck_loading::DeckEntry>,
+        theirs: Vec<engine::game::deck_loading::DeckEntry>,
+    ) -> GameState {
+        use engine::game::deck_loading::{load_deck_into_state, DeckPayload, PlayerDeckPayload};
+        let mut state = GameState::new(format, 2, 7);
+        load_deck_into_state(
+            &mut state,
+            &DeckPayload {
+                player: PlayerDeckPayload {
+                    main_deck: mine,
+                    ..Default::default()
+                },
+                opponent: PlayerDeckPayload {
+                    main_deck: theirs,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        state
+    }
+
+    #[test]
+    fn deck_color_demand_reads_the_shared_pool_for_both_seats() {
+        let state = loaded_state(
+            engine::types::format::FormatConfig::dandan(),
+            colored_list("Red Card", ManaCostShard::Red),
+            colored_list("Green Card", ManaCostShard::Green),
+        );
+        assert_eq!(state.deck_pools.len(), 1, "reach: one pool");
+        let red = mana_type_index(ManaType::Red).unwrap();
+        let holder = deck_color_demand(&state, PlayerId(0));
+        assert_eq!(holder[red], 4, "reach: the holder's pool is red");
+        assert_eq!(deck_color_demand(&state, PlayerId(1)), holder);
+    }
+
+    #[test]
+    fn deck_color_demand_keeps_each_seats_own_pool_in_standard() {
+        let state = loaded_state(
+            engine::types::format::FormatConfig::standard(),
+            colored_list("Red Card", ManaCostShard::Red),
+            colored_list("Green Card", ManaCostShard::Green),
+        );
+        let green = mana_type_index(ManaType::Green).unwrap();
+        assert_eq!(state.deck_pools.len(), 2, "reach: two pools");
+        assert_eq!(deck_color_demand(&state, PlayerId(1))[green], 4);
+        assert_eq!(deck_color_demand(&state, PlayerId(0))[green], 0);
+    }
+
+    fn large_board_state(format: engine::types::format::FormatConfig, ai: PlayerId) -> GameState {
+        let mut state = GameState::new(format, 2, 42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = ai;
+        state.priority_player = ai;
+        state.waiting_for = WaitingFor::Priority { player: ai };
+        for _ in 0..LARGE_BOARD_FAST_PRIORITY_BATTLEFIELD_OBJECTS {
+            add_creature(&mut state, PlayerId(0), 1, 1);
+        }
+        state
+    }
+
+    #[test]
+    fn large_board_shared_graveyard_is_a_development_source_for_either_seat() {
+        use engine::types::format::FormatConfig;
+        for ai in [PlayerId(0), PlayerId(1)] {
+            let mut state = large_board_state(FormatConfig::dandan(), ai);
+            assert!(
+                large_board_main_phase_has_no_development_sources(&state, ai),
+                "reach: only the graveyard conjunct can refuse"
+            );
+            create_object(
+                &mut state,
+                CardId(900),
+                PlayerId(0),
+                "Pile Card".to_string(),
+                Zone::Graveyard,
+            );
+            assert_eq!(state.graveyard_of(ai).len(), 1);
+            assert!(!large_board_main_phase_has_no_development_sources(
+                &state, ai
+            ));
+        }
+    }
+
+    #[test]
+    fn large_board_own_graveyard_is_a_development_source_in_standard() {
+        use engine::types::format::FormatConfig;
+        let ai = PlayerId(1);
+        let mut state = large_board_state(FormatConfig::standard(), ai);
+        assert!(large_board_main_phase_has_no_development_sources(
+            &state, ai
+        ));
+        create_object(
+            &mut state,
+            CardId(900),
+            ai,
+            "Own Card".to_string(),
+            Zone::Graveyard,
+        );
+        assert!(!large_board_main_phase_has_no_development_sources(
+            &state, ai
+        ));
+    }
+
     fn spell_target_selection_state(
         mut state: GameState,
         current_legal_targets: Vec<TargetRef>,
@@ -8611,6 +9067,234 @@ mod tests {
             .into_iter()
             .map(|candidate| candidate.action)
             .collect()
+    }
+
+    /// A Dandan mulligan prompt where P0 holds exactly the named real cards.
+    fn dandan_mulligan_state(hand: &[&str], p0_count: u8) -> GameState {
+        use engine::game::scenario_db::GameScenarioDbExt;
+        use engine::types::format::FormatConfig;
+        use engine::types::game_state::MulliganDecisionEntry;
+
+        let db = integration_card_db();
+        let mut scenario = GameScenario::new_with_format(FormatConfig::dandan(), 2, 7);
+        for name in hand {
+            scenario.add_real_card(P0, name, Zone::Hand, &db);
+        }
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.waiting_for = WaitingFor::MulliganDecision {
+            pending: [(P0, p0_count), (P1, 0)]
+                .into_iter()
+                .map(|(player, mulligan_count)| MulliganDecisionEntry {
+                    player,
+                    mulligan_count,
+                    phase: MulliganDecisionPhase::Declare,
+                })
+                .collect(),
+            free_first_mulligan: false,
+            declared: Vec::new(),
+        };
+        state.clone()
+    }
+
+    const NO_LANDS: [&str; 7] = [
+        "Dandân",
+        "Memory Lapse",
+        "Brainstorm",
+        "Control Magic",
+        "Telling Time",
+        "Predict",
+        "Magical Hack",
+    ];
+    const KEEPABLE: [&str; 7] = [
+        "Island",
+        "Island",
+        "Island",
+        "Dandân",
+        "Memory Lapse",
+        "Brainstorm",
+        "Control Magic",
+    ];
+
+    fn registry_keeps(state: &GameState, player: PlayerId) -> bool {
+        let hand: Vec<ObjectId> = state.players[player.0 as usize]
+            .hand
+            .iter()
+            .copied()
+            .collect();
+        let count = match &state.waiting_for {
+            WaitingFor::MulliganDecision { pending, .. } => pending
+                .iter()
+                .find(|e| e.player == player)
+                .map_or(0, |e| e.mulligan_count),
+            _ => 0,
+        };
+        crate::policies::mulligan::MulliganRegistry::default()
+            .evaluate_hand(
+                &hand,
+                state,
+                &crate::features::DeckFeatures::default(),
+                &crate::plan::PlanSnapshot::default(),
+                crate::policies::mulligan::turn_order_for(state, player),
+                count,
+            )
+            .keep
+    }
+
+    fn free_reveal_action() -> GameAction {
+        GameAction::MulliganDecision {
+            choice: MulliganChoice::FreeReveal,
+        }
+    }
+
+    fn mulligan_action(choice: MulliganChoice) -> GameAction {
+        GameAction::MulliganDecision { choice }
+    }
+
+    #[test]
+    fn mulligan_selects_the_engine_issued_free_reveal_and_never_derives_it() {
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let state = dandan_mulligan_state(&NO_LANDS, 0);
+        assert!(!registry_keeps(&state, P0), "reach: the registry declines");
+        let issued = issued_actions(&state, P0);
+        assert!(
+            issued.contains(&free_reveal_action()),
+            "reach: engine issued it"
+        );
+
+        assert_eq!(
+            deterministic_choice(&state, P0, &config, &issued, None),
+            Some(free_reveal_action())
+        );
+
+        // Same hand and count, the engine withholds the candidate: the AI does not
+        // re-derive the hand predicate.
+        let withheld: Vec<GameAction> = issued
+            .iter()
+            .filter(|a| **a != free_reveal_action())
+            .cloned()
+            .collect();
+        assert_eq!(
+            deterministic_choice(&state, P0, &config, &withheld, None),
+            Some(mulligan_action(MulliganChoice::Mulligan))
+        );
+
+        // After a regular mulligan the engine no longer offers it.
+        let after_mulligan = dandan_mulligan_state(&NO_LANDS, 1);
+        let issued = issued_actions(&after_mulligan, P0);
+        assert!(!issued.contains(&free_reveal_action()));
+        assert!(
+            !registry_keeps(&after_mulligan, P0),
+            "reach: still declined"
+        );
+        assert_eq!(
+            deterministic_choice(&after_mulligan, P0, &config, &issued, None),
+            Some(mulligan_action(MulliganChoice::Mulligan))
+        );
+    }
+
+    #[test]
+    fn mulligan_keeps_a_hand_the_registry_endorses_even_when_a_free_reveal_is_issued() {
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let state = dandan_mulligan_state(&KEEPABLE, 0);
+        assert!(
+            registry_keeps(&state, P0),
+            "reach: the registry endorses it"
+        );
+        let mut issued = issued_actions(&state, P0);
+        issued.push(free_reveal_action());
+
+        assert_eq!(
+            deterministic_choice(&state, P0, &config, &issued, None),
+            Some(mulligan_action(MulliganChoice::Keep))
+        );
+    }
+
+    #[test]
+    fn mulligan_prefers_a_free_reveal_to_a_serum_powder() {
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let mut hand = NO_LANDS[..6].to_vec();
+        hand.push("Serum Powder");
+        let state = dandan_mulligan_state(&hand, 0);
+        let powder = first_serum_powder_in_hand(&state, P0).expect("reach: Powder in hand");
+        let issued = issued_actions(&state, P0);
+        let powder_action = mulligan_action(MulliganChoice::UseSerumPowder { object_id: powder });
+        assert!(issued.contains(&free_reveal_action()) && issued.contains(&powder_action));
+        assert!(!registry_keeps(&state, P0));
+
+        assert_eq!(
+            deterministic_choice(&state, P0, &config, &issued, None),
+            Some(free_reveal_action())
+        );
+        let contract = AiDecisionContract::issue(&state, P0);
+        assert_eq!(
+            fallback_action(&state, &config, &contract),
+            Some(free_reveal_action())
+        );
+
+        // Count 1: the engine withholds the free reveal and the Powder is next.
+        let after_mulligan = dandan_mulligan_state(&hand, 1);
+        let contract = AiDecisionContract::issue(&after_mulligan, P0);
+        assert_eq!(
+            fallback_action(&after_mulligan, &config, &contract),
+            Some(powder_action)
+        );
+    }
+
+    #[test]
+    fn fallback_takes_an_issued_free_reveal_and_otherwise_keeps() {
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let state = dandan_mulligan_state(&NO_LANDS, 0);
+        let contract = AiDecisionContract::issue(&state, P0);
+        assert!(contract
+            .candidates
+            .iter()
+            .any(|c| c.action == free_reveal_action()));
+        assert_eq!(
+            fallback_action(&state, &config, &contract),
+            Some(free_reveal_action())
+        );
+
+        let after_mulligan = dandan_mulligan_state(&NO_LANDS, 1);
+        let contract = AiDecisionContract::issue(&after_mulligan, P0);
+        assert_eq!(
+            fallback_action(&after_mulligan, &config, &contract),
+            Some(mulligan_action(MulliganChoice::Keep))
+        );
+    }
+
+    /// Both seats driven by the AI through the real engine on the real 80-card pile:
+    /// every game leaves the mulligan, and the free reveal is actually taken.
+    #[test]
+    fn ai_pair_leaves_the_dandan_mulligan_taking_free_reveals() {
+        use engine::game::deck_loading::{load_and_hydrate_decks, DeckPayload};
+        use engine::game::engine::{apply, start_game_with_starting_player};
+        use engine::types::format::FormatConfig;
+
+        let db = integration_card_db();
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let mut free_reveals = 0;
+        for seed in 0..30 {
+            let mut state = GameState::new(FormatConfig::dandan(), 2, seed);
+            load_and_hydrate_decks(&mut state, &DeckPayload::default(), Some(&db));
+            start_game_with_starting_player(&mut state, P0);
+            for _ in 0..200 {
+                let WaitingFor::MulliganDecision { pending, .. } = &state.waiting_for else {
+                    break;
+                };
+                let seat = pending[0].player;
+                let issued = issued_actions(&state, seat);
+                let action = deterministic_choice(&state, seat, &config, &issued, None)
+                    .expect("the AI answers its mulligan prompt");
+                free_reveals += usize::from(action == free_reveal_action());
+                apply(&mut state, seat, action).expect("the engine accepts the AI's answer");
+            }
+            assert!(
+                !matches!(state.waiting_for, WaitingFor::MulliganDecision { .. }),
+                "seed {seed}: the mulligan must end"
+            );
+        }
+        assert!(free_reveals > 0, "reach: some opening hand qualified");
     }
 
     #[test]
@@ -12054,6 +12738,7 @@ mod tests {
                 },
             ],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
@@ -14486,6 +15171,7 @@ mod tests {
                     },
                 }],
                 free_first_mulligan: false,
+                declared: Vec::new(),
             }
         });
         push("OpeningHandBottomCards", &|state| {
@@ -15416,6 +16102,7 @@ mod tests {
                 },
             }],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
@@ -15476,6 +16163,7 @@ mod tests {
                 },
             ],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);

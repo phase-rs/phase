@@ -86,7 +86,7 @@ pub(crate) fn continue_exile_loop(
         .players
         .iter()
         .find(|player| player.id == controller)
-        .and_then(|player| player.library.front().copied())
+        .and_then(|player| state.library_of(player.id).front().copied())
     else {
         return finish_without_hit(state, controller, source_id, exiled_misses, events);
     };
@@ -126,7 +126,9 @@ pub(crate) fn complete_exile_loop_step(
             .players
             .iter()
             .find(|player| player.id == controller)
-            .is_some_and(|player| player.library.front().copied() == Some(current_card));
+            .is_some_and(|player| {
+                state.library_of(player.id).front().copied() == Some(current_card)
+            });
         return if current_card_is_still_top {
             finish_without_hit(state, controller, source_id, exiled_misses, events)
         } else {

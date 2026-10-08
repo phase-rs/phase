@@ -646,10 +646,15 @@ pub(crate) fn prepare_effective_search(
     for zone in &effective_zones {
         let zone_ids: Vec<_> = match zone {
             Zone::Library => match top_limit {
-                Some(limit) => owner.library.iter().take(limit as usize).copied().collect(),
-                None => owner.library.iter().copied().collect(),
+                Some(limit) => state
+                    .library_of(owner.id)
+                    .iter()
+                    .take(limit as usize)
+                    .copied()
+                    .collect(),
+                None => state.library_of(owner.id).iter().copied().collect(),
             },
-            Zone::Graveyard => owner.graveyard.iter().copied().collect(),
+            Zone::Graveyard => state.graveyard_of(owner.id).iter().copied().collect(),
             Zone::Hand => owner.hand.iter().copied().collect(),
             _ => Vec::new(),
         };

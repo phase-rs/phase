@@ -275,7 +275,25 @@ mod external_format_config_tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use engine::types::custom_format::CustomFormatId;
     use engine::types::format::RangeOfInfluenceConfig;
+
+    #[test]
+    fn best_of_three_ceiling_reads_the_format_axis_and_fails_closed() {
+        assert_eq!(
+            best_of_three_ceiling_or_bo1(Some(GameFormat::Standard)),
+            MatchType::Bo3
+        );
+        assert_eq!(
+            best_of_three_ceiling_or_bo1(Some(GameFormat::Custom(CustomFormatId(1)))),
+            MatchType::Bo3
+        );
+        assert_eq!(
+            best_of_three_ceiling_or_bo1(Some(GameFormat::Dandan)),
+            MatchType::Bo1
+        );
+        assert_eq!(best_of_three_ceiling_or_bo1(None), MatchType::Bo1);
+    }
 
     #[test]
     fn restore_refuses_only_legacy_paused_casting_variant_menu_without_face() {
@@ -1099,6 +1117,19 @@ pub fn max_deck_copies_for_format(name: &str, format_config: JsValue) -> JsValue
     })
 }
 
+/// The longest match structure `format` may be played as; the lobby offers Bo3 only when this is Bo3.
+#[wasm_bindgen(js_name = bestOfThreeCeilingForFormat)]
+pub fn best_of_three_ceiling_for_format(format: JsValue) -> JsValue {
+    to_js(&best_of_three_ceiling_or_bo1(
+        serde_wasm_bindgen::from_value::<GameFormat>(format).ok(),
+    ))
+}
+
+/// An undecodable format identifies no format whose ceiling admits Bo3, so it answers Bo1.
+fn best_of_three_ceiling_or_bo1(format: Option<GameFormat>) -> MatchType {
+    format.map_or(MatchType::Bo1, GameFormat::best_of_three_ceiling)
+}
+
 /// Whether the named card can serve as this format's command-zone leader.
 /// Reads the engine's MTGJSON-derived `CardFace` leadership fields and
 /// format-specific deck-validation predicates.
@@ -1146,7 +1177,8 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
             | GameFormat::FreeForAll
             | GameFormat::TwoHeadedGiant
             | GameFormat::Limited
-            | GameFormat::Freeform => false,
+            | GameFormat::Freeform
+            | GameFormat::Dandan => false,
             // Phase 1d wired a real custom-format deck-legality evaluator
             // (`evaluate_custom_format`), but it is scoped to non-command-zone
             // (constructed-shaped) custom formats — a command-zone custom
@@ -1900,10 +1932,9 @@ fn initialize_game_impl(
         // ends up with a deck while a missing seat would silently have an
         // empty library). Surface it as a hard error instead of starting.
         let empty_seats: Vec<u8> = state
-            .players
-            .iter()
-            .filter(|p| p.library.is_empty())
-            .map(|p| p.id.0)
+            .seats_with_empty_library()
+            .into_iter()
+            .map(|seat| seat.0)
             .collect();
         if !empty_seats.is_empty() {
             return to_js(&serde_json::json!({
@@ -2297,6 +2328,8 @@ pub fn get_filtered_game_state(viewer: u8) -> JsValue {
 pub fn get_legal_actions_js() -> JsValue {
     match with_state_mut(|state| {
         engine::game::layers::flush_layers(state);
+        // Seat-agnostic: carries no seat-only action (Dandan `FreeReveal`); a
+        // surface serving a seat calls `get_legal_actions_for_viewer_js`.
         let (actions, spell_costs, legal_actions_by_object) = legal_actions_full(state);
         let auto_pass = auto_pass_recommended(state, &actions);
         let end_continuous_effect_offers = end_continuous_effect_offers(&actions);
@@ -2312,9 +2345,8 @@ pub fn get_legal_actions_js() -> JsValue {
                 engine::game::interaction::object_action_payloads(&legal_actions_by_object),
             ),
             // CR 117.1: the UNSCOPED sibling is correct here and only here —
-            // this entry point takes no viewer and serves a single-player local
-            // surface with exactly one recipient. Every multi-recipient
-            // transport must call `activation_block_reasons_for_viewer`.
+            // this entry point takes no viewer and has no client consumer. Every
+            // transport serving a seat must call `activation_block_reasons_for_viewer`.
             activation_block_reasons: object_id_record(
                 engine::ai_support::activation_block_reasons(state),
             ),
@@ -4918,6 +4950,7 @@ mod tests {
                 },
             ],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
         let keep = GameAction::MulliganDecision {
             choice: engine::types::actions::MulliganChoice::Keep,

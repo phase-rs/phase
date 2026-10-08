@@ -2618,7 +2618,8 @@ fn evaluate_selected_format_summary(
         | GameFormat::Historic
         | GameFormat::Timeless
         | GameFormat::Pauper
-        | GameFormat::Freeform => quick_constructed_check(
+        | GameFormat::Freeform
+        | GameFormat::Dandan => quick_constructed_check(
             db,
             request,
             &format_rules,
@@ -3083,7 +3084,8 @@ fn evaluate_selected_format(
         | GameFormat::Historic
         | GameFormat::Timeless
         | GameFormat::Pauper
-        | GameFormat::Freeform => {
+        | GameFormat::Freeform
+        | GameFormat::Dandan => {
             let check = evaluate_constructed(
                 db,
                 request,
@@ -8997,6 +8999,107 @@ mod tests {
     /// ever drift, `momir_madness_snow_basics_pass` below catches it.
     fn momir_madness_deck() -> Vec<String> {
         crate::game::deck_loading::momir_fixed_deck_names()
+    }
+
+    fn dandan_request(main: Vec<String>, summary_only: bool) -> DeckCompatibilityRequest {
+        DeckCompatibilityRequest {
+            main_deck: main,
+            sideboard: Vec::new(),
+            commander: Vec::new(),
+            companion: Vec::new(),
+            planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
+            signature_spell: Vec::new(),
+            selected_format: Some(SelectedFormat::Tag(GameFormat::Dandan)),
+            selected_match_type: None,
+            player_count: default_player_count(),
+            summary_only,
+            draft_set_codes: Vec::new(),
+        }
+    }
+
+    /// Dandân's deck rules come from its format axes (exactly 80, no sideboard,
+    /// no commander slot, unlimited copies, no card pool), read by the shared
+    /// constructed validator on both dispatch paths.
+    #[test]
+    fn dandan_deck_compatibility_reads_the_format_axes_on_both_paths() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        for summary_only in [false, true] {
+            let reasons_of = |request: &DeckCompatibilityRequest| {
+                let result = evaluate_deck_compatibility(&db, request);
+                (
+                    result.selected_format_compatible,
+                    result.selected_format_reasons,
+                )
+            };
+
+            // Positive reach-guard: eighty copies of one nonbasic card pass, so
+            // the refusals below are measured against an accepted request.
+            let (compatible, reasons) =
+                reasons_of(&dandan_request(expand("Legal Standard", 80), summary_only));
+            assert_eq!(
+                compatible,
+                Some(true),
+                "summary_only={summary_only}: {reasons:?}"
+            );
+
+            let (compatible, reasons) =
+                reasons_of(&dandan_request(expand("Legal Standard", 79), summary_only));
+            assert_eq!(compatible, Some(false));
+            assert!(
+                reasons.iter().any(|r| r.contains("exactly 80")),
+                "summary_only={summary_only}: {reasons:?}"
+            );
+
+            // The pool is `AdmitsEveryCard`: a card no legality table admits is
+            // accepted, while the same list under Standard is refused for that card.
+            let (compatible, reasons) =
+                reasons_of(&dandan_request(expand("Not Standard", 80), summary_only));
+            assert_eq!(
+                compatible,
+                Some(true),
+                "summary_only={summary_only}: {reasons:?}"
+            );
+            let mut under_standard = dandan_request(expand("Not Standard", 80), summary_only);
+            under_standard.selected_format = Some(SelectedFormat::Tag(GameFormat::Standard));
+            let (compatible, reasons) = reasons_of(&under_standard);
+            assert_eq!(compatible, Some(false));
+            assert!(
+                reasons.iter().any(|r| r.contains("Not Standard")),
+                "summary_only={summary_only}: {reasons:?}"
+            );
+
+            let mut sideboarded = dandan_request(expand("Legal Standard", 80), summary_only);
+            sideboarded.sideboard = vec!["Legal Standard".to_string()];
+            let (compatible, reasons) = reasons_of(&sideboarded);
+            assert_eq!(compatible, Some(false));
+            assert!(
+                reasons
+                    .iter()
+                    .any(|r| r.contains("does not allow a sideboard")),
+                "summary_only={summary_only}: {reasons:?}"
+            );
+
+            let mut commanded = dandan_request(expand("Legal Standard", 80), summary_only);
+            commanded.commander = vec!["Legal Commander".to_string()];
+            let (compatible, reasons) = reasons_of(&commanded);
+            assert_eq!(compatible, Some(false));
+            assert!(
+                reasons
+                    .iter()
+                    .any(|r| r.contains("do not use a commander slot")),
+                "summary_only={summary_only}: {reasons:?}"
+            );
+
+            let mut unknown = expand("Legal Standard", 79);
+            unknown.push("No Such Card".to_string());
+            let (compatible, reasons) = reasons_of(&dandan_request(unknown, summary_only));
+            assert_eq!(compatible, Some(false));
+            assert!(
+                reasons.iter().any(|r| r.contains("No Such Card")),
+                "summary_only={summary_only}: {reasons:?}"
+            );
+        }
     }
 
     #[test]

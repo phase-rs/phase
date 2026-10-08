@@ -2140,7 +2140,7 @@ pub(crate) fn candidate_cycles_from_nodes(nodes: Vec<AbilityNode>) -> Vec<Candid
 
         out.push(CandidateCycle {
             faces: faces_in,
-            win_kind: classify_win_kind(CONTROLLER, &net),
+            win_kind: classify_win_kind(CONTROLLER, &net, None),
             net,
             unbounded,
             completeness,
@@ -2622,7 +2622,7 @@ mod tests {
         // DISCRIMINATION: the same net, with the victim AS controller, is
         // self-damage ⇒ Advantage (the controller-scoped classification).
         assert_eq!(
-            classify_win_kind(OPPONENT, &cands[0].net),
+            classify_win_kind(OPPONENT, &cands[0].net, None),
             WinKind::Advantage,
             "the same damage, with the victim as controller, is self-damage (Advantage)"
         );

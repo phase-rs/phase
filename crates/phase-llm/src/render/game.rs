@@ -93,8 +93,8 @@ fn push_players(out: &mut String, state: &GameState, viewer: PlayerId) {
         let mut facts = vec![
             format!("{} life", player.life),
             format!("{} cards in hand", player.hand.len()),
-            format!("{} cards in library", player.library.len()),
-            format!("{} cards in graveyard", player.graveyard.len()),
+            format!("{} cards in library", state.library_of(player.id).len()),
+            format!("{} cards in graveyard", state.graveyard_of(player.id).len()),
         ];
         if player.poison_counters > 0 {
             facts.push(format!("{} poison", player.poison_counters));
@@ -228,8 +228,8 @@ fn push_hand(
 fn push_graveyards(out: &mut String, state: &GameState, viewer: PlayerId) {
     out.push_str("\n--- GRAVEYARDS ---\n");
     for player in &state.players {
-        let names: Vec<String> = player
-            .graveyard
+        let names: Vec<String> = state
+            .graveyard_of(player.id)
             .iter()
             .filter_map(|id| object_name(state, *id))
             .collect();
@@ -611,5 +611,66 @@ mod tests {
     fn the_viewers_seat_reads_as_you_and_others_by_number() {
         assert_eq!(seat_label(PlayerId(1), PlayerId(1)), "You");
         assert_eq!(seat_label(PlayerId(0), PlayerId(1)), "Player 0");
+    }
+
+    #[test]
+    fn the_shared_pile_renders_for_every_seat_through_the_viewer_filter() {
+        use engine::game::create_object;
+        use engine::game::visibility::filter_state_for_viewer;
+        use engine::types::format::FormatConfig;
+        use engine::types::identifiers::CardId;
+
+        for (format, viewer, other, shared) in [
+            (FormatConfig::dandan(), PlayerId(1), PlayerId(0), true),
+            (FormatConfig::dandan(), PlayerId(0), PlayerId(1), true),
+            (FormatConfig::standard(), PlayerId(1), PlayerId(0), false),
+        ] {
+            let mut state = GameState::new(format, 2, 3);
+            // Standard: the staged cards belong to the viewer's own zones.
+            let holder = if shared { PlayerId(0) } else { viewer };
+            for (id, name) in ["Island", "Brainstorm", "Mental Note"]
+                .into_iter()
+                .enumerate()
+            {
+                create_object(
+                    &mut state,
+                    CardId(id as u64),
+                    holder,
+                    name.to_string(),
+                    Zone::Library,
+                );
+            }
+            create_object(
+                &mut state,
+                CardId(9),
+                holder,
+                "Memory Lapse".to_string(),
+                Zone::Graveyard,
+            );
+            let visible = filter_state_for_viewer(&state, viewer);
+            let board = render_board(&visible, viewer, None, &[], &GameRenderOptions::default());
+
+            let line = |label: &str| {
+                board
+                    .lines()
+                    .find(|l| l.starts_with(&format!("{label}: ")) && l.contains("life"))
+                    .unwrap_or_else(|| panic!("no players line for {label} in\n{board}"))
+                    .to_string()
+            };
+            assert!(
+                line("You").contains("3 cards in library"),
+                "{viewer:?} shared={shared}: {board}"
+            );
+            let other_line = line(&format!("Player {}", other.0));
+            assert_eq!(
+                other_line.contains("3 cards in library"),
+                shared,
+                "{viewer:?}: the other seat reads the same pile only when shared"
+            );
+            assert!(
+                board.contains("You: Memory Lapse"),
+                "{viewer:?} shared={shared}: the viewer's graveyard line"
+            );
+        }
     }
 }
