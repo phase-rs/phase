@@ -1701,6 +1701,10 @@
       "title": "Jace stärken",
       "subtitle": "Wähle einen Jace-Spielstein, den du kontrollierst, für +{{count}} Loyalität"
     },
+    "spellCopyOrder": {
+      "title": "Kopien ordnen",
+      "subtitle": "Wähle den Zauberspruch, dessen Kopie als Nächstes auf den Stapel kommt"
+    },
     "collectEvidence": {
       "title": "Beweise sammeln",
       "subtitle": "Schicke Karten aus deinem Friedhof mit einem Gesamtmanawert von {{minimum}} oder mehr ins Exil"

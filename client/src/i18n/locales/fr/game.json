@@ -1701,6 +1701,10 @@
       "title": "Renforcer Jace",
       "subtitle": "Choisissez un jeton Jace que vous contrôlez pour qu'il gagne +{{count}} de loyauté"
     },
+    "spellCopyOrder": {
+      "title": "Ordonner les copies",
+      "subtitle": "Choisissez le sort dont la copie va ensuite sur la pile"
+    },
     "collectEvidence": {
       "title": "Collecter des preuves",
       "subtitle": "Exilez des cartes de votre cimetière dont la valeur de mana totale est {{minimum}} ou plus"

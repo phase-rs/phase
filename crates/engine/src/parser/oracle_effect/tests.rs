@@ -51825,15 +51825,12 @@ fn a_printed_cap_reaching_the_tail_branches_is_refused() {
 /// CR 115.1 + CR 601.2c: an "up to one target ..." cast whose typed per-slot
 /// filters no cast shape can carry reaches the bare `Any` fallback; it fails
 /// closed with the untyped-target gap instead of granting a cast of any card
-/// (Finale of Promise, Gale, Waterdeep Prodigy). A typed single-target cast
-/// still lowers to a real `CastFromZone`.
+/// (Gale, Waterdeep Prodigy). A typed single-target cast still lowers to a
+/// real `CastFromZone`. (Finale of Promise's two typed slots now lower — see
+/// `a_free_cast_slot_list_keeps_one_link_per_slot_under_one_window`.)
 #[test]
 fn an_untyped_cast_target_fails_closed_and_a_typed_one_lowers() {
     for (name, text) in [
-        (
-            "Finale of Promise",
-            "you may cast up to one target instant card and/or up to one target sorcery card from your graveyard",
-        ),
         (
             "Gale, Waterdeep Prodigy",
             "you may cast up to one target card of the other type from your graveyard",
@@ -79341,14 +79338,15 @@ fn choose_target_declaration_list_keeps_its_consuming_instruction() {
     );
 }
 
-/// CR 601.2c: a slot whose clause lowers to the untyped `Any` filter is not
-/// copied into the chain; the whole list declines to the single-clause path,
-/// which itself fails closed on the untyped cast target rather than fabricating
-/// any cast link.
+/// CR 601.2c: a slot whose clause does not lower to a typed cast ("card of the
+/// other type") is not copied into the chain; the whole list declines to the
+/// single-clause path, which itself fails closed on the untyped cast target
+/// rather than fabricating any cast link — not even for the slot that would
+/// lower on its own.
 #[test]
-fn multi_slot_list_declines_when_a_slot_lowers_to_any() {
+fn multi_slot_list_declines_when_a_slot_does_not_lower() {
     let def = parse_effect_chain(
-        "Cast up to one target instant card and/or up to one target sorcery card from your graveyard without paying their mana costs.",
+        "Cast up to one target instant card and/or up to one target card of the other type from your graveyard without paying their mana costs.",
         AbilityKind::Spell,
     );
     let effects = collect_chain_effects(&def);
@@ -81079,4 +81077,102 @@ fn self_cost_modification_after_closed_quote_is_its_own_chunk() {
 
     let anaphoric = chunk_texts(&format!("{grant} The token is goaded."));
     assert_eq!(anaphoric.len(), 1, "{anaphoric:?}");
+}
+
+const FINALE_OF_PROMISE: &str = "You may cast up to one target instant card and/or up to one target sorcery card from your graveyard each with mana value X or less without paying their mana costs. If a spell cast this way would be put into your graveyard, exile it instead. If X is 10 or more, copy each of those spells twice. You may choose new targets for the copies.";
+
+fn graveyard_cast_slot(card_type: TypeFilter) -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::new(card_type)
+            .controller(ControllerRef::You)
+            .properties(vec![
+                FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                },
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                },
+            ]),
+    )
+}
+
+/// CR 601.2c: "cast up to one target <card>" is a single targeted cast whose
+/// target count is zero or one, not a cast budget.
+#[test]
+fn cast_up_to_one_target_card_is_an_optional_single_target() {
+    let def = parse_effect_chain(
+        "You may cast up to one target instant card from your graveyard with mana value X or less without paying its mana cost.",
+        AbilityKind::Spell,
+    );
+    let Effect::CastFromZone {
+        target,
+        without_paying_mana_cost: true,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected a free CastFromZone, got {:?}", def.effect);
+    };
+    assert_eq!(*target, graveyard_cast_slot(TypeFilter::Instant));
+    assert_eq!(def.multi_target, Some(MultiTargetSpec::fixed(0, 1)));
+}
+
+/// CR 601.2c + CR 608.2g: a free "cast up to one target A and/or up to one
+/// target B" list keeps one link per slot; its shared "you may" is the cast
+/// window's decline, so the head asks nothing first.
+#[test]
+fn a_free_cast_slot_list_keeps_one_link_per_slot_under_one_window() {
+    let def = parse_effect_chain(FINALE_OF_PROMISE, AbilityKind::Spell);
+    assert!(
+        !def.optional,
+        "the window's decline carries the shared \"you may\""
+    );
+    let slots: Vec<&AbilityDefinition> =
+        std::iter::successors(Some(&def), |link| link.sub_ability.as_deref())
+            .take(2)
+            .collect();
+    assert_eq!(slots.len(), 2, "one link per slot");
+    for (slot, card_type) in slots.iter().zip([TypeFilter::Instant, TypeFilter::Sorcery]) {
+        let Effect::CastFromZone {
+            target,
+            without_paying_mana_cost: true,
+            ..
+        } = slot.effect.as_ref()
+        else {
+            panic!("expected a free cast slot, got {:?}", slot.effect);
+        };
+        assert_eq!(*target, graveyard_cast_slot(card_type));
+        assert_eq!(slot.multi_target, Some(MultiTargetSpec::fixed(0, 1)));
+    }
+}
+
+/// CR 707.10 + CR 608.2c: "copy each of those spells twice" is a member-driven
+/// copy over the chain's tracked set, run once per printed repetition.
+#[test]
+fn copy_each_of_those_spells_twice_is_a_member_loop_over_the_tracked_set() {
+    let def = parse_effect_chain(FINALE_OF_PROMISE, AbilityKind::Spell);
+    let copy = std::iter::successors(Some(&def), |link| link.sub_ability.as_deref())
+        .find(|link| matches!(link.effect.as_ref(), Effect::CopySpell { .. }))
+        .expect("the copy instruction");
+    assert!(matches!(
+        copy.effect.as_ref(),
+        Effect::CopySpell {
+            target: TargetFilter::ParentTarget,
+            retarget: CopyRetargetPermission::MayChooseNewTargets,
+            ..
+        }
+    ));
+    assert_eq!(
+        copy.repeat_for,
+        Some(QuantityExpr::Multiply {
+            factor: 2,
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            }),
+        })
+    );
 }

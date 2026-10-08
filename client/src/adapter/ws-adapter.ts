@@ -210,39 +210,43 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 117 — ManaColorSpent on AbilityCondition and TriggerCondition retypes `color` from a
+ * 118 — ManaColorSpent on AbilityCondition and TriggerCondition retypes `color` from a
  *      bare ManaColor to SpentColor (ColorWord or ManaSymbol), serialized in the ability
- *      and trigger definitions of GameState. A v116 peer cannot deserialize the tagged
- *      color. Wire 99 moves with it; no lobby frame names it.
- * 116 — DerivedViews gains `shared_piles`, the seat whose Player container stores a
- *      shared library and graveyard, omitted for a per-player format. A v115 peer
+ *      and trigger definitions of GameState. A v117 peer cannot deserialize the tagged
+ *      color. Wire 100 moves with it; no lobby frame names it.
+ * 117 — DerivedViews gains `shared_piles`, the seat whose Player container stores a
+ *      shared library and graveyard, omitted for a per-player format. A v116 peer
  *      drops the key and renders per-seat piles for a state whose other seat's
- *      containers are empty. Wire 98 moves with it; no lobby frame names it.
- * 115 — DrawSequenceFrame gains `dealer`, the in-game simultaneous-draw dealer,
+ *      containers are empty. Wire 99 moves with it; no lobby frame names it.
+ * 116 — DrawSequenceFrame gains `dealer`, the in-game simultaneous-draw dealer,
  *      serialized in the resolution frames behind RESOLUTION_STATE_WIRE_VERSION 5.
- *      A v114 peer refuses the version-5 resolution state. Wire 97 moves with it;
+ *      A v115 peer refuses the version-5 resolution state. Wire 98 moves with it;
  *      no lobby frame names it.
- * 114 — MulliganChoice gains `FreeReveal` and MulliganDeclaration gains `kind`:
+ * 115 — MulliganChoice gains `FreeReveal` and MulliganDeclaration gains `kind`:
  *      the Dandan free reveal mulligan, a MulliganDecision action payload and a
- *      held declaration in GameState.waiting_for. A v113 peer cannot parse the
+ *      held declaration in GameState.waiting_for. A v114 peer cannot parse the
  *      choice and would carry out a held free reveal as a regular mulligan.
- *      Wire 96 moves with it; no lobby frame names it.
- * 113 — WaitingFor::MulliganDecision gains `declared`, the mulligans recorded
+ *      Wire 97 moves with it; no lobby frame names it.
+ * 114 — WaitingFor::MulliganDecision gains `declared`, the mulligans recorded
  *      in a CR 103.5 declare round until every player has declared. It is
- *      serialized in GameState.waiting_for, so a v112 peer would drop it
- *      silently. Wire 95 moves with it; no lobby frame names it.
- * 112 — ResolvedZoneChangeCommand gains `rebound_from`, the owner a card had
+ *      serialized in GameState.waiting_for, so a v113 peer would drop it
+ *      silently. Wire 96 moves with it; no lobby frame names it.
+ * 113 — ResolvedZoneChangeCommand gains `rebound_from`, the owner a card had
  *      before a Hand entry from a shared zone rebound it to the taker
  *      (CR 108.3 as modified by the Dandan announcement). It is serialized
- *      inside GameState.resolved_rules_journal, so a v111 peer would drop it
- *      silently. Wire 94 moves with it; no lobby frame names it.
- * 111 — ContinuousModification gains `SubstituteTextWord` (CR 612.1), serialized
- *      inside GameState's transient continuous effects, so a v110 peer cannot
+ *      inside GameState.resolved_rules_journal, so a v112 peer would drop it
+ *      silently. Wire 95 moves with it; no lobby frame names it.
+ * 112 — ContinuousModification gains `SubstituteTextWord` (CR 612.1), serialized
+ *      inside GameState's transient continuous effects, so a v111 peer cannot
  *      parse the tag.
- * 110 — GameFormat gains `Dandan`. It serializes as its Display string and
- *      deserializes through FromStr, so a v109 peer cannot parse a GameState or
- *      a lobby FormatConfig that names it. Wire 92 and lobby 16 move with it;
+ * 111 — GameFormat gains `Dandan`. It serializes as its Display string and
+ *      deserializes through FromStr, so a v110 peer cannot parse a GameState or
+ *      a lobby FormatConfig that names it. Wire 93 and lobby 16 move with it;
  *      see PROTOCOL_VERSION in crates/lobby-broker/src/protocol.rs.
+ * 110 — GameState.deferredSpellDelivery holds a resolving spell's move to
+ *       its zone while it is paused on its own free-cast window. Older peers
+ *       would leave the spell on the stack in no zone; P2P moves in lockstep
+ *       (wire 92).
  * 109 — CR 201.5a granter binding: ObjectScope gains GrantingObject and
  *      SpecificObject, TargetFilter.GrantingObject gains `bound`, PlayerFilter
  *      gains GrantingObjectCaster, and ability, trigger, static, replacement, spell and
@@ -742,7 +746,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 117;
+export const PROTOCOL_VERSION = 118;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

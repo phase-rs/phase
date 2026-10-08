@@ -1701,6 +1701,10 @@
       "title": "Wzmocnij Jace'a",
       "subtitle": "Wybierz kontrolowany przez siebie żeton Jace'a, aby zyskał +{{count}} lojalności"
     },
+    "spellCopyOrder": {
+      "title": "Ustal kolejność kopii",
+      "subtitle": "Wybierz czar, którego kopia trafi teraz na stos"
+    },
     "collectEvidence": {
       "title": "Zbierz dowody",
       "subtitle": "Wygnaj karty ze swojego cmentarza o łącznej wartości many {{minimum}} lub większej"

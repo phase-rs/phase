@@ -8714,6 +8714,14 @@ pub(super) fn resume_pending_continuation_if_priority(
             }
         }
     }
+    // CR 608.2n + CR 608.2g: a spell held on the stack by its own free-cast
+    // window is put into its zone as the final part of its resolution, now
+    // that the window and everything parked behind it are done.
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && resolution_instructions_are_done(state)
+    {
+        super::stack::deliver_deferred_spell(state, events);
+    }
     settle_resolving_stack_entry_after_continuation_resume(state);
     Ok(())
 }
@@ -8755,6 +8763,15 @@ pub(super) fn settle_resolving_stack_entry_before_trigger_selection(state: &mut 
 /// by `resolving_carrier_parity_is_coherent` and reported on the settle path
 /// rather than gating it.
 fn resolving_stack_entry_can_settle(state: &GameState) -> bool {
+    resolution_instructions_are_done(state) && state.deferred_spell_delivery.is_none()
+}
+
+/// CR 608.2c + CR 608.2n: whether the carrier's resolution has followed all of
+/// its instructions. Its carrier still may not settle while a spell paused on
+/// its own free-cast window owes its final move (`deferred_spell_delivery`):
+/// only a site that can deliver that move (`stack::deliver_deferred_spell`,
+/// which needs the event stream) may do so first.
+pub(super) fn resolution_instructions_are_done(state: &GameState) -> bool {
     state.resolving_stack_entry.is_some()
         && state.active_ability_continuation().is_none()
         && state.active_spell_resolution().is_none()
@@ -11152,6 +11169,9 @@ fn apply_non_priority_pass_action(
             (identity, cleared)
         });
 
+    // CR 608.2g: whether this action answers a step of a spell being cast or
+    // an ability being activated — see the resolution settle below the match.
+    let answers_a_cast_step = state.waiting_for.has_pending_cast();
     // Validate and process action against current WaitingFor
     let waiting_for = match (&state.waiting_for.clone(), action) {
         (
@@ -15728,6 +15748,31 @@ fn apply_non_priority_pass_action(
                 action, waiting
             )));
         }
+    };
+
+    // CR 608.2g: a spell an effect lets a player cast during a resolution is
+    // cast "except no player receives priority after it's cast" — the
+    // resolving object finishes first. When an answer to a cast or activation
+    // step (target, mode, X, cost or mana payment) leaves a Priority window
+    // while an object is still resolving, the resolution is finished here,
+    // not at the next pass: a free-cast window whose last chosen spell needs a
+    // target (Invoke Calamity, Finale of Promise) otherwise handed its caster
+    // priority with the parent half-resolved — the state persistence rejects
+    // as `UnsettledPriorityResolution`. Scoped to answers of a cast or
+    // activation step, so an answer that leaves a provisional window on
+    // purpose (the untap choice of a deferred untap-step leave) keeps it;
+    // handlers that already resumed leave nothing parked, so this is a no-op
+    // for them.
+    let waiting_for = if answers_a_cast_step
+        && matches!(waiting_for, WaitingFor::Priority { .. })
+        && state.resolving_stack_entry.is_some()
+        && state.stack_resolution_session.is_none()
+    {
+        state.waiting_for = waiting_for;
+        resume_pending_continuation_if_priority(state, &mut events)?;
+        state.waiting_for.clone()
+    } else {
+        waiting_for
     };
 
     if let Some(((player, source_id, ability_index), cleared)) = target_settlement_acceptance {

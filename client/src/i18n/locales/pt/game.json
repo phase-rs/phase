@@ -1701,6 +1701,10 @@
       "title": "Fortalecer Jace",
       "subtitle": "Escolha uma ficha de Jace que você controla para receber +{{count}} de lealdade"
     },
+    "spellCopyOrder": {
+      "title": "Ordenar as cópias",
+      "subtitle": "Escolha a mágica cuja cópia vai para a pilha em seguida"
+    },
     "collectEvidence": {
       "title": "Coletar Evidências",
       "subtitle": "Exile cartas de seu cemitério com valor de mana total {{minimum}} ou maior"
