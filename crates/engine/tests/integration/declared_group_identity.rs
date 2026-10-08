@@ -695,7 +695,8 @@ fn d1_hexproof_granted_after_install_still_affects_the_player() {
         let reference = same_chain_run(kind(name, &dp(G)));
         let hexproof = payload_run(def(kind(name, &dp(G))), After::Nothing, After::Hexproof);
         assert_eq!(
-            hexproof.fingerprint, reference.fingerprint,
+            (&hexproof.fingerprint, &hexproof.last_wait),
+            (&reference.fingerprint, &reference.last_wait),
             "{name}: hexproof after install"
         );
     }
@@ -715,7 +716,8 @@ fn d1_player_eliminated_after_install_is_no_one() {
             "{name}: reach guard, alive P1 is affected"
         );
         assert_eq!(
-            gone.fingerprint, empty.fingerprint,
+            (&gone.fingerprint, &gone.last_wait),
+            (&empty.fingerprint, &empty.last_wait),
             "{name}: gone vs empty payload"
         );
     }
