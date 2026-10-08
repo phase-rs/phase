@@ -39,17 +39,7 @@ fn resolve_object_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<O
         // filter. No target is announced (`target_filter()` is `None` for the
         // `All` scope), so iterate the battlefield instead of `ability.targets`.
         EffectScope::All => {
-            let effective_filter =
-                crate::game::effects::resolved_object_filter(state, ability, filter);
-            let ctx = crate::game::filter::FilterContext::from_ability(ability);
-            state
-                .battlefield
-                .iter()
-                .copied()
-                .filter(|id| {
-                    crate::game::filter::matches_target_filter(state, *id, &effective_filter, &ctx)
-                })
-                .collect()
+            crate::game::effects::resolved_battlefield_population_ids(state, ability, filter)
         }
         EffectScope::Single => match filter {
             TargetFilter::LastCreated => state.last_created_token_ids.clone(),

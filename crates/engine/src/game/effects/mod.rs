@@ -362,6 +362,34 @@ pub(crate) fn resolved_battlefield_object_ids(
         .collect()
 }
 
+/// CR 115.10a + CR 608.2c + CR 608.2h: the battlefield objects an UNTARGETED
+/// population filter ("each creature you control") selects, determined once,
+/// when the effect resolves. The filter's context references ("you", the
+/// source) bind to the resolving ability (`FilterContext::from_ability`: "you"
+/// is the ability's controller, CR 109.5 + CR 113.8); CR 702.26b phased-out
+/// permanents are not listed.
+///
+/// Unlike [`resolved_battlefield_object_ids`], this never reads
+/// `ability.targets` as the subject: a mass form names no target, so object
+/// targets propagated through a chain must not narrow or replace the
+/// population. The ids are collected before the caller mutates anything.
+/// Shared by the `EffectScope::All` arms of the Suspect/Unsuspect and
+/// BecomePrepared/BecomeUnprepared resolvers.
+pub(crate) fn resolved_battlefield_population_ids(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    let effective_filter = resolved_object_filter(state, ability, filter);
+    let ctx = crate::game::filter::FilterContext::from_ability(ability);
+    crate::game::targeting::zone_object_ids(state, crate::types::zones::Zone::Battlefield)
+        .into_iter()
+        .filter(|id| {
+            crate::game::filter::matches_target_filter(state, *id, &effective_filter, &ctx)
+        })
+        .collect()
+}
+
 pub(crate) fn target_filter_controller_scope(filter: &TargetFilter) -> Option<ControllerRef> {
     match filter {
         TargetFilter::Typed(tf) => tf.controller.clone(),

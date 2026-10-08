@@ -8,10 +8,11 @@
 //! and absent from Paradigm / cast-a-copy-of-a-card copies (CR 707.12).
 //!
 //! Codie is built from its verbatim Oracle text so these tests read the parser
-//! under change. DEFERRED(phase 2): Codie's activated ability ("Each creature you
-//! control becomes prepared") and the full activate-then-cast end-to-end flow;
-//! here the prepare cards are marked prepared through the Debug `SetPrepared`
-//! action.
+//! under change. The trigger tests mark the prepare cards prepared through the
+//! Debug `SetPrepared` action to isolate the trigger; the activated ability
+//! ("Each creature you control becomes prepared", CR 115.10a: untargeted) and
+//! the full activate-then-cast end-to-end flow are covered at the end of the
+//! file without any Debug action.
 
 use std::sync::Arc;
 
@@ -191,7 +192,13 @@ fn set_prepared(runner: &mut GameRunner, object_id: ObjectId) {
 /// return the stack object id once the cast pauses for its target.
 fn begin_prepared_cast(runner: &mut GameRunner, source: ObjectId) -> ObjectId {
     set_prepared(runner, source);
+    start_prepared_cast(runner, source)
+}
 
+/// Start the prepared cast of an already-prepared `source`'s targeted prepare
+/// spell (CR 722.3c) and return the stack object id once the cast pauses for
+/// its target.
+fn start_prepared_cast(runner: &mut GameRunner, source: ObjectId) -> ObjectId {
     runner
         .act(GameAction::CastPreparedCopy { source })
         .expect("CastPreparedCopy should start the prepared spell cast");
@@ -535,15 +542,9 @@ fn codie_prepared_spell_paradigm_copy_neither_carries_nor_triggers() {
     runner
         .act(GameAction::CastParadigmCopy { source })
         .expect("accepting the paradigm offer must succeed");
-    println!(
-        "V1c state right after CastParadigmCopy: {}, stack len {}",
-        runner.state().waiting_for.variant_name(),
-        runner.state().stack.len()
-    );
     let copy_id = runner.state().stack[0].id;
     // CR 603.3b: answer any ordering prompt before reading trigger counts.
-    let drained = engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
-    println!("V1c drain count: {drained}");
+    engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
     assert_priority(&runner, P0);
 
     assert_eq!(
@@ -632,7 +633,22 @@ fn codie_prepared_spell_cast_copies_and_retargets() {
         "exactly one Codie trigger for one prepared cast"
     );
 
-    let mut events = pass_twice(&mut runner);
+    finish_codie_copy_and_retarget(&mut runner, codie, spell_id, x, y);
+}
+
+/// From `[spell (targeting x), Codie trigger]` with P0 holding priority: resolve
+/// the trigger, retarget the copy to `y`, and resolve both spells. Asserts the
+/// copy is made once from `spell_id`, the original keeps `x`, the copy targets
+/// `y`, the copy does not retrigger Codie, and both Swords resolve (X and Y
+/// exiled, each controller gains its creature's power).
+fn finish_codie_copy_and_retarget(
+    runner: &mut GameRunner,
+    codie: ObjectId,
+    spell_id: ObjectId,
+    x: ObjectId,
+    y: ObjectId,
+) {
+    let mut events = pass_twice(runner);
     match &runner.state().waiting_for {
         WaitingFor::CopyRetarget {
             player,
@@ -649,13 +665,13 @@ fn codie_prepared_spell_cast_copies_and_retargets() {
         other => panic!("CR 707.10c: expected CopyRetarget, got {other:?}"),
     }
     events.extend(act_events(
-        &mut runner,
+        runner,
         GameAction::ChooseTarget {
             target: Some(TargetRef::Object(y)),
         },
         "choose the copy's new target",
     ));
-    assert_priority(&runner, P0);
+    assert_priority(runner, P0);
 
     let copied = spell_copied(&events);
     assert_eq!(copied.len(), 1, "exactly one SpellCopied");
@@ -917,10 +933,9 @@ fn codie_prepared_spell_two_codies_each_copy_original() {
         ..
     } = build_fixture(db(), FixtureSpec::swords(2));
     let spell_id = begin_prepared_cast(&mut runner, emeritus);
-    let mut drained = drive_cast_to_stack(&mut runner, Some(x));
+    drive_cast_to_stack(&mut runner, Some(x));
     // CR 603.3b: drain unconditionally before reading counts.
-    drained += engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
-    println!("V7 two-Codie drain count: {drained}");
+    engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
     assert_priority(&runner, P0);
     assert_eq!(runner.state().stack.len(), 3);
     assert_eq!(codie_triggers(runner.state(), &codies), 2);
@@ -962,15 +977,22 @@ fn codie_prepared_spell_two_codies_each_copy_original() {
     assert_priority(&runner, P0);
     assert_eq!(codie_triggers(runner.state(), &codies), 1);
 
-    // The remaining trigger resolves; its retarget prompt (if any) keeps targets.
+    // The remaining trigger resolves; the targeted copy opens its retarget
+    // prompt (CR 707.10c), which keeps the targets.
     let mut events_two = pass_twice(&mut runner);
-    if matches!(runner.state().waiting_for, WaitingFor::CopyRetarget { .. }) {
-        events_two.extend(act_events(
-            &mut runner,
-            GameAction::KeepAllCopyTargets,
-            "keep the second copy's targets",
-        ));
-    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::CopyRetarget { player: P0, .. }
+        ),
+        "got {:?}",
+        runner.state().waiting_for
+    );
+    events_two.extend(act_events(
+        &mut runner,
+        GameAction::KeepAllCopyTargets,
+        "keep the second copy's targets",
+    ));
     assert_priority(&runner, P0);
     let second = spell_copied(&events_two);
     assert_eq!(second.len(), 1);
@@ -1068,8 +1090,304 @@ fn codie_prepared_spell_trigger_copies_countered_original() {
     assert_eq!(runner.state().stack.len(), 1);
     assert_eq!(runner.state().stack[0].id, copy_id);
     assert_eq!(triggers_from(runner.state(), codie), 0);
-    println!(
-        "V7 countered: copy marker = {:?}",
-        runner.state().objects[&copy_id].prepared_copy_source
+    let copy = &runner.state().objects[&copy_id];
+    assert_eq!(copy.zone, Zone::Stack);
+    assert!(
+        copy.prepared_copy_source.is_some(),
+        "CR 722.3d: a copy of a prepare spell, made from the departed record, is a prepare spell"
     );
+}
+
+/// Exactly Codie's activation cost, {W}{U}{B}{R}{G}.
+const WUBRG: &[ManaType] = &[
+    ManaType::White,
+    ManaType::Blue,
+    ManaType::Black,
+    ManaType::Red,
+    ManaType::Green,
+];
+
+/// Codie's activation cost plus the {W} of Swords to Plowshares.
+const WUBRG_AND_W: &[ManaType] = &[
+    ManaType::White,
+    ManaType::Blue,
+    ManaType::Black,
+    ManaType::Red,
+    ManaType::Green,
+    ManaType::White,
+];
+
+/// CR 602.2: activate `source`'s ability `ability_index` and answer every
+/// prompt until priority returns. A `TargetSelection` is answered with the
+/// first legal target so a run against a targeted parse keeps driving; callers
+/// assert on the returned `WaitingFor` names, in visit order.
+fn drive_activation(
+    runner: &mut GameRunner,
+    source: ObjectId,
+    ability_index: usize,
+) -> Vec<&'static str> {
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index,
+        })
+        .expect("the activation must be accepted");
+    let mut visited = Vec::new();
+    for _ in 0..16 {
+        visited.push(runner.state().waiting_for.variant_name());
+        match &runner.state().waiting_for {
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .choose_first_legal_target()
+                    .expect("answer the activation's target prompt");
+            }
+            WaitingFor::ManaPayment { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pay the activation cost from the pool");
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::Priority { .. } => return visited,
+            other => panic!("unexpected waiting state during activation: {other:?}"),
+        }
+    }
+    panic!("the activation never returned to priority; visited {visited:?}");
+}
+
+/// P0 controls Codie, an unprepared Emeritus of Truce, a Goblin Glasswright
+/// that is already prepared, and a creature with no prepare spell; P1 controls
+/// its own Emeritus of Truce. P0's pool pays Codie's activation exactly.
+struct MassFixture {
+    runner: GameRunner,
+    codie: ObjectId,
+    emeritus_p0: ObjectId,
+    glasswright_p0: ObjectId,
+    faceless_p0: ObjectId,
+    emeritus_p1: ObjectId,
+}
+
+fn build_mass_fixture(db: &CardDatabase) -> MassFixture {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let codie = scenario
+        .add_creature_from_oracle(P0, "Codie, Ravenous Codex", 1, 4, CODIE_ORACLE)
+        .id();
+    let emeritus_p0 = scenario.add_real_card(P0, "Emeritus of Truce", Zone::Battlefield, db);
+    let glasswright_p0 = scenario.add_real_card(P0, "Goblin Glasswright", Zone::Battlefield, db);
+    let faceless_p0 = scenario.add_creature(P0, "Faceless Bystander", 2, 2).id();
+    let emeritus_p1 = scenario.add_real_card(P1, "Emeritus of Truce", Zone::Battlefield, db);
+    scenario.with_mana_pool(P0, mana(WUBRG));
+
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    for id in [emeritus_p0, glasswright_p0, emeritus_p1] {
+        assert!(
+            runner.state().objects[&id].back_face.is_some(),
+            "{} must hydrate its prepare face",
+            runner.state().objects[&id].name
+        );
+    }
+    assert!(runner.state().objects[&faceless_p0].back_face.is_none());
+    set_prepared(&mut runner, glasswright_p0);
+
+    MassFixture {
+        runner,
+        codie,
+        emeritus_p0,
+        glasswright_p0,
+        faceless_p0,
+        emeritus_p1,
+    }
+}
+
+/// CR 115.10a + CR 722.3a: "{W}{U}{B}{R}{G}, {T}: Each creature you control
+/// becomes prepared." names no target, so activation announces none; on
+/// resolution each creature its controller controls that has a prepare spell
+/// and is not already prepared becomes prepared. Codie (no prepare spell), a
+/// faceless creature and the opponent's creature stay unprepared; the
+/// already-prepared Glasswright gets no second designation.
+#[test]
+fn codie_activation_prepares_each_eligible_creature_without_targeting() {
+    let MassFixture {
+        mut runner,
+        codie,
+        emeritus_p0,
+        glasswright_p0,
+        faceless_p0,
+        emeritus_p1,
+    } = build_mass_fixture(db());
+    assert!(
+        runner.state().objects[&glasswright_p0].prepared.is_some(),
+        "Glasswright starts prepared"
+    );
+    for id in [emeritus_p0, emeritus_p1, faceless_p0, codie] {
+        assert!(runner.state().objects[&id].prepared.is_none());
+    }
+
+    let visited = drive_activation(&mut runner, codie, 0);
+    assert!(
+        !visited.contains(&"TargetSelection"),
+        "CR 115.10a: Codie's activation must not announce a target; visited {visited:?}"
+    );
+    assert_priority(&runner, P0);
+    assert_eq!(runner.state().stack.len(), 1);
+    let entry = &runner.state().stack[0];
+    assert!(matches!(
+        entry.kind,
+        StackEntryKind::ActivatedAbility { .. }
+    ));
+    assert_eq!(entry.source_id, codie);
+    let ability = entry
+        .ability()
+        .expect("the activated ability carries its resolved ability");
+    assert!(
+        engine::game::ability_utils::flatten_targets_in_chain(ability).is_empty(),
+        "no target was chosen"
+    );
+    // CR 602.2b + CR 107.5: the cost is paid on activation.
+    assert!(runner.state().objects[&codie].tapped);
+    assert!(runner.state().players[0].mana_pool.mana.is_empty());
+
+    let events = pass_twice(&mut runner);
+    assert_priority(&runner, P0);
+    assert!(runner.state().stack.is_empty());
+    let prepared_events: Vec<ObjectId> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::BecamePrepared { object_id } => Some(*object_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(prepared_events, [emeritus_p0]);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        GameEvent::EffectResolved {
+            kind: engine::types::ability::EffectKind::BecomePrepared,
+            ..
+        }
+    )));
+
+    // The linked exile copy each new designation creates (CR 722.3c) is pinned
+    // at the resolver by the `prepare.rs` unit tests; this test reads the
+    // designation through the full activation.
+    assert!(runner.state().objects[&emeritus_p0].prepared.is_some());
+    // CR 722.3a: already prepared, so it can't gain the designation again (no
+    // second `BecamePrepared` above).
+    assert!(runner.state().objects[&glasswright_p0].prepared.is_some());
+    for id in [emeritus_p1, faceless_p0, codie] {
+        assert!(
+            runner.state().objects[&id].prepared.is_none(),
+            "{} must stay unprepared",
+            runner.state().objects[&id].name
+        );
+    }
+}
+
+/// The full Codie flow, no Debug action: the activation prepares Emeritus of
+/// Truce, its prepared Swords to Plowshares is cast (CR 722.3c), Codie's
+/// trigger copies it (CR 722.3d + CR 707.10), the copy is retargeted
+/// (CR 707.10c), and both resolve.
+#[test]
+fn codie_activation_then_prepared_cast_copies_and_retargets() {
+    let mut spec = FixtureSpec::swords(1);
+    spec.p0_pool = WUBRG_AND_W;
+    let Fixture {
+        mut runner,
+        codies,
+        prepare_source: emeritus,
+        x,
+        y,
+        ..
+    } = build_fixture(db(), spec);
+    let codie = codies[0];
+    // Only the activation can prepare Emeritus in this test.
+    assert!(runner.state().objects[&emeritus].prepared.is_none());
+
+    let visited = drive_activation(&mut runner, codie, 0);
+    assert!(
+        !visited.contains(&"TargetSelection"),
+        "CR 115.10a: Codie's activation must not announce a target; visited {visited:?}"
+    );
+    assert_priority(&runner, P0);
+    pass_twice(&mut runner);
+    assert_priority(&runner, P0);
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().objects[&emeritus].prepared.is_some());
+    assert_eq!(runner.state().players[0].mana_pool.mana.len(), 1);
+
+    let spell_id = start_prepared_cast(&mut runner, emeritus);
+    drive_cast_to_stack(&mut runner, Some(x));
+    assert_priority(&runner, P0);
+    assert_eq!(runner.state().stack.len(), 2);
+    assert_eq!(
+        triggers_from(runner.state(), codie),
+        1,
+        "CR 601.2i + CR 722.3d: casting the prepared spell triggers Codie"
+    );
+    assert!(runner.state().players[0].mana_pool.mana.is_empty());
+
+    finish_codie_copy_and_retarget(&mut runner, codie, spell_id, x, y);
+}
+
+/// The serialized shapes the protocol bump covers: Codie's activated ability
+/// carries `scope: All` and its trigger's `valid_card` the `PrepareSpell` tag,
+/// and both round-trip. A real card loaded from the fixture, whose stored AST
+/// predates `scope`, reads the `Single` default.
+#[test]
+fn codie_serialized_shapes_carry_the_new_tags() {
+    let db = db();
+    let mut scenario = GameScenario::new();
+    let codie = scenario
+        .add_creature_from_oracle(P0, "Codie, Ravenous Codex", 1, 4, CODIE_ORACLE)
+        .id();
+    let tomekeeper = scenario.add_real_card(P0, "Biblioplex Tomekeeper", Zone::Battlefield, db);
+    let runner = scenario.build();
+    let state = runner.state();
+
+    let ability = &state.objects[&codie].abilities[0];
+    let json = serde_json::to_value(ability).expect("serialize Codie's activated ability");
+    assert_eq!(json["effect"]["type"], "BecomePrepared");
+    assert_eq!(json["effect"]["scope"]["type"], "All");
+    let back: AbilityDefinition =
+        serde_json::from_value(json).expect("Codie's activated ability round-trips");
+    assert!(back == *ability, "the activated ability round-trips equal");
+
+    let trigger = state.objects[&codie]
+        .trigger_definitions
+        .as_slice()
+        .iter()
+        .map(|entry| entry.definition())
+        .find(|definition| matches!(definition.mode, TriggerMode::SpellCast))
+        .expect("Codie carries its SpellCast trigger");
+    let json = serde_json::to_value(trigger).expect("serialize Codie's trigger");
+    assert_eq!(json["valid_card"]["properties"][0]["type"], "PrepareSpell");
+    let back: engine::types::ability::TriggerDefinition =
+        serde_json::from_value(json).expect("Codie's trigger round-trips");
+    assert_eq!(&back, trigger);
+
+    let execute = state.objects[&tomekeeper]
+        .trigger_definitions
+        .as_slice()
+        .iter()
+        .map(|entry| entry.definition())
+        .find_map(|definition| definition.execute.as_deref())
+        .expect("Biblioplex Tomekeeper carries its ETB trigger");
+    assert_eq!(execute.mode_abilities.len(), 2);
+    assert!(matches!(
+        *execute.mode_abilities[0].effect,
+        Effect::BecomePrepared {
+            scope: engine::types::ability::EffectScope::Single,
+            ..
+        }
+    ));
+    assert!(matches!(
+        *execute.mode_abilities[1].effect,
+        Effect::BecomeUnprepared {
+            scope: engine::types::ability::EffectScope::Single,
+            ..
+        }
+    ));
 }

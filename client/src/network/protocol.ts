@@ -106,6 +106,12 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  90 — game_setup and state_update carry GameState, whose ability
+ *       definitions now carry the "prepared spell" filter tag and a scope on
+ *       the become-prepared / become-unprepared effects. A v89 peer cannot
+ *       parse the new tag and would read a mass prepare as a single-target
+ *       one, so first contact rejects the skew. Bumped in lockstep with
+ *       full-game protocol 108.
  *  89 — game_setup and state_update carry GameState, whose exile-until
  *       loops now carry a match count, whose paused loop keeps its hits,
  *       whose zone choices can read ParentTargets, and whose spell context
@@ -547,7 +553,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 89 as const;
+export const WIRE_PROTOCOL_VERSION = 90 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

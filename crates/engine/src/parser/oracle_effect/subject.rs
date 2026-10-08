@@ -4324,6 +4324,28 @@ pub(super) fn static_affected_for_application(application: &SubjectApplication) 
     }
 }
 
+/// CR 115.10a + CR 722.3a: the `(target, scope)` of "<subject> becomes
+/// (un)prepared", read from the shape of the already-parsed subject.
+///
+/// A declared target ("target creature becomes prepared") or an inherited
+/// antecedent binds through `ParentTarget` with `Single` scope. An untargeted
+/// subject that is a context reference (`SelfRef` for "this creature",
+/// `TriggeringSource`, `LastCreated`, ...) names one object, also `Single`. Any
+/// other untargeted noun phrase ("each creature you control") is a population:
+/// it is not a target (CR 115.10a), so the filter is kept and read at
+/// resolution under `All`.
+fn prepared_designation_subject(application: &SubjectApplication) -> (TargetFilter, EffectScope) {
+    if application.target.is_some() || application.inherits_parent {
+        return (TargetFilter::ParentTarget, EffectScope::Single);
+    }
+    let scope = if application.affected.is_context_ref() {
+        EffectScope::Single
+    } else {
+        EffectScope::All
+    };
+    (application.affected.clone(), scope)
+}
+
 /// CR 707.2 + CR 115.1 + CR 611.2c: map a parsed "<subject> become[s] a copy /
 /// copies of …" subject onto [`CopyRecipient`] — WHO becomes the copy.
 ///
@@ -5569,13 +5591,13 @@ fn build_become_clause(
         });
     }
 
-    // CR 702.xxx: Prepare (Strixhaven) — "becomes prepared" / "becomes
-    // unprepared" toggles the PreparedState on the target creature. Must
+    // CR 722.3a + CR 722.3b: Prepare — "becomes prepared" / "becomes
+    // unprepared" gives or removes the prepared designation. Must
     // intercept before parse_animation_spec which would try to classify
     // "prepared" / "unprepared" as a subtype. `all_consuming` enforces that
     // the matched tag covers the full `become_text` trailer; longer-match
     // alternative is listed first so "unprepared" doesn't get shadowed by
-    // "prepared". Assign when WotC publishes SOS CR update.
+    // "prepared".
     #[derive(Clone, Copy)]
     enum PreparedKind {
         Prepared,
@@ -5590,22 +5612,17 @@ fn build_become_clause(
     )))
     .parse(become_lower.as_str())
     {
-        // CR 722.3a: Resolve the prepare/unprepare target from the subject.
-        // A targeted subject ("target creature becomes prepared", Biblioplex)
-        // binds to the chosen object via `ParentTarget` at resolution; a
-        // self-referential or anaphoric subject ("this creature becomes
-        // prepared" — Stensian Sanguinist, normalized to `~` → `SelfRef`) uses
-        // the subject's own `affected` filter. Mirrors
-        // `static_affected_for_application`'s targeted-vs-subject split so the
-        // self-reference is preserved instead of collapsing to `ParentTarget`.
-        let target = if application.target.is_some() || application.inherits_parent {
-            crate::types::ability::TargetFilter::ParentTarget
-        } else {
-            application.affected.clone()
-        };
+        // CR 722.3a + CR 115.10a: Resolve the prepare/unprepare subject. A
+        // targeted subject ("target creature becomes prepared", Biblioplex)
+        // binds to the chosen object via `ParentTarget`; a self-referential or
+        // anaphoric subject ("this creature becomes prepared" — Stensian
+        // Sanguinist, normalized to `~` → `SelfRef`) keeps its own `affected`
+        // filter; both are `Single`. An untargeted population ("each creature
+        // you control becomes prepared" — Codie, Ravenous Codex) is `All`.
+        let (target, scope) = prepared_designation_subject(&application);
         let effect = match kind {
-            PreparedKind::Prepared => Effect::BecomePrepared { target },
-            PreparedKind::Unprepared => Effect::BecomeUnprepared { target },
+            PreparedKind::Prepared => Effect::BecomePrepared { target, scope },
+            PreparedKind::Unprepared => Effect::BecomeUnprepared { target, scope },
         };
         return Some(super::parsed_clause(effect));
     }

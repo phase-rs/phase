@@ -1,5 +1,6 @@
 use crate::types::ability::{
-    CastingPermission, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    CastingPermission, Effect, EffectError, EffectKind, EffectScope, ResolvedAbility, TargetFilter,
+    TargetRef,
 };
 use crate::types::card::LayoutKind;
 use crate::types::events::GameEvent;
@@ -60,13 +61,42 @@ pub(in crate::game) fn priority_prepared_copy_announcements(
 // the prepare-spell face so the copy can reuse the normal casting pipeline
 // (targets/modes/mana payment/cost modifiers).
 
-/// Extract object targets from `ability.targets`, or fall back to `last_created_token_ids`
-/// for `TargetFilter::LastCreated`. Mirrors the pattern used by `suspect::resolve`.
+/// Resolve the object subjects of a BecomePrepared / BecomeUnprepared effect.
+///
+/// Dispatches on the effect's `scope` (mirrors `suspect::resolve_object_targets`):
+///
+/// - [`EffectScope::All`] — the untargeted population ("Each creature you
+///   control becomes prepared", Codie, Ravenous Codex): CR 115.10a, nothing is
+///   a target, so every battlefield permanent matching the filter at resolution
+///   is a subject. The designation gates (prepare spell, already prepared) stay
+///   in `prepare_object` / `unprepare_object`.
+/// - [`EffectScope::Single`] — a declared target, a self-reference or an
+///   anaphor; see [`resolve_single_object_targets`].
+///
+/// Shared by both resolvers so the designation pair selects subjects
+/// identically.
 fn resolve_object_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<ObjectId> {
-    let filter = match &ability.effect {
-        Effect::BecomePrepared { target } | Effect::BecomeUnprepared { target } => target,
+    let (filter, scope) = match &ability.effect {
+        Effect::BecomePrepared { target, scope } | Effect::BecomeUnprepared { target, scope } => {
+            (target, *scope)
+        }
         _ => return Vec::new(),
     };
+    match scope {
+        EffectScope::All => {
+            crate::game::effects::resolved_battlefield_population_ids(state, ability, filter)
+        }
+        EffectScope::Single => resolve_single_object_targets(state, ability, filter),
+    }
+}
+
+/// Extract object targets from `ability.targets`, or fall back to `last_created_token_ids`
+/// for `TargetFilter::LastCreated`. Mirrors the pattern used by `suspect::resolve`.
+fn resolve_single_object_targets(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Vec<ObjectId> {
     if matches!(filter, TargetFilter::LastCreated) {
         return state.last_created_token_ids.clone();
     }
@@ -109,9 +139,11 @@ fn has_prepare_face(state: &GameState, object_id: ObjectId) -> bool {
 
 /// CR 722.3a-c: Prepare — resolver for `Effect::BecomePrepared`.
 ///
-/// Idempotent: no-op (and no event emitted) if the target is already prepared
-/// or if the target lacks a prepare face (Biblioplex gate). Otherwise sets
-/// `prepared = Some(PreparedState)` and emits `BecamePrepared`.
+/// Applies to each subject `resolve_object_targets` selects (one for the
+/// `Single` scope, the whole population for `All`). Per subject: no-op (and no
+/// event emitted) if it is already prepared or lacks a prepare face (Biblioplex
+/// gate). Otherwise sets `prepared = Some(PreparedState)`, creates its linked
+/// exile copy (CR 722.3c) and emits `BecamePrepared`.
 pub fn resolve_become_prepared(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -131,7 +163,9 @@ pub fn resolve_become_prepared(
 
 /// CR 722.3b: Prepare — resolver for `Effect::BecomeUnprepared`.
 ///
-/// Idempotent: no-op (and no event emitted) if the target is not prepared.
+/// Applies to each subject `resolve_object_targets` selects (one for the
+/// `Single` scope, the whole population for `All`). Per subject: no-op (and no
+/// event emitted) if it is not prepared.
 /// Otherwise clears `prepared` and emits `BecameUnprepared`. Single authority
 /// for the "Doing so unprepares it." consumption — callers must not inspect
 /// the field directly.
@@ -634,6 +668,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::BecomePrepared {
                 target: TargetFilter::ParentTarget,
+                scope: EffectScope::Single,
             },
             vec![],
             source,
@@ -699,6 +734,7 @@ mod tests {
                         AbilityKind::Spell,
                         Effect::BecomePrepared {
                             target: TargetFilter::SelfRef,
+                            scope: EffectScope::Single,
                         },
                     ))
                     .valid_card(TargetFilter::SelfRef),
@@ -762,6 +798,7 @@ mod tests {
                         AbilityKind::Spell,
                         Effect::BecomePrepared {
                             target: TargetFilter::SelfRef,
+                            scope: EffectScope::Single,
                         },
                     ))
                     .valid_card(TargetFilter::SelfRef),
@@ -810,6 +847,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::BecomePrepared {
                 target: TargetFilter::Any,
+                scope: EffectScope::Single,
             },
             vec![TargetRef::Object(id)],
             ObjectId(100),
@@ -842,6 +880,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::BecomeUnprepared {
                 target: TargetFilter::Any,
+                scope: EffectScope::Single,
             },
             vec![TargetRef::Object(id)],
             ObjectId(100),
@@ -1167,6 +1206,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::BecomePrepared {
                 target: TargetFilter::Any,
+                scope: EffectScope::Single,
             },
             vec![TargetRef::Object(id)],
             ObjectId(100),
@@ -1199,6 +1239,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::BecomePrepared {
                 target: TargetFilter::Any,
+                scope: EffectScope::Single,
             },
             vec![TargetRef::Object(id)],
             ObjectId(100),
@@ -1484,6 +1525,408 @@ mod tests {
             !can_cast_prepared_copy_now(&state, PlayerId(0), source_id),
             "prepared copy must not be castable without payable mana"
         );
+    }
+
+    // ---- EffectScope::All: "Each creature you control becomes (un)prepared" ----
+
+    /// A battlefield creature controlled (and owned) by `controller`, with or
+    /// without a prepare spell (CR 722.2a).
+    fn add_prepare_creature(
+        state: &mut GameState,
+        controller: PlayerId,
+        name: &str,
+        with_face: bool,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            controller,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_power = Some(2);
+        obj.base_toughness = Some(2);
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        if with_face {
+            obj.back_face = Some(BackFaceForTest::prepare());
+        }
+        id
+    }
+
+    /// The population filter of Codie, Ravenous Codex: "each creature you control".
+    fn creatures_you_control() -> TargetFilter {
+        TargetFilter::Typed(
+            crate::types::ability::TypedFilter::creature()
+                .controller(crate::types::ability::ControllerRef::You),
+        )
+    }
+
+    fn mass_prepare(scope: EffectScope) -> Effect {
+        Effect::BecomePrepared {
+            target: creatures_you_control(),
+            scope,
+        }
+    }
+
+    fn mass_unprepare(scope: EffectScope) -> Effect {
+        Effect::BecomeUnprepared {
+            target: creatures_you_control(),
+            scope,
+        }
+    }
+
+    fn became_prepared(events: &[GameEvent]) -> Vec<ObjectId> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::BecamePrepared { object_id } => Some(*object_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn became_unprepared(events: &[GameEvent]) -> Vec<ObjectId> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::BecameUnprepared { object_id } => Some(*object_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// CR 722.3c: every linked exile copy of `source`'s prepare spell.
+    fn linked_copies(state: &GameState, source: ObjectId) -> Vec<ObjectId> {
+        state
+            .objects
+            .values()
+            .filter(|object| {
+                object.zone == Zone::Exile && object.prepared_copy_source == Some(source)
+            })
+            .map(|object| object.id)
+            .collect()
+    }
+
+    /// CR 115.10a: the mass scope names no target, so `target_filter()` is `None`
+    /// and no slot is built; the single scope with the same filter builds one slot
+    /// (reach guard: the slot builder does build slots for this effect).
+    #[test]
+    fn become_prepared_scope_gates_target_slot() {
+        let mut state = GameState::new_two_player(42);
+        let source = add_prepare_creature(&mut state, PlayerId(0), "Source", false);
+        let a = add_prepare_creature(&mut state, PlayerId(0), "A", true);
+        for (all, single) in [
+            (
+                mass_prepare(EffectScope::All),
+                mass_prepare(EffectScope::Single),
+            ),
+            (
+                mass_unprepare(EffectScope::All),
+                mass_unprepare(EffectScope::Single),
+            ),
+        ] {
+            assert!(all.target_filter().is_none(), "{all:?}");
+            let slots = build_target_slots(
+                &state,
+                &ResolvedAbility::new(all.clone(), vec![], source, PlayerId(0)),
+            )
+            .unwrap();
+            assert!(slots.is_empty(), "{all:?} must build no target slot");
+
+            assert_eq!(single.target_filter(), Some(&creatures_you_control()));
+            let slots = build_target_slots(
+                &state,
+                &ResolvedAbility::new(single.clone(), vec![], source, PlayerId(0)),
+            )
+            .unwrap();
+            assert_eq!(slots.len(), 1, "{single:?} builds exactly one slot");
+            assert!(slots[0].legal_targets.contains(&TargetRef::Object(a)));
+        }
+    }
+
+    /// CR 722.3a + CR 722.3c + CR 608.2h: every creature the ability's controller
+    /// controls that has a prepare spell becomes prepared, with one linked exile
+    /// copy each; the population is read at resolution.
+    #[test]
+    fn become_prepared_all_prepares_each_controlled_eligible_creature() {
+        let mut state = GameState::new_two_player(42);
+        // The source stands in for Codie: a creature with no prepare spell.
+        let source = add_prepare_creature(&mut state, PlayerId(0), "Codie stand-in", false);
+        let a = add_prepare_creature(&mut state, PlayerId(0), "A", true);
+        let b = add_prepare_creature(&mut state, PlayerId(0), "B", true);
+        let c = add_prepare_creature(&mut state, PlayerId(0), "Faceless C", false);
+        let d = add_prepare_creature(&mut state, PlayerId(1), "Opponent D", true);
+        let ability =
+            ResolvedAbility::new(mass_prepare(EffectScope::All), vec![], source, PlayerId(0));
+        // Created after the ability was built, before it resolves.
+        let f = add_prepare_creature(&mut state, PlayerId(0), "Late F", true);
+
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+
+        let mut prepared = became_prepared(&events);
+        prepared.sort_by_key(|id| id.0);
+        assert_eq!(prepared, vec![a, b, f]);
+        for id in [a, b, f] {
+            assert!(state.objects[&id].prepared.is_some());
+            let copies = linked_copies(&state, id);
+            assert_eq!(copies.len(), 1, "CR 722.3c: one linked copy");
+            assert_eq!(state.objects[&copies[0]].controller, PlayerId(0));
+        }
+        for id in [c, source, d] {
+            assert!(state.objects[&id].prepared.is_none());
+            assert!(linked_copies(&state, id).is_empty());
+        }
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::BecomePrepared,
+                ..
+            }
+        )));
+    }
+
+    /// CR 722.3a: an already-prepared creature can't gain the designation again —
+    /// no second event and no second linked copy.
+    #[test]
+    fn become_prepared_all_skips_already_prepared() {
+        let mut state = GameState::new_two_player(42);
+        let source = add_prepare_creature(&mut state, PlayerId(0), "Source", false);
+        let a = add_prepare_creature(&mut state, PlayerId(0), "A", true);
+        let b = add_prepare_creature(&mut state, PlayerId(0), "B", true);
+        prepare_object(&mut state, b, &mut Vec::new());
+        let b_copy = linked_copies(&state, b);
+        assert_eq!(b_copy.len(), 1);
+
+        let ability =
+            ResolvedAbility::new(mass_prepare(EffectScope::All), vec![], source, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(became_prepared(&events), vec![a]);
+        assert!(state.objects[&a].prepared.is_some());
+        assert_eq!(linked_copies(&state, b), b_copy);
+    }
+
+    /// CR 115.10a: object targets propagated through a chain are not the mass
+    /// subject — the population is read from the filter alone. Paired: the same
+    /// targets under `Single` do act on the foreign creature.
+    #[test]
+    fn become_prepared_all_ignores_foreign_targets() {
+        let build = || {
+            let mut state = GameState::new_two_player(42);
+            let source = add_prepare_creature(&mut state, PlayerId(0), "Source", false);
+            let a = add_prepare_creature(&mut state, PlayerId(0), "A", true);
+            let b = add_prepare_creature(&mut state, PlayerId(0), "B", true);
+            let c = add_prepare_creature(&mut state, PlayerId(0), "Faceless C", false);
+            let d = add_prepare_creature(&mut state, PlayerId(1), "Opponent D", true);
+            (state, source, a, b, c, d)
+        };
+
+        let (mut state, source, a, b, c, d) = build();
+        let foreign = vec![TargetRef::Object(d), TargetRef::Object(c)];
+        let ability = ResolvedAbility::new(
+            mass_prepare(EffectScope::All),
+            foreign.clone(),
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+        assert!(state.objects[&a].prepared.is_some());
+        assert!(state.objects[&b].prepared.is_some());
+        assert!(state.objects[&d].prepared.is_none());
+        assert!(state.objects[&c].prepared.is_none());
+
+        let (mut state, source, a, _, _, d) = build();
+        let ability = ResolvedAbility::new(
+            mass_prepare(EffectScope::Single),
+            foreign,
+            source,
+            PlayerId(0),
+        );
+        resolve_become_prepared(&mut state, &ability, &mut Vec::new()).unwrap();
+        assert!(
+            state.objects[&d].prepared.is_some(),
+            "the Single scope acts on the announced targets"
+        );
+        assert!(state.objects[&a].prepared.is_none());
+    }
+
+    /// CR 702.26b: a phased-out permanent is treated as though it does not exist,
+    /// so it is not in the population. Paired: once phased in, it is.
+    #[test]
+    fn become_prepared_all_excludes_phased_out() {
+        use crate::game::game_object::{PhaseOutCause, PhaseStatus};
+        let mut state = GameState::new_two_player(42);
+        let source = add_prepare_creature(&mut state, PlayerId(0), "Source", false);
+        let a = add_prepare_creature(&mut state, PlayerId(0), "A", true);
+        let e = add_prepare_creature(&mut state, PlayerId(0), "Phased E", true);
+        state.objects.get_mut(&e).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+        let ability =
+            ResolvedAbility::new(mass_prepare(EffectScope::All), vec![], source, PlayerId(0));
+
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(became_prepared(&events), vec![a]);
+        assert!(state.objects[&e].prepared.is_none());
+        assert!(linked_copies(&state, e).is_empty());
+
+        state.objects.get_mut(&e).unwrap().phase_status = PhaseStatus::PhasedIn;
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(became_prepared(&events), vec![e], "phased in, E is reached");
+    }
+
+    /// CR 109.5 + CR 113.8: "you" is the ability's controller, not the source's
+    /// controller.
+    #[test]
+    fn become_prepared_all_binds_you_to_the_ability_controller() {
+        let mut state = GameState::new_two_player(42);
+        let source = add_prepare_creature(&mut state, PlayerId(0), "Source", false);
+        let a = add_prepare_creature(&mut state, PlayerId(0), "A", true);
+        let d = add_prepare_creature(&mut state, PlayerId(1), "D", true);
+        let ability =
+            ResolvedAbility::new(mass_prepare(EffectScope::All), vec![], source, PlayerId(1));
+
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(became_prepared(&events), vec![d]);
+        assert!(state.objects[&d].prepared.is_some());
+        assert!(state.objects[&a].prepared.is_none());
+    }
+
+    /// CR 722.3b + CR 722.3c: the unprepare mirror removes the designation from
+    /// each creature in the population, and the linked copy does not outlive it.
+    /// Paired: the single scope on A alone leaves B prepared.
+    #[test]
+    fn become_unprepared_all_unprepares_each_controlled_creature() {
+        let build = || {
+            let mut state = GameState::new_two_player(42);
+            let source = add_prepare_creature(&mut state, PlayerId(0), "Source", false);
+            let a = add_prepare_creature(&mut state, PlayerId(0), "A", true);
+            let b = add_prepare_creature(&mut state, PlayerId(0), "B", true);
+            let c = add_prepare_creature(&mut state, PlayerId(0), "Faceless C", false);
+            let d = add_prepare_creature(&mut state, PlayerId(1), "Opponent D", true);
+            for id in [a, b, d] {
+                prepare_object(&mut state, id, &mut Vec::new());
+                assert_eq!(linked_copies(&state, id).len(), 1);
+            }
+            (state, source, a, b, c, d)
+        };
+
+        let (mut state, source, a, b, c, d) = build();
+        let ability = ResolvedAbility::new(
+            mass_unprepare(EffectScope::All),
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_become_unprepared(&mut state, &ability, &mut events).unwrap();
+        let mut unprepared = became_unprepared(&events);
+        unprepared.sort_by_key(|id| id.0);
+        assert_eq!(unprepared, vec![a, b]);
+        for id in [a, b] {
+            assert!(state.objects[&id].prepared.is_none());
+            assert!(linked_copies(&state, id).is_empty());
+        }
+        assert!(state.objects[&d].prepared.is_some());
+        assert_eq!(linked_copies(&state, d).len(), 1);
+        assert!(state.objects[&c].prepared.is_none());
+
+        let (mut state, source, a, b, _, _) = build();
+        let ability = ResolvedAbility::new(
+            mass_unprepare(EffectScope::Single),
+            vec![TargetRef::Object(a)],
+            source,
+            PlayerId(0),
+        );
+        resolve_become_unprepared(&mut state, &ability, &mut Vec::new()).unwrap();
+        assert!(state.objects[&a].prepared.is_none());
+        assert!(state.objects[&b].prepared.is_some());
+    }
+
+    /// The single scope still acts only on its declared targets.
+    #[test]
+    fn become_prepared_single_still_acts_only_on_declared_targets() {
+        let mut state = GameState::new_two_player(42);
+        let source = add_prepare_creature(&mut state, PlayerId(0), "Source", false);
+        let a = add_prepare_creature(&mut state, PlayerId(0), "A", true);
+        let b = add_prepare_creature(&mut state, PlayerId(0), "B", true);
+        let ability = ResolvedAbility::new(
+            mass_prepare(EffectScope::Single),
+            vec![TargetRef::Object(a)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(became_prepared(&events), vec![a]);
+        assert!(state.objects[&b].prepared.is_none());
+    }
+
+    /// CR 109.5 + CR 722.3c: "you control" follows the controller, not the owner,
+    /// and the linked copy is created by the prepared permanent's controller.
+    #[test]
+    fn become_prepared_all_follows_controller_not_owner() {
+        let mut state = GameState::new_two_player(42);
+        let source = add_prepare_creature(&mut state, PlayerId(0), "Source", false);
+        let borrowed = add_prepare_creature(&mut state, PlayerId(1), "Owned by P1", true);
+        state.objects.get_mut(&borrowed).unwrap().controller = PlayerId(0);
+        let lent = add_prepare_creature(&mut state, PlayerId(0), "Owned by P0", true);
+        state.objects.get_mut(&lent).unwrap().controller = PlayerId(1);
+        let ability =
+            ResolvedAbility::new(mass_prepare(EffectScope::All), vec![], source, PlayerId(0));
+
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(became_prepared(&events), vec![borrowed]);
+        let copies = linked_copies(&state, borrowed);
+        assert_eq!(copies.len(), 1);
+        assert_eq!(state.objects[&copies[0]].controller, PlayerId(0));
+        assert!(state.objects[&lent].prepared.is_none());
+    }
+
+    /// Serde: a legacy payload without `scope` loads as `Single`; `All`
+    /// round-trips.
+    #[test]
+    fn become_prepared_scope_serde_default_and_roundtrip() {
+        let legacy: Effect =
+            serde_json::from_str(r#"{"type":"BecomePrepared","target":{"type":"ParentTarget"}}"#)
+                .unwrap();
+        assert_eq!(
+            legacy,
+            Effect::BecomePrepared {
+                target: TargetFilter::ParentTarget,
+                scope: EffectScope::Single,
+            }
+        );
+        let legacy: Effect =
+            serde_json::from_str(r#"{"type":"BecomeUnprepared","target":{"type":"ParentTarget"}}"#)
+                .unwrap();
+        assert_eq!(
+            legacy,
+            Effect::BecomeUnprepared {
+                target: TargetFilter::ParentTarget,
+                scope: EffectScope::Single,
+            }
+        );
+
+        for effect in [
+            mass_prepare(EffectScope::All),
+            mass_unprepare(EffectScope::All),
+        ] {
+            let json = serde_json::to_value(&effect).unwrap();
+            assert_eq!(json["scope"]["type"], "All");
+            let back: Effect = serde_json::from_value(json).unwrap();
+            assert_eq!(back, effect);
+        }
     }
 
     /// Helper to build a minimal back-face with `layout_kind == Prepare` so

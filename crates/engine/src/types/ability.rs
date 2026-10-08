@@ -18678,22 +18678,33 @@ pub enum Effect {
     },
     /// CR 719.2: Solve the source Case — it becomes solved.
     SolveCase,
-    /// CR 702.xxx: Prepare (Strixhaven) — mark the target creature as prepared.
-    /// The target must be a creature with a prepare face (CardLayout::Prepare);
-    /// on targets without a prepare face (e.g. Biblioplex Tomekeeper's Oracle
-    /// "Target creature becomes prepared. (Only creatures with prepare spells
-    /// can become prepared.)") the resolver is a no-op. Idempotent: if already
-    /// prepared, no event fires. Assign when WotC publishes SOS CR update.
+    /// CR 722.3a: Prepare — give a permanent the prepared designation. A
+    /// permanent can't gain the designation unless it has a prepare spell
+    /// (CardLayout::Prepare), so on one without a prepare face (e.g.
+    /// Biblioplex Tomekeeper's Oracle "Target creature becomes prepared. (Only
+    /// creatures with prepare spells can become prepared.)") the resolver is a
+    /// no-op. Idempotent: if already prepared, no event fires.
+    ///
+    /// `scope` is the single-vs-mass axis, exactly as on [`Effect::Suspect`]:
+    /// `EffectScope::Single` (the default) is a declared target or an
+    /// anaphor/self-reference (`SelfRef`, `ParentTarget`, `LastCreated`, any
+    /// context ref); `EffectScope::All` is an untargeted population filter
+    /// ("Each creature you control becomes prepared") enumerated over the
+    /// battlefield at resolution (CR 115.10a: it is not a target).
     BecomePrepared {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+        #[serde(default = "default_effect_scope_single")]
+        scope: EffectScope,
     },
-    /// CR 702.xxx: Prepare (Strixhaven) — clear the prepared state on the
-    /// target creature. Idempotent: if not prepared, no event fires. Assign
-    /// when WotC publishes SOS CR update.
+    /// CR 722.3b: Prepare — remove the prepared designation from a permanent.
+    /// Idempotent: if not prepared, no event fires. `scope` mirrors
+    /// [`Effect::BecomePrepared`].
     BecomeUnprepared {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+        #[serde(default = "default_effect_scope_single")]
+        scope: EffectScope,
     },
     /// CR 702.171b: the target permanent becomes saddled until end of turn.
     /// Distinct from the Saddle keyword's activated ability (CR 702.171a,
@@ -22078,8 +22089,6 @@ impl Effect {
             | Effect::PhaseOut { target, .. }
             | Effect::PhaseIn { target, .. }
             | Effect::ForceBlock { target, .. }
-            | Effect::BecomePrepared { target, .. }
-            | Effect::BecomeUnprepared { target, .. }
             | Effect::BecomeSaddled { target, .. }
             | Effect::CastFromZone { target, .. }
             | Effect::Exploit { target, .. }
@@ -22359,6 +22368,27 @@ impl Effect {
                 ..
             }
             | Effect::Unsuspect {
+                scope: EffectScope::All,
+                ..
+            } => None,
+
+            // CR 722.3a/b + CR 115.10a: `BecomePrepared`/`BecomeUnprepared`
+            // expose a target slot only for the single scope. The `All` scope
+            // ("Each creature you control becomes prepared") names no target, so
+            // its population filter is read at resolution and builds no slot.
+            Effect::BecomePrepared {
+                scope: EffectScope::Single,
+                target,
+            }
+            | Effect::BecomeUnprepared {
+                scope: EffectScope::Single,
+                target,
+            } => Some(target),
+            Effect::BecomePrepared {
+                scope: EffectScope::All,
+                ..
+            }
+            | Effect::BecomeUnprepared {
                 scope: EffectScope::All,
                 ..
             } => None,
@@ -25177,9 +25207,9 @@ pub enum EffectKind {
     ForceBlock,
     ForceAttack,
     SolveCase,
-    /// CR 702.xxx: Prepare (Strixhaven) — mark target creature as prepared.
+    /// CR 722.3a: Prepare — give a permanent the prepared designation.
     BecomePrepared,
-    /// CR 702.xxx: Prepare (Strixhaven) — clear prepared state on target.
+    /// CR 722.3b: Prepare — remove the prepared designation from a permanent.
     BecomeUnprepared,
     /// CR 702.171b: mark the target permanent as saddled until end of turn.
     BecomeSaddled,
