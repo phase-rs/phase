@@ -1,11 +1,14 @@
 use crate::types::ability::{
     AbilityDefinition, DelayedTriggerCondition, Effect, EffectError, EffectKind, ManaProduction,
-    PtValue, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
+    PtValue, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, TargetFilter,
+    TargetRef,
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{BattlefieldDepartureSourceContext, DelayedTrigger, GameState};
+use crate::types::game_state::{
+    BattlefieldDepartureSourceContext, DelayedTrigger, GameState, TargetSelectionConstraint,
+};
 use crate::types::identifiers::TrackedSetId;
 use crate::types::zones::Zone;
 
@@ -735,16 +738,117 @@ fn bind_outer_declared_groups(
         crate::game::targeting::resolve_live_declared_player(state, creator, group)
     };
     walk(payload, &mut |def| {
-        let effect = &mut *def.effect;
+        use crate::game::filter::{
+            rebind_declared_groups as filter_of, rebind_declared_groups_in_condition,
+            rebind_declared_groups_in_controller, rebind_declared_groups_in_player_filter,
+            rebind_declared_groups_in_quantity as quantity_of,
+        };
+        // Exhaustive: a new definition field must be classified as bound or player-free.
+        let AbilityDefinition {
+            kind: _,
+            effect,
+            declares_chosen_group: _,
+            reads_chosen_group: _,
+            declares_return_result: _,
+            reads_return_result,
+            sub_ability: _,
+            else_ability: _,
+            mode_abilities: _,
+            description: _,
+            target_prompt: _,
+            ability_tag: _,
+            condition,
+            optional_targeting: _,
+            optional: _,
+            optional_player,
+            optional_for: _,
+            multi_target,
+            target_constraints,
+            target_choice_timing: _,
+            distribute: _,
+            unless_pay,
+            modal,
+            repeat_for,
+            min_x_value: _,
+            announced_x,
+            cant_be_copied: _,
+            illegal_targets_disposition: _,
+            forward_result: _,
+            player_scope,
+            starting_with,
+            target_selection_mode: _,
+            target_chooser,
+            repeat_until,
+            sub_link: _,
+            target_reads: _,
+            iteration_kind_binding: _,
+            sibling_condition: _,
+            unlowered_guard: _,
+            face_down_in_exile: _,
+            granting_object: _,
+            // Fail-closed, unbound: activation-time fields never reach a fired payload;
+            // `duration` and `unless_pay.cost` have no rewriter.
+            cost: _,
+            duration: _,
+            activation_restrictions: _,
+            activation_mana_payment_restriction: _,
+            activator_filter: _,
+            activation_zone: _,
+            cost_reduction: _,
+        } = def;
+        let effect = &mut **effect;
         crate::parser::oracle_effect::each_target_filter_mut(effect, &mut |filter| {
-            crate::game::filter::rebind_declared_groups(filter, &mut resolve);
+            filter_of(filter, &mut resolve);
         });
         if let Some(filter) = super::mass_population_target_mut(effect) {
-            crate::game::filter::rebind_declared_groups(filter, &mut resolve);
+            filter_of(filter, &mut resolve);
         }
         crate::parser::oracle_effect::each_quantity_expr_mut(effect, &mut |expr| {
-            crate::game::filter::rebind_declared_groups_in_quantity(expr, &mut resolve);
+            quantity_of(expr, &mut resolve);
         });
+        if let Some((_, spec)) = reads_return_result {
+            filter_of(&mut spec.noun, &mut resolve);
+            rebind_declared_groups_in_controller(&mut spec.recipient, &mut resolve);
+        }
+        if let Some(condition) = condition {
+            rebind_declared_groups_in_condition(condition, &mut resolve);
+        }
+        for filter in optional_player
+            .iter_mut()
+            .chain(target_chooser.iter_mut())
+            .chain(unless_pay.iter_mut().map(|modifier| &mut modifier.payer))
+        {
+            filter_of(filter, &mut resolve);
+        }
+        for expr in repeat_for.iter_mut().chain(announced_x.iter_mut()) {
+            quantity_of(expr, &mut resolve);
+        }
+        if let Some(spec) = multi_target {
+            quantity_of(&mut spec.min, &mut resolve);
+            if let Some(max) = &mut spec.max {
+                quantity_of(max, &mut resolve);
+            }
+        }
+        for constraint in target_constraints {
+            if let TargetSelectionConstraint::TotalManaValue { value, .. } = constraint {
+                quantity_of(value, &mut resolve);
+            }
+        }
+        if let Some(modal) = modal {
+            rebind_declared_groups_in_player_filter(&mut modal.chooser, &mut resolve);
+            if let Some(max) = &mut modal.dynamic_max_choices {
+                quantity_of(max, &mut resolve);
+            }
+        }
+        if let Some(filter) = player_scope {
+            rebind_declared_groups_in_player_filter(filter, &mut resolve);
+        }
+        if let Some(controller) = starting_with {
+            rebind_declared_groups_in_controller(controller, &mut resolve);
+        }
+        if let Some(RepeatContinuation::WhileCondition { condition, .. }) = repeat_until {
+            rebind_declared_groups_in_condition(condition, &mut resolve);
+        }
     });
 }
 

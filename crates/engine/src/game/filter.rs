@@ -12,10 +12,11 @@ use crate::game::quantity::{
     resolve_quantity_with_ctx, resolve_quantity_with_targets, QuantityContext,
 };
 use crate::types::ability::{
-    AttackerBlockStatus, CardTypeSetSource, CastManaSpentMetric, ChoiceValue, ChosenAttribute,
-    CombatRelation, CombatRelationSubject, ControllerRef, CountScope, FilterProp, Parity,
-    ParitySource, PlayerFilter, PtStat, PtValueScope, QuantityExpr, QuantityRef, ResolvedAbility,
-    SharedQuality, SharedQualityRelation, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    AbilityCondition, AttackerBlockStatus, CardTypeSetSource, CastManaSpentMetric, ChoiceValue,
+    ChosenAttribute, CombatRelation, CombatRelationSubject, ControllerRef, CountScope, FilterProp,
+    Parity, ParitySource, PlayerFilter, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+    ResolvedAbility, SharedQuality, SharedQualityRelation, TargetFilter, TargetRef, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, Supertype};
@@ -2710,51 +2711,199 @@ fn declared_group_controller(prop: &mut FilterProp) -> Option<&mut ControllerRef
     }
 }
 
+type DeclaredGroupResolver<'r> =
+    &'r mut dyn FnMut(crate::types::ability::ChosenGroupId) -> Option<PlayerId>;
+
+/// Runs `walk` over a clone and commits it only when the bounded population walk completed.
+fn rebind_declared_groups_with<T: Clone>(
+    value: &mut T,
+    resolve: DeclaredGroupResolver<'_>,
+    walk: impl FnOnce(&mut T, &DeclaredGroupBinder<'_>, &mut bool),
+) -> bool {
+    let binder = DeclaredGroupBinder {
+        resolve: std::cell::RefCell::new(resolve),
+    };
+    let mut rewritten = value.clone();
+    let mut complete = true;
+    walk(&mut rewritten, &binder, &mut complete);
+    if complete {
+        *value = rewritten;
+    }
+    complete
+}
+
 /// CR 608.2c + CR 115.1a: rewrite every declared-player reference in `filter` whose group
 /// `resolve` names to the concrete player. A group `resolve` declines is left untouched.
 /// `resolve` is called once per reference, so a recording closure doubles as the detector.
 /// Returns `false` (input unchanged) when a bounded population walk was incomplete.
 pub(crate) fn rebind_declared_groups(
     filter: &mut TargetFilter,
-    resolve: &mut dyn FnMut(crate::types::ability::ChosenGroupId) -> Option<PlayerId>,
+    resolve: DeclaredGroupResolver<'_>,
 ) -> bool {
-    let binder = DeclaredGroupBinder {
-        resolve: std::cell::RefCell::new(resolve),
-    };
-    let mut rewritten = filter.clone();
-    let mut complete = true;
-    rewrite_filter_props(
-        &mut rewritten,
-        &mut |node| binder.node(node),
-        &mut |prop| binder.prop(prop),
-        &mut complete,
-    );
-    if complete {
-        *filter = rewritten;
-    }
-    complete
+    rebind_declared_groups_with(filter, resolve, |filter, binder, complete| {
+        rewrite_filter_props(
+            filter,
+            &mut |node| binder.node(node),
+            &mut |prop| binder.prop(prop),
+            complete,
+        )
+    })
 }
 
 /// [`rebind_declared_groups`] over the filters inside a quantity expression.
 pub(crate) fn rebind_declared_groups_in_quantity(
     expr: &mut QuantityExpr,
-    resolve: &mut dyn FnMut(crate::types::ability::ChosenGroupId) -> Option<PlayerId>,
+    resolve: DeclaredGroupResolver<'_>,
 ) -> bool {
-    let binder = DeclaredGroupBinder {
+    rebind_declared_groups_with(expr, resolve, |expr, binder, complete| {
+        rewrite_quantity_expr_filter_props(
+            expr,
+            &mut |node| binder.node(node),
+            &mut |prop| binder.prop(prop),
+            complete,
+        )
+    })
+}
+
+/// [`rebind_declared_groups`] over the filters inside a player filter.
+pub(crate) fn rebind_declared_groups_in_player_filter(
+    filter: &mut PlayerFilter,
+    resolve: DeclaredGroupResolver<'_>,
+) -> bool {
+    rebind_declared_groups_with(filter, resolve, |filter, binder, complete| {
+        rewrite_player_filter_props(
+            filter,
+            &mut |node| binder.node(node),
+            &mut |prop| binder.prop(prop),
+            complete,
+        )
+    })
+}
+
+/// [`rebind_declared_groups`] over a bare controller scope.
+pub(crate) fn rebind_declared_groups_in_controller(
+    controller: &mut ControllerRef,
+    resolve: DeclaredGroupResolver<'_>,
+) {
+    DeclaredGroupBinder {
         resolve: std::cell::RefCell::new(resolve),
-    };
-    let mut rewritten = expr.clone();
-    let mut complete = true;
-    rewrite_quantity_expr_filter_props(
-        &mut rewritten,
-        &mut |node| binder.node(node),
-        &mut |prop| binder.prop(prop),
-        &mut complete,
-    );
-    if complete {
-        *expr = rewritten;
     }
-    complete
+    .controller(controller);
+}
+
+/// [`rebind_declared_groups`] over a bare filter property.
+fn rebind_declared_groups_in_prop(
+    prop: &mut FilterProp,
+    resolve: DeclaredGroupResolver<'_>,
+) -> bool {
+    rebind_declared_groups_with(prop, resolve, |prop, binder, complete| {
+        rewrite_filter_prop(
+            prop,
+            &mut |node| binder.node(node),
+            &mut |prop| binder.prop(prop),
+            complete,
+        )
+    })
+}
+
+/// [`rebind_declared_groups`] over every filter, quantity, player scope and controller scope an
+/// ability condition names. Exhaustive, so a new condition must classify its player references.
+pub(crate) fn rebind_declared_groups_in_condition(
+    condition: &mut AbilityCondition,
+    resolve: DeclaredGroupResolver<'_>,
+) {
+    match condition {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+            rebind_declared_groups_in_quantity(lhs, resolve);
+            rebind_declared_groups_in_quantity(rhs, resolve);
+        }
+        AbilityCondition::PreviousEffectAmount { rhs, .. } => {
+            rebind_declared_groups_in_quantity(rhs, resolve);
+        }
+        AbilityCondition::ScopedPlayerMatches { filter } => {
+            rebind_declared_groups_in_player_filter(filter, resolve);
+        }
+        AbilityCondition::WasStartingPlayer { controller } => {
+            rebind_declared_groups_in_controller(controller, resolve);
+        }
+        AbilityCondition::ObjectsShareQuality {
+            subject, reference, ..
+        } => {
+            rebind_declared_groups(subject, resolve);
+            rebind_declared_groups(reference, resolve);
+        }
+        AbilityCondition::RevealedHasCardType {
+            additional_filter,
+            subtype_filter,
+            ..
+        } => {
+            if let Some(prop) = additional_filter {
+                rebind_declared_groups_in_prop(prop, resolve);
+            }
+            if let Some(filter) = subtype_filter {
+                rebind_declared_groups(filter, resolve);
+            }
+        }
+        AbilityCondition::TargetSharesNameWithOtherExiledThisWay { target: filter }
+        | AbilityCondition::DiscardedCardMatchesFilter { filter }
+        | AbilityCondition::TargetMatchesFilter { filter, .. }
+        | AbilityCondition::TriggeringSpellTargetsFilter { filter }
+        | AbilityCondition::SourceMatchesFilter { filter }
+        | AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter }
+        | AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. }
+        | AbilityCondition::ControllerControlsMatching { filter }
+        | AbilityCondition::ControllerControlledMatchingAsCast { filter }
+        | AbilityCondition::ZoneChangedThisWay { filter, .. }
+        | AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
+            rebind_declared_groups(filter, resolve);
+        }
+        AbilityCondition::ConditionInstead { inner: condition }
+        | AbilityCondition::Not { condition } => {
+            rebind_declared_groups_in_condition(condition, resolve)
+        }
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            for condition in conditions {
+                rebind_declared_groups_in_condition(condition, resolve);
+            }
+        }
+        AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::TriggerEventTargetExploitedBySource
+        | AbilityCondition::AdditionalCostPaid { .. }
+        | AbilityCondition::AdditionalCostPaidInstead
+        | AbilityCondition::AlternativeManaCostPaid
+        | AbilityCondition::EffectOutcome { .. }
+        | AbilityCondition::EventOutcomeWon
+        | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::WhenYouDo
+        | AbilityCondition::WasCast { .. }
+        | AbilityCondition::CastDuringPhase { .. }
+        | AbilityCondition::CurrentPhaseIs { .. }
+        | AbilityCondition::CastTimingPermission { .. }
+        | AbilityCondition::ManaColorSpent { .. }
+        | AbilityCondition::SourceEnteredThisTurn
+        | AbilityCondition::CastVariantPaid { .. }
+        | AbilityCondition::CastVariantPaidInstead { .. }
+        | AbilityCondition::HasMaxSpeed
+        | AbilityCondition::IsMonarch
+        | AbilityCondition::IsInitiative
+        | AbilityCondition::HasCityBlessing
+        | AbilityCondition::HasEnduringStory
+        | AbilityCondition::ControlsCommander { .. }
+        | AbilityCondition::IsRingBearer
+        | AbilityCondition::CompletedDungeon { .. }
+        | AbilityCondition::TargetHasKeywordInstead { .. }
+        | AbilityCondition::HasObjectTarget
+        | AbilityCondition::IsYourTurn
+        | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+        | AbilityCondition::FirstCombatPhaseOfTurn
+        | AbilityCondition::FirstEndStepOfTurn
+        | AbilityCondition::SourceIsTapped
+        | AbilityCondition::SourceAttachedToCreature
+        | AbilityCondition::DayNightIsNeither
+        | AbilityCondition::DayNightIs { .. }
+        | AbilityCondition::AbilityUseCountThisTurn { .. }
+        | AbilityCondition::SourceLacksKeyword { .. } => {}
+    }
 }
 
 /// The distinct declared-player groups `filter` names, in first-seen order.
@@ -5714,7 +5863,25 @@ fn zone_change_filter_inner(
                             _ => return false,
                         }
                     }
-                    _ => {}
+                    // CR 608.2c + CR 608.2b: the announced player, or no one once gone.
+                    ControllerRef::DeclaredPlayer { group } => {
+                        match declared_player(state, ability, *group) {
+                            Some(pid) if pid == obj_ctrl => {}
+                            _ => return false,
+                        }
+                    }
+                    // CR 109.4 + CR 611.2: a resolution-time snapshot — compare directly.
+                    ControllerRef::SpecificPlayer { id } if *id != obj_ctrl => {
+                        return false;
+                    }
+                    ControllerRef::You
+                    | ControllerRef::Opponent
+                    | ControllerRef::SpecificPlayer { .. }
+                    | ControllerRef::ParentTargetOwner
+                    | ControllerRef::DefendingPlayer
+                    | ControllerRef::SourceChosenPlayer
+                    | ControllerRef::TriggeringPlayer
+                    | ControllerRef::ActivePlayer => {}
                 }
                     true
                 };

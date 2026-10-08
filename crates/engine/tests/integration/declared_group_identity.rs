@@ -4,14 +4,16 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, ChosenGroupId, Comparator, ControllerRef,
-    DelayedTriggerCondition, Effect, FilterProp, QuantityExpr, QuantityRef, StaticDefinition,
-    SubAbilityLink, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ChosenGroupId, Comparator,
+    ControllerRef, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
+    QuantityExpr, QuantityRef, StaticDefinition, SubAbilityLink, TargetFilter, TargetRef,
+    TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{CastPaymentMode, GameState, LayersDirty, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
@@ -468,6 +470,8 @@ struct Out {
     bears: Vec<bool>,
     last_wait: String,
     fingerprint: String,
+    asked: Vec<String>,
+    affected: Vec<String>,
 }
 
 fn grant_hexproof(state: &mut GameState, player: PlayerId) {
@@ -512,6 +516,19 @@ fn run(
     before_resolve: After,
     after_install: After,
 ) -> Out {
+    run_deciding(root, picks, phases, before_resolve, after_install, None)
+}
+
+/// [`run`], answering every optional-effect and unless-payment prompt with `decide` (accept /
+/// pay) and recording who was asked.
+fn run_deciding(
+    root: AbilityDefinition,
+    picks: &[Pick],
+    phases: &[Phase],
+    before_resolve: After,
+    after_install: After,
+    decide: Option<bool>,
+) -> Out {
     let mut scenario = GameScenario::new_n_player(3, 7);
     scenario.at_phase(Phase::PreCombatMain);
     let bears: Vec<ObjectId> = [P1, P2]
@@ -546,6 +563,7 @@ fn run(
     let mut prompts = 0;
     let mut applied_before = false;
     let mut last_wait = String::new();
+    let mut asked: Vec<String> = Vec::new();
     let mut drive = |runner: &mut GameRunner| {
         for _ in 0..80 {
             match runner.state().waiting_for.clone() {
@@ -569,6 +587,27 @@ fn run(
                         apply(runner.state_mut(), before_resolve);
                     }
                     runner.act(GameAction::PassPriority).expect("pass");
+                }
+                WaitingFor::OptionalEffectChoice { player, .. } if decide.is_some() => {
+                    asked.push(format!("optional:{}", player.0));
+                    runner
+                        .act(GameAction::DecideOptionalEffect {
+                            accept: decide == Some(true),
+                        })
+                        .expect("decide optional");
+                }
+                WaitingFor::UnlessPayment { player, .. } if decide.is_some() => {
+                    asked.push(format!("unless:{}", player.0));
+                    let pay = decide == Some(true);
+                    if pay {
+                        let _ = runner.state_mut().add_mana_to_pool(
+                            player,
+                            ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+                        );
+                    }
+                    runner
+                        .act(GameAction::PayUnlessCost { pay })
+                        .expect("decide unless");
                 }
                 other => {
                     last_wait = format!("{other:?}").chars().take(140).collect();
@@ -598,6 +637,12 @@ fn run(
             })
             .collect(),
         last_wait,
+        asked,
+        affected: state
+            .transient_continuous_effects
+            .iter()
+            .map(|t| format!("{:?}", t.affected))
+            .collect(),
         fingerprint: format!(
             "{}|{:?}|{:?}",
             serde_json::to_string(&state.players).unwrap(),
@@ -973,4 +1018,245 @@ fn e2_true_condition_takes_the_main_branch() {
         &[true, true],
         1,
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Definition-level readers of a payload
+// ---------------------------------------------------------------------------------------------
+
+fn deciding_run(payload: AbilityDefinition, before: After, decide: bool) -> Out {
+    run_deciding(
+        then(head(), delayed(payload, Phase::End)),
+        &[Pick::Player(P1)],
+        &[Phase::End],
+        before,
+        After::Nothing,
+        Some(decide),
+    )
+}
+
+fn draw_for(group: ChosenGroupId) -> AbilityDefinition {
+    def(kind("Draw", &dp(group)))
+}
+
+fn may_draw() -> AbilityDefinition {
+    let mut payload = draw_for(G);
+    payload.optional = true;
+    payload.optional_player = Some(dp(G));
+    payload
+}
+
+fn unless_lose() -> AbilityDefinition {
+    let mut payload = def(lose(dp(G)));
+    payload.unless_pay = Some(UnlessPayModifier {
+        cost: AbilityCost::Mana {
+            cost: ManaCost::generic(1),
+        },
+        payer: dp(G),
+    });
+    payload
+}
+
+/// I1: `optional_player` naming G offers the "may" to G's player (CR 608.2d, CR 603.7a).
+#[test]
+fn i1_optional_player_offers_the_groups_player_the_may() {
+    let accepted = deciding_run(may_draw(), After::Nothing, true);
+    assert_eq!(accepted.asked, ["optional:1"]);
+    assert_eq!(accepted.hand, [0, 3, 2]);
+    let declined = deciding_run(may_draw(), After::Nothing, false);
+    assert_eq!(declined.asked, ["optional:1"]);
+    assert_eq!(declined.hand, [0, 2, 2]);
+}
+
+/// I2: `unless_pay.payer` naming G offers the payment to G's player (CR 118.12a, CR 603.7a).
+#[test]
+fn i2_unless_payer_offers_the_payment_to_the_groups_player() {
+    let declined = deciding_run(unless_lose(), After::Nothing, false);
+    assert_eq!(declined.asked, ["unless:1"]);
+    assert_eq!(declined.life, [20, 17, 20]);
+    let paid = deciding_run(unless_lose(), After::Nothing, true);
+    assert_eq!(paid.asked, ["unless:1"]);
+    assert_eq!(paid.life, [20, 20, 20]);
+}
+
+/// I3: a declared player who left before the chain resolved is asked nothing (CR 608.2b); the
+/// available-player control is I1 / I2.
+#[test]
+fn i3_unavailable_group_player_is_asked_nothing_and_nothing_happens() {
+    for payload in [may_draw(), unless_lose()] {
+        let out = deciding_run(payload, After::Eliminate, true);
+        assert!(out.asked.is_empty(), "{:?}", out.asked);
+        assert_eq!((out.life[0], out.life[2]), (20, 20));
+        assert_eq!((out.hand[0], out.hand[2]), (0, 2));
+    }
+}
+
+fn bears_of_g() -> QuantityExpr {
+    QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(creature_of(G)),
+        },
+    }
+}
+
+/// I4a: a payload `condition` reads G's player's board.
+#[test]
+fn i4a_condition_reads_the_groups_player() {
+    let mut gated = def(lose(TargetFilter::Controller));
+    gated.condition = Some(AbilityCondition::QuantityCheck {
+        lhs: bears_of_g(),
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 1 },
+    });
+    assert_out(
+        &payload_run(gated, After::Nothing, After::Nothing),
+        &[17, 20, 20],
+        &[0, 2, 2],
+        &[true, true],
+        1,
+    );
+}
+
+/// I4b: a payload `repeat_for` reads G's player's board.
+#[test]
+fn i4b_repeat_for_reads_the_groups_player() {
+    let mut repeated = def(lose(TargetFilter::Controller));
+    repeated.repeat_for = Some(bears_of_g());
+    assert_out(
+        &payload_run(repeated, After::Nothing, After::Nothing),
+        &[17, 20, 20],
+        &[0, 2, 2],
+        &[true, true],
+        1,
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Zone-change record door
+// ---------------------------------------------------------------------------------------------
+
+/// P0's life lost to a count of `Typed(creature)` under `controller` among this turn's deaths,
+/// after P1 is declared; `died` lists the owners of the creatures that died.
+fn deaths_counted(controller: ControllerRef, died: &[PlayerId]) -> i32 {
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let victims: Vec<ObjectId> = died
+        .iter()
+        .map(|player| scenario.add_creature(*player, "Victim", 2, 2).id())
+        .collect();
+    let count = QuantityExpr::Ref {
+        qty: QuantityRef::ZoneChangeCountThisTurn {
+            from: Some(Zone::Battlefield),
+            to: Some(Zone::Graveyard),
+            filter: TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Creature).controller(controller),
+            ),
+        },
+    };
+    let reader = effect_json(json!({
+        "type": "LoseLife",
+        "amount": serde_json::to_value(&count).unwrap(),
+        "target": serde_json::to_value(TargetFilter::Controller).unwrap(),
+    }));
+    let spell = scenario
+        .add_spell_to_hand(P0, "Probe", false)
+        .with_ability_definition(then(head(), def(reader)))
+        .id();
+    let mut runner = scenario.build();
+    for victim in victims {
+        engine::game::zones::move_to_zone(
+            runner.state_mut(),
+            victim,
+            Zone::Graveyard,
+            &mut Vec::new(),
+        );
+    }
+    assert_eq!(runner.state().zone_changes_this_turn.len(), died.len());
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast");
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P1)),
+        })
+        .expect("declare P1");
+    runner.advance_until_stack_empty();
+    20 - runner.state().players[0].life
+}
+
+fn assert_record_door(controller: ControllerRef) {
+    assert_eq!(
+        deaths_counted(controller.clone(), &[P1]),
+        1,
+        "{controller:?}: P1's creature"
+    );
+    assert_eq!(
+        deaths_counted(controller.clone(), &[P0]),
+        0,
+        "{controller:?}: P0's creature"
+    );
+    assert_eq!(
+        deaths_counted(controller.clone(), &[P0, P1, P2]),
+        1,
+        "{controller:?}: all three"
+    );
+}
+
+/// R1: a zone-change record's controller is read against the declared player (CR 608.2c).
+#[test]
+fn r1_record_controller_reads_the_declared_player() {
+    assert_record_door(declared(G));
+}
+
+/// R2: a snapshot controller id compares against the record's controller.
+#[test]
+fn r2_record_controller_compares_a_specific_player() {
+    assert_record_door(ControllerRef::SpecificPlayer { id: P1 });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Force-attack population
+// ---------------------------------------------------------------------------------------------
+
+fn force_attack_all(group: ChosenGroupId) -> AbilityDefinition {
+    def(Effect::ForceAttack {
+        target: TargetFilter::Typed(creature_of(group)),
+        required_defender: TargetFilter::Controller,
+        duration: Duration::UntilEndOfTurn,
+        scope: EffectScope::All,
+    })
+}
+
+/// F1: a broadcast force-attack population keeps the declared player as a concrete id, and
+/// installs nothing once that player is gone (CR 611.2c, CR 608.2b).
+#[test]
+fn f1_force_attack_population_lowers_the_declared_player() {
+    let root = then(head(), force_attack_all(G));
+    let live = run(
+        root.clone(),
+        &[Pick::Player(P1)],
+        &[],
+        After::Nothing,
+        After::Nothing,
+    );
+    assert_eq!(live.affected.len(), 1, "{:?}", live.affected);
+    assert!(
+        live.affected[0].contains("SpecificPlayer") && !live.affected[0].contains("DeclaredPlayer"),
+        "{:?}",
+        live.affected
+    );
+    let gone = run(
+        root,
+        &[Pick::Player(P1)],
+        &[],
+        After::Eliminate,
+        After::Nothing,
+    );
+    assert!(gone.affected.is_empty(), "{:?}", gone.affected);
 }

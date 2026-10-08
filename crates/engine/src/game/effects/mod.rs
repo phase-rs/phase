@@ -20814,8 +20814,11 @@ fn resolve_unless_payer(
         // `TargetFilter::Player` arm which scans `ability.targets` for the
         // first `TargetRef::Player`. CR 608.2c: a later "that player" payer
         // (`DeclaredPlayer`) takes that resolver's own arm, which reads the
-        // declared player and honors CR 608.2b.
-        TargetFilter::Player | TargetFilter::DeclaredPlayer { .. } => {
+        // declared player and honors CR 608.2b. `SpecificPlayer` is the same
+        // payer bound at delayed-trigger install (CR 603.7a).
+        TargetFilter::Player
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::SpecificPlayer { .. } => {
             crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
         }
         // CR 508.5 + CR 118.12a: "[Effect] unless defending player [pays cost]"
