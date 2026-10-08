@@ -20,7 +20,11 @@ interface OpponentSeatPaneProps {
   battlefieldView: PlayerBattlefieldView;
   showCards: boolean;
   onKickPlayer?: (playerId: PlayerId) => void;
-  onViewZone: (zone: ZoneName, playerId: PlayerId) => void;
+  onViewZone: (
+    zone: ZoneName,
+    playerId: PlayerId,
+    launcher: HTMLButtonElement,
+  ) => void;
 }
 
 const zoneRailStyle = {
@@ -112,7 +116,7 @@ export function OpponentSeatPane({
             </span>
           )}
         </div>
-        <div className="pointer-events-none -translate-y-[52%]">
+        <div className="pointer-events-none">
           <OpponentHand playerId={playerId} showCards={showCards} layout="split" />
         </div>
       </div>
@@ -125,17 +129,19 @@ export function OpponentSeatPane({
             <ExilePile
               playerId={playerId}
               size={pileSize}
-              onClick={() => onViewZone("exile", playerId)}
+              onClick={(launcher) => onViewZone("exile", playerId, launcher)}
             />
             <LibraryPile
               playerId={playerId}
               size={pileSize}
-              onView={() => onViewZone("library", playerId)}
+              onView={(launcher) => onViewZone("library", playerId, launcher)}
             />
             <GraveyardPile
               playerId={playerId}
               size={pileSize}
-              onClick={() => onViewZone("graveyard", playerId)}
+              onClick={(launcher) =>
+                onViewZone("graveyard", playerId, launcher)
+              }
             />
           </div>
         </div>

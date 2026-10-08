@@ -4,6 +4,7 @@ export interface DiscordThread {
   id: string;
   name: string;
   parent_id: string;
+  applied_tags?: string[];
   type: number;
   owner_id: string | null;
   last_message_id?: string | null;

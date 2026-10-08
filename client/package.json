@@ -1,15 +1,19 @@
 {
   "name": "phase-rs-client",
   "private": true,
-  "version": "0.25.0",
+  "version": "0.104.0",
   "type": "module",
+  "packageManager": "pnpm@9.15.9",
   "scripts": {
     "dev": "vite",
     "build": "pnpm run protocol:check && tsc -b && vite build",
+    "build:bootstrap": "vite build --config bootstrap/vite.config.ts",
     "lint": "eslint .",
     "protocol:check": "node ../scripts/check-protocol-version.mjs",
     "type-check": "pnpm run protocol:check && tsc -b --noEmit",
     "preview": "vite preview",
+    "storybook": "storybook dev -c storybook -p 6006",
+    "build-storybook": "storybook build -c storybook -o storybook-static",
     "test": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "tauri": "tauri",
@@ -22,36 +26,52 @@
     "@supabase/supabase-js": "^2.106.2",
     "@tailwindcss/vite": "^4.2.1",
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-opener": "2.5.4",
     "@tauri-apps/plugin-process": "^2.3.1",
-    "@tauri-apps/plugin-shell": "^2.3.5",
     "@tauri-apps/plugin-updater": "^2.10.0",
     "fflate": "^0.8.2",
     "framer-motion": "^12.35.1",
     "i18next": "^26.2.0",
+    "idb": "^8.0.3",
     "idb-keyval": "^6.2.2",
     "mana-font": "^1.18.0",
     "peerjs": "^1.5.5",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-i18next": "^17.0.8",
-    "react-router": "^7.15.1",
+    "react-router": "^7.18.2",
     "tailwindcss": "^4.2.1",
     "three": "^0.184.0",
-    "vite-plugin-top-level-await": "^1.5.0",
     "vite-plugin-wasm": "^3.4.1",
     "zustand": "^5.0.11"
   },
   "pnpm": {
     "overrides": {
       "serialize-javascript@<7.0.5": "7.0.5",
-      "ws@<8.20.1": "8.20.1",
+      "ws@<8.21.0": "8.21.0",
+      "@babel/core": "7.29.7",
+      "brace-expansion@1": "1.1.16",
+      "brace-expansion@2": "2.1.2",
+      "brace-expansion@>=3 <5.0.7": "5.0.7",
+      "fast-uri": "3.1.4",
+      "js-yaml": "4.3.0",
       "picomatch": ">=4.0.4",
       "lodash": ">=4.18.0",
-      "postcss": ">=8.5.10"
-    }
+      "postcss": ">=8.5.10",
+      "sharp": "0.35.3",
+      "undici": "7.28.0",
+      "uuid": "11.1.1"
+    },
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "workerd"
+    ]
   },
   "devDependencies": {
     "@eslint/js": "^9.21.0",
+    "@storybook/addon-a11y": "10.6.0",
+    "@storybook/addon-docs": "10.6.0",
+    "@storybook/react-vite": "10.6.0",
     "@tauri-apps/cli": "^2",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.3.0",
@@ -65,11 +85,14 @@
     "eslint": "^9.39.4",
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.19",
+    "eslint-plugin-storybook": "10.6.0",
+    "fake-indexeddb": "^6.2.5",
     "fishery": "^2.4.0",
     "globals": "^16.0.0",
     "happy-dom": "^20.8.9",
     "i18next-parser": "^9.4.0",
     "jsdom": "^26.0.0",
+    "storybook": "10.6.0",
     "typescript": "~5.7.0",
     "typescript-eslint": "^8.24.1",
     "vite": "^6.4.3",
@@ -77,6 +100,6 @@
     "vite-plugin-pwa": "^1.2.0",
     "vitest": "^4.1.0",
     "workbox-window": "^7.4.0",
-    "wrangler": "^4.76.0"
+    "wrangler": "^4.113.0"
   }
 }

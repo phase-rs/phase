@@ -1,7 +1,10 @@
 // Shared card-fan geometry — the overlap / tilt / arc math that lays a row of
 // cards out as a held "hand". Extracted from PlayerHand so any centered spread
-// of cards (the player's hand, a host permanent + its attachments) fans with
-// identical proportions instead of each surface re-deriving the curve.
+// of cards can share the same geometry building block while choosing the
+// density appropriate to its surface: compact for constrained overlays/mobile,
+// wide for the desktop player hand where adjacent hover targets matter.
+
+export type FanGeometryProfile = "compact" | "wide";
 
 // Signed overlap FRACTION of one card width by which each card slides over the
 // previous one (negative == leftward). Tightens continuously as the row grows so
@@ -9,7 +12,17 @@
 // truth for both the CSS margin (`getHandOverlap`) and the fan's total-width
 // budget (`spreadFactor`), so a caller sizing cards to fit a viewport can never
 // drift out of sync with the margin the cards actually render with.
-function overlapFraction(rowSize: number): number {
+function overlapFraction(rowSize: number, profile: FanGeometryProfile): number {
+  if (profile === "wide") {
+    if (rowSize <= 3) return -0.1;
+    if (rowSize <= 5) return -0.15;
+    if (rowSize <= 7) return -0.25;
+    // For 8+ cards, target total width ≈ 5.5× card width. This exposes
+    // substantially more of each adjacent card than the compact 4× profile,
+    // while the lower clamp still reins in unusually large Commander hands.
+    return Math.max(-0.86, Math.min(-0.35, 4.5 / (rowSize - 1) - 1));
+  }
+
   if (rowSize <= 5) return -0.25;
   if (rowSize <= 7) return -0.45;
   // For 8+ cards: target total width ≈ 4× card width.
@@ -22,9 +35,12 @@ function overlapFraction(rowSize: number): number {
 // occupies 1w and each of the remaining (n-1) cards adds its visible fraction
 // `(1 + overlap)`. A caller sizing cards to fit a viewport divides its width
 // budget by this factor. Never below 1 (a single card is 1w).
-export function spreadFactor(rowSize: number): number {
+export function spreadFactor(
+  rowSize: number,
+  profile: FanGeometryProfile = "compact",
+): number {
   if (rowSize <= 1) return 1;
-  return 1 + (rowSize - 1) * (1 + overlapFraction(rowSize));
+  return 1 + (rowSize - 1) * (1 + overlapFraction(rowSize, profile));
 }
 
 // Horizontal overlap between adjacent fanned cards, as a CSS margin-left. The
@@ -34,13 +50,27 @@ export function spreadFactor(rowSize: number): number {
 // (e.g. base `--card-w` while cards render 1.14–1.4× larger) leaves the real
 // overlap off by the scale factor, spreading the fan ~40% too wide with the
 // error compounding as the row grows.
-export function getHandOverlap(rowSize: number, cardWidthVar = "--hand-card-w"): string {
-  return `calc(var(${cardWidthVar}) * ${overlapFraction(rowSize)})`;
+export function getHandOverlap(
+  rowSize: number,
+  cardWidthVar = "--hand-card-w",
+  profile: FanGeometryProfile = "compact",
+): string {
+  return `calc(var(${cardWidthVar}) * ${overlapFraction(rowSize, profile)})`;
 }
 
 // Quadratic arc lift coefficient. Scales down as the row grows so the parabola
 // stays inside the band instead of pushing edge cards off-screen.
-export function getArcCoefficient(rowSize: number): number {
+export function getArcCoefficient(
+  rowSize: number,
+  profile: FanGeometryProfile = "compact",
+): number {
+  if (profile === "wide") {
+    if (rowSize <= 7) return 3.5;
+    // Flatter desktop arc: keep the outermost drop around 32px.
+    const maxDist = (rowSize - 1) / 2;
+    return 32 / (maxDist * maxDist);
+  }
+
   if (rowSize <= 7) return 6;
   // Keep max arc lift (at the edges) roughly constant at ~54px.
   const maxDist = (rowSize - 1) / 2;
@@ -64,19 +94,25 @@ export interface FanGeometry {
 // into the same tight, angle-clamped arc a 16-card row would, instead of
 // inheriting loose 3-card spacing and spilling off-screen with near-sideways
 // edge cards.
-export function fanGeometry(totalCards: number, cardWidthVar = "--hand-card-w"): FanGeometry {
+export function fanGeometry(
+  totalCards: number,
+  cardWidthVar = "--hand-card-w",
+  profile: FanGeometryProfile = "compact",
+): FanGeometry {
   const center = (totalCards - 1) / 2;
   // Size the SHAPE (tilt + arc) from at least two cards so a lone card still
   // fans (a raw delta of 0 would render flat).
   const shape = Math.max(2, totalCards);
-  const delta = Math.min(6, 36 / (shape - 1));
-  const arcCoeff = getArcCoefficient(shape);
+  const delta = profile === "wide"
+    ? Math.min(4, 24 / (shape - 1))
+    : Math.min(6, 36 / (shape - 1));
+  const arcCoeff = getArcCoefficient(shape, profile);
   // Downward parabola (edges drop, center rides highest), clamped at the row's
   // own edges so the outermost cards rest level with the band instead of
   // sinking below it and clipping.
   const edgeLift = center * center * arcCoeff;
   return {
-    overlap: getHandOverlap(totalCards, cardWidthVar),
+    overlap: getHandOverlap(totalCards, cardWidthVar, profile),
     rotation: (k: number) => (k - center) * delta,
     arc: (k: number) => {
       const d = k - center;

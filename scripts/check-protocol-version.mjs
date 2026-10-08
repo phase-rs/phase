@@ -3,6 +3,200 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+// Upstream's Winston draft frames are v71. Upstream's v72 combines its
+// independent policy carrier with the paid graveyard cast offer; v73 adds
+// face-qualified variants and preserves a paid addition while a resolution
+// modal-face prompt is paused; v74 carries exact delayed-trigger receipts;
+// v75 carries producer-owned paid-offer cleanup authority; v76 carries CR
+// 601.2f caster-elected cost-reduction ordering (#8885). v77
+// is a pre-emptive bump moved ahead of new `GameFormat` variants,
+// carrying no wire-shape change of its own; v78 adds the event-deadline
+// duration (`Duration::UntilEvent` and the transient effect's
+// `duration_event_source`); v79 adds the CR 601.2f activated-ability
+// cost-reduction election (`ReductionProvenance::{AbilityCostRider,
+// TransientEffect}` and the `activation_cost_snapshot` carrier); v80 reshapes
+// the face-down exile look link (`ExileLinkKind::HideawayLookable { grant,
+// lookers, source_incarnation }`); v81 adds the CR 702.117a Surge cast
+// election tag (`AlternativeCastKeyword::Surge`); v82 retypes
+// `AdditionalPhase.after` to `ExtraPhaseAnchor`, adds
+// `DelayedTriggerCondition::AtBeginningOfAddedPhase`, replaces
+// `ExtraPhase.phase` and the `extra_phase_resume` element with
+// `TurnSegment`-carrying records and minted ids, and replaces the two
+// per-turn step counters with the `steps_started_this_turn` tally; v83 adds
+// target-gated activation costs (`ReduceAbilityCost { targets, frequency }`,
+// the per-turn activation journal and the target-settlement carrier fields);
+// v84 adds required dungeon choice card and room previews.
+// v85 adds the tagged ignored-die display event; v86 adds the tagged
+// GameEvent::Melded event; v87 adds the Dig remainder split choice; v88 adds
+// `WaitingFor::DeclareBlockers.block_capacities` (CR 509.1a + CR 101.1); v89
+// adds the CR 118.9b required casting method on graveyard permissions
+// (`GraveyardCastPermission.required_cast_keyword`), the casting-menu
+// option's `additional_cost`, and the announced graveyard permission (the
+// option's `authority`, the slot prompt's `permission`, the latched terms).
+// v91 retypes PendingManaAbility's required chosen-counter count (#9207).
+// v92 serializes the reveal-until whiff verdict (ParentTargetMissingReason).
+// v93 adds the SacrificedForCost reduction provenance.
+// v97 adds TargetReadOrigin instruction provenance.
+// v99 adds the GraveyardCastPermission pool.
+// v100 replaces `AdditionalPhase.phase` with a `TurnSegment` `segment`,
+// retypes `followed_by` to `TurnSegment`, and replaces
+// `AdditionalPhase.target` with an `ExtraPhaseRecipient` `recipient`.
+// v101 adds `ActivatedAbilityKind::Mana` (mana-ability activations now emit
+// `GameEvent::AbilityActivated`), the event's `departed_source_lki`, and
+// `AbilityActivationRecord.source_zone`.
+// v109 carries the CR 201.5a granter binding (ObjectScope + granting_object).
+// v110 adds deferred spell delivery after a free-cast window and the
+// spell-copy order choice.
+// v111 adds the `Dandan` GameFormat name.
+// v112 adds the `SubstituteTextWord` text-changing modification (CR 612.1).
+// v113 adds `ResolvedZoneChangeCommand.rebound_from` (the Dandan hand-entry
+// ownership rebind).
+// v114 adds `WaitingFor::MulliganDecision.declared` (the CR 103.5 declare round).
+// v115 adds `MulliganChoice::FreeReveal` and `MulliganDeclaration.kind` (the Dandan
+// free reveal mulligan).
+// v116 adds the simultaneous-draw dealer to the multi-draw resolution frame
+// (`RESOLUTION_STATE_WIRE_VERSION` 5).
+// v117 adds `DerivedViews.shared_piles` (the shared-pile holder seat).
+// v118 retypes the `ManaColorSpent` color of `AbilityCondition` and `TriggerCondition`
+// to `SpentColor` (word versus symbol provenance, CR 612.2).
+// Keep the measured base so a future merge cannot collapse independent wire
+// changes onto one number.
+const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
+// +10: upstream's v76 CR 601.2f caster-elected cost-reduction ordering, the
+// v77 pre-emptive bump ahead of new format names, the v78 CR 611.2a
+// event-deadline duration parse bump, the v79 activated-ability
+// cost-reduction election, the v80 exile look-link reshape, and the v81 Surge
+// cast election tag.
+// +11: the v82 CR 500.8–500.10 added-phase anchoring parse bump.
+// +12: the v83 target-gated activation costs.
+// +13: the v84 dungeon choice card and room previews.
+// +14: the v85 ignored-die display event.
+// +15: the v86 Melded event tag.
+// +16: the v87 Dig rest-split serialized choice and effect field.
+// +17: the v88 CR 509.1a + CR 101.1 block-capacities capability bump.
+// +18: the v89 graveyard cast-method requirement and permission announcement.
+// +19: the v90 FormatConfig.allow_experimental_dungeons capability flag.
+// +20: the v91 PendingManaAbility chosen-counter count retype.
+// +21: the v92 serialized ParentTargetMissingReason carrier and its
+// RevealUntil reveal-until whiff verdict.
+// +22: the v93 SacrificedForCost reduction provenance.
+// +23: the v94 phase-delayed departure look-back carrier
+// (SpellContext.creation_lookback_event) and TriggerSourceContext.mana_cost.
+// +24: the v95 FilterProp::BlockStatus reshape (Unblocked → BlockStatus { status }).
+// +25: the v96 QuantityRef::NameStickerLetterCount tagged quantity.
+// +26: the v97 serialized TargetReadOrigin (`target_reads`) instruction
+// provenance.
+// +27: the v98 PerPlayerScope::Opponents value, the PerPlayerChoiceOrder and
+// SubstituteChooser chooser purposes, and the per-player frame's current and
+// nominee fields.
+// +28: the v99 GraveyardCastPermission pool (from any graveyard).
+// +29: the v100 additional-phase segment and recipient parse bump.
+// +30: the v101 mana-ability activation kind and departed-source LKI.
+// +31: v102 adds the tagged SharedCardTypes quantity.
+// +32: v103 removes FormatConfig.allow_experimental_dungeons for the format-derived dungeon pool.
+// +33: v104 moves delve fuel to total-cost payment (PendingCast.delved_cards,
+// the FinalizeDelvedCast completion; DelveManaPayment removed).
+// +34: v105 adds the nominal base quantity to deferred mana-source selections.
+// +35: v106 adds exact replacement-choice preferences and remembered response actions.
+// +36: v107 adds the counted exile-until loop and the ParentTargets zone choice.
+// +37: v108 adds serialized IllegalTargetsDisposition.StillResolves.
+// +38: the v109 CR 201.5a granter binding.
+// +39: v110 adds the deferred spell delivery after a free-cast window and the
+//      spell-copy order choice.
+// +40: the v111 `Dandan` GameFormat name.
+// +41: the v112 `SubstituteTextWord` text-changing modification.
+// +42: v113 adds `ResolvedZoneChangeCommand.rebound_from`.
+// +43: v114 adds `WaitingFor::MulliganDecision.declared`.
+// +44: v115 adds `MulliganChoice::FreeReveal` and `MulliganDeclaration.kind`.
+// +45: v116 adds the simultaneous-draw dealer to the multi-draw resolution frame.
+// +46: v117 adds `DerivedViews.shared_piles` (the shared-pile holder seat).
+// +47: v118 retypes the `ManaColorSpent` color to `SpentColor` (word versus symbol).
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 47;
+// The LOBBY message-set version, not derived from the full-game number above.
+// The classifier below refuses an expression only on the SOURCE constants; this
+// script never reads itself, so its own EXPECTED_* must stay literals.
+const EXPECTED_LOBBY_PROTOCOL_VERSION = 16;
+// The capability FLOOR for correlated tournament settlement — a different kind
+// of number from the other version constants here, and the reason it is pinned
+// separately. Those track a surface's current version; this one is frozen at the
+// version that INTRODUCED the ack and must never be bumped alongside
+// EXPECTED_LOBBY_PROTOCOL_VERSION. Raising it would refuse every newer broker
+// that answers the ack perfectly well, silently disabling all four organizer
+// actions.
+const EXPECTED_MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK = 5;
+// The capability FLOOR for broker-owned default scoring — a second frozen
+// floor, pinned for the same reason as the ack floor above and never bumped
+// alongside EXPECTED_LOBBY_PROTOCOL_VERSION. It is frozen at the version that
+// RELAXED CreateTournament.scoring to optional. Raising it would push every
+// newer broker below the floor and pin this client to sending an explicit
+// policy forever; lowering it is worse, because omitting `scoring` against a
+// pre-6 broker is a hard `missing field` parse error rather than a degrade.
+const EXPECTED_MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING = 6;
+// The P2P wire version. A THIRD independent surface: host/guest first-contact
+// frames carry it, and the same GameState shape change that moves
+// EXPECTED_PROTOCOL_VERSION must move this one too. It was previously ungated
+// here, so a full-game bump could ship with an unbumped P2P version and CI
+// stayed green — a v(n-1) host and a v(n) guest would then complete a
+// handshake and only fail when the incompatible payload arrived.
+const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
+// +6: wire 60 moves with full-game v78 for the event-deadline duration.
+// +7: wire 61 moves with full-game v79 for the activated-ability cost election.
+// +8: wire 62 moves with full-game v80 for the exile look-link reshape.
+// +9: wire 63 moves with full-game v81 for the Surge cast election tag.
+// +10: wire 64 moves with full-game v82 for added-phase anchoring.
+// +11: wire 65 moves with full-game v83 for target-gated activation costs.
+// +12: wire 66 moves with full-game v84 for dungeon choice previews.
+// +13: wire 67 moves with full-game v85 for ignored-die event batches.
+// +14: wire 68 moves with full-game v86 for the Melded event tag.
+// +15: wire 69 moves with full-game v87 for the Dig rest-split choice.
+// +16: wire 70 moves with full-game v88 for block-capacities.
+// +17: wire 71 moves with full-game v89 for the graveyard cast-method
+// requirement and permission announcement.
+// +18: wire 72 moves with full-game v90 for the experimental-dungeon capability flag.
+// +19: wire 73 moves with full-game v91 for the counter-count retype.
+// +20: wire 74 moves with full-game v92 for the serialized reveal-until verdict.
+// +21: wire 75 moves with full-game v93 for the SacrificedForCost provenance.
+// +22: wire 76 moves with full-game v94 for the departure look-back carrier.
+// +23: wire 77 moves with full-game v95 for the FilterProp::BlockStatus reshape.
+// +24: wire 78 moves with full-game v96 for name-sticker quantities.
+// +25: wire 79 moves with full-game v97 for the serialized TargetReadOrigin.
+// +26: wire 80 moves with full-game v98 for per-player choice order and
+// PerPlayerScope::Opponents.
+// +27: wire 81 moves with full-game v99 for the graveyard permission pool.
+// +28: wire 82 moves with full-game v100 for the additional-phase segment and
+// recipient.
+// +29: wire 83 moves with full-game v101 for the mana-ability activation kind.
+// +30: wire 84 moves with full-game v102 for SharedCardTypes.
+// +31: wire 85 moves with full-game v103 for the format-derived dungeon pool.
+// +32: wire 86 moves with full-game v104 for the delve payment state shape.
+// +33: wire 87 moves with full-game v105 for deferred mana-source quantities.
+// +34: wire 88 moves with full-game v106 for remembered replacement choices.
+// +35: wire 89 moves with full-game v107 for the counted exile-until loop.
+// +36: wire 90 moves with full-game v108 for illegal-target resolution disposition.
+// +37: wire 91 moves with full-game v109 for the CR 201.5a granter binding.
+// +38: wire 92 moves with full-game v110 for the deferred spell delivery and
+//      the spell-copy order choice.
+// +39: wire 93 moves with full-game v111 for the `Dandan` GameFormat name.
+// +40: wire 94 moves with full-game v112 for the `SubstituteTextWord` modification.
+// +41: wire 95 moves with full-game v113 for the journaled `rebound_from`.
+// +42: wire 96 moves with full-game v114 for `MulliganDecision.declared`.
+// +43: wire 97 moves with full-game v115 for the free reveal mulligan.
+// +44: wire 98 moves with full-game v116 for the simultaneous-draw dealer.
+// +45: wire 99 moves with full-game v117 for `DerivedViews.shared_piles`.
+// +46: wire 100 moves with full-game v118 for `SpentColor` on `ManaColorSpent`.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 46;
+// The P2P DRAFT wire version. A FIFTH independent surface, and the one this
+// script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
+// EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse
+// a mismatched peer before allocating a seat or consuming reconnect grace) —
+// the most consequential kind of version number to leave ungated, because the
+// dangerous direction is the one that stays GREEN. Adding a draft message or a
+// player-view field without bumping this number left `draftProtocol.test.ts`
+// pinning the old value, nothing compared the two, and two mismatched peers
+// would pair successfully and silently drop every frame of the new shape. The
+// leg below closes that: the source constant, the test's `toBe(...)` and the
+// test's TITLE now all move with this expectation or the gate reds.
+const EXPECTED_DRAFT_PROTOCOL_VERSION = 30;
 
 function extractVersion(source, pattern, label) {
   const match = source.match(pattern);
@@ -14,7 +208,13 @@ function extractVersion(source, pattern, label) {
 
 function requirePattern(source, pattern, label) {
   if (!pattern.test(source)) {
-    throw new Error(`Protocol floor does not match expectation in ${label}`);
+    throw new Error(`Required protocol form not found in ${label}`);
+  }
+}
+
+function refusePattern(source, pattern, label) {
+  if (pattern.test(source)) {
+    throw new Error(`Superseded protocol version still named in ${label}`);
   }
 }
 
@@ -32,6 +232,30 @@ const clientSource = readFileSync(
 );
 const workerHelloGateSource = readFileSync(
   resolve(root, "lobby-worker/src/hello-gate.ts"),
+  "utf8",
+);
+const p2pProtocolSource = readFileSync(
+  resolve(root, "client/src/network/protocol.ts"),
+  "utf8",
+);
+const p2pProtocolTestSource = readFileSync(
+  resolve(root, "client/src/network/__tests__/protocol.test.ts"),
+  "utf8",
+);
+const draftProtocolSource = readFileSync(
+  resolve(root, "client/src/network/draftProtocol.ts"),
+  "utf8",
+);
+const draftProtocolTestSource = readFileSync(
+  resolve(root, "client/src/network/__tests__/draftProtocol.test.ts"),
+  "utf8",
+);
+const draftCoreTypesSource = readFileSync(
+  resolve(root, "crates/draft-core/src/types.rs"),
+  "utf8",
+);
+const p2pAdapterTestSource = readFileSync(
+  resolve(root, "client/src/adapter/__tests__/p2p-adapter-multiplayer.test.ts"),
   "utf8",
 );
 
@@ -63,9 +287,86 @@ requirePattern(
 );
 requirePattern(
   workerHelloGateSource,
-  /const\s+minSupportedProtocol\s*=\s*Math\.max\(0,\s*serverProtocolVersion\s*-\s*1\)\s*;/,
+  /const\s+legacyMin\s*=\s*Math\.max\(0,\s*policy\.serverProtocolVersion\s*-\s*1\)\s*;/,
   "lobby-worker/src/hello-gate.ts",
 );
+
+// ── Authored vs derived: which constants may carry a bare integer ──────────
+//
+// Of the protocol constants declared in the files below, only the names listed
+// here may carry an integer. A derived constant replaced by its correct current
+// value passes every other check in this file and every relational assertion in
+// the Rust and vitest suites, and reds only at the next bump. Ceilings: a
+// right-hand side that is constant but not a decimal integer (hex, arithmetic,
+// a block expression) reads as derived, and so does a decimal integer whose
+// type suffix falls outside INTEGER_RHS's `[iu]<digits>` alphabet — `<n>usize`,
+// `<n>isize` and TypeScript's `<n>n`; the name filter below lets a helper named
+// neither PROTOCOL nor MIN_SUPPORTED hold the literal while a protocol
+// constant derives from it; and the declaration regex sees one binding per
+// `const` and ends the right-hand side at the first `;`, comment or not.
+const AUTHORED_LITERALS = [
+  [rustSource, "crates/lobby-broker/src/protocol.rs", [
+    "LOBBY_PROTOCOL_VERSION",
+    "MIN_SUPPORTED_LOBBY_PROTOCOL",
+    "PROTOCOL_VERSION",
+  ]],
+  [serverCoreSource, "crates/server-core/src/protocol.rs", []],
+  [clientSource, "client/src/adapter/ws-adapter.ts", [
+    "LOBBY_PROTOCOL_VERSION",
+    // Authored for the opposite reason to the others: it is frozen, not
+    // current. Deriving it would silently disable the organizer actions at the
+    // next lobby bump, so the classifier has to insist on the literal.
+    "MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK",
+    // Same frozen-floor reasoning as the ack floor above: the default-scoring
+    // floor must stay a literal so re-deriving it from the current version
+    // fails this check instead of silently pinning the client forever.
+    "MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING",
+    // The client-only send-path floor for per-event `match_type`. Frozen at the
+    // version that introduced it, for the same reason as the two floors above:
+    // deriving it from the current version would, at the next lobby bump,
+    // silently start refusing v8 brokers that honor `match_type` perfectly. It
+    // has no shared Rust constant to mirror, so unlike the ack/scoring floors it
+    // is not additionally value-pinned by an EXPECTED_* assertion below.
+    "MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE",
+    // The client-only behavioral floor for recoverable (bounded-overlap)
+    // credential rotation. Same frozen-literal reasoning as the match-type floor
+    // above: it gates proactive rotation on the broker honoring the overlap, has
+    // no shared Rust constant to mirror, and must stay a bare literal so a future
+    // bump cannot re-derive it and start refusing v9 brokers that recover.
+    "MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION",
+    // Client-only frozen floor for the format names lobby 11 introduced; no Rust mirror.
+    "MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS",
+    // Client-only frozen floor for the format name lobby 16 introduced; no Rust mirror.
+    "MIN_LOBBY_PROTOCOL_FOR_DANDAN",
+    "MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL",
+    "PROTOCOL_VERSION",
+  ]],
+  [p2pProtocolSource, "client/src/network/protocol.ts", [
+    "WIRE_PROTOCOL_VERSION",
+  ]],
+];
+
+const CONST_DECL =
+  /(?:pub(?:\([^)]+\))?\s+|export\s+)?(?:const|static)\s+([A-Z][A-Z0-9_]*)\s*(?::\s*[^=;]+)?\s*=\s*([^;]+);/g;
+const INTEGER_RHS = /^\d[\d_]*(_?[iu]\d+)?(\s+(as|satisfies)\s+[^=;]+)?$/;
+
+for (const [source, label, authored] of AUTHORED_LITERALS) {
+  const found = [...source.matchAll(CONST_DECL)]
+    .filter(([, name]) => /PROTOCOL|MIN_SUPPORTED/.test(name))
+    .filter(([, , rhs]) =>
+      INTEGER_RHS.test(rhs.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, " ").trim()),
+    )
+    .map(([, name]) => name)
+    .sort();
+  const expected = [...authored].sort();
+  if (found.join(" ") !== expected.join(" ")) {
+    console.error(
+      `Protocol constants with a bare-integer right-hand side in ${label} must be exactly [${expected.join(", ")}], found [${found.join(", ")}]. ` +
+        `Every other protocol constant there derives from one of these and must stay an expression.`,
+    );
+    process.exit(1);
+  }
+}
 
 if (rustVersion !== clientVersion) {
   console.error(
@@ -73,3 +374,371 @@ if (rustVersion !== clientVersion) {
   );
   process.exit(1);
 }
+
+if (
+  rustVersion !== EXPECTED_PROTOCOL_VERSION ||
+  clientVersion !== EXPECTED_PROTOCOL_VERSION
+) {
+  console.error(
+    `Protocol version must remain ${EXPECTED_PROTOCOL_VERSION}: Rust=${rustVersion}, client=${clientVersion}`,
+  );
+  process.exit(1);
+}
+
+// ── P2P wire protocol: the third surface ───────────────────────────────────
+//
+// Pinned here for the same reason the full-game number is: a `GameState` shape
+// change crosses BOTH the WebSocket full-game wire and the P2P host/guest wire,
+// and the decoder on each of those wires reads whatever arrives. The P2P peer's
+// `validateMessage` (client/src/network/protocol.ts) checks the `type` tag and
+// nothing else, and the WebSocket client hands server frames straight to
+// `JSON.parse` (client/src/adapter/ws-adapter.ts). First-contact version
+// equality is the only place either skew is refusable, and bumping one number
+// without the other leaves the unbumped surface with nothing that can refuse.
+
+const wireProtocolVersion = extractVersion(
+  p2pProtocolSource,
+  /export\s+const\s+WIRE_PROTOCOL_VERSION\s*=\s*(\d+)\s*as\s+const\s*;/,
+  "client/src/network/protocol.ts",
+);
+
+if (wireProtocolVersion !== EXPECTED_WIRE_PROTOCOL_VERSION) {
+  console.error(
+    `P2P wire protocol version must remain ${EXPECTED_WIRE_PROTOCOL_VERSION}: got ${wireProtocolVersion}. ` +
+      `A GameState shape change must bump this alongside PROTOCOL_VERSION, not instead of it.`,
+  );
+  process.exit(1);
+}
+
+// ── P2P draft wire: the FIFTH surface ──────────────────────────────────
+//
+// Independent of all four numbers above: the draft host/guest pair versions its
+// own message set and its own player-view shape, and refuses a mismatch at
+// first contact rather than at the frame that would have broken. The regex
+// requires a bare integer right-hand side, so a future
+// `DRAFT_PROTOCOL_VERSION = SOMETHING + 1` trips "Could not find protocol
+// version" instead of silently un-pinning the surface.
+
+const draftProtocolVersion = extractVersion(
+  draftProtocolSource,
+  /export\s+const\s+DRAFT_PROTOCOL_VERSION\s*=\s*(\d+)\s*as\s+const\s*;/,
+  "client/src/network/draftProtocol.ts",
+);
+
+if (draftProtocolVersion !== EXPECTED_DRAFT_PROTOCOL_VERSION) {
+  console.error(
+    `P2P draft protocol version must remain ${EXPECTED_DRAFT_PROTOCOL_VERSION}: got ${draftProtocolVersion}. ` +
+      `A new draft message type or player-view field must bump this number, and the test that pins it moves in the same commit.`,
+  );
+  process.exit(1);
+}
+
+
+// ── Draft payload BOUNDS: a sixth surface, and a different kind of number ──
+//
+// `draftProtocol.ts` mirrors three engine constants that bound what a draft
+// message may STATE, so the transport can refuse an over-long payload without a
+// session. Each carried a `@sync-with` comment and nothing that reads it, and
+// the pile bound additionally CLAIMED to be "pinned by this module's test
+// against the engine constant's published figure" — which it was not: that test
+// asserts pile 3 rejected and pile 2 accepted, which pins the constant against
+// itself and passes for any value the two sides happen to share.
+//
+// The dangerous direction is the silent one. Each Rust constant is DERIVED and
+// already pinned on its own side (`max_shared_stack_piles_matches_procedure_table`
+// folds `DraftKind::ALL`), so a future 4-pile procedure row moves the Rust value
+// and every Rust test stays green, while the unmoved TypeScript mirror rejects
+// legal pile-3 decisions at the transport — a rules-correct engine reachable
+// only by a message the client refuses to send. Comparing the two literals is
+// the only thing that reds on that edit, and this is the script that already
+// reads Rust constants for exactly this purpose.
+const DRAFT_PAYLOAD_BOUNDS = [
+  "MAX_CARDS_PER_PICK",
+  "MAX_COMMANDER_DESIGNATIONS",
+  "MAX_SHARED_STACK_PILES",
+];
+
+for (const name of DRAFT_PAYLOAD_BOUNDS) {
+  // Both sides require a bare integer right-hand side, for the same reason the
+  // version regexes do: re-deriving either mirror from the other would defeat
+  // the comparison, and an expression trips "Could not find" instead.
+  const rustBound = extractVersion(
+    draftCoreTypesSource,
+    new RegExp(`pub\\s+const\\s+${name}\\s*:\\s*usize\\s*=\\s*(\\d+)\\s*;`),
+    `crates/draft-core/src/types.rs ${name}`,
+  );
+  const clientBound = extractVersion(
+    draftProtocolSource,
+    new RegExp(`const\\s+${name}\\s*=\\s*(\\d+)\\s*;`),
+    `client/src/network/draftProtocol.ts ${name}`,
+  );
+  if (rustBound !== clientBound) {
+    console.error(
+      `Draft payload bound mismatch for ${name}: Rust=${rustBound}, client=${clientBound}. ` +
+        "The engine constant is derived from the procedure table; the transport mirror must move with it, " +
+        "or the client will refuse payloads the reducer accepts.",
+    );
+    process.exit(1);
+  }
+}
+
+// ── Lobby protocol: a SEPARATE surface with its own version ────────────────
+//
+// `PROTOCOL_VERSION` versions the full-game GameState/GameAction wire surface.
+// The lobby broker carries neither type, so most full-game bumps leave it
+// alone. It is not disjoint from them, though: its messages embed
+// `FormatConfig` and `MatchConfig`, which `GameState` also carries as fields,
+// so retyping one of those breaks lobby messages too and has to move BOTH
+// numbers. What is wrong is deriving one number from the other — the
+// accept-window used to come from the full-game number, so a GameState-only
+// bump slid the lobby window and stranded every already-deployed client.
+
+const rustLobbyVersion = extractVersion(
+  rustSource,
+  /pub\s+const\s+LOBBY_PROTOCOL_VERSION\s*:\s*u32\s*=\s*(\d+)\s*;/,
+  "crates/lobby-broker/src/protocol.rs",
+);
+const clientLobbyVersion = extractVersion(
+  clientSource,
+  /export\s+const\s+LOBBY_PROTOCOL_VERSION\s*=\s*(\d+)\s*;/,
+  "client/src/adapter/ws-adapter.ts",
+);
+const rustLobbyFloor = extractVersion(
+  rustSource,
+  /pub\s+const\s+MIN_SUPPORTED_LOBBY_PROTOCOL\s*:\s*u32\s*=\s*(\d+)\s*;/,
+  "crates/lobby-broker/src/protocol.rs",
+);
+const clientLobbyFloor = extractVersion(
+  clientSource,
+  /export\s+const\s+MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL\s*=\s*(\d+)\s*;/,
+  "client/src/adapter/ws-adapter.ts",
+);
+const clientTournamentAckFloor = extractVersion(
+  clientSource,
+  /export\s+const\s+MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK\s*=\s*(\d+)\s*;/,
+  "client/src/adapter/ws-adapter.ts",
+);
+const clientDefaultScoringFloor = extractVersion(
+  clientSource,
+  /export\s+const\s+MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING\s*=\s*(\d+)\s*;/,
+  "client/src/adapter/ws-adapter.ts",
+);
+
+// The structural invariant, and the reason this block exists. Each of the six
+// regexes above requires a bare integer literal on the right-hand side, so a
+// future edit to `LOBBY_PROTOCOL_VERSION = PROTOCOL_VERSION - 1` (or any other
+// expression) fails to match and trips "Could not find protocol version"
+// rather than silently re-coupling the two surfaces.
+//
+// That device is doing MORE work for the two FROZEN floors — the ack floor and
+// the default-scoring floor — than for the four current-version pins. The
+// plausible "improvement" to a frozen floor is to re-derive it from the current
+// version — `= LOBBY_PROTOCOL_VERSION` — which reads like removing a magic
+// number and is in fact a latent bug: at the next lobby bump every v5 broker,
+// which does mint the ack, would be refused as unsupported, and every v6
+// broker, which does apply the scoring default, likewise. The bare-integer
+// regex is what turns that edit into a failed check here instead.
+
+if (rustLobbyVersion !== clientLobbyVersion) {
+  console.error(
+    `Lobby protocol version mismatch: Rust=${rustLobbyVersion}, client=${clientLobbyVersion}`,
+  );
+  process.exit(1);
+}
+
+if (rustLobbyFloor !== clientLobbyFloor) {
+  console.error(
+    `Lobby protocol floor mismatch: Rust=${rustLobbyFloor}, client=${clientLobbyFloor}`,
+  );
+  process.exit(1);
+}
+
+if (rustLobbyVersion !== EXPECTED_LOBBY_PROTOCOL_VERSION) {
+  console.error(
+    `Lobby protocol version must remain ${EXPECTED_LOBBY_PROTOCOL_VERSION}: got ${rustLobbyVersion}. ` +
+      `Bump it ONLY for a LobbyClientMessage/LobbyServerMessage shape change — never for a full-game bump.`,
+  );
+  process.exit(1);
+}
+
+if (
+  clientTournamentAckFloor !== EXPECTED_MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK
+) {
+  console.error(
+    `MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK must remain ${EXPECTED_MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK}: got ${clientTournamentAckFloor}. ` +
+      `It is FROZEN at the lobby version that introduced TournamentActionAck — not a moving target. ` +
+      `Do NOT bump it with LOBBY_PROTOCOL_VERSION: a newer broker still answers the ack, and raising this ` +
+      `floor would refuse every one of them and silently disable all four organizer actions.`,
+  );
+  process.exit(1);
+}
+
+if (clientDefaultScoringFloor !== EXPECTED_MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING) {
+  console.error(
+    `MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING must remain ${EXPECTED_MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING}: got ${clientDefaultScoringFloor}. ` +
+      `It is FROZEN at the lobby version that relaxed CreateTournament.scoring to optional — not a moving target. ` +
+      `Do NOT bump it with LOBBY_PROTOCOL_VERSION: a newer broker still applies the arity default, and raising this ` +
+      `floor would pin this client to sending an explicit scoring policy against every broker that can default one.`,
+  );
+  process.exit(1);
+}
+
+if (clientDefaultScoringFloor > rustLobbyVersion) {
+  console.error(
+    `The default-scoring floor ${clientDefaultScoringFloor} exceeds the lobby version ${rustLobbyVersion}: ` +
+      `no broker could ever accept a CreateTournament with scoring omitted.`,
+  );
+  process.exit(1);
+}
+
+if (clientTournamentAckFloor > rustLobbyVersion) {
+  console.error(
+    `The tournament-ack floor ${clientTournamentAckFloor} exceeds the lobby version ${rustLobbyVersion}: ` +
+      `no broker could ever answer a gated tournament action.`,
+  );
+  process.exit(1);
+}
+
+if (rustLobbyFloor > rustLobbyVersion) {
+  console.error(
+    `Lobby floor ${rustLobbyFloor} exceeds the lobby version ${rustLobbyVersion}: no client that advertises a lobby version could connect.`,
+  );
+  process.exit(1);
+}
+
+// ── Directory announcement shape: a FOURTH constant surface ────────────────
+//
+// `DIRECTORY_VERSION` versions the ANNOUNCEMENT shape — the `POST /announce`
+// body Rust sends and the `GET /servers` envelope the client reads. It is
+// unrelated to all three wire protocols above: none of the lobby, full-game or
+// P2P message sets appears in a directory row. It moves only when
+// `RawAnnouncement` / `DirectoryRow` change shape, and both sides must move
+// together or a client silently ignores every listing.
+
+const EXPECTED_DIRECTORY_VERSION = 1;
+
+const directorySource = readFileSync(
+  resolve(root, "crates/lobby-broker/src/directory.rs"),
+  "utf8",
+);
+const clientDirectorySource = readFileSync(
+  resolve(root, "client/src/services/serverDirectory.ts"),
+  "utf8",
+);
+
+// Both regexes require a bare integer literal on the right-hand side, so a
+// future `DIRECTORY_VERSION = SOMETHING + 1` trips "Could not find protocol
+// version" rather than silently un-pinning the surface.
+const rustDirectoryVersion = extractVersion(
+  directorySource,
+  /pub\s+const\s+DIRECTORY_VERSION\s*:\s*u32\s*=\s*(\d+)\s*;/,
+  "crates/lobby-broker/src/directory.rs",
+);
+const clientDirectoryVersion = extractVersion(
+  clientDirectorySource,
+  /export\s+const\s+DIRECTORY_VERSION\s*=\s*(\d+)\s*;/,
+  "client/src/services/serverDirectory.ts",
+);
+
+if (rustDirectoryVersion !== clientDirectoryVersion) {
+  console.error(
+    `Directory version mismatch: Rust=${rustDirectoryVersion}, client=${clientDirectoryVersion}`,
+  );
+  process.exit(1);
+}
+
+// Not redundant with the mismatch check above. A COORDINATED bump of both
+// sides — exactly what an auto-merge of two branches can produce silently —
+// passes consistency and fails here.
+if (rustDirectoryVersion !== EXPECTED_DIRECTORY_VERSION) {
+  console.error(
+    `Directory version must remain ${EXPECTED_DIRECTORY_VERSION}: got ${rustDirectoryVersion}. ` +
+      `Bump it ONLY for a RawAnnouncement/DirectoryRow shape change.`,
+  );
+  process.exit(1);
+}
+// ── Names that embed a version number ─────────────────────────────────────
+//
+// A name carrying a version goes stale silently: `assert_eq!(PROTOCOL_VERSION,
+// <n>)` under `fn protocol_version_is_<n-1>` is green. The two sites below
+// require the CURRENT number and refuse the SUPERSEDED one; the handshake pair
+// after them requires both numerals and has no refuse leg. Every number here
+// derives from the EXPECTED_* constants above, so a later bump edits the
+// sources and those constants, never the patterns themselves. Ceiling: a
+// refuse leg catches leftover text from the previous version, which is the
+// defect a bump produces. Prose rewritten to some other wrong number is not a
+// bump leftover and is not guarded here.
+const P = EXPECTED_PROTOCOL_VERSION;
+const W = EXPECTED_WIRE_PROTOCOL_VERSION;
+const D = EXPECTED_DRAFT_PROTOCOL_VERSION;
+
+requirePattern(serverCoreSource, new RegExp(`fn protocol_version_is_${P}(?![0-9])`),
+  `crates/server-core/src/protocol.rs fn protocol_version_is_${P}`);
+refusePattern(serverCoreSource, new RegExp(`protocol_version_is_${P - 1}(?![0-9])`),
+  "crates/server-core/src/protocol.rs");
+
+// The draft wire's title pin, mirroring the device above. `toBe(<n>)` under
+// `it("is version <n-1>")` is green and misleading, and the title is the half
+// no type system and no assertion can check. Whole-file, not a title slice:
+// that test file holds exactly one `is version` phrase, so the narrowing the
+// p2p title legs need to stay admit-only buys nothing here, while reading the
+// whole file also catches the numeral in a nearby comment.
+requirePattern(draftProtocolTestSource, new RegExp(`is version ${D}(?![0-9])`),
+  `client/src/network/__tests__/draftProtocol.test.ts it("is version ${D}")`);
+refusePattern(draftProtocolTestSource, new RegExp(`is version ${D - 1}(?![0-9])`),
+  "client/src/network/__tests__/draftProtocol.test.ts");
+// And the assertion's own literal, so all three sites in the draft bump — the
+// source constant, this value and the title above — red THIS gate rather than
+// only the vitest run, which CI schedules separately from `type-check` and
+// `build`. Anchored on `expect(DRAFT_PROTOCOL_VERSION)` rather than on a bare
+// `toBe(<n>)`, so the refuse leg can never fire on an unrelated assertion that
+// happens to expect the superseded numeral.
+requirePattern(draftProtocolTestSource,
+  new RegExp(`expect\\(DRAFT_PROTOCOL_VERSION\\)\\.toBe\\(${D}\\)`),
+  `client/src/network/__tests__/draftProtocol.test.ts expect(DRAFT_PROTOCOL_VERSION).toBe(${D})`);
+refusePattern(draftProtocolTestSource,
+  new RegExp(`expect\\(DRAFT_PROTOCOL_VERSION\\)\\.toBe\\(${D - 1}\\)`),
+  "client/src/network/__tests__/draftProtocol.test.ts");
+
+// Both legs read the file's test TITLES, not its whole source, so coverage that legitimately
+// drives the superseded version in a body is not a bump leftover. Ceiling: double-quoted titles
+// only, so a backtick or single-quoted title falls out of the slice — admit-only, never a false
+// refusal, which is what makes the narrowing safe.
+const p2pProtocolTestTitles = [
+  ...p2pProtocolTestSource.matchAll(/\b(?:describe|it|test)\(\s*"([^"]*)"/g),
+]
+  .map((match) => match[1])
+  .join("\n");
+
+requirePattern(p2pProtocolTestTitles, new RegExp(`\\bv${W}\\b`),
+  `client/src/network/__tests__/protocol.test.ts titles v${W}`);
+refusePattern(p2pProtocolTestTitles, new RegExp(`\\bv${W - 1}\\b`),
+  "client/src/network/__tests__/protocol.test.ts titles");
+
+const P2P_GATE = 'describe("P2P wire-protocol version gate"';
+if (!p2pAdapterTestSource.includes(P2P_GATE)) {
+  console.error(
+    `Could not find ${P2P_GATE} in client/src/adapter/__tests__/p2p-adapter-multiplayer.test.ts: ` +
+      "that block holds the only instrument that tells a bumped client from an unbumped one.",
+  );
+  process.exit(1);
+}
+const gateLabel = "client/src/adapter/__tests__/p2p-adapter-multiplayer.test.ts";
+// Scoped to the gate block: the anchor above to the next top-level `describe(`,
+// or EOF if this is the last one. The slice starts AT the anchor, so it can
+// never widen back to the whole file.
+const gateBlockStart = p2pAdapterTestSource.indexOf(P2P_GATE);
+const gateBlockEnd = p2pAdapterTestSource.indexOf("\ndescribe(", gateBlockStart);
+const gateBlock = p2pAdapterTestSource.slice(
+  gateBlockStart,
+  gateBlockEnd === -1 ? undefined : gateBlockEnd,
+);
+
+// Order binds each numeral to its role: refused named and sent before admitted.
+// Raw-source match: a comment in the block quoting an it(...) title passes the title leg.
+requirePattern(gateBlock,
+  new RegExp(`\\bit\\("[^"]*\\bv${W - 1}\\b[^"]*\\bv${W}\\b[^"]*"`),
+  `${gateLabel} an it(...) title naming refused v${W - 1} before admitted v${W}`);
+requirePattern(gateBlock,
+  new RegExp(`setupFrameAt\\(${W - 1}\\)[\\s\\S]*setupFrameAt\\(${W}\\)`),
+  `${gateLabel} refused setupFrameAt(${W - 1}) before admitted setupFrameAt(${W})`);

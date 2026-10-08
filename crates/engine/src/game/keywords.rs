@@ -12,13 +12,47 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{
-    EmbalmCost, EternalizeCost, FlashbackCost, Keyword, KeywordKind, ProtectionTarget,
+    BestowCost, BlitzCost, EmbalmCost, EmergeCost, EternalizeCost, EvokeCost, FlashbackCost,
+    GiftKind, Keyword, KeywordKind, ProtectionTarget,
 };
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::statics::{CostModifyMode, StaticMode};
 use crate::types::zones::Zone;
+
+use super::engine::{PriorityAnnouncementFacadeAccess, PriorityPrincipal};
+
+/// An engine-authored Ninjutsu-family activation announcement for Priority
+/// preflight. The hand/command source and return creature stay private to the
+/// keyword authority until facade conversion.
+pub(in crate::game) struct PriorityNinjutsuAnnouncement {
+    ninjutsu_object_id: ObjectId,
+    creature_to_return: ObjectId,
+}
+
+impl PriorityNinjutsuAnnouncement {
+    fn new(ninjutsu_object_id: ObjectId, creature_to_return: ObjectId) -> Self {
+        Self {
+            ninjutsu_object_id,
+            creature_to_return,
+        }
+    }
+
+    pub(in crate::game) fn ninjutsu_object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.ninjutsu_object_id
+    }
+
+    pub(in crate::game) fn creature_to_return(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.creature_to_return
+    }
+}
 
 /// Check if a game object has a specific keyword, using discriminant-based matching
 /// for simple keywords (ignoring associated data for parameterized variants).
@@ -82,17 +116,29 @@ pub fn effective_flashback_cost(state: &GameState, object_id: ObjectId) -> Optio
     }
 }
 
+/// CR 702.174a: Effective Gift kind for casting prompts (hand / stack included).
+/// Routes through [`effective_keyword_for_object`] so off-zone grants are visible.
+pub fn effective_gift_kind(state: &GameState, object_id: ObjectId) -> Option<GiftKind> {
+    match effective_keyword_for_object(state, object_id, KeywordKind::Gift)? {
+        Keyword::Gift(kind) => Some(kind),
+        _ => None,
+    }
+}
+
 /// CR 702.146a: Effective Disturb alt-cost for an object in the graveyard.
 pub fn effective_disturb_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {
     let keyword =
         effective_keyword_for_object(state, object_id, KeywordKind::Disturb).or_else(|| {
             let obj = state.objects.get(&object_id)?;
-            // `snapshot_object_face` clears layout_kind; a still-unswapped DFC
-            // back face retains its layout kind and must not grant Disturb.
+            // #7565: the explicit swap-snapshot marker says "the live face is
+            // the alternative and this slot holds the stashed normal face" —
+            // a still-unswapped DFC back face must not grant Disturb. (The old
+            // discriminator was layout_kind.is_none(), an implicit contract
+            // with snapshot_object_face's erasure.)
             let stored_front_face = obj
                 .back_face
                 .as_ref()
-                .filter(|face| face.layout_kind.is_none())?;
+                .filter(|face| face.is_swap_snapshot)?;
             stored_front_face
                 .keywords
                 .iter()
@@ -329,10 +375,10 @@ pub(crate) fn resolve_keyword_mana_cost(
     }
 }
 
-/// CR 602.1a + CR 702.141a: Resolve `SelfManaCost` / `SelfManaValue` placeholders
-/// anywhere in an activated ability's cost tree before legality or payment.
-/// The mana payment path treats those placeholders as free, so every activation
-/// fetch must concretize them against the source object (Sliver Gravemother class).
+/// CR 601.2f + CR 602.1a: Resolve `SelfManaCost` / `SelfManaValue` placeholders
+/// anywhere in an `AbilityCost` tree before affordability or payment. The mana
+/// payment path treats those placeholders as free, so every payable cost must
+/// concretize them against its source object (Kentaro and Sliver Gravemother classes).
 pub(crate) fn resolve_self_mana_in_ability_cost(
     state: &GameState,
     source_id: ObjectId,
@@ -429,6 +475,86 @@ pub fn resolve_self_cost_graveyard_activated_keyword(
     }
 }
 
+/// CR 118.9 + CR 601.2f + CR 604.1: Resolve a `ManaCost::SelfManaCost` /
+/// `SelfManaValue` / `SelfManaCostReduced` payload carried by a *cast-time*
+/// alternative-cost keyword (CR 702.152a Blitz, CR 702.137a Spectacle, CR
+/// 702.119a Emerge, and the rest of the cast-from-hand alt-cost family) to the
+/// recipient spell's own concrete mana cost, before that keyword's cost is
+/// offered or paid. A `CastWithKeyword` static (CR 604.1) can grant one of
+/// these keywords with a bare `SelfManaCost` placeholder payload ("The blitz
+/// cost is equal to its mana cost" — Henzie, "Toolbox" Torre); left
+/// unresolved, `ManaCost::SelfManaCost` has mana value 0 but is not flagged
+/// "without paying mana", so it silently acts as a real {0} alternative cost.
+/// This mirrors [`resolve_self_cost_graveyard_activated_keyword`] but covers
+/// the disjoint keyword family whose cost is paid on the stack as a spell's
+/// total cost (CR 601.2f) rather than as an `AbilityCost::Mana` sub-cost.
+///
+/// Inclusion criterion: every keyword here is (a) a cast-time alternative or
+/// additional cost that substitutes for or accompanies a spell's mana cost,
+/// and (b) carries a bare `ManaCost` (or a `Mana(ManaCost)` variant of its
+/// cost enum, or a struct payload with a `mana_cost` field such as
+/// `EmergeCost`) that a `CastWithKeyword` grant could plausibly bind to a
+/// self-referential placeholder. Battlefield/activated-only keywords (Equip,
+/// Fortify, Reconfigure, Outlast, Unearth, Ninjutsu, Morph/Megamorph, Kicker)
+/// are not granted through this spell-cast seam and are intentionally
+/// excluded — they resolve their own placeholders (if any) at their own
+/// activation seam. Non-self-referential keywords pass through unchanged.
+pub(crate) fn resolve_self_cost_spell_keyword(
+    state: &GameState,
+    object_id: ObjectId,
+    keyword: &Keyword,
+) -> Keyword {
+    match keyword {
+        Keyword::Blitz(BlitzCost::Mana(cost)) => Keyword::Blitz(BlitzCost::Mana(
+            resolve_keyword_mana_cost(state, object_id, cost),
+        )),
+        Keyword::Spectacle(cost) => {
+            Keyword::Spectacle(resolve_keyword_mana_cost(state, object_id, cost))
+        }
+        Keyword::Dash(cost) => Keyword::Dash(resolve_keyword_mana_cost(state, object_id, cost)),
+        Keyword::Prowl(cost) => Keyword::Prowl(resolve_keyword_mana_cost(state, object_id, cost)),
+        Keyword::Surge(cost) => Keyword::Surge(resolve_keyword_mana_cost(state, object_id, cost)),
+        Keyword::Freerunning(cost) => {
+            Keyword::Freerunning(resolve_keyword_mana_cost(state, object_id, cost))
+        }
+        Keyword::Evoke(EvokeCost::Mana(cost)) => Keyword::Evoke(EvokeCost::Mana(
+            resolve_keyword_mana_cost(state, object_id, cost),
+        )),
+        Keyword::Bestow(BestowCost::Mana(cost)) => Keyword::Bestow(BestowCost::Mana(
+            resolve_keyword_mana_cost(state, object_id, cost),
+        )),
+        Keyword::Madness(cost) => {
+            Keyword::Madness(resolve_keyword_mana_cost(state, object_id, cost))
+        }
+        Keyword::Miracle(cost) => {
+            Keyword::Miracle(resolve_keyword_mana_cost(state, object_id, cost))
+        }
+        Keyword::Overload(cost) => {
+            Keyword::Overload(resolve_keyword_mana_cost(state, object_id, cost))
+        }
+        Keyword::Mutate(cost) => Keyword::Mutate(resolve_keyword_mana_cost(state, object_id, cost)),
+        Keyword::Mayhem(cost) => Keyword::Mayhem(resolve_keyword_mana_cost(state, object_id, cost)),
+        // CR 702.119a: Emerge's mana cost is a struct field (`EmergeCost.mana_cost`),
+        // not a bare `ManaCost`, so it needs its own arm; `sacrifice_filter` is
+        // untouched (it has no self-referential mana placeholder).
+        Keyword::Emerge(EmergeCost {
+            mana_cost,
+            sacrifice_filter,
+        }) => Keyword::Emerge(EmergeCost {
+            mana_cost: resolve_keyword_mana_cost(state, object_id, mana_cost),
+            sacrifice_filter: sacrifice_filter.clone(),
+        }),
+        Keyword::WebSlinging(cost) => {
+            Keyword::WebSlinging(resolve_keyword_mana_cost(state, object_id, cost))
+        }
+        Keyword::Plot(cost) => Keyword::Plot(resolve_keyword_mana_cost(state, object_id, cost)),
+        Keyword::Offspring(cost) => {
+            Keyword::Offspring(resolve_keyword_mana_cost(state, object_id, cost))
+        }
+        other => other.clone(),
+    }
+}
+
 /// Convenience: check for Flying.
 /// CR 702.9a: A creature with flying can't be blocked except by creatures with flying or reach.
 pub fn has_flying(obj: &GameObject) -> bool {
@@ -500,6 +626,13 @@ pub fn source_matches_protection_target(
             .chosen_card_type()
             .and_then(|ct| ct.protection_quality_str())
             .is_some_and(|quality| source_matches_card_type(source, quality)),
+        // CR 702.16k: Resolve "the chosen player" from the protected
+        // permanent's persisted choice. Protection covers objects that player
+        // controls and objects they own that no other player controls; CR
+        // 109.4 + CR 108.4a make controller-or-owner the shared authority.
+        ProtectionTarget::ChosenPlayer => protected
+            .chosen_player()
+            .is_some_and(|player| source.controller_or_owner() == player),
         // CR 702.16j: "Protection from everything" — protection from each object
         // regardless of the source's characteristic values.
         ProtectionTarget::Everything => true,
@@ -765,16 +898,24 @@ pub fn activate_ninjutsu(
     let effective_cost = apply_ability_cost_reduction(state, player, "ninjutsu", mana_cost);
 
     // CR 702.49a/d: Pay the ninjutsu-family mana cost (after all validation, before mutations)
-    super::casting::pay_ability_cost(
+    match super::casting::pay_ability_cost_for_activation(
         state,
         player,
         ninjutsu_obj_id,
         &AbilityCost::Mana {
             cost: effective_cost,
         },
+        None,
         events,
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())?
+    {
+        super::casting::PaymentOutcome::Paid => {}
+        super::casting::PaymentOutcome::Paused { .. }
+        | super::casting::PaymentOutcome::Failed { .. } => {
+            return Err("ninjutsu mana payment unexpectedly paused".to_string());
+        }
+    }
 
     // 1. Return creature to owner's hand
     // CR 702.49a + CR 614.6: ninjutsu returns the unblocked attacker to its
@@ -1072,6 +1213,36 @@ pub fn ninjutsu_family_activatable_sources(
     });
 
     hand_sources.chain(command_sources).collect()
+}
+
+/// Enumerates the Priority holder's finite Ninjutsu-family primers through the
+/// existing source, timing, cost, and return-creature authorities.
+pub(in crate::game) fn priority_ninjutsu_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityNinjutsuAnnouncement> {
+    let player = principal.semantic_holder();
+    ninjutsu_family_activatable_sources(state, player)
+        .into_iter()
+        .filter_map(|(ninjutsu_object_id, _, variant, cost)| {
+            (ninjutsu_timing_ok(&state.phase, &variant)
+                && crate::game::casting::can_pay_ability_mana_cost_after_auto_tap(
+                    state,
+                    player,
+                    ninjutsu_object_id,
+                    None,
+                    &cost,
+                ))
+            .then_some((ninjutsu_object_id, variant))
+        })
+        .flat_map(|(ninjutsu_object_id, variant)| {
+            returnable_creatures_for_variant(state, player, &variant)
+                .into_iter()
+                .map(move |creature_to_return| {
+                    PriorityNinjutsuAnnouncement::new(ninjutsu_object_id, creature_to_return)
+                })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1972,6 +2143,25 @@ mod tests {
         (state, attacker_id, ninja_id)
     }
 
+    #[test]
+    fn priority_offers_ninjutsu_to_an_active_teams_non_active_member() {
+        let (mut state, _, _) = setup_ninjutsu_scenario();
+        state.format_config = crate::types::format::FormatConfig::two_headed_giant();
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let principal = crate::game::engine::priority_principal_for_preflight(&state)
+            .expect("an active-team priority holder has a principal");
+
+        assert_eq!(
+            priority_ninjutsu_announcements(&state, &principal).len(),
+            1,
+            "a teammate of the active player may take ninjutsu during the team's priority"
+        );
+    }
+
     /// CR 702.49c + CR 616.1 discriminating test (fail-first): a ninja whose
     /// battlefield entry parks on a replacement-ordering prompt (two opposite-
     /// direction enter tap-state `Moved` effects — one enters tapped, one enters
@@ -2114,7 +2304,7 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::BecomeCopy {
-                            recipient: TargetFilter::SelfRef,
+                            recipient: crate::types::ability::CopyRecipient::Source,
                             target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
                             duration: None,
                             mana_value_limit: None,
@@ -2592,6 +2782,58 @@ mod tests {
             effective_keyword_mana_cost(&state, id, KeywordKind::Flashback),
             None,
             "Flashback (compound-cost kind) must be refused by the single authority",
+        );
+    }
+
+    /// CR 702.174a + CR 702.174b: the promised [something] is the discriminant that
+    /// selects the gift effect ("The specific effect is defined by the [something]
+    /// listed"), so `effective_gift_kind` must report which kind was promised — not
+    /// merely that Gift is present. The value reaches the casting prompt as
+    /// `WaitingFor::OptionalCostChoice`'s `gift_kind`, which is what the client
+    /// renders; a blanket `None` would silently strip the promise from the prompt
+    /// with no other observable effect.
+    #[test]
+    fn effective_gift_kind_reports_each_promised_kind() {
+        for kind in [
+            GiftKind::Card,
+            GiftKind::Treasure,
+            GiftKind::Food,
+            GiftKind::TappedFish,
+            GiftKind::ExtraTurn,
+        ] {
+            let mut state = GameState::new_two_player(1);
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Gifted Spell".to_string(),
+                Zone::Hand,
+            );
+            {
+                let obj = state.objects.get_mut(&id).unwrap();
+                obj.keywords.push(Keyword::Gift(kind.clone()));
+                obj.base_keywords = obj.keywords.clone();
+            }
+            assert_eq!(
+                effective_gift_kind(&state, id),
+                Some(kind.clone()),
+                "{kind:?} must survive to the casting prompt",
+            );
+        }
+
+        // No Gift keyword: the prompt must not claim a promise that wasn't made.
+        let mut state = GameState::new_two_player(1);
+        let plain = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Plain Spell".to_string(),
+            Zone::Hand,
+        );
+        assert_eq!(
+            effective_gift_kind(&state, plain),
+            None,
+            "an object without Gift must report no promised kind",
         );
     }
 

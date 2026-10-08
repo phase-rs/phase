@@ -106,7 +106,7 @@ fn stensian_sanguinist_becomes_prepared_on_combat_damage() {
     // at resolution); its EFFECT prepares Stensian itself ("this creature
     // becomes prepared" → SelfRef, the source — NOT the targeted attacker).
     let installed = runner.state().delayed_triggers.iter().any(|dt| {
-        let DelayedTriggerCondition::WheneverEvent { trigger } = &dt.condition else {
+        let DelayedTriggerCondition::WheneverEvent { trigger, .. } = &dt.condition else {
             return false;
         };
         trigger.valid_source == Some(TargetFilter::SpecificObject { id: attacker })

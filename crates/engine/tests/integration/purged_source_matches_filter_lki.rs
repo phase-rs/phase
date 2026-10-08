@@ -315,6 +315,7 @@ fn purged_token_source_that_was_not_enchanted_answers_false() {
             .trigger_definitions
             .first()
             .expect("PREMISE: Dreampod Druid must parse to exactly one triggered ability")
+            .definition
             .condition
             .as_ref()
             .expect("PREMISE: that trigger must carry an intervening-if");
@@ -496,6 +497,7 @@ fn lki_attachment_ids_are_identity_only_and_survive_a_purged_aura() {
         .trigger_definitions
         .first()
         .expect("PREMISE: one trigger")
+        .definition
         .condition
         .as_ref()
         .expect("PREMISE: intervening-if")
@@ -545,7 +547,7 @@ fn lki_attachment_ids_are_identity_only_and_survive_a_purged_aura() {
 
 /// RIDER — SAVE-COMPAT ROUND TRIP, BOTH DIRECTIONS.
 ///
-/// `GameState` is `Serialize`/`Deserialize` and owns `lki_cache: HashMap<ObjectId, LKISnapshot>`,
+/// `GameState` is `Serialize`/`Deserialize` and owns `lki_cache: im::HashMap<ObjectId, LKISnapshot>`,
 /// so `LKISnapshot` IS persisted into saves. The new field therefore needs `#[serde(default)]`
 /// (it has it) and a two-way round-trip proof:
 ///

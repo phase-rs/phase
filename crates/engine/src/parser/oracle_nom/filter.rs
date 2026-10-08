@@ -6,23 +6,61 @@
 
 use nom::branch::alt;
 use nom::bytes::complete::tag;
-use nom::character::complete::space1;
-use nom::combinator::{map, opt, value};
-use nom::sequence::preceded;
+use nom::character::complete::{alphanumeric1, space1};
+use nom::combinator::{map, not, opt, peek, value};
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::error::OracleResult;
-use super::primitives::{parse_article, parse_pt_modifier};
+use super::primitives::{
+    parse_article, parse_property_keyword, parse_pt_modifier, parse_superlative_adjective,
+};
 use super::quantity::{parse_quantity_expr_number, parse_quantity_ref};
 use crate::types::ability::{
-    Comparator, ControllerRef, FilterProp, PtStat, PtValueScope, QuantityExpr,
+    AggregateFunction, AttackerBlockStatus, Comparator, ControllerRef, FilterProp, ObjectProperty,
+    PtStat, PtValueScope, QuantityExpr, SourceExclusion,
 };
+use crate::types::card_type::CoreType;
 #[cfg(test)]
 use crate::types::counter::CounterType;
 use crate::types::counter::{parse_counter_type, CounterMatch};
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
+/// CR 201.2 + CR 201.2a: "not named <name>" — a NAME predicate, lowered to
+/// `Not(Named)`. It's never a self-exclusion (`Another`): a different object
+/// with the excluded name is excluded too, and an object with no name is "not
+/// named" anything, so it passes.
+///
+/// The name span ends at the shared named-filter clause boundary
+/// (`oracle_target::named_filter_name_end`), so comma-bearing names survive
+/// ("Ebondeath, Dracolich"). Any text after that boundary is returned as the
+/// remainder, and a caller that requires the whole subject to be consumed can
+/// fail closed on it. The input is the lowercase shadow, so the name is stored
+/// lowercase and compared case-insensitively at evaluation.
+///
+/// Fails on an empty name, and on a name carrying the `~` self-reference token
+/// (CR 201.5). `Named{"~"}` would match no object, so its negation would accept
+/// every object.
+pub(crate) fn parse_not_named_suffix(input: &str) -> OracleResult<'_, FilterProp> {
+    let (name_text, _) = tag("not named ").parse(input)?;
+    let name_end = crate::parser::oracle_target::named_filter_name_end(name_text);
+    let name = name_text[..name_end].trim();
+    if name.is_empty() || name.contains('~') {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    Ok((
+        &name_text[name_end..],
+        FilterProp::Not {
+            prop: Box::new(FilterProp::Named {
+                name: name.to_string(),
+            }),
+        },
+    ))
+}
 /// Parse a zone filter phrase from Oracle text.
 ///
 /// Matches "on the battlefield", "in your graveyard", "in your hand",
@@ -161,9 +199,27 @@ pub fn parse_property_filter(input: &str) -> OracleResult<'_, FilterProp> {
         value(FilterProp::FaceDown, tag("face down")),
         // CR 701.27g: "transformed permanent"/"transformed creature" selector.
         value(FilterProp::Transformed, tag("transformed")),
-        value(FilterProp::Unblocked, tag("unblocked")),
+        value(
+            FilterProp::BlockStatus {
+                status: AttackerBlockStatus::Unblocked,
+            },
+            tag("unblocked"),
+        ),
+        // CR 509.1h: "blocked" as a prefix adjective; postfix "blocked by"/"blocked this
+        // turn" are handled elsewhere and must not be consumed here.
+        value(
+            FilterProp::BlockStatus {
+                status: AttackerBlockStatus::Blocked,
+            },
+            terminated(
+                tag("blocked"),
+                peek(preceded(tag(" "), not(alt((tag("by"), tag("this turn")))))),
+            ),
+        ),
         value(FilterProp::Suspected, tag("suspected")),
         value(FilterProp::Renowned, tag("renowned")),
+        // CR 701.15b/c: standalone "goaded" designation property token.
+        value(FilterProp::Goaded, tag("goaded")),
         value(FilterProp::EnchantedBy, tag("enchanted")),
         value(FilterProp::EquippedBy, tag("equipped")),
         parse_color_property,
@@ -181,6 +237,65 @@ pub fn parse_property_filter(input: &str) -> OracleResult<'_, FilterProp> {
 /// "with defender", etc. Returns the FilterProp extracted from the clause.
 pub fn parse_with_property(input: &str) -> OracleResult<'_, FilterProp> {
     preceded((tag("with"), space1), parse_with_inner).parse(input)
+}
+
+/// Parse one "with <property>" clause into the conjoined `FilterProp`s it
+/// denotes. Most clauses denote a single property (delegates to
+/// [`parse_with_property`]); the base-P/T designation "with base power and
+/// toughness N/M" denotes two (CR 208.4b), so callers that accumulate a
+/// property list use this entry and `extend` with the result.
+pub fn parse_with_properties(input: &str) -> OracleResult<'_, Vec<FilterProp>> {
+    alt((
+        map(parse_with_base_pt_designation, Vec::from),
+        map(parse_with_property, |prop| vec![prop]),
+    ))
+    .parse(input)
+}
+
+/// "with base power and toughness N/M" — see [`parse_base_pt_designation`].
+pub fn parse_with_base_pt_designation(input: &str) -> OracleResult<'_, [FilterProp; 2]> {
+    preceded((tag("with"), space1), parse_base_pt_designation).parse(input)
+}
+
+/// CR 208.4 + CR 208.4b: "base power and toughness N/M" used as an OBJECT FILTER
+/// ("a creature you control with base power and toughness 2/2" — Duskana, the
+/// Rage Mother; "other creatures you control with base power and toughness 1/1"
+/// — Bess, Soul Nourisher; "tapped creatures you control with base power and
+/// toughness 4/3" — Andrios, Roaming Explorer). Per CR 208.4b the check sees the
+/// creature's P/T after characteristic-defining abilities (CR 613.4a) and
+/// setting effects (CR 613.4b) but ignores counters and modifying effects
+/// (CR 613.4c) — i.e. `PtValueScope::Base`.
+///
+/// Lowers to two exact base-scope comparisons, one per characteristic — the same
+/// two-prop conjunction the leading "N/M creature" designation emits for current
+/// P/T (`oracle_target::parse_leading_pt_designation`). The enclosing
+/// `TypedFilter.properties` list conjoins them, so no conjunction variant exists.
+///
+/// This is the FILTER form only. The P/T-SETTING form ("becomes/is a <type> with
+/// base power and toughness N/M") is owned by the animation and type-change
+/// parsers, which split on that phrase before any type phrase sees it. Distinct
+/// from [`parse_pt_comparison`]: a designation has no comparator tail and
+/// denotes two props.
+fn parse_base_pt_designation(input: &str) -> OracleResult<'_, [FilterProp; 2]> {
+    let (input, _) = tag("base power and toughness ").parse(input)?;
+    let (input, power) = parse_quantity_expr_number(input)?;
+    let (input, _) = tag("/").parse(input)?;
+    let (input, toughness) = parse_quantity_expr_number(input)?;
+    // Word boundary: "2/2s" or any alphanumeric continuation is not a designation.
+    let (input, _) = not(alphanumeric1).parse(input)?;
+    let exact_base = |stat, value| FilterProp::PtComparison {
+        stat,
+        scope: PtValueScope::Base,
+        comparator: Comparator::EQ,
+        value,
+    };
+    Ok((
+        input,
+        [
+            exact_base(PtStat::Power, power),
+            exact_base(PtStat::Toughness, toughness),
+        ],
+    ))
 }
 
 /// CR 113.1 + CR 113.3: an object with none of the four ability categories
@@ -229,6 +344,9 @@ fn parse_with_inner(input: &str) -> OracleResult<'_, FilterProp> {
 /// - comparison tail: either the postfix `N or less` / `N or greater` form, or
 ///   the infix `less than [or equal to] N` / `greater than [or equal to] N`
 ///   form (resolving to LE/GE with an `Offset` for strict `<`/`>`).
+///
+/// The conjunctive designation "base power and toughness N/M" is not a
+/// comparison and is parsed by [`parse_base_pt_designation`].
 pub fn parse_pt_comparison(input: &str) -> OracleResult<'_, FilterProp> {
     // Optional distributive "each " qualifier (no semantic effect).
     let (input, _) = opt(tag("each ")).parse(input)?;
@@ -286,18 +404,46 @@ pub fn parse_pt_comparison(input: &str) -> OracleResult<'_, FilterProp> {
     Ok((rest, prop))
 }
 
-/// CR 208.1: Possessive pronoun introducing a creature's *own* stat in a
-/// self-referential P/T comparison — "its" (singular subject) or "their" (plural
-/// subject). Both refer to the candidate object itself, not the ability source.
+/// CR 208.1 (power and toughness) + CR 202.3 (mana value): the HEAD of a
+/// postnominal superlative property qualifier — "with the `<superlative>`
+/// `<property>`".
+///
+/// SINGLE AUTHORITY for that head. The trailing eligible-set clause is the
+/// caller's business: an explicit "among `<set>`" (CR 109.2, owned by
+/// `oracle_target::parse_superlative_property_suffix`), or the enclosing noun
+/// phrase itself (CR 109.2, owned by the bare-form pass in
+/// `parse_type_phrase_folding_with_ctx`).
+///
+/// The `not(alphanumeric1)` tail guard enforces a word boundary so "mana values"
+/// or "powerstone" cannot half-match the property word. The `among`-form caller
+/// gets that boundary implicitly from its following `tag(" among ")`; the
+/// bare-form caller has none. The guard lives HERE rather than inside
+/// `parse_property_keyword`, because narrowing that shared atom would silently
+/// change the ten existing condition-layer call sites.
+pub(crate) fn parse_superlative_property_head(
+    input: &str,
+) -> OracleResult<'_, (AggregateFunction, ObjectProperty)> {
+    let (input, _) = tag("with the ").parse(input)?;
+    let (input, function) = parse_superlative_adjective(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, property) = parse_property_keyword(input)?;
+    let (input, _) = not(alphanumeric1).parse(input)?;
+    Ok((input, (function, property)))
+}
+
+/// CR 208.1: Possessive phrase introducing a creature's *own* stat in a
+/// self-referential P/T comparison — "its", "their", or "that creature's".
+/// All refer to the candidate object itself, not the ability source.
 fn parse_pt_possessive(input: &str) -> OracleResult<'_, &str> {
-    alt((tag("its"), tag("their"))).parse(input)
+    alt((tag("its "), tag("their "), tag("that creature's "))).parse(input)
 }
 
 /// CR 208.1: "toughness greater than <poss> power" → [`FilterProp::ToughnessGTPower`]
 /// and "power greater than <poss> base power" → [`FilterProp::PowerExceedsBase`].
 /// These are the self-referential P/T comparisons (a creature's own stat vs its
 /// own other stat), distinct from the numeric/quantity-threshold comparisons the
-/// rest of `parse_pt_comparison` handles. Accepts singular and plural possessives.
+/// rest of `parse_pt_comparison` handles. Accepts pronoun and demonstrative
+/// possessives.
 fn parse_self_referential_pt(input: &str) -> OracleResult<'_, FilterProp> {
     alt((
         value(
@@ -305,7 +451,7 @@ fn parse_self_referential_pt(input: &str) -> OracleResult<'_, FilterProp> {
             (
                 tag("toughness greater than "),
                 parse_pt_possessive,
-                tag(" power"),
+                tag("power"),
             ),
         ),
         value(
@@ -313,7 +459,7 @@ fn parse_self_referential_pt(input: &str) -> OracleResult<'_, FilterProp> {
             (
                 tag("power greater than "),
                 parse_pt_possessive,
-                tag(" base power"),
+                tag("base power"),
             ),
         ),
     ))
@@ -348,8 +494,18 @@ fn parse_pt_infix_tail(input: &str) -> OracleResult<'_, (Comparator, QuantityExp
     let rest = rest.trim_start();
     let (rest, includes_equal) = map(opt(tag("or equal to")), |e| e.is_some()).parse(rest)?;
     let rest = rest.trim_start();
-    let (rest, qty) = parse_quantity_ref(rest)?;
-    let value = QuantityExpr::Ref { qty };
+    // CR 208.1: Power and toughness are creature characteristics, so this
+    // grammar preserves their comparison threshold as a typed quantity.
+    // The threshold may be a dynamic quantity ("less than the number of …") OR a
+    // literal number / X ("power less than 3", Wasp, Shrinking Savior). The
+    // postfix form ("3 or less") already accepts literals via
+    // `parse_quantity_expr_number`; the infix form must too, so try the dynamic
+    // ref first (unchanged behavior) and fall back to the literal/X parser.
+    let (rest, value) = alt((
+        map(parse_quantity_ref, |qty| QuantityExpr::Ref { qty }),
+        parse_quantity_expr_number,
+    ))
+    .parse(rest)?;
     // Strict `<`/`>` lower to LE/GE by shifting the threshold by ∓1 (CR 107.1:
     // integers only, so "less than N" ≡ "≤ N-1").
     let (comparator, value) = match (base_cmp, includes_equal) {
@@ -459,9 +615,310 @@ pub fn parse_color_property(input: &str) -> OracleResult<'_, FilterProp> {
     .parse(input)
 }
 
+/// CR 105.4: the trailing "of the color of your choice" object-filter
+/// qualifier — the clause PRINTS its own colour choice (Wash Out,
+/// Root Greevil).
+///
+/// The tag is SPACE-FREE: the caller trims and tracks the separating
+/// whitespace itself, exactly as the sibling chosen-TYPE arm in
+/// `oracle_target.rs` does, so an upstream suffix arm that already consumed
+/// the space cannot silently defeat this one.
+///
+/// The ANAPHOR forms ("of the chosen color", "of that color") are
+/// deliberately NOT recognized here. Their referent is a colour chosen by an
+/// EARLIER clause, and no in-chain "Choose a color." currently persists that
+/// colour onto its source (`ChoiceType::Color` is absent from the `persist:`
+/// match in `oracle_effect/imperative.rs`), so `FilterProp::IsChosenColor`
+/// would be a fail-closed match-NOTHING filter. They stay with the existing
+/// count-phrase recognizer `parse_pre_controller_chosen_filter_suffix`
+/// (`oracle_nom/quantity.rs`), unchanged, until that gap is fixed.
+pub(crate) fn parse_printed_color_choice_qualifier(input: &str) -> OracleResult<'_, FilterProp> {
+    value(
+        FilterProp::IsChosenColor,
+        tag("of the color of your choice"),
+    )
+    .parse(input)
+}
+
+/// CR 607.2d + CR 608.2d: which KIND of chosen-colour reference a
+/// KEYWORD GRANT printed. CR 607.2d links only a reader saying "the chosen
+/// [value]", "the last chosen [value]", "or similar"; "the color of your choice"
+/// is a FRESH CR 608.2d choice the player announces while applying the effect.
+/// `types/keywords.rs::parse_protection_target` / `parse_hexproof_filter` map both
+/// onto `ProtectionTarget::ChosenColor` / `HexproofFilter::ChosenColor`, which is
+/// correct at RUNTIME (the layer applier bakes either identically) and lossy for
+/// CR 607.2d LINKAGE. This recovers the lost axis at parse time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub(crate) enum ChosenColorGrantReference {
+    /// Every chosen-colour grant phrase in this clause is a CR 607.2d anaphor.
+    AnaphoricOnly,
+    /// At least one grant phrase printed a fresh CR 608.2d "the color of your
+    /// choice", so this clause must keep a chooser of its own.
+    IncludesIndependentChoice,
+}
+
+/// The GRANT prefix, shared by both forms.
+///
+/// DOMAIN, stated exactly. This text classifier's domain is a strict SUPERSET of
+/// the injector's: `oracle_effect/mod.rs::effect_grants_chosen_color_keyword`
+/// destructures `Effect::GenericEffect { static_abilities, .. }` and returns
+/// `false` for everything else, so a clause whose printed text carries the grant
+/// phrase inside, say, a `ReturnAsAura { grants }` quoted body is classified here
+/// and never visited there. The excess is EMPTY today — measured: 16 pool cards
+/// print an "…Aura enchantment with enchant…" quoted-grant body and NONE contains
+/// a chosen-colour grant phrase — but the excess direction is
+/// `IncludesIndependentChoice`, i.e. suppression WITHHELD, the unsafe direction.
+/// That is why phase 1's `floating_shield_sacrifice_grant_reads_the_as_enters_color`
+/// is the load-bearing regression guard for this file.
+///
+/// "becomes the color of your choice" (`AddChosenColor`, Mondo Gecko) is
+/// deliberately NOT in the prefix — the injector never visits that modification.
+fn parse_chosen_color_grant_prefix(input: &str) -> OracleResult<'_, ()> {
+    value((), alt((tag("protection from "), tag("hexproof from ")))).parse(input)
+}
+
+/// CR 607.2d's own phrase list. `the last chosen color` is DEFENSIVE ONLY: no
+/// `ChosenColor` keyword is ever produced from it — `parse_protection_target` has
+/// no such arm and `grep -rn "last chosen color" crates/engine/src/` returns zero
+/// — so the alternative can never fire on a grant the injector visits. It is kept
+/// because it is CR 607.2d's own wording and because its failure direction is
+/// `AnaphoricOnly`, i.e. suppression preserved.
+fn parse_anaphoric_chosen_color_grant(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        preceded(
+            parse_chosen_color_grant_prefix,
+            alt((
+                tag("the last chosen color"),
+                tag("the chosen color"),
+                tag("chosen color"),
+                tag("that color"),
+            )),
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 608.2d: a fresh choice this clause's own text offers.
+fn parse_independent_chosen_color_grant(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        preceded(
+            parse_chosen_color_grant_prefix,
+            alt((
+                tag("the color of your choice"),
+                tag("a color of your choice"),
+                tag("color of your choice"),
+            )),
+        ),
+    )
+    .parse(input)
+}
+
+/// SINGLE AUTHORITY for a clause's chosen-colour grant provenance. `None` = the
+/// clause prints no chosen-colour keyword grant at all.
+///
+/// Clause `source_text` is ORIGINAL-CASED (the committed Mother of Runes IR
+/// snapshot's fragment begins "Target creature you control gains …") and every
+/// `tag()` above is lowercase and case-sensitive, so the scan runs over an
+/// explicitly lowercased copy. This is the same shape
+/// `oracle_replacement.rs::parse_as_enters_choose` already uses
+/// (`scan_at_word_boundaries(norm_lower, …)`); `bridge::nom_on_lower` is NOT
+/// applicable — it applies its parser ONCE at offset 0 and maps the consumed
+/// length back onto original-cased text, so it cannot wrap a scanner.
+pub(crate) fn classify_chosen_color_grant(clause_text: &str) -> Option<ChosenColorGrantReference> {
+    let lower = clause_text.to_ascii_lowercase();
+    let independent =
+        super::primitives::scan_at_word_boundaries(&lower, parse_independent_chosen_color_grant)
+            .is_some();
+    let anaphoric =
+        super::primitives::scan_at_word_boundaries(&lower, parse_anaphoric_chosen_color_grant)
+            .is_some();
+    match (independent, anaphoric) {
+        (true, _) => Some(ChosenColorGrantReference::IncludesIndependentChoice),
+        (false, true) => Some(ChosenColorGrantReference::AnaphoricOnly),
+        (false, false) => None,
+    }
+}
+
+/// CR 614.1a + CR 109.1: the parsed "\[other\] `<plural-type>` you control" tail
+/// of a compound damage recipient. A named struct rather than a tuple so both
+/// axes are explicit at every call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlledPermanentsConjunct {
+    /// CR 614.1a: restriction on the permanent leg — `None` for bare
+    /// "permanents", `Some(ct)` for a plural type word.
+    pub permanent_type: Option<CoreType>,
+    /// CR 109.1: whether the leading "other" article excluded the ability's own
+    /// source object.
+    pub source_scope: SourceExclusion,
+}
+
+/// CR 614.1a + CR 109.1: SINGLE AUTHORITY for the controlled-permanent noun
+/// phrase that follows "…to you and " in a compound damage recipient.
+///
+/// Both damage surfaces compose this one combinator rather than re-spelling the
+/// noun list:
+/// * `oracle_effect::imperative::parse_compound_you_and_permanents` →
+///   `TargetFilter::ControllerAndControlledPermanents` (the `Effect::PreventDamage`
+///   half: Comeuppance, Channel Harm, Blessed Sanctuary, Safe Passage, The
+///   Wanderer).
+/// * `oracle_replacement::parse_damage_target_phrase` →
+///   `DamageTargetFilter::PlayerOrPermanentsControlledBy` (the replacement half:
+///   Palisade Giant, Ancient Adamantoise, Heroic Sacrifice, Gideon's Sacrifice).
+///
+/// They previously kept two hand-rolled copies that had already drifted apart in
+/// both directions — one knew six nouns but not "other", the other knew "other"
+/// but only three nouns. One combinator with composable cardinality and article
+/// axes keeps those noun forms in one authority.
+///
+/// Composed one axis per combinator: plural cardinality (including "other" and
+/// "one or more") or singular article ("a"/"another"), the corresponding type
+/// noun, and the fixed " you control" suffix. Singular nouns must retain their
+/// article; accepting bare "creature you control" here would make this shared
+/// authority claim ungrammatical recipient text.
+pub fn parse_controlled_permanents_conjunct(
+    input: &str,
+) -> OracleResult<'_, ControlledPermanentsConjunct> {
+    let (input, (permanent_type, source_scope)) = alt((
+        map(
+            (
+                opt(tag("one or more ")),
+                opt(tag("other ")),
+                alt((
+                    value(Some(CoreType::Planeswalker), tag("planeswalkers")),
+                    value(Some(CoreType::Creature), tag("creatures")),
+                    value(Some(CoreType::Artifact), tag("artifacts")),
+                    value(Some(CoreType::Enchantment), tag("enchantments")),
+                    value(Some(CoreType::Land), tag("lands")),
+                    value(None, tag("permanents")),
+                )),
+            ),
+            |(_, other, permanent_type)| {
+                (
+                    permanent_type,
+                    if other.is_some() {
+                        SourceExclusion::Exclude
+                    } else {
+                        SourceExclusion::Include
+                    },
+                )
+            },
+        ),
+        map(
+            (
+                alt((
+                    value(SourceExclusion::Include, tag("a ")),
+                    value(SourceExclusion::Exclude, tag("another ")),
+                )),
+                alt((
+                    value(Some(CoreType::Planeswalker), tag("planeswalker")),
+                    value(Some(CoreType::Creature), tag("creature")),
+                    value(Some(CoreType::Artifact), tag("artifact")),
+                    value(Some(CoreType::Enchantment), tag("enchantment")),
+                    value(Some(CoreType::Land), tag("land")),
+                    value(None, tag("permanent")),
+                )),
+            ),
+            |(source_scope, permanent_type)| (permanent_type, source_scope),
+        ),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" you control").parse(input)?;
+    Ok((
+        input,
+        ControlledPermanentsConjunct {
+            permanent_type,
+            source_scope,
+        },
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CR 614.1a + CR 109.1: the single authority must cover every plural noun
+    /// BOTH former copies knew, and must carry the "other" article rather than
+    /// discarding it.
+    #[test]
+    fn controlled_permanents_conjunct_covers_every_noun_and_the_other_article() {
+        for (phrase, expected_type) in [
+            ("permanents you control", None),
+            ("creatures you control", Some(CoreType::Creature)),
+            ("planeswalkers you control", Some(CoreType::Planeswalker)),
+            ("artifacts you control", Some(CoreType::Artifact)),
+            ("enchantments you control", Some(CoreType::Enchantment)),
+            ("lands you control", Some(CoreType::Land)),
+        ] {
+            let (rest, plain) = parse_controlled_permanents_conjunct(phrase)
+                .unwrap_or_else(|_| panic!("{phrase} must parse"));
+            assert!(rest.is_empty(), "{phrase} must be fully consumed");
+            assert_eq!(plain.permanent_type, expected_type);
+            assert_eq!(
+                plain.source_scope,
+                SourceExclusion::Include,
+                "no \"other\" article means the source is included"
+            );
+
+            let othered = format!("other {phrase}");
+            let (rest, excluded) = parse_controlled_permanents_conjunct(&othered)
+                .unwrap_or_else(|_| panic!("{othered} must parse"));
+            assert!(rest.is_empty());
+            assert_eq!(excluded.permanent_type, expected_type);
+            assert_eq!(
+                excluded.source_scope,
+                SourceExclusion::Exclude,
+                "the \"other\" article must reach the caller, not be opt()-discarded"
+            );
+        }
+
+        for (phrase, expected_type, expected_scope) in [
+            ("a permanent you control", None, SourceExclusion::Include),
+            (
+                "another permanent you control",
+                None,
+                SourceExclusion::Exclude,
+            ),
+            (
+                "one or more creatures you control",
+                Some(CoreType::Creature),
+                SourceExclusion::Include,
+            ),
+            (
+                "a creature you control",
+                Some(CoreType::Creature),
+                SourceExclusion::Include,
+            ),
+        ] {
+            let (rest, parsed) = parse_controlled_permanents_conjunct(phrase)
+                .unwrap_or_else(|_| panic!("{phrase} must parse"));
+            assert!(rest.is_empty(), "{phrase} must be fully consumed");
+            assert_eq!(parsed.permanent_type, expected_type);
+            assert_eq!(parsed.source_scope, expected_scope);
+        }
+    }
+
+    /// Hostile: the combinator must not claim a phrase whose controller clause is
+    /// absent or inverted, and must leave the remainder untouched on failure.
+    #[test]
+    fn controlled_permanents_conjunct_fails_closed_off_grammar() {
+        for phrase in [
+            "permanents an opponent controls",
+            "creatures",
+            "other stuff you control",
+            "creature you control",
+            "other creature you control",
+            "a creatures you control",
+            "another creatures you control",
+            "one or more creature you control",
+        ] {
+            assert!(
+                parse_controlled_permanents_conjunct(phrase).is_err(),
+                "{phrase} must not be claimed by the conjunct authority"
+            );
+        }
+    }
 
     #[test]
     fn test_parse_zone_filter_battlefield() {
@@ -556,6 +1013,14 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_property_filter_goaded() {
+        // CR 701.15b/c: standalone "goaded" designation property token (Gap A, site 14).
+        let (rest, p) = parse_property_filter("goaded creature").unwrap();
+        assert_eq!(p, FilterProp::Goaded);
+        assert_eq!(rest, " creature");
+    }
+
+    #[test]
     fn test_parse_property_filter_failure() {
         assert!(parse_property_filter("flying").is_err());
     }
@@ -633,6 +1098,16 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_with_self_referential_base_power_demonstrative() {
+        // CR 208.4b: the demonstrative possessive names the candidate creature's
+        // base power, not the ability source's power.
+        let (rest, prop) =
+            parse_with_property("with power greater than that creature's base power").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(prop, FilterProp::PowerExceedsBase);
+    }
+
+    #[test]
     fn test_parse_pt_comparison_base_disjunction() {
         // CR 208.4b: "base power or toughness 1 or less" → AnyOf of two
         // Base-scope PtComparison props (the Angelic Aberration sacrifice filter).
@@ -689,6 +1164,102 @@ mod tests {
         );
     }
 
+    /// The two exact base-scope props a "base power and toughness N/M"
+    /// designation lowers to (CR 208.4b).
+    fn exact_base_pt(power: QuantityExpr, toughness: QuantityExpr) -> [FilterProp; 2] {
+        [
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Base,
+                comparator: Comparator::EQ,
+                value: power,
+            },
+            FilterProp::PtComparison {
+                stat: PtStat::Toughness,
+                scope: PtValueScope::Base,
+                comparator: Comparator::EQ,
+                value: toughness,
+            },
+        ]
+    }
+
+    /// CR 208.4b: the base-P/T designation lowers to one exact base-scope prop
+    /// per characteristic, for symmetric (Duskana 2/2) and asymmetric
+    /// (Andrios 4/3) values, and leaves the following predicate unconsumed.
+    #[test]
+    fn parse_base_pt_designation_symmetric_and_asymmetric() {
+        let (rest, props) = parse_base_pt_designation("base power and toughness 2/2").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            props,
+            exact_base_pt(
+                QuantityExpr::Fixed { value: 2 },
+                QuantityExpr::Fixed { value: 2 }
+            )
+        );
+
+        let (rest, props) = parse_with_base_pt_designation(
+            "with base power and toughness 4/3 have base power and toughness 16/9",
+        )
+        .unwrap();
+        assert_eq!(rest, " have base power and toughness 16/9");
+        assert_eq!(
+            props,
+            exact_base_pt(
+                QuantityExpr::Fixed { value: 4 },
+                QuantityExpr::Fixed { value: 3 }
+            )
+        );
+    }
+
+    /// CR 107.3: an X designation keeps X as a variable on both stats.
+    #[test]
+    fn parse_base_pt_designation_x() {
+        let x = || QuantityExpr::Ref {
+            qty: crate::types::ability::QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        let (rest, props) = parse_base_pt_designation("base power and toughness x/x").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(props, exact_base_pt(x(), x()));
+    }
+
+    /// The designation must not swallow the P/T-setting "each equal to" form,
+    /// an alphanumeric continuation, or the single-stat comparison.
+    #[test]
+    fn parse_base_pt_designation_rejects_non_designations() {
+        // Positive reach-guard: the well-formed designation parses.
+        assert!(parse_base_pt_designation("base power and toughness 1/1").is_ok());
+
+        assert!(parse_base_pt_designation(
+            "base power and toughness each equal to the number of creatures you control"
+        )
+        .is_err());
+        assert!(parse_base_pt_designation("base power and toughness 2/2s").is_err());
+        assert!(parse_with_base_pt_designation("with base power 2").is_err());
+    }
+
+    /// `parse_with_properties` returns both props for the designation and the
+    /// single existing prop for every other "with" clause.
+    #[test]
+    fn parse_with_properties_arity() {
+        let (rest, props) = parse_with_properties("with base power and toughness 1/1").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            props,
+            Vec::from(exact_base_pt(
+                QuantityExpr::Fixed { value: 1 },
+                QuantityExpr::Fixed { value: 1 }
+            ))
+        );
+
+        let (rest, props) = parse_with_properties("with base power 1").unwrap();
+        assert_eq!(rest, "");
+        let (_, single) = parse_with_property("with base power 1").unwrap();
+        assert_eq!(props, vec![single]);
+    }
+
     #[test]
     fn test_parse_pt_comparison_each_with_qualifier() {
         // The distributive "each with" qualifier is consumed; the emitted prop
@@ -719,6 +1290,145 @@ mod tests {
                 comparator: Comparator::LE,
                 value: QuantityExpr::Fixed { value: 2 },
             }
+        );
+    }
+
+    #[test]
+    fn test_parse_pt_comparison_infix_less_than_literal() {
+        // CR 208.1 + CR 107.1: "power less than 3" (infix form with a LITERAL
+        // threshold) must parse, not just the postfix "3 or less" form. Wasp,
+        // Shrinking Savior: "for each creature with power less than 0". Strict
+        // "less than N" lowers to LE (N-1).
+        let (rest, p) = parse_pt_comparison("power less than 3").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            p,
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Fixed { value: 3 }),
+                    offset: -1,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_pt_comparison_infix_greater_than_literal() {
+        // "toughness greater than 4" → GE (4+1) with a literal threshold.
+        let (rest, p) = parse_pt_comparison("toughness greater than 4").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            p,
+            FilterProp::PtComparison {
+                stat: PtStat::Toughness,
+                scope: PtValueScope::Current,
+                comparator: Comparator::GE,
+                value: QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Fixed { value: 4 }),
+                    offset: 1,
+                },
+            }
+        );
+    }
+
+    /// CR 208.1 + CR 107.1: inclusive-literal boundary — "power less than or equal
+    /// to 0" keeps the LITERAL threshold with NO offset (the "or equal to" clause
+    /// makes it a non-strict `LE 0`), proving the `0` boundary and the optional
+    /// equal clause on the newly-admitted literal axis.
+    #[test]
+    fn test_parse_pt_comparison_infix_less_than_or_equal_literal() {
+        let (rest, p) = parse_pt_comparison("power less than or equal to 0").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            p,
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 0 },
+            }
+        );
+    }
+
+    /// CR 107.3a: the newly-admitted `X` threshold on the infix form — "power less
+    /// than X" lowers to `LE` of `Offset(Variable("X"), -1)`, proving the literal/X
+    /// parser (not only `parse_quantity_ref`) feeds the infix tail.
+    #[test]
+    fn test_parse_pt_comparison_infix_less_than_x() {
+        let (rest, p) = parse_pt_comparison("power less than x").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            p,
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    }),
+                    offset: -1,
+                },
+            }
+        );
+    }
+
+    /// CR 208.1 + CR 107.1 — production-path regression (Wasp, Shrinking Savior).
+    /// Parsing the FULL card through `parse_oracle_text` must retain the
+    /// `power < 0` filter on the draw count: "draw a card for each creature with
+    /// power less than 0" lowers to a Draw whose count is an `ObjectCount` over
+    /// creatures carrying a `PtComparison(Power, …)`, not a flat draw of one.
+    /// Reverting the infix-literal parser fix collapses the count to `Fixed(1)`,
+    /// which makes this assertion fail — proving the whole card-conversion path,
+    /// not just the isolated grammar branch, depends on the change.
+    #[test]
+    fn wasp_shrinking_savior_draw_count_retains_power_filter() {
+        use crate::types::ability::{
+            AbilityDefinition, Effect, FilterProp, PtStat, QuantityRef, TargetFilter,
+        };
+        fn find_draw_count(def: &AbilityDefinition) -> Option<QuantityExpr> {
+            if let Effect::Draw { count, .. } = &*def.effect {
+                return Some(count.clone());
+            }
+            def.sub_ability.as_deref().and_then(find_draw_count)
+        }
+        let parsed = crate::parser::parse_oracle_text(
+            "Whenever Wasp attacks, up to one other target creature gets -3/-0 until your next turn. Then draw a card for each creature with power less than 0 on the battlefield.",
+            "Wasp, Shrinking Savior",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let count = parsed
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_deref())
+            .find_map(find_draw_count)
+            .expect("Wasp's attack trigger must contain a Draw effect");
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = &count
+        else {
+            panic!("draw count must be a dynamic ObjectCount, got {count:?}");
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("ObjectCount filter must be a Typed creature filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    ..
+                }
+            )),
+            "the draw-count filter must retain the power comparison, got {:?}",
+            tf.properties
         );
     }
 
@@ -797,5 +1507,109 @@ mod tests {
             }
         );
         assert_eq!(rest3, "");
+    }
+
+    /// V-FORMS (SHAPE) — CR 105.4. The printed chosen-colour qualifier must
+    /// CHOMP (not peek) its text and must reject every adjacent form.
+    ///
+    /// The anaphor rejections are load-bearing, not incidental: the anaphor
+    /// referent is a colour chosen by an EARLIER clause, and no in-chain
+    /// "Choose a color." persists that colour onto its source today, so
+    /// stamping `IsChosenColor` for them would produce a fail-closed
+    /// match-NOTHING filter.
+    #[test]
+    fn printed_color_choice_qualifier_chomps_and_rejects_adjacent_forms() {
+        // Positive reach-guards, in this same test, so the negatives below
+        // cannot pass vacuously on a combinator that matches nothing at all.
+        let (rest, prop) =
+            parse_printed_color_choice_qualifier("of the color of your choice").unwrap();
+        assert_eq!(prop, FilterProp::IsChosenColor);
+        assert_eq!(rest, "", "the bare form must be fully consumed, not peeked");
+
+        let (rest, prop) = parse_printed_color_choice_qualifier(
+            "of the color of your choice to their owners' hands",
+        )
+        .unwrap();
+        assert_eq!(prop, FilterProp::IsChosenColor);
+        assert_eq!(rest, " to their owners' hands");
+
+        for adjacent in [
+            "of the chosen color",
+            "of that color",
+            "of the same color",
+            "of your choice",
+            "of the chosen type",
+            "of the colors of your choice",
+        ] {
+            assert!(
+                parse_printed_color_choice_qualifier(adjacent).is_err(),
+                "{adjacent:?} must NOT be recognized as the printed chosen-colour qualifier"
+            );
+        }
+    }
+
+    /// CR 607.2d vs CR 608.2d: `classify_chosen_color_grant`'s single-authority
+    /// contract. Cases 1-8 are positive reach-guards (real or synthetic clauses
+    /// that DO print a chosen-colour grant); cases 9-12 are the negatives, so
+    /// they cannot pass vacuously on a classifier that matches nothing.
+    ///
+    /// Case 1 is the committed Mother of Runes IR-snapshot fragment, verbatim
+    /// and original-cased — exactly the string production hands the classifier.
+    /// Cases 2 and 3 are SYNTHETIC and exist only to pin the lowercase step:
+    /// zero pool cards print a capitalised chosen-colour grant phrase at a line
+    /// or sentence start (measured: 0 of 35,961 faces, against a reach-guard of
+    /// 150 faces printing a capitalised `Protection from ` / `Hexproof from ` at
+    /// a line or sentence start), so no real-cased pool fragment can catch a
+    /// dropped `to_ascii_lowercase()` — only these two synthetic rows can.
+    #[test]
+    fn classify_chosen_color_grant_distinguishes_anaphoric_from_independent() {
+        let cases: &[(&str, Option<ChosenColorGrantReference>)] = &[
+            (
+                "Target creature you control gains protection from the color of your choice until end of turn",
+                Some(ChosenColorGrantReference::IncludesIndependentChoice),
+            ),
+            (
+                "Protection from the color of your choice",
+                Some(ChosenColorGrantReference::IncludesIndependentChoice),
+            ),
+            (
+                "Hexproof from the chosen color",
+                Some(ChosenColorGrantReference::AnaphoricOnly),
+            ),
+            (
+                "gains protection from the chosen color until end of turn",
+                Some(ChosenColorGrantReference::AnaphoricOnly),
+            ),
+            (
+                "gains protection from the color of your choice until end of turn",
+                Some(ChosenColorGrantReference::IncludesIndependentChoice),
+            ),
+            (
+                "gains hexproof from that color",
+                Some(ChosenColorGrantReference::AnaphoricOnly),
+            ),
+            (
+                "gains protection from a color of your choice",
+                Some(ChosenColorGrantReference::IncludesIndependentChoice),
+            ),
+            (
+                "gains protection from the chosen color and hexproof from the color of your choice",
+                Some(ChosenColorGrantReference::IncludesIndependentChoice),
+            ),
+            ("gains protection from red", None),
+            ("gains protection from the chosen card type", None),
+            ("becomes the color of your choice", None),
+            ("draw a card", None),
+        ];
+
+        for (i, (input, want)) in cases.iter().enumerate() {
+            let got = classify_chosen_color_grant(input);
+            assert_eq!(
+                got,
+                *want,
+                "case {} ({input:?}): got {got:?}, want {want:?}",
+                i + 1
+            );
+        }
     }
 }

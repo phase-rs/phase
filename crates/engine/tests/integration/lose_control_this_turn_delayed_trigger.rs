@@ -22,7 +22,7 @@
 use std::sync::Arc;
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::game::triggers::check_delayed_triggers;
+use engine::game::triggers::{check_delayed_triggers, trigger_source_context_for_latch};
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, ContinuousModification, DelayedTriggerCondition,
     DelayedTriggerLifetime, Duration, Effect, QuantityExpr, TargetFilter, TriggerDefinition,
@@ -87,21 +87,33 @@ fn install_lose_control_draw(
             target: TargetFilter::Controller,
         },
     );
-    let ability = engine::game::ability_utils::build_resolved_from_def(&inner, source, controller);
+    let mut ability =
+        engine::game::ability_utils::build_resolved_from_def(&inner, source, controller);
+    ability.set_trigger_source_recursive(trigger_source_context_for_latch(
+        runner.state(),
+        runner
+            .state()
+            .objects
+            .get(&source)
+            .expect("delayed trigger source"),
+    ));
     let mut trig = TriggerDefinition::new(TriggerMode::ChangesController);
     trig.valid_card = Some(TargetFilter::SpecificObject { id: scoped_obj });
     trig.execute = None;
-    runner.state_mut().delayed_triggers.push(DelayedTrigger {
-        condition: DelayedTriggerCondition::WhenNextEvent {
-            trigger: Box::new(trig),
-            or_trigger: None,
-            lifetime: DelayedTriggerLifetime::ThisTurn,
-        },
-        ability,
-        controller,
-        source_id: source,
-        one_shot: true,
-    });
+    runner
+        .state_mut()
+        .delayed_triggers
+        .push(DelayedTrigger::new(
+            DelayedTriggerCondition::WhenNextEvent {
+                trigger: Box::new(trig),
+                or_trigger: None,
+                lifetime: DelayedTriggerLifetime::ThisTurn,
+            },
+            Box::new(ability),
+            controller,
+            source,
+            true,
+        ));
 }
 
 /// Install a SELF-REFERENTIAL "when you lose control of ~, draw a card"
@@ -193,6 +205,15 @@ fn selfref_lose_control_this_turn_fires_at_cleanup() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P1, &["P1 Card A", "P1 Card B"]);
+    // PR #8332 round 1 (U3): seeded so the draw lands regardless of which
+    // player CR 603.10d attributes it to. Before U3 this file's fixture
+    // seeded only P1 and the draw happened to land there anyway because the
+    // pre-U3 code (wrongly) attributed the trigger to the post-flush LIVE
+    // controller, which for this fixture's direction is also P1 — the
+    // fixture's "attribution-independent" claim below was accidentally true,
+    // not independent by construction. Seeding both players makes it
+    // genuinely independent.
+    scenario.with_library_top(P0, &["P0 Card A", "P0 Card B"]);
     // Owned by P1; the self-ref lose-control trigger lives on this permanent.
     let permanent = scenario.add_creature(P1, "Self Ref Artifact", 0, 0).id();
     let mut runner = scenario.build();
@@ -209,8 +230,11 @@ fn selfref_lose_control_this_turn_fires_at_cleanup() {
     );
 
     // Attribution-independent signal: the fired trigger draws exactly one card
-    // (control-change triggers attribute to the post-flush controller; who draws
-    // is out of scope — that the trigger FIRES at all is the regression here).
+    // (CR 603.10d: the trigger is controlled by whoever just lost control — P0
+    // here; see `cr603_10d_lose_control_trigger_is_controlled_by_the_player_who_lost_control`
+    // in `spell_controller_is_derived.rs` for the row that pins the direction
+    // — who draws is out of scope FOR THIS ROW; that the trigger FIRES at all
+    // is the regression this row guards).
     let before = hand_size(&runner, P0) + hand_size(&runner, P1);
     runner.advance_to_phase(Phase::Upkeep);
     runner.advance_until_stack_empty();

@@ -2,8 +2,33 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection};
+use engine::types::player::PlayerId;
+use rusqlite::{params, Connection, OptionalExtension};
+use server_core::{
+    CurrentTerminalDelivery, FullPersistDisposition, FullPersistSnapshot, FullSessionKey,
+    PersistedSession, TerminalBootstrapRequest, TerminalCredential, TerminalDeliveryId,
+    TerminalMatchDisplay,
+};
+use sha2::{Digest, Sha256};
 use tracing::{error, info};
+
+/// How the game-session store bounds retention of `game_sessions` rows.
+///
+/// This is a property of the deployment, not of any individual save call, so it
+/// lives on the store and `save_session` is its single enforcement point.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SessionRetention {
+    /// Online server: every `game_code` persists independently. Many games run
+    /// concurrently across distinct seats, so a save only upserts its own row.
+    Multiplayer,
+    /// Single-user desktop instance: at most one solo game exists at a time.
+    /// The client tracks a single active-game pointer, so starting a new game
+    /// orphans the previous session server-side. Saving a new `game_code`
+    /// prunes every other game session, keeping the store bounded to one row
+    /// without relying on the stale-age purge (which single-user disables so a
+    /// suspended game never expires).
+    SingleUser,
+}
 
 /// SQLite-backed persistence for active game sessions.
 ///
@@ -12,9 +37,10 @@ use tracing::{error, info};
 /// All operations acquire the lock briefly for a single SQL statement.
 pub struct GameDb {
     conn: Mutex<Connection>,
+    retention: SessionRetention,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RatingDelta {
     pub player_key: String,
     pub game_code: String,
@@ -25,19 +51,49 @@ pub struct RatingDelta {
     pub rating_delta: i32,
 }
 
+/// Server-private terminal artifact supplied by the future Full finalizer.
+/// The pre-terminal tokens are used only during preparation to derive stable
+/// recipient credentials; neither raw token nor raw credential reaches SQLite.
+#[derive(Debug, Clone)]
+pub struct FullTerminalArtifact {
+    pub key: FullSessionKey,
+    pub terminal_revision: u64,
+    pub display: TerminalMatchDisplay,
+    pub recipients: Vec<TerminalRecipient>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TerminalRecipient {
+    pub player_id: PlayerId,
+    pub pre_terminal_player_token: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrepareFullTerminalDisposition {
+    Prepared,
+    AlreadyPrepared,
+}
+
+/// Every payload column a retire must null, as one SQL fragment. `session_json`
+/// stays in the list because a row an earlier build wrote carries its payload
+/// there, and a retire must clear whatever the row actually holds. A future
+/// payload column joins them in one edit rather than one per statement.
+const CLEAR_PAYLOAD_COLUMNS: &str =
+    "session_json = NULL, session_state_json = NULL, deck_pools_json = NULL";
+
 impl GameDb {
+    pub fn is_single_user(&self) -> bool {
+        self.retention == SessionRetention::SingleUser
+    }
+
     /// Open (or create) the game database at the given path.
     /// Enables WAL mode and creates the schema if needed.
-    pub fn open(path: &Path) -> rusqlite::Result<Self> {
-        let conn = Connection::open(path)?;
+    pub fn open(path: &Path, retention: SessionRetention) -> rusqlite::Result<Self> {
+        let mut conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        migrate_game_sessions(&mut conn)?;
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS game_sessions (
-                game_code TEXT PRIMARY KEY,
-                session_json TEXT NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS draft_sessions (
+            "CREATE TABLE IF NOT EXISTS draft_sessions (
                 draft_code TEXT PRIMARY KEY,
                 session_json TEXT NOT NULL,
                 updated_at INTEGER NOT NULL
@@ -70,26 +126,37 @@ impl GameDb {
         info!("Game database opened at {}", path.display());
         Ok(Self {
             conn: Mutex::new(conn),
+            retention,
         })
     }
 
-    /// Persist a game session (upsert).
-    pub fn save_session(&self, game_code: &str, json: &str) -> rusqlite::Result<()> {
+    /// Legacy persistence path retained while Full runtime callers migrate to
+    /// generation-fenced snapshots. New lifecycle code must use
+    /// [`Self::save_full_session`] instead.
+    #[cfg(test)]
+    pub(crate) fn save_session(&self, game_code: &str, json: &str) -> rusqlite::Result<()> {
         let now = now_epoch();
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO game_sessions (game_code, session_json, updated_at)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(game_code) DO UPDATE SET session_json = ?2, updated_at = ?3",
+            "INSERT INTO game_sessions
+                (game_code, generation, mutation_revision, activation_epoch, retired, session_json, updated_at)
+             VALUES (?1, 0, 0, NULL, 0, ?2, ?3)
+             ON CONFLICT(game_code) DO UPDATE SET
+                session_json = ?2, updated_at = ?3
+             WHERE game_sessions.generation = 0 AND game_sessions.retired = 0",
             params![game_code, json, now],
         )?;
         Ok(())
     }
 
     /// Load all persisted sessions. Returns (game_code, json) pairs.
-    pub fn load_all(&self) -> rusqlite::Result<Vec<(String, String)>> {
+    #[cfg(test)]
+    pub(crate) fn load_all(&self) -> rusqlite::Result<Vec<(String, String)>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT game_code, session_json FROM game_sessions")?;
+        let mut stmt = conn.prepare(
+            "SELECT game_code, session_json FROM game_sessions
+             WHERE retired = 0 AND session_json IS NOT NULL",
+        )?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
@@ -103,8 +170,10 @@ impl GameDb {
         Ok(results)
     }
 
-    /// Delete a session by game code.
-    pub fn delete_session(&self, game_code: &str) -> rusqlite::Result<()> {
+    /// Legacy destructive removal retained until Full terminal finalization is
+    /// routed through retirement tombstones.
+    #[cfg(test)]
+    pub(crate) fn delete_session(&self, game_code: &str) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "DELETE FROM game_sessions WHERE game_code = ?1",
@@ -126,7 +195,7 @@ impl GameDb {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let mut deleted = tx.execute(
-            "DELETE FROM game_sessions WHERE updated_at < ?1",
+            "DELETE FROM game_sessions WHERE retired = 0 AND updated_at < ?1",
             params![cutoff],
         )?;
         deleted += tx.execute(
@@ -139,6 +208,626 @@ impl GameDb {
         )?;
         tx.commit()?;
         Ok(deleted)
+    }
+
+    /// Allocates and durably binds a new Full key to `game_code` before any
+    /// caller can publish credentials for that session. The placeholder row is
+    /// intentionally snapshot-less; the first mutation save supplies its
+    /// authoritative state and revision.
+    pub fn create_full_session_key(&self, game_code: &str) -> rusqlite::Result<FullSessionKey> {
+        let now = now_epoch();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let existing_active = tx
+            .query_row(
+                "SELECT retired FROM game_sessions WHERE game_code = ?1",
+                params![game_code],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?;
+        if existing_active == Some(false) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let previous = tx
+            .query_row(
+                "SELECT generation FROM full_generation_high_water WHERE game_code = ?1",
+                params![game_code],
+                |row| row.get::<_, u64>(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        let generation = previous.saturating_add(1);
+        tx.execute(
+            "INSERT INTO full_generation_high_water (game_code, generation)
+             VALUES (?1, ?2)
+             ON CONFLICT(game_code) DO UPDATE SET generation = excluded.generation",
+            params![game_code, generation],
+        )?;
+        tx.execute(
+            &format!(
+                "INSERT INTO game_sessions
+                    (game_code, generation, mutation_revision, activation_epoch, retired, updated_at)
+                 VALUES (?1, ?2, 0, NULL, 0, ?3)
+                 ON CONFLICT(game_code) DO UPDATE SET
+                    generation = excluded.generation,
+                    mutation_revision = 0,
+                    activation_epoch = NULL,
+                    retired = 0,
+                    {CLEAR_PAYLOAD_COLUMNS},
+                    updated_at = excluded.updated_at
+                 WHERE game_sessions.retired = 1"
+            ),
+            params![game_code, generation, now],
+        )?;
+        tx.commit()?;
+        Ok(FullSessionKey {
+            game_code: game_code.to_string(),
+            generation,
+        })
+    }
+
+    /// Returns the exact live key for a game code, never reconstructing a
+    /// generation from the code string or from a client payload.
+    pub fn load_active_full_key(
+        &self,
+        game_code: &str,
+    ) -> rusqlite::Result<Option<FullSessionKey>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT generation FROM game_sessions WHERE game_code = ?1 AND retired = 0",
+            params![game_code],
+            |row| {
+                Ok(FullSessionKey {
+                    game_code: game_code.to_string(),
+                    generation: row.get(0)?,
+                })
+            },
+        )
+        .optional()
+    }
+
+    /// Saves a Full authoritative snapshot only when it is newer than the
+    /// retained lifetime. Equal revisions are intentionally no-ops.
+    pub fn save_full_session(
+        &self,
+        snapshot: &FullPersistSnapshot,
+    ) -> rusqlite::Result<FullPersistDisposition> {
+        let json = serde_json::to_string(&snapshot.persisted)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let now = now_epoch();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        if let Some(epoch) = snapshot.activation_epoch {
+            let active = tx
+                .query_row(
+                    "SELECT game_code, generation, activation_epoch FROM full_active_session WHERE slot = 1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, u64>(1)?,
+                            row.get::<_, u64>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            if active
+                != Some((
+                    snapshot.key.game_code.clone(),
+                    snapshot.key.generation,
+                    epoch,
+                ))
+            {
+                return Ok(FullPersistDisposition::NotCurrentActivation);
+            }
+        }
+
+        // The dynamic payload and the pools are two columns of one upsert in
+        // one transaction, so they cannot diverge on a production write.
+        // `session_json` is not bound *and* is nulled on conflict, so the
+        // statement itself — not an argument about its callers — is what makes
+        // every row this build writes carry it NULL. That is what moves the
+        // payload out from under an older reader; a row an earlier build wrote
+        // arrives here still carrying one, and is exactly the row that reader
+        // would otherwise restore subtly wrong.
+        let changed = tx.execute(
+            "INSERT INTO game_sessions
+                (game_code, generation, mutation_revision, activation_epoch, retired,
+                 session_state_json, deck_pools_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7)
+             ON CONFLICT(game_code) DO UPDATE SET
+                generation = excluded.generation,
+                mutation_revision = excluded.mutation_revision,
+                activation_epoch = excluded.activation_epoch,
+                retired = 0,
+                session_json = NULL,
+                session_state_json = excluded.session_state_json,
+                deck_pools_json = excluded.deck_pools_json,
+                updated_at = excluded.updated_at
+             WHERE excluded.generation > game_sessions.generation
+                OR (excluded.generation = game_sessions.generation
+                    AND game_sessions.retired = 0
+                    AND (excluded.mutation_revision > game_sessions.mutation_revision
+                        OR game_sessions.session_state_json IS NULL))",
+            params![
+                snapshot.key.game_code,
+                snapshot.key.generation,
+                snapshot.mutation_revision,
+                snapshot.activation_epoch,
+                json,
+                snapshot.deck_pools_json.as_ref(),
+                now,
+            ],
+        )?;
+        if changed == 1 {
+            tx.execute(
+                "INSERT INTO full_generation_high_water (game_code, generation)
+                 VALUES (?1, ?2)
+                 ON CONFLICT(game_code) DO UPDATE SET generation = MAX(generation, excluded.generation)",
+                params![snapshot.key.game_code, snapshot.key.generation],
+            )?;
+            tx.commit()?;
+            Ok(FullPersistDisposition::Applied)
+        } else {
+            tx.commit()?;
+            Ok(FullPersistDisposition::SupersededOrRetired)
+        }
+    }
+
+    /// Activates a newly-created Full session in the desktop singleton. The
+    /// pointer transition and retirement of the previous active row are one
+    /// SQLite transaction, so a delayed save from the prior activation cannot
+    /// become current again.
+    pub fn activate_single_user_session(
+        &self,
+        snapshot: &FullPersistSnapshot,
+    ) -> rusqlite::Result<(u64, FullPersistDisposition)> {
+        if self.retention != SessionRetention::SingleUser {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+
+        let json = serde_json::to_string(&snapshot.persisted)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let now = now_epoch();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let next_epoch = tx
+            .query_row(
+                "SELECT activation_epoch FROM full_active_session WHERE slot = 1",
+                [],
+                |row| row.get::<_, u64>(0),
+            )
+            .optional()?
+            .unwrap_or(0)
+            .saturating_add(1);
+
+        let current_generation = tx
+            .query_row(
+                "SELECT generation FROM game_sessions WHERE game_code = ?1",
+                params![snapshot.key.game_code],
+                |row| row.get::<_, u64>(0),
+            )
+            .optional()?;
+        if current_generation.is_some_and(|generation| generation > snapshot.key.generation) {
+            return Ok((next_epoch, FullPersistDisposition::SupersededOrRetired));
+        }
+
+        tx.execute(
+            &format!(
+                "UPDATE game_sessions
+                 SET retired = 1, {CLEAR_PAYLOAD_COLUMNS}, updated_at = ?1
+                 WHERE (game_code, generation) IN (
+                     SELECT game_code, generation FROM full_active_session WHERE slot = 1
+                 ) AND retired = 0"
+            ),
+            params![now],
+        )?;
+        // Same structural clear as `save_full_session`: this build never leaves
+        // a payload where an older reader looks for one.
+        tx.execute(
+            "INSERT INTO game_sessions
+                (game_code, generation, mutation_revision, activation_epoch, retired,
+                 session_state_json, deck_pools_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7)
+             ON CONFLICT(game_code) DO UPDATE SET
+                generation = excluded.generation,
+                mutation_revision = excluded.mutation_revision,
+                activation_epoch = excluded.activation_epoch,
+                retired = 0,
+                session_json = NULL,
+                session_state_json = excluded.session_state_json,
+                deck_pools_json = excluded.deck_pools_json,
+                updated_at = excluded.updated_at
+             WHERE excluded.generation >= game_sessions.generation",
+            params![
+                snapshot.key.game_code,
+                snapshot.key.generation,
+                snapshot.mutation_revision,
+                next_epoch,
+                json,
+                snapshot.deck_pools_json.as_ref(),
+                now,
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO full_active_session (slot, game_code, generation, activation_epoch)
+             VALUES (1, ?1, ?2, ?3)
+             ON CONFLICT(slot) DO UPDATE SET
+                game_code = excluded.game_code,
+                generation = excluded.generation,
+                activation_epoch = excluded.activation_epoch",
+            params![snapshot.key.game_code, snapshot.key.generation, next_epoch],
+        )?;
+        tx.execute(
+            "INSERT INTO full_generation_high_water (game_code, generation)
+             VALUES (?1, ?2)
+             ON CONFLICT(game_code) DO UPDATE SET generation = MAX(generation, excluded.generation)",
+            params![snapshot.key.game_code, snapshot.key.generation],
+        )?;
+        tx.commit()?;
+        Ok((next_epoch, FullPersistDisposition::Applied))
+    }
+
+    /// Retires a never-started Full session while retaining its generation
+    /// tombstone. A started game must use the terminal finalizer instead.
+    pub fn retire_unstarted_full_session(
+        &self,
+        key: &FullSessionKey,
+        activation_epoch: Option<u64>,
+    ) -> rusqlite::Result<FullPersistDisposition> {
+        let now = now_epoch();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        if let Some(epoch) = activation_epoch {
+            let active = tx
+                .query_row(
+                    "SELECT game_code, generation, activation_epoch FROM full_active_session WHERE slot = 1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, u64>(1)?,
+                            row.get::<_, u64>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            if active != Some((key.game_code.clone(), key.generation, epoch)) {
+                return Ok(FullPersistDisposition::NotCurrentActivation);
+            }
+        }
+
+        let row = tx
+            .query_row(
+                "SELECT retired, session_state_json FROM game_sessions
+                 WHERE game_code = ?1 AND generation = ?2",
+                params![key.game_code, key.generation],
+                |row| Ok((row.get::<_, bool>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?;
+        let Some((retired, json)) = row else {
+            return Ok(FullPersistDisposition::SupersededOrRetired);
+        };
+        if retired {
+            return Ok(FullPersistDisposition::SupersededOrRetired);
+        }
+        if let Some(json) = json {
+            let persisted: PersistedSession = serde_json::from_str(&json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+            if persisted.game_started {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        }
+
+        tx.execute(
+            &format!(
+                "UPDATE game_sessions
+                 SET retired = 1, {CLEAR_PAYLOAD_COLUMNS}, updated_at = ?1
+                 WHERE game_code = ?2 AND generation = ?3 AND retired = 0"
+            ),
+            params![now, key.game_code, key.generation],
+        )?;
+        if activation_epoch.is_some() {
+            tx.execute("DELETE FROM full_active_session WHERE slot = 1", [])?;
+        }
+        tx.commit()?;
+        Ok(FullPersistDisposition::Applied)
+    }
+
+    /// Loads only non-retired Full session rows. Terminal tombstones remain in
+    /// SQLite to fence stale writers but are never reconstructed at startup.
+    pub fn load_active_full_sessions(&self) -> rusqlite::Result<Vec<FullPersistSnapshot>> {
+        let conn = self.conn.lock().unwrap();
+        // One read shape. The `WHERE` drops the rows an earlier build wrote
+        // before they are decoded; `count_legacy_full_sessions` reports how
+        // many it dropped, so "restored nothing" stays distinguishable from
+        // "there was nothing to restore". Both payload columns are
+        // written by one statement, so a row carrying one without the other has
+        // no production producer; it is read as absent and skipped per row,
+        // like the decode failure below, rather than failing the whole restore.
+        let mut stmt = conn.prepare(
+            "SELECT game_code, generation, mutation_revision, activation_epoch,
+                    session_state_json, deck_pools_json
+             FROM game_sessions WHERE retired = 0 AND session_state_json IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, u64>(2)?,
+                row.get::<_, Option<u64>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })?;
+        let mut snapshots = Vec::new();
+        for row in rows {
+            let (game_code, generation, mutation_revision, activation_epoch, json, pools) = row?;
+            let Some(pools) = pools else {
+                error!("Skipped Full session row {game_code}: deck_pools_json is NULL");
+                continue;
+            };
+            match serde_json::from_str(&json).and_then(|mut persisted: PersistedSession| {
+                persisted.deck_pools = serde_json::from_str(&pools)?;
+                Ok(persisted)
+            }) {
+                Ok(persisted) => snapshots.push(FullPersistSnapshot {
+                    key: FullSessionKey {
+                        game_code,
+                        generation,
+                    },
+                    mutation_revision,
+                    activation_epoch,
+                    persisted,
+                    // The column's own string, carried so the restore owner can
+                    // seed the rebuilt session's encoding cache with it
+                    // (`GameSession::seed_deck_pools_encoding`) instead of
+                    // re-serializing pools it just decoded.
+                    deck_pools_json: pools.into(),
+                }),
+                Err(error) => error!("Failed to deserialize Full session row {game_code}: {error}"),
+            }
+        }
+        Ok(snapshots)
+    }
+
+    /// Counts the live rows an earlier build wrote — payload in `session_json`,
+    /// no `session_state_json`. `load_active_full_sessions` drops these in its
+    /// `WHERE`, so without this count an upgrade that can restore none of its
+    /// games looks exactly like a boot with no games to restore.
+    pub fn count_legacy_full_sessions(&self) -> rusqlite::Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM game_sessions
+             WHERE retired = 0 AND session_state_json IS NULL AND session_json IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+    }
+
+    /// Atomically records one immutable Full terminal artifact, creates one
+    /// delivery row per occupied seat, and retires the matching active row.
+    /// Replaying byte-identical artifact content is idempotent; any changed
+    /// replay is rejected rather than replacing a result already shown to a
+    /// recipient.
+    pub fn prepare_full_terminal(
+        &self,
+        artifact: &FullTerminalArtifact,
+    ) -> rusqlite::Result<PrepareFullTerminalDisposition> {
+        let display_json = serde_json::to_string(&artifact.display)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let digest = terminal_artifact_digest(artifact, &display_json);
+        let now = now_epoch();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        if let Some(existing_digest) = tx
+            .query_row(
+                "SELECT artifact_digest FROM terminal_match_results
+                 WHERE game_code = ?1 AND generation = ?2",
+                params![artifact.key.game_code, artifact.key.generation],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            if existing_digest == digest {
+                tx.commit()?;
+                return Ok(PrepareFullTerminalDisposition::AlreadyPrepared);
+            }
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+
+        let active = tx
+            .query_row(
+                "SELECT retired FROM game_sessions WHERE game_code = ?1 AND generation = ?2",
+                params![artifact.key.game_code, artifact.key.generation],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?;
+        if active != Some(false) || artifact.recipients.is_empty() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+
+        let mut seen_players = std::collections::HashSet::new();
+        for recipient in &artifact.recipients {
+            if recipient.pre_terminal_player_token.is_empty()
+                || !seen_players.insert(recipient.player_id)
+            {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        }
+
+        tx.execute(
+            "INSERT INTO terminal_match_results
+                (game_code, generation, terminal_revision, artifact_digest, display_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                artifact.key.game_code,
+                artifact.key.generation,
+                artifact.terminal_revision,
+                digest,
+                display_json,
+                now,
+            ],
+        )?;
+        for recipient in &artifact.recipients {
+            let credential = terminal_credential(
+                &artifact.key,
+                artifact.terminal_revision,
+                recipient.player_id,
+                &recipient.pre_terminal_player_token,
+            );
+            tx.execute(
+                "INSERT INTO terminal_match_delivery
+                    (game_code, generation, player_id, terminal_revision, delivery_id,
+                     pre_terminal_token_verifier, credential_verifier, acknowledged_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+                params![
+                    artifact.key.game_code,
+                    artifact.key.generation,
+                    recipient.player_id.0,
+                    artifact.terminal_revision,
+                    terminal_delivery_id(
+                        &artifact.key,
+                        artifact.terminal_revision,
+                        recipient.player_id
+                    )
+                    .0,
+                    verifier(&recipient.pre_terminal_player_token),
+                    verifier(&credential.0),
+                ],
+            )?;
+        }
+        tx.execute(
+            &format!(
+                "UPDATE game_sessions
+                 SET retired = 1, {CLEAR_PAYLOAD_COLUMNS}, updated_at = ?1
+                 WHERE game_code = ?2 AND generation = ?3 AND retired = 0"
+            ),
+            params![now, artifact.key.game_code, artifact.key.generation],
+        )?;
+        tx.execute(
+            "DELETE FROM full_active_session WHERE game_code = ?1 AND generation = ?2",
+            params![artifact.key.game_code, artifact.key.generation],
+        )?;
+        tx.commit()?;
+        Ok(PrepareFullTerminalDisposition::Prepared)
+    }
+
+    /// Returns a recipient's currently prepared terminal delivery after
+    /// proving the retained pre-terminal token. This is used by the Full
+    /// finalizer before it sends a GameOver in Wave 3.
+    pub fn current_terminal_delivery_for_recipient(
+        &self,
+        key: &FullSessionKey,
+        player_id: PlayerId,
+        pre_terminal_player_token: &str,
+    ) -> rusqlite::Result<Option<CurrentTerminalDelivery>> {
+        let conn = self.conn.lock().unwrap();
+        current_terminal_delivery(&conn, key, player_id, pre_terminal_player_token)
+    }
+
+    /// Terminal-only bootstrap. A repeated request id must belong to exactly
+    /// the same key and recipient; it returns the same deterministic delivery
+    /// tuple and never attaches a normal game session.
+    pub fn bootstrap_terminal_delivery(
+        &self,
+        request: &TerminalBootstrapRequest,
+    ) -> rusqlite::Result<Option<CurrentTerminalDelivery>> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let recipient = tx
+            .query_row(
+                "SELECT player_id FROM terminal_match_delivery
+                 WHERE game_code = ?1 AND generation = ?2
+                   AND pre_terminal_token_verifier = ?3",
+                params![
+                    request.key.game_code,
+                    request.key.generation,
+                    verifier(&request.player_token),
+                ],
+                |row| row.get::<_, u8>(0).map(PlayerId),
+            )
+            .optional()?;
+        let Some(player_id) = recipient else {
+            tx.commit()?;
+            return Ok(None);
+        };
+
+        if let Some(existing) = tx
+            .query_row(
+                "SELECT game_code, generation, player_id FROM terminal_bootstrap_requests
+                 WHERE request_id = ?1",
+                params![request.request_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u64>(1)?,
+                        row.get::<_, u8>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+        {
+            if existing
+                != (
+                    request.key.game_code.clone(),
+                    request.key.generation,
+                    player_id.0,
+                )
+            {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        } else {
+            tx.execute(
+                "INSERT INTO terminal_bootstrap_requests
+                    (request_id, game_code, generation, player_id, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    request.request_id,
+                    request.key.game_code,
+                    request.key.generation,
+                    player_id.0,
+                    now_epoch(),
+                ],
+            )?;
+        }
+        let delivery =
+            current_terminal_delivery(&tx, &request.key, player_id, &request.player_token)?;
+        tx.commit()?;
+        Ok(delivery)
+    }
+
+    /// Looks up a terminal delivery by its recipient-only credential.
+    pub fn read_terminal_result(
+        &self,
+        credential: &TerminalCredential,
+    ) -> rusqlite::Result<Option<CurrentTerminalDelivery>> {
+        let conn = self.conn.lock().unwrap();
+        terminal_delivery_by_credential(&conn, credential)
+    }
+
+    /// Idempotently marks a terminal delivery acknowledged. An invalid
+    /// delivery-id/credential pair has no effect and reports `false`.
+    pub fn ack_terminal_delivery(
+        &self,
+        delivery_id: &TerminalDeliveryId,
+        credential: &TerminalCredential,
+    ) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE terminal_match_delivery SET acknowledged_at = COALESCE(acknowledged_at, ?1)
+             WHERE delivery_id = ?2 AND credential_verifier = ?3",
+            params![now_epoch(), delivery_id.0, verifier(&credential.0)],
+        )?;
+        Ok(changed == 1)
     }
 
     // ── Draft session persistence ──────────────────────────────────────────
@@ -248,13 +937,67 @@ impl GameDb {
         }
     }
 
-    pub fn save_ranked_result(&self, deltas: &[RatingDelta]) -> rusqlite::Result<()> {
+    /// Whether any ranked result is recorded under `game_code`.
+    ///
+    /// [`Self::save_ranked_result_idempotent`] treats existing rows under a code
+    /// as a retry of the same game, so a ranked game must not be created under a
+    /// code that has them: its result would be refused or replayed, never rated.
+    pub fn ranked_history_exists(&self, game_code: &str) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ranked_match_history WHERE game_code = ?1)",
+            params![game_code],
+            |row| row.get(0),
+        )
+    }
+
+    /// Records one ranked result exactly once per game. A retry returns the
+    /// original receipt instead of applying a second rating change.
+    pub fn save_ranked_result_idempotent(
+        &self,
+        deltas: &[RatingDelta],
+    ) -> rusqlite::Result<Vec<RatingDelta>> {
         if deltas.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let now = now_epoch();
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
+        let game_code = &deltas[0].game_code;
+        if deltas.iter().any(|delta| delta.game_code != *game_code) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let mut existing_statement = tx.prepare(
+            "SELECT player_key, game_code, opponent_key, won, rating_before, rating_after, rating_delta
+             FROM ranked_match_history WHERE game_code = ?1 ORDER BY id",
+        )?;
+        let existing = existing_statement
+            .query_map(params![game_code], |row| {
+                Ok(RatingDelta {
+                    player_key: row.get(0)?,
+                    game_code: row.get(1)?,
+                    opponent_key: row.get(2)?,
+                    won: row.get::<_, i64>(3)? != 0,
+                    rating_before: row.get(4)?,
+                    rating_after: row.get(5)?,
+                    rating_delta: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(existing_statement);
+        if !existing.is_empty() {
+            if existing.len() != deltas.len()
+                || existing.iter().zip(deltas).any(|(saved, requested)| {
+                    saved.player_key != requested.player_key
+                        || saved.opponent_key != requested.opponent_key
+                        || saved.won != requested.won
+                })
+            {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            tx.commit()?;
+            return Ok(existing);
+        }
         for delta in deltas {
             tx.execute(
                 "INSERT INTO player_ratings (player_key, rating, updated_at)
@@ -279,8 +1022,267 @@ impl GameDb {
             )?;
         }
         tx.commit()?;
-        Ok(())
+        Ok(deltas.to_vec())
     }
+}
+
+fn migrate_game_sessions(conn: &mut Connection) -> rusqlite::Result<()> {
+    let game_sessions_exists = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'game_sessions'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+
+    if !game_sessions_exists {
+        return create_full_game_session_schema(conn);
+    }
+
+    let mut statement = conn.prepare("PRAGMA table_info(game_sessions)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    if columns.iter().any(|column| column == "generation") {
+        return create_full_game_session_schema(conn);
+    }
+
+    let transaction = conn.transaction()?;
+    transaction.execute_batch(
+        "ALTER TABLE game_sessions RENAME TO game_sessions_legacy;
+         CREATE TABLE game_sessions (
+             game_code TEXT PRIMARY KEY,
+             generation INTEGER NOT NULL DEFAULT 0,
+             mutation_revision INTEGER NOT NULL DEFAULT 0,
+             activation_epoch INTEGER,
+             retired INTEGER NOT NULL DEFAULT 0,
+             session_json TEXT,
+             updated_at INTEGER NOT NULL
+         );
+         INSERT INTO game_sessions
+             (game_code, generation, mutation_revision, activation_epoch, retired, session_json, updated_at)
+         SELECT game_code, 0, 0, NULL, 0, session_json, updated_at
+         FROM game_sessions_legacy;
+         DROP TABLE game_sessions_legacy;",
+    )?;
+    transaction.commit()?;
+    create_full_game_session_schema(conn)
+}
+
+fn create_full_game_session_schema(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS game_sessions (
+             game_code TEXT PRIMARY KEY,
+             generation INTEGER NOT NULL DEFAULT 0,
+             mutation_revision INTEGER NOT NULL DEFAULT 0,
+             activation_epoch INTEGER,
+             retired INTEGER NOT NULL DEFAULT 0,
+             session_json TEXT,
+             session_state_json TEXT,
+             deck_pools_json TEXT,
+             updated_at INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS full_generation_high_water (
+             game_code TEXT PRIMARY KEY,
+             generation INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS full_active_session (
+             slot INTEGER PRIMARY KEY CHECK (slot = 1),
+             game_code TEXT NOT NULL,
+             generation INTEGER NOT NULL,
+             activation_epoch INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS terminal_match_results (
+             game_code TEXT NOT NULL,
+             generation INTEGER NOT NULL,
+             terminal_revision INTEGER NOT NULL,
+             artifact_digest TEXT NOT NULL,
+             display_json TEXT NOT NULL,
+             created_at INTEGER NOT NULL,
+             PRIMARY KEY (game_code, generation)
+         );
+         CREATE TABLE IF NOT EXISTS terminal_match_delivery (
+             game_code TEXT NOT NULL,
+             generation INTEGER NOT NULL,
+             player_id INTEGER NOT NULL,
+             terminal_revision INTEGER NOT NULL,
+             delivery_id TEXT NOT NULL UNIQUE,
+             pre_terminal_token_verifier TEXT NOT NULL,
+             credential_verifier TEXT NOT NULL,
+             acknowledged_at INTEGER,
+             PRIMARY KEY (game_code, generation, player_id)
+         );
+         CREATE TABLE IF NOT EXISTS terminal_bootstrap_requests (
+             request_id TEXT PRIMARY KEY,
+             game_code TEXT NOT NULL,
+             generation INTEGER NOT NULL,
+             player_id INTEGER NOT NULL,
+             created_at INTEGER NOT NULL
+         );",
+    )?;
+    // Every `migrate_game_sessions` exit converges here, so a fresh database
+    // gets the split payload columns through the `CREATE` above and an
+    // already-migrated one gets them here — by construction, not by
+    // inspecting which exit ran.
+    let mut statement = conn.prepare("PRAGMA table_info(game_sessions)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    for column in ["session_state_json", "deck_pools_json"] {
+        if !columns.iter().any(|existing| existing == column) {
+            conn.execute_batch(&format!(
+                "ALTER TABLE game_sessions ADD COLUMN {column} TEXT;"
+            ))?;
+        }
+    }
+    Ok(())
+}
+
+fn current_terminal_delivery(
+    conn: &Connection,
+    key: &FullSessionKey,
+    player_id: PlayerId,
+    pre_terminal_player_token: &str,
+) -> rusqlite::Result<Option<CurrentTerminalDelivery>> {
+    let row = conn
+        .query_row(
+            "SELECT d.terminal_revision, d.delivery_id, r.display_json
+             FROM terminal_match_delivery d
+             JOIN terminal_match_results r
+               ON r.game_code = d.game_code AND r.generation = d.generation
+             WHERE d.game_code = ?1 AND d.generation = ?2 AND d.player_id = ?3
+               AND d.pre_terminal_token_verifier = ?4",
+            params![
+                key.game_code,
+                key.generation,
+                player_id.0,
+                verifier(pre_terminal_player_token),
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, u64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((terminal_revision, delivery_id, display_json)) = row else {
+        return Ok(None);
+    };
+    let display = serde_json::from_str(&display_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    Ok(Some(CurrentTerminalDelivery {
+        key: key.clone(),
+        terminal_revision,
+        delivery_id: TerminalDeliveryId(delivery_id),
+        credential: terminal_credential(
+            key,
+            terminal_revision,
+            player_id,
+            pre_terminal_player_token,
+        ),
+        display,
+    }))
+}
+
+fn terminal_delivery_by_credential(
+    conn: &Connection,
+    credential: &TerminalCredential,
+) -> rusqlite::Result<Option<CurrentTerminalDelivery>> {
+    let row = conn
+        .query_row(
+            "SELECT d.game_code, d.generation, d.player_id, d.terminal_revision,
+                    d.delivery_id, r.display_json
+             FROM terminal_match_delivery d
+             JOIN terminal_match_results r
+               ON r.game_code = d.game_code AND r.generation = d.generation
+             WHERE d.credential_verifier = ?1",
+            params![verifier(&credential.0)],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, u8>(2)?,
+                    row.get::<_, u64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((game_code, generation, _player_id, terminal_revision, delivery_id, display_json)) =
+        row
+    else {
+        return Ok(None);
+    };
+    let display = serde_json::from_str(&display_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    Ok(Some(CurrentTerminalDelivery {
+        key: FullSessionKey {
+            game_code,
+            generation,
+        },
+        terminal_revision,
+        delivery_id: TerminalDeliveryId(delivery_id),
+        credential: credential.clone(),
+        display,
+    }))
+}
+
+fn terminal_artifact_digest(artifact: &FullTerminalArtifact, display_json: &str) -> String {
+    let mut material = format!(
+        "{}:{}:{}:{}",
+        artifact.key.game_code, artifact.key.generation, artifact.terminal_revision, display_json
+    );
+    let mut recipients = artifact
+        .recipients
+        .iter()
+        .map(|recipient| {
+            (
+                recipient.player_id.0,
+                verifier(&recipient.pre_terminal_player_token),
+            )
+        })
+        .collect::<Vec<_>>();
+    recipients.sort_unstable();
+    for (player_id, token_verifier) in recipients {
+        material.push_str(&format!(":{player_id}:{token_verifier}"));
+    }
+    verifier(&material)
+}
+
+fn terminal_delivery_id(
+    key: &FullSessionKey,
+    terminal_revision: u64,
+    player_id: PlayerId,
+) -> TerminalDeliveryId {
+    TerminalDeliveryId(verifier(&format!(
+        "terminal-delivery:{}:{}:{terminal_revision}:{}",
+        key.game_code, key.generation, player_id.0
+    )))
+}
+
+fn terminal_credential(
+    key: &FullSessionKey,
+    terminal_revision: u64,
+    player_id: PlayerId,
+    pre_terminal_player_token: &str,
+) -> TerminalCredential {
+    TerminalCredential(verifier(&format!(
+        "terminal-credential:{}:{}:{terminal_revision}:{}:{pre_terminal_player_token}",
+        key.game_code, key.generation, player_id.0
+    )))
+}
+
+fn verifier(secret: &str) -> String {
+    let digest = Sha256::digest(secret.as_bytes());
+    format!("{digest:x}")
 }
 
 fn now_epoch() -> u64 {
@@ -293,11 +1295,651 @@ fn now_epoch() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::types::game_state::{GameState, PersistedGameState};
     use tempfile::NamedTempFile;
 
     fn test_db() -> GameDb {
         let file = NamedTempFile::new().unwrap();
-        GameDb::open(file.path()).unwrap()
+        GameDb::open(file.path(), SessionRetention::Multiplayer).unwrap()
+    }
+
+    fn full_snapshot(
+        game_code: &str,
+        generation: u64,
+        mutation_revision: u64,
+        activation_epoch: Option<u64>,
+        game_started: bool,
+    ) -> FullPersistSnapshot {
+        FullPersistSnapshot {
+            key: FullSessionKey {
+                game_code: game_code.to_string(),
+                generation,
+            },
+            mutation_revision,
+            activation_epoch,
+            persisted: PersistedSession {
+                game_code: game_code.to_string(),
+                state_revision: mutation_revision,
+                ai_driver_fault: None,
+                next_ai_driver_fault_id: 1,
+                state: PersistedGameState::capture(GameState::new_two_player(7)),
+                player_tokens: vec!["player-0".to_string(), "player-1".to_string()],
+                deck_choices: vec![None, None],
+                display_names: vec!["P0".to_string(), "P1".to_string()],
+                timer_seconds: None,
+                player_count: 2,
+                ai_seats: vec![],
+                ai_difficulties: Default::default(),
+                game_started,
+                start_when_full: true,
+                ranked: false,
+                booster_pack_pool: None,
+                lobby_meta: None,
+                deck_pools: Vec::new(),
+            },
+            deck_pools_json: "[]".into(),
+        }
+    }
+
+    /// A session with a live Full runtime, so `full_persist_snapshot` produces
+    /// the same shape production persists.
+    fn seeded_full_session(db: &GameDb) -> (server_core::session::SessionManager, String) {
+        use server_core::session::{FullRuntime, SessionManager};
+
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(Default::default(), None);
+        let key = db.create_full_session_key(&code).expect("full key");
+        let session = mgr.session_exclusive(&code).expect("session");
+        session.full_runtime = Some(FullRuntime {
+            key,
+            activation_epoch: None,
+        });
+        (mgr, code)
+    }
+
+    fn save(
+        db: &GameDb,
+        mgr: &server_core::session::SessionManager,
+        code: &str,
+    ) -> FullPersistDisposition {
+        let snapshot = mgr
+            .try_session(code)
+            .expect("session")
+            .full_persist_snapshot()
+            .expect("a runtime-bound session has a snapshot");
+        db.save_full_session(&snapshot).expect("save")
+    }
+
+    /// One deck pool holding one named entry — the shape
+    /// `load_and_hydrate_decks` leaves on a started session.
+    fn pool_named(name: &str) -> engine::types::game_state::PlayerDeckPool {
+        let card = engine::types::card::CardFace {
+            name: name.to_string(),
+            ..Default::default()
+        };
+        let entries = std::sync::Arc::new(vec![engine::game::deck_loading::DeckEntry {
+            card,
+            count: 1,
+        }]);
+        engine::types::game_state::PlayerDeckPool {
+            player: engine::types::player::PlayerId(0),
+            registered_main: std::sync::Arc::clone(&entries),
+            current_main: entries,
+            ..Default::default()
+        }
+    }
+
+    fn pool_names(pools: &[engine::types::game_state::PlayerDeckPool]) -> Vec<String> {
+        pools
+            .iter()
+            .flat_map(|pool| pool.current_main.iter())
+            .map(|entry| entry.card.name.clone())
+            .collect()
+    }
+
+    /// Seeds the row shape an earlier build wrote: payload in `session_json`,
+    /// both new columns absent. Shape-faithful only — nothing should assert on
+    /// the payload's interior.
+    fn insert_legacy_row(db: &GameDb, game_code: &str) {
+        let legacy = serde_json::to_string(&full_snapshot(game_code, 1, 1, None, false).persisted)
+            .expect("a legacy payload serializes");
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO game_sessions
+                    (game_code, generation, mutation_revision, activation_epoch, retired,
+                     session_json, updated_at)
+                 VALUES (?1, 1, 1, NULL, 0, ?2, 0)",
+                params![game_code, legacy],
+            )
+            .expect("seed a pre-change row");
+    }
+
+    /// The half-written shape no production writer produces: the mutation
+    /// payload bound without its pools column.
+    fn insert_pool_less_row(db: &GameDb, game_code: &str) {
+        let payload = serde_json::to_string(&full_snapshot(game_code, 1, 1, None, false).persisted)
+            .expect("a payload serializes");
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO game_sessions
+                    (game_code, generation, mutation_revision, activation_epoch, retired,
+                     session_state_json, deck_pools_json, updated_at)
+                 VALUES (?1, 1, 1, NULL, 0, ?2, NULL, 0)",
+                params![game_code, payload],
+            )
+            .expect("seed a pools-less row");
+    }
+
+    fn column<T: rusqlite::types::FromSql>(db: &GameDb, column: &str, game_code: &str) -> T {
+        db.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                &format!("SELECT {column} FROM game_sessions WHERE game_code = ?1"),
+                params![game_code],
+                |row| row.get::<_, T>(0),
+            )
+            .expect("the row exists")
+    }
+
+    /// Row 9 legs (a), (b) and (c): the shape this build writes restores from
+    /// its own two columns, the dynamic payload no longer carries the pools,
+    /// and the shape an earlier build left behind is not restored at all.
+    #[test]
+    fn a_row_this_build_writes_restores_from_its_own_two_columns() {
+        let db = test_db();
+        let (mut mgr, code) = seeded_full_session(&db);
+        mgr.session_exclusive(&code)
+            .expect("session")
+            .state
+            .deck_pools = vec![pool_named("Forest")];
+        let live = pool_names(&mgr.try_session(&code).expect("session").state.deck_pools);
+        assert_eq!(
+            live,
+            vec!["Forest".to_string()],
+            "reach guard: the fixture must carry pools for the split to move"
+        );
+
+        let snapshot = mgr
+            .try_session(&code)
+            .expect("session")
+            .full_persist_snapshot()
+            .expect("a runtime-bound session has a snapshot");
+        assert_eq!(
+            db.save_full_session(&snapshot).expect("save"),
+            FullPersistDisposition::Applied
+        );
+        insert_legacy_row(&db, "LEGACY");
+
+        let loaded = db.load_active_full_sessions().expect("read back");
+
+        // (a) the round trip.
+        let restored = loaded
+            .iter()
+            .find(|snapshot| snapshot.key.game_code == code)
+            .expect("this build's own row is returned");
+        assert_eq!(
+            pool_names(&restored.persisted.deck_pools),
+            live,
+            "the pools must come back name-for-name from their own column"
+        );
+
+        // (c) the compatibility break, with (a)'s row as its positive control
+        // in the same call.
+        assert!(
+            !loaded
+                .iter()
+                .any(|snapshot| snapshot.key.game_code == "LEGACY"),
+            "a row carrying only session_json is never restored"
+        );
+        assert_eq!(
+            column::<Option<String>>(&db, "session_json", &code),
+            None,
+            "this build binds no payload to session_json"
+        );
+
+        // (b) the lift: the dynamic payload's own pools are empty.
+        let payload: serde_json::Value =
+            serde_json::from_str(&column::<String>(&db, "session_state_json", &code))
+                .expect("the stored payload decodes");
+        assert_eq!(
+            payload["state"]["state"]["deck_pools"],
+            serde_json::json!([]),
+            "the mutation-time payload must not carry the pools"
+        );
+    }
+
+    /// A row whose pools column is NULL is skipped like a payload that fails
+    /// to decode, not propagated out of the reader — one such row must not
+    /// cost the boot every other game.
+    #[test]
+    fn a_row_missing_its_pools_column_is_skipped_not_fatal() {
+        let db = test_db();
+        let (mgr, code) = seeded_full_session(&db);
+        assert_eq!(save(&db, &mgr, &code), FullPersistDisposition::Applied);
+        insert_pool_less_row(&db, "NOPOOLS");
+
+        let loaded = db
+            .load_active_full_sessions()
+            .expect("one unreadable row must not fail the whole restore");
+
+        assert!(
+            loaded.iter().any(|snapshot| snapshot.key.game_code == code),
+            "the production-written row is still restored"
+        );
+        assert!(
+            !loaded
+                .iter()
+                .any(|snapshot| snapshot.key.game_code == "NOPOOLS"),
+            "the row with no pools column is not restored"
+        );
+    }
+
+    /// The count that makes the compatibility break visible in a boot log.
+    /// It must be the reader's drop set and nothing else: this build's own
+    /// saved row, a key claimed but never saved and a tombstone are all live
+    /// in the same table, and a row the reader's `WHERE` lets through is
+    /// reported by the reader itself. Counting any of them would announce
+    /// healthy, finished or already-reported games as lost.
+    #[test]
+    fn only_live_rows_an_earlier_build_wrote_are_counted() {
+        let db = test_db();
+        let (mgr, code) = seeded_full_session(&db);
+        assert_eq!(save(&db, &mgr, &code), FullPersistDisposition::Applied);
+        let (_unsaved, placeholder) = seeded_full_session(&db);
+        insert_legacy_row(&db, "LEGACY");
+        insert_legacy_row(&db, "TOMBSTONE");
+        insert_legacy_row(&db, "BOTHCOLS");
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE game_sessions SET retired = 1 WHERE game_code = ?1",
+                params!["TOMBSTONE"],
+            )
+            .expect("retire the legacy row");
+            conn.execute(
+                "UPDATE game_sessions SET session_state_json = session_json WHERE game_code = ?1",
+                params!["BOTHCOLS"],
+            )
+            .expect("give the legacy row a column this build reads");
+        }
+
+        assert_eq!(
+            db.count_legacy_full_sessions().expect("count"),
+            1,
+            "only the live row this build's reader drops counts, not {code}, \
+             {placeholder}, the tombstone or the row carrying both columns"
+        );
+
+        let restored: Vec<String> = db
+            .load_active_full_sessions()
+            .expect("read back")
+            .into_iter()
+            .map(|snapshot| snapshot.key.game_code)
+            .collect();
+        assert_eq!(
+            restored,
+            vec![code],
+            "reach guard: the reader drops the counted row and keeps its own"
+        );
+    }
+
+    /// Row 10 leg (a): the same-generation revision-monotonicity guard. Left
+    /// keyed on `session_json` the disjunct is vacuously true for every row
+    /// this build writes, and an out-of-order persist clobbers a newer one.
+    #[test]
+    fn an_out_of_order_same_generation_persist_is_refused() {
+        let db = test_db();
+        let (mgr, code) = seeded_full_session(&db);
+        let key = mgr
+            .try_session(&code)
+            .expect("session")
+            .full_runtime
+            .as_ref()
+            .expect("seeded runtime")
+            .key
+            .clone();
+
+        let at = |revision: u64| FullPersistSnapshot {
+            key: key.clone(),
+            mutation_revision: revision,
+            activation_epoch: None,
+            persisted: full_snapshot(&code, key.generation, revision, None, false).persisted,
+            deck_pools_json: "[]".into(),
+        };
+
+        assert_eq!(
+            db.save_full_session(&at(5)).expect("save"),
+            FullPersistDisposition::Applied
+        );
+        assert_eq!(
+            db.save_full_session(&at(3)).expect("save"),
+            FullPersistDisposition::SupersededOrRetired,
+            "an older revision must not overwrite a newer one"
+        );
+        // Positive control: a genuinely newer revision still applies.
+        assert_eq!(
+            db.save_full_session(&at(6)).expect("save"),
+            FullPersistDisposition::Applied
+        );
+    }
+
+    /// Row 10 leg (b): the started-game guard on the unstarted retire path.
+    /// Left keyed on `session_json` the `if let Some(json)` arm never enters
+    /// and a started game retires as if it had never begun.
+    #[test]
+    fn retiring_a_started_game_through_the_unstarted_path_is_refused() {
+        let db = test_db();
+        let (mgr, code) = seeded_full_session(&db);
+        let key = mgr
+            .try_session(&code)
+            .expect("session")
+            .full_runtime
+            .as_ref()
+            .expect("seeded runtime")
+            .key
+            .clone();
+
+        // Positive control: an unstarted row retires.
+        assert_eq!(
+            db.save_full_session(&FullPersistSnapshot {
+                key: key.clone(),
+                mutation_revision: 1,
+                activation_epoch: None,
+                persisted: full_snapshot(&code, key.generation, 1, None, false).persisted,
+                deck_pools_json: "[]".into(),
+            })
+            .expect("save"),
+            FullPersistDisposition::Applied
+        );
+        assert_eq!(
+            db.retire_unstarted_full_session(&key, None)
+                .expect("retire"),
+            FullPersistDisposition::Applied
+        );
+
+        let started_key = db
+            .create_full_session_key(&code)
+            .expect("a retired row allows a fresh generation");
+        assert_eq!(
+            db.save_full_session(&FullPersistSnapshot {
+                key: started_key.clone(),
+                mutation_revision: 1,
+                activation_epoch: None,
+                persisted: full_snapshot(&code, started_key.generation, 1, None, true).persisted,
+                deck_pools_json: "[]".into(),
+            })
+            .expect("save"),
+            FullPersistDisposition::Applied
+        );
+        assert!(
+            db.retire_unstarted_full_session(&started_key, None)
+                .is_err(),
+            "a started game must not retire through the unstarted path"
+        );
+    }
+
+    /// The compatibility break's central invariant — every row this build
+    /// writes carries `session_json` NULL — held by the statements rather than
+    /// by the fact that neither writer binds the column. Each writer's upsert
+    /// meets a row an older build wrote, which is the one row shape an older
+    /// reader would otherwise restore subtly wrong.
+    #[test]
+    fn both_writers_null_an_older_builds_payload_on_conflict() {
+        let db = test_db();
+        insert_legacy_row(&db, "LEGACY");
+        assert!(
+            column::<Option<String>>(&db, "session_json", "LEGACY").is_some(),
+            "reach guard: the seeded row must really carry a legacy payload"
+        );
+        assert_eq!(
+            db.save_full_session(&full_snapshot("LEGACY", 1, 2, None, false))
+                .expect("save"),
+            FullPersistDisposition::Applied,
+            "reach guard: the write must reach the conflict path, not be refused"
+        );
+        assert_eq!(
+            column::<Option<String>>(&db, "session_json", "LEGACY"),
+            None,
+            "the upsert must null the column an older reader selects on"
+        );
+        assert!(
+            column::<Option<String>>(&db, "session_state_json", "LEGACY").is_some(),
+            "positive control: the columns this build does write stay populated"
+        );
+
+        // The sibling statement, on its own retention mode.
+        let file = NamedTempFile::new().unwrap();
+        let solo = GameDb::open(file.path(), SessionRetention::SingleUser).unwrap();
+        insert_legacy_row(&solo, "SOLO_L");
+        assert!(
+            column::<Option<String>>(&solo, "session_json", "SOLO_L").is_some(),
+            "reach guard: the seeded row must really carry a legacy payload"
+        );
+        let (_epoch, result) = solo
+            .activate_single_user_session(&full_snapshot("SOLO_L", 1, 2, None, false))
+            .expect("activate");
+        assert_eq!(
+            result,
+            FullPersistDisposition::Applied,
+            "reach guard: the activation must reach the conflict path"
+        );
+        assert_eq!(
+            column::<Option<String>>(&solo, "session_json", "SOLO_L"),
+            None,
+            "the activation upsert must null it too"
+        );
+        assert!(
+            column::<Option<String>>(&solo, "session_state_json", "SOLO_L").is_some(),
+            "positive control: the activation wrote its own payload column"
+        );
+    }
+
+    /// Row 11: a retire clears every payload column, whichever one the row
+    /// actually carries — and an ordinary save is refused by the same class,
+    /// because it must leave the two written columns populated.
+    #[test]
+    fn every_retire_clears_every_payload_column() {
+        let db = test_db();
+        let (mut mgr, code) = seeded_full_session(&db);
+        mgr.session_exclusive(&code)
+            .expect("session")
+            .state
+            .deck_pools = vec![pool_named("Forest")];
+        let key = mgr
+            .try_session(&code)
+            .expect("session")
+            .full_runtime
+            .as_ref()
+            .expect("seeded runtime")
+            .key
+            .clone();
+        let snapshot = mgr
+            .try_session(&code)
+            .expect("session")
+            .full_persist_snapshot()
+            .expect("a runtime-bound session has a snapshot");
+        assert_eq!(
+            db.save_full_session(&snapshot).expect("save"),
+            FullPersistDisposition::Applied
+        );
+
+        // The admitted member at the other end of the class: an ordinary save
+        // is not a retire and must leave both written columns populated.
+        assert!(column::<Option<String>>(&db, "session_state_json", &code).is_some());
+        assert!(column::<Option<String>>(&db, "deck_pools_json", &code).is_some());
+
+        assert_eq!(
+            db.retire_unstarted_full_session(&key, None)
+                .expect("retire"),
+            FullPersistDisposition::Applied
+        );
+        assert_eq!(column::<Option<String>>(&db, "session_json", &code), None);
+        assert_eq!(
+            column::<Option<String>>(&db, "session_state_json", &code),
+            None
+        );
+        assert_eq!(
+            column::<Option<String>>(&db, "deck_pools_json", &code),
+            None
+        );
+
+        // The other end of the class: `create_full_session_key`'s clear takes
+        // the same fragment, and a legacy row's payload lives in the column it
+        // is the only statement able to reach.
+        insert_legacy_row(&db, "LEGACY");
+        assert!(column::<Option<String>>(&db, "session_json", "LEGACY").is_some());
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE game_sessions SET retired = 1 WHERE game_code = 'LEGACY'",
+                [],
+            )
+            .expect("retire the legacy row so the key upsert fires");
+        db.create_full_session_key("LEGACY")
+            .expect("a retired row allows a fresh generation");
+        assert_eq!(
+            column::<Option<String>>(&db, "session_json", "LEGACY"),
+            None
+        );
+    }
+
+    /// Row 13: the new columns reach a database an earlier build created.
+    /// Every other test here opens a fresh tempfile, which is exactly the
+    /// population that cannot see this defect.
+    #[test]
+    fn the_new_columns_reach_an_already_migrated_database() {
+        let file = NamedTempFile::new().unwrap();
+        {
+            let conn = Connection::open(file.path()).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE game_sessions (
+                     game_code TEXT PRIMARY KEY,
+                     generation INTEGER NOT NULL DEFAULT 0,
+                     mutation_revision INTEGER NOT NULL DEFAULT 0,
+                     activation_epoch INTEGER,
+                     retired INTEGER NOT NULL DEFAULT 0,
+                     session_json TEXT,
+                     updated_at INTEGER NOT NULL
+                 );",
+            )
+            .expect("build the pre-column schema");
+            let columns: Vec<String> = conn
+                .prepare("PRAGMA table_info(game_sessions)")
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            // Reach guard: a fixture that silently already had them would make
+            // the assertions below pass without the migration running.
+            assert!(
+                !columns.iter().any(|column| column == "session_state_json")
+                    && !columns.iter().any(|column| column == "deck_pools_json"),
+                "fixture premise: the pre-column schema has neither column, got {columns:?}"
+            );
+        }
+
+        let db = GameDb::open(file.path(), SessionRetention::Multiplayer)
+            .expect("the production open migrates an existing database");
+        insert_legacy_row(&db, "LEGACY");
+        let columns: Vec<String> = db
+            .conn
+            .lock()
+            .unwrap()
+            .prepare("PRAGMA table_info(game_sessions)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            columns.iter().any(|column| column == "session_state_json")
+                && columns.iter().any(|column| column == "deck_pools_json"),
+            "both columns must reach an already-migrated database, got {columns:?}"
+        );
+
+        let (mut mgr, code) = seeded_full_session(&db);
+        mgr.session_exclusive(&code)
+            .expect("session")
+            .state
+            .deck_pools = vec![pool_named("Forest")];
+        let snapshot = mgr
+            .try_session(&code)
+            .expect("session")
+            .full_persist_snapshot()
+            .expect("a runtime-bound session has a snapshot");
+        assert_eq!(
+            db.save_full_session(&snapshot).expect("save"),
+            FullPersistDisposition::Applied
+        );
+
+        let loaded = db.load_active_full_sessions().expect("read back");
+        assert_eq!(
+            pool_names(
+                &loaded
+                    .iter()
+                    .find(|snapshot| snapshot.key.game_code == code)
+                    .expect("the migrated database restores this build's row")
+                    .persisted
+                    .deck_pools
+            ),
+            vec!["Forest".to_string()]
+        );
+        assert!(
+            !loaded
+                .iter()
+                .any(|snapshot| snapshot.key.game_code == "LEGACY"),
+            "the pre-existing legacy row is still not restored"
+        );
+
+        // The admitted member: re-opening a database that already has the
+        // columns must not error.
+        GameDb::open(file.path(), SessionRetention::Multiplayer).expect("a second open is a no-op");
+    }
+
+    /// The production symptom: a seat edit's snapshot must clear the
+    /// `mutation_revision` fence, or the write silently never lands.
+    #[test]
+    fn a_seat_edits_persist_is_accepted() {
+        use seat_reducer::types::{SeatDelta, SeatState};
+
+        let db = test_db();
+        let (mut mgr, code) = seeded_full_session(&db);
+        // Reach guard: a mis-seeded fixture would return
+        // `SupersededOrRetired` here for an unrelated reason.
+        assert_eq!(save(&db, &mgr, &code), FullPersistDisposition::Applied);
+
+        let session = mgr.session_exclusive(&code).expect("session");
+        let seat_state: SeatState = session.seat_state();
+        session.apply_seat_delta(
+            seat_state,
+            &SeatDelta::empty(),
+            &engine::database::CardDatabase::default(),
+        );
+
+        assert_eq!(save(&db, &mgr, &code), FullPersistDisposition::Applied);
+    }
+
+    #[test]
+    fn a_joins_persist_is_accepted() {
+        let db = test_db();
+        let (mut mgr, code) = seeded_full_session(&db);
+        assert_eq!(save(&db, &mgr, &code), FullPersistDisposition::Applied);
+
+        let (token, _) = mgr
+            .session_exclusive(&code)
+            .expect("session")
+            .join_with_reservation(Default::default(), None, String::new(), None)
+            .expect("seat 1 is open");
+        mgr.index_token(token, &code);
+
+        assert_eq!(save(&db, &mgr, &code), FullPersistDisposition::Applied);
     }
 
     #[test]
@@ -322,6 +1964,328 @@ mod tests {
     }
 
     #[test]
+    fn legacy_single_user_save_does_not_prune_other_game_sessions() {
+        let file = NamedTempFile::new().unwrap();
+        let db = GameDb::open(file.path(), SessionRetention::SingleUser).unwrap();
+
+        // Legacy callers cannot safely implement the active-session transition:
+        // they must not delete an unrelated row that may be a retained Full
+        // tombstone. Wave 3 routes single-user creation through activation.
+        db.save_session("GAME_A", "a").unwrap();
+        assert_eq!(db.load_all().unwrap().len(), 1);
+
+        // Re-saving the same game (autosave) keeps exactly one row.
+        db.save_session("GAME_A", "a2").unwrap();
+        let all = db.load_all().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].1, "a2");
+
+        // A second legacy save keeps both rows until lifecycle code adopts the
+        // atomic active pointer API below.
+        db.save_session("GAME_B", "b").unwrap();
+        let all = db.load_all().unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|(code, _)| code == "GAME_A"));
+        assert!(all.iter().any(|(code, _)| code == "GAME_B"));
+    }
+
+    #[test]
+    fn full_save_rejects_equal_and_stale_mutation_revisions() {
+        let db = test_db();
+        let initial = full_snapshot("FENCE1", 1, 3, None, false);
+        assert_eq!(
+            db.save_full_session(&initial).unwrap(),
+            FullPersistDisposition::Applied
+        );
+        assert_eq!(
+            db.save_full_session(&full_snapshot("FENCE1", 1, 3, None, false))
+                .unwrap(),
+            FullPersistDisposition::SupersededOrRetired
+        );
+        assert_eq!(
+            db.save_full_session(&full_snapshot("FENCE1", 1, 2, None, false))
+                .unwrap(),
+            FullPersistDisposition::SupersededOrRetired
+        );
+        assert_eq!(
+            db.load_active_full_sessions().unwrap()[0].mutation_revision,
+            3
+        );
+    }
+
+    #[test]
+    fn full_generation_fences_a_delayed_save_from_an_older_lifetime() {
+        let db = test_db();
+        let first = db.create_full_session_key("REUSE1").unwrap();
+        db.retire_unstarted_full_session(&first, None).unwrap();
+        let second = db.create_full_session_key("REUSE1").unwrap();
+        assert_eq!(first.generation, 1);
+        assert_eq!(second.generation, 2);
+        assert_eq!(
+            db.save_full_session(&full_snapshot("REUSE1", second.generation, 1, None, false))
+                .unwrap(),
+            FullPersistDisposition::Applied
+        );
+        assert_eq!(
+            db.save_full_session(&full_snapshot("REUSE1", first.generation, 99, None, false))
+                .unwrap(),
+            FullPersistDisposition::SupersededOrRetired
+        );
+        assert_eq!(
+            db.load_active_full_sessions().unwrap()[0].key.generation,
+            second.generation
+        );
+    }
+
+    #[test]
+    fn single_user_activation_retires_previous_row_and_fences_late_save() {
+        let file = NamedTempFile::new().unwrap();
+        let db = GameDb::open(file.path(), SessionRetention::SingleUser).unwrap();
+        let first = full_snapshot("SOLO_A", 1, 1, None, false);
+        let (first_epoch, first_result) = db.activate_single_user_session(&first).unwrap();
+        assert_eq!(first_result, FullPersistDisposition::Applied);
+
+        let second = full_snapshot("SOLO_B", 1, 1, None, false);
+        let (second_epoch, second_result) = db.activate_single_user_session(&second).unwrap();
+        assert_eq!(second_result, FullPersistDisposition::Applied);
+        assert!(second_epoch > first_epoch);
+
+        assert_eq!(
+            db.save_full_session(&full_snapshot("SOLO_A", 1, 2, Some(first_epoch), false))
+                .unwrap(),
+            FullPersistDisposition::NotCurrentActivation
+        );
+        let loaded = db.load_active_full_sessions().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].key.game_code, "SOLO_B");
+        assert_eq!(loaded[0].activation_epoch, Some(second_epoch));
+    }
+
+    #[test]
+    fn retiring_unstarted_full_session_keeps_tombstone_out_of_restore() {
+        let db = test_db();
+        let snapshot = full_snapshot("RETIRE1", 1, 1, None, false);
+        db.save_full_session(&snapshot).unwrap();
+        assert_eq!(
+            db.retire_unstarted_full_session(&snapshot.key, None)
+                .unwrap(),
+            FullPersistDisposition::Applied
+        );
+        assert!(db.load_active_full_sessions().unwrap().is_empty());
+        assert_eq!(
+            db.save_full_session(&full_snapshot("RETIRE1", 1, 2, None, false))
+                .unwrap(),
+            FullPersistDisposition::SupersededOrRetired
+        );
+    }
+
+    #[test]
+    fn full_key_allocation_is_durable_and_never_derived_from_code() {
+        let db = test_db();
+        let first = db.create_full_session_key("KEY001").unwrap();
+        assert_eq!(first.generation, 1);
+        assert_eq!(
+            db.load_active_full_key("KEY001").unwrap(),
+            Some(first.clone())
+        );
+        assert_eq!(
+            db.save_full_session(&FullPersistSnapshot {
+                key: first.clone(),
+                mutation_revision: 0,
+                activation_epoch: None,
+                persisted: full_snapshot("KEY001", 1, 0, None, false).persisted,
+                deck_pools_json: "[]".into(),
+            })
+            .unwrap(),
+            FullPersistDisposition::Applied
+        );
+        db.retire_unstarted_full_session(&first, None).unwrap();
+        let second = db.create_full_session_key("KEY001").unwrap();
+        assert_eq!(second.generation, 2);
+        assert_eq!(db.load_active_full_key("KEY001").unwrap(), Some(second));
+    }
+
+    #[test]
+    fn prepared_terminal_bootstraps_reads_and_acknowledges_idempotently() {
+        let db = test_db();
+        let snapshot = full_snapshot("TERM01", 1, 1, None, true);
+        db.save_full_session(&snapshot).unwrap();
+        let artifact = FullTerminalArtifact {
+            key: snapshot.key.clone(),
+            terminal_revision: 2,
+            display: TerminalMatchDisplay {
+                winner: Some(PlayerId(1)),
+                reason: "Match conceded".to_string(),
+                ranked_result: None,
+            },
+            recipients: vec![
+                TerminalRecipient {
+                    player_id: PlayerId(0),
+                    pre_terminal_player_token: "player-0".to_string(),
+                },
+                TerminalRecipient {
+                    player_id: PlayerId(1),
+                    pre_terminal_player_token: "player-1".to_string(),
+                },
+            ],
+        };
+        assert_eq!(
+            db.prepare_full_terminal(&artifact).unwrap(),
+            PrepareFullTerminalDisposition::Prepared
+        );
+        assert_eq!(
+            db.prepare_full_terminal(&artifact).unwrap(),
+            PrepareFullTerminalDisposition::AlreadyPrepared
+        );
+
+        let request = TerminalBootstrapRequest {
+            key: snapshot.key.clone(),
+            player_token: "player-0".to_string(),
+            request_id: "lost-first-frame".to_string(),
+        };
+        let first = db.bootstrap_terminal_delivery(&request).unwrap().unwrap();
+        let retry = db.bootstrap_terminal_delivery(&request).unwrap().unwrap();
+        assert_eq!(first.delivery_id, retry.delivery_id);
+        assert_eq!(first.credential, retry.credential);
+        assert_eq!(first.display.reason, "Match conceded");
+        assert!(db.load_active_full_sessions().unwrap().is_empty());
+
+        let read = db.read_terminal_result(&first.credential).unwrap().unwrap();
+        assert_eq!(read.delivery_id, first.delivery_id);
+        assert!(db
+            .ack_terminal_delivery(&first.delivery_id, &first.credential)
+            .unwrap());
+        // A lost acknowledgement response retries safely against the same row.
+        assert!(db
+            .ack_terminal_delivery(&first.delivery_id, &first.credential)
+            .unwrap());
+    }
+
+    #[test]
+    fn terminal_bootstrap_rejects_wrong_token_and_changed_artifact() {
+        let db = test_db();
+        let snapshot = full_snapshot("TERM02", 1, 1, None, true);
+        db.save_full_session(&snapshot).unwrap();
+        let artifact = FullTerminalArtifact {
+            key: snapshot.key.clone(),
+            terminal_revision: 2,
+            display: TerminalMatchDisplay {
+                winner: Some(PlayerId(0)),
+                reason: "Game ended".to_string(),
+                ranked_result: None,
+            },
+            recipients: vec![TerminalRecipient {
+                player_id: PlayerId(0),
+                pre_terminal_player_token: "player-0".to_string(),
+            }],
+        };
+        db.prepare_full_terminal(&artifact).unwrap();
+        assert!(db
+            .bootstrap_terminal_delivery(&TerminalBootstrapRequest {
+                key: snapshot.key.clone(),
+                player_token: "wrong-token".to_string(),
+                request_id: "wrong".to_string(),
+            })
+            .unwrap()
+            .is_none());
+
+        let mut changed = artifact.clone();
+        changed.display.reason = "Changed replay".to_string();
+        assert!(matches!(
+            db.prepare_full_terminal(&changed),
+            Err(rusqlite::Error::InvalidQuery)
+        ));
+    }
+
+    #[test]
+    fn ranked_result_retry_reuses_the_original_receipt() {
+        let db = test_db();
+        let initial = vec![
+            RatingDelta {
+                player_key: "alice".to_string(),
+                game_code: "RANK01".to_string(),
+                opponent_key: "bob".to_string(),
+                won: true,
+                rating_before: 1200,
+                rating_after: 1212,
+                rating_delta: 12,
+            },
+            RatingDelta {
+                player_key: "bob".to_string(),
+                game_code: "RANK01".to_string(),
+                opponent_key: "alice".to_string(),
+                won: false,
+                rating_before: 1200,
+                rating_after: 1188,
+                rating_delta: -12,
+            },
+        ];
+        assert_eq!(
+            db.save_ranked_result_idempotent(&initial).unwrap()[0].rating_after,
+            1212
+        );
+
+        let retry = vec![
+            RatingDelta {
+                rating_before: 1212,
+                rating_after: 1224,
+                rating_delta: 12,
+                ..initial[0].clone()
+            },
+            RatingDelta {
+                rating_before: 1188,
+                rating_after: 1176,
+                rating_delta: -12,
+                ..initial[1].clone()
+            },
+        ];
+        let receipt = db.save_ranked_result_idempotent(&retry).unwrap();
+        assert_eq!(receipt, initial);
+        assert_eq!(db.load_rating("alice").unwrap(), Some(1212));
+        assert_eq!(db.load_rating("bob").unwrap(), Some(1188));
+    }
+
+    #[test]
+    fn ranked_history_exists_only_for_a_code_with_saved_results() {
+        let db = test_db();
+        assert_eq!(db.ranked_history_exists("RANK01"), Ok(false));
+
+        db.save_ranked_result_idempotent(&[
+            RatingDelta {
+                player_key: "alice".to_string(),
+                game_code: "RANK01".to_string(),
+                opponent_key: "bob".to_string(),
+                won: true,
+                rating_before: 1200,
+                rating_after: 1212,
+                rating_delta: 12,
+            },
+            RatingDelta {
+                player_key: "bob".to_string(),
+                game_code: "RANK01".to_string(),
+                opponent_key: "alice".to_string(),
+                won: false,
+                rating_before: 1200,
+                rating_after: 1188,
+                rating_delta: -12,
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(db.ranked_history_exists("RANK01"), Ok(true));
+        assert_eq!(db.ranked_history_exists("RANK02"), Ok(false));
+    }
+
+    #[test]
+    fn multiplayer_save_retains_every_game_session() {
+        let db = test_db(); // SessionRetention::Multiplayer
+        db.save_session("GAME_A", "a").unwrap();
+        db.save_session("GAME_B", "b").unwrap();
+        // Online mode keeps every concurrent game independently.
+        assert_eq!(db.load_all().unwrap().len(), 2);
+    }
+
+    #[test]
     fn delete_session_removes_row() {
         let db = test_db();
         db.save_session("ABC123", "data").unwrap();
@@ -339,6 +2303,26 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].0, "DRAF01");
         assert!(all[0].1.contains("DRAF01"));
+
+        // `draft_sessions` is a different table and no part of the payload
+        // split reaches it. A round trip cannot see a rename that did: this
+        // suite always opens a fresh database, so DDL and statements would
+        // agree here while a deployed database's `CREATE TABLE IF NOT EXISTS`
+        // no-ops and keeps the old column. Assert the column name itself.
+        let columns: Vec<String> = db
+            .conn
+            .lock()
+            .unwrap()
+            .prepare("PRAGMA table_info(draft_sessions)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            columns.iter().any(|column| column == "session_json"),
+            "the draft table keeps its own payload column, got {columns:?}"
+        );
     }
 
     #[test]

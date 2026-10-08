@@ -2,16 +2,19 @@ use crate::game::ability_utils::build_resolved_from_def;
 use crate::game::effects::resolve_ability_chain;
 use crate::types::ability::AbilityKind;
 use crate::types::actions::MulliganChoice;
+use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::format::GameFormat;
+use crate::types::format::{DealOrder, FreeRevealMulligan, GameFormat, ZoneScope};
 use crate::types::game_state::{
     GameState, MulliganBottomEntry, MulliganDecisionEntry, MulliganDecisionPhase,
-    OpeningHandBottomReason, PendingBeginGameAbility, PendingMulliganAction, WaitingFor,
+    MulliganDeclaration, MulliganDeclarationKind, OpeningHandBottomReason, PendingBeginGameAbility,
+    PendingMulliganAction, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
+use super::players::{is_alive, turn_order_index};
 use super::turns;
 
 /// CR 103.5: A player's starting hand size is normally seven cards.
@@ -20,7 +23,7 @@ const STARTING_HAND_SIZE: usize = 7;
 /// hand would be zero cards. In a standard game that means at most 7 mulligans
 /// (7→6→5→4→3→2→1→0; the 8th would be 0). CR 103.5c adds that in free-first
 /// formats the first mulligan is uncounted, so the cap shifts up by one to 8
-/// — the player may still be brought all the way down to a 1-card opening
+/// — the player may still be brought all the way down to a 0-card opening
 /// hand after exhausting their bottoms allowance.
 const MAX_MULLIGANS: u8 = 7;
 
@@ -89,11 +92,12 @@ pub fn start_mulligan(state: &mut GameState, events: &mut Vec<GameEvent>) -> Wai
         crate::util::im_ext::shuffle_vector(&mut player.library, rng);
     }
 
-    // Draw the opening hand for each player in seat order.
-    let seat_order = state.seat_order.clone();
-    for &player_id in &seat_order {
-        draw_n(state, player_id, STARTING_HAND_SIZE, events);
-    }
+    let deals: Vec<(PlayerId, usize)> = state
+        .seat_order
+        .iter()
+        .map(|&player| (player, STARTING_HAND_SIZE))
+        .collect();
+    deal_hands(state, &deals, events);
 
     let forced_pending = tiny_leaders_forced_mulligan_pending(state);
     if !forced_pending.is_empty() {
@@ -124,6 +128,7 @@ fn normal_mulligan_decision(state: &GameState) -> WaitingFor {
     WaitingFor::MulliganDecision {
         pending,
         free_first_mulligan: free_first_mulligan(state),
+        declared: Vec::new(),
     }
 }
 
@@ -163,7 +168,8 @@ fn tiny_leaders_forced_mulligan_pending(state: &GameState) -> Vec<MulliganBottom
 ///   player's bottoms ledger to 0 (CR 103.5 — a fresh redraw invalidates prior
 ///   credit). The player remains in `pending` to decide again. At the mulligan
 ///   cap (CR 103.5 final sentence) the mulligan is treated as an implicit Keep
-///   at the new count.
+///   at the new count. In a shared-library format the declaration is only
+///   recorded in `declared` (CR 103.5) and carried out by `close_declare_round`.
 /// - `UseSerumPowder { object_id }` (CR 103.5b + Serum Powder Oracle text) is a
 ///   declare-point action. If bottoms are still owed, the entry transitions to
 ///   `BottomCards { then: UseSerumPowder { object_id } }` and the exile+redraw
@@ -174,9 +180,9 @@ fn tiny_leaders_forced_mulligan_pending(state: &GameState) -> Vec<MulliganBottom
 /// A decision is rejected if the player's entry is not in the `Declare` phase
 /// (they owe bottoms first).
 ///
-/// When `pending` becomes empty, advance directly to `finish_mulligans` — each
-/// player's bottoms are resolved at their own declare point, so there is no
-/// separate batch bottoms phase.
+/// When `pending` becomes empty, close the declare round if any declaration is
+/// held, then advance to `finish_mulligans` — each player's bottoms are resolved
+/// at their own declare point, so there is no separate batch bottoms phase.
 pub fn handle_mulligan_decision(
     state: &mut GameState,
     player: PlayerId,
@@ -187,10 +193,14 @@ pub fn handle_mulligan_decision(
 
     // Snapshot the current pending list (we own a clone because the engine
     // borrows `state.waiting_for` immutably during match dispatch).
-    let WaitingFor::MulliganDecision { pending, .. } = &state.waiting_for else {
+    let WaitingFor::MulliganDecision {
+        pending, declared, ..
+    } = &state.waiting_for
+    else {
         return Err("handle_mulligan_decision called outside MulliganDecision".to_string());
     };
     let mut pending = pending.clone();
+    let mut declared = declared.clone();
 
     let idx = pending
         .iter()
@@ -216,27 +226,60 @@ pub fn handle_mulligan_decision(
                 events,
             )?;
         }
-        MulliganChoice::Mulligan => {
-            let new_count = current_count + 1;
-            shuffle_hand_into_library(state, player, events);
-            draw_n(state, player, STARTING_HAND_SIZE, events);
-            // CR 103.5: a fresh redraw makes any prior "already bottomed"
-            // credit meaningless — the obligation for the new count starts
-            // from scratch.
-            state.prepaid_mulligan_bottoms.insert(player, 0);
-            pending[idx].mulligan_count = new_count;
+        MulliganChoice::Mulligan => match mulligan_timing(state) {
+            MulliganTiming::Immediate => {
+                let new_count = current_count + 1;
+                shuffle_hand_into_library(state, player, events);
+                draw_n(state, player, STARTING_HAND_SIZE, events);
+                // CR 103.5: a fresh redraw makes any prior "already bottomed"
+                // credit meaningless — the obligation for the new count starts
+                // from scratch.
+                state.prepaid_mulligan_bottoms.insert(player, 0);
+                pending[idx].mulligan_count = new_count;
 
-            if new_count >= max_mulligans_for(free_first) {
-                // CR 103.5 final sentence: this is the last legal mulligan.
-                // Treat it as an implicit Keep at the new count.
-                resolve_declare_point(
-                    state,
-                    &mut pending,
-                    idx,
-                    free_first,
-                    PendingMulliganAction::Keep,
-                    events,
-                )?;
+                if new_count >= max_mulligans_for(free_first) {
+                    // CR 103.5 final sentence: this is the last legal mulligan.
+                    // Treat it as an implicit Keep at the new count.
+                    resolve_declare_point(
+                        state,
+                        &mut pending,
+                        idx,
+                        free_first,
+                        PendingMulliganAction::Keep,
+                        events,
+                    )?;
+                }
+            }
+            MulliganTiming::Simultaneous => {
+                // CR 103.5: record the declaration; the hand stays until every
+                // player has declared.
+                pending.remove(idx);
+                declared.push(MulliganDeclaration {
+                    player,
+                    mulligan_count: current_count,
+                    kind: MulliganDeclarationKind::Regular,
+                });
+            }
+        },
+        MulliganChoice::FreeReveal => {
+            if !free_reveal_offered(state, &pending[idx]) {
+                return Err(format!(
+                    "Player {:?} may not take a free reveal mulligan",
+                    player
+                ));
+            }
+            match mulligan_timing(state) {
+                MulliganTiming::Immediate => redraw_after_free_reveal(state, player, events),
+                MulliganTiming::Simultaneous => {
+                    // CR 103.5: record the declaration; the reveal and redraw
+                    // happen when the round closes.
+                    pending.remove(idx);
+                    declared.push(MulliganDeclaration {
+                        player,
+                        mulligan_count: current_count,
+                        kind: MulliganDeclarationKind::FreeReveal,
+                    });
+                }
             }
         }
         MulliganChoice::UseSerumPowder { object_id } => {
@@ -255,7 +298,126 @@ pub fn handle_mulligan_decision(
         }
     }
 
-    Ok(advance_after_decision(state, pending, free_first, events))
+    Ok(advance_after_decision(
+        state, pending, declared, free_first, events,
+    ))
+}
+
+/// CR 103.5 as modified by the Dandan free-reveal rule (`FreeRevealMulligan`
+/// axis): whether the entry's seat may take the free reveal mulligan now.
+/// Computed from the live hand, never stored, so `WaitingFor` leaks no hand
+/// composition to the opponent.
+pub(crate) fn free_reveal_offered(state: &GameState, entry: &MulliganDecisionEntry) -> bool {
+    match state.format_config.format.free_reveal_mulligan() {
+        FreeRevealMulligan::Unavailable => false,
+        FreeRevealMulligan::WhenHandLacks {
+            min_lands,
+            min_nonlands,
+        } => {
+            let (lands, nonlands) = hand_land_split(state, entry.player);
+            // `mulligan_count == 0` is "no regular mulligan taken yet": every
+            // regular mulligan increments it and a free reveal never does.
+            matches!(entry.phase, MulliganDecisionPhase::Declare)
+                && entry.mulligan_count == 0
+                && (lands < usize::from(min_lands) || nonlands < usize::from(min_nonlands))
+        }
+    }
+}
+
+/// CR 103.5b + Serum Powder Oracle text: every object in `player`'s hand named
+/// "Serum Powder" (CR 201.2: name match is exact and case-insensitive).
+pub(crate) fn serum_powders_in_hand(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
+    let Some(p) = state.players.iter().find(|p| p.id == player) else {
+        return Vec::new();
+    };
+    p.hand
+        .iter()
+        .copied()
+        .filter(|oid| {
+            state
+                .objects
+                .get(oid)
+                .is_some_and(|o| o.name.eq_ignore_ascii_case(SERUM_POWDER_NAME))
+        })
+        .collect()
+}
+
+/// The Serum Powders `seat`'s own pending entry may use now (CR 103.5b: "any
+/// time you could mulligan"). The single seat-scoped authority for emitting
+/// `MulliganChoice::UseSerumPowder`: the action names an object in one seat's
+/// hand, so only a list built for that seat may carry it.
+pub(crate) fn serum_powders_offered_to(state: &GameState, seat: PlayerId) -> Vec<ObjectId> {
+    match &state.waiting_for {
+        WaitingFor::MulliganDecision { pending, .. }
+            if pending.iter().any(|entry| {
+                entry.player == seat && matches!(entry.phase, MulliganDecisionPhase::Declare)
+            }) =>
+        {
+            serum_powders_in_hand(state, seat)
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Whether `seat`'s own pending entry may take the free reveal now. The single
+/// seat-scoped authority for emitting `MulliganChoice::FreeReveal`: the action
+/// names no seat, so only a list built for one seat may carry it.
+pub(crate) fn free_reveal_offered_to(state: &GameState, seat: PlayerId) -> bool {
+    match &state.waiting_for {
+        WaitingFor::MulliganDecision { pending, .. } => pending
+            .iter()
+            .any(|entry| entry.player == seat && free_reveal_offered(state, entry)),
+        _ => false,
+    }
+}
+
+/// (lands, nonland cards) in `player`'s hand. CR 205.2a: land is a card type.
+fn hand_land_split(state: &GameState, player: PlayerId) -> (usize, usize) {
+    let hand = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .map(|p| &p.hand);
+    let lands = hand.map_or(0, |hand| {
+        hand.iter()
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.card_types.core_types.contains(&CoreType::Land))
+            })
+            .count()
+    });
+    (lands, hand.map_or(0, |hand| hand.len()) - lands)
+}
+
+/// CR 701.20a: show the hand to all players, by name only. The cards do not
+/// move (CR 701.20b), and no object id is published: the hand is returned and
+/// redealt before the end-of-action public-reveal hook reads event ids, which
+/// would otherwise mark whichever objects now hold those ids as revealed.
+fn reveal_hand(state: &GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
+    let card_names = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .into_iter()
+        .flat_map(|p| p.hand.iter())
+        .filter_map(|id| state.objects.get(id))
+        .map(|obj| obj.name.clone())
+        .collect();
+    events.push(GameEvent::CardsRevealed {
+        player,
+        card_ids: Vec::new(),
+        card_names,
+    });
+}
+
+/// The free reveal where each player has their own library: reveal, shuffle
+/// the hand back and redraw, leaving the count and bottoms ledger untouched.
+fn redraw_after_free_reveal(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
+    reveal_hand(state, player, events);
+    shuffle_hand_into_library(state, player, events);
+    draw_n(state, player, STARTING_HAND_SIZE, events);
 }
 
 /// CR 103.5 + 103.5b: Shared declare-point resolution for `Keep` and
@@ -389,12 +551,14 @@ fn handle_serum_powder(
 }
 
 /// CR 103.5: After updating `pending`, either re-emit `MulliganDecision` or,
-/// once every player is out of `pending`, finish the mulligan flow directly.
+/// once every player is out of `pending`, carry out the held declarations
+/// (`declared`) as one round and re-enter, or finish the mulligan flow.
 /// Bottoming is resolved per-entry at each declare point, so there is no
 /// separate batch bottoms phase.
-fn advance_after_decision(
+pub(crate) fn advance_after_decision(
     state: &mut GameState,
     pending: Vec<MulliganDecisionEntry>,
+    declared: Vec<MulliganDeclaration>,
     free_first: bool,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
@@ -402,10 +566,121 @@ fn advance_after_decision(
         return WaitingFor::MulliganDecision {
             pending,
             free_first_mulligan: free_first,
+            declared,
         };
     }
-    state.prepaid_mulligan_bottoms.clear();
-    finish_mulligans(state, events)
+    if declared.is_empty() {
+        state.prepaid_mulligan_bottoms.clear();
+        return finish_mulligans(state, events);
+    }
+    let pending = close_declare_round(state, declared, free_first, events);
+    advance_after_decision(state, pending, Vec::new(), free_first, events)
+}
+
+/// CR 103.5: when a declared mulligan is carried out.
+enum MulliganTiming {
+    Immediate,
+    Simultaneous,
+}
+
+/// CR 103.5: with a library per player the simultaneity of the redraws is
+/// unobservable; a shared pile makes the return, shuffle and deal order matter.
+fn mulligan_timing(state: &GameState) -> MulliganTiming {
+    match state.format_config.format.shared_zones().library {
+        ZoneScope::Shared => MulliganTiming::Simultaneous,
+        ZoneScope::PerPlayer => MulliganTiming::Immediate,
+    }
+}
+
+/// CR 103.5: once every player has declared, all the players who took a
+/// mulligan do so at the same time: every hand goes back, the library is
+/// shuffled, and the new hands are dealt. Returns the redrawers' fresh entries
+/// in seat order.
+fn close_declare_round(
+    state: &mut GameState,
+    declared: Vec<MulliganDeclaration>,
+    free_first: bool,
+    events: &mut Vec<GameEvent>,
+) -> Vec<MulliganDecisionEntry> {
+    let redrawers: Vec<MulliganDeclaration> = seat_walk_from_active(state)
+        .into_iter()
+        .filter_map(|player| declared.iter().find(|d| d.player == player).cloned())
+        .collect();
+
+    // CR 701.20a + CR 103.5: every free reveal is shown before any hand
+    // returns, so no declarer's hand is seen after another's was shuffled away.
+    for declaration in &redrawers {
+        match declaration.kind {
+            MulliganDeclarationKind::FreeReveal => reveal_hand(state, declaration.player, events),
+            MulliganDeclarationKind::Regular => {}
+        }
+    }
+    for declaration in &redrawers {
+        return_hand_to_library(state, declaration.player, events);
+    }
+    // CR 701.24a: one shuffle per distinct library, however many seats share it.
+    let mut holders: Vec<PlayerId> = Vec::new();
+    for declaration in &redrawers {
+        let holder = state.zone_storage_seat(Zone::Library, declaration.player);
+        if !holders.contains(&holder) {
+            holders.push(holder);
+        }
+    }
+    for holder in holders {
+        shuffle_library_of(state, holder);
+    }
+
+    for declaration in &redrawers {
+        // CR 103.5: a fresh redraw voids any prior "already bottomed" credit.
+        state.prepaid_mulligan_bottoms.insert(declaration.player, 0);
+    }
+    let deals: Vec<(PlayerId, usize)> = redrawers
+        .iter()
+        .map(|declaration| (declaration.player, STARTING_HAND_SIZE))
+        .collect();
+    deal_hands(state, &deals, events);
+
+    let mut entries: Vec<MulliganDecisionEntry> = state
+        .seat_order
+        .iter()
+        .filter_map(|&player| {
+            redrawers
+                .iter()
+                .find(|d| d.player == player)
+                .map(|d| MulliganDecisionEntry {
+                    player,
+                    mulligan_count: match d.kind {
+                        MulliganDeclarationKind::Regular => d.mulligan_count + 1,
+                        // The free reveal is not a regular mulligan: no count, no bottom.
+                        MulliganDeclarationKind::FreeReveal => d.mulligan_count,
+                    },
+                    phase: MulliganDecisionPhase::Declare,
+                })
+        })
+        .collect();
+
+    let mut idx = 0;
+    while idx < entries.len() {
+        if entries[idx].mulligan_count < max_mulligans_for(free_first) {
+            idx += 1;
+            continue;
+        }
+        // CR 103.5 final sentence + CR 103.5c: the last legal mulligan is an implicit Keep.
+        let before = entries.len();
+        resolve_declare_point(
+            state,
+            &mut entries,
+            idx,
+            free_first,
+            PendingMulliganAction::Keep,
+            events,
+        )
+        .expect("a Keep at the declare point performs no fallible action");
+        if entries.len() == before {
+            idx += 1;
+        }
+    }
+    entries
 }
 
 /// TL:R 906.6a/e: Resolve a forced opening-hand bottom before any normal
@@ -470,12 +745,14 @@ pub fn handle_mulligan_bottom(
     let WaitingFor::MulliganDecision {
         pending,
         free_first_mulligan,
+        declared,
     } = &state.waiting_for
     else {
         return Err("handle_mulligan_bottom called outside MulliganDecision".to_string());
     };
     let free_first = *free_first_mulligan;
     let mut pending = pending.clone();
+    let declared = declared.clone();
 
     let idx = pending
         .iter()
@@ -529,7 +806,9 @@ pub fn handle_mulligan_bottom(
         }
     }
 
-    Ok(advance_after_decision(state, pending, free_first, events))
+    Ok(advance_after_decision(
+        state, pending, declared, free_first, events,
+    ))
 }
 
 fn validate_bottom_selection(
@@ -551,7 +830,15 @@ fn validate_bottom_selection(
         .iter()
         .find(|p| p.id == player)
         .expect("player exists");
+    // CR 103.5: A mulligan puts the owed number of those hand cards on the
+    // bottom. Each selected object must therefore be distinct; this shared
+    // validator also protects the Tiny Leaders format-extension bottoming path.
+    // It mirrors `validate_keep_on_top_selection` / `validate_dig_selection`.
+    let mut seen = std::collections::HashSet::new();
     for &card_id in cards {
+        if !seen.insert(card_id) {
+            return Err(format!("Duplicate card {:?} in bottom selection", card_id));
+        }
         if !player_data.hand.contains(&card_id) {
             return Err(format!("Card {:?} is not in player's hand", card_id));
         }
@@ -581,7 +868,7 @@ fn queue_begin_game_abilities(state: &mut GameState) {
                         .iter()
                         .find(|a| a.kind == AbilityKind::BeginGame)?;
                     Some(PendingBeginGameAbility {
-                        ability: build_resolved_from_def(ability, obj_id, player_id),
+                        ability: Box::new(build_resolved_from_def(ability, obj_id, player_id)),
                     })
                 })
                 .collect::<Vec<_>>()
@@ -614,21 +901,18 @@ pub fn resume_begin_game_abilities(
 
     state.resolving_begin_game_abilities = false;
     crate::game::planechase::reveal_starting_plane(state);
+    // The pregame conversation is complete before the phase driver crosses the
+    // first turn boundary. Install its settled sentinel explicitly, including
+    // the common case where there were no beginning-of-game abilities to drain.
+    state.waiting_for = WaitingFor::Priority {
+        player: state.priority_player,
+    };
     turns::auto_advance(state, events)
 }
 
 /// TL:R 906.6a: Re-entry point after pruning an opening-hand bottom prompt.
 pub(crate) fn enter_normal_mulligan_public(state: &GameState) -> WaitingFor {
     normal_mulligan_decision(state)
-}
-
-/// CR 103.5 + CR 800.4a: Re-entry point for elimination cleanup — drives the
-/// flow to game start as if all bottoms had been submitted.
-pub(crate) fn finish_mulligans_public(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-) -> WaitingFor {
-    finish_mulligans(state, events)
 }
 
 /// All players have kept. Start the game properly.
@@ -639,6 +923,11 @@ fn finish_mulligans(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
 }
 
 fn shuffle_hand_into_library(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
+    return_hand_to_library(state, player, events);
+    shuffle_library_of(state, player);
+}
+
+fn return_hand_to_library(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
     let hand_ids: Vec<ObjectId> = state
         .players
         .iter()
@@ -650,7 +939,8 @@ fn shuffle_hand_into_library(state: &mut GameState, player: PlayerId, events: &m
         .collect();
 
     // CR 103.5: pregame mulligan — return the hand to the library through the
-    // pipeline under the `PregameProcedure` exempt cause, then shuffle once.
+    // pipeline under the `PregameProcedure` exempt cause; the caller shuffles
+    // once afterwards.
     //
     // The requests MUST go through the library-placement arm
     // (`.at_library_position(Bottom)` — insertion order is irrelevant because
@@ -666,39 +956,105 @@ fn shuffle_hand_into_library(state: &mut GameState, player: PlayerId, events: &m
             .at_library_position(crate::types::ability::LibraryPosition::Bottom);
         crate::game::zone_pipeline::move_object(state, req, events);
     }
+}
 
-    // Shuffle library
+/// CR 103.5 + CR 400.1 + CR 701.24a: shuffle the library `player` draws from,
+/// which is the shared pile's holder's unless the format gives each player their own.
+fn shuffle_library_of(state: &mut GameState, player: PlayerId) {
+    let holder = state.zone_storage_seat(Zone::Library, player);
     let GameState { players, rng, .. } = state;
     let player_data = players
         .iter_mut()
-        .find(|p| p.id == player)
+        .find(|p| p.id == holder)
         .expect("player exists");
     crate::util::im_ext::shuffle_vector(&mut player_data.library, rng);
 }
 
-fn draw_n(state: &mut GameState, player_id: PlayerId, count: usize, events: &mut Vec<GameEvent>) {
-    for _ in 0..count {
-        let player = state
-            .players
+/// The living seats in `seat_order`, starting at the active player, so every
+/// format (shared team turns included) deals and redraws in seat order.
+fn seat_walk_from_active(state: &GameState) -> Vec<PlayerId> {
+    let len = state.seat_order.len();
+    let start = state
+        .seat_order
+        .iter()
+        .position(|&id| id == state.active_player)
+        .unwrap_or(0);
+    (0..len)
+        .map(|offset| state.seat_order[turn_order_index(start, offset, len, state.turn_direction)])
+        .filter(|&player| is_alive(state, player))
+        .collect()
+}
+
+/// CR 103.5 + the format's `DealOrder`: the recipient of each successive card,
+/// seat by seat from the active player. Seats absent from `deals` or no longer
+/// in the game receive nothing.
+pub(crate) fn deal_sequence(state: &GameState, deals: &[(PlayerId, usize)]) -> Vec<PlayerId> {
+    let ordered: Vec<(PlayerId, usize)> = seat_walk_from_active(state)
+        .into_iter()
+        .filter_map(|player| deals.iter().find(|(p, _)| *p == player).copied())
+        .collect();
+    match state.format_config.format.deal_order() {
+        // CR 121.2c order (active player first) applied as the pregame default;
+        // CR 103.5 sets no deal order.
+        DealOrder::PlayerByPlayer => ordered
             .iter()
-            .find(|p| p.id == player_id)
-            .expect("player exists");
-
-        if player.library.is_empty() {
-            break;
+            .flat_map(|&(player, count)| std::iter::repeat_n(player, count))
+            .collect(),
+        DealOrder::Interleaved => {
+            let rounds = ordered.iter().map(|&(_, count)| count).max().unwrap_or(0);
+            (0..rounds)
+                .flat_map(|round| {
+                    ordered
+                        .iter()
+                        .filter(move |&&(_, count)| count > round)
+                        .map(|&(player, _)| player)
+                })
+                .collect()
         }
-
-        let top_card = player.library[0];
-        // CR 103.5: pregame draw — route through the pipeline under the
-        // `PregameProcedure` exempt cause.
-        let req = crate::game::zone_pipeline::ZoneMoveRequest::pregame(top_card, Zone::Hand);
-        crate::game::zone_pipeline::move_object(state, req, events);
     }
+}
 
-    events.push(GameEvent::CardsDrawn {
-        player_id,
-        count: count as u32,
-    });
+/// The one pregame deal: each recipient in `deal_sequence` order draws one
+/// card, and a player's `CardsDrawn` follows their last card.
+pub(crate) fn deal_hands(
+    state: &mut GameState,
+    deals: &[(PlayerId, usize)],
+    events: &mut Vec<GameEvent>,
+) {
+    let sequence = deal_sequence(state, deals);
+    for (slot, &recipient) in sequence.iter().enumerate() {
+        draw_one(state, recipient, events);
+        if sequence[slot + 1..].iter().all(|&p| p != recipient) {
+            let count = deals
+                .iter()
+                .find(|(p, _)| *p == recipient)
+                .map_or(0, |&(_, count)| count);
+            events.push(GameEvent::CardsDrawn {
+                player_id: recipient,
+                count: count as u32,
+            });
+        }
+    }
+}
+
+/// CR 121.1: draw the top card of the library `player` draws from. Returns
+/// false when it is empty.
+fn draw_one(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) -> bool {
+    // CR 103.5 + CR 121.1: the top of the player's library, which is the
+    // shared pile's top in a shared-library format.
+    let Some(&top_card) = state.library_of(player).front() else {
+        return false;
+    };
+    // CR 103.5: pregame draw — route through the pipeline under the
+    // `PregameProcedure` exempt cause.
+    let req = crate::game::zone_pipeline::ZoneMoveRequest::pregame(top_card, Zone::Hand)
+        .performed_by(player);
+    crate::game::zone_pipeline::move_object(state, req, events);
+    true
+}
+
+fn draw_n(state: &mut GameState, player_id: PlayerId, count: usize, events: &mut Vec<GameEvent>) {
+    deal_hands(state, &[(player_id, count)], events);
 }
 
 #[cfg(test)]
@@ -876,6 +1232,76 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::MulliganStarted)));
+    }
+
+    #[test]
+    fn free_reveal_redraw_reveals_then_reshuffles_only_the_declarers_hand() {
+        let mut state = setup_with_libraries(20);
+        let mut events = Vec::new();
+        let wf = start_mulligan(&mut state, &mut events);
+        state.waiting_for = wf;
+        let hand_of = |state: &GameState, seat: usize| -> Vec<ObjectId> {
+            state.players[seat].hand.iter().copied().collect()
+        };
+        let (old_hand, other_hand) = (hand_of(&state, 0), hand_of(&state, 1));
+        let old_names: Vec<String> = old_hand
+            .iter()
+            .map(|id| state.objects[id].name.clone())
+            .collect();
+        let library_len = state.players[0].library.len();
+
+        events.clear();
+        redraw_after_free_reveal(&mut state, PlayerId(0), &mut events);
+
+        assert!(
+            matches!(
+                events.first(),
+                Some(GameEvent::CardsRevealed { player, card_ids, card_names })
+                    if *player == PlayerId(0) && card_ids.is_empty() && *card_names == old_names
+            ),
+            "the reveal comes first, by name only: {events:?}"
+        );
+        let new_hand = hand_of(&state, 0);
+        assert_eq!(new_hand.len(), STARTING_HAND_SIZE);
+        assert_ne!(new_hand, old_hand, "reach: the hand was redrawn");
+        assert_eq!(state.players[0].library.len(), library_len);
+        assert_eq!(hand_of(&state, 1), other_hand);
+        assert!(!events.iter().any(|e| matches!(
+            e,
+            GameEvent::PlayerPerformedAction {
+                action: crate::types::events::PlayerActionKind::ShuffledLibrary,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn free_reveal_is_refused_where_the_format_offers_none() {
+        let mut state = setup_with_libraries(20);
+        let mut events = Vec::new();
+        let wf = start_mulligan(&mut state, &mut events);
+        state.waiting_for = wf.clone();
+        // Untyped test cards are all nonland: a (0, 7) hand that Dandan would offer.
+        let entry = MulliganDecisionEntry {
+            player: PlayerId(0),
+            mulligan_count: 0,
+            phase: MulliganDecisionPhase::Declare,
+        };
+        assert!(!free_reveal_offered(&state, &entry));
+        assert!(handle_mulligan_decision(
+            &mut state,
+            PlayerId(0),
+            MulliganChoice::FreeReveal,
+            &mut events
+        )
+        .is_err());
+        assert_eq!(state.waiting_for, wf);
+
+        state.format_config = crate::types::format::FormatConfig::dandan();
+        assert!(
+            free_reveal_offered(&state, &entry),
+            "reach: the axis is the difference"
+        );
     }
 
     /// CR 103.5: a mulligan shuffles the hand back as ONE shuffle, and that
@@ -2200,5 +2626,357 @@ mod tests {
             "remaining players should complete the flow after P0's concession, got {:?}",
             waiting
         );
+    }
+
+    fn dandan_with_pile(seats: u8, pile: usize) -> GameState {
+        let mut state = setup_n_player_with_libraries(seats, 0);
+        state.format_config.format = GameFormat::Dandan;
+        for i in 0..pile {
+            create_object(
+                &mut state,
+                CardId(i as u64),
+                PlayerId(0),
+                format!("Pile {i}"),
+                Zone::Library,
+            );
+        }
+        state
+    }
+
+    fn drawn_recipients(state: &GameState, events: &[GameEvent]) -> Vec<PlayerId> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Library),
+                    to: Zone::Hand,
+                    ..
+                } => state
+                    .players
+                    .iter()
+                    .find(|p| p.hand.contains(object_id))
+                    .map(|p| p.id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn deal_sequence_interleaves_from_the_active_player_when_the_format_says_so() {
+        let (p0, p1) = (PlayerId(0), PlayerId(1));
+        let alternating = |first: PlayerId, second: PlayerId, n: usize| -> Vec<PlayerId> {
+            (0..n).flat_map(|_| [first, second]).collect()
+        };
+
+        let mut state = dandan_with_pile(2, 0);
+        assert_eq!(
+            deal_sequence(&state, &[(p0, 7), (p1, 7)]),
+            alternating(p0, p1, 7)
+        );
+        assert_eq!(
+            deal_sequence(&state, &[(p0, 7), (p1, 3)]),
+            [p0, p1, p0, p1, p0, p1, p0, p0, p0, p0]
+        );
+        assert_eq!(deal_sequence(&state, &[(p1, 7)]), vec![p1; 7]);
+
+        state.seat_order = vec![p1, p0];
+        state.active_player = p1;
+        assert_eq!(
+            deal_sequence(&state, &[(p0, 7), (p1, 7)]),
+            alternating(p1, p0, 7),
+            "the active player deals first even when it is not the canonical seat"
+        );
+
+        let mut standard = setup_with_libraries(0);
+        let expected: Vec<PlayerId> = [vec![p0; 7], vec![p1; 7]].concat();
+        assert_eq!(deal_sequence(&standard, &[(p0, 7), (p1, 7)]), expected);
+        standard.seat_order = vec![p1, p0];
+        standard.active_player = p1;
+        let expected: Vec<PlayerId> = [vec![p1; 7], vec![p0; 7]].concat();
+        assert_eq!(deal_sequence(&standard, &[(p0, 7), (p1, 7)]), expected);
+    }
+
+    #[test]
+    fn deal_hands_alternates_pile_cards_and_the_receiver_owns_them() {
+        let (p0, p1) = (PlayerId(0), PlayerId(1));
+        let mut state = dandan_with_pile(2, 16);
+        let pile: Vec<ObjectId> = state.library_of(p0).iter().copied().collect();
+        assert_eq!(pile.len(), 16, "reach: the pile is staged");
+        let mut events = Vec::new();
+
+        deal_hands(&mut state, &[(p0, 7), (p1, 7)], &mut events);
+
+        let hand = |seat: PlayerId| -> Vec<ObjectId> {
+            state.players[seat.0 as usize]
+                .hand
+                .iter()
+                .copied()
+                .collect()
+        };
+        assert_eq!(
+            hand(p0),
+            (0..14).step_by(2).map(|i| pile[i]).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            hand(p1),
+            (1..14).step_by(2).map(|i| pile[i]).collect::<Vec<_>>()
+        );
+        for id in hand(p1) {
+            assert_eq!(state.objects[&id].owner, p1, "the receiver owns the card");
+        }
+        let drawn_p0 = events
+            .iter()
+            .position(
+                |e| matches!(e, GameEvent::CardsDrawn { player_id, count: 7 } if *player_id == p0),
+            )
+            .expect("P0 CardsDrawn");
+        let last_move = events
+            .iter()
+            .rposition(|e| matches!(e, GameEvent::ZoneChanged { .. }))
+            .expect("zone events");
+        assert!(
+            drawn_p0 < last_move,
+            "P0's CardsDrawn precedes P1's last card"
+        );
+        assert!(
+            matches!(events.last(), Some(GameEvent::CardsDrawn { player_id, count: 7 }) if *player_id == p1)
+        );
+    }
+
+    #[test]
+    fn standard_opening_deal_event_order_is_seat_by_seat() {
+        let mut state = setup_with_libraries(20);
+        let mut events = Vec::new();
+        start_mulligan(&mut state, &mut events);
+
+        let kinds: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::ZoneChanged { .. } => Some("move"),
+                GameEvent::CardsDrawn { player_id, .. } if *player_id == PlayerId(0) => Some("p0"),
+                GameEvent::CardsDrawn { .. } => Some("p1"),
+                _ => None,
+            })
+            .collect();
+        let expected: Vec<&str> =
+            [vec!["move"; 7], vec!["p0"], vec!["move"; 7], vec!["p1"]].concat();
+        assert_eq!(kinds, expected);
+    }
+
+    #[test]
+    fn shared_team_turn_opening_deal_walks_seats_from_the_starting_player() {
+        for start in [1u8, 3] {
+            let mut state = setup_n_player_with_libraries(4, 20);
+            state.format_config = crate::types::format::FormatConfig::two_headed_giant();
+            assert!(
+                state.format_config.topology().has_shared_team_turns(),
+                "reach: the shared-team-turn arm is the one under test"
+            );
+            state.active_player = PlayerId(start);
+            state.seat_order.rotate_left(start as usize);
+            let mut events = Vec::new();
+            start_mulligan(&mut state, &mut events);
+
+            let mut recipients = drawn_recipients(&state, &events);
+            recipients.dedup();
+            let expected: Vec<PlayerId> = (0..4).map(|i| PlayerId((start + i) % 4)).collect();
+            assert_eq!(recipients, expected, "starting player P{start}");
+        }
+    }
+
+    #[test]
+    fn dandan_mulligan_is_held_until_every_player_has_declared() {
+        let (p0, p1) = (PlayerId(0), PlayerId(1));
+        let mut state = dandan_with_pile(2, 30);
+        let mut events = Vec::new();
+        state.waiting_for = start_mulligan(&mut state, &mut events);
+        let p1_hand: Vec<ObjectId> = state.players[1].hand.iter().copied().collect();
+        let pile_before: Vec<ObjectId> = state.library_of(p0).iter().copied().collect();
+
+        events.clear();
+        let waiting = decide(&mut state, p1, false, &mut events);
+
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, GameEvent::ZoneChanged { .. })));
+        assert_eq!(
+            state.players[1].hand.iter().copied().collect::<Vec<_>>(),
+            p1_hand
+        );
+        assert_eq!(
+            state.library_of(p0).iter().copied().collect::<Vec<_>>(),
+            pile_before
+        );
+        let WaitingFor::MulliganDecision {
+            pending, declared, ..
+        } = &waiting
+        else {
+            panic!("expected MulliganDecision, got {waiting:?}");
+        };
+        assert_eq!(
+            pending.iter().map(|e| e.player).collect::<Vec<_>>(),
+            vec![p0]
+        );
+        assert_eq!(
+            declared,
+            &vec![MulliganDeclaration {
+                player: p1,
+                mulligan_count: 0,
+                kind: MulliganDeclarationKind::Regular,
+            }]
+        );
+        assert_eq!(waiting.acting_players(), vec![p0]);
+
+        events.clear();
+        let waiting = decide(&mut state, p0, true, &mut events);
+        assert_eq!(drawn_recipients(&state, &events), vec![p1; 7]);
+        assert_eq!(decision_count_for(&waiting, p1), Some(1));
+        assert!(matches!(
+            &waiting,
+            WaitingFor::MulliganDecision { declared, .. } if declared.is_empty()
+        ));
+    }
+
+    #[test]
+    fn dandan_close_returns_every_hand_before_the_deal_and_deals_active_player_first() {
+        let (p0, p1) = (PlayerId(0), PlayerId(1));
+        let mut state = dandan_with_pile(2, 40);
+        let mut events = Vec::new();
+        state.waiting_for = start_mulligan(&mut state, &mut events);
+
+        decide(&mut state, p1, false, &mut events);
+        events.clear();
+        decide(&mut state, p0, false, &mut events);
+
+        let moves: Vec<(Option<Zone>, Zone)> = events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::ZoneChanged { from, to, .. } => Some((*from, *to)),
+                _ => None,
+            })
+            .collect();
+        let expected: Vec<(Option<Zone>, Zone)> = [
+            vec![(Some(Zone::Hand), Zone::Library); 14],
+            vec![(Some(Zone::Library), Zone::Hand); 14],
+        ]
+        .concat();
+        assert_eq!(moves, expected, "all hands return before any card is dealt");
+        let alternating: Vec<PlayerId> = (0..7).flat_map(|_| [p0, p1]).collect();
+        assert_eq!(drawn_recipients(&state, &events), alternating);
+        assert!(!events.iter().any(|e| matches!(
+            e,
+            GameEvent::PlayerPerformedAction {
+                action: crate::types::events::PlayerActionKind::ShuffledLibrary,
+                ..
+            }
+        )));
+        assert_eq!(decision_count_for(&state.waiting_for, p0), Some(1));
+        assert_eq!(decision_count_for(&state.waiting_for, p1), Some(1));
+    }
+
+    #[test]
+    fn dandan_round_waits_for_owed_bottoms_before_redrawing() {
+        let (p0, p1) = (PlayerId(0), PlayerId(1));
+        let mut state = dandan_with_pile(2, 40);
+        let mut events = Vec::new();
+        state.waiting_for = start_mulligan(&mut state, &mut events);
+        decide(&mut state, p0, false, &mut events);
+        decide(&mut state, p1, false, &mut events);
+        assert_eq!(
+            decision_count_for(&state.waiting_for, p1),
+            Some(1),
+            "reach: round one closed"
+        );
+
+        decide(&mut state, p1, false, &mut events);
+        let p1_hand: Vec<ObjectId> = state.players[1].hand.iter().copied().collect();
+        let waiting = decide(&mut state, p0, true, &mut events);
+        assert_eq!(
+            bottom_phase_for(&waiting, p0),
+            Some((1, PendingMulliganAction::Keep))
+        );
+        assert_eq!(
+            state.players[1].hand.iter().copied().collect::<Vec<_>>(),
+            p1_hand
+        );
+
+        let bottomed = state.players[0].hand[0];
+        let waiting = bottom(&mut state, p0, vec![bottomed], &mut events).expect("bottom");
+        assert_ne!(
+            state.players[1].hand.iter().copied().collect::<Vec<_>>(),
+            p1_hand
+        );
+        assert_eq!(decision_count_for(&waiting, p1), Some(2));
+        assert!(state.library_of(p0).contains(&bottomed));
+        assert!(state.players.iter().all(|p| !p.hand.contains(&bottomed)));
+    }
+
+    #[test]
+    fn dandan_cap_applies_an_implicit_keep_at_the_close() {
+        let (p0, p1) = (PlayerId(0), PlayerId(1));
+        for (count, at_cap) in [(6u8, true), (5, false)] {
+            let mut state = dandan_with_pile(2, 40);
+            let mut events = Vec::new();
+            state.waiting_for = start_mulligan(&mut state, &mut events);
+            let WaitingFor::MulliganDecision { pending, .. } = &mut state.waiting_for else {
+                panic!("expected MulliganDecision");
+            };
+            pending[0].mulligan_count = count;
+
+            decide(&mut state, p1, true, &mut events);
+            let waiting = decide(&mut state, p0, false, &mut events);
+
+            if at_cap {
+                assert_eq!(
+                    bottom_phase_for(&waiting, p0),
+                    Some((7, PendingMulliganAction::Keep))
+                );
+            } else {
+                assert_eq!(decision_count_for(&waiting, p0), Some(6));
+                assert_eq!(bottom_phase_for(&waiting, p0), None);
+            }
+        }
+    }
+
+    #[test]
+    fn dandan_elimination_with_a_held_declaration_still_closes_the_round() {
+        use crate::game::engine::apply;
+        use crate::types::actions::GameAction;
+
+        for p0_mulligans in [true, false] {
+            let mut state = dandan_with_pile(3, 60);
+            let mut events = Vec::new();
+            state.waiting_for = start_mulligan(&mut state, &mut events);
+            let p0_hand: Vec<ObjectId> = state.players[0].hand.iter().copied().collect();
+
+            decide(&mut state, PlayerId(0), !p0_mulligans, &mut events);
+            decide(&mut state, PlayerId(1), true, &mut events);
+            apply(
+                &mut state,
+                PlayerId(2),
+                GameAction::Concede {
+                    player_id: PlayerId(2),
+                },
+            )
+            .expect("concede");
+
+            if p0_mulligans {
+                let hand: Vec<ObjectId> = state.players[0].hand.iter().copied().collect();
+                assert_ne!(hand, p0_hand, "the held mulligan was carried out");
+                assert_eq!(
+                    decision_count_for(&state.waiting_for, PlayerId(0)),
+                    Some(1),
+                    "{:?}",
+                    state.waiting_for
+                );
+            } else {
+                assert!(
+                    matches!(state.waiting_for, WaitingFor::Priority { .. }),
+                    "{:?}",
+                    state.waiting_for
+                );
+            }
+        }
     }
 }

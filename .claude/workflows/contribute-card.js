@@ -6,7 +6,7 @@ export const meta = {
     { title: 'Select', detail: 'resolve explicit card arg or auto-pick low-gap unsupported cards' },
     { title: 'Plan', detail: 'engine-planner + review-engine-plan loop' },
     { title: 'Implement', detail: 'branch + implement the card on the AI-CONTRIBUTOR §4 prompt' },
-    { title: 'Review', detail: 'review-impl loop + independent fresh-context cross-check' },
+    { title: 'Review', detail: 'review-engine-impl loop + independent fresh-context cross-check' },
     { title: 'Verify', detail: 'fmt, combinator gate, clippy/test/card-data, coverage, semantic-audit' },
     { title: 'PR', detail: 'commit, push, open PR with the §7 body template' },
   ],
@@ -19,10 +19,8 @@ const TIER = 'Frontier'
 // Published coverage endpoint (AI-CONTRIBUTOR.md §3).
 const COVERAGE_URL = 'https://data.phase-rs.dev/staging/coverage-data.json'
 
-// This per-card pipeline embodies the /engine-implementer contract: /engine-planner ->
-// /review-engine-plan (looped) -> engine-implementation-executor -> /review-impl (looped until
-// clean; reviewer confirms the card actually parses correctly). The review caps are runaway-loop
-// safeguards, not a "two rounds and ship" gate (which engine-implementer forbids).
+// This is a legacy uncommitted-worktree card workflow: it keeps its own planning and review loops.
+// It is not /engine-implementer Checkpoint Mode, whose executor requires immutable-candidate inputs.
 const MAX_PLAN_REVIEW_ROUNDS = 8
 const MAX_IMPL_REVIEW_ROUNDS = 8
 const MAX_CROSSCHECK_ROUNDS = 2
@@ -194,7 +192,7 @@ function replanPrompt(card, plan, findings) {
 
 function reviewImplPrompt(card) {
   return (
-    `Use the \`review-impl\` skill against the current uncommitted working-tree diff ` +
+    `Use the \`review-engine-impl\` skill against the current uncommitted working-tree diff ` +
     `for the card "${card}". Set clean=true only if there are no defects, gaps, or ` +
     `missing cases. CRITICAL (engine-implementer feedback_review_impl_verify_bug_fixed): you MUST ` +
     `confirm "${card}" actually parses/behaves correctly now via a discriminating runtime check ` +
@@ -205,7 +203,7 @@ function reviewImplPrompt(card) {
 
 function fixImplPrompt(card, findings) {
   return (
-    `Address every one of these \`review-impl\` findings for "${card}" with code ` +
+    `Address every one of these \`review-engine-impl\` findings for "${card}" with code ` +
     `changes in the working tree. Do not commit.\n\nFINDINGS:\n` +
     findings.map((f) => `- ${f}`).join('\n')
   )
@@ -254,7 +252,7 @@ function verifyPrompt(card) {
     `2. ./scripts/check-parser-combinators.sh   (Gate A; one-shot, direct)\n` +
     `3. If \`tilt get uiresource clippy >/dev/null 2>&1\` succeeds: ` +
     `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data ; else: ` +
-    `cargo clippy-strict && cargo test -p engine && ./scripts/gen-card-data.sh\n` +
+    `cargo clippy-strict && cargo test -p phase-engine && ./scripts/gen-card-data.sh\n` +
     `4. cargo coverage   (confirm "${card}" is now supported:true, gap_count:0 -> ` +
     `set coverageSupported)\n` +
     `5. cargo semantic-audit   (confirm "${card}" has 0 findings -> set ` +
@@ -336,20 +334,19 @@ async function planCard(card) {
 }
 
 async function implementCard(card, plan) {
-  // Step 3 of the /engine-implementer contract: surgical edits via the executor agent.
+  // This legacy workflow intentionally uses a general implementation agent, not the checkpoint executor.
   return await agent(implementPrompt(card, plan), {
     label: `implement:${card}`,
     phase: 'Implement',
     schema: IMPL_SCHEMA,
-    agentType: 'engine-implementation-executor',
   })
 }
 
 async function reviewImpl(card) {
-  // /review-impl looped until clean (engine-implementer mandate); fixes via a fresh executor agent.
+  // This workflow reviews its uncommitted diff and fixes it with a fresh general implementation agent.
   for (let round = 1; round <= MAX_IMPL_REVIEW_ROUNDS; round++) {
     const review = await agent(reviewImplPrompt(card), {
-      label: `review-impl:${card}#${round}`,
+      label: `review-engine-impl:${card}#${round}`,
       phase: 'Review',
       schema: REVIEW_SCHEMA,
     })
@@ -357,7 +354,6 @@ async function reviewImpl(card) {
     await agent(fixImplPrompt(card, review.findings), {
       label: `fix-impl:${card}#${round}`,
       phase: 'Review',
-      agentType: 'engine-implementation-executor',
     })
   }
   return false

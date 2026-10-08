@@ -4,17 +4,22 @@ import type { TFunction } from "i18next";
 import { useNavigate } from "react-router";
 
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
+import { COMMANDER_DRAFT_ENTRY, WINSTON_DRAFT_ENTRY, draftKindLabels } from "../components/draft/draftKind";
 import { MenuShell } from "../components/menu/MenuShell";
 import { MenuActionTile } from "../components/menu/MenuActionTile";
+import { PodIcon } from "../components/draft/PodIcon";
 import {
   loadActiveQuickDraft,
   type ActiveQuickDraftMeta,
 } from "../services/quickDraftPersistence";
 import {
+  loadActiveDraftGuest,
   loadActiveDraftPod,
+  type ActiveDraftGuestMeta,
   type ActiveDraftPodMeta,
 } from "../services/draftPersistence";
 import { loadGame } from "../services/gamePersistence";
+import { useEffectiveOffline } from "../stores/connectivityStore";
 
 const SET_LABELS: Record<string, string> = {
   otj: "Outlaws of Thunder Junction",
@@ -45,6 +50,17 @@ function formatSetLabel(code: string, name?: string): string {
   return name ?? SET_LABELS[code.toLowerCase()] ?? code.toUpperCase();
 }
 
+/**
+ * The set whose icon stands for a draft.
+ *
+ * A multi-set draft's `setCode` joins its distinct sets (`"ISD+DKA+AVR"`,
+ * matching the engine's own `DraftSource::set_code` label), which resolves to
+ * no icon of its own; the first set it opened represents it.
+ */
+function primarySetCode(code: string): string {
+  return code.split("+")[0] ?? code;
+}
+
 function formatRelativeTime(timestamp: number, t: TFunction<"draft">): string {
   const seconds = Math.floor((Date.now() - timestamp) / 1000);
   if (seconds < 60) return t("relativeTime.justNow");
@@ -61,12 +77,15 @@ export function DraftLandingPage() {
   // rather than duplicating the string into draft locales.
   const { t: tMenu } = useTranslation("menu");
   const navigate = useNavigate();
+  const effectiveOffline = useEffectiveOffline();
   const [activeDraft, setActiveDraft] = useState<ActiveQuickDraftMeta | null>(null);
   const [activePod, setActivePod] = useState<ActiveDraftPodMeta | null>(null);
+  const [activeGuestPod, setActiveGuestPod] = useState<ActiveDraftGuestMeta | null>(null);
 
   useEffect(() => {
     setActiveDraft(loadActiveQuickDraft());
     setActivePod(loadActiveDraftPod());
+    setActiveGuestPod(loadActiveDraftGuest());
   }, []);
 
   return (
@@ -85,6 +104,7 @@ export function DraftLandingPage() {
         <div className="flex w-full flex-col">
           {activeDraft && <ActiveDraftCard meta={activeDraft} />}
           {activePod && <ActivePodCard meta={activePod} />}
+          {activeGuestPod && <ActiveGuestPodCard meta={activeGuestPod} />}
 
           <div className="flex flex-col gap-3">
             <h2 className="text-[0.68rem] font-semibold uppercase tracking-[0.22em] text-fg-meta">
@@ -93,7 +113,7 @@ export function DraftLandingPage() {
 
             {/* Same bento action tiles as the home dashboard — one accent tone
                 per mode — so the draft landing shares the home card grammar. */}
-            <div className="grid grid-cols-1 gap-4 min-[640px]:grid-cols-3">
+            <div className="grid grid-cols-1 gap-4 min-[640px]:grid-cols-2">
               <MenuActionTile
                 tone="arcane"
                 motif="pack"
@@ -102,6 +122,15 @@ export function DraftLandingPage() {
                 enterLabel={tMenu("home.dashboard.enter")}
                 renderIcon={(cls) => <BotIcon className={cls} />}
                 onClick={() => navigate("/draft/quick")}
+              />
+              <MenuActionTile
+                tone="ember"
+                motif="pack"
+                title={t("landing.sealed.title")}
+                description={t("landing.sealed.description")}
+                enterLabel={tMenu("home.dashboard.enter")}
+                renderIcon={(cls) => <PackIcon className={cls} />}
+                onClick={() => navigate("/draft/quick?mode=sealed")}
               />
               <MenuActionTile
                 tone="ember"
@@ -116,10 +145,37 @@ export function DraftLandingPage() {
                 tone="jade"
                 motif="network"
                 title={t("landing.podDraft.title")}
-                description={t("landing.podDraft.description")}
+                description={effectiveOffline
+                  ? t("offline.startUnavailable")
+                  : t("landing.podDraft.description")}
                 enterLabel={tMenu("home.dashboard.enter")}
                 renderIcon={(cls) => <PodIcon className={cls} />}
                 onClick={() => navigate("/draft-pod")}
+                disabled={effectiveOffline}
+              />
+              <MenuActionTile
+                tone="arcane"
+                motif="network"
+                title={t("landing.commanderDraft.title")}
+                description={effectiveOffline
+                  ? t("offline.startUnavailable")
+                  : t("landing.commanderDraft.description")}
+                enterLabel={tMenu("home.dashboard.enter")}
+                renderIcon={(cls) => <CrownIcon className={cls} />}
+                onClick={() => navigate(`/draft-pod?kind=${COMMANDER_DRAFT_ENTRY}`)}
+                disabled={effectiveOffline}
+              />
+              <MenuActionTile
+                tone="ember"
+                motif="network"
+                title={t("landing.winstonDraft.title")}
+                description={effectiveOffline
+                  ? t("offline.startUnavailable")
+                  : t("landing.winstonDraft.description")}
+                enterLabel={tMenu("home.dashboard.enter")}
+                renderIcon={(cls) => <PilesIcon className={cls} />}
+                onClick={() => navigate(`/draft-pod?kind=${WINSTON_DRAFT_ENTRY}`)}
+                disabled={effectiveOffline}
               />
             </div>
           </div>
@@ -132,6 +188,10 @@ export function DraftLandingPage() {
 function ActivePodCard({ meta }: { meta: ActiveDraftPodMeta }) {
   const { t } = useTranslation("draft");
   const navigate = useNavigate();
+  // `landing.podLabel` interpolates the kind into a sentence, so a raw enum reads
+  // "CommanderDraft Pod". `draftKindLabels` is the single authority for that
+  // rendering, shared with the pod lobby header.
+  const kindLabel = draftKindLabels(t);
 
   function getPhaseLabel(): string {
     switch (meta.phase) {
@@ -151,7 +211,7 @@ function ActivePodCard({ meta }: { meta: ActiveDraftPodMeta }) {
       </h2>
       <button
         type="button"
-        onClick={() => navigate("/draft-pod?resume=1")}
+        onClick={() => navigate("/draft-pod?entry=host")}
         className="group flex w-full cursor-pointer items-center gap-5 rounded-[20px] border border-cyan-300/20 bg-cyan-400/[0.06] p-5 text-left transition-colors hover:border-cyan-300/35 hover:bg-cyan-400/[0.10]"
       >
         <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border border-white/8 bg-black/24">
@@ -160,7 +220,7 @@ function ActivePodCard({ meta }: { meta: ActiveDraftPodMeta }) {
 
         <div className="min-w-0 flex-1">
           <div className="text-lg font-semibold text-white">
-            {t("landing.podLabel", { kind: meta.kind })}
+            {t("landing.podLabel", { kind: kindLabel[meta.kind] })}
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-white/45">
             <span className="rounded-md border border-cyan-300/20 bg-cyan-400/10 px-2 py-0.5 text-xs font-medium text-cyan-100">
@@ -185,6 +245,40 @@ function ActivePodCard({ meta }: { meta: ActiveDraftPodMeta }) {
   );
 }
 
+function ActiveGuestPodCard({ meta }: { meta: ActiveDraftGuestMeta }) {
+  const { t } = useTranslation("draft");
+  const navigate = useNavigate();
+
+  return (
+    <div className="mb-8">
+      <h2 className="mb-3 text-[0.68rem] font-semibold uppercase tracking-[0.22em] text-fg-meta">
+        {t("landing.guestPodInProgress")}
+      </h2>
+      <button
+        type="button"
+        onClick={() => navigate("/draft-pod?entry=guest")}
+        className="group flex w-full cursor-pointer items-center gap-5 rounded-[20px] border border-violet-300/20 bg-violet-400/[0.06] p-5 text-left transition-colors hover:border-violet-300/35 hover:bg-violet-400/[0.10]"
+      >
+        <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border border-white/8 bg-black/24">
+          <PodIcon />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-lg font-semibold text-white">{t("landing.guestPodLabel")}</div>
+          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-white/45">
+            <span>{t("landing.roomLabel", { code: meta.roomCode })}</span>
+            <span>{formatRelativeTime(meta.timestamp, t)}</span>
+          </div>
+        </div>
+        <div className="flex items-center self-stretch pl-2">
+          <div className="rounded-full border border-violet-300/15 bg-violet-400/10 px-4 py-2 text-sm font-medium text-violet-100 transition-colors group-hover:border-violet-300/30 group-hover:bg-violet-400/18">
+            {t("landing.reconnect")}
+          </div>
+        </div>
+      </button>
+    </div>
+  );
+}
+
 function ActiveDraftCard({ meta }: { meta: ActiveQuickDraftMeta }) {
   const { t } = useTranslation("draft");
   const navigate = useNavigate();
@@ -194,7 +288,7 @@ function ActiveDraftCard({ meta }: { meta: ActiveQuickDraftMeta }) {
     fetch(__SCRYFALL_SETS_URL__)
       .then((res) => (res.ok ? res.json() : null))
       .then((data: Record<string, { icon_svg_uri?: string }> | null) => {
-        const icon = data?.[meta.setCode.toLowerCase()]?.icon_svg_uri;
+        const icon = data?.[primarySetCode(meta.setCode).toLowerCase()]?.icon_svg_uri;
         if (icon) setSetIcon(icon);
       })
       .catch(() => {});
@@ -213,6 +307,7 @@ function ActiveDraftCard({ meta }: { meta: ActiveQuickDraftMeta }) {
   function getPhaseLabel(): string {
     switch (meta.phase) {
       case "drafting": return t("quickPhase.drafting");
+      case "opening": return t("quickPhase.opening");
       case "deckbuilding": return t("quickPhase.deckbuilding");
       case "playing": {
         const w = meta.runWins ?? 0;
@@ -225,6 +320,7 @@ function ActiveDraftCard({ meta }: { meta: ActiveQuickDraftMeta }) {
       case "complete":
         return t("quickPhase.runComplete", { wins: meta.runWins ?? 0, losses: meta.runLosses ?? 0 });
     }
+    return t("quickPhase.drafting");
   }
 
   function handleClick() {
@@ -300,6 +396,14 @@ function BotIcon({ className = "h-6 w-6" }: { className?: string }) {
   );
 }
 
+function CrownIcon({ className = "h-6 w-6" }: { className?: string }) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className={`${className} fill-current`}>
+      <path d="M5 18h14l1.6-9.5-4.6 3.2L12 4.5 7.99 11.7 3.4 8.5 5 18Zm0 1.5h14V21H5v-1.5Z" />
+    </svg>
+  );
+}
+
 function CubeIcon({ className = "h-6 w-6" }: { className?: string }) {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24" className={`${className} fill-current`}>
@@ -308,10 +412,19 @@ function CubeIcon({ className = "h-6 w-6" }: { className?: string }) {
   );
 }
 
-function PodIcon({ className = "h-6 w-6" }: { className?: string }) {
+/** Three piles side by side — the shape of a Winston table. */
+function PilesIcon({ className = "h-6 w-6" }: { className?: string }) {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24" className={`${className} fill-current`}>
-      <path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5s-3 1.34-3 3 1.34 3 3 3Zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5 5 6.34 5 8s1.34 3 3 3Zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5Zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5Z" />
+      <path d="M2.5 7.5h5v11h-5v-11Zm1.5 1.5v8h2v-8H4Zm5.5-3.5h5v14.5h-5V5.5ZM11 7v11.5h2V7h-2Zm5.5.5h5v11h-5v-11ZM18 9v8h2V9h-2Z" />
+    </svg>
+  );
+}
+
+function PackIcon({ className = "h-6 w-6" }: { className?: string }) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className={`${className} fill-current`}>
+      <path d="M5.25 2.5h13.5l1.75 19H3.5l1.75-19ZM7.1 4.5 5.72 19.5h12.56L16.9 4.5H7.1Zm4.9 2.25 2.75 3.75L12 14.25 9.25 10.5 12 6.75Z" />
     </svg>
   );
 }

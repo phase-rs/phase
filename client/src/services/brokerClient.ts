@@ -6,23 +6,52 @@ import type {
   MatchConfig,
   PeerInfo,
 } from "../adapter/types";
-import type { ServerInfo } from "../adapter/ws-adapter";
+import { lobbyProtocolRequiredForFormat, type ServerInfo } from "../adapter/ws-adapter";
+import { isFormatConfigShape } from "../adapter/format-config-shape";
 import {
   HandshakeError,
   openPhaseSocket,
   type PhaseSocket,
 } from "./openPhaseSocket";
+import { startSocketKeepalive } from "./socketKeepalive";
+
+/**
+ * Structurally validate the `format_config` on a broker-sent `PeerInfo` /
+ * `JoinTargetInfo` before the rest of the client trusts it.
+ *
+ * These frames arrive via `JSON.parse` and are cast straight to their TS type,
+ * which is erased at runtime — nothing else validates their shape, and this is
+ * the one wire direction where no per-frame rejection exists (see
+ * `MIN_SUPPORTED_LOBBY_PROTOCOL`'s doc in `crates/lobby-broker/src/protocol.rs`).
+ * A stale or malformed config would otherwise reach code reading
+ * `.min_players`, `.deck_size.type`, `.custom_rules`, and so on.
+ *
+ * A bad config is dropped to `null` rather than failing the whole frame:
+ * `format_config` is already optional on both types, every consumer handles its
+ * absence (they read it as `format_config?.format ?? fallback`), and the
+ * peer id / game code the frame primarily carries are still good. Failing the
+ * frame would deny a join over a field used only for a pre-flight hint.
+ */
+function withValidatedFormatConfig<T extends { format_config?: FormatConfig | null }>(
+  info: T,
+): T {
+  if (info.format_config == null) return info;
+  // The shape guard names required fields but never rejects unknown ones,
+  // so frames minted when the removed experimental-dungeons flag still
+  // existed keep validating with the stale key ignored.
+  if (isFormatConfigShape(info.format_config)) {
+    return info;
+  }
+  console.warn(
+    "[broker] dropping a malformed format_config from a lobby frame; "
+      + "the room's format will be treated as unknown",
+  );
+  return { ...info, format_config: null };
+}
 
 export interface RegisterHostRequest {
   /** PeerJS peer ID guests dial to reach the host's engine. */
   hostPeerId: string;
-  deck: {
-    main_deck: string[];
-    sideboard: string[];
-    commander: string[];
-    planar_deck?: string[];
-    scheme_deck?: string[];
-  };
   displayName: string;
   public: boolean;
   password: string | null;
@@ -30,18 +59,51 @@ export interface RegisterHostRequest {
   playerCount: number;
   matchConfig: MatchConfig;
   formatConfig: FormatConfig | null;
-  aiSeats: unknown[];
   startWhenFull?: boolean;
   ranked?: boolean;
   roomName: string | null;
   /** Draft-specific metadata. When set, the lobby entry is badged as a
    *  draft pod with set code and draft kind. */
   draftMetadata: DraftLobbyMetadata | null;
+  /** Pre-minted `[A-Z0-9]{6}` game code from a Discord link. Absent → the
+   *  broker mints one. */
+  requestedCode?: string;
+}
+
+/**
+ * A broker `Error` frame, rejected from a request promise. `code` is the wire
+ * `ServerErrorCode` (e.g. `code_in_use`), or `null` when the broker sent none.
+ */
+export class BrokerRequestError extends Error {
+  constructor(
+    message: string,
+    readonly code: string | null,
+  ) {
+    super(message);
+    this.name = "BrokerRequestError";
+  }
 }
 
 export interface RegisteredGame {
   gameCode: string;
   playerToken: string;
+}
+
+/**
+ * Rejection from `registerHost` when the broker's advertised lobby protocol
+ * is below what the registration's format needs; nothing is sent.
+ */
+export class LobbyCapabilityError extends Error {
+  constructor(
+    public readonly neededLobbyVersion: number,
+    public readonly advertisedLobbyVersion: number | undefined,
+  ) {
+    super(
+      `Broker lobby protocol ${advertisedLobbyVersion ?? "unknown"} is below the ${neededLobbyVersion} `
+        + "this format's name requires",
+    );
+    this.name = "LobbyCapabilityError";
+  }
 }
 
 /**
@@ -106,7 +168,11 @@ export async function openBrokerClient(
   wsUrl: string,
   opts: OpenBrokerOptions = {},
 ): Promise<BrokerClient> {
-  const socket = await openPhaseSocket(wsUrl, opts);
+  const socket = await openPhaseSocket(wsUrl, { ...opts, surface: "lobby" });
+  // Load-bearing for surface safety, not just for API shape: `registerHost`
+  // sends `CreateGameWithSettings`, which a `Full` server answers by creating a
+  // server-run game and streaming its state. Refusing every non-`LobbyOnly`
+  // server here is what keeps that frame off a lobby-surface socket.
   if (socket.serverInfo.mode !== "LobbyOnly") {
     socket.close();
     throw new HandshakeError(
@@ -117,14 +183,31 @@ export async function openBrokerClient(
   return makeBrokerClient(socket);
 }
 
-function makeBrokerClient(socket: PhaseSocket): BrokerClient {
+/**
+ * Exported for the same reason as `lookupJoinTargetOver` and friends: the
+ * socket-taking form is what a test can drive.
+ */
+export function makeBrokerClient(socket: PhaseSocket): BrokerClient {
   const { ws, serverInfo } = socket;
   let closed = false;
+  // Losing this socket to an idle-timeout makes the broker delist the room
+  // while the host still believes it is hosting.
+  const stopKeepalive = startSocketKeepalive(ws);
+  ws.addEventListener("close", stopKeepalive, { once: true });
 
   const registerHost = (req: RegisterHostRequest): Promise<RegisteredGame> => {
     return new Promise<RegisteredGame>((resolve, reject) => {
       if (closed || ws.readyState !== WebSocket.OPEN) {
         reject(new Error("Broker socket not open"));
+        return;
+      }
+
+      const needed = req.formatConfig ? lobbyProtocolRequiredForFormat(req.formatConfig.format) : null;
+      if (
+        needed !== null
+        && (serverInfo.lobbyProtocolVersion === undefined || serverInfo.lobbyProtocolVersion < needed)
+      ) {
+        reject(new LobbyCapabilityError(needed, serverInfo.lobbyProtocolVersion));
         return;
       }
 
@@ -142,9 +225,9 @@ function makeBrokerClient(socket: PhaseSocket): BrokerClient {
           cleanup();
           resolve({ gameCode: data.game_code, playerToken: data.player_token });
         } else if (msg.type === "Error") {
-          const data = msg.data as { message: string };
+          const data = msg.data as { message: string; code?: string };
           cleanup();
-          reject(new Error(data.message));
+          reject(new BrokerRequestError(data.message, data.code ?? null));
         }
       };
 
@@ -165,7 +248,16 @@ function makeBrokerClient(socket: PhaseSocket): BrokerClient {
         JSON.stringify({
           type: "CreateGameWithSettings",
           data: {
-            deck: req.deck,
+            // LobbyOnly brokers never consume deck data. Keep the existing
+            // wire shape for protocol compatibility without exposing the
+            // host's private deck or AI seat metadata.
+            deck: {
+              main_deck: [],
+              sideboard: [],
+              commander: [],
+              planar_deck: [],
+              scheme_deck: [],
+            },
             display_name: req.displayName,
             public: req.public,
             password: req.password,
@@ -173,12 +265,13 @@ function makeBrokerClient(socket: PhaseSocket): BrokerClient {
             player_count: req.playerCount,
             match_config: req.matchConfig,
             format_config: req.formatConfig,
-            ai_seats: req.aiSeats,
+            ai_seats: [],
             room_name: req.roomName,
             host_peer_id: req.hostPeerId,
             draft_metadata: req.draftMetadata,
             start_when_full: req.startWhenFull ?? true,
             ranked: req.ranked ?? false,
+            requested_code: req.requestedCode ?? null,
           },
         }),
       );
@@ -228,6 +321,7 @@ function makeBrokerClient(socket: PhaseSocket): BrokerClient {
     close: () => {
       if (closed) return;
       closed = true;
+      stopKeepalive();
       socket.close();
     },
   };
@@ -279,10 +373,39 @@ export function resolveGuestOver(
   password?: string,
   opts: ResolveGuestOptions = {},
 ): Promise<ResolveResult> {
-  const { ws } = socket;
+  const { ws, serverInfo } = socket;
   const { signal, timeoutMs = 10_000 } = opts;
 
   return new Promise<ResolveResult>((resolve) => {
+    // SINGLE AUTHORITY for putting `JoinGameWithPassword` on the wire, and the
+    // only frame a lobby-surface socket sends that a `Full` server can answer
+    // off its server-run game path.
+    //
+    // This resolver asks for `PeerInfo` — the peer id of a P2P host. A `Full`
+    // server has none to give: both of its lobby registrations hardcode
+    // `host_peer_id: String::new()` ("Full-mode server runs the engine itself —
+    // no PeerJS peer is involved"), so every row it publishes carries
+    // `is_p2p: false` and no caller should route a Full server's code here.
+    //
+    // Sending anyway would be worse than useless. The frame skips the broker
+    // branch on a `Full` server (`if matches!(mode, ServerMode::LobbyOnly)` in
+    // `crates/phase-server/src/main.rs`), attaches a session, and replies
+    // `SessionAttached` + `StateUpdate` — neither of which the listener below
+    // handles, so the promise would hang to its timeout and report
+    // `connection_lost` AFTER the server had already seated the guest. Refusing
+    // every `Full` server, not merely the version-mismatched ones, is what makes
+    // "a relaxed lobby socket never carries a full-game join" unconditional.
+    // Browsing such a server's lobby stays available; only joining through this
+    // resolver is refused.
+    if (serverInfo.mode === "Full") {
+      resolve({
+        ok: false,
+        reason: "error",
+        message:
+          "This server runs its own games, so it has no peer-to-peer room to join.",
+      });
+      return;
+    }
     if (ws.readyState !== WebSocket.OPEN) {
       resolve({
         ok: false,
@@ -313,7 +436,7 @@ export function resolveGuestOver(
         const data = msg.data as PeerInfo;
         if (data.game_code !== code) return;
         cleanup();
-        resolve({ ok: true, peerInfo: data });
+        resolve({ ok: true, peerInfo: withValidatedFormatConfig(data) });
       } else if (msg.type === "PasswordRequired") {
         const data = msg.data as { game_code: string };
         if (data.game_code !== code) return;
@@ -324,9 +447,13 @@ export function resolveGuestOver(
           message: "This room requires a password",
         });
       } else if (msg.type === "Error") {
-        const data = msg.data as { message: string };
+        const data = msg.data as { message: string; code?: string };
         cleanup();
-        resolve({ ok: false, reason: classifyError(data.message), message: data.message });
+        resolve({
+          ok: false,
+          reason: classifyError(data.message, data.code),
+          message: data.message,
+        });
       }
     };
 
@@ -431,7 +558,7 @@ export function lookupJoinTargetOver(
         const data = msg.data as JoinTargetInfo;
         if (data.game_code !== code) return;
         cleanup();
-        resolve({ ok: true, info: data });
+        resolve({ ok: true, info: withValidatedFormatConfig(data) });
       } else if (msg.type === "PasswordRequired") {
         const data = msg.data as { game_code: string };
         if (data.game_code !== code) return;
@@ -442,9 +569,13 @@ export function lookupJoinTargetOver(
           message: "This room requires a password",
         });
       } else if (msg.type === "Error") {
-        const data = msg.data as { message: string };
+        const data = msg.data as { message: string; code?: string };
         cleanup();
-        resolve({ ok: false, reason: classifyError(data.message), message: data.message });
+        resolve({
+          ok: false,
+          reason: classifyError(data.message, data.code),
+          message: data.message,
+        });
       }
     };
 
@@ -506,7 +637,10 @@ export function lookupJoinTargetOver(
 
 type FailureReason = Extract<ResolveResult | LookupJoinTargetResult, { ok: false }>["reason"];
 
-function classifyError(message: string): FailureReason {
+function classifyError(message: string, code?: string): FailureReason {
+  // Typed wire code first (lobby protocol 10+); the substring checks below
+  // remain the fallback for older brokers that send only a message.
+  if (code === "game_not_found") return "not_found";
   const lower = message.toLowerCase();
   if (lower.includes("build mismatch")) return "build_mismatch";
   if (lower.includes("not found")) return "not_found";

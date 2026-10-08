@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState, type RefObject } from "react";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
@@ -14,6 +14,10 @@ interface ChromeControlsProps {
   /** Controlled settings-modal state (e.g. board context-menu deep-link). */
   settingsOpen?: boolean;
   onSettingsOpenChange?: (open: boolean) => void;
+  hideVolume?: boolean;
+  hideLanguage?: boolean;
+  /** Shared launcher authority when settings state is owned by an ancestor. */
+  settingsReturnFocusRef?: RefObject<HTMLButtonElement | null>;
 }
 
 function SettingsIcon() {
@@ -42,10 +46,16 @@ function SettingsIcon() {
 export function ChromeControls({
   settingsOpen,
   onSettingsOpenChange,
+  hideVolume = false,
+  hideLanguage = false,
+  settingsReturnFocusRef,
 }: ChromeControlsProps) {
   const { t } = useTranslation();
   const language = usePreferencesStore((s) => s.language);
   const [internalShowSettings, setInternalShowSettings] = useState(false);
+  const ownedSettingsReturnFocusRef = useRef<HTMLButtonElement>(null);
+  const resolvedSettingsReturnFocusRef =
+    settingsReturnFocusRef ?? ownedSettingsReturnFocusRef;
   const isSettingsControlled = settingsOpen !== undefined;
   const showSettings = isSettingsControlled ? settingsOpen : internalShowSettings;
 
@@ -54,13 +64,34 @@ export function ChromeControls({
     onSettingsOpenChange?.(open);
   };
 
+  const openSettingsFrom = (launcher: HTMLButtonElement) => {
+    resolvedSettingsReturnFocusRef.current = launcher;
+    setShowSettings(true);
+  };
+
   return (
     <>
       {/* Account + Volume + Settings — upper-right. Fullscreen lives lower-right
           (below) to keep this cluster uncrowded. */}
       <div className="fixed right-4 top-[calc(env(safe-area-inset-top)+1rem)] z-40 flex gap-2">
-        <VolumeControl variant="chrome" />
+        {!hideVolume && <VolumeControl variant="chrome" />}
         <AccountControl />
+        {!hideLanguage && (
+          <motion.button
+            className={menuButtonClass({
+              tone: "neutral",
+              size: "chrome",
+              className: "text-white/46 hover:text-white/72",
+            })}
+            whileHover={{ y: -1 }}
+            whileTap={{ scale: 0.98 }}
+            onClick={(event) => openSettingsFrom(event.currentTarget)}
+            aria-label={t("chrome.languageSettings", { lang: language.toUpperCase() })}
+            title={t("chrome.languageTitle", { lang: language.toUpperCase() })}
+          >
+            <LanguageFlag lng={language} className="h-3.5 w-5 rounded-sm" />
+          </motion.button>
+        )}
         <motion.button
           className={menuButtonClass({
             tone: "neutral",
@@ -69,21 +100,7 @@ export function ChromeControls({
           })}
           whileHover={{ y: -1 }}
           whileTap={{ scale: 0.98 }}
-          onClick={() => setShowSettings(true)}
-          aria-label={t("chrome.languageSettings", { lang: language.toUpperCase() })}
-          title={t("chrome.languageTitle", { lang: language.toUpperCase() })}
-        >
-          <LanguageFlag lng={language} className="h-3.5 w-5 rounded-sm" />
-        </motion.button>
-        <motion.button
-          className={menuButtonClass({
-            tone: "neutral",
-            size: "chrome",
-            className: "text-white/46 hover:text-white/72",
-          })}
-          whileHover={{ y: -1 }}
-          whileTap={{ scale: 0.98 }}
-          onClick={() => setShowSettings(true)}
+          onClick={(event) => openSettingsFrom(event.currentTarget)}
           aria-label={t("chrome.settings")}
           title={t("chrome.settings")}
         >
@@ -96,7 +113,12 @@ export function ChromeControls({
         <FullscreenButton variant="chrome" />
       </div>
 
-      {showSettings && <PreferencesModal onClose={() => setShowSettings(false)} />}
+      {showSettings && (
+        <PreferencesModal
+          onClose={() => setShowSettings(false)}
+          returnFocusRef={resolvedSettingsReturnFocusRef}
+        />
+      )}
     </>
   );
 }

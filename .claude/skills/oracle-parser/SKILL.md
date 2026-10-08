@@ -439,6 +439,7 @@ Unlabeled handlers interleaved between labeled slots are shown as `—` rows.
 | `6c-altcost-e` | "You may [cost] rather than pay [keyword] cost[s]" (New Perspectives / Heart of Kiran class) | `parse_alternative_keyword_cost()` | `oracle_static/cost_mod.rs` |
 | `6d` | Compound "enters tapped and doesn't untap during your untap step" — decomposed into ETB-tapped replacement (CR 614.1c) + CantUntap static (CR 502.3) | both parsers run | `oracle.rs` |
 | `6e` | Cross-layer compound "`<subject>` can't `<P1>` and can't `<P2>`" — each conjunct routed to both layer parsers (Blossombind: Untap-prevention replacement CR 701.26b + AddCounter-prevention replacement CR 614.6) so a conjunct isn't dropped by `is_static_pattern` claiming the whole line | `parse_static_replacement_compound()` | `oracle.rs` |
+| `6f` | Compound "`<continuous grant or restriction>` and can't become/be untapped" (Frozen in Ice class) — leading grant/restriction clause stays a static modification, trailing clause becomes a broad Untap-prevention replacement (CR 701.26b + CR 614.6) so `is_static_pattern` at `7` doesn't silently absorb and drop the untap prohibition | `try_split_and_cant_become_untapped()` | `oracle.rs` |
 | `7` | Static/continuous patterns — `is_static_pattern()`; spell lines with explicit durations and damage verbs are deferred to `9`; copy-replacement lines route to the replacement parser first | `parse_static_line_multi()` family | `oracle_classifier.rs` → `oracle_static/` |
 | `8` | Replacement patterns — `is_replacement_pattern()`; one paragraph can yield multiple ETB replacements | `parse_replacement_line()` | `oracle_classifier.rs` → `oracle_replacement.rs` |
 | `8c` | Leyline clause "If this card is in your opening hand, you may begin the game with it on the battlefield" (CR 103.6) | `parse_begin_game_clause()` | `oracle.rs` |
@@ -452,7 +453,6 @@ Unlabeled handlers interleaved between labeled slots are shown as `—` rows.
 | `13b` | Kicker/Multikicker leftovers | skip (handled by keywords) | — |
 | `13c` | Vehicle tier lines "N+ \| keyword(s)" | skip | `oracle_classifier.rs` |
 | `13d` | "Activate only…" constraint line | skip | — |
-| `13e` | "X can't be 0." annotation → `min_x_value` on previous ability | defensive fallback | `oracle.rs` |
 | `14` | Ability word prefix ("Landfall —") — strip, map known words to typed conditions, re-classify the body | `strip_ability_word_with_name()` + `ability_word_to_condition()` | `oracle.rs` |
 | `14a` | Nom fallback dispatch — try effect, trigger, static, and replacement sub-parsers | `dispatch_line_nom()` | `oracle_dispatch.rs` |
 | `15` | Final fallback | `Effect::Unimplemented` with diagnostic trace | — |
@@ -918,7 +918,7 @@ grep -n "^704.5a" docs/MagicCompRules.txt   # Verify SBA rule
 - [ ] Runtime discriminating test when the change claims runtime behavior (see `/card-test`): parser shape tests alone are acceptable ONLY when unsupported semantics remain honestly `Unimplemented`/red in coverage
 - [ ] Snapshot tests: `oracle_ir/snapshot_tests.rs` (IR + lowered parity, insta), plus per-module `snapshot_tests.rs` in `oracle_static/`
 - [ ] `cargo coverage` — Unimplemented count should decrease
-- [ ] Verify per CLAUDE.md § "Canonical verification pattern" — `cargo fmt --all`, then if `tilt get uiresource clippy >/dev/null 2>&1`: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p engine` + `./scripts/gen-card-data.sh`.
+- [ ] Verify per CLAUDE.md § "Canonical verification pattern" — `cargo fmt --all`, then if `tilt get uiresource clippy >/dev/null 2>&1`: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p phase-engine` + `./scripts/gen-card-data.sh`.
 
 ### 9b. Adding a New Effect Type
 
@@ -990,7 +990,7 @@ The `crates/engine/src/parser/swallow_check.rs` module audits each card's parsed
 jq -r '[.[] | .parse_warnings // [] | .[]] | length' client/public/card-data.json
 
 # Top clustered warning patterns by likely shared fix.
-cargo run -p engine --bin coverage-report -- data --brief \
+cargo run -p phase-engine --bin coverage-report -- data --brief \
   --write-warning-patterns /tmp/parser-warning-patterns.json >/tmp/coverage.json
 jq -r '
   [.[] | select(.category=="swallowed-clause")]
@@ -1002,18 +1002,18 @@ jq -r '
 # Drill down into one exact warning pattern. This uses the same clustering
 # function as parser-warning-patterns.json and includes support status,
 # gap count, warning text, parsed labels, and gap details.
-cargo run -p engine --bin coverage-report -- data \
+cargo run -p phase-engine --bin coverage-report -- data \
   --warning-category swallowed-clause \
   --warning-pattern 'Replacement_Instead: instead' \
   --warning-limit 20 >/tmp/warning-drilldown.json
 
 # Drill down into a broader detector family when exact-pattern slices are too narrow.
-cargo run -p engine --bin coverage-report -- data \
+cargo run -p phase-engine --bin coverage-report -- data \
   --warning-detector Replacement_Instead \
   --warning-limit 20 >/tmp/warning-drilldown.json
 
 # Include the full parse_details tree and exported CardFace JSON when needed.
-cargo run -p engine --bin coverage-report -- data \
+cargo run -p phase-engine --bin coverage-report -- data \
   --warning-detector DynamicQty \
   --warning-full \
   --warning-limit 5 >/tmp/warning-drilldown-full.json

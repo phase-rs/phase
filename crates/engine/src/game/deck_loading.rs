@@ -1,5 +1,7 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
+use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 
 use crate::database::CardDatabase;
@@ -65,6 +67,11 @@ pub struct PlayerDeckPayload {
     pub sideboard: Vec<DeckEntry>,
     #[serde(default)]
     pub commander: Vec<DeckEntry>,
+    /// Commander-family companion held outside the game's 100-card deck.
+    /// The loader accepts this slot only for `GameFormat::uses_commander()`;
+    /// Oathbreaker keeps its separate signature-spell slot.
+    #[serde(default)]
+    pub companion: Vec<DeckEntry>,
     /// CR 717.2: Optional supplementary Attraction deck (typically 10 cards).
     #[serde(default)]
     pub attraction_deck: Vec<DeckEntry>,
@@ -96,6 +103,9 @@ pub struct PlayerDeckPayload {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeckPayload {
+    /// Original bounded booster source, separate from every player's deck.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub booster_pack_pool: Option<Vec<String>>,
     pub player: PlayerDeckPayload,
     pub opponent: PlayerDeckPayload,
     #[serde(default)]
@@ -117,6 +127,9 @@ pub struct PlayerDeckList {
     pub sideboard: Vec<String>,
     #[serde(default)]
     pub commander: Vec<String>,
+    /// Commander-family companion held outside the game's 100-card deck.
+    #[serde(default)]
+    pub companion: Vec<String>,
     #[serde(default)]
     pub attraction_deck: Vec<String>,
     #[serde(default)]
@@ -139,6 +152,9 @@ pub struct PlayerDeckList {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeckList {
+    /// Original bounded booster source; preserve order, copies, and empty lists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub booster_pack_pool: Option<Vec<String>>,
     pub player: PlayerDeckList,
     pub opponent: PlayerDeckList,
     #[serde(default)]
@@ -151,16 +167,86 @@ pub struct DeckList {
     /// means no AI seat is cEDH and validation is skipped — safe default.
     #[serde(default)]
     pub ai_difficulties: Vec<String>,
+    /// Every set whose draft boosters the draft behind this deck CONTAINED.
+    /// Empty means constructed play — there is no draft behind the deck.
+    ///
+    /// CR 903.13f(3): "If the draft contained draft boosters from Commander
+    /// Masters, any card which can be a player's commander by itself and whose
+    /// color identity includes one or fewer colors is considered to have the
+    /// partner ability for the purposes of deckbuilding." (See CR 702.124,
+    /// "Partner.") This field is what decides whether that grant is in force.
+    ///
+    /// Plural because CR 903.13's conditions are about CONTAINMENT: a draft
+    /// that opened boosters from several sets satisfies each named set's
+    /// condition independently, so a mixed draft must carry every set it
+    /// contained rather than one chosen representative.
+    ///
+    /// Old payloads that omit the field deserialize as empty, which is the
+    /// constructed-play value and therefore the safe default; ones that wrote
+    /// the pre-multi-set `draft_set_code` string restore as a one-set draft.
+    #[serde(
+        default,
+        alias = "draft_set_code",
+        deserialize_with = "deserialize_draft_set_codes"
+    )]
+    pub draft_set_codes: Vec<String>,
+}
+
+/// Accept the three spellings a draft's contained sets reach a deck payload in:
+/// the `draft_set_codes` array a multi-set draft writes, the single
+/// `draft_set_code` string every pre-multi-set producer wrote, and `null` /
+/// absent for constructed play.
+///
+/// Public because the same three shapes arrive at a second boundary —
+/// `DeckCompatibilityRequest::draft_set_codes` — and one deserializer owning
+/// all of them beats each boundary re-deciding what a legacy payload meant.
+/// Mirrors `draft_core::types::deserialize_set_codes`, which does the same job
+/// for `DraftSource::Set` snapshots, with the additional `null` arm this
+/// boundary needs because its predecessor field was an `Option`.
+pub fn deserialize_draft_set_codes<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum DraftSetCodes {
+        Absent,
+        Single(String),
+        Sequence(Vec<String>),
+    }
+
+    Ok(match DraftSetCodes::deserialize(deserializer)? {
+        DraftSetCodes::Absent => Vec::new(),
+        DraftSetCodes::Single(code) => vec![code],
+        DraftSetCodes::Sequence(codes) => codes,
+    })
 }
 
 /// Resolve a flat name list into DeckEntry entries using the card database.
 /// Groups duplicate names and skips unresolvable names.
+///
+/// CR 709.2 / CR 712.1: grouping compares the RESOLVED face name, never the
+/// caller's raw spelling. A decklist may name one physical card by its
+/// composite name (`"Fire // Ice"`), its glued composite (`"Fire//Ice"`), its
+/// front-face name (`"Fire"`), or an unaccented alias, and every one of those
+/// is one copy of the same card. Comparing the already-resolved
+/// `entry.card.name` against the raw input would never match those spellings
+/// against each other and would emit several `DeckEntry` values for one card —
+/// the same name-identity error `deck_validation::same_card` documents.
+/// `db.get_face_by_name` performs the resolution (it routes through
+/// `CardDatabase::lookup_key`), so the comparison must happen after it.
 fn resolve_names(db: &CardDatabase, names: &[String]) -> Vec<DeckEntry> {
     let mut entries: Vec<DeckEntry> = Vec::new();
     for name in names {
-        if let Some(index) = entries.iter().position(|entry| entry.card.name == *name) {
+        let Some(face) = db.get_face_by_name(name) else {
+            continue;
+        };
+        if let Some(index) = entries
+            .iter()
+            .position(|entry| entry.card.name.eq_ignore_ascii_case(&face.name))
+        {
             entries[index].count += 1;
-        } else if let Some(face) = db.get_face_by_name(name) {
+        } else {
             // CR 202.3d + CR 709.4b: build through the single authority so the
             // split-card off-stack override is stamped consistently with the
             // server transport resolver.
@@ -182,6 +268,7 @@ pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> Pla
         main_deck: resolve_names(db, &list.main_deck),
         sideboard: resolve_names(db, &list.sideboard),
         commander: resolve_names(db, &list.commander),
+        companion: resolve_names(db, &list.companion),
         attraction_deck: resolve_names(db, &list.attraction_deck),
         planar_deck: resolve_names(db, &list.planar_deck),
         scheme_deck: resolve_names(db, &list.scheme_deck),
@@ -205,6 +292,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
             main_deck: resolve_names(db, &list.player.main_deck),
             sideboard: resolve_names(db, &list.player.sideboard),
             commander: resolve_names(db, &list.player.commander),
+            companion: resolve_names(db, &list.player.companion),
             attraction_deck: resolve_names(db, &list.player.attraction_deck),
             planar_deck: resolve_names(db, &list.player.planar_deck),
             scheme_deck: resolve_names(db, &list.player.scheme_deck),
@@ -217,6 +305,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
             main_deck: resolve_names(db, &list.opponent.main_deck),
             sideboard: resolve_names(db, &list.opponent.sideboard),
             commander: resolve_names(db, &list.opponent.commander),
+            companion: resolve_names(db, &list.opponent.companion),
             attraction_deck: resolve_names(db, &list.opponent.attraction_deck),
             planar_deck: resolve_names(db, &list.opponent.planar_deck),
             scheme_deck: resolve_names(db, &list.opponent.scheme_deck),
@@ -232,6 +321,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
                 main_deck: resolve_names(db, &deck.main_deck),
                 sideboard: resolve_names(db, &deck.sideboard),
                 commander: resolve_names(db, &deck.commander),
+                companion: resolve_names(db, &deck.companion),
                 attraction_deck: resolve_names(db, &deck.attraction_deck),
                 planar_deck: resolve_names(db, &deck.planar_deck),
                 scheme_deck: resolve_names(db, &deck.scheme_deck),
@@ -244,6 +334,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
         // ai_difficulties is carried through from the DeckList so the caller's
         // per-seat difficulty annotations survive resolution.
         ai_difficulties: list.ai_difficulties.clone(),
+        booster_pack_pool: list.booster_pack_pool.clone(),
     }
 }
 
@@ -298,6 +389,43 @@ pub fn momir_fixed_deck_names() -> Vec<String> {
         }
     }
     names
+}
+
+/// The Dandân fixed decklist as printed name and copy count: the 80-card pile
+/// every game loads as its one shared library.
+const DANDAN_DECKLIST: [(&str, usize); 23] = [
+    ("Dandân", 10),
+    ("Island", 20),
+    ("Memory Lapse", 8),
+    ("Accumulated Knowledge", 4),
+    ("Magical Hack", 2),
+    ("Mystic Sanctuary", 2),
+    ("Brainstorm", 2),
+    ("Capture of Jingzhou", 2),
+    ("Chart a Course", 2),
+    ("Control Magic", 2),
+    ("Crystal Spray", 2),
+    ("Day's Undoing", 2),
+    ("Mental Note", 2),
+    ("Metamorphose", 2),
+    ("Predict", 2),
+    ("Telling Time", 2),
+    ("Unsubstantiate", 2),
+    ("Halimar Depths", 2),
+    ("Haunted Fengraf", 2),
+    ("Lonely Sandbar", 2),
+    ("Remote Isle", 2),
+    ("The Surgical Bay", 2),
+    ("Svyelunite Temple", 2),
+];
+
+/// The Dandân decklist as a flat name list (80 cards). Single source for the
+/// auto-supplied pile across every transport.
+pub fn dandan_fixed_deck_names() -> Vec<String> {
+    DANDAN_DECKLIST
+        .iter()
+        .flat_map(|&(name, copies)| std::iter::repeat_n(name.to_string(), copies))
+        .collect()
 }
 
 pub const DEFAULT_PLANAR_DECK_NAMES: [&str; 40] = [
@@ -384,16 +512,13 @@ pub fn default_scheme_deck_entries(db: &CardDatabase) -> Vec<DeckEntry> {
         .collect()
 }
 
-/// Build the auto-supplied Momir's Madness `DeckPayload`: every seat (player,
-/// opponent, and each AI seat) receives the identical fixed 60-card snow-basic
-/// deck. Momir admits exactly one legal deck, so the submitted payload's deck
-/// *contents* are ignored; only its seat structure (AI seat count and per-seat
-/// difficulties) is preserved so the correct number of players is created.
-fn momir_fixed_deck_payload(db: &CardDatabase, submitted: &DeckPayload) -> DeckPayload {
-    let fixed_seat = || PlayerDeckPayload {
-        main_deck: resolve_names(db, &momir_fixed_deck_names()),
+/// One seat's payload holding exactly the named main deck and nothing else.
+fn fixed_seat_payload(db: &CardDatabase, names: &[String]) -> PlayerDeckPayload {
+    PlayerDeckPayload {
+        main_deck: resolve_names(db, names),
         sideboard: Vec::new(),
         commander: Vec::new(),
+        companion: Vec::new(),
         attraction_deck: Vec::new(),
         planar_deck: Vec::new(),
         scheme_deck: Vec::new(),
@@ -401,12 +526,48 @@ fn momir_fixed_deck_payload(db: &CardDatabase, submitted: &DeckPayload) -> DeckP
         sticker_sheets: Vec::new(),
         signature_spell: Vec::new(),
         bracket_tier: CommanderBracketTier::default(),
+    }
+}
+
+/// Build the auto-supplied Dandân `DeckPayload`: the one 80-card pile on
+/// `pile_seat`, the seat that holds the shared library, and an empty payload
+/// for every other seat. Only the submitted seat structure is preserved.
+fn dandan_fixed_deck_payload(
+    db: &CardDatabase,
+    submitted: &DeckPayload,
+    pile_seat: PlayerId,
+) -> DeckPayload {
+    let seat_payload = |seat: PlayerId| {
+        if seat == pile_seat {
+            fixed_seat_payload(db, &dandan_fixed_deck_names())
+        } else {
+            PlayerDeckPayload::default()
+        }
     };
+    DeckPayload {
+        player: seat_payload(PlayerId(0)),
+        opponent: seat_payload(PlayerId(1)),
+        ai_decks: (0..submitted.ai_decks.len())
+            .map(|i| seat_payload(PlayerId((2 + i) as u8)))
+            .collect(),
+        ai_difficulties: submitted.ai_difficulties.clone(),
+        booster_pack_pool: submitted.booster_pack_pool.clone(),
+    }
+}
+
+/// Build the auto-supplied Momir's Madness `DeckPayload`: every seat (player,
+/// opponent, and each AI seat) receives the identical fixed 60-card snow-basic
+/// deck. Momir admits exactly one legal deck, so the submitted payload's deck
+/// *contents* are ignored; only its seat structure (AI seat count and per-seat
+/// difficulties) is preserved so the correct number of players is created.
+fn momir_fixed_deck_payload(db: &CardDatabase, submitted: &DeckPayload) -> DeckPayload {
+    let fixed_seat = || fixed_seat_payload(db, &momir_fixed_deck_names());
     DeckPayload {
         player: fixed_seat(),
         opponent: fixed_seat(),
         ai_decks: submitted.ai_decks.iter().map(|_| fixed_seat()).collect(),
         ai_difficulties: submitted.ai_difficulties.clone(),
+        booster_pack_pool: submitted.booster_pack_pool.clone(),
     }
 }
 
@@ -502,6 +663,7 @@ pub fn create_attraction_deck_card(
     let obj = state.objects.get_mut(&obj_id).expect("just created");
     apply_card_face_to_object(obj, card_face);
     obj.in_attraction_deck = true;
+    // allow-raw-zone: new Attraction deck object is born into command-zone bookkeeping (CR 717.2).
     state.command_zone.retain(|id| *id != obj_id);
     state
         .players
@@ -514,10 +676,8 @@ pub fn create_attraction_deck_card(
 }
 
 fn load_player_attraction_deck(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
-    for entry in entries {
-        for _ in 0..entry.count {
-            create_attraction_deck_card(state, &entry.card, owner);
-        }
+    for face in shuffled_entry_faces(state, entries) {
+        create_attraction_deck_card(state, face, owner);
     }
 }
 
@@ -534,6 +694,7 @@ pub fn create_planar_deck_card(
     let obj = state.objects.get_mut(&obj_id).expect("just created");
     apply_card_face_to_object(obj, card_face);
     obj.face_down = true;
+    // allow-raw-zone: new planar deck object is born into command-zone bookkeeping (CR 901.4 + CR 901.15a).
     state.command_zone.retain(|id| *id != obj_id);
     state.planar_deck.push_back(obj_id);
     obj_id
@@ -541,10 +702,8 @@ pub fn create_planar_deck_card(
 
 fn load_shared_planar_deck(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
     state.planar_deck.clear();
-    for entry in entries {
-        for _ in 0..entry.count {
-            create_planar_deck_card(state, &entry.card, owner);
-        }
+    for face in shuffled_entry_faces(state, entries) {
+        create_planar_deck_card(state, face, owner);
     }
     state.planar_controller = Some(owner);
     crate::game::planechase::restamp_planar_objects_to_controller(state);
@@ -563,6 +722,7 @@ pub fn create_scheme_deck_card(
     let obj = state.objects.get_mut(&obj_id).expect("just created");
     apply_card_face_to_object(obj, card_face);
     obj.face_down = true;
+    // allow-raw-zone: new scheme deck object is born into command-zone bookkeeping (CR 314.2 + CR 904.4).
     state.command_zone.retain(|id| *id != obj_id);
     state.scheme_deck.push_back(obj_id);
     obj_id
@@ -570,10 +730,8 @@ pub fn create_scheme_deck_card(
 
 fn load_shared_scheme_deck(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
     state.scheme_deck.clear();
-    for entry in entries {
-        for _ in 0..entry.count {
-            create_scheme_deck_card(state, &entry.card, owner);
-        }
+    for face in shuffled_entry_faces(state, entries) {
+        create_scheme_deck_card(state, face, owner);
     }
     state.archenemy = Some(owner);
 }
@@ -590,6 +748,7 @@ pub fn create_contraption_deck_card(
     let obj = state.objects.get_mut(&obj_id).expect("just created");
     apply_card_face_to_object(obj, card_face);
     obj.in_contraption_deck = true;
+    // allow-raw-zone: Contraption deck object is born into command-zone bookkeeping; Contraption mechanics are outside the CR (CR 701.45a).
     state.command_zone.retain(|id| *id != obj_id);
     state
         .players
@@ -602,10 +761,8 @@ pub fn create_contraption_deck_card(
 }
 
 fn load_player_contraption_deck(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
-    for entry in entries {
-        for _ in 0..entry.count {
-            create_contraption_deck_card(state, &entry.card, owner);
-        }
+    for face in shuffled_entry_faces(state, entries) {
+        create_contraption_deck_card(state, face, owner);
     }
 }
 
@@ -655,6 +812,8 @@ pub fn create_signature_spell_from_card_face(
 
 /// Load deck data into a GameState, creating GameObjects in each player's library and shuffling.
 pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
+    state.booster_pack_pool = payload.booster_pack_pool.clone().map(Arc::new);
+    state.booster_shelf = Arc::default();
     state.deck_pools.clear();
     state.outside_game_cards_brought_in.clear();
     state.sideboard_submitted.clear();
@@ -668,7 +827,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     // `deck_validation.rs`) accepts the entries; this is the rule-enforcement
     // boundary.
     let drop_sideboard = matches!(
-        state.format_config.format.sideboard_policy(),
+        state.format_config.sideboard_policy,
         crate::types::format::SideboardPolicy::Forbidden
     );
     let sideboard_for = |submitted: &[DeckEntry]| -> Vec<DeckEntry> {
@@ -678,13 +837,131 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             submitted.to_vec()
         }
     };
+    // CR 903.5a: the commander is one of the 100 — a decklist that names it in
+    // both the command zone and the main deck describes ONE physical card, not
+    // two. The validator nets exactly this double-listing out of its deck-size
+    // and singleton checks (`CommandZoneNetting::NetAgainstMainDeck` in
+    // `deck_validation.rs`), so the loader must drop the same copy or it builds
+    // a 101-card game the validator promised was legal. Oathbreaker RC's
+    // signature spell is the second command-zone slot with the same "one
+    // physical card" identity, and it is netted on the same axis rather than as
+    // a special case. This is the rule-enforcement boundary, mirroring
+    // `sideboard_for` above.
+    //
+    // Netting is bounded by occurrence: `min(command_zone_copies,
+    // main_deck_copies)` per card, so a main deck holding more copies than the
+    // command zone claims keeps its remainder (and the validator still reports
+    // the CR 903.5b singleton violation).
+    let net_command_zone = |main: &[DeckEntry], command: &[&[DeckEntry]]| -> Vec<DeckEntry> {
+        let mut netted = main.to_vec();
+        for entry in command.iter().copied().flatten() {
+            let Some(target) = netted
+                .iter_mut()
+                .find(|m| m.card.name.eq_ignore_ascii_case(&entry.card.name))
+            else {
+                continue;
+            };
+            target.count = target.count.saturating_sub(entry.count);
+        }
+        netted.retain(|entry| entry.count > 0);
+        netted
+    };
+    // The netted slots must mirror the command-zone placement loops below
+    // EXACTLY: commanders only when the format's command zone is filled from
+    // the decklist's `commander` slot, signature spells only under
+    // Oathbreaker. Netting a slot that is not placed would
+    // silently delete a library card; placing a slot that is not netted is the
+    // 101-card bug this guards. `place_commanders` is therefore read by BOTH
+    // this closure and the placement loop — the single predicate is what keeps
+    // the two in lockstep.
+    //
+    // CR 903.5a's "the commander is one of the 100" identity exists only where
+    // a command zone does. A constructed payload can still carry a populated
+    // `commander` slot (the deck-builder reuses it the way it reuses the
+    // sideboard as a maybeboard, and `resolve_deck_list` forwards the slot
+    // without gating), and for those formats the card is an ordinary main-deck
+    // copy: `deck_validation.rs` counts it with
+    // `CommandZoneNetting::CountVerbatim` precisely so a command-zone entry
+    // does NOT discount a main-deck copy. Netting it here would start the game
+    // one library card short of the decklist the validator approved.
+    //
+    // NOTE ON SCOPE: placement was UNCONDITIONAL before this change — every
+    // format placed whatever sat in the `commander` slot, and nothing was ever
+    // netted. This introduces both the netting and a deliberate narrowing of
+    // placement to formats whose command zone holds a decklist card. Two
+    // pre-existing tests had to declare `FormatConfig::commander()` to keep
+    // passing; that is the narrowing, made visible.
+    //
+    // The predicate is `command_zone_holds_decklist_commander`, NOT
+    // `uses_commander`. `uses_commander` is `command_zone &&
+    // commander_damage_threshold.is_some()` — it answers "does CR 903.10a
+    // commander damage apply", not "does the command zone hold a decklist
+    // card". Tiny Leaders and Oathbreaker seat a real commander card in the
+    // command zone with no damage threshold, so `uses_commander` is `false`
+    // for both while `deck_validation.rs` nets them with
+    // `CommandZoneNetting::NetAgainstMainDeck`. Narrowing on `uses_commander`
+    // instead WOULD leave a legal Oathbreaker or Tiny Leaders deck's commander
+    // in the library AND unplaced in the command zone, while the validator had
+    // already netted it out of the deck-size check — the two would disagree
+    // about the same card. That is the trap this predicate exists to avoid, not
+    // a bug that shipped. `FormatConfig::command_zone` is not the predicate
+    // either:
+    // Archenemy (CR 904.3 + CR 904.4: the scheme deck lives in the command
+    // zone) and Momir have a command zone that holds no
+    // decklist card at all, so netting on it would delete a library card.
+    //
+    // Called on the RESOLVED config, not the bare `GameFormat`: a Custom
+    // format is answered from its own `CommandZoneMode`. Deriving Custom from
+    // `uses_commander` would reopen exactly that trap for Custom, since
+    // `for_custom_rules` sets `uses_commander` from the declared
+    // commander-damage threshold alone — a custom format shaped like
+    // Oathbreaker (enabled command zone, an eligibility rule, no threshold)
+    // would strand its commander in the library.
+    let place_commanders = state.format_config.command_zone_holds_decklist_commander();
+    let oathbreaker = state.format_config.format == crate::types::format::GameFormat::Oathbreaker;
+    let main_deck_for = |deck: &PlayerDeckPayload| -> Vec<DeckEntry> {
+        let mut command: Vec<&[DeckEntry]> = Vec::new();
+        if place_commanders {
+            command.push(deck.commander.as_slice());
+        }
+        if oathbreaker {
+            command.push(deck.signature_spell.as_slice());
+        }
+        net_command_zone(&deck.main_deck, &command)
+    };
+    // CR 702.139a: The Commander-family external companion slot represents one
+    // card, even when a transport bypasses name-list validation and supplies a
+    // resolved entry with an aggregated count. Keep one normalized copy in the
+    // game pool; construction validation remains responsible for rejecting an
+    // oversized submitted list.
+    let dedicated_companion_for = |submitted: &[DeckEntry]| -> Vec<DeckEntry> {
+        if !state.format_config.uses_commander {
+            return Vec::new();
+        }
+        submitted
+            .first()
+            .cloned()
+            .map(|mut entry| {
+                entry.count = 1;
+                vec![entry]
+            })
+            .unwrap_or_default()
+    };
+    let signature_spell_for = |submitted: &[DeckEntry]| -> Vec<DeckEntry> {
+        if state.format_config.format == crate::types::format::GameFormat::Oathbreaker {
+            submitted.to_vec()
+        } else {
+            Vec::new()
+        }
+    };
 
     // Build each Arc<Vec<_>> once and share between registered_X and current_X —
     // they start identical and diverge via Arc::make_mut on first mutation.
-    let p0_main = std::sync::Arc::new(payload.player.main_deck.clone());
+    let p0_main = std::sync::Arc::new(main_deck_for(&payload.player));
     let p0_side = std::sync::Arc::new(sideboard_for(&payload.player.sideboard));
     let p0_cmdr = std::sync::Arc::new(payload.player.commander.clone());
-    let p0_sig = std::sync::Arc::new(payload.player.signature_spell.clone());
+    let p0_companion = std::sync::Arc::new(dedicated_companion_for(&payload.player.companion));
+    let p0_sig = std::sync::Arc::new(signature_spell_for(&payload.player.signature_spell));
     let p0_planar = std::sync::Arc::new(payload.player.planar_deck.clone());
     let p0_scheme = std::sync::Arc::new(payload.player.scheme_deck.clone());
     state
@@ -695,6 +972,8 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             registered_sideboard: std::sync::Arc::clone(&p0_side),
             current_main: p0_main,
             current_sideboard: p0_side,
+            registered_companion: std::sync::Arc::clone(&p0_companion),
+            current_companion: p0_companion,
             registered_commander: std::sync::Arc::clone(&p0_cmdr),
             current_commander: p0_cmdr,
             registered_signature_spell: std::sync::Arc::clone(&p0_sig),
@@ -704,10 +983,11 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             current_scheme_deck: p0_scheme,
             bracket_tier: payload.player.bracket_tier,
         });
-    let p1_main = std::sync::Arc::new(payload.opponent.main_deck.clone());
+    let p1_main = std::sync::Arc::new(main_deck_for(&payload.opponent));
     let p1_side = std::sync::Arc::new(sideboard_for(&payload.opponent.sideboard));
     let p1_cmdr = std::sync::Arc::new(payload.opponent.commander.clone());
-    let p1_sig = std::sync::Arc::new(payload.opponent.signature_spell.clone());
+    let p1_companion = std::sync::Arc::new(dedicated_companion_for(&payload.opponent.companion));
+    let p1_sig = std::sync::Arc::new(signature_spell_for(&payload.opponent.signature_spell));
     let p1_scheme = std::sync::Arc::new(payload.opponent.scheme_deck.clone());
     state
         .deck_pools
@@ -717,6 +997,8 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             registered_sideboard: std::sync::Arc::clone(&p1_side),
             current_main: p1_main,
             current_sideboard: p1_side,
+            registered_companion: std::sync::Arc::clone(&p1_companion),
+            current_companion: p1_companion,
             registered_commander: std::sync::Arc::clone(&p1_cmdr),
             current_commander: p1_cmdr,
             registered_signature_spell: std::sync::Arc::clone(&p1_sig),
@@ -728,10 +1010,11 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
         });
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
         let player_id = PlayerId((2 + i) as u8);
-        let main = std::sync::Arc::new(ai_deck.main_deck.clone());
+        let main = std::sync::Arc::new(main_deck_for(ai_deck));
         let side = std::sync::Arc::new(sideboard_for(&ai_deck.sideboard));
         let cmdr = std::sync::Arc::new(ai_deck.commander.clone());
-        let sig = std::sync::Arc::new(ai_deck.signature_spell.clone());
+        let companion = std::sync::Arc::new(dedicated_companion_for(&ai_deck.companion));
+        let sig = std::sync::Arc::new(signature_spell_for(&ai_deck.signature_spell));
         let scheme = std::sync::Arc::new(ai_deck.scheme_deck.clone());
         state
             .deck_pools
@@ -741,6 +1024,8 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
                 registered_sideboard: std::sync::Arc::clone(&side),
                 current_main: main,
                 current_sideboard: side,
+                registered_companion: std::sync::Arc::clone(&companion),
+                current_companion: companion,
                 registered_commander: std::sync::Arc::clone(&cmdr),
                 current_commander: cmdr,
                 registered_signature_spell: std::sync::Arc::clone(&sig),
@@ -752,30 +1037,49 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             });
     }
 
-    for entry in &payload.player.main_deck {
-        for _ in 0..entry.count {
-            create_object_from_card_face(state, &entry.card, PlayerId(0));
-        }
-    }
+    // CR 400.1: a seat whose library is stored in another seat's container gets
+    // no pool and loads no cards; the holder's pool backs the shared pile.
+    let library_holders: Vec<PlayerId> = state
+        .players
+        .iter()
+        .map(|player| player.id)
+        .filter(|&seat| state.zone_storage_seat(Zone::Library, seat) == seat)
+        .collect();
+    state
+        .deck_pools
+        .retain(|pool| library_holders.contains(&pool.player));
 
-    for entry in &payload.opponent.main_deck {
-        for _ in 0..entry.count {
-            create_object_from_card_face(state, &entry.card, PlayerId(1));
-        }
+    // CR 903.5a: load the command-zone-netted list, not the submitted one, so
+    // the library holds exactly the copies the command zone did not claim. The
+    // registered pools above were built from the same `main_deck_for` output,
+    // so library and pool cannot disagree about the 100.
+    let p0_library = main_deck_for(&payload.player);
+    let p1_library = main_deck_for(&payload.opponent);
+    if library_holders.contains(&PlayerId(0)) {
+        load_player_library(state, &p0_library, PlayerId(0));
+    }
+    if library_holders.contains(&PlayerId(1)) {
+        load_player_library(state, &p1_library, PlayerId(1));
     }
 
     // Load additional AI decks into PlayerId(2), PlayerId(3), etc.
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
         let player_id = PlayerId((2 + i) as u8);
-        for entry in &ai_deck.main_deck {
-            for _ in 0..entry.count {
-                create_object_from_card_face(state, &entry.card, player_id);
-            }
+        if library_holders.contains(&player_id) {
+            let library = main_deck_for(ai_deck);
+            load_player_library(state, &library, player_id);
         }
     }
 
     // CR 903.6 + CR 408.1: Place commanders in the command zone at game start.
-    let commander_decks: Vec<(PlayerId, &[DeckEntry])> =
+    // Gated on the same `place_commanders` predicate `main_deck_for` nets with:
+    // a format whose command zone is not filled from the decklist's
+    // `commander` slot must neither place a command-zone object nor net the
+    // slot out of the library, or a populated-but-inert `commander` slot would
+    // add a 61st card to a constructed game.
+    let commander_decks: Vec<(PlayerId, &[DeckEntry])> = if !place_commanders {
+        Vec::new()
+    } else {
         std::iter::once((PlayerId(0), payload.player.commander.as_slice()))
             .chain(std::iter::once((
                 PlayerId(1),
@@ -788,7 +1092,8 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
                     .enumerate()
                     .map(|(i, d)| (PlayerId((2 + i) as u8), d.commander.as_slice())),
             )
-            .collect();
+            .collect()
+    };
     for (owner, entries) in commander_decks {
         for entry in entries {
             for _ in 0..entry.count {
@@ -825,25 +1130,27 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
         );
     }
 
-    // Oathbreaker RC: Place signature spells in the command zone at game start.
-    let sig_decks: Vec<(PlayerId, &[DeckEntry])> =
-        std::iter::once((PlayerId(0), payload.player.signature_spell.as_slice()))
-            .chain(std::iter::once((
-                PlayerId(1),
-                payload.opponent.signature_spell.as_slice(),
-            )))
-            .chain(
-                payload
-                    .ai_decks
-                    .iter()
-                    .enumerate()
-                    .map(|(i, d)| (PlayerId((2 + i) as u8), d.signature_spell.as_slice())),
-            )
-            .collect();
-    for (owner, entries) in sig_decks {
-        for entry in entries {
-            for _ in 0..entry.count {
-                create_signature_spell_from_card_face(state, &entry.card, owner);
+    if state.format_config.format == crate::types::format::GameFormat::Oathbreaker {
+        // Oathbreaker RC: Place signature spells in the command zone at game start.
+        let sig_decks: Vec<(PlayerId, &[DeckEntry])> =
+            std::iter::once((PlayerId(0), payload.player.signature_spell.as_slice()))
+                .chain(std::iter::once((
+                    PlayerId(1),
+                    payload.opponent.signature_spell.as_slice(),
+                )))
+                .chain(
+                    payload
+                        .ai_decks
+                        .iter()
+                        .enumerate()
+                        .map(|(i, d)| (PlayerId((2 + i) as u8), d.signature_spell.as_slice())),
+                )
+                .collect();
+        for (owner, entries) in sig_decks {
+            for entry in entries {
+                for _ in 0..entry.count {
+                    create_signature_spell_from_card_face(state, &entry.card, owner);
+                }
             }
         }
     }
@@ -859,10 +1166,9 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
 
     // Momir Basic: grant each player a game-start command-zone emblem carrying
     // the random-creature-token activated ability (CR 114.1 / CR 113.1b). The
-    // grant runs BEFORE `rehydrate_game_from_card_db` populates the Momir pool
-    // (in `load_and_hydrate_decks`); this ordering is correct ONLY because
-    // `grant_emblem` does not read `momir_pool` / `momir_pool_faces` — those are
-    // resolution-time-only reads inside the effect resolver.
+    // emblem's random creature is drawn from `GameState::card_db` when the
+    // ability RESOLVES, so this grant has no ordering dependency on the card
+    // database being installed yet.
     if state.format_config.format == crate::types::format::GameFormat::Momir {
         for i in 0..state.players.len() {
             let player = PlayerId(i as u8);
@@ -945,6 +1251,30 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     }
 }
 
+/// Assign library object/card IDs in an order independent of the submitted
+/// deck list. Public stack/battlefield objects retain their `ObjectId`, so
+/// allocating IDs in deck-list order would let opponents recover the hidden
+/// identity behind any later face-down spell. The normal library shuffle is
+/// intentionally separate: revealed ID/name pairs carry no information about
+/// the current order of unrevealed cards.
+fn load_player_library(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
+    for face in shuffled_entry_faces(state, entries) {
+        create_object_from_card_face(state, face, owner);
+    }
+}
+
+/// Produces a fresh ID-allocation order for every hidden-order deck before its
+/// usual game-start shuffle. This prevents a public object ID from encoding the
+/// submitted deck-list position once the card is later revealed.
+fn shuffled_entry_faces<'a>(state: &mut GameState, entries: &'a [DeckEntry]) -> Vec<&'a CardFace> {
+    let mut faces = entries
+        .iter()
+        .flat_map(|entry| std::iter::repeat_n(&entry.card, entry.count as usize))
+        .collect::<Vec<_>>();
+    faces.shuffle(&mut state.rng);
+    faces
+}
+
 /// Canonical init sequence for every transport layer: load the decks into
 /// the state, then hydrate runtime-only fields (back_face, layout_kind)
 /// from the CardDatabase.
@@ -976,6 +1306,21 @@ pub fn load_and_hydrate_decks(
             Some(card_db) => {
                 momir_payload = momir_fixed_deck_payload(card_db, payload);
                 &momir_payload
+            }
+            None => payload,
+        }
+    } else {
+        payload
+    };
+    // Dandân loads its one fixed pile into the shared library's holder seat;
+    // with no db we fall back to whatever was submitted, as Momir does.
+    let dandan_payload;
+    let payload = if state.format_config.format == crate::types::format::GameFormat::Dandan {
+        match db {
+            Some(card_db) => {
+                dandan_payload =
+                    dandan_fixed_deck_payload(card_db, payload, state.canonical_seat());
+                &dandan_payload
             }
             None => payload,
         }
@@ -1027,21 +1372,7 @@ pub fn load_and_hydrate_decks(
     };
     load_deck_into_state(state, payload);
     match db {
-        Some(db) => {
-            super::printed_cards::rehydrate_game_from_card_db(state, db);
-            // CR 205.3m: Seed the creature subtype vocabulary from the full
-            // card corpus (not just loaded decks) so token-only types like
-            // Saproling and not-in-this-deck types like Golem are recognized
-            // by `SharesQuality::CreatureType` (Coat of Arms #1471), the
-            // Changeling expansion, and `ChoiceType::CreatureType` (Morophon
-            // #1472). The deck-only union performed by `load_deck_into_state`
-            // remains as a safety net for the `db == None` path below.
-            let mut merged: HashSet<String> = state.all_creature_types.drain(..).collect();
-            merged.extend(db.creature_type_vocabulary().iter().cloned());
-            let mut sorted: Vec<String> = merged.into_iter().collect();
-            sorted.sort();
-            state.all_creature_types = sorted;
-        }
+        Some(db) => hydrate_loaded_game_from_card_db(state, db),
         None => {
             // Latch the warning so a long-running desktop session that
             // starts many games doesn't spam the log on each match.
@@ -1060,6 +1391,29 @@ pub fn load_and_hydrate_decks(
             }
         }
     }
+}
+
+/// Hydrate a game whose decks `load_deck_into_state` has just loaded: printed
+/// faces and the card-database-derived registries (`rehydrate_game_from_card_db`)
+/// plus the full-corpus creature subtype vocabulary.
+///
+/// The second half of [`load_and_hydrate_decks`], shared with the between-games
+/// rebuild (`match_flow`), which reloads decks already synthesized by game one
+/// and must not re-run the payload synthesis above.
+pub(crate) fn hydrate_loaded_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
+    super::printed_cards::rehydrate_game_from_card_db(state, db);
+    // CR 205.3m: Seed the creature subtype vocabulary from the full
+    // card corpus (not just loaded decks) so token-only types like
+    // Saproling and not-in-this-deck types like Golem are recognized
+    // by `SharesQuality::CreatureType` (Coat of Arms #1471), the
+    // Changeling expansion, and `ChoiceType::CreatureType` (Morophon
+    // #1472). The deck-only union performed by `load_deck_into_state`
+    // remains as a safety net for the `db == None` path.
+    let mut merged: HashSet<String> = state.all_creature_types.drain(..).collect();
+    merged.extend(db.creature_type_vocabulary().iter().cloned());
+    let mut sorted: Vec<String> = merged.into_iter().collect();
+    sorted.sort();
+    state.all_creature_types = sorted;
 }
 
 #[cfg(test)]
@@ -1179,6 +1533,89 @@ mod tests {
             rarities: Default::default(),
             attraction_lights: vec![],
         }
+    }
+
+    fn single_face_card_json(name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "mana_cost": { "type": "NoCost" },
+            "card_type": { "supertypes": [], "core_types": ["Instant"], "subtypes": [] },
+            "power": null,
+            "toughness": null,
+            "loyalty": null,
+            "defense": null,
+            "oracle_text": null,
+            "non_ability_text": null,
+            "flavor_name": null,
+            "keywords": [],
+            "abilities": [],
+            "triggers": [],
+            "static_abilities": [],
+            "replacements": [],
+            "color_override": null,
+            "scryfall_oracle_id": null
+        })
+    }
+
+    #[test]
+    fn resolve_names_groups_mixed_spellings_of_one_card() {
+        // CR 709.2 / CR 712.1: a composite name, its glued form, and its
+        // front-face name are three spellings of ONE physical card. Grouping
+        // must compare the RESOLVED face name — comparing the resolved
+        // `entry.card.name` against the raw input never matches these against
+        // each other and emits several entries for one card.
+        let mut cards = serde_json::Map::new();
+        cards.insert("fire".to_string(), single_face_card_json("Fire"));
+        let db =
+            CardDatabase::from_json_str(&serde_json::Value::Object(cards).to_string()).unwrap();
+
+        let entries = resolve_names(
+            &db,
+            &[
+                "Fire // Ice".to_string(),
+                "Fire".to_string(),
+                "Fire//Ice".to_string(),
+                "fire".to_string(),
+            ],
+        );
+
+        assert_eq!(entries.len(), 1, "four spellings are one card, not several");
+        assert_eq!(entries[0].card.name, "Fire");
+        assert_eq!(entries[0].count, 4, "every spelling contributes one copy");
+    }
+
+    #[test]
+    fn resolve_names_groups_slash_spellings_of_one_card() {
+        let mut cards = serde_json::Map::new();
+        cards.insert(
+            "summon: choco/mog".to_string(),
+            single_face_card_json("Summon: Choco/Mog"),
+        );
+        cards.insert("revival".to_string(), single_face_card_json("Revival"));
+        let db =
+            CardDatabase::from_json_str(&serde_json::Value::Object(cards).to_string()).unwrap();
+
+        let entries = resolve_names(
+            &db,
+            &[
+                "Summon: Choco/Mog".to_string(),
+                "Summon: Choco // Mog".to_string(),
+                "Revival/Revenge".to_string(),
+                "Revival // Revenge".to_string(),
+            ],
+        );
+
+        assert_eq!(entries.len(), 2, "two cards, four spellings");
+        let choco = entries
+            .iter()
+            .find(|entry| entry.card.name == "Summon: Choco/Mog")
+            .expect("Summon: Choco/Mog must resolve");
+        assert_eq!(choco.count, 2);
+        let revival = entries
+            .iter()
+            .find(|entry| entry.card.name == "Revival")
+            .expect("Revival must resolve");
+        assert_eq!(revival.count, 2);
     }
 
     #[test]
@@ -1458,6 +1895,7 @@ mod tests {
             },
             ai_decks: vec![],
             ai_difficulties: vec![],
+            booster_pack_pool: None,
         };
 
         load_deck_into_state(&mut state, &payload);
@@ -1466,6 +1904,348 @@ mod tests {
         assert!(state.deck_pools[0].registered_sideboard.is_empty());
         assert!(state.deck_pools[1].current_sideboard.is_empty());
         assert!(state.deck_pools[1].registered_sideboard.is_empty());
+    }
+
+    #[test]
+    fn load_deck_nets_a_commander_also_listed_in_the_main_deck() {
+        // CR 903.5a: the commander is one of the 100. A decklist naming it in
+        // both the command zone and the main deck describes ONE physical card,
+        // and the validator nets exactly that double-listing out of its
+        // deck-size and singleton checks. If the loader did not drop the same
+        // copy it would build a 101-card game the validator called legal.
+        let mut state = GameState::new_two_player(42);
+        state.format_config = crate::types::format::FormatConfig::commander();
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: vec![
+                    DeckEntry {
+                        card: make_creature_face(),
+                        count: 1,
+                    },
+                    DeckEntry {
+                        card: make_instant_face(),
+                        count: 2,
+                    },
+                ],
+                commander: vec![DeckEntry {
+                    card: make_creature_face(),
+                    count: 1,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        load_deck_into_state(&mut state, &payload);
+
+        let library = state
+            .objects
+            .values()
+            .filter(|o| o.owner == PlayerId(0) && o.zone == Zone::Library)
+            .count();
+        assert_eq!(
+            library, 2,
+            "the commander's main-deck listing is the same physical card as its              command-zone entry, so only the untouched instant playset remains"
+        );
+        assert!(
+            !state.deck_pools[0]
+                .registered_main
+                .iter()
+                .any(|e| e.card.name == "Grizzly Bears"),
+            "the registered pool must agree with the library about the 100"
+        );
+        assert_eq!(
+            state
+                .objects
+                .values()
+                .filter(|o| o.owner == PlayerId(0) && o.zone == Zone::Command)
+                .count(),
+            1,
+            "the card is still in the command zone — netted, not deleted"
+        );
+    }
+
+    #[test]
+    fn load_deck_nets_only_as_many_copies_as_the_command_zone_claims() {
+        // Netting is the CR 903.5a double-listing correction, not a blanket
+        // amnesty: a main deck holding MORE copies than the command zone claims
+        // keeps its remainder, so the copy-limit verdict still has something to
+        // catch.
+        let mut state = GameState::new_two_player(42);
+        state.format_config = crate::types::format::FormatConfig::commander();
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: vec![DeckEntry {
+                    card: make_creature_face(),
+                    count: 3,
+                }],
+                commander: vec![DeckEntry {
+                    card: make_creature_face(),
+                    count: 1,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        load_deck_into_state(&mut state, &payload);
+
+        assert_eq!(
+            state
+                .objects
+                .values()
+                .filter(|o| o.owner == PlayerId(0) && o.zone == Zone::Library)
+                .count(),
+            2,
+            "only the one copy the command zone claims is netted away"
+        );
+    }
+
+    #[test]
+    fn load_deck_does_not_net_a_commander_slot_in_a_format_without_a_command_zone() {
+        // CR 903.5a's "the commander is one of the 100" identity exists only
+        // where a format designates a decklist commander for the command zone.
+        // CR 408.1 defines the zone generally (Archenemy schemes live there per
+        // CR 904.4), so the zone's existence is NOT the test — the decklist
+        // commander is. A
+        // constructed payload can still arrive with a populated `commander`
+        // slot — the deck builder reuses the slot and `resolve_deck_list`
+        // forwards it ungated — and for such a format that card is an ordinary
+        // main-deck copy.
+        //
+        // This is the negative twin of
+        // `constructed_copy_limit_does_not_net_out_a_commander_slot_entry` in
+        // `deck_validation.rs`: the validator counts the slot with
+        // `CommandZoneNetting::CountVerbatim`, so the loader must not discount a
+        // main-deck copy against it or the game starts one library card short
+        // of the decklist the validator approved. It also pins the other half of
+        // the mirror — an inert slot must not be placed either, or the same deck
+        // would gain a card in the command zone.
+        let mut state = GameState::new_two_player(42);
+        state.format_config = crate::types::format::FormatConfig::standard();
+        assert!(
+            !state.format_config.uses_commander,
+            "fixture must exercise the no-command-zone arm"
+        );
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: vec![
+                    DeckEntry {
+                        card: make_creature_face(),
+                        count: 4,
+                    },
+                    DeckEntry {
+                        card: make_instant_face(),
+                        count: 2,
+                    },
+                ],
+                commander: vec![DeckEntry {
+                    card: make_creature_face(),
+                    count: 1,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        load_deck_into_state(&mut state, &payload);
+
+        assert_eq!(
+            state
+                .objects
+                .values()
+                .filter(|o| o.owner == PlayerId(0) && o.zone == Zone::Library)
+                .count(),
+            6,
+            "with no command zone the slot nets nothing — every submitted              main-deck copy stays in the library"
+        );
+        assert_eq!(
+            state.deck_pools[0]
+                .registered_main
+                .iter()
+                .filter(|e| e.card.name == "Grizzly Bears")
+                .map(|e| e.count)
+                .sum::<u32>(),
+            4,
+            "the registered pool must agree with the library about the playset"
+        );
+        assert!(
+            state.command_zone.is_empty(),
+            "a format with no command zone places nothing there, so the netting              gate and the placement gate stay mirrored"
+        );
+    }
+
+    #[test]
+    fn load_deck_ignores_signature_spells_outside_oathbreaker() {
+        let mut state = GameState::new_two_player(42);
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                signature_spell: vec![DeckEntry {
+                    card: make_instant_face(),
+                    count: 1,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        load_deck_into_state(&mut state, &payload);
+
+        assert!(state.deck_pools[0].current_signature_spell.is_empty());
+        assert!(state.deck_pools[0].registered_signature_spell.is_empty());
+        assert!(state.command_zone.is_empty());
+    }
+
+    #[test]
+    fn load_deck_keeps_oathbreaker_signature_spells_in_the_command_zone() {
+        let mut state = GameState::new_two_player(42);
+        state.format_config = crate::types::format::FormatConfig::oathbreaker();
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                signature_spell: vec![DeckEntry {
+                    card: make_instant_face(),
+                    count: 1,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        load_deck_into_state(&mut state, &payload);
+
+        assert_eq!(state.deck_pools[0].current_signature_spell.len(), 1);
+        assert_eq!(state.command_zone.len(), 1);
+        let signature_spell = &state.objects[&state.command_zone[0]];
+        assert!(signature_spell.is_signature_spell());
+        assert_eq!(
+            serde_json::to_value(signature_spell).expect("signature spell must serialize")
+                ["signature_spell"],
+            serde_json::json!({}),
+            "the wire marker must be non-null so clients recognize the signature spell"
+        );
+    }
+
+    /// CR 903.5a: Oathbreaker's command zone holds a decklist card, so its
+    /// commander must be placed in the command zone AND netted out of the
+    /// library — the two halves of one physical card's identity.
+    ///
+    /// This PR narrows command-zone placement, which was unconditional before
+    /// it, to formats whose zone holds a decklist commander. Oathbreaker is the
+    /// case that makes the narrowing predicate load-bearing rather than
+    /// cosmetic: it declares no commander-damage threshold, so
+    /// `FormatConfig::uses_commander` is `false` for it, and gating on that
+    /// field instead would leave a legal Oathbreaker in the library with no
+    /// command-zone object while `deck_validation` had already netted it out of
+    /// the deck-size check. The `current_main.is_empty()` and
+    /// `library.len() == 0` assertions below are what pin the netting half.
+    #[test]
+    fn load_deck_places_the_oathbreaker_in_the_command_zone() {
+        let mut state = GameState::new_two_player(42);
+        state.format_config = crate::types::format::FormatConfig::oathbreaker();
+        let commander = make_creature_face();
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: vec![DeckEntry {
+                    card: commander.clone(),
+                    count: 1,
+                }],
+                commander: vec![DeckEntry {
+                    card: commander.clone(),
+                    count: 1,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        load_deck_into_state(&mut state, &payload);
+
+        assert_eq!(
+            state.command_zone.len(),
+            1,
+            "the Oathbreaker must occupy the command zone"
+        );
+        assert!(state.objects[&state.command_zone[0]].is_commander);
+        // CR 903.5a: netted out of the library, so the same physical card is
+        // not in two zones at once.
+        assert!(
+            state.deck_pools[0].current_main.is_empty(),
+            "the command-zone copy must be netted out of the main deck"
+        );
+        assert_eq!(
+            state.players[0].library.len(),
+            0,
+            "the netted copy must not also be shuffled into the library"
+        );
+    }
+
+    /// Tiny Leaders has the same shape as Oathbreaker: a decklist card in the
+    /// command zone with no commander-damage threshold, so `uses_commander` is
+    /// `false` while `deck_validation` nets with `NetAgainstMainDeck`.
+    #[test]
+    fn load_deck_places_the_tiny_leaders_commander_in_the_command_zone() {
+        let mut state = GameState::new_two_player(42);
+        state.format_config = crate::types::format::FormatConfig::tiny_leaders();
+        let commander = make_creature_face();
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: vec![DeckEntry {
+                    card: commander.clone(),
+                    count: 1,
+                }],
+                commander: vec![DeckEntry {
+                    card: commander.clone(),
+                    count: 1,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        load_deck_into_state(&mut state, &payload);
+
+        assert_eq!(state.command_zone.len(), 1);
+        assert!(state.objects[&state.command_zone[0]].is_commander);
+        assert!(state.deck_pools[0].current_main.is_empty());
+    }
+
+    /// Control for the two tests above: Archenemy has `command_zone: true`
+    /// (CR 904.3 + CR 904.4, the scheme deck) but its zone holds no decklist
+    /// card, so a
+    /// populated-but-inert `commander` slot must be neither placed nor netted.
+    /// Widening the predicate to `FormatConfig::command_zone` instead of
+    /// `command_zone_holds_decklist_commander` would delete this library card.
+    #[test]
+    fn load_deck_neither_places_nor_nets_a_commander_slot_without_a_decklist_command_zone() {
+        let mut state = GameState::new_two_player(42);
+        state.format_config = crate::types::format::FormatConfig::archenemy();
+        let card = make_creature_face();
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: vec![DeckEntry {
+                    card: card.clone(),
+                    count: 1,
+                }],
+                commander: vec![DeckEntry {
+                    card: card.clone(),
+                    count: 1,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        load_deck_into_state(&mut state, &payload);
+
+        assert!(
+            state.command_zone.is_empty(),
+            "Archenemy's command zone holds schemes, not a decklist commander"
+        );
+        assert_eq!(
+            state.deck_pools[0].current_main.len(),
+            1,
+            "an inert commander slot must not discount a real main-deck card"
+        );
     }
 
     #[test]
@@ -1543,6 +2323,59 @@ mod tests {
     }
 
     #[test]
+    fn library_object_ids_do_not_encode_submitted_deck_order() {
+        let entries = (0..20)
+            .map(|i| DeckEntry {
+                card: CardFace {
+                    name: format!("Card {i}"),
+                    ..make_creature_face()
+                },
+                count: 1,
+            })
+            .collect::<Vec<_>>();
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: entries,
+                ..Default::default()
+            },
+            opponent: PlayerDeckPayload::default(),
+            ..Default::default()
+        };
+        let mut first = GameState::new_two_player(42);
+        let mut repeated = GameState::new_two_player(42);
+        load_deck_into_state(&mut first, &payload);
+        load_deck_into_state(&mut repeated, &payload);
+
+        let names_by_id = |state: &GameState| {
+            let mut objects = state
+                .objects
+                .iter()
+                .filter(|(_, object)| object.owner == PlayerId(0))
+                .collect::<Vec<_>>();
+            objects.sort_by_key(|(id, _)| **id);
+            objects
+                .into_iter()
+                .map(|(id, object)| {
+                    assert_eq!(object.card_id.0, id.0);
+                    object.name.clone()
+                })
+                .collect::<Vec<_>>()
+        };
+        let insertion_order = (0..20).map(|i| format!("Card {i}")).collect::<Vec<_>>();
+        let first_names = names_by_id(&first);
+
+        assert_ne!(
+            first_names, insertion_order,
+            "public object IDs must not reveal submitted deck order"
+        );
+        assert_eq!(
+            first_names,
+            names_by_id(&repeated),
+            "ID assignment must stay deterministic for replay"
+        );
+    }
+
+    #[test]
     fn create_object_with_trigger_definitions() {
         let mut state = GameState::new_two_player(42);
         let mut face = make_creature_face();
@@ -1555,7 +2388,7 @@ mod tests {
         let obj = &state.objects[&obj_id];
         assert_eq!(obj.trigger_definitions.len(), 1);
         assert_eq!(
-            obj.trigger_definitions[0].mode,
+            obj.trigger_definitions[0].definition.mode,
             crate::types::triggers::TriggerMode::ChangesZone
         );
     }
@@ -1654,6 +2487,11 @@ mod tests {
     #[test]
     fn load_deck_with_commanders_creates_command_zone_objects() {
         let mut state = GameState::new_two_player(42);
+        // CR 903.6: a commander is put into the command zone at the start of
+        // the game. This PR narrows placement from unconditional to
+        // command-zone-holding formats, so this pre-existing test must now
+        // declare one; without it the payload's `commander` slot is inert.
+        state.format_config = crate::types::format::FormatConfig::commander();
         let commander_face = CardFace {
             name: "Kaalia".to_string(),
             card_type: CardType {
@@ -1752,6 +2590,10 @@ mod tests {
         );
 
         let mut state = GameState::new_two_player(42);
+        // CR 903.6: command-zone placement now requires a format whose command
+        // zone holds a decklist commander (narrowed by this PR from
+        // unconditional), so this pre-existing test must declare one.
+        state.format_config = crate::types::format::FormatConfig::commander();
         load_deck_into_state(&mut state, &payload);
 
         assert_eq!(state.command_zone.len(), 1);

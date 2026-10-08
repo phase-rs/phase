@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { isDesktopTauri, isTauri } from "../../services/platform";
+
 function EnterFullscreenIcon({ className }: { className?: string }) {
   return (
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className={className ?? "w-5 h-5"}>
@@ -24,30 +26,88 @@ interface FullscreenButtonProps {
 export function FullscreenButton({ variant }: FullscreenButtonProps) {
   const { t } = useTranslation();
   const [isFullscreen, setIsFullscreen] = useState(!!document.fullscreenElement);
+  const desktopTauri = isDesktopTauri();
+  const unknownOrMobileTauri = isTauri() && !desktopTauri;
 
   useEffect(() => {
+    if (desktopTauri) {
+      let active = true;
+      let unlisten: (() => void) | undefined;
+
+      void (async () => {
+        try {
+          const { getCurrentWindow } = await import("@tauri-apps/api/window");
+          const appWindow = getCurrentWindow();
+          const syncFullscreen = async () => {
+            try {
+              const fullscreen = await appWindow.isFullscreen();
+              if (active) setIsFullscreen(fullscreen);
+            } catch (error) {
+              console.warn("[phase.rs] Could not synchronize Tauri fullscreen state.", error);
+            }
+          };
+
+          await syncFullscreen();
+          const removeResizeListener = await appWindow.onResized(() => {
+            void syncFullscreen();
+          });
+          if (active) {
+            unlisten = removeResizeListener;
+          } else {
+            removeResizeListener();
+          }
+        } catch (error) {
+          console.warn("[phase.rs] Could not synchronize Tauri fullscreen state.", error);
+        }
+      })();
+
+      return () => {
+        active = false;
+        unlisten?.();
+      };
+    }
+
+    if (unknownOrMobileTauri) return;
+
     function onChange() {
       setIsFullscreen(!!document.fullscreenElement);
     }
     document.addEventListener("fullscreenchange", onChange);
     return () => document.removeEventListener("fullscreenchange", onChange);
-  }, []);
+  }, [desktopTauri, unknownOrMobileTauri]);
 
-  const toggle = useCallback(() => {
-    if (document.fullscreenElement) {
-      document.exitFullscreen();
-    } else {
-      document.documentElement.requestFullscreen();
+  const toggle = useCallback(async () => {
+    try {
+      if (desktopTauri) {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const appWindow = getCurrentWindow();
+        const nextFullscreen = !(await appWindow.isFullscreen());
+        await appWindow.setFullscreen(nextFullscreen);
+        setIsFullscreen(nextFullscreen);
+        return;
+      }
+
+      if (unknownOrMobileTauri) return;
+
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await document.documentElement.requestFullscreen();
+      }
+    } catch (error) {
+      console.warn("[phase.rs] Could not toggle fullscreen.", error);
     }
-  }, []);
+  }, [desktopTauri, unknownOrMobileTauri]);
 
   const Icon = isFullscreen ? ExitFullscreenIcon : EnterFullscreenIcon;
   const label = isFullscreen ? t("fullscreen.exit") : t("fullscreen.enter");
 
+  if (unknownOrMobileTauri) return null;
+
   if (variant === "game") {
     return (
       <button
-        onClick={toggle}
+        onClick={() => void toggle()}
         className="flex h-7 w-7 items-center justify-center rounded-md bg-white/6 text-gray-400 transition-colors hover:bg-white/10 hover:text-gray-200"
         aria-label={label}
         title={label}
@@ -59,7 +119,7 @@ export function FullscreenButton({ variant }: FullscreenButtonProps) {
 
   return (
     <button
-      onClick={toggle}
+      onClick={() => void toggle()}
       className="flex min-h-9 min-w-9 items-center justify-center rounded-[12px] border border-white/12 bg-black/18 text-white/46 backdrop-blur-sm transition-colors hover:text-white/72"
       aria-label={label}
       title={label}

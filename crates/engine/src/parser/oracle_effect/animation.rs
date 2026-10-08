@@ -11,7 +11,7 @@ use nom::Parser;
 use super::super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
-use super::super::oracle_util::split_around;
+use super::super::oracle_util::{parse_count_expr, split_around};
 use super::token::{
     map_token_keyword, push_unique_string, split_token_keyword_list, title_case_word,
 };
@@ -19,7 +19,7 @@ use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::types::ability::{PtValue, QuantityExpr, QuantityRef};
-use crate::types::card_type::Supertype;
+use crate::types::card_type::{CoreType, Supertype};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 
@@ -341,7 +341,13 @@ fn strip_prefix_word<'a>(text: &'a str, word: &str) -> Option<&'a str> {
     }
 }
 
-pub(super) fn parse_fixed_become_pt_prefix(text: &str) -> Option<(i32, i32, &str)> {
+/// `pub(crate)` so the additive-type leaf in `oracle_static/type_change.rs`
+/// (`parse_additive_type_clause_modifications`) can share this exact "leading
+/// fixed `N/M`" test rather than reimplementing it. That leaf keys its
+/// animation-parsing route on this prefix precisely because the *trailing*
+/// "base power and toughness N/M" form must keep the older word-split route —
+/// see the double-emit guard documented there.
+pub(crate) fn parse_fixed_become_pt_prefix(text: &str) -> Option<(i32, i32, &str)> {
     let (rest, (power, toughness)) = nom_primitives::parse_pt_value.parse(text).ok()?;
     match (power, toughness) {
         (
@@ -436,10 +442,22 @@ fn parse_dynamic_pt_clause(input: &str) -> OracleResult<'_, (&str, QuantityExpr)
         tag("base power and toughness are each equal to "),
     ))
     .parse(rest)?;
-    let (rest, qty) = nom_quantity::parse_quantity_ref.parse(rest)?;
+    let (rest, qty) = alt((
+        nom::combinator::map(nom_quantity::parse_quantity_ref, |qty| QuantityExpr::Ref {
+            qty,
+        }),
+        parse_animation_count_expr,
+    ))
+    .parse(rest)?;
     let (rest, _) = opt(tag(".")).parse(rest)?;
     let (rest, _) = eof.parse(rest)?;
-    Ok((rest, (descriptor, QuantityExpr::Ref { qty })))
+    Ok((rest, (descriptor, qty)))
+}
+
+fn parse_animation_count_expr(input: &str) -> OracleResult<'_, QuantityExpr> {
+    parse_count_expr(input)
+        .map(|(expression, rest)| (rest, expression))
+        .ok_or_else(|| oracle_err(input))
 }
 
 fn split_animation_dynamic_pt_clause(text: &str) -> Option<(&str, QuantityExpr)> {
@@ -494,6 +512,32 @@ fn parse_animation_core_type(input: &str) -> OracleResult<'_, AnimationTypeToken
     let (rest, _) = opt(tag_no_case::<_, _, OracleError<'_>>("s")).parse(rest)?;
     let (rest, _) = alpha_word_boundary(rest)?;
     Ok((rest, AnimationTypeToken::CoreType(core)))
+}
+
+/// CR 205.2a: map one whole type word — singular or plural — to its core type,
+/// or `None` if the word is not a core type.
+///
+/// `pub(crate)` so the copy-exception type-list mapper
+/// (`become_copy_except.rs::append_color_and_type_modifications`) can share this
+/// crate's one plural-tolerant core-type recognizer rather than hand-rolling a
+/// suffix strip. `CoreType::from_str` matches the singular literals only, so a
+/// plural head word — "they're 3/3 **creatures** in addition to their other
+/// types" (Rebuild the City, Astral Dragon) — would otherwise fall through and
+/// be emitted as a fabricated `AddSubtype{"Creatures"}` instead of
+/// `AddType{Creature}`, leaving the tokens non-creatures.
+///
+/// The word must be consumed in full: [`parse_animation_core_type`]'s own
+/// word boundary already rejects "landwalk" / "creatured", and the emptiness
+/// check here rejects a bare prefix match.
+pub(crate) fn core_type_from_animation_word(word: &str) -> Option<CoreType> {
+    let (rest, token) = parse_animation_core_type(word).ok()?;
+    if !rest.is_empty() {
+        return None;
+    }
+    let AnimationTypeToken::CoreType(name) = token else {
+        return None;
+    };
+    CoreType::from_str(name).ok()
 }
 
 /// Parse a CR 205.4 supertype keyword (case-insensitive, word-boundary terminated).
@@ -637,7 +681,12 @@ fn try_parse_type_sequence_with_suffix(input: &str) -> Option<Vec<AnimationTypeT
 /// variant. Returns `None` if the marker is absent. Uses `take_until` to
 /// locate the marker, then [`parse_in_addition_other_types_marker`] to consume
 /// and recognize the variant.
-fn split_in_addition_tail(input: &str) -> Option<(&str, &str)> {
+///
+/// `pub(crate)` so `try_parse_become_choice` (`oracle_effect/subject.rs`) can
+/// share this exact split rather than reimplementing it: the "of your choice"
+/// forms (Navigator's Compass) carry the same trailing marker as the fixed-type
+/// forms (Possessed Goat) this was built for.
+pub(crate) fn split_in_addition_tail(input: &str) -> Option<(&str, &str)> {
     type VE<'a> = OracleError<'a>;
     let (_, prefix) =
         nom::bytes::complete::take_until::<_, _, VE<'_>>(" in addition to ")(input).ok()?;
@@ -888,6 +937,109 @@ fn strip_still_a_type_rider(text: &str) -> &str {
     .map_or(text, |idx| text[..idx].trim_end())
 }
 
+/// nom combinator: the boundary between an animation clause and a conjoined
+/// ability clause — "… and it has trample", "… and they gain flying",
+/// "… and has defender".
+///
+/// CR 613.1f + CR 613.4b: the conjunct grants an ability (Layer 6) while the
+/// clause before it sets types and base P/T (Layer 4 / Layer 7b). Both halves
+/// belong to one printed sentence.
+///
+/// Two independent axes — the optional pronoun subject and the grant verb — are
+/// composed as a single `opt` and a single `alt`, never the 2 × 4 `tag` cross
+/// product. Mirrors [`parse_in_addition_other_types_marker`] in this file (see
+/// `oracle_nom/PATTERNS.md` §8, "compose, don't enumerate permutations").
+///
+/// The conjunction carries **no leading space**: this combinator is driven by
+/// `nom_primitives::scan_preceded`, which advances to word boundaries and
+/// `trim_start()`s the remainder, so the slice offered to it never begins with
+/// whitespace. A `tag(" and ")` here would match at most the first position and
+/// then never again.
+fn parse_animation_conjunct_boundary(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("and ").parse(input)?;
+    let (input, _) = opt(alt((tag("it "), tag("they ")))).parse(input)?;
+    let (input, _) = alt((tag("has "), tag("have "), tag("gains "), tag("gain "))).parse(input)?;
+    Ok((input, ()))
+}
+
+/// CR 613.1d + CR 613.4b + CR 613.1f: peel a conjoined ability clause off the
+/// end of an animation body, returning `(animation_body, conjunct_tail)`.
+///
+/// Without this peel one printed sentence loses a half: "it's a 0/0 creature in
+/// addition to its other types and it has annihilator 2" yields either the
+/// animation or the keyword, never both. CR 205.1b keeps the prior types while
+/// the animation adds Creature, so both halves must survive.
+///
+/// The boundary is located by word-boundary scanning (`scan_preceded` — the
+/// `scan_timing_restrictions` idiom) rather than a substring search, so the
+/// verb can never match inside a longer word.
+///
+/// **Deliberately not consumed by [`parse_animation_spec`] itself.**
+/// `parse_animation_spec` has ~53 call sites, and the one-shot animate effects
+/// among them ("becomes a 4/4 creature and gains haste until end of turn")
+/// already parse this tail on their own; silently consuming it there would
+/// grant the keyword twice. This peel is invoked only from
+/// `parse_pronoun_becomes_type_static`, a 6.6× smaller blast radius.
+pub(crate) fn split_animation_conjunct_clause(text: &str) -> Option<(&str, &str)> {
+    // `parse_animation_conjunct_boundary` is built from case-sensitive `tag`s, so
+    // the scan runs over an ASCII-lowered copy and the offsets it yields are
+    // mapped back onto `text`, keeping the returned slices in their original
+    // case. This is the `nom_on_lower` contract applied to a scan rather than to
+    // a single parse. `to_ascii_lowercase` is required, not incidental: it
+    // preserves byte length, which is what makes the offsets transferable —
+    // `to_lowercase` does not and must not be substituted here.
+    //
+    // No current card text reaches the capitalized form, because a conjunct
+    // boundary is mid-sentence by construction. Lowering makes that independent
+    // of which half of a `TextPair` the caller happens to pass, rather than a
+    // property of today's single call site.
+    let lower = text.to_ascii_lowercase();
+    let (before, (), tail) =
+        nom_primitives::scan_preceded(&lower, parse_animation_conjunct_boundary)?;
+    let body = text[..before.len()]
+        .trim_end()
+        .trim_end_matches(',')
+        .trim_end();
+    let tail = text[lower.len() - tail.len()..].trim();
+    // A line that is *only* a conjunct is not an animation with a tail.
+    (!body.is_empty()).then_some((body, tail))
+}
+
+/// CR 613.1f (Layer 6): map an animation conjunct tail to the keywords it
+/// grants — "trample", "vigilance and menace", "flying, haste".
+///
+/// Returns `None` rather than an empty or partial vector, so the caller declines
+/// the whole line instead of emitting a silent half-parse (an animation whose
+/// ability clause was quietly dropped). Three cases decline:
+/// * the tail opens a quoted ability — owned by
+///   `parse_quoted_ability_modifications`, not by keyword mapping;
+/// * the tail yields no tokens at all;
+/// * any token fails to map, which would leave a partial grant behind.
+///
+/// Reuses the same `split_token_keyword_list` + `map_token_keyword` pair that
+/// [`split_animation_keyword_clause`] uses for the `" with "` tail — the two
+/// clause shapes are grammatical siblings and must not drift apart.
+pub(crate) fn parse_animation_conjunct_keywords(tail: &str) -> Option<Vec<Keyword>> {
+    if peek(tag::<_, _, OracleError<'_>>("\"")).parse(tail).is_ok() {
+        return None;
+    }
+    // `split_token_keyword_list` recognises only the lowercase separators
+    // (" and ", ", and ", ", "), so the tail is lowered before splitting.
+    // `map_token_keyword` already lowercases its own input, which is why this
+    // split is the only case-sensitive step left in the path.
+    let keyword_text = tail.trim_end_matches('.').trim().to_ascii_lowercase();
+    let tokens = split_token_keyword_list(&keyword_text);
+    if tokens.is_empty() {
+        return None;
+    }
+    let keywords: Vec<Keyword> = tokens
+        .iter()
+        .copied()
+        .filter_map(map_token_keyword)
+        .collect();
+    (keywords.len() == tokens.len()).then_some(keywords)
+}
+
 #[cfg(test)]
 mod test_den_bugbear {
     use super::*;
@@ -1001,6 +1153,62 @@ mod test_den_bugbear {
         assert!(mods.contains(
             &crate::types::ability::ContinuousModification::SetToughnessDynamic { value: expected }
         ));
+    }
+
+    #[test]
+    fn animation_dynamic_pt_accepts_complete_numeric_count_expressions() {
+        for expression in [
+            "X",
+            "X plus 2",
+            "X minus 1",
+            "two plus X",
+            "three",
+            "twice X",
+        ] {
+            let spec = parse_animation_spec(
+                &format!(
+                    "a green Fractal with base power and toughness each equal to {expression}"
+                ),
+                &mut ParseContext::default(),
+            )
+            .unwrap_or_else(|| panic!("numeric expression must parse completely: {expression}"));
+            assert_eq!(spec.colors, Some(vec![ManaColor::Green]));
+            assert_eq!(spec.types, vec!["Creature", "Fractal"]);
+            assert_eq!(spec.dynamic_power, spec.dynamic_toughness);
+            assert!(spec.dynamic_power.is_some());
+        }
+    }
+
+    #[test]
+    fn animation_dynamic_pt_rejects_incomplete_or_unsupported_numeric_expressions() {
+        let prefix = "a green Fractal with base power and toughness each equal to ";
+        let accepted = format!("{prefix}X plus 1");
+        let (_, (descriptor, quantity)) = parse_dynamic_pt_clause(&accepted)
+            .expect("the complete X plus 1 control must reach the dynamic P/T parser");
+        assert_eq!(descriptor, "a green Fractal");
+        assert_eq!(
+            quantity,
+            QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_owned(),
+                    },
+                }),
+                offset: 1,
+            },
+            "X plus 1 must retain its dynamic quantity rather than only accepting the prefix"
+        );
+
+        for expression in [
+            "X plus X",
+            "X plus the number of creatures you control",
+            "X plus 1 and gains flying",
+        ] {
+            assert!(
+                parse_dynamic_pt_clause(&format!("{prefix}{expression}")).is_err(),
+                "unsupported or trailing expression must not parse cleanly: {expression}"
+            );
+        }
     }
 
     #[test]

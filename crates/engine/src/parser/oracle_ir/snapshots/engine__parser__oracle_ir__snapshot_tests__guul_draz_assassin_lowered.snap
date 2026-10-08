@@ -1,0 +1,196 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 525
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": {
+          "type": "Fixed",
+          "value": -2
+        },
+        "toughness": {
+          "type": "Fixed",
+          "value": -2
+        },
+        "target": {
+          "type": "Typed",
+          "type_filters": [
+            "Creature"
+          ],
+          "controller": null,
+          "properties": []
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": {
+              "type": "Cost",
+              "shards": [
+                "Black"
+              ],
+              "generic": 0
+            }
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "duration": "UntilEndOfTurn",
+      "description": "{B}, {T}: Target creature gets -2/-2 until end of turn.",
+      "target_prompt": null,
+      "activation_restrictions": [
+        {
+          "type": "LevelCounterRange",
+          "data": {
+            "minimum": 2,
+            "maximum": 3
+          }
+        }
+      ],
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Pump",
+        "power": {
+          "type": "Fixed",
+          "value": -4
+        },
+        "toughness": {
+          "type": "Fixed",
+          "value": -4
+        },
+        "target": {
+          "type": "Typed",
+          "type_filters": [
+            "Creature"
+          ],
+          "controller": null,
+          "properties": []
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": {
+              "type": "Cost",
+              "shards": [
+                "Black"
+              ],
+              "generic": 0
+            }
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "duration": "UntilEndOfTurn",
+      "description": "{B}, {T}: Target creature gets -4/-4 until end of turn.",
+      "target_prompt": null,
+      "activation_restrictions": [
+        {
+          "type": "LevelCounterRange",
+          "data": {
+            "minimum": 4
+          }
+        }
+      ],
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "affected": {
+        "type": "SelfRef"
+      },
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 2
+        },
+        {
+          "type": "SetToughness",
+          "value": 2
+        }
+      ],
+      "condition": {
+        "type": "HasCounters",
+        "counters": {
+          "type": "OfType",
+          "data": "level"
+        },
+        "minimum": 2,
+        "maximum": 3
+      },
+      "affected_zone": null,
+      "effect_zone": null,
+      "active_zones": [],
+      "characteristic_defining": false,
+      "description": "LEVEL 2-3 / 2/2"
+    },
+    {
+      "mode": "Continuous",
+      "affected": {
+        "type": "SelfRef"
+      },
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 4
+        },
+        {
+          "type": "SetToughness",
+          "value": 4
+        }
+      ],
+      "condition": {
+        "type": "HasCounters",
+        "counters": {
+          "type": "OfType",
+          "data": "level"
+        },
+        "minimum": 4
+      },
+      "affected_zone": null,
+      "effect_zone": null,
+      "active_zones": [],
+      "characteristic_defining": false,
+      "description": "LEVEL 4+ / 4/4"
+    }
+  ],
+  "replacements": [],
+  "extractedKeywords": [
+    {
+      "LevelUp": {
+        "type": "Cost",
+        "shards": [
+          "Black"
+        ],
+        "generic": 1
+      }
+    }
+  ]
+}

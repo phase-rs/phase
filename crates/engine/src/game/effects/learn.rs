@@ -1,14 +1,16 @@
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, OutsideGameSourcePool, QuantityExpr, ResolvedAbility,
+    TargetFilter, TypeFilter, TypedFilter,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
+use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
 /// CR 701.48a: Learn — "You may discard a card. If you do, draw a card.
 /// If you didn't discard a card, you may reveal a Lesson card you own from
 /// outside the game and put it into your hand."
-///
-/// Current implementation supports rummage (discard→draw) and skip.
-/// Lesson/sideboard access is deferred until sideboard infrastructure exists.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -26,7 +28,11 @@ pub fn resolve(
         .unwrap_or_default();
 
     if hand_cards.is_empty() {
-        // No cards to discard and no Lesson access yet — auto-skip.
+        // CR 701.48a: with no card available to discard, the "if you didn't
+        // discard a card" branch applies unconditionally — offer the Lesson
+        // search from outside the game.
+        let lesson_search = lesson_search_ability(ability.source_id, player);
+        let _ = super::resolve_ability_chain(state, &lesson_search, events, 0);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Learn,
             source_id: ability.source_id,
@@ -38,6 +44,27 @@ pub fn resolve(
     // Present the choice: rummage one card or skip.
     state.waiting_for = WaitingFor::LearnChoice { player, hand_cards };
     Ok(())
+}
+
+/// CR 701.48a: "reveal a Lesson card you own from outside the game and put it
+/// into your hand" — the "if you didn't discard a card" branch, built as a
+/// `SearchOutsideGame` ability so it reuses the same sideboard-access
+/// machinery as Wish-class effects.
+pub(crate) fn lesson_search_ability(source_id: ObjectId, controller: PlayerId) -> ResolvedAbility {
+    ResolvedAbility::new(
+        Effect::SearchOutsideGame {
+            filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype(
+                "Lesson".to_string(),
+            ))),
+            count: QuantityExpr::up_to(QuantityExpr::Fixed { value: 1 }),
+            reveal: true,
+            destination: Zone::Hand,
+            source_pool: OutsideGameSourcePool::Sideboard,
+        },
+        vec![],
+        source_id,
+        controller,
+    )
 }
 
 #[cfg(test)]

@@ -21,13 +21,21 @@ use crate::types::game_state::GameState;
 /// future whole-corpus mechanic. Never special-case a card.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub enum FullDbReason {
-    /// CR 707.2 + CR 202.3: Momir seeds its random-token pool from the ENTIRE
-    /// creature corpus, keyed by mana value, at rehydrate (printed_cards.rs:1334;
-    /// `momir_pool_faces` is `#[serde(skip)]`). The emblem creates a token that's
-    /// a copy (CR 707.2) of a random creature card with the chosen mana value
-    /// (CR 202.3). A subset DB yields a tiny, wrong pool, so Momir games use the
-    /// full DB on AI workers.
+    /// CR 707.2 + CR 202.3: the Momir emblem creates a token that's a copy
+    /// (CR 707.2) of a random creature card with the chosen mana value
+    /// (CR 202.3), drawn at RESOLUTION time from the whole creature corpus via
+    /// `GameState::card_db` (`create_token_copy_from_pool`). The candidate set
+    /// is therefore whatever database the resolving engine has loaded: a subset
+    /// DB silently narrows it to the handful of cards this game's decks
+    /// reference, so Momir games must give AI workers the full DB.
     Momir,
+    /// CR 400.11 + CR 400.11b: `Effect::OpenBoosterPack` stocks its shelf from
+    /// the ENTIRE printed corpus at rehydrate (`game::boosters::build_shelf`),
+    /// because a pack may contain any card from any set. A subset DB carries
+    /// only this game's cards, so no set could fill a pack and the shelf would
+    /// come back empty — an AI worker would then simulate every booster open as
+    /// doing nothing. Games that can open a pack use the full DB.
+    BoosterPack,
 }
 
 /// Result of building an AI-worker card subset for one game. `Full` means the
@@ -47,6 +55,12 @@ pub fn game_requires_full_card_db(state: &GameState) -> Option<FullDbReason> {
         GameFormat::Momir => Some(FullDbReason::Momir),
         _ => None,
     }
+    // CR 400.11b: see `FullDbReason::BoosterPack`. Checked after the format
+    // gate so a Momir game keeps reporting the reason it escalated for. A
+    // stocked shelf is the db-free signal that this game can open a pack: it is
+    // populated at rehydrate, on the main worker that holds the full database,
+    // exactly when `boosters::game_opens_booster_packs` holds.
+    .or_else(|| (!state.booster_shelf.is_empty()).then_some(FullDbReason::BoosterPack))
 }
 
 /// Every card-face name an AI worker could need for THIS game: every object's
@@ -69,6 +83,8 @@ pub fn collect_game_card_universe(state: &GameState, db: &CardDatabase) -> BTree
             &pool.current_main,
             &pool.registered_sideboard,
             &pool.current_sideboard,
+            &pool.registered_companion,
+            &pool.current_companion,
             &pool.registered_commander,
             &pool.current_commander,
             &pool.registered_signature_spell,
@@ -225,6 +241,8 @@ mod tests {
         let db = CardDatabase::from_json_str(&export).expect("export db parses");
 
         let mut state = GameState::new_two_player(7);
+        // Source 3 is a spellbook: the default Standard pool seeds no digital-only face.
+        state.format_config = FormatConfig::historic();
 
         // Source 1: a battlefield object carrying the printed face.
         let bf_id = create_object(
@@ -426,5 +444,35 @@ mod tests {
             "single-face card must carry no layout"
         );
         assert!(subset.get_face_by_name("Plain Card").is_some());
+    }
+
+    #[test]
+    fn subset_preserves_duplicate_meld_back_storage_keys() {
+        let front_a = creature_face("Meld Front A", "meld-a");
+        let front_b = creature_face("Meld Front B", "meld-b");
+        let back_a = creature_face("Shared Meld Back", "meld-a");
+        let back_b = creature_face("Shared Meld Back", "meld-b");
+        let export = serde_json::json!({
+            "meld front a": entry_value(&front_a, Some("meld"), &[], &[], false),
+            "meld front b": entry_value(&front_b, Some("meld"), &[], &[], false),
+            "shared meld back": entry_value(&back_a, Some("meld"), &[], &[], false),
+            "shared meld back [meld-b]": entry_value(&back_b, Some("meld"), &[], &[], false),
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&export).expect("meld export parses");
+        let names = db.face_index.keys().cloned().collect();
+        let subset = CardDatabase::from_json_str(&db.export_subset_json(&names))
+            .expect("meld subset parses");
+
+        for front in [&front_a, &front_b] {
+            let printed = printed_ref_from_face(front).expect("front has printed identity");
+            assert_eq!(
+                subset
+                    .get_other_face_by_printed_ref(&printed)
+                    .map(|face| face.name.as_str()),
+                Some("Shared Meld Back"),
+                "each front oracle id retains its own shared-name back"
+            );
+        }
     }
 }

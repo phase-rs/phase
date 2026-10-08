@@ -133,7 +133,7 @@ pub fn resolve(
             // or overwrite each other (CR 611.2c fixes each affected set
             // independently).
             //
-            // CR 112.6a: "you control" must resolve against the resolving
+            // CR 109.5 + CR 113.8: "you control" must resolve against the resolving
             // ability's controller, not whatever player currently controls the
             // live source object. `FilterContext::from_ability` binds
             // `source_controller` to `ability.controller` (captured when the
@@ -216,9 +216,9 @@ fn snapshot_granted_modifications(
     // CR 603.1: triggered abilities live in a separate store the activated-only
     // path never reads. `AllOther` grants them too, as `GrantTrigger`.
     if scope == GrantedAbilityScope::AllOther {
-        for trigger in donor.trigger_definitions.iter_all() {
+        for entry in donor.trigger_definitions.iter_all() {
             mods.push(ContinuousModification::GrantTrigger {
-                trigger: Box::new(trigger.clone()),
+                trigger: Box::new(entry.definition.clone()),
             });
         }
     }
@@ -799,7 +799,7 @@ mod tests {
     }
 
     // ── Regression: group recipients must resolve against the resolving
-    // ability's controller (CR 112.6a), not the live source object's current
+    // ability's controller (CR 109.5 + CR 113.8), not the live source object's current
     // controller. Simulates the source (Grell) leaving the battlefield before
     // its triggered ability resolves — `state.objects` no longer holds it, so
     // `FilterContext::from_source` would read `source_controller: None` and
@@ -869,7 +869,7 @@ mod tests {
                 .abilities
                 .iter()
                 .any(|a| *a == draw_ability()),
-            "CR 112.6a: the grant must still land on the ORIGINAL ability \
+            "CR 109.5 + CR 113.8: the grant must still land on the ORIGINAL ability \
              controller's (P0) Horror even though the source has left play \
              and `state.objects` no longer has an entry for it"
         );
@@ -995,7 +995,7 @@ mod tests {
             state.objects[&recip_all_other]
                 .trigger_definitions
                 .iter_all()
-                .any(|t| *t == combat_damage_trigger()),
+                .any(|t| t.definition == combat_damage_trigger()),
             "AllOther must transfer the donor's triggered ability"
         );
         // ActivatedOnly must NOT transfer it — this is the discriminator. If the
@@ -1005,7 +1005,7 @@ mod tests {
             state.objects[&recip_activated_only]
                 .trigger_definitions
                 .iter_all()
-                .all(|t| *t != combat_damage_trigger()),
+                .all(|t| t.definition != combat_damage_trigger()),
             "ActivatedOnly must NOT transfer a triggered ability"
         );
         assert!(
@@ -1058,7 +1058,7 @@ mod tests {
             state.objects[&recipient]
                 .trigger_definitions
                 .iter_all()
-                .any(|t| *t == combat_damage_trigger()),
+                .any(|t| t.definition == combat_damage_trigger()),
             "the exiled donor's triggered ability must transfer to the recipient"
         );
         // The plain (non-granting) activated ability transferred.
@@ -1102,7 +1102,7 @@ mod tests {
         let granted_after = state.objects[&recipient]
             .trigger_definitions
             .iter_all()
-            .filter(|t| **t == combat_damage_trigger())
+            .filter(|t| t.definition == combat_damage_trigger())
             .count();
         assert_eq!(granted_after, 1, "the one snapshotted trigger was granted");
 

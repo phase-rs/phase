@@ -1,8 +1,12 @@
+use crate::game::engine::EngineError;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{AutoPassMode, GameState, WaitingFor};
+use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 
 use super::players;
+use super::precast_copy_shortcut;
+use super::turn_control;
 use super::turns;
 
 /// Handle a priority pass from the current priority player (CR 117.4).
@@ -26,15 +30,39 @@ pub fn handle_priority_pass(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
-    handle_priority_pass_with_limit(current_seat, state, events, None)
+    handle_priority_pass_with_limit(current_seat, state, events, None).waiting_for
 }
 
-pub fn handle_priority_pass_with_limit(
+/// The observable result of one CR 117.4 priority-pass boundary.
+///
+/// `consumed_stack_entries` is the exact count returned by the stack resolver,
+/// rather than a before/after stack-length estimate. A resolution can create
+/// triggers, so a length delta is not a trustworthy authorization cursor.
+pub(crate) struct PriorityPassOutcome {
+    pub(crate) waiting_for: WaitingFor,
+    pub(crate) consumed_stack_entries: u32,
+    /// A phase transition (the cleanup step, or a leave that ends the turn)
+    /// deferred until a live resolution settles; the engine pipeline settles
+    /// it and retries the transition once.
+    pub(crate) transition_deferred: bool,
+}
+
+/// The pass leaves the step's priority window open while its phase transition
+/// waits for a live resolution to settle.
+fn deferred_transition_outcome(state: &GameState) -> PriorityPassOutcome {
+    PriorityPassOutcome {
+        waiting_for: state.waiting_for.clone(),
+        consumed_stack_entries: 0,
+        transition_deferred: true,
+    }
+}
+
+pub(crate) fn handle_priority_pass_with_limit(
     current_seat: PlayerId,
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     stack_resolution_limit: Option<u32>,
-) -> WaitingFor {
+) -> PriorityPassOutcome {
     let canonical_seat = super::topology::priority_pass_representative(state, current_seat);
 
     // Record this seat's pass (CR 117.4). CR 117.6 + CR 805.5b: In shared-team
@@ -53,6 +81,14 @@ pub fn handle_priority_pass_with_limit(
         clear_priority_passes(state);
 
         if state.stack.is_empty() {
+            // Cleanup -> Untap is owned by the phase interpreter, but only
+            // after the resolution pipeline has retired every popped carrier
+            // and typed continuation.  Returning the current Priority window
+            // lets `engine::pass_priority_once_with_pipeline` perform that
+            // settlement before asking the turn interpreter to retry.
+            if state.phase == Phase::Cleanup && turns::phase_transition_requires_settlement(state) {
+                return deferred_transition_outcome(state);
+            }
             // CR 510.4: The combat damage step's turn-based action runs in two
             // sub-steps when a first-strike/double-strike creature is present. If
             // the first-strike sub-step paused on a CR 603.3b trigger-ordering
@@ -72,7 +108,13 @@ pub fn handle_priority_pass_with_limit(
                     .as_ref()
                     .is_some_and(|c| !c.regular_damage_done);
             if combat_damage_incomplete {
-                turns::auto_advance(state, events)
+                let (waiting_for, transition_deferred) =
+                    turns::auto_advance_reporting_deferral(state, events);
+                PriorityPassOutcome {
+                    waiting_for,
+                    consumed_stack_entries: 0,
+                    transition_deferred,
+                }
             } else if state.phase == crate::types::phase::Phase::Cleanup {
                 // CR 514.3a: Triggered abilities that triggered during the
                 // cleanup step (e.g. Stolen Uniform's "when you lose control
@@ -84,11 +126,35 @@ pub fn handle_priority_pass_with_limit(
                 // returns `None` and advances normally (the until-EOT control
                 // TCE is already pruned, so no new loss event re-fires — the
                 // one-shot trigger is gone, guaranteeing termination).
-                turns::auto_advance(state, events)
+                // CR 514.3a: "another cleanup step begins", re-running the cleanup arm
+                // directly rather than through the turn machine's step entry.
+                turns::record_step_begin(state, crate::types::phase::Phase::Cleanup);
+                let (waiting_for, transition_deferred) =
+                    turns::auto_advance_reporting_deferral(state, events);
+                PriorityPassOutcome {
+                    waiting_for,
+                    consumed_stack_entries: 0,
+                    transition_deferred,
+                }
             } else {
-                // CR 117.4: Empty stack — advance to next phase.
-                turns::advance_phase(state, events);
-                turns::auto_advance(state, events)
+                // CR 117.4: Empty stack — advance to next phase. CR 500.1 +
+                // CR 500.8: a leave that ends the turn (the final step of a
+                // unit added after the cleanup step) defers while a
+                // resolution is live; the step's priority window stays open
+                // for the engine pipeline's retry.
+                match turns::advance_phase_once(state, events) {
+                    turns::AdvancePhaseOnce::Deferred => {
+                        return deferred_transition_outcome(state);
+                    }
+                    turns::AdvancePhaseOnce::Entry(_) | turns::AdvancePhaseOnce::Skipped => {}
+                }
+                let (waiting_for, transition_deferred) =
+                    turns::auto_advance_reporting_deferral(state, events);
+                PriorityPassOutcome {
+                    waiting_for,
+                    consumed_stack_entries: 0,
+                    transition_deferred,
+                }
             }
         } else {
             // CR 117.4: Non-empty stack — resolve the next object. A batch-safe
@@ -100,9 +166,32 @@ pub fn handle_priority_pass_with_limit(
             // After resolve_next: the stack shrank by `consumed` entries.
             // Update auto-pass baselines by the SAME amount so trigger-growth
             // detection stays accurate across apply() calls (§7.2 / R6).
-            for mode in state.auto_pass.values_mut() {
-                if let AutoPassMode::UntilStackEmpty { initial_stack_len } = mode {
-                    *initial_stack_len = initial_stack_len.saturating_sub(consumed as usize);
+            let session_representative_auto_pass_keys = state
+                .stack_resolution_session
+                .as_ref()
+                .map(|session| {
+                    state
+                        .auto_pass
+                        .keys()
+                        .copied()
+                        .filter(|player| {
+                            session.representatives.contains(
+                                &super::topology::priority_pass_representative(state, *player),
+                            )
+                        })
+                        .collect::<std::collections::BTreeSet<_>>()
+                })
+                .unwrap_or_default();
+            for (&player, mode) in state.auto_pass.iter_mut() {
+                if let AutoPassMode::UntilStackEmpty {
+                    initial_stack_len, ..
+                } = mode
+                {
+                    if !session_representative_auto_pass_keys.contains(&player) {
+                        let consumed = usize::try_from(consumed)
+                            .expect("a stack resolver count fits the engine's native index size");
+                        *initial_stack_len = initial_stack_len.saturating_sub(consumed);
+                    }
                 }
             }
 
@@ -110,13 +199,18 @@ pub fn handle_priority_pass_with_limit(
             // ScryChoice, SearchChoice), preserve it instead of overwriting
             // with Priority. Only reset to Priority if the effect didn't
             // request player interaction.
-            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            let waiting_for = if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                 reset_priority(state);
                 WaitingFor::Priority {
                     player: state.active_player,
                 }
             } else {
                 state.waiting_for.clone()
+            };
+            PriorityPassOutcome {
+                waiting_for,
+                consumed_stack_entries: consumed,
+                transition_deferred: false,
             }
         }
     } else {
@@ -131,8 +225,96 @@ pub fn handle_priority_pass_with_limit(
 
         events.push(GameEvent::PriorityPassed { player_id: next });
 
-        WaitingFor::Priority { player: next }
+        PriorityPassOutcome {
+            waiting_for: WaitingFor::Priority { player: next },
+            consumed_stack_entries: 0,
+            transition_deferred: false,
+        }
     }
+}
+
+/// CR 117.3d: "If a player has priority and chooses not to take any actions,
+/// that player passes." Passing is available to the holder of any live priority
+/// window; this is the single authority for the two conditions under which the
+/// engine nevertheless refuses one.
+///
+/// CR 723.5: under a turn-control effect the authorized submitter for the
+/// holder's seat is the controller, so the live `priority_player` must be
+/// compared against that mapped submitter, never against the seat itself.
+///
+/// CR 732.2a-c: a shortened pre-cast shortcut proposal (CR 732.2a-b) obliges the
+/// player who now has priority to "make a different game choice than what was
+/// originally proposed" (CR 732.2c). The runtime models that obligation as a
+/// divergence latch, and a bare pass can never discharge it.
+///
+/// Both the `(Priority, PassPriority)` reducer arm and
+/// `pass_priority_structurally_legal` below call this, so no fast path can drift
+/// from the reducer.
+pub fn pass_priority_legality(state: &GameState, player: PlayerId) -> Result<(), EngineError> {
+    if state.priority_player != turn_control::authorized_submitter_for_player(state, player) {
+        return Err(EngineError::NotYourPriority);
+    }
+    if precast_copy_shortcut::blocks_pass(state, player) {
+        return Err(EngineError::ActionNotAllowed(
+            "A shortened pre-cast shortcut requires a different meaningful action before passing"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// `true` iff a bare `PassPriority` by `player` is legal **and** the pass
+/// boundary is decidable without simulating it.
+///
+/// This is the single predicate shared by every structural fast path for a pass
+/// — the AI legality hatch (`ai_support::filter`) and the `phase-ai` forward
+/// projection. Both must ask exactly this question; a caller that re-derives a
+/// weaker approximation reintroduces the drift `pass_priority_legality` exists to
+/// prevent.
+///
+/// CR 118.3b + CR 119.4 + CR 616.1: a parked deferred-life or cost-move payment
+/// root makes the pass boundary drain a continuation
+/// (`engine::resume_pending_continuation_if_priority`, whose own annotation on
+/// that seam cites these same three rules), and that drain's failure modes are
+/// not modelled here. Both fallible `?` sites in the drain are gated on exactly
+/// these two fields being `Some`, so refusing on either is a sound, O(1)
+/// over-approximation for roots that are already parked when this runs.
+///
+/// **Scope limit — read before "simplifying" this.** This test is evaluated
+/// BEFORE the pass boundary. The drain reads these fields AFTER
+/// `handle_priority_pass_with_limit` has resolved the top of the stack (CR
+/// 117.4), so a root parked BY that resolution is not visible here. The
+/// mitigating argument is that parking such a root coincides with installing a
+/// live non-`Priority` prompt, and each fallible drain site re-tests
+/// `WaitingFor::Priority` immediately before firing, so it is skipped at that
+/// boundary and caught here at the next window. The local half of that argument
+/// is visible in `handle_priority_pass_with_limit` above: after a CR 117.4
+/// resolution it returns `state.waiting_for.clone()` untouched and only resets
+/// to `Priority` when the resolved effect requested no interaction. Two links
+/// are read rather than proved, though — the `PaidWithDeferredSubstitution`
+/// variant's doc contract in `game::life_costs`, and that the installed prompt
+/// still stands at the drain instant (the drains are not the first thing after
+/// the resolution: `engine::sync_waiting_for` and the Priority-gated infallible
+/// `effects::drain_pending_continuation` / `effects::resume_resolution_frames`
+/// run before them). So the remainder is a known, booked residual rather than a
+/// closed window.
+///
+/// **Note the direction**: this is a test on the *fields*, not on
+/// `ai_support::classify_payment_continuation`'s verdict — that verdict can be
+/// `NotAffiliated` while a field is still `Some` (see
+/// `ai_support::payment_continuation::classify_parked_cost_move_root` and
+/// `classify_deferred_life_root`), so a verdict test would be strictly weaker
+/// and would let a fallible drain through.
+///
+/// Conservative by design, mirroring `ai_support::structurally_valid_search_selection`:
+/// `false` only costs a simulation, so any shape this does not fully model returns
+/// `false` rather than guessing.
+pub fn pass_priority_structurally_legal(state: &GameState, player: PlayerId) -> bool {
+    if state.pending_deferred_life_cost_resume.is_some() || state.pending_cost_move_resume.is_some()
+    {
+        return false;
+    }
+    pass_priority_legality(state, player).is_ok()
 }
 
 /// Determine the next player to receive priority, using APNAP order (CR 101.4).
@@ -184,7 +366,7 @@ mod tests {
     use crate::types::ability::ResolvedAbility;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{CastingVariant, StackEntry};
-    use crate::types::identifiers::CardId;
+    use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
 
     fn setup() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -238,6 +420,52 @@ mod tests {
 
         // Should advance past combat to PostCombatMain
         assert!(matches!(result, WaitingFor::Priority { .. }));
+    }
+
+    #[test]
+    fn empty_stack_phase_wrap_propagates_cleanup_deferral() {
+        let mut state = setup();
+        state.phase = Phase::End;
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+        state.priority_passes.insert(PlayerId(0));
+        state.priority_pass_count = 1;
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(1),
+            source_id: ObjectId(1),
+            controller: PlayerId(0),
+            kind: crate::types::game_state::StackEntryKind::TriggeredAbility {
+                source_id: ObjectId(1),
+                ability: Box::new(ResolvedAbility::new(
+                    crate::types::ability::Effect::NoOp,
+                    vec![],
+                    ObjectId(1),
+                    PlayerId(0),
+                )),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        state.resolving_trigger_firing = Some(TriggerFiring::Ordinary);
+
+        let outcome =
+            handle_priority_pass_with_limit(PlayerId(1), &mut state, &mut Vec::new(), None);
+
+        assert!(outcome.transition_deferred);
+        assert_eq!(state.phase, Phase::Cleanup);
+        assert!(matches!(
+            outcome.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(1)
+            }
+        ));
     }
 
     #[test]
@@ -495,6 +723,99 @@ mod tests {
         assert!(!state.priority_passes.contains(&PlayerId(1)));
     }
 
+    // --- pass legality authority (CR 117.3d / CR 723.5 / CR 732.2c) ---
+
+    /// T1. `pass_priority_legality` is the single expression of the reducer's two
+    /// pass guards. Each arm is asserted separately so a delegation that drops
+    /// one of them cannot pass on the strength of the other.
+    #[test]
+    fn pass_priority_legality_expresses_both_reducer_guards() {
+        // (a) A fresh two-player state: P0 holds priority and is its own
+        // authorized submitter, no divergence latch — the pass is legal.
+        let state = setup();
+        assert!(pass_priority_legality(&state, PlayerId(0)).is_ok());
+
+        // (b) CR 723.5: `priority_player` no longer maps to the seat's
+        // authorized submitter.
+        let mut desynced = setup();
+        desynced.priority_player = PlayerId(1);
+        assert!(matches!(
+            pass_priority_legality(&desynced, PlayerId(0)),
+            Err(EngineError::NotYourPriority)
+        ));
+
+        // (c) CR 732.2c: a shortened pre-cast shortcut obliges its owner to make
+        // a different game choice; a bare pass can never discharge it.
+        let mut latched = setup();
+        latched.precast_shortcut_runtime.must_diverge = Some(PlayerId(0));
+        let Err(EngineError::ActionNotAllowed(message)) =
+            pass_priority_legality(&latched, PlayerId(0))
+        else {
+            panic!("a latched divergence obligation must reject a bare pass");
+        };
+        assert!(
+            message.contains("shortened pre-cast shortcut"),
+            "the reducer's exact message must be preserved by the extraction, got {message:?}"
+        );
+    }
+
+    /// T1b. `pass_priority_structurally_legal` is the authority PLUS the
+    /// parked-continuation field gate — not an alias for
+    /// `pass_priority_legality(..).is_ok()`.
+    ///
+    /// Each `false` case re-asserts that `pass_priority_legality` is still `Ok`
+    /// in the same state. That paired positive is the non-vacuity partner: it
+    /// proves the refusal came from the field gate and not from the authority,
+    /// so collapsing the two functions into one goes red here.
+    ///
+    /// The gate is `Option::is_some` on the two fields, so it is deliberately
+    /// variant-agnostic; the variants below are the cheapest constructible
+    /// representatives. `DeferredLifeCostResume::ManaRoot` is one of the two
+    /// fallible deferred-life roots that motivate the gate.
+    #[test]
+    fn pass_priority_structurally_legal_adds_the_parked_continuation_gate() {
+        use crate::types::game_state::{
+            DeferredLifeCostResume, ManaAbilityResume, PendingCostMoveResume,
+        };
+
+        let clean = setup();
+        assert!(pass_priority_structurally_legal(&clean, PlayerId(0)));
+
+        let mut deferred_life = setup();
+        deferred_life.pending_deferred_life_cost_resume = Some(DeferredLifeCostResume::ManaRoot {
+            player: PlayerId(0),
+            resume: Box::new(ManaAbilityResume::Priority),
+            remaining_life_payments: vec![],
+            resume_at_resolution_depth: 0,
+        });
+        assert!(!pass_priority_structurally_legal(
+            &deferred_life,
+            PlayerId(0)
+        ));
+        assert!(
+            pass_priority_legality(&deferred_life, PlayerId(0)).is_ok(),
+            "the refusal must come from the field gate, not from the authority"
+        );
+
+        let mut cost_move = setup();
+        cost_move.pending_cost_move_resume = Some(PendingCostMoveResume::LoyaltyActivation {
+            player: PlayerId(0),
+            pw_id: crate::types::identifiers::ObjectId(1),
+            resolved: Box::new(ResolvedAbility::new(
+                crate::types::ability::Effect::NoOp,
+                vec![],
+                crate::types::identifiers::ObjectId(1),
+                PlayerId(0),
+            )),
+            ability_index: 0,
+        });
+        assert!(!pass_priority_structurally_legal(&cost_move, PlayerId(0)));
+        assert!(
+            pass_priority_legality(&cost_move, PlayerId(0)).is_ok(),
+            "the refusal must come from the field gate, not from the authority"
+        );
+    }
+
     #[test]
     fn resolve_preserves_interactive_waiting_for() {
         use crate::game::zones::create_object;
@@ -552,6 +873,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 

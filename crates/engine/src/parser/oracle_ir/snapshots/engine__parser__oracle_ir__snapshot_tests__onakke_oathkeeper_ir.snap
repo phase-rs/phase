@@ -1,0 +1,200 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 157,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Creatures can't attack planeswalkers you control unless their controller pays {1} for each creature they control that's attacking a planeswalker you control."
+      },
+      "node": {
+        "Static": {
+          "definition": {
+            "mode": "CantAttack",
+            "affected": {
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": "Opponent",
+              "properties": []
+            },
+            "modifications": [],
+            "condition": {
+              "type": "UnlessPay",
+              "cost": {
+                "type": "Cost",
+                "shards": [],
+                "generic": 1
+              },
+              "scaling": {
+                "type": "PerAffectedCreature"
+              },
+              "defended": "Planeswalker"
+            },
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "Creatures can't attack planeswalkers you control unless their controller pays {1} for each creature they control that's attacking a planeswalker you control."
+          },
+          "source_text": "Creatures can't attack planeswalkers you control unless their controller pays {1} for each creature they control that's attacking a planeswalker you control.",
+          "body_ir": null
+        }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 158,
+          "end_byte": 277,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "{4}{W}{W}, Exile this card from your graveyard: Return target planeswalker card from your graveyard to the battlefield."
+      },
+      "node": {
+        "Spell": {
+          "source_text": "Return target planeswalker card from your graveyard to the battlefield",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 70,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Return target planeswalker card from your graveyard to the battlefield"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "ChangeZone",
+                    "origin": "Graveyard",
+                    "destination": "Battlefield",
+                    "target": {
+                      "type": "Typed",
+                      "type_filters": [
+                        "Planeswalker"
+                      ],
+                      "controller": "You",
+                      "properties": [
+                        {
+                          "type": "InZone",
+                          "zone": "Graveyard"
+                        }
+                      ]
+                    },
+                    "owner_library": false,
+                    "enter_transformed": false,
+                    "enter_tapped": false,
+                    "enters_attacking": false
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": null,
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              }
+            ],
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
+          },
+          "shell": {
+            "sub_link": null,
+            "cost": {
+              "type": "Composite",
+              "costs": [
+                {
+                  "type": "Mana",
+                  "cost": {
+                    "type": "Cost",
+                    "shards": [
+                      "White",
+                      "White"
+                    ],
+                    "generic": 4
+                  }
+                },
+                {
+                  "type": "Exile",
+                  "count": 1,
+                  "zone": "Graveyard",
+                  "filter": {
+                    "type": "SelfRef"
+                  }
+                }
+              ]
+            },
+            "activation_zone": "Graveyard",
+            "description": "{4}{W}{W}, Exile this card from your graveyard: Return target planeswalker card from your graveyard to the battlefield.",
+            "stages": [
+              "NormalizeActivatedManaInstead",
+              "ExtractCostReduction",
+              "ExtractManaSpendTrigger"
+            ]
+          },
+          "die_results": [],
+          "root_transforms": []
+        }
+      }
+    }
+  ],
+  "source_text": "Creatures can't attack planeswalkers you control unless their controller pays {1} for each creature they control that's attacking a planeswalker you control.\n{4}{W}{W}, Exile this card from your graveyard: Return target planeswalker card from your graveyard to the battlefield.",
+  "card_name": "Onakke Oathkeeper"
+}

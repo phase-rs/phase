@@ -42,11 +42,13 @@ This skill lands contributor work, but **only after it meets the maintainer's ba
 
 7. **Never auto-enqueue a batch on the strength of a first-pass review.** Enqueue is effectively irreversible under the merge queue. Bring the maintainer the per-PR evidence (change summary, blast radius, regression/perf findings, test-discrimination result, architecture verdict, and large-refactor value verdict when applicable) and confirm authority. When authorized, enqueue only PRs that clear the full bar above — and improve the ones that fall short *first*.
 
-### Gemini review handling
+### Independent review pass
 
-- If a PR has **no Gemini review**, trigger one (`@gemini-code-assist review`) AND run a local `/code-review` — the bot's findings and the codebase-specific review are complementary.
-- If Gemini reports **daily quota exhaustion** (a `> [!WARNING] You have reached your daily quota limit` comment), stop triggering Gemini for the rest of the session and fall back to local `/code-review` only. Detect it by reading the Gemini comment body, not just by its presence.
-- A Gemini review may be **stale** (filed against an earlier commit). Confirm/refute each finding against the PR *head*, not the review timestamp — findings are routinely already fixed in later commits.
+The bar wants a second, independent look on top of `review-engine-impl` — historically an external bot supplied it for free. **Gemini Code Assist has been sunset**: never post `@gemini-code-assist` (or any Gemini) triggers. The bot no longer answers, so summoning it spends a round-trip and posts dead-noise comments while adding zero coverage.
+
+- **CodeRabbit** is the free external reviewer for this public repo, and it reviews automatically on push — do not trigger it manually. When it has posted a review, treat its findings as the independent pass: confirm-or-refute each against the PR *head* (not the review timestamp — findings are routinely already fixed in later commits) and fold confirmed ones into the gate.
+- When **no external review exists** (CodeRabbit not yet run, or not installed) AND the PR trips a risk trigger — hot/shared path, new machinery, or the large-refactor value gate — run a local `/code-review` as the independent pass. Skip it for low-risk PRs an external review already covers: a local pass spends tokens, so scale it to blast radius rather than running it blanket.
+- Any external review — bot or human — may be **stale** (filed against an earlier commit). Always confirm/refute against the current head, never the review timestamp.
 
 ### Re-auditing merged PRs
 
@@ -56,7 +58,7 @@ When asked to ensure already-merged PRs meet the bar (or when a PR merged during
 
 Before changing code, read these files from the repo root and apply their logic:
 
-- `$review-impl` for the implementation-gap review lenses.
+- `$review-engine-impl` for the implementation-gap review lenses.
 - `.claude/agents/pr-review-comment-resolver.md` for phase.rs-specific review-comment fetching, categorization, prioritization, resolution, verification, and reporting.
 - `.agents/skills/engine-implementer/SKILL.md` when the PR needs the full engine implementation plan/review cycle.
 
@@ -67,7 +69,7 @@ Do not paraphrase these from memory. Re-read them each time because they are the
 A non-stop fleet exhausts GitHub's **5,000-req/hr REST `core`** bucket long before the separate GraphQL bucket. Minimize `core` reads:
 
 - **Scan diffs locally, not via API.** After fetching the PR head ref (needed for checkout anyway), use `git diff origin/main...pr/<N>` — never `gh pr diff <N>`, which spends one `core` request per PR and returns a truncatable payload. The local diff is free and carries the full patch (gitlink modes, binary flags, deletion counts).
-- **Comments: comprehensive via GraphQL for the gate; a windowed sweep only for triage.** Most feedback here is **top-level** — review bodies (Gemini's summary, human reviews) and issue comments — which have no resolved-flag, so the "all blocking comments resolved" gate must read every one. Fetch `reviews` + `comments` + inline `reviewThreads` comprehensively in one GraphQL call per PR (idle bucket), paginating every connection whose `hasNextPage` is true — never a time-windowed slice, which can drop an old unaddressed blocker (see `pr-review-comment-resolver.md` §2). A repo-wide `since=` REST sweep is acceptable **only** for lightweight "what's new across the batch" triage: derive `since` from the run window, dedup by comment `id` (`since` is inclusive), never a per-PR un-`since`'d `--paginate` walk (the top `core` drain). Do NOT persist a shared global high-water-mark file: concurrent fleet agents race on it and skip each other's new comments.
+- **Comments: comprehensive via GraphQL for the gate; a windowed sweep only for triage.** Most feedback here is **top-level** — review bodies (a bot's summary, human reviews) and issue comments — which have no resolved-flag, so the "all blocking comments resolved" gate must read every one. Fetch `reviews` + `comments` + inline `reviewThreads` comprehensively in one GraphQL call per PR (idle bucket), paginating every connection whose `hasNextPage` is true — never a time-windowed slice, which can drop an old unaddressed blocker (see `pr-review-comment-resolver.md` §2). A repo-wide `since=` REST sweep is acceptable **only** for lightweight "what's new across the batch" triage: derive `since` from the run window, dedup by comment `id` (`since` is inclusive), never a per-PR un-`since`'d `--paginate` walk (the top `core` drain). Do NOT persist a shared global high-water-mark file: concurrent fleet agents race on it and skip each other's new comments.
 - **Prefer GraphQL builders for state.** `gh pr view --json` / `gh pr list --json` / `gh pr checks` are GraphQL (the idle bucket) — they do not relieve `core`, but they are the right place to read PR state and check rollups.
 - **Back-pressure off response headers.** Watch `x-ratelimit-remaining` on calls you already make; consult `gh api rate_limit` at most once per batch (it counts against the *secondary* limit). When `core` runs low, pause **only at PR boundaries** — never inside the approve → label → enqueue → verify sequence (that critical section must not be interrupted; a half-enqueued PR is worse than waiting).
 
@@ -310,7 +312,7 @@ This expiry path is only for contributors not addressing requested changes. It m
 
 **Operational — posting and fetching.** Post every PR comment, review body, and final report through a temp file (`gh pr comment <N> --body-file /tmp/body.md`, `gh pr review <N> --body-file /tmp/review.md`), **never** an inline `--body "…"` string. Inline bodies are mangled by the shell — zsh strips backticked identifiers and code spans, which has silently corrupted the technical claims of a *blocking* review. Write the body to a file, then pass `--body-file`.
 
-**Fetching — gate vs triage.** For per-PR comment **resolution** (the gate), fetch `reviews` + `comments` + `reviewThreads` comprehensively via one GraphQL call per PR (the idle bucket — cheap even at fleet scale; query and pagination rules in `pr-review-comment-resolver.md` §2). Most feedback here is top-level review bodies and issue comments, which carry no resolved-flag — read every one's body for findings (Gemini posts its review as `COMMENTED` with `reviewDecision: null`, so do NOT gate on review `state`; treat `CHANGES_REQUESTED` as an additional hard block). The repo-wide `since=` REST sweep below is **only** for lightweight cross-batch triage of what changed recently — never the resolution gate, and never a per-PR un-`since`'d `--paginate` walk (that drains the 5,000/hr `core` bucket at fleet scale):
+**Fetching — gate vs triage.** For per-PR comment **resolution** (the gate), fetch `reviews` + `comments` + `reviewThreads` comprehensively via one GraphQL call per PR (the idle bucket — cheap even at fleet scale; query and pagination rules in `pr-review-comment-resolver.md` §2). Most feedback here is top-level review bodies and issue comments, which carry no resolved-flag — read every one's body for findings (review bots typically post as `COMMENTED` with `reviewDecision: null`, so do NOT gate on review `state`; treat `CHANGES_REQUESTED` as an additional hard block). The repo-wide `since=` REST sweep below is **only** for lightweight cross-batch triage of what changed recently — never the resolution gate, and never a per-PR un-`since`'d `--paginate` walk (that drains the 5,000/hr `core` bucket at fleet scale):
 
 ```bash
 gh api --paginate 'repos/phase-rs/phase/pulls/comments?since=<ISO8601>&per_page=100'   # inline review comments
@@ -332,7 +334,7 @@ When a comment asks for a questionable design, satisfy the underlying concern wh
 
 ## Architecture Review
 
-After comment resolution, run `$review-impl` against the PR diff.
+After comment resolution, run `$review-engine-impl` against the PR diff.
 
 Use this diff basis:
 
@@ -346,7 +348,7 @@ Ask, explicitly, TWO questions in this order:
 1. **Is the change in the architecturally correct LOCATION (the right seam)?** Is this fix made at the layer / module / function where the codebase's design says the responsibility belongs — or is it a symptom-patch at the wrong seam that merely makes the test pass? A change on the wrong code path is **technical debt even when CI is green**: it ossifies a dead or duplicate path, scatters logic that should live in one authority, and the *next* card in the class won't be covered because the real seam was never touched. **This is the single most important check in the entire review.** Increasing PR velocity NEVER justifies merging debt — a wrong-location fix that ships is worse than no fix, because it looks done while leaving the actual seam broken and now obscured. If the correct location is a different function/module than the PR touches, the verdict is **BLOCK** (close or request re-implementation at the right seam), or escalate to the full engine cycle — it is *not* an inline patch of the wrong location. Always cite the correct seam in the report, and release the assignment lock (see *Releasing the Assignment Lock*) when you BLOCK and hand the PR back. (Precedent: #1251 added a green, inert branch to `classify_quoted_inner` when the real fix belonged in `parse_spells_have_keyword` / `StaticMode::CastWithKeyword` — BLOCKED despite passing CI, because merging it would have ossified a dead path and left the target card class uncovered.)
 2. **Is the change AT that seam the MOST IDIOMATIC change possible?** Once the location is right, the implementation at it must be the one a principal engineer steeped in this codebase would write — the established building block reused rather than re-implemented, an existing typed enum parameterized rather than a new `bool` or sibling variant, `nom` combinators composed rather than string dispatch. A correct-but-unidiomatic change at the right seam is still a finding, not a nit: it passes CI and may even cover the class, but it diverges from house style and seeds the next contributor's copy-paste with a non-idiom. Bring it to the idiom before merge (improve the author's branch per Quality Bar rule 1) — never merge "works, but not how we'd write it."
 
-Apply the relevant lenses from `review-impl.md`, especially:
+Apply the relevant lenses from `review-engine-impl.md`, especially:
 
 - **correct location / right seam** — is this the layer and function a maintainer would change, or a wrong-place patch that adds debt? Highest priority; a "no" here is disqualifying regardless of how clean the code looks
 - **most idiomatic change at the seam** — once the location is right, is the implementation the one a principal engineer would write (building-block reuse over re-implementation, enum parameterization over a new bool/sibling, composed combinators over string dispatch)? A correct-but-unidiomatic change is a finding, not a nit
@@ -449,7 +451,7 @@ if tilt get uiresource clippy >/dev/null 2>&1; then
   ./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data
 else
   cargo clippy --all-targets -- -D warnings
-  cargo test -p engine
+  cargo test -p phase-engine
   ./scripts/gen-card-data.sh
 fi
 ```
@@ -505,7 +507,7 @@ Classify from the behavior in the diff, not the author or PR title. Label every 
 
 Apply the policy-configured **`quality` label** in addition to the type label when the PR is additive and genuinely well executed: it adds real engine/parser/frontend capability or coverage, has almost no review churn, lands at the right seam, uses the house idioms, has discriminating tests/proof, and required no maintainer redesign beyond tiny local fixups. Do not apply `quality` to merely acceptable PRs, bugfixes with heavy correction, broad churn, PRs that needed substantial maintainer rescue, or anything still carrying unresolved deferrals. Record matching praise signals (`right-seam`, `scope-discipline`, `discriminating-runtime-test`, `parameterized-not-proliferated`, `evidence-backed-pushback` when applicable) in the local event.
 
-The manual quality gate is one-shot and current-PR-only: the claimed parse-impact count must equal the measured parse-diff count **and the normalized card sets must be identical**; `review-impl` must confirm the existing authority/right seam; and at least one production-pipeline test must be demonstrated to fail when the production change is reverted. Prior standing is irrelevant. Use the existing label and attach the existing praise tokens to the ordinary review/enqueue event—there is no `quality_recommended` event.
+The manual quality gate is one-shot and current-PR-only: the claimed parse-impact count must equal the measured parse-diff count **and the normalized card sets must be identical**; `review-engine-impl` must confirm the existing authority/right seam; and at least one production-pipeline test must be demonstrated to fail when the production change is reverted. Prior standing is irrelevant. Use the existing label and attach the existing praise tokens to the ordinary review/enqueue event—there is no `quality_recommended` event.
 
 After every delegated or direct label operation, verify live state with `gh pr view <PR> --json labels`. Stdout from `gh pr edit`, a handler report, or a local event is not proof. Missing type/quality labels must be repaired or reported before enqueue is considered complete.
 
@@ -552,7 +554,7 @@ Every item must be satisfied before running `gh pr merge`. Failing any item mean
 - [ ] **Adversarial second pass clean** for hot/shared-path or new-machinery PRs — "would a principal engineer merge this, or request changes?" answered, findings resolved.
 - [ ] **Architecture Review came back clean** (or all findings were resolved inline). No outstanding `class-of-cases-vs-special-case`, `building-block-reuse`, `CR-annotation-correctness`, or `engine/frontend boundary` issues left open.
 - [ ] **All blocking review comments resolved.** Author/reviewer comments tagged as required changes are addressed in commits; non-blocking nits may be deferred.
-- [ ] **No open finding more severe than the verdict.** If Gemini, another bot, or a reviewer raised an issue you would rate higher than your own verdict, you must confirm-or-refute it against the head with code evidence and resolve it before enqueue. A green "approve" never overrides an unaddressed higher-severity finding from another reviewer — reconcile it explicitly, do not enqueue past it.
+- [ ] **No open finding more severe than the verdict.** If a bot or a reviewer raised an issue you would rate higher than your own verdict, you must confirm-or-refute it against the head with code evidence and resolve it before enqueue. A green "approve" never overrides an unaddressed higher-severity finding from another reviewer — reconcile it explicitly, do not enqueue past it.
 - [ ] **Verification passed.** `cargo fmt` + the relevant Tilt resources (or fallback equivalents) reported green. If the PR touches engine/parser, `card-data` was included.
 - [ ] **No textual merge conflicts with `origin/main`.** Either the PR was already an ancestor descendant, or you merged main in cleanly. The queue can't speculate a rebase through textual conflicts.
 - [ ] **No explicit deferral was left that should have been finished in-PR.** Per "Explicit Deferrals" section ROI calibration — if a Frontier-tier PR left a deferral that ROI says you should have finished, finish it before enqueuing or report and stop.
@@ -575,7 +577,7 @@ For each PR, report:
 - checkout location and whether it was a worktree or main workspace
 - update status against `origin/main`
 - review comments resolved and any left manual
-- architecture-review findings from `review-impl.md`
+- architecture-review findings from `review-engine-impl.md`
 - inline fixes made vs full-cycle work invoked or recommended
 - deferred items completed vs left open
 - verification commands and results

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import type { GameFormat } from "../../adapter/types";
+import type { FormatConfig } from "../../adapter/types";
 import { DECK_CONSTRUCTION_FORMATS } from "../../data/formatRegistry";
 import {
   sideboardPolicyForFormat,
@@ -9,15 +9,17 @@ import {
 
 /**
  * Map the lowercase deck-builder format string (e.g. "standard", "commander")
- * to the engine's `GameFormat` PascalCase identifier. Derived from the
+ * to the engine's resolved `FormatConfig` for that format. Derived from the
  * engine-authored deck-construction formats so adding a deck format is
- * automatic here.
+ * automatic here. Returns the whole config, not a bare `GameFormat`: the
+ * sideboard policy is a stored field on the config, and only the config can
+ * carry a custom format's declared policy.
  */
-function mapToEngineFormat(format: string | undefined): GameFormat | null {
+function mapToEngineFormatConfig(format: string | undefined): FormatConfig | null {
   if (!format) return null;
   const lower = format.toLowerCase();
   const match = DECK_CONSTRUCTION_FORMATS.find((m) => m.format.toLowerCase() === lower);
-  return match?.format ?? null;
+  return match?.default_config ?? null;
 }
 
 /**
@@ -35,13 +37,13 @@ const FALLBACK_CONSTRUCTED_POLICY: SideboardPolicy = { type: "Limited", data: 15
 export function useSideboardPolicy(format: string | undefined): SideboardPolicy {
   const [policy, setPolicy] = useState<SideboardPolicy>(FALLBACK_CONSTRUCTED_POLICY);
   useEffect(() => {
-    const engineFormat = mapToEngineFormat(format);
-    if (!engineFormat) {
+    const engineFormatConfig = mapToEngineFormatConfig(format);
+    if (!engineFormatConfig) {
       setPolicy(FALLBACK_CONSTRUCTED_POLICY);
       return;
     }
     let cancelled = false;
-    sideboardPolicyForFormat(engineFormat)
+    sideboardPolicyForFormat(engineFormatConfig)
       .then((next) => {
         if (!cancelled) setPolicy(next);
       })

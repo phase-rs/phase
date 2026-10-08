@@ -1,0 +1,98 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 412
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Unimplemented",
+        "name": "unknown",
+        "description": "Station"
+      },
+      "cost": null,
+      "sub_ability": null,
+      "duration": null,
+      "description": "Station",
+      "target_prompt": null,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "affected": {
+        "type": "Typed",
+        "type_filters": [
+          "Creature"
+        ],
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Another"
+          }
+        ]
+      },
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 1
+        },
+        {
+          "type": "AddToughness",
+          "value": 1
+        }
+      ],
+      "condition": {
+        "type": "HasCounters",
+        "counters": {
+          "type": "OfType",
+          "data": "charge"
+        },
+        "minimum": 2
+      },
+      "affected_zone": null,
+      "effect_zone": null,
+      "active_zones": [],
+      "characteristic_defining": false,
+      "description": "Other creatures you control get +1/+1."
+    },
+    {
+      "mode": "Continuous",
+      "affected": {
+        "type": "SelfRef"
+      },
+      "modifications": [
+        {
+          "type": "AddKeyword",
+          "keyword": "Flying"
+        },
+        {
+          "type": "AddKeyword",
+          "keyword": "Lifelink"
+        }
+      ],
+      "condition": {
+        "type": "HasCounters",
+        "counters": {
+          "type": "OfType",
+          "data": "charge"
+        },
+        "minimum": 12
+      },
+      "affected_zone": null,
+      "effect_zone": null,
+      "active_zones": [],
+      "characteristic_defining": false,
+      "description": "12+ | Flying, lifelink"
+    }
+  ],
+  "replacements": [],
+  "extractedKeywords": []
+}

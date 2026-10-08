@@ -1,8 +1,33 @@
 {
+  "lan": {
+    "title": "Lokales Netzwerk",
+    "guidance": "Gib eine Serveradresse ein, um manuell beizutreten. HTTPS-Browserseiten benötigen einen sicheren wss://-Server; verwende die Desktop-App für lokale ws://-Adressen.",
+    "unavailable": "LAN-Hosting und -Suche erfordern eine aktuelle Desktop-App.",
+    "checking": "LAN-Unterstützung wird geprüft…",
+    "start": "LAN-Hosting starten",
+    "stop": "LAN-Hosting stoppen",
+    "scan": "LAN-Server suchen",
+    "pending": "Wird ausgeführt…",
+    "running": "LAN-Hosting läuft. Teile eine Adresse mit Spielern in deinem Netzwerk.",
+    "empty": "Keine LAN-Server gefunden. Prüfe, ob der Host im selben Netzwerk läuft, und versuche es erneut.",
+    "add": "Server hinzufügen",
+    "copy": "Adresse kopieren",
+    "copied": "Adresse kopiert",
+    "error": "LAN-Vorgang fehlgeschlagen. {{detail}}",
+    "added": "Server hinzugefügt. Verwende einen dedizierten Server, sobald seine Verbindung kompatibel und bereit ist.",
+    "originUnavailable": "LAN-Hosting ist für diese App-Version oder Herkunft nicht verfügbar."
+  },
   "concedeDialog": {
     "title": "Spiel aufgeben?",
-    "message": "Dein Gegner wird zum Sieger erklärt.",
-    "concede": "Aufgeben"
+    "game": {
+      "label": "Dieses Spiel aufgeben",
+      "ordinaryMessage": "Dein Gegner gewinnt dieses Spiel.",
+      "matchMessage": "Du gibst nur das aktuelle Spiel auf. Ist das Match noch nicht entschieden, folgt das Sideboarden oder das nächste Spiel."
+    },
+    "match": {
+      "label": "Gesamtes Match aufgeben",
+      "message": "Du gibst das Match auf. Dein Gegner gewinnt das Match und es werden keine weiteren Spiele gespielt."
+    }
   },
   "takebackDialog": {
     "requestedTitle": "{{name}} beantragt eine Rücknahme",
@@ -53,24 +78,38 @@
     "matchScore": "Partiestand {{p0}}-{{p1}}{{draws}}. Verschiebe Karten zwischen Haupt und Sideboard und reiche dann ein.",
     "draws_one": " ({{count}} Unentschieden)",
     "draws_other": " ({{count}} Unentschieden)",
-    "main": "Haupt ({{count}}/{{total}})",
+    "main": "Haupt ({{count}}, min. {{min}})",
+    "mainNoMinimum": "Haupt ({{count}})",
     "sideboard": "Sideboard ({{count}})",
+    "sideboardCapped": "Sideboard ({{count}}/{{max}})",
     "moveFromSideboard": "Karten aus dem Sideboard verschieben.",
     "moveFromMain": "Karten aus dem Hauptdeck verschieben.",
-    "matchesRegistered": "Hauptdeck entspricht der registrierten Größe ({{total}}).",
-    "submitDisabled": "Hauptdeck hat {{count}} / {{total}} — Einreichen deaktiviert.",
     "resetAria": "Auf registriertes Deck zurücksetzen",
     "reset": "Zurücksetzen",
     "submitAria": "Deck für das nächste Spiel einreichen",
-    "submitDeck": "Deck einreichen"
+    "submitDeck": "Deck einreichen",
+    "readyToSubmit": "Deck ist legal — bereit zum Einreichen.",
+    "belowMinimum": "Hauptdeck benötigt mindestens {{min}} Karten — aktuell {{count}}.",
+    "overSideboardCap": "Sideboard hat {{count}} Karten — maximal {{max}}."
   },
   "brokerOfflinePrompt": {
     "title": "Lobby-Server nicht erreichbar",
     "message": "Dein Spiel wird nicht öffentlich gelistet. Du kannst trotzdem über P2P hosten — teile einfach den Raumcode direkt mit deinem Gegner.",
     "continueWithoutLobby": "Ohne Lobby fortfahren"
   },
+  "lobbyCapability": {
+    "formatNeedsNewerServer": "Dieser Lobby-Server ist zu alt, um Spiele im gewählten Format aufzulisten (er benötigt Lobby-Protokoll {{needed}})."
+  },
   "joinErrorDialog": {
     "dismiss": "Schließen"
+  },
+  "reconnectRejected": {
+    "firstMessageInvalid": "Der Host hat die Verbindung vor der Einrichtung abgelehnt. Aktualisiere beide Fenster und versuche es erneut.",
+    "versionRequired": "Dieser Host benötigt das Übertragungsprotokoll v{{version}}. Aktualisiere beide Fenster und versuche es erneut.",
+    "versionMismatch": "Übertragungsprotokoll stimmt nicht überein: Dein Client hat v{{guestVersion}} gesendet, der Host verwendet jedoch v{{hostVersion}}. Aktualisiere beide Fenster.",
+    "malformedAuthority": "Der Host hat eine ungültige Verbindungsberechtigung abgelehnt. Tritt mit einem neuen Raumcode erneut bei.",
+    "frameUndecodable": "Der Host hat eine Nachricht gesendet, die dieser Client nicht lesen konnte. Aktualisiere beide Fenster und versuche es erneut.",
+    "hostDisconnectedBeforeSetup": "Die Verbindung zum Host wurde vor Abschluss der Einrichtung getrennt."
   },
   "serverOfflinePrompt": {
     "title": "Matchmaking nicht erreichbar",
@@ -89,27 +128,38 @@
     "waitTimeJustNow": "gerade eben",
     "waitTimeMinutes": "vor {{count}}m",
     "waitTimeHours": "vor {{count}}h",
-    "buildMismatchTitle": "Host nutzt {{version}} ({{commit}}) — dein Build ist anders. Aktualisiere, um auf den neuesten Stand zu kommen.",
     "gameFull": "Dieses Spiel ist voll.",
     "youAreHosting": "Du hostest dieses Spiel.",
     "hosting": "Hosten",
     "sandboxConfirm": "Dies ist ein Sandbox-Spiel. Spieler mit Debug-Berechtigung können den Spielzustand direkt manipulieren. Fortfahren?",
     "draftBadgeTitle": "{{kind}} Draft — {{setCode}}",
     "draftBadge": "{{setCode}} Draft",
+    "cubeDraftBadgeTitle": "{{kind}} Draft — {{cubeName}}",
+    "cubeDraftBadge": "{{cubeName}} Draft",
     "p2pBadgeTitle": "Peer-to-Peer-Spiel (der Host führt die Engine aus)",
     "sandboxBadgeTitle": "Dieses Spiel erlaubt Debug-Aktionen. Zum Testen nutzen — keine kompetitive Partie.",
+    "hintSlow": "LANGSAM",
+    "hintSlowTitle": "Dieser Server hat zuletzt langsam auf Spieler reagiert.",
+    "hintUnreliable": "UNZUVERLÄSSIG",
+    "hintUnreliableTitle": "Spieler konnten sich zuletzt oft nicht mit diesem Server verbinden.",
     "rankedBadgeTitle": "Ranglistenraum",
     "rankedBadge": "RANGLISTE",
     "anonymous": "Anonym",
     "by": "von {{name}}",
     "passwordProtected": "Passwortgeschützt",
-    "join": "Beitreten"
+    "join": "Beitreten",
+    "originTitle": "Gelistet von {{name}} {{kind}}",
+    "kindFull": "(Spielserver)",
+    "kindLobbyOnly": "(Lobby-Broker)"
+  },
+  "connectionMode": {
+    "label": "Verbindung",
+    "server": "Offizieller Server",
+    "p2p": "P2P"
   },
   "serverPicker": {
     "title": "Server",
-    "subtitle": "Wähle eine Region oder verbinde dich mit einer selbst gehosteten Instanz.",
-    "noneLabel": "Keiner (nur P2P)",
-    "directCodes": "direkte Codes",
+    "subtitle": "Wähle, wo du hostest und welche Lobbys du durchsuchst.",
     "official": "Offiziell",
     "selfHosted": "Selbst gehostet",
     "customUrlPlaceholder": "wss://dein-server.beispiel/ws",
@@ -118,7 +168,23 @@
     "urlError": "Die URL muss mit ws:// oder wss:// beginnen",
     "connected": "Verbunden",
     "connectionFailed": "Verbindung fehlgeschlagen",
-    "testing": "Wird getestet…"
+    "testing": "Wird getestet…",
+    "hostingServer": "Host-Server",
+    "hostingServerHelp": "Wo die von dir gehosteten Spiele erstellt und registriert werden.",
+    "sources": "Lobby-Quellen",
+    "sourcesHelp": "Offene Tische aller Quellen unten werden zu einer Liste zusammengeführt.",
+    "addSource": "Quelle hinzufügen",
+    "remove": "Entfernen",
+    "useForHosting": "Zum Hosten verwenden",
+    "sourceStatusConnecting": "Verbinde…",
+    "sourceStatusDegraded": "Nicht erreichbar",
+    "sourceDuplicate": "Dieser Server ist bereits eine Lobby-Quelle.",
+    "sourceCapReached": "Es können bis zu {{max}} Quellen hinzugefügt werden.",
+    "directoryOrigin": "Verzeichnis",
+    "sourceScore": "Punktzahl {{score}}",
+    "enable": "Aktivieren",
+    "disable": "Deaktivieren",
+    "incompatibleVersion": "Inkompatibel — Serverversion {{version}}"
   },
   "lobbyDraftRooms": {
     "noRooms": "Keine Draft-Räume verfügbar",
@@ -139,10 +205,7 @@
     "createDraft": "Draft erstellen"
   },
   "lobbyView": {
-    "directConnection": "Direktverbindung",
     "onlineLobby": "Online-Lobby",
-    "pickServerTitle": "Wähle einen Server, um den Online-Lobby-Modus zu nutzen",
-    "pickServer": "Server wählen",
     "online": "{{count}} online",
     "format": "Format",
     "allFormats": "Alle Formate",
@@ -154,26 +217,25 @@
     "noFormatGames": "Derzeit keine {{format}}-Spiele.",
     "noOpenGames": "Derzeit keine offenen Spiele.",
     "showAllFormats": "Alle Formate anzeigen",
-    "p2pNotice": "Dedizierter Server nicht verfügbar. Du kannst trotzdem direkt mit einem 5-stelligen Raumcode hosten oder beitreten.",
-    "joinByCode": "Per Code beitreten",
     "joinATable": "Einem Tisch beitreten",
-    "p2pCodePlaceholder": "5-stelligen P2P-Code eingeben",
     "serverCodePlaceholder": "Code oder CODE@IP:PORT eingeben",
     "join": "Beitreten",
     "host": "Hosten",
-    "hostP2PDescription": "Erstelle einen direkten Raum für einen Gegner.",
     "hostServerDescription": "Öffne einen Raum und warte auf Spieler.",
     "hostDraft": "Draft hosten",
     "hostGame": "Spiel hosten",
-    "hostP2PGame": "P2P-Spiel hosten",
     "passwordRequired": "Passwort erforderlich",
     "passwordPlaceholder": "Passwort eingeben",
-    "watch": "Watch"
+    "watch": "Watch",
+    "sourcesDegraded": "Einige Lobby-Quellen sind nicht erreichbar",
+    "invalidJoinServer": "Die Serveradresse in diesem Beitrittscode ist ungültig."
   },
   "hostSetup": {
+    "dedicatedUnavailable": "Derzeit ist kein dedizierter Server verfügbar. Du kannst ein Spiel per P2P hosten.",
     "hostDirectMatch": "Direkte Partie hosten",
     "hostMatch": "Partie hosten",
-    "p2pNotice": "Der dedizierte Server ist nicht verfügbar, daher nutzt dieser Raum eine Direktverbindung.",
+    "p2pNotice": "Peer-to-Peer-Modus. Dieser Raum verbindet die Spieler direkt, statt auf einem Server zu laufen.",
+    "p2pSeatCap": "P2P-Tische haben höchstens {{max}} Plätze, daher ist die Spielerzahl begrenzt.",
     "roomName": "Raumname",
     "optional": "(optional)",
     "roomNamePlaceholder": "z. B. Freitagabend Commander",
@@ -198,6 +260,10 @@
     "startWhenFull": "Starten, wenn voll",
     "ranked": "Rangliste",
     "listInLobby": "In Lobby listen",
+    "hostServer": "Hosten auf",
+    "hostServerHelp": "Welcher Server diese Partie ausführt. Deine Browsing- und Direktcode-Einstellungen ändern sich nicht.",
+    "hostServerScore": "{{name}} — Zustand {{score}}",
+    "hostServerUnscored": "{{name}} — noch nicht bewertet",
     "sandboxMode": "Sandbox-Modus — Debug-Aktionen erlauben",
     "sandboxModeHelp": "Der Host kann den Spielzustand direkt manipulieren (Karten verschieben, Leben ändern, Marken anpassen) und anderen Spielern Debug-Berechtigung erteilen. Zum Testen oder für Sandbox-Spiele nutzen — nicht für kompetitive Partien. Diese Einstellung kann nach dem Spielstart nicht mehr geändert werden.",
     "setPassword": "Passwort festlegen",
@@ -205,7 +271,21 @@
     "back": "Zurück",
     "opening": "Wird geöffnet…",
     "hostP2PGame": "P2P-Spiel hosten",
-    "hostGame": "Spiel hosten"
+    "hostGame": "Spiel hosten",
+    "savedFormats": "Gespeicherte eigene Formate",
+    "saveAsCustomFormat": "Format speichern",
+    "customFormatNamePlaceholder": "Format benennen",
+    "useCustomFormat": "Verwenden",
+    "customFormatInUse": "In Verwendung",
+    "deleteCustomFormat": "Löschen",
+    "loadingCustomFormat": "Format wird geladen…",
+    "noSavedCustomFormats": "Noch keine eigenen Formate gespeichert.",
+    "customFormatResolveFailed": "Dieses gespeicherte Format konnte nicht geladen werden.",
+    "customFormatHostingUnavailable": "Das Hosten mit einem eigenen Format wird noch nicht unterstützt — die Deck-Legalität kann dafür nicht geprüft werden. Speichere und sieh es dir vorerst nur an.",
+    "botGameNotice": "Du hostest das Discord-Spiel {{code}}. Verbindung und Privatsphäre legt der Discord-Beitrag fest.",
+    "botSeedIgnored": "Einige Einstellungen aus dem Discord-Beitrag können hier nicht verwendet werden — prüfe Format und Spielerzahl.",
+    "botP2PNotice": "Dein Gerät führt das Spiel aus. Lass die App geöffnet und bleib verbunden.",
+    "botServerNotice": "Ein dedizierter Server führt das Spiel aus. Er kann langsamer werden oder offline gehen."
   },
   "page": {
     "deckRejected": "Das Deck wurde vom Host abgelehnt.",
@@ -221,13 +301,13 @@
     "joinErrorCantJoinTitle": "Diesem Raum kann nicht beigetreten werden",
     "titleLobby": "Tritt einem Tisch bei oder hoste einen.",
     "titleHostSetup": "Richte deinen Tisch ein.",
-    "titleDraftLobby": "Draft-Pod",
     "titleDeckSelect": "Wähle ein Deck.",
     "descriptionLobby": "Durchsuche verfügbare Tische, tritt per Code bei oder hoste eine neue Partie.",
     "descriptionHostSetup": "Passe Format, Privatsphäre und Timing an, bevor du den Raum öffnest.",
-    "descriptionDraftLobby": "Warten, bis Spieler dem Draft-Pod beitreten.",
     "descriptionDeckSelectFormat": "Wähle ein Deck für {{format}}.",
     "descriptionDeckSelect": "Wähle das Deck, das du online mitbringen möchtest.",
+    "offlineUnavailableTitle": "Mehrspieler ist offline nicht verfügbar.",
+    "offlineUnavailableDescription": "Stelle die Verbindung wieder her oder deaktiviere den Offline-Modus, um ein Mehrspielerspiel zu hosten oder ihm beizutreten.",
     "eyebrow": "Mehrspieler",
     "activeDeck": "Aktives Deck",
     "edit": "Bearbeiten",
@@ -235,21 +315,41 @@
     "noDeckWarning": "Kein Deck ausgewählt — du musst vor dem Hosten eines auswählen.",
     "pickDeck": "Deck wählen",
     "anonymous": "Anonym",
-    "joining": "Tritt bei"
-  },
-  "draftLobbyPanel": {
-    "draftPod": "Draft-Pod",
-    "connecting": "Verbindung zum Draft-Pod wird hergestellt...",
-    "connectionFailed": "Verbindung fehlgeschlagen.",
-    "playersJoined": "{{joined}}/{{total}} Spieler beigetreten",
-    "seat": "Platz {{number}}",
-    "draftInProgress": "Draft läuft. Die Draft-Ansicht öffnet sich automatisch.",
-    "leaveDraft": "Draft verlassen"
+    "joining": "Tritt bei",
+    "joinNeedsServer": "Wähle einen Server, bevor du einem Spiel beitrittst.",
+    "serverDraftJoinUnsupported": "Serverseitig gehosteten Draft-Pods kannst du nicht aus der Lobby beitreten.",
+    "p2pDraftSpectateUnsupported": "Spielergehostete Draft-Pods können nicht beobachtet werden.",
+    "alreadyInDraftPod": "Du bist bereits in einem Draft-Pod. Verlasse ihn, bevor du einem anderen beitrittst.",
+    "invalidGameLink": "Dieser Spiellink ist ungültig oder unvollständig.",
+    "waitingForHostTitle": "Warte auf den Host…",
+    "waitingForHostMessage": "Der Host hat dieses Spiel noch nicht geöffnet, oder es wurde geschlossen. Versuche es erneut, sobald der Host seinen Link geöffnet hat.",
+    "botLinkBrokerUnreachable": "Der Lobby-Server für dieses Discord-Spiel ist nicht erreichbar. Prüfe deine Verbindung und öffne dann deinen Host-Link erneut.",
+    "updatingTitle": "Aktualisierung auf die neueste Version…",
+    "updatingMessage": "Eine neuere Version von phase.rs ist verfügbar. Die Seite wird neu geladen, sobald sie bereit ist.",
+    "refreshAfterGame": "Beende dein aktuelles Spiel und aktualisiere dann, um die neue Version zu laden.",
+    "updateFailedTitle": "Automatische Aktualisierung nicht möglich",
+    "updateFailedMessage": "Aktualisiere, um die neueste Version zu laden, oder fahre mit dieser fort. Spieler mit unterschiedlichen Versionen können nicht demselben Spiel beitreten.",
+    "continueAnyway": "Trotzdem fortfahren"
   },
   "deckLegalityChip": {
     "checking": "Deck wird gegen {{format}} geprüft…",
     "checkingLegality": "Deck-Legalität wird geprüft…",
     "legal": "✓ Legal in {{format}}",
     "notLegal": "Nicht legal in {{format}}"
+  },
+  "botLink": {
+    "codeUnsupported": "Dieser Server unterstützt noch keine Discord-Spiele.",
+    "codeInUse": "Der Code dieses Spiels ist noch von einem früheren Raum belegt. Warte ein paar Minuten und öffne dann deinen Host-Link aus Discord erneut. Wenn es weiter passiert, starte ein neues /lfg."
+  },
+  "openDesktop": {
+    "title": "Die phase.rs-Desktop-App wird geöffnet…",
+    "invalid": "Dieser Link kann nicht in der Desktop-App geöffnet werden.",
+    "openApp": "Desktop-App öffnen",
+    "continueInBrowser": "Nicht geöffnet? Im Browser fortfahren",
+    "getDesktopApp": "Desktop-App herunterladen"
+  },
+  "deepLink": {
+    "gameInProgressTitle": "Spiel läuft",
+    "gameInProgressBody": "Beende oder verlasse dein aktuelles Spiel und öffne den Link dann erneut."
   }
 }

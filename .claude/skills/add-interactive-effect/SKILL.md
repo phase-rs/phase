@@ -236,7 +236,7 @@ When the continuation is created, parent targets propagate down if the sub-abili
 - [ ] Tracked-set test: if the choice feeds "those", "them", "this way", or a downstream tracked-set consumer, publish or clear a fresh tracked set on first choice resolution, including all-decline/empty paths, or prove no tracked-set consumer exists.
 - [ ] Resume-state test: verify downstream continuations execute and priority / next waiting state is restored; do not only assert that the pending queue was cleared.
 - [ ] AI test: `get_legal_actions()` returns valid options for the waiting state
-- [ ] Verify per CLAUDE.md § "Canonical verification pattern" — `cargo fmt --all`, then if `tilt get uiresource clippy >/dev/null 2>&1`: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p engine` + `./scripts/gen-card-data.sh`.
+- [ ] Verify per CLAUDE.md § "Canonical verification pattern" — `cargo fmt --all`, then if `tilt get uiresource clippy >/dev/null 2>&1`: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p phase-engine` + `./scripts/gen-card-data.sh`.
 
 ---
 

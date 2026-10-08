@@ -26,11 +26,11 @@ Whenever you sacrifice a permanent, target player mills two cards.\n\
 {2}{B}: Level 3\n\
 At the beginning of your end step, you may sacrifice three other nonland permanents. If you do, return a creature card from your graveyard to the battlefield with a finality counter on it.";
 
-fn level3_end_step_trigger(
-    triggers: &[engine::types::ability::TriggerDefinition],
+fn level3_end_step_trigger<'a>(
+    triggers: impl IntoIterator<Item = &'a engine::types::ability::TriggerDefinition>,
 ) -> engine::types::ability::TriggerDefinition {
     triggers
-        .iter()
+        .into_iter()
         .find(|t| {
             t.mode == TriggerMode::Phase
                 && t.phase == Some(Phase::End)
@@ -84,7 +84,8 @@ fn scavengers_talent_level3_return_targets_graveyard_creature_cards() {
     let trigger = level3_end_step_trigger(
         runner.state().objects[&scavenger]
             .trigger_definitions
-            .as_slice(),
+            .iter_unchecked()
+            .map(engine::types::ability::TriggerEntry::definition),
     );
     let return_step = graveyard_return_sub_ability(&trigger);
     let Effect::ChangeZone {
@@ -330,7 +331,7 @@ fn scavengers_talent_card_data_level3_shape_matches_oracle_parse() {
         &["Enchantment".to_string()],
         &["Class".to_string()],
     );
-    let trigger = level3_end_step_trigger(&parsed.triggers);
+    let trigger = level3_end_step_trigger(parsed.triggers.iter());
     let return_step = graveyard_return_sub_ability(&trigger);
     assert!(
         matches!(return_step.effect.as_ref(), Effect::ChangeZone { .. }),

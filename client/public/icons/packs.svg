@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">Three fantasy trading card booster packs</title>
+  <desc id="desc">Minimal vector icon of three booster packs fanned symmetrically with an upright center pack.</desc>
+  <defs>
+    <linearGradient id="rearFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#334155"/><stop offset="1" stop-color="#1E293B"/></linearGradient>
+    <linearGradient id="frontFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3A475D"/><stop offset="1" stop-color="#222D40"/></linearGradient>
+    <linearGradient id="foil" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#7DD3FC"/><stop offset="1" stop-color="#A78BFA"/></linearGradient>
+  </defs>
+  <g transform="translate(44 67) rotate(-18)"><path d="M-19 -35 H19 L17 -29 V29 L19 35 H-19 L-17 29 V-29 Z" fill="url(#rearFill)" stroke="#7B899F" stroke-width="2.75" stroke-linejoin="round"/><path d="M-17 -28 H17 M-17 28 H17" fill="none" stroke="#AEB8C8" stroke-width="2" stroke-linecap="round" opacity=".55"/><path d="M-10 -22 V18" fill="none" stroke="url(#foil)" stroke-width="2.5" stroke-linecap="round" opacity=".5"/></g>
+  <g transform="translate(84 67) rotate(18)"><path d="M-19 -35 H19 L17 -29 V29 L19 35 H-19 L-17 29 V-29 Z" fill="url(#rearFill)" stroke="#7B899F" stroke-width="2.75" stroke-linejoin="round"/><path d="M-17 -28 H17 M-17 28 H17" fill="none" stroke="#AEB8C8" stroke-width="2" stroke-linecap="round" opacity=".55"/><path d="M10 -22 V18" fill="none" stroke="url(#foil)" stroke-width="2.5" stroke-linecap="round" opacity=".5"/></g>
+  <g transform="translate(64 63)"><path d="M-22 -39 H22 L20 -32 V32 L22 39 H-22 L-20 32 V-32 Z" fill="url(#frontFill)" stroke="#B9C2D0" stroke-width="3" stroke-linejoin="round"/><path d="M-20 -31 H20 M-20 31 H20" fill="none" stroke="#D5DBE5" stroke-width="2.5" stroke-linecap="round" opacity=".78"/><path d="M-11 -15 L9 -4" fill="none" stroke="url(#foil)" stroke-width="4" stroke-linecap="round"/><path d="M-9 6 L11 17" fill="none" stroke="url(#foil)" stroke-width="4" stroke-linecap="round" opacity=".8"/></g>
+</svg>

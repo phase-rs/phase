@@ -1,0 +1,154 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 87,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "At the beginning of each combat this turn, untap all creatures that attacked this turn."
+      },
+      "node": {
+        "Spell": {
+          "source_text": "At the beginning of each combat this turn, untap all creatures that attacked this turn.",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 87,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "At the beginning of each combat this turn, untap all creatures that attacked this turn."
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "CreateDelayedTrigger",
+                    "condition": {
+                      "type": "WheneverEvent",
+                      "trigger": {
+                        "mode": "Phase",
+                        "execute": null,
+                        "valid_card": null,
+                        "origin": null,
+                        "destination": null,
+                        "trigger_zones": [
+                          "Battlefield"
+                        ],
+                        "phase": "BeginCombat",
+                        "optional": false,
+                        "damage_kind": "Any",
+                        "secondary": false,
+                        "valid_target": null,
+                        "valid_source": null,
+                        "description": null,
+                        "constraint": null,
+                        "condition": null,
+                        "batched": false
+                      }
+                    },
+                    "effect": {
+                      "kind": "Spell",
+                      "effect": {
+                        "type": "SetTapState",
+                        "target": {
+                          "type": "Typed",
+                          "type_filters": [
+                            "Creature"
+                          ],
+                          "controller": null,
+                          "properties": [
+                            {
+                              "type": "AttackedThisTurn"
+                            }
+                          ]
+                        },
+                        "scope": {
+                          "type": "All"
+                        },
+                        "state": {
+                          "type": "Untap"
+                        }
+                      },
+                      "cost": null,
+                      "sub_ability": null,
+                      "duration": null,
+                      "description": null,
+                      "target_prompt": null,
+                      "condition": null,
+                      "optional_targeting": false,
+                      "optional": false,
+                      "forward_result": false
+                    },
+                    "uses_tracked_set": false
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": null,
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              }
+            ],
+            "kind": "Spell",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
+          },
+          "shell": {
+            "sub_link": null
+          },
+          "die_results": [],
+          "root_transforms": []
+        }
+      }
+    }
+  ],
+  "source_text": "At the beginning of each combat this turn, untap all creatures that attacked this turn.",
+  "card_name": "Full Throttle"
+}

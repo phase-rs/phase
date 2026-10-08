@@ -27,12 +27,22 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (subtype, count_expr) = match &ability.effect {
-        Effect::Amass { subtype, count } => (subtype.clone(), count.clone()),
+    let (subtype, count_expr, player_filter) = match &ability.effect {
+        Effect::Amass {
+            subtype,
+            count,
+            player,
+        } => (subtype.clone(), count.clone(), player.clone()),
         _ => return Ok(()),
     };
 
-    let controller = ability.controller;
+    // CR 109.4 + CR 701.47a: the amass instruction is performed by `player`,
+    // not necessarily the ability's own controller — Azog, Moria's Ruin's
+    // "Its controller amasses Goblins X" binds this to the destroyed
+    // creature's controller (`TargetFilter::ParentTargetController`), which
+    // can differ from `ability.controller` (Azog's controller). Mirrors
+    // `Manifest.target` / `Discover.player`'s resolution path.
+    let controller = super::resolve_player_for_context_ref(state, ability, &player_filter);
     let n = resolve_quantity_with_targets(state, &count_expr, ability).max(0) as u32;
 
     // CR 701.47a: Find an existing Army creature on the controller's battlefield.
@@ -149,8 +159,9 @@ pub(crate) fn finalize_amass(
     // CR 701.47c + CR 608.2c: Chained reflexive continuations may have been
     // stashed before a replacement choice finished. Stamp them with the final
     // post-replacement Army snapshot before they resume.
-    if let Some(continuation) = state.pending_continuation.as_mut() {
-        continuation
+    if let Some(frame) = state.active_ability_continuation_frame_mut() {
+        frame
+            .pending
             .chain
             .set_amassed_army_object_recursive(snapshot.clone());
     }
@@ -171,10 +182,7 @@ fn amassed_army_snapshot(state: &GameState, object_id: ObjectId) -> Option<CostP
     state
         .objects
         .get(&object_id)
-        .map(|obj| CostPaidObjectSnapshot {
-            object_id,
-            lki: obj.snapshot_public_characteristics(),
-        })
+        .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_public_characteristics()))
 }
 
 /// Create a 0/0 black [subtype] Army creature token on the battlefield.
@@ -192,6 +200,7 @@ fn create_army_token(
             display_name: name.clone(),
             power: Some(0),
             toughness: Some(0),
+            loyalty: None,
             core_types: vec![CoreType::Creature],
             subtypes: vec!["Army".to_string(), subtype.to_string()],
             supertypes: vec![],
@@ -203,7 +212,7 @@ fn create_army_token(
         enter_with_counters: vec![],
         tapped: false,
         enters_attacking: false,
-        attach_to: None,
+        attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         sacrifice_at: None,
         source_id: ability.source_id,
         controller: ability.controller,
@@ -260,6 +269,7 @@ mod tests {
             Effect::Amass {
                 subtype: subtype.to_string(),
                 count,
+                player: crate::types::ability::TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -371,6 +381,7 @@ mod tests {
                     display_name: "Squirrel".to_string(),
                     power: Some(1),
                     toughness: Some(1),
+                    loyalty: None,
                     core_types: vec![CoreType::Creature],
                     subtypes: vec!["Squirrel".to_string()],
                     supertypes: Vec::new(),
@@ -382,7 +393,7 @@ mod tests {
                 enter_with_counters: Vec::new(),
                 tapped: false,
                 enters_attacking: false,
-                attach_to: None,
+                attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: P0,
@@ -423,6 +434,137 @@ mod tests {
             squirrel_tokens.len(),
             1,
             "Chatterfang should append one Squirrel when amass creates the Army token"
+        );
+    }
+
+    // CR 701.47a + CR 701.47c + CR 301.5a (Goblin Plate Mail, HOB): the
+    // provenance-binding regression pair. "When this Equipment enters, amass
+    // Goblins 1, then attach this Equipment to the amassed Army" must attach
+    // to the EXACT Army object amass just touched — the freshly created
+    // token in the no-Army case, or the pre-existing Army in the other —
+    // never re-derived by rescanning the battlefield for "an Army you
+    // control" after the fact.
+    const GOBLIN_PLATE_MAIL_ORACLE: &str = "When this Equipment enters, amass Goblins 1, then \
+         attach this Equipment to the amassed Army. (To amass Goblins 1, put a +1/+1 counter on \
+         an Army you control. It's also a Goblin. If you don't control an Army, create a 0/0 \
+         black Goblin Army creature token first.)\nEquipped creature gets +1/+0 and has \
+         menace.\nEquip {4}";
+
+    /// CR 701.47a: no pre-existing Army — ETB creates a 0/0 black Goblin Army
+    /// token, amass puts one +1/+1 counter on it, and the Equipment ends up
+    /// attached to THAT token specifically. By the time resolution finishes,
+    /// the Equipment's own "equipped creature gets +1/+0" (CR 613.4c layer
+    /// 7c) is also live on its new host, so the token's EFFECTIVE power/
+    /// toughness is 2/1 (0/0 base + the counter's +1/+1 + the equipment's
+    /// +1/+0) — not the 1/1 the counter alone would produce.
+    #[test]
+    fn goblin_plate_mail_etb_creates_army_and_attaches_to_it() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let equipment = scenario
+            .add_artifact_to_hand_from_oracle(P0, "Goblin Plate Mail", GOBLIN_PLATE_MAIL_ORACLE)
+            .with_subtypes(vec!["Equipment"])
+            .with_mana_cost(crate::types::mana::ManaCost::generic(0))
+            .id();
+        let mut runner = scenario.build();
+
+        let outcome = runner.cast(equipment).resolve();
+        let state = outcome.state();
+
+        let armies: Vec<_> = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .filter(|obj| obj.card_types.subtypes.iter().any(|s| s == "Army"))
+            .collect();
+        assert_eq!(
+            armies.len(),
+            1,
+            "expected exactly one Army on the battlefield"
+        );
+        let army = armies[0];
+        assert!(
+            army.is_token,
+            "no pre-existing Army — amass must create a token"
+        );
+        assert_eq!(army.base_power, Some(0), "amass creates a 0/0 Army token");
+        assert_eq!(
+            army.base_toughness,
+            Some(0),
+            "amass creates a 0/0 Army token"
+        );
+        assert_eq!(
+            army.counters.get(&CounterType::Plus1Plus1).copied(),
+            Some(1),
+            "amass Goblins 1 puts one +1/+1 counter on the amassed Army"
+        );
+        // CR 613.4c (layer 7c): once attached, Goblin Plate Mail's own
+        // "equipped creature gets +1/+0" is live on this token too, so the
+        // EFFECTIVE power/toughness is base 0/0 + the counter's +1/+1 + the
+        // equipment's +1/+0 = 2/1, not the 1/1 the counter alone would give.
+        assert_eq!(army.power, Some(2));
+        assert_eq!(army.toughness, Some(1));
+        assert!(army.card_types.subtypes.iter().any(|s| s == "Goblin"));
+
+        let equipment_obj = state.objects.get(&equipment).expect("equipment object");
+        assert_eq!(
+            equipment_obj.attached_to,
+            Some(crate::game::game_object::AttachTarget::Object(army.id)),
+            "Goblin Plate Mail must attach to the newly created Army token"
+        );
+    }
+
+    /// CR 701.47c: a pre-existing Army — amass must reuse it (not create a
+    /// second, phantom Army) and the Equipment must attach to THAT exact
+    /// object, not to some Army found by re-scanning the battlefield.
+    #[test]
+    fn goblin_plate_mail_etb_reuses_existing_army_and_attaches_to_it() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let existing_army = scenario
+            .add_creature(P0, "Zombie Army", 0, 0)
+            .with_subtypes(vec!["Army", "Zombie"])
+            .id();
+        scenario.with_counter(existing_army, CounterType::Plus1Plus1, 2);
+        let equipment = scenario
+            .add_artifact_to_hand_from_oracle(P0, "Goblin Plate Mail", GOBLIN_PLATE_MAIL_ORACLE)
+            .with_subtypes(vec!["Equipment"])
+            .with_mana_cost(crate::types::mana::ManaCost::generic(0))
+            .id();
+        let mut runner = scenario.build();
+
+        let outcome = runner.cast(equipment).resolve();
+        let state = outcome.state();
+
+        let armies: Vec<_> = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .filter(|obj| obj.card_types.subtypes.iter().any(|s| s == "Army"))
+            .collect();
+        assert_eq!(
+            armies.len(),
+            1,
+            "must not create a second Army when the controller already has one"
+        );
+        let army = armies[0];
+        assert_eq!(
+            army.id, existing_army,
+            "must reuse the pre-existing Army object, not a new one"
+        );
+        assert_eq!(
+            army.counters.get(&CounterType::Plus1Plus1).copied(),
+            Some(3),
+            "amass Goblins 1 adds to the existing Army's counters (2 -> 3)"
+        );
+        assert!(army.card_types.subtypes.iter().any(|s| s == "Zombie"));
+        assert!(army.card_types.subtypes.iter().any(|s| s == "Goblin"));
+
+        let equipment_obj = state.objects.get(&equipment).expect("equipment object");
+        assert_eq!(
+            equipment_obj.attached_to,
+            Some(crate::game::game_object::AttachTarget::Object(existing_army)),
+            "Goblin Plate Mail must attach to the EXISTING Army amass touched, not a phantom new one"
         );
     }
 }

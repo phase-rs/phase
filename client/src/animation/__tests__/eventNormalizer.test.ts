@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import type { GameEvent } from "../../adapter/types";
+import type { GameEvent, StackEntry } from "../../adapter/types";
+import { buildStackEntry } from "../../test/factories/gameStateFactory";
 import type { AnimationStep } from "../types";
 import { normalizeEvents } from "../eventNormalizer";
 import {
@@ -15,8 +16,8 @@ function combatPlayerDamage(sourceId: number, playerId = 0, amount = 1): GameEve
   return { type: "DamageDealt", data: { source_id: sourceId, target: { Player: playerId }, amount, is_combat: true } };
 }
 
-function lifeChanged(playerId = 0, amount = -1): GameEvent {
-  return { type: "LifeChanged", data: { player_id: playerId, amount } };
+function lifeChanged(playerId = 0, amount = -1, newTotal?: number): GameEvent {
+  return { type: "LifeChanged", data: { player_id: playerId, amount, new_total: newTotal } };
 }
 
 function poisonCounterChanged(playerId = 0, amount = 1): GameEvent {
@@ -77,6 +78,7 @@ describe("normalizeEvents", () => {
       { type: "CardDrawn", data: { player_id: 0, object_id: 1, nth_in_turn: 1, nth_in_step: 1 } },
       { type: "PermanentTapped", data: { object_id: 1 } },
       { type: "PermanentUntapped", data: { object_id: 1 } },
+      { type: "Milled", data: { player_id: 0, object_id: 1, to: "Graveyard" } },
     ];
 
     expect(normalizeEvents(events)).toEqual([]);
@@ -88,6 +90,92 @@ describe("normalizeEvents", () => {
     ];
 
     expect(normalizeEvents(events)).toEqual([]);
+  });
+
+  // CR 605.3b: a mana ability's activation is presented like the mana it adds
+  // (non-visual, so no activation sound plays per land tap), while an ordinary
+  // activation keeps its step — the one the activation SFX is scheduled from.
+  it("skips mana-ability activations but keeps ordinary activations", () => {
+    const mana: GameEvent = { type: "AbilityActivated", data: { player_id: 0, source_id: 1, kind: "Mana" } };
+    const normal: GameEvent = { type: "AbilityActivated", data: { player_id: 0, source_id: 2, kind: "Normal" } };
+    const legacy: GameEvent = { type: "AbilityActivated", data: { player_id: 0, source_id: 3 } };
+
+    expect(normalizeEvents([mana])).toEqual([]);
+    const steps = normalizeEvents([normal, legacy]);
+    const activations = steps.flatMap((step) => step.effects.map(({ event }) => event));
+    expect(activations).toEqual([normal, legacy]);
+  });
+
+  describe("Melded", () => {
+    const melded: GameEvent = {
+      type: "Melded",
+      data: { object_id: 10, partner_id: 11, controller: 0 },
+    };
+    const meldSequence: GameEvent[] = [
+      { type: "ZoneChanged", data: { object_id: 10, from: "Battlefield", to: "Exile" } },
+      { type: "ZoneChanged", data: { object_id: 11, from: "Battlefield", to: "Exile" } },
+      { type: "ZoneChanged", data: { object_id: 10, from: "Exile", to: "Battlefield" } },
+      melded,
+    ];
+
+    it("plays the forge animation as its own step at the meld duration", () => {
+      const steps = normalizeEvents([
+        { type: "SpellCast", data: { card_id: 1, controller: 0, object_id: 1 } },
+        melded,
+      ]);
+      expect(steps).toHaveLength(2);
+      expect(steps[1].effects.map((effect) => effect.event.type)).toEqual(["Melded"]);
+      expect(steps[1].duration).toBe(EVENT_DURATIONS.Melded);
+    });
+
+    it("presents the pair's exile and entry moves through the forge animation alone", () => {
+      const steps = normalizeEvents(meldSequence);
+      expect(steps).toHaveLength(1);
+      expect(steps[0].effects.map((effect) => effect.event.type)).toEqual(["Melded"]);
+    });
+
+    it("still animates unrelated zone moves in the same batch", () => {
+      const unrelated: GameEvent = {
+        type: "ZoneChanged",
+        data: { object_id: 12, from: "Battlefield", to: "Graveyard" },
+      };
+      const steps = normalizeEvents([
+        { type: "SpellCast", data: { card_id: 1, controller: 0, object_id: 1 } },
+        unrelated,
+        ...meldSequence,
+      ]);
+      const animated = steps.flatMap((step) => step.effects.map((effect) => effect.event));
+      expect(animated).toContainEqual(unrelated);
+      expect(animated.filter((event) => event.type === "ZoneChanged")).toHaveLength(1);
+    });
+
+    it("presents redirected exile attempts through the forge animation alone", () => {
+      const steps = normalizeEvents([
+        { type: "ZoneChanged", data: { object_id: 10, from: "Battlefield", to: "Graveyard" } },
+        { type: "ZoneChanged", data: { object_id: 11, from: "Battlefield", to: "Command" } },
+        { type: "ZoneChanged", data: { object_id: 10, from: "Graveyard", to: "Battlefield" } },
+        melded,
+      ]);
+      expect(steps).toHaveLength(1);
+      expect(steps[0].effects.map((effect) => effect.event.type)).toEqual(["Melded"]);
+    });
+
+    it("still animates a component's moves that precede the meld sequence", () => {
+      const earlierExile: GameEvent = {
+        type: "ZoneChanged",
+        data: { object_id: 11, from: "Hand", to: "Exile" },
+      };
+      const earlierReturn: GameEvent = {
+        type: "ZoneChanged",
+        data: { object_id: 11, from: "Exile", to: "Battlefield" },
+      };
+      const steps = normalizeEvents([earlierExile, earlierReturn, ...meldSequence]);
+      const animated = steps.flatMap((step) => step.effects.map((effect) => effect.event));
+      expect(animated.filter((event) => event.type === "ZoneChanged")).toEqual([
+        earlierExile,
+        earlierReturn,
+      ]);
+    });
   });
 
   it("SpellCast always starts a new step", () => {
@@ -159,15 +247,73 @@ describe("normalizeEvents", () => {
 
   it("consecutive CreatureDestroyed events group into one step (board wipe)", () => {
     const events: GameEvent[] = [
-      { type: "CreatureDestroyed", data: { object_id: 1 } },
-      { type: "CreatureDestroyed", data: { object_id: 2 } },
-      { type: "CreatureDestroyed", data: { object_id: 3 } },
+      { type: "CreatureDestroyed", data: { object_id: 1, source_id: null } },
+      { type: "CreatureDestroyed", data: { object_id: 2, source_id: null } },
+      { type: "CreatureDestroyed", data: { object_id: 3, source_id: null } },
     ];
 
     const steps = normalizeEvents(events);
     expect(steps).toHaveLength(1);
     expect(steps[0].effects).toHaveLength(3);
     expect(steps[0].duration).toBe(400);
+  });
+
+  it("V15-4: a board wipe in the engine's order, each move before its destruction, plays as one step", () => {
+    const events: GameEvent[] = [1, 2, 3].flatMap((object_id): GameEvent[] => [
+      { type: "ZoneChanged", data: { object_id, from: "Battlefield", to: "Graveyard" } },
+      { type: "CreatureDestroyed", data: { object_id, source_id: 9 } },
+    ]);
+
+    const steps = normalizeEvents(events);
+    expect(steps).toHaveLength(1);
+    expect(steps[0].effects).toHaveLength(6);
+    expect(steps[0].duration).toBe(400);
+  });
+
+  it("V15-4: a destruction and its move do not join a step that holds anything else", () => {
+    const events: GameEvent[] = [
+      { type: "LifeChanged", data: { player_id: 0, amount: -2 } },
+      { type: "ZoneChanged", data: { object_id: 1, from: "Battlefield", to: "Graveyard" } },
+      { type: "CreatureDestroyed", data: { object_id: 1, source_id: null } },
+    ];
+
+    const steps = normalizeEvents(events);
+    expect(steps.map((step) => step.effects.map((effect) => effect.event.type))).toEqual([
+      ["LifeChanged"],
+      ["ZoneChanged", "CreatureDestroyed"],
+    ]);
+  });
+
+  it("V16-9: a destruction's move stays with it, across non-visual events, wherever a replacement sent it", () => {
+    const events: GameEvent[] = [
+      { type: "EffectResolved", data: { kind: "DealDamage", source_id: 9 } },
+      { type: "ZoneChanged", data: { object_id: 9, from: "Stack", to: "Graveyard" } },
+      { type: "ZoneChanged", data: { object_id: 1, from: "Battlefield", to: "Exile" } },
+      { type: "ReplacementApplied", data: { source_id: 5, event_type: "ZoneChange" } },
+      { type: "CreatureDestroyed", data: { object_id: 1, source_id: null } },
+      { type: "ZoneChanged", data: { object_id: 2, from: "Battlefield", to: "Graveyard" } },
+      { type: "PermanentSacrificed", data: { object_id: 2, player_id: 0 } },
+    ];
+
+    const steps = normalizeEvents(events);
+    expect(steps.map((step) => step.effects.map((effect) => effect.event.type))).toEqual([
+      ["EffectResolved", "ZoneChanged"],
+      ["ZoneChanged", "CreatureDestroyed"],
+      ["ZoneChanged", "PermanentSacrificed"],
+    ]);
+  });
+
+  it("V17-5: a shuffle-back replacement stays in a run of destructions with its shuffle preserved", () => {
+    const events: GameEvent[] = [
+      { type: "ZoneChanged", data: { object_id: 1, from: "Battlefield", to: "Library" } },
+      { type: "PlayerPerformedAction", data: { player_id: 0, action: "ShuffledLibrary" } },
+      { type: "CreatureDestroyed", data: { object_id: 1, source_id: 9 } },
+      { type: "ZoneChanged", data: { object_id: 2, from: "Battlefield", to: "Graveyard" } },
+      { type: "CreatureDestroyed", data: { object_id: 2, source_id: 9 } },
+    ];
+    const steps = normalizeEvents(events);
+    expect(steps).toHaveLength(1);
+    expect(steps[0].effects.map(({ event }) => event)).toEqual(events);
   });
 
   it("ZoneChanged groups with preceding cause (SpellCast)", () => {
@@ -199,6 +345,22 @@ describe("normalizeEvents", () => {
     ];
 
     const steps = normalizeEvents(events);
+    expect(steps).toHaveLength(1);
+    expect(steps[0].effects[0].event.type).toBe("TurnStarted");
+  });
+
+  it("ExtraTurnCreated is non-visual while TurnStarted remains visual", () => {
+    const creation: GameEvent = {
+      type: "ExtraTurnCreated",
+      data: { player_id: 1, anchor: 0 },
+    };
+    const turnStarted: GameEvent = {
+      type: "TurnStarted",
+      data: { player_id: 1, turn_number: 2 },
+    };
+
+    expect(normalizeEvents([creation])).toEqual([]);
+    const steps = normalizeEvents([creation, turnStarted]);
     expect(steps).toHaveLength(1);
     expect(steps[0].effects[0].event.type).toBe("TurnStarted");
   });
@@ -289,8 +451,8 @@ describe("normalizeEvents", () => {
       { type: "DamageDealt", data: { source_id: 1, target: { Object: 2 }, amount: 3, is_combat: false } },
       { type: "DamageDealt", data: { source_id: 1, target: { Object: 3 }, amount: 2, is_combat: false } },
       { type: "LifeChanged", data: { player_id: 1, amount: -5 } },
-      { type: "CreatureDestroyed", data: { object_id: 2 } },
-      { type: "CreatureDestroyed", data: { object_id: 3 } },
+      { type: "CreatureDestroyed", data: { object_id: 2, source_id: null } },
+      { type: "CreatureDestroyed", data: { object_id: 3, source_id: null } },
     ];
 
     const steps = normalizeEvents(events);
@@ -315,6 +477,33 @@ describe("normalizeEvents", () => {
     expect(normalizeEvents(events)).toEqual([]);
   });
 
+  describe("spell announcements", () => {
+    const spell = buildStackEntry({ id: 7, source_id: 7 });
+    const ability = buildStackEntry({
+      id: 8,
+      source_id: 3,
+      kind: { type: "ActivatedAbility", data: { source_id: 3, ability: { targets: [] } } },
+    } as Partial<StackEntry>);
+    const pushed = (objectId: number): GameEvent => ({ type: "StackPushed", data: { object_id: objectId } });
+    const cast: GameEvent = { type: "SpellCast", data: { card_id: 7, controller: 0, object_id: 7 } };
+    const paused = { stack: [spell, ability], has_pending_cast: true };
+
+    it("V7-3: a spell whose cast pauses after its announcement gets a step of its own", () => {
+      const steps = normalizeEvents([pushed(7)], { announcementState: paused });
+
+      expect(steps).toHaveLength(1);
+      expect(steps[0].effects.map((effect) => effect.event)).toEqual([pushed(7)]);
+    });
+
+    it("V7-3: an announcement is skipped once cast in the same batch, for an ability, with no pending cast, or without flights", () => {
+      expect(normalizeEvents([pushed(7), cast], { announcementState: paused }).flatMap((step) => step.effects))
+        .toEqual([expect.objectContaining({ event: cast })]);
+      expect(normalizeEvents([pushed(8)], { announcementState: paused })).toEqual([]);
+      expect(normalizeEvents([pushed(7)], { announcementState: { ...paused, has_pending_cast: false } })).toEqual([]);
+      expect(normalizeEvents([pushed(7)], { announcementState: null })).toEqual([]);
+    });
+  });
+
   it("groups large aggregate combat damage with following LifeChanged pairs into one flurry step", () => {
     const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
     const events = [
@@ -330,6 +519,58 @@ describe("normalizeEvents", () => {
       event: { type: "LifeChanged", data: { player_id: 0, amount: -sources.length } },
       displayOnly: true,
     });
+  });
+
+  it("carries the last engine-reported total on a collapsed run's synthesized life change", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    // One engine event per hit, each reporting the total it left the player on.
+    const events = [
+      ...sources.flatMap((sourceId, hit) => [
+        combatPlayerDamage(sourceId),
+        lifeChanged(0, -1, 20 - hit - 1),
+      ]),
+      combatAggregate(sources),
+    ];
+
+    const steps = normalizeEvents(events);
+
+    expect(steps).toHaveLength(1);
+    // The run collapses to one visible hit, so it must land on the total the LAST
+    // consumed event reported — never a sum of amounts, and never the first total.
+    expect(steps[0].effects[1]).toMatchObject({
+      event: {
+        type: "LifeChanged",
+        data: { player_id: 0, amount: -sources.length, new_total: 20 - sources.length },
+      },
+      displayOnly: true,
+    });
+  });
+
+  it("leaves a collapsed run's synthesized total absent when no consumed event carried one", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const events = [
+      ...sources.flatMap((sourceId) => [combatPlayerDamage(sourceId), lifeChanged()]),
+      combatAggregate(sources),
+    ];
+
+    const steps = normalizeEvents(events);
+
+    expect(expectLifeChanged(steps[0].effects[1].event).data.new_total).toBeUndefined();
+  });
+
+  it("uses the final consumed event's absent total for a collapsed run", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const events = [
+      ...sources.flatMap((sourceId, hit) => [
+        combatPlayerDamage(sourceId),
+        hit === sources.length - 1 ? lifeChanged() : lifeChanged(0, -1, 20 - hit - 1),
+      ]),
+      combatAggregate(sources),
+    ];
+
+    const steps = normalizeEvents(events);
+
+    expect(expectLifeChanged(steps[0].effects[1].event).data.new_total).toBeUndefined();
   });
 
   it("groups aggregate combat damage when replacement effects change life-loss amount", () => {

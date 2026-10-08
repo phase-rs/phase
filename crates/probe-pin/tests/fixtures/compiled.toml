@@ -1,0 +1,19 @@
+# Rows 15 and 31: `mode = "compiled"` parses and is REJECTED at validation time, before the
+# workspace is located or anything is built — so this manifest costs zero target runs.
+version = 1
+
+[target]
+mode         = "compiled"
+package      = "probe-pin"
+test         = "pure_logic"
+filter       = "ppfixture_census"
+filter_match = "substring"
+
+[output]
+file   = "crates/probe-pin/tests/fixtures/tmp/compiled_block.md"
+marker = "PROBE-PIN"
+
+[[probe]]
+id = "P0_control"
+  [probe.expect]
+  outcome = "pass"

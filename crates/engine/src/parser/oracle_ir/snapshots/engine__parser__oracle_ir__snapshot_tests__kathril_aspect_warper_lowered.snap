@@ -17,7 +17,12 @@ expression: "&lowered"
             "value": 1
           },
           "target": {
-            "type": "Any"
+            "type": "Typed",
+            "type_filters": [
+              "Creature"
+            ],
+            "controller": "You",
+            "properties": []
           }
         },
         "cost": null,
@@ -31,7 +36,12 @@ expression: "&lowered"
               "value": 1
             },
             "target": {
-              "type": "Any"
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": "You",
+              "properties": []
             }
           },
           "cost": null,
@@ -45,7 +55,12 @@ expression: "&lowered"
                 "value": 1
               },
               "target": {
-                "type": "Any"
+                "type": "Typed",
+                "type_filters": [
+                  "Creature"
+                ],
+                "controller": "You",
+                "properties": []
               }
             },
             "cost": null,
@@ -59,7 +74,12 @@ expression: "&lowered"
                   "value": 1
                 },
                 "target": {
-                  "type": "Any"
+                  "type": "Typed",
+                  "type_filters": [
+                    "Creature"
+                  ],
+                  "controller": "You",
+                  "properties": []
                 }
               },
               "cost": null,
@@ -73,7 +93,12 @@ expression: "&lowered"
                     "value": 1
                   },
                   "target": {
-                    "type": "Any"
+                    "type": "Typed",
+                    "type_filters": [
+                      "Creature"
+                    ],
+                    "controller": "You",
+                    "properties": []
                   }
                 },
                 "cost": null,
@@ -87,7 +112,12 @@ expression: "&lowered"
                       "value": 1
                     },
                     "target": {
-                      "type": "Any"
+                      "type": "Typed",
+                      "type_filters": [
+                        "Creature"
+                      ],
+                      "controller": "You",
+                      "properties": []
                     }
                   },
                   "cost": null,
@@ -101,7 +131,12 @@ expression: "&lowered"
                         "value": 1
                       },
                       "target": {
-                        "type": "Any"
+                        "type": "Typed",
+                        "type_filters": [
+                          "Creature"
+                        ],
+                        "controller": "You",
+                        "properties": []
                       }
                     },
                     "cost": null,
@@ -115,7 +150,12 @@ expression: "&lowered"
                           "value": 1
                         },
                         "target": {
-                          "type": "Any"
+                          "type": "Typed",
+                          "type_filters": [
+                            "Creature"
+                          ],
+                          "controller": "You",
+                          "properties": []
                         }
                       },
                       "cost": null,
@@ -129,7 +169,12 @@ expression: "&lowered"
                             "value": 1
                           },
                           "target": {
-                            "type": "Any"
+                            "type": "Typed",
+                            "type_filters": [
+                              "Creature"
+                            ],
+                            "controller": "You",
+                            "properties": []
                           }
                         },
                         "cost": null,
@@ -143,7 +188,12 @@ expression: "&lowered"
                               "value": 1
                             },
                             "target": {
-                              "type": "Any"
+                              "type": "Typed",
+                              "type_filters": [
+                                "Creature"
+                              ],
+                              "controller": "You",
+                              "properties": []
                             }
                           },
                           "cost": null,
@@ -157,7 +207,12 @@ expression: "&lowered"
                                 "value": 1
                               },
                               "target": {
-                                "type": "Any"
+                                "type": "Typed",
+                                "type_filters": [
+                                  "Creature"
+                                ],
+                                "controller": "You",
+                                "properties": []
                               }
                             },
                             "cost": null,
@@ -223,8 +278,10 @@ expression: "&lowered"
                             },
                             "optional_targeting": false,
                             "optional": false,
+                            "target_choice_timing": "Resolution",
                             "forward_result": false,
-                            "sub_link": "SequentialSibling"
+                            "sub_link": "SequentialSibling",
+                            "sibling_condition": "ReplicatedOrBranch"
                           },
                           "duration": null,
                           "description": null,
@@ -262,8 +319,10 @@ expression: "&lowered"
                           },
                           "optional_targeting": false,
                           "optional": false,
+                          "target_choice_timing": "Resolution",
                           "forward_result": false,
-                          "sub_link": "SequentialSibling"
+                          "sub_link": "SequentialSibling",
+                          "sibling_condition": "ReplicatedOrBranch"
                         },
                         "duration": null,
                         "description": null,
@@ -301,8 +360,10 @@ expression: "&lowered"
                         },
                         "optional_targeting": false,
                         "optional": false,
+                        "target_choice_timing": "Resolution",
                         "forward_result": false,
-                        "sub_link": "SequentialSibling"
+                        "sub_link": "SequentialSibling",
+                        "sibling_condition": "ReplicatedOrBranch"
                       },
                       "duration": null,
                       "description": null,
@@ -340,8 +401,10 @@ expression: "&lowered"
                       },
                       "optional_targeting": false,
                       "optional": false,
+                      "target_choice_timing": "Resolution",
                       "forward_result": false,
-                      "sub_link": "SequentialSibling"
+                      "sub_link": "SequentialSibling",
+                      "sibling_condition": "ReplicatedOrBranch"
                     },
                     "duration": null,
                     "description": null,
@@ -379,8 +442,10 @@ expression: "&lowered"
                     },
                     "optional_targeting": false,
                     "optional": false,
+                    "target_choice_timing": "Resolution",
                     "forward_result": false,
-                    "sub_link": "SequentialSibling"
+                    "sub_link": "SequentialSibling",
+                    "sibling_condition": "ReplicatedOrBranch"
                   },
                   "duration": null,
                   "description": null,
@@ -418,8 +483,10 @@ expression: "&lowered"
                   },
                   "optional_targeting": false,
                   "optional": false,
+                  "target_choice_timing": "Resolution",
                   "forward_result": false,
-                  "sub_link": "SequentialSibling"
+                  "sub_link": "SequentialSibling",
+                  "sibling_condition": "ReplicatedOrBranch"
                 },
                 "duration": null,
                 "description": null,
@@ -457,8 +524,10 @@ expression: "&lowered"
                 },
                 "optional_targeting": false,
                 "optional": false,
+                "target_choice_timing": "Resolution",
                 "forward_result": false,
-                "sub_link": "SequentialSibling"
+                "sub_link": "SequentialSibling",
+                "sibling_condition": "ReplicatedOrBranch"
               },
               "duration": null,
               "description": null,
@@ -496,8 +565,10 @@ expression: "&lowered"
               },
               "optional_targeting": false,
               "optional": false,
+              "target_choice_timing": "Resolution",
               "forward_result": false,
-              "sub_link": "SequentialSibling"
+              "sub_link": "SequentialSibling",
+              "sibling_condition": "ReplicatedOrBranch"
             },
             "duration": null,
             "description": null,
@@ -535,8 +606,10 @@ expression: "&lowered"
             },
             "optional_targeting": false,
             "optional": false,
+            "target_choice_timing": "Resolution",
             "forward_result": false,
-            "sub_link": "SequentialSibling"
+            "sub_link": "SequentialSibling",
+            "sibling_condition": "ReplicatedOrBranch"
           },
           "duration": null,
           "description": null,
@@ -574,8 +647,10 @@ expression: "&lowered"
           },
           "optional_targeting": false,
           "optional": false,
+          "target_choice_timing": "Resolution",
           "forward_result": false,
-          "sub_link": "SequentialSibling"
+          "sub_link": "SequentialSibling",
+          "sibling_condition": "ReplicatedOrBranch"
         },
         "duration": null,
         "description": null,
@@ -613,6 +688,7 @@ expression: "&lowered"
         },
         "optional_targeting": false,
         "optional": false,
+        "target_choice_timing": "Resolution",
         "forward_result": false
       },
       "valid_card": {
@@ -637,13 +713,5 @@ expression: "&lowered"
   ],
   "statics": [],
   "replacements": [],
-  "extractedKeywords": [],
-  "parseWarnings": [
-    {
-      "type": "TargetFallback",
-      "context": "parse_target could not classify",
-      "text": "any creature you control",
-      "line_index": 0
-    }
-  ]
+  "extractedKeywords": []
 }

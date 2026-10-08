@@ -43,8 +43,8 @@ fn impostor_syndrome_copies_combat_damage_creature_not_self() {
         .find(|o| o.name == "Impostor Syndrome")
         .unwrap()
         .trigger_definitions[0];
-    assert_eq!(trigger.mode, TriggerMode::DamageDone);
-    match trigger.execute.as_ref().unwrap().effect.as_ref() {
+    assert_eq!(trigger.definition.mode, TriggerMode::DamageDone);
+    match trigger.definition.execute.as_ref().unwrap().effect.as_ref() {
         engine::types::ability::Effect::CopyTokenOf { target, .. } => {
             assert_eq!(
                 *target,

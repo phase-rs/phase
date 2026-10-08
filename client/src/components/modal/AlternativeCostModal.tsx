@@ -2,6 +2,8 @@ import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 
 import type {
+  AlternativeAdditionalCostDescription,
+  EmergeSacrificeQuality,
   GameAction,
   ManaCost,
   SerializedAbilityCost,
@@ -12,6 +14,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { assertNever } from "../../utils/assertNever.ts";
 import { ManaCostSymbols } from "../mana/ManaCostSymbols.tsx";
 import { CardTextboxPreview } from "./CardTextboxPreview.tsx";
+import { describeAdditionalCost } from "./describeAdditionalCost.ts";
 import { DialogShell } from "./DialogShell.tsx";
 
 type AlternativeCastChoice = Extract<
@@ -35,6 +38,7 @@ interface KeywordCopy {
 function keywordCopy(
   keyword: Keyword,
   cardName: string,
+  alternativeAdditionalCostDescription: AlternativeAdditionalCostDescription | null,
   t: TFunction<"game">,
 ): KeywordCopy {
   switch (keyword) {
@@ -55,15 +59,20 @@ function keywordCopy(
         showOracleText: true,
         subtitle: t("alternativeCost.evokeSubtitle", { name: cardName }),
       };
-    // CR 702.119a-c: Emerge — sacrifice a creature while casting; the emerge
-    // cost is reduced by that creature's mana value (handled engine-side).
+    // CR 702.119a-b: Emerge's required sacrifice quality is supplied by the
+    // engine; the modal must not infer it from the typed cost filter.
     case "Emerge":
       return {
         eyebrow: t("alternativeCost.emergeEyebrow"),
         normalLabel: t("alternativeCost.emergeNormalLabel"),
         altLabel: t("alternativeCost.emergeAltLabel"),
         showOracleText: true,
-        subtitle: t("alternativeCost.emergeSubtitle", { name: cardName }),
+        subtitle: t("alternativeCost.emergeSubtitle", {
+          name: cardName,
+          sacrifice: alternativeAdditionalCostDescription
+            ? describeAdditionalCostDescription(alternativeAdditionalCostDescription, t)
+            : t("alternativeCost.emergeFallbackSacrifice"),
+        }),
       };
     // CR 702.109a: Dash — like Warp, the rider (haste + end-step return to hand)
     // lives on the keyword itself and doesn't change the spell's printed text.
@@ -189,34 +198,58 @@ function keywordCopy(
         showOracleText: true,
         subtitle: t("alternativeCost.faceDownSubtitle", { name: cardName }),
       };
+    // CR 702.117a: Surge — pay the surge cost if you or a teammate cast another spell this turn.
+    case "Surge":
+      return {
+        eyebrow: t("alternativeCost.surgeEyebrow"),
+        normalLabel: t("alternativeCost.surgeNormalLabel"),
+        altLabel: t("alternativeCost.surgeAltLabel"),
+        showOracleText: true,
+        subtitle: t("alternativeCost.surgeSubtitle", { name: cardName }),
+      };
   }
   return assertNever(keyword);
 }
 
-/**
- * CR 702.74a + CR 601.2h: Compact display copy for the non-mana portion of
- * an alternative cost (e.g., Solitude's Evoke "Exile a white card from your
- * hand."). Mirrors the engine's typed `AbilityCost` taxonomy 1:1 by the
- * discriminant `type` field — the FE does not interpret game state, it just
- * renders the engine-provided variant.
- */
-function describeAdditionalCost(
-  cost: SerializedAbilityCost,
+function describeEmergeSacrificeQuality(
+  quality: EmergeSacrificeQuality,
   t: TFunction<"game">,
 ): string {
-  switch (cost.type) {
-    case "Exile":
-      return t("alternativeCost.additionalExile");
-    case "Sacrifice":
-      return t("alternativeCost.additionalSacrifice");
-    case "PayLife":
-      return t("alternativeCost.additionalPayLife");
-    case "Discard":
-      return t("alternativeCost.additionalDiscard");
-    case "TapCreatures":
-      return t("alternativeCost.additionalTapCreatures");
-    default:
-      return t("alternativeCost.additionalGeneric", { type: cost.type });
+  switch (quality.type) {
+    case "Artifact":
+      return t("alternativeCost.emergeSacrificeQuality.artifact");
+    case "Battle":
+      return t("alternativeCost.emergeSacrificeQuality.battle");
+    case "Card":
+      return t("alternativeCost.emergeSacrificeQuality.card");
+    case "Creature":
+      return t("alternativeCost.emergeSacrificeQuality.creature");
+    case "Enchantment":
+      return t("alternativeCost.emergeSacrificeQuality.enchantment");
+    case "Instant":
+      return t("alternativeCost.emergeSacrificeQuality.instant");
+    case "Kindred":
+      return t("alternativeCost.emergeSacrificeQuality.kindred");
+    case "Land":
+      return t("alternativeCost.emergeSacrificeQuality.land");
+    case "Permanent":
+      return t("alternativeCost.emergeSacrificeQuality.permanent");
+    case "Planeswalker":
+      return t("alternativeCost.emergeSacrificeQuality.planeswalker");
+    case "Sorcery":
+      return t("alternativeCost.emergeSacrificeQuality.sorcery");
+    case "Subtype":
+      return t("alternativeCost.emergeSacrificeQuality.subtype", { subtype: quality.data });
+  }
+}
+
+function describeAdditionalCostDescription(
+  description: AlternativeAdditionalCostDescription,
+  t: TFunction<"game">,
+): string {
+  switch (description.type) {
+    case "EmergeSacrifice":
+      return describeEmergeSacrificeQuality(description.quality, t);
   }
 }
 
@@ -243,6 +276,7 @@ export function AlternativeCostModal() {
       normalCost={data.normal_cost}
       alternativeCost={data.alternative_cost}
       alternativeAdditionalCost={data.alternative_additional_cost}
+      alternativeAdditionalCostDescription={data.alternative_additional_cost_description}
       dispatch={dispatch}
     />
   );
@@ -254,6 +288,7 @@ function AlternativeCostContent({
   normalCost,
   alternativeCost,
   alternativeAdditionalCost,
+  alternativeAdditionalCostDescription,
   dispatch,
 }: {
   objectId: number;
@@ -261,6 +296,7 @@ function AlternativeCostContent({
   normalCost: ManaCost;
   alternativeCost: ManaCost | null;
   alternativeAdditionalCost: SerializedAbilityCost | null;
+  alternativeAdditionalCostDescription: AlternativeAdditionalCostDescription | null;
   dispatch: (action: GameAction) => Promise<unknown>;
 }) {
   const { t } = useTranslation("game");
@@ -269,7 +305,7 @@ function AlternativeCostContent({
   if (!obj) return null;
 
   const cardName = obj.name;
-  const copy = keywordCopy(keyword, cardName, t);
+  const copy = keywordCopy(keyword, cardName, alternativeAdditionalCostDescription, t);
 
   return (
     <DialogShell
@@ -315,7 +351,9 @@ function AlternativeCostContent({
           )}
           {alternativeAdditionalCost && (
             <span className="ml-2 text-xs text-slate-300">
-              {describeAdditionalCost(alternativeAdditionalCost, t)}
+              {alternativeAdditionalCostDescription
+                ? describeAdditionalCostDescription(alternativeAdditionalCostDescription, t)
+                : describeAdditionalCost(alternativeAdditionalCost, t)}
             </span>
           )}
           {copy.altSuffix && (

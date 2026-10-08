@@ -405,11 +405,11 @@ fn push_first_no_legal_modes_modal_trigger_dropped_silently() {
         source_id,
         controller: PlayerId(0),
         condition: None,
-        ability: super::super::ability_utils::build_resolved_from_def(
+        ability: Box::new(super::super::ability_utils::build_resolved_from_def(
             &modal_ability,
             source_id,
             PlayerId(0),
-        ),
+        )),
         timestamp: state.turn_number,
         target_constraints: Vec::new(),
         distribute: None,
@@ -420,6 +420,7 @@ fn push_first_no_legal_modes_modal_trigger_dropped_silently() {
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        provenance: None,
     };
 
     let stack_before = state.stack.len();
@@ -515,11 +516,11 @@ fn random_modal_trigger_resolves_without_prompting() {
         source_id,
         controller: PlayerId(0),
         condition: None,
-        ability: super::super::ability_utils::build_resolved_from_def(
+        ability: Box::new(super::super::ability_utils::build_resolved_from_def(
             &modal_ability,
             source_id,
             PlayerId(0),
-        ),
+        )),
         timestamp: state.turn_number,
         target_constraints: Vec::new(),
         distribute: None,
@@ -530,6 +531,7 @@ fn random_modal_trigger_resolves_without_prompting() {
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        provenance: None,
     };
 
     let stack_before = state.stack.len();
@@ -565,6 +567,17 @@ fn random_modal_trigger_resolves_without_prompting() {
         state.pending_trigger_entry.is_none(),
         "random modal trigger entry must be resolver-eligible (cursor cleared)",
     );
+    let labels = &state
+        .stack
+        .back()
+        .unwrap()
+        .ability()
+        .unwrap()
+        .selected_mode_labels;
+    assert!(
+        matches!(labels.as_slice(), [label] if label == "A" || label == "B"),
+        "the random modal trigger must retain the label of the engine-selected mode, got {labels:?}",
+    );
 }
 
 /// SHAPE-level regression (manual surgery): drives the real dispatch pipeline to
@@ -574,11 +587,12 @@ fn random_modal_trigger_resolves_without_prompting() {
 /// rules-legal causes were both proven unreachable (a controller leaving is
 /// handled upstream by `elimination::do_eliminate`; countering/removal
 /// mid-construction is impossible because modes/targets are chosen before anyone
-/// has priority, CR 603.3d) — so this test surgically injects the corrupt state
-/// rather than reproducing the producer. See the follow-up issue for the hunt.
+/// has priority, CR 603.3c + CR 603.3d) — so this test surgically injects the
+/// corrupt state rather than reproducing the producer. See the follow-up issue
+/// for the hunt.
 ///
-/// The recovery (`triggers::abandon_ceased_pending_trigger`, CR 608.2b / CR
-/// 800.4a recovery semantics) must NOT panic in
+/// The recovery (`triggers::abandon_ceased_pending_trigger`, CR 608.1 recovery
+/// semantics) must NOT panic in
 /// `assign_pending_trigger_entry_ability`; it must record a distinguishable
 /// diagnostic, clean the vanished entry's side tables, clear all pending-trigger
 /// state, and hand control back to the game via `Priority`.

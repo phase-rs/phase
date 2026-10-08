@@ -35,6 +35,7 @@ fn declare_attackers_state() -> GameState {
     scenario.add_creature(P0, "Attacker", 3, 3);
     let mut runner = scenario.build();
     runner.pass_both_players();
+    runner.pass_both_players();
     assert_matches!(
         runner.state().waiting_for,
         WaitingFor::DeclareAttackers { .. }
@@ -48,6 +49,7 @@ fn declare_blockers_state() -> GameState {
     let attacker = scenario.add_creature(P0, "Attacker", 3, 3).id();
     scenario.add_creature(P1, "Blocker", 2, 2);
     let mut runner = scenario.build();
+    runner.pass_both_players();
     runner.pass_both_players();
     runner
         .act(GameAction::DeclareAttackers {
@@ -74,6 +76,7 @@ fn assign_combat_damage_state() -> GameState {
     let blocker_a = scenario.add_creature(P1, "Blocker A", 2, 2).id();
     let blocker_b = scenario.add_creature(P1, "Blocker B", 2, 2).id();
     let mut runner = scenario.build();
+    runner.pass_both_players();
     runner.pass_both_players();
     runner
         .act(GameAction::DeclareAttackers {

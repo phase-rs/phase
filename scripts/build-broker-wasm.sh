@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the Rust `lobby-broker` core to WASM for the Cloudflare Durable Object
 # shell, emitting wasm-bindgen "web"-target glue to
-# lobby-worker/src/broker-wasm-pkg/.
+# lobby-worker/broker-wasm-pkg/.
 #
 # Invoked by wrangler's [build] command (lobby-worker/wrangler.toml) on
 # `wrangler deploy` / `wrangler dev`, and directly in CI (release workflow).
@@ -13,7 +13,7 @@ set -euo pipefail
 PROFILE="${1:-release}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CRATE_DIR="$ROOT/lobby-worker/broker-wasm"
-OUT_DIR="$ROOT/lobby-worker/src/broker-wasm-pkg"
+OUT_DIR="$ROOT/lobby-worker/broker-wasm-pkg"
 
 # Build from the crate dir so its .cargo/config.toml — which sets
 # `getrandom_backend="wasm_js"` for wasm32 — is on cargo's config search path.

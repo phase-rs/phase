@@ -1,7 +1,8 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useState, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useCardImage } from "../../hooks/useCardImage";
+import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { usePrintingsLoaded } from "../../hooks/usePrintingsLoaded";
 import { hasAlternatePrintingsSync, resolveOracleIdSync } from "../../services/scryfall";
 import type { DeckEntry, ParsedDeck } from "../../services/deckParser";
@@ -11,7 +12,7 @@ import { usePreferencesStore } from "../../stores/preferencesStore";
 import type { GameFormat } from "../../adapter/types";
 import { DeckCardContextMenu } from "./DeckCardContextMenu";
 import { PrintingPickerModal } from "./PrintingPickerModal";
-import { mouseHoverPreview } from "./hoverPreview";
+import { mouseHoverPreview, type CardHoverHandler } from "./hoverPreview";
 import { groupAccent, groupKey, groupRank, groupTitleKey, type GroupMode } from "./deckGrouping";
 import { isMaybeboardPolicy, useSideboardPolicy } from "./useSideboardPolicy";
 
@@ -20,15 +21,20 @@ interface DeckStackProps {
   commanders: string[];
   cardDataCache: Map<string, ScryfallCard>;
   onAddCard: (name: string) => void;
+  /** CR 100.2a: engine-resolved copy-limit predicate — disables the `+` on a
+   *  card already at its ceiling for this format. */
+  canAddCard: (name: string) => boolean;
   onRemoveCard: (name: string, section: "main" | "sideboard") => void;
   onMoveCard: (name: string, from: "main" | "sideboard") => void;
   onRemoveCommander: (cardName: string) => void;
-  onCardHover?: (cardName: string | null, scryfallId?: string) => void;
+  onCardHover?: CardHoverHandler;
   /** Deck format — resolves the sideboard policy so the second section
    *  is labelled "Sideboard" or "Maybeboard" consistently with the list view. */
   format?: GameFormat;
   /** Whether the main deck is sub-grouped by card type or by color. */
   groupMode: GroupMode;
+  /** Stable deck surface restored after the nested printing picker closes. */
+  pickerReturnFocusRef?: RefObject<HTMLElement | SVGElement | null>;
 }
 
 type DeckStackSection = "commander" | "main" | "sideboard";
@@ -39,6 +45,7 @@ interface DeckStackItem {
   section: DeckStackSection;
   groupTitle: string;
   sortKey: [number, number, string];
+  scryfallId?: string;
   sourcePrinting?: SourcePrinting;
 }
 
@@ -75,6 +82,7 @@ function createDeckStackItems(
     commandersItems.push({
       count: 1,
       name,
+      scryfallId: card?.id,
       section: "commander",
       groupTitle: "",
       sortKey: [0, card?.cmc ?? 0, name.toLowerCase()],
@@ -87,6 +95,7 @@ function createDeckStackItems(
     mainItems.push({
       count: entry.count,
       name: entry.name,
+      scryfallId: card?.id,
       sourcePrinting: entry.sourcePrinting,
       section: "main",
       groupTitle: groupTitleKey(mode, groupKey(mode, card)),
@@ -100,6 +109,7 @@ function createDeckStackItems(
     sideboardItems.push({
       count: entry.count,
       name: entry.name,
+      scryfallId: card?.id,
       sourcePrinting: entry.sourcePrinting,
       section: "sideboard",
       groupTitle: groupTitleKey(mode, groupKey(mode, card)),
@@ -170,15 +180,20 @@ function DeckStackCard({
   onRemoveCard: (name: string, section: "main" | "sideboard") => void;
   onMoveCard: (name: string, from: "main" | "sideboard") => void;
   onRemoveCommander: (cardName: string) => void;
-  onCardHover?: (cardName: string | null, scryfallId?: string) => void;
+  onCardHover?: CardHoverHandler;
   onContextMenu?: (cardName: string, x: number, y: number) => void;
 }) {
   const { t } = useTranslation("deck-builder");
-  const { src, isLoading } = useCardImage(item.name, { size: "normal", sourcePrinting: item.sourcePrinting });
+  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(item.name, { size: "normal", sourcePrinting: item.sourcePrinting });
   const printingsLoaded = usePrintingsLoaded();
   const oracleId = printingsLoaded ? resolveOracleIdSync(item.name) : null;
   const hasAlternates = oracleId ? hasAlternatePrintingsSync(oracleId) : false;
   const isCommander = item.section === "commander";
+  const hoverInfo = {
+    name: item.name,
+    scryfallId: item.scryfallId,
+    sourcePrinting: item.sourcePrinting,
+  };
   const showAddButton = item.section === "main";
   // The commander isn't part of the main/maybeboard partition, so it has no
   // move target. Main cards move out to the sideboard/maybeboard; second-section
@@ -221,8 +236,8 @@ function DeckStackCard({
       style={{ zIndex, width: CARD_WIDTH }}
       // Tap previews the card on touch; hover previews on mouse (guarded so the
       // touch-compat mouseleave can't tear down the overlay the tap just opened).
-      onClick={() => onCardHover?.(item.name)}
-      {...mouseHoverPreview(onCardHover, item.name)}
+      onClick={() => onCardHover?.(hoverInfo)}
+      {...mouseHoverPreview(onCardHover, hoverInfo)}
       onContextMenu={(e) => {
         if (onContextMenu) {
           e.preventDefault();
@@ -286,8 +301,10 @@ function DeckStackCard({
         ) : (
           <img
             src={src}
+            {...getCardImageSrcSetProps(src, rungs)}
             alt={item.name}
             draggable={false}
+            onError={() => advanceFailedSource?.(src)}
             className="object-cover"
             style={{ height: CARD_HEIGHT, width: CARD_WIDTH }}
           />
@@ -346,7 +363,7 @@ function DeckStackSectionLane({
   onRemoveCard: (name: string, section: "main" | "sideboard") => void;
   onMoveCard: (name: string, from: "main" | "sideboard") => void;
   onRemoveCommander: (cardName: string) => void;
-  onCardHover?: (cardName: string | null, scryfallId?: string) => void;
+  onCardHover?: CardHoverHandler;
   onContextMenu?: (cardName: string, x: number, y: number) => void;
 }) {
   const { t } = useTranslation("deck-builder");
@@ -427,12 +444,14 @@ export function DeckStack({
   commanders,
   cardDataCache,
   onAddCard,
+  canAddCard,
   onRemoveCard,
   onMoveCard,
   onRemoveCommander,
   onCardHover,
   format,
   groupMode,
+  pickerReturnFocusRef,
 }: DeckStackProps) {
   const { t } = useTranslation("deck-builder");
   const isMaybeboard = isMaybeboardPolicy(useSideboardPolicy(format));
@@ -446,9 +465,11 @@ export function DeckStack({
     sections.commander.length > 0
     || sections.main.length > 0
     || sections.sideboard.length > 0;
-  const canAddCard = useMemo(
-    () => (item: DeckStackItem) => item.section === "main",
-    [],
+  // CR 100.2a: only main-deck lanes carry a `+`, and only up to the card's
+  // engine-resolved copy ceiling for this format.
+  const canAddStackCard = useCallback(
+    (item: DeckStackItem) => item.section === "main" && canAddCard(item.name),
+    [canAddCard],
   );
 
   const artOverrides = usePreferencesStore((s) => s.artOverrides);
@@ -529,7 +550,7 @@ export function DeckStack({
                 emptyLabel={t("stack.noCommander")}
                 isMaybeboard={isMaybeboard}
                 onAddCard={onAddCard}
-                canAddCard={canAddCard}
+                canAddCard={canAddStackCard}
                 onRemoveCard={onRemoveCard}
                 onMoveCard={onMoveCard}
                 onRemoveCommander={onRemoveCommander}
@@ -552,7 +573,7 @@ export function DeckStack({
               extraGroups={sideboardGroups}
               isMaybeboard={isMaybeboard}
               onAddCard={onAddCard}
-              canAddCard={canAddCard}
+              canAddCard={canAddStackCard}
               onRemoveCard={onRemoveCard}
               onMoveCard={onMoveCard}
               onRemoveCommander={onRemoveCommander}
@@ -582,6 +603,7 @@ export function DeckStack({
           oracleId={pickerCard.oracleId}
           onCardHover={onCardHover}
           onClose={() => setPickerCard(null)}
+          returnFocusRef={pickerReturnFocusRef}
         />
       )}
     </div>

@@ -673,7 +673,7 @@ fn filter_mana_value_bound_binds_x_and_destroys_within_bound() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let relic = scenario
-        .add_creature(P1, "Worn Powerstone", 0, 0)
+        .add_creature(P1, "Worn Powerstone", 1, 1)
         .as_artifact()
         .id();
     let ooze = {
@@ -737,7 +737,7 @@ fn filter_mana_value_bound_excludes_targets_above_x() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let relic = scenario
-        .add_creature(P1, "Worn Powerstone", 0, 0)
+        .add_creature(P1, "Worn Powerstone", 1, 1)
         .as_artifact()
         .id();
     let ooze = {

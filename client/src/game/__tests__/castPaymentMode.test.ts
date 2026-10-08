@@ -38,4 +38,35 @@ describe("applySpellPaymentPreference", () => {
       type: "Manual",
     });
   });
+
+  it("stamps every cast-family action with the sacrificial-mana preference", () => {
+    usePreferencesStore.setState({ spellPaymentMode: "autoExceptSacrificialMana" });
+    const castTypes = [
+      "CastSpell",
+      "CastSpellForFree",
+      "CastSpellAsMiracle",
+      "CastSpellAsMadness",
+      "CastSpellAsSneak",
+      "CastSpellAsWebSlinging",
+    ] as const;
+
+    for (const type of castTypes) {
+      const action = { type, data: {} } as GameAction;
+      const result = applySpellPaymentPreference(action) as GameAction & {
+        data: { payment_mode?: unknown };
+      };
+      expect(result.data.payment_mode).toEqual({ type: "AutoExceptSacrificialMana" });
+    }
+  });
+
+  it("lets the per-game manual override dominate the sacrificial-mana preference", () => {
+    usePreferencesStore.setState({ spellPaymentMode: "autoExceptSacrificialMana" });
+    useUiStore.setState({ manualManaOverride: true });
+
+    const result = applySpellPaymentPreference(castAction);
+
+    expect((result as Extract<GameAction, { type: "CastSpell" }>).data.payment_mode).toEqual({
+      type: "Manual",
+    });
+  });
 });

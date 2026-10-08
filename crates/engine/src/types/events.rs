@@ -8,10 +8,12 @@ use super::ability::{
     AbilityTag, AttachmentKind, CostPaidObjectSnapshot, EffectKind, FilterProp, TargetFilter,
     TargetRef, ThisWayCause, TypeFilter, TypedFilter,
 };
-use super::card_type::{CoreType, Supertype};
-use super::game_state::ZoneChangeRecord;
+use super::card::PrintedCardRef;
+use super::card_type::{CardType, CoreType, Supertype};
+use super::game_state::{LKISnapshot, TriggerSourceContext, ZoneChangeRecord};
 use super::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
 use super::keywords::Keyword;
+use super::mana::ManaCost;
 use super::mana::{ManaColor, ManaType};
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
@@ -28,6 +30,36 @@ fn default_nth_in_step() -> u32 {
 
 fn default_nth_in_turn() -> u32 {
     1
+}
+
+/// A passive, viewer-safe snapshot of one face seen during a hidden-zone search.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibrarySearchCardFaceView {
+    pub name: String,
+    pub mana_cost: ManaCost,
+    pub mana_value: u32,
+    pub colors: Vec<ManaColor>,
+    pub card_type: CardType,
+    pub keywords: Vec<Keyword>,
+    pub power: Option<i32>,
+    pub toughness: Option<i32>,
+    pub loyalty: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_ref: Option<PrintedCardRef>,
+}
+
+/// CR 400.7: search knowledge is bound to the exact incarnation that was
+/// looked at, never merely to a reusable object storage id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibrarySearchCardView {
+    pub owner: PlayerId,
+    pub zone: Zone,
+    pub identity: ObjectIncarnationRef,
+    pub card_id: CardId,
+    pub current_face: LibrarySearchCardFaceView,
+    pub front_face: LibrarySearchCardFaceView,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back_face: Option<LibrarySearchCardFaceView>,
 }
 
 /// CR 605.1a + CR 605.1b + CR 605.4a: Records whether a `ManaAdded` event was
@@ -53,18 +85,109 @@ pub enum ManaTapState {
     FromTapTriggersResolved,
 }
 
-/// CR 602.2 + CR 606.2: Discriminates how an activated ability was activated so
-/// that "Whenever you activate a loyalty ability" triggers (CR 606.2) can be told
-/// apart from ordinary activated abilities (CR 602.2) while both share the single
-/// `GameEvent::AbilityActivated` event family. A loyalty ability is an activated
-/// ability of a planeswalker paid for by adding or removing loyalty counters.
+/// CR 605.4a: Records whether the triggered mana abilities coupled to one
+/// aggregate mana-ability production event have already resolved inline.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ManaAbilityTriggerState {
+    /// Coupled triggered mana abilities have not yet resolved.
+    #[default]
+    Pending,
+    /// Coupled triggered mana abilities resolved inline during a payment.
+    InlineResolved,
+}
+
+impl ManaAbilityTriggerState {
+    pub fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending)
+    }
+}
+
+/// CR 603.10 + CR 605.3b: Who owns an activation event's trigger observation.
+/// A mana ability's activation is observed at its own boundary, before the
+/// ability resolves (CR 603.10); the event then travels on through payment
+/// ledgers and the action's event list as already observed, so no later
+/// collector — live scan, durable cost ledger, or delayed-trigger match —
+/// observes it a second time (CR 603.2c: an ability triggers only once each
+/// time its trigger event occurs).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ActivationTriggerState {
+    /// Observed by the action's ordinary trigger collection (a stack-using or
+    /// loyalty activation), or a mana activation not yet at its boundary.
+    #[default]
+    Pending,
+    /// Already observed at the activation boundary, with the outcome of that
+    /// observation.
+    CollectedAtActivation { observers: ActivationObservers },
+}
+
+impl ActivationTriggerState {
+    pub fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending)
+    }
+}
+
+/// CR 603.2 + CR 603.5: What observing an activation at its boundary bound.
+/// `Bound` means at least one trigger was admitted for the event — whether its
+/// context was queued or then pruned (a remembered decline still spends a
+/// "triggers only once each turn" limit). A bound observation has consequences
+/// a mana-tap undo cannot reverse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ActivationObservers {
+    Unbound,
+    Bound,
+}
+
+/// CR 602.2 + CR 605.1a + CR 606.2: Discriminates which kind of activated
+/// ability was activated, so "Whenever you activate a loyalty ability"
+/// triggers (CR 606.2), "that isn't a mana ability" qualifiers (CR 605.1a), and
+/// ordinary activation triggers share the single `GameEvent::AbilityActivated`
+/// event family. The three kinds partition activated abilities: CR 605.1a
+/// excludes loyalty abilities from being mana abilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ActivatedAbilityKind {
-    /// CR 602.2: An ordinary activated ability.
+    /// CR 602.2: An ordinary (non-loyalty, non-mana) activated ability.
     #[default]
     Normal,
     /// CR 606.1 + CR 606.2: A loyalty ability of a planeswalker.
     Loyalty,
+    /// CR 605.1a + CR 605.3: An activated mana ability. Activating it follows
+    /// CR 602.2 like any other activation, but it resolves immediately without
+    /// using the stack (CR 605.3b).
+    Mana,
+}
+
+impl ActivatedAbilityKind {
+    /// CR 606.1 + CR 605.1a: The single classifier of an activated ability's
+    /// kind, from the ability definition bound when it was announced. Never
+    /// reads live game state, so an ability removed from its source (a granted
+    /// ability, a source that left) is still classified as it was activated.
+    pub fn of_definition(def: &super::ability::AbilityDefinition) -> Self {
+        if def
+            .cost
+            .as_ref()
+            .is_some_and(super::ability::is_loyalty_ability_cost)
+        {
+            Self::Loyalty
+        } else if crate::game::mana_abilities::is_mana_ability(def) {
+            Self::Mana
+        } else {
+            Self::Normal
+        }
+    }
+
+    /// CR 602.5 + CR 606.1: Whether an activation of this kind falls under a
+    /// `CantBeActivated` prohibition's ability-kind axis. That axis predates the
+    /// `Mana` kind and distinguishes loyalty from non-loyalty abilities, so a
+    /// `Normal` requirement means "non-loyalty" and keeps covering mana
+    /// abilities. Mana abilities are carved out on the separate
+    /// `ActivationExemption::ManaAbilities` axis (CR 605.1a).
+    pub fn satisfies_prohibition_kind(self, required: Self) -> bool {
+        match required {
+            Self::Normal => matches!(self, Self::Normal | Self::Mana),
+            Self::Loyalty => self == Self::Loyalty,
+            Self::Mana => self == Self::Mana,
+        }
+    }
 }
 
 impl ManaTapState {
@@ -91,7 +214,7 @@ impl ManaTapState {
 }
 
 /// Avatar crossover: The four elemental bending types, tracked per-turn on each player.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum BendingType {
     Fire,
     Air,
@@ -99,7 +222,7 @@ pub enum BendingType {
     Water,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum PlayerActionKind {
     /// A player accepted a resolution-time optional effect.
     AcceptedOptionalEffect,
@@ -113,6 +236,19 @@ pub enum PlayerActionKind {
     Proliferate,
     /// CR 701.16a: A player investigated (created a Clue token).
     Investigate,
+    /// CR 701.61a: A player foraged by exiling three cards from their graveyard
+    /// or sacrificing a Food.
+    Forage,
+    /// A player completed a draw instruction that delivered at least
+    /// one card. Emitted once per settled draw INSTRUCTION (at draw-sequence
+    /// completion), not once per card — so a multi-card draw records a single
+    /// event. Recorded so "for each opponent who drew a card this way" (Cut a
+    /// Deal) resolves via `PlayerFilter::PerformedActionThisWay` — a count over
+    /// players, not objects — and so `PlayerActionsThisTurn { Draw }` would count
+    /// draw events rather than cards. `player_actions_this_way` (a set) counts the
+    /// drawing player once; a draw that delivered no card (empty library, or every
+    /// unit replaced away) emits nothing because that player did not draw.
+    Draw,
 }
 
 /// CR 701.30d: Result of a clash — whether the controller won, lost, or tied.
@@ -289,6 +425,7 @@ pub struct EventObjectSnapshot {
     /// CR 202.3: effective mana value as of capture.
     pub mana_value: u32,
     /// CR 122.1: counters on the subject as of capture.
+    #[serde(with = "crate::types::counter::counter_map_serde")]
     pub counters: HashMap<CounterType, u32>,
 
     pub is_token: bool,
@@ -440,11 +577,14 @@ impl EventObjectSnapshot {
             // semantics for a nonsensical player-Connives subject rather than inventing one.
             TargetFilter::Player
             | TargetFilter::Controller
+            | TargetFilter::SourceController
+            | TargetFilter::Opponent
             | TargetFilter::Owner
             | TargetFilter::AllPlayers
             | TargetFilter::ScopedPlayer
             | TargetFilter::SpecificPlayer { .. }
             | TargetFilter::PlayerWhoChoseLabel { .. }
+            | TargetFilter::PlayerMatching { .. }
             | TargetFilter::Neighbor { .. }
             | TargetFilter::DefendingPlayer
             | TargetFilter::SourceChosenPlayer
@@ -453,6 +593,7 @@ impl EventObjectSnapshot {
             | TargetFilter::TriggeringSpellController
             | TargetFilter::TriggeringSpellOwner
             | TargetFilter::TriggeringSourceController
+            | TargetFilter::EventTargetController
             | TargetFilter::ParentTargetController
             | TargetFilter::ParentTargetOwner
             | TargetFilter::PostReplacementSourceController
@@ -462,12 +603,14 @@ impl EventObjectSnapshot {
             // Answering any of these would require resolving the candidate (or an engine
             // referent) out of live state, which is exactly what this snapshot forbids.
             // If the parser ever reaches one, the gate fails and it must be handled here.
-            TargetFilter::GrantingObject
+            TargetFilter::GrantingObject { .. }
             | TargetFilter::SourceOrPaired
             | TargetFilter::SpecificObject { .. }
             | TargetFilter::LastCreated
             | TargetFilter::LastRevealed
+            | TargetFilter::LastZoneChanged
             | TargetFilter::CostPaidObject
+            | TargetFilter::AmassedArmy
             | TargetFilter::ChosenCard
             | TargetFilter::TrackedSet { .. }
             | TargetFilter::ExiledCardByIndex { .. }
@@ -476,6 +619,10 @@ impl EventObjectSnapshot {
             | TargetFilter::ParentTargetSlot { .. }
             | TargetFilter::OriginalSource
             | TargetFilter::PostReplacementDamageTarget
+            // CR 615.5 + CR 615: object/compound referents never reachable from
+            // the Connive subject grammar; resolving them needs live state.
+            | TargetFilter::PostReplacementDamageSource
+            | TargetFilter::ControllerAndControlledPermanents { .. }
             | TargetFilter::ChosenDamageSource { .. } => Unsupported,
         }
     }
@@ -582,7 +729,7 @@ impl EventObjectSnapshot {
             // ---- embedded combat role; candidate membership never re-read ----
             FilterProp::Attacking { .. }
             | FilterProp::Blocking
-            | FilterProp::Unblocked
+            | FilterProp::BlockStatus { .. }
             | FilterProp::AttackingAlone
             | FilterProp::BlockingAlone
             | FilterProp::CombatRelation { .. } => Supported,
@@ -592,6 +739,7 @@ impl EventObjectSnapshot {
 
             // ---- embedded per-turn history ----
             FilterProp::WasDealtDamageThisTurn
+            | FilterProp::DealtDamageThisTurn { .. }
             | FilterProp::EnteredThisTurn
             | FilterProp::AttackedThisTurn { .. }
             | FilterProp::BlockedThisTurn
@@ -629,7 +777,18 @@ impl EventObjectSnapshot {
             // ---- unsupported: needs a live candidate lookup or an unmodeled field ----
             // Not reachable from the subject grammar today. Reaching one fails the gate,
             // which is the designed signal to extend the snapshot + evaluator together.
-            FilterProp::WasPlayed
+            // CR 701.15b/c: goad is a designation on the LIVE permanent (its `goaded_by`
+            // set, read by game/filter.rs `FilterProp::Goaded => !obj.goaded_by.is_empty()`).
+            // Neither EventObjectSnapshot nor ZoneChangeRecord carries a goaded field, and the
+            // runtime already fail-closes it (game/filter.rs zone-change-record matcher).
+            // Classify Unsupported so a future goaded event-subject filter fails the reach gate
+            // LOUDLY rather than silently reading an ungoaded snapshot. Deferred follow-up
+            // (option a): snapshot goaded onto EventObjectSnapshot + ZoneChangeRecord.
+            FilterProp::Goaded
+            | FilterProp::WasPlayed
+            // CR 108.2 + CR 108.2b: event snapshots retain token status but not whether
+            // a nontoken object is a copy, so card representation cannot be reconstructed.
+            | FilterProp::RepresentedByCard
             | FilterProp::ControllerChoseLabel { .. }
             | FilterProp::ControllerMatches { .. }
             | FilterProp::BlockingSource
@@ -639,8 +798,13 @@ impl EventObjectSnapshot {
             | FilterProp::ManaCostIn { .. }
             | FilterProp::ManaSymbolCount { .. }
             | FilterProp::Foretold
+            | FilterProp::HasAdventure
+            // CR 607.2a: This compares against an object linked in the live
+            // exile-link side table, which event snapshots deliberately omit.
+            | FilterProp::SameNameAsExiledBySource
             | FilterProp::AttachedToSource
             | FilterProp::AttachedToRecipient
+            | FilterProp::AttachedToPlayer { .. }
             | FilterProp::Unpaired
             | FilterProp::OtherThanTriggerObject
             | FilterProp::MostPrevalentCreatureTypeIn { .. }
@@ -662,13 +826,58 @@ impl EventObjectSnapshot {
     }
 }
 
+/// A life total reported alongside the change that produced it, for display.
+///
+/// Its `PartialEq` is deliberately always true, which is what makes it safe to carry
+/// inside a [`GameEvent`]. The event can be retained as resolution context, and a life
+/// total moves every iteration of a drain loop. A derived `PartialEq` would therefore make
+/// two otherwise-equivalent cycle points differ by this display reading alone. Being
+/// equality-transparent, the reading cannot perturb any comparison of game state, present
+/// or future, while the change itself (`amount`) stays fully compared.
+///
+/// `None` means no total was reported: an event from a peer or a recording older than this
+/// field, where a consumer falls back to the accompanying state snapshot.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LifeTotalReading(pub Option<i32>);
+
+impl LifeTotalReading {
+    /// Whether no total was reported, so serialization can leave the key out entirely.
+    pub fn is_unreported(&self) -> bool {
+        self.0.is_none()
+    }
+}
+
+impl PartialEq for LifeTotalReading {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for LifeTotalReading {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum GameEvent {
     GameStarted,
+    /// CR 400.2 + CR 701.23e: private knowledge captured while searching a
+    /// hidden zone is transported only to its latched audience; it is not a
+    /// public reveal or a searched-a-library marker.
+    HiddenSearchViewed {
+        searcher: PlayerId,
+        cards: Vec<LibrarySearchCardView>,
+        audience: Vec<PlayerId>,
+    },
     TurnStarted {
         player_id: PlayerId,
         turn_number: u32,
+    },
+    /// CR 500.7: One extra turn was created after the turn identified by
+    /// `anchor`; `player_id` is the beneficiary. CR 805.8: In a shared-team-turn
+    /// game, both ids are the corresponding shared-turn representatives.
+    ExtraTurnCreated {
+        player_id: PlayerId,
+        anchor: PlayerId,
     },
     PhaseChanged {
         phase: Phase,
@@ -680,6 +889,11 @@ pub enum GameEvent {
         card_id: CardId,
         controller: PlayerId,
         object_id: ObjectId, // CR 601.2a: The spell object on the stack
+        /// CR 202.3e + CR 601.2i: Mana value while this cast was on the stack,
+        /// including the announced value of X. Optional for legacy and
+        /// synthetic events that do not carry cast-time characteristics.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cast_mana_value: Option<u32>,
     },
     /// CR 702.140c + CR 730.2: A mutating creature spell merged with a target
     /// creature, forming a mutated permanent. Emitted by
@@ -707,6 +921,22 @@ pub enum GameEvent {
         augmenting_id: ObjectId,
         controller: PlayerId,
     },
+    /// CR 701.42a + CR 712.4a: The two cards of a meld pair were put onto the
+    /// battlefield back faces up and combined, as a single permanent represented
+    /// by both cards. Emitted only once the melded permanent has entered the
+    /// battlefield — never for a meld that fails (CR 701.42c). `object_id` is the
+    /// melded permanent, which keeps the instigating card's `ObjectId`;
+    /// `partner_id` is the other card of the pair, now its second component.
+    ///
+    /// Distinct from `Mutated`: melding enters a new object onto the battlefield
+    /// (CR 701.42a), whereas a CR 730.2b merge is not a battlefield entry. No
+    /// printed card triggers on melding, so this event dispatches no trigger key;
+    /// it drives the game log and the frontend's meld animation.
+    Melded {
+        object_id: ObjectId,
+        partner_id: ObjectId,
+        controller: PlayerId,
+    },
     /// CR 707.10: A spell was copied onto the stack. A copy of a spell isn't
     /// cast, so this is a distinct event from `SpellCast` — copy-sensitive
     /// triggers (Magecraft, "whenever you copy a spell") fire on this, while
@@ -724,15 +954,14 @@ pub enum GameEvent {
         object_id: ObjectId,
         value: u32,
     },
-    /// CR 602.1 + CR 605.3b: An activated ability has been activated and put on
-    /// the stack. **Not emitted for mana abilities** (CR 605.3b: mana abilities
-    /// resolve immediately without using the stack and follow a separate code
-    /// path that never reaches this event). This invariant — `AbilityActivated`
-    /// fires only for non-mana activations — is what makes
-    /// `TriggerCondition::ActivatedAbilityIsNonMana` trivially satisfied when
-    /// matched against this event, and is what lets the generic
-    /// "Whenever a player activates an ability that isn't a mana ability"
-    /// trigger class (Burning-Tree Shaman, Flamescroll Celebrant) listen here.
+    /// CR 602.2b + CR 601.2i + CR 605.3: An activated ability has become
+    /// activated (all costs paid). Emitted for every activation, including
+    /// mana abilities (CR 605.3: activating a mana ability follows CR 602.2;
+    /// it then resolves immediately without using the stack, CR 605.3b).
+    /// `kind` tells the three apart, so "that isn't a mana ability"
+    /// qualifiers (`TriggerCondition::ActivatedAbilityIsNonMana`, Burning-Tree
+    /// Shaman) are a real check, and triggers without that carve-out (Elrond,
+    /// Moon-Reader; Avalanche of Sector 7) see mana activations.
     AbilityActivated {
         /// CR 602.2a: "Its controller is the player who activated the ability."
         /// Required so `extract_player_from_event` can resolve "that player" /
@@ -740,14 +969,25 @@ pub enum GameEvent {
         /// ability's effect (Burning-Tree Shaman, Flamescroll Celebrant).
         player_id: PlayerId,
         source_id: ObjectId,
-        /// CR 606.2: Distinguishes loyalty-ability activations (planeswalker
-        /// abilities paid with loyalty counters) from ordinary activated
-        /// abilities so the "Whenever you activate a loyalty ability" trigger
-        /// class can match without a separate event. `#[serde(default)]` keeps
-        /// older serialized `AbilityActivated` events (which predate this field)
-        /// deserializing as `Normal`.
+        /// CR 605.1a + CR 606.2: Which kind of activated ability this was.
+        /// `#[serde(default)]` keeps older serialized `AbilityActivated` events
+        /// (which predate this field) deserializing as `Normal`.
         #[serde(default)]
         kind: ActivatedAbilityKind,
+        /// CR 113.7 + CR 113.7a + CR 400.7: The source's last known information, present only
+        /// when the source was on the battlefield when the ability was announced
+        /// and a cost moved it off before the ability became activated (a
+        /// sacrificed Treasure or Clue). Activation triggers read the source's
+        /// characteristics and controller from it. `None` when the source is
+        /// still where it was, or was activated from another zone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        departed_source_lki: Option<Box<LKISnapshot>>,
+        /// CR 603.10 + CR 603.2c: `CollectedAtActivation` for a mana ability's
+        /// activation, whose triggers were collected at its boundary (with
+        /// what that observation bound); every later collector skips it.
+        /// Omitted on the wire when `Pending`.
+        #[serde(default, skip_serializing_if = "ActivationTriggerState::is_pending")]
+        trigger_state: ActivationTriggerState,
     },
     /// CR 603.6a: Enters-the-battlefield and zone-change triggers fire on this
     /// event. `from` is `None` when an object is created directly in a zone
@@ -769,6 +1009,13 @@ pub enum GameEvent {
     LifeChanged {
         player_id: PlayerId,
         amount: i32,
+        /// CR 119.1 + CR 119.3: the player's own life total once this change has
+        /// been applied. Emitted so a presentation layer animating a run of life
+        /// changes can show each intermediate total without re-deriving it by
+        /// summing `amount`s — summing cannot reproduce the real sequence once a
+        /// replacement effect alters an amount mid-run.
+        #[serde(default, skip_serializing_if = "LifeTotalReading::is_unreported")]
+        new_total: LifeTotalReading,
     },
     ManaAdded {
         player_id: PlayerId,
@@ -798,6 +1045,16 @@ pub enum GameEvent {
         #[serde(default, skip_serializing_if = "ManaTapState::is_not_from_tap")]
         tap_state: ManaTapState,
     },
+    /// CR 605.1b: An activated mana ability resolved and produced mana. Unlike
+    /// `ManaAdded`, this is one aggregate event per ability resolution; unlike
+    /// `TappedForMana`, it also covers mana abilities without a tap cost.
+    ManaAbilityProduced {
+        player_id: PlayerId,
+        source_id: ObjectId,
+        produced: Vec<ManaType>,
+        #[serde(default, skip_serializing_if = "ManaAbilityTriggerState::is_pending")]
+        trigger_state: ManaAbilityTriggerState,
+    },
     /// CR 500.5 + CR 703.4q: A single mana unit was emptied from a player's
     /// pool during the step-end empty event after the CR 616.1 replacement
     /// pipeline resolved. `source_id` is the unit's original producer
@@ -806,6 +1063,23 @@ pub enum GameEvent {
         player_id: PlayerId,
         source_id: ObjectId,
         color: ManaType,
+    },
+    /// Mana burn: a player lost life for mana unspent when one of CR 500.1's
+    /// five phases ended. Pre-M10 only — the current rules have no such rule
+    /// (glossary "Mana Burn (Obsolete)": "Older versions of the rules stated
+    /// that unspent mana caused a player to lose life"), so this is emitted
+    /// only for a custom format declaring `LegacyRuleSet.mana_burn`.
+    ///
+    /// Distinct from the Yurlok-class life loss a card's static ability
+    /// causes at the same seam: that is a card doing something, this is the
+    /// format's rules being older. A log that conflated them would tell a
+    /// player the wrong reason they are at 14 life.
+    ManaBurn {
+        player_id: PlayerId,
+        /// The number of mana units that emptied — a count, so `u32` like
+        /// `apply_empty_mana_pool_decisions` returns. Under mana burn the
+        /// emptied count IS the life lost, which is why no second tally exists.
+        amount: u32,
     },
     /// CR 614.1a + CR 703.4q: A `Transform(_)` step-end mana handler (Horizon
     /// Stone, Kruphix, Omnath, Ozai) recolored a unit in place during the
@@ -932,6 +1206,21 @@ pub enum GameEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_id: Option<ObjectId>,
     },
+    /// CR 701.17a: a card was milled — the milling player put it from the top of
+    /// their library toward their graveyard. Emitted once per card (CR 603.2c),
+    /// and emitted even when a replacement rewrote the destination: CR 614.6 says
+    /// the modified event is what occurred, and CR 701.17c confirms the card is
+    /// still a milled card by letting an effect find it "in the zone it moved to
+    /// from the library". `to` is that post-replacement zone, which CR 701.17c
+    /// scopes on being public (CR 400.2) — the wire visibility filter reads it.
+    Milled {
+        /// CR 701.17a: the player whose library the card left.
+        player_id: PlayerId,
+        /// The milled card.
+        object_id: ObjectId,
+        /// CR 701.17c: the zone the card actually moved to from the library.
+        to: Zone,
+    },
     DamageCleared {
         object_id: ObjectId,
     },
@@ -977,6 +1266,53 @@ pub enum GameEvent {
         object_id: ObjectId,
         counter_type: CounterType,
         count: u32,
+        // CR 122.1 + CR 603.2c: the player who put the counters, so "whenever
+        // you/an opponent put one or more counters" triggers can gate on the
+        // actor. Defaults to `PlayerId(0)` on pre-field serialized fixtures.
+        #[serde(default)]
+        actor: PlayerId,
+    },
+    /// CR 714.2 + CR 608.2p: A Saga's chapter ability finished resolving.
+    ///
+    /// CR 608.2p is the rule this event exists to serve: once every resolution
+    /// step is completed, abilities that trigger on that ability resolving
+    /// trigger. Nothing else on the bus reports that moment for a chapter
+    /// ability.
+    ///
+    /// A chapter ability is not a distinct AST concept — CR 714.2b defines a
+    /// chapter symbol as a lore-counter threshold trigger on the Saga itself.
+    /// This event is the resolution half of that ability's lifecycle, which
+    /// nothing else on the bus reports: `StackResolved` is emitted for fizzles
+    /// and failed intervening-ifs too, and carries the stack entry id rather
+    /// than the Saga.
+    ///
+    /// `chapter` and `final_chapter` are captured BEFORE the chapter ability
+    /// executes, because a chapter ability may remove its own Saga from the
+    /// battlefield as its effect (Fable of the Mirror-Breaker III), and CR 714.4
+    /// sacrifices it as soon as the ability leaves the stack — after which
+    /// neither number could be re-derived.
+    SagaChapterAbilityResolved {
+        /// CR 400.7 + CR 113.7a: The exact Saga incarnation whose chapter ability
+        /// resolved, with the characteristics it had when the ability triggered.
+        ///
+        /// The trigger's own source context, not a raw `ObjectId`, for the same
+        /// reason `ConniveSubject` carries a snapshot: a chapter ability already
+        /// on the stack still resolves after its Saga leaves and re-enters, and
+        /// the re-entered permanent can occupy the same storage id. A bare id
+        /// would let an observer's "that Saga" bind to the NEW incarnation and
+        /// read its mana value (CR 202.3); suppressing the event instead would
+        /// lose an occurrence that genuinely resolved. Carrying the context does
+        /// neither — `identity.reference` pins the incarnation and `lki` answers
+        /// every characteristic an observer can ask about.
+        saga: Box<TriggerSourceContext>,
+        /// CR 109.5: controller of the resolved chapter ability.
+        controller: PlayerId,
+        /// CR 714.2b: the chapter number (lore threshold) that resolved.
+        chapter: u32,
+        /// CR 714.2d: the greatest chapter number among this Saga's chapter
+        /// abilities. Per CR 714.2e, `chapter == final_chapter` is exactly what
+        /// makes this the Saga's *final* chapter ability.
+        final_chapter: u32,
     },
     /// Digital-only Alchemy (no CR entry): a card's intensity increased by
     /// `amount`. Emitted per affected card so consumers (triggers that watch for
@@ -1012,6 +1348,13 @@ pub enum GameEvent {
     },
     CreatureDestroyed {
         object_id: ObjectId,
+        /// CR 701.8a: the object whose destroy instruction destroyed it (the
+        /// resolving spell or ability's source); `None` for a state-based
+        /// destruction from lethal or deathtouch damage (CR 704.5g / CR 704.5h).
+        /// `#[serde(default)]` keeps events from peers that predate the field
+        /// readable.
+        #[serde(default)]
+        source_id: Option<ObjectId>,
     },
     PermanentSacrificed {
         object_id: ObjectId,
@@ -1045,12 +1388,29 @@ pub enum GameEvent {
         attachment_id: ObjectId,
         old_target: TargetRef,
     },
+    /// CR 109.5 + CR 116.2c: the player meant by "you" took the special action
+    /// of paying the printed termination cost, ending the effect. CR 116.1: the
+    /// action does not use the stack, so this event records a completed state
+    /// change rather than something that can be responded to.
+    ///
+    /// `group` names every `TransientContinuousEffect` the creating resolution
+    /// installed (see `EndEffectPermission`); `source_id` is the object whose
+    /// resolution installed them.
+    ContinuousEffectEnded {
+        group: crate::types::game_state::EndEffectGroupId,
+        source_id: ObjectId,
+        player: PlayerId,
+    },
     AttackersDeclared {
         attacker_ids: Vec<ObjectId>,
         defending_player: PlayerId,
         /// Per-attacker targets — parallel to attacker_ids, same length and order.
         #[serde(default)]
         attacks: Vec<(ObjectId, crate::game::combat::AttackTarget)>,
+        /// CR 508.1a + CR 603.4: declaration-time characteristics for the
+        /// exact attackers in this event, used by event-scoped trigger checks.
+        #[serde(default)]
+        declaration_records: Vec<crate::types::game_state::AttackDeclarationRecord>,
     },
     BlockersDeclared {
         assignments: Vec<(ObjectId, ObjectId)>,
@@ -1087,6 +1447,7 @@ pub enum GameEvent {
     BecomesTarget {
         target: TargetRef,
         source_id: ObjectId,
+        source_controller: PlayerId,
     },
     /// CR 702.122e: A Vehicle's crew ability resolved.
     /// Carries creature list for trigger conditions that reference "creatures that crewed it".
@@ -1121,6 +1482,15 @@ pub enum GameEvent {
     Transformed {
         object_id: ObjectId,
     },
+    /// CR 710.4: A Kamigawa flip permanent was flipped to its alternative face.
+    /// Distinct from `Transformed` — CR 701.27a restricts transforming to
+    /// double-faced permanents, and CR 710.1c keeps a flipped permanent's color
+    /// and mana cost unchanged where transforming swaps them. Drives the game
+    /// log and the public-state/frontend re-render. No printed card triggers on
+    /// a permanent flipping, so this event dispatches no trigger key.
+    Flipped {
+        object_id: ObjectId,
+    },
     /// Digital-only Specialize: a permanent became a color-specific specialized face.
     Specialized {
         object_id: ObjectId,
@@ -1145,6 +1515,20 @@ pub enum GameEvent {
         #[serde(default)]
         card_ids: Vec<ObjectId>,
         card_names: Vec<String>,
+    },
+    /// CR 101.4 + CR 608.2c: Secretly-chosen numbers were published by a reveal
+    /// instruction ("then all players reveal those numbers simultaneously" —
+    /// Wheel of Misfortune). One event carries every number published by the
+    /// single instruction, because the card reveals them SIMULTANEOUSLY; a
+    /// per-player event would imply an ordering the rules do not have.
+    ///
+    /// Distinct from `CardsRevealed`, which is CR 701.20 (showing a card). This
+    /// is the game log's and the frontend's view of the secret→public
+    /// transition that `game::visibility` enforces on
+    /// `ChosenAttribute::RevealedNumber`.
+    ChosenNumbersRevealed {
+        /// Each revealing player and the number they had chosen, in APNAP order.
+        numbers: Vec<(PlayerId, u32)>,
     },
     CombatDamageDealtToPlayer {
         player_id: PlayerId,
@@ -1185,6 +1569,29 @@ pub enum GameEvent {
     PlayerPerformedAction {
         player_id: PlayerId,
         action: PlayerActionKind,
+        /// CR 701.22a: For `PlayerActionKind::Scry`, the effective number of
+        /// cards looked at — the requested amount clamped to library size.
+        /// This is the PER-EVENT provenance for "the number of cards looked
+        /// at while scrying this way" (Elrond, Master of Healing →
+        /// `QuantityRef::TriggeringScryLookCount`): each queued "whenever you
+        /// scry" trigger preserves its own event through target selection and
+        /// stack resolution (`PendingTriggerContext`), so two scries with
+        /// different look counts in one resolution keep distinct values —
+        /// a global scalar could be overwritten before the queued triggers
+        /// are constructed. `None` for actions without a magnitude.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        look_count: Option<u32>,
+        /// CR 701.22a + CR 701.22d: Number of cards put on the bottom as the
+        /// completed scry's controller chose. `Some(0)` distinguishes a
+        /// completed nonzero scry that left every looked-at card on top.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scry_bottom_count: Option<u32>,
+        /// CR 701.22a: Number of cards the player kept on top during a
+        /// completed scry. This is presentation data paired with the bottom
+        /// count; it lets observers display the public outcome without
+        /// reconstructing it from hidden-zone data.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scry_top_count: Option<u32>,
     },
     /// Engine-authored diagnostic for top-card predicate
     /// guesses. This is intentionally a log/debug event rather than rules input:
@@ -1245,6 +1652,10 @@ pub enum GameEvent {
     CityBlessingGained {
         player_id: PlayerId,
     },
+    /// A player gained an enduring story.
+    EnduringStoryGained {
+        player_id: PlayerId,
+    },
     /// CR 706: A die was rolled. `result` is `None` when the roll has no numeric
     /// face value — the symbolic planar die (CR 901.9d / CR 706.7): the
     /// `RolledDie` trigger still fires, but numeric-result consumers ignore it.
@@ -1252,6 +1663,17 @@ pub enum GameEvent {
         player_id: PlayerId,
         sides: u8,
         result: Option<u8>,
+    },
+    /// CR 706.6: A die roll ignored by a replacement (Barbarian Class, Pixie
+    /// Guide, Wyll) — the NATURAL value, before any modifier (modifiers never
+    /// touch an ignored roll). Display mirror ONLY: it must never be read as
+    /// a roll by triggers, results tables, aggregates, snapshots, or AI —
+    /// an ignored roll "is considered to have never happened". Emitted
+    /// alongside the survivors so the UI can show what the lowest roll was.
+    DieRollIgnored {
+        player_id: PlayerId,
+        sides: u8,
+        result: u8,
     },
     /// CR 103.1 / CR 706: The game-1 starting-player roll-off, emitted as one
     /// authoritative structured event so the contest can be rendered round by
@@ -1273,6 +1695,15 @@ pub enum GameEvent {
     /// CR 701.54: The Ring tempted a player.
     RingTemptsYou {
         player_id: PlayerId,
+        /// CR 701.54a + CR 701.54d: the Ring-bearer chosen as part of THIS
+        /// temptation (None when the player controlled no creatures, so no
+        /// choice happened). The temptation's actions complete before the
+        /// "whenever the Ring tempts you" event occurs, so the event carries
+        /// the completed choice and both CR 603.4 checks of a bearer-dependent
+        /// intervening-if read this immutable record, never the mutable
+        /// `state.ring_bearer` designation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chosen_bearer: Option<ObjectId>,
     },
     /// CR 309.4c: A player moved their venture marker into a dungeon room.
     RoomEntered {
@@ -1350,9 +1781,16 @@ pub enum GameEvent {
         kind: StickerKind,
     },
     /// CR 701.52: The active player rolled to visit their Attractions.
+    ///
+    /// CR 701.52a specifies ONE roll-to-visit turn-based action, so this event
+    /// is emitted ONCE per action even when a CR 706.6 count-raising replacement
+    /// (Barbarian Class, Pixie Guide, Wyll) leaves more than one surviving die.
+    /// `rolls` therefore carries every SURVIVING result, in roll order — an
+    /// ignored roll never happened (CR 706.6) and never appears here. Visiting
+    /// is still decided per result (`AttractionVisited`, one per visit).
     AttractionsRolledToVisit {
         player_id: PlayerId,
-        roll: u8,
+        rolls: Vec<u8>,
     },
     /// CR 701.52a + CR 702.159a: A specific Attraction was visited this roll.
     AttractionVisited {
@@ -1417,10 +1855,16 @@ pub enum GameEvent {
         is_mana_ability: bool,
     },
 
-    /// CR 702.110: A creature exploited another creature (sacrificed via exploit ETB).
+    /// CR 702.110b + CR 603.10a + CR 400.7: A creature exploited another
+    /// creature. `exploiter` identifies the actor, while `record` preserves the
+    /// sacrificed victim's exact pre-departure characteristics for later
+    /// trigger matching after the victim has become a new object.
     CreatureExploited {
         exploiter: ObjectId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exploiter_incarnation: Option<u64>,
         sacrificed: ObjectId,
+        record: Box<ZoneChangeRecord>,
     },
     /// CR 122.1: A player's energy counter total changed.
     EnergyChanged {
@@ -1507,6 +1951,29 @@ pub enum GameEvent {
     },
 }
 
+/// CR 603.2 + CR 702.59a: True when an off-zone trigger source was already
+/// functioning in `zone` when `event` occurred — i.e. it did not co-depart into
+/// that zone as the triggering object moved there. Shared by off-zone trigger
+/// collection and SelfRef co-departure mis-latch gating (CR 400.7e).
+pub(crate) fn source_was_not_co_departed_into_zone(
+    event: &GameEvent,
+    source_id: ObjectId,
+    zone: Zone,
+) -> bool {
+    match event {
+        GameEvent::ZoneChanged {
+            object_id,
+            to,
+            record,
+            ..
+        } if *to == zone => {
+            (*object_id != source_id || record.from_zone != Some(Zone::Battlefield))
+                && !record.co_departed.contains(&source_id)
+        }
+        _ => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1530,6 +1997,22 @@ mod tests {
     }
 
     #[test]
+    fn extra_turn_created_serializes_with_normalized_record_identity() {
+        let event = GameEvent::ExtraTurnCreated {
+            player_id: PlayerId(2),
+            anchor: PlayerId(5),
+        };
+
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "ExtraTurnCreated");
+        assert_eq!(json["data"]["player_id"], 2);
+        assert_eq!(json["data"]["anchor"], 5);
+
+        let round_tripped: GameEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(round_tripped, event);
+    }
+
+    #[test]
     fn ability_activated_kind_defaults_to_normal_for_legacy_state() {
         // CR 606.2: an older serialized `AbilityActivated` event predates the
         // `kind` field. `#[serde(default)]` must deserialize it as `Normal`,
@@ -1540,8 +2023,22 @@ mod tests {
         });
         let event: GameEvent = serde_json::from_value(legacy).unwrap();
         match event {
-            GameEvent::AbilityActivated { kind, .. } => {
+            GameEvent::AbilityActivated {
+                kind,
+                departed_source_lki,
+                trigger_state,
+                ..
+            } => {
                 assert_eq!(kind, ActivatedAbilityKind::Normal);
+                assert!(
+                    departed_source_lki.is_none(),
+                    "a legacy event predating the field carries no departed-source LKI"
+                );
+                assert_eq!(
+                    trigger_state,
+                    ActivationTriggerState::Pending,
+                    "a legacy event is observed by ordinary collection"
+                );
             }
             other => panic!("expected AbilityActivated, got {other:?}"),
         }
@@ -1549,12 +2046,18 @@ mod tests {
 
     #[test]
     fn ability_activated_kind_round_trips() {
-        // CR 606.2: the discriminator survives serialization.
-        for kind in [ActivatedAbilityKind::Normal, ActivatedAbilityKind::Loyalty] {
+        // CR 606.2 + CR 605.1a: the discriminator survives serialization.
+        for kind in [
+            ActivatedAbilityKind::Normal,
+            ActivatedAbilityKind::Loyalty,
+            ActivatedAbilityKind::Mana,
+        ] {
             let event = GameEvent::AbilityActivated {
                 player_id: PlayerId(1),
                 source_id: ObjectId(9),
                 kind,
+                departed_source_lki: None,
+                trigger_state: crate::types::events::ActivationTriggerState::Pending,
             };
             let json = serde_json::to_value(&event).unwrap();
             let back: GameEvent = serde_json::from_value(json).unwrap();
@@ -1749,6 +2252,22 @@ mod tests {
             properties: vec![FilterProp::WasKicked],
         });
         assert_eq!(classify(&needs_live), Unsupported);
+    }
+
+    /// CR 701.15b/c: goad is a designation on the LIVE permanent, not a fact the event
+    /// snapshot / zone-change record carries — the runtime fail-closes it. The reach-gate
+    /// classifier must AGREE: a goaded event-subject filter is `Unsupported`, so a future
+    /// card that reaches it fails the gate loudly instead of silently certifying ungoaded.
+    /// Revert-probe: returning Goaded to the Supported group (its state on head e3448a3c3)
+    /// makes classify yield Supported, flipping this assertion.
+    #[test]
+    fn goaded_subject_filter_is_unsupported() {
+        let goaded = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![FilterProp::Goaded],
+        });
+        assert_eq!(classify(&goaded), Unsupported);
     }
 
     /// `Unsupported` dominates a composite: if one branch cannot be answered, the whole

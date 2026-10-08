@@ -83,6 +83,7 @@ fn export_backed_grizzly_bears_combat_canary() {
     let mut runner = scenario.build();
 
     runner.pass_both_players();
+    runner.pass_both_players();
     assert_matches!(
         runner.state().waiting_for,
         WaitingFor::DeclareAttackers { .. }

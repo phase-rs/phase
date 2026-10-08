@@ -1,4 +1,4 @@
-// CR 613.3g (Layer 7) — P/T anthem static abilities.
+// CR 613.1g (Layer 7) — P/T anthem static abilities.
 
 #[allow(unused_imports)]
 use super::prelude::*;
@@ -23,6 +23,27 @@ pub(crate) fn parse_typed_you_control(
         let descriptor = before.original.trim();
         if !descriptor.is_empty() {
             let after_prefix = &after.original[" creatures you control ".len()..];
+            // CR 611.3: "X creatures you control and Y ..." — "you control" here
+            // ends only the FIRST conjunct of a compound subject, not the whole
+            // subject. A well-formed single-subject predicate always starts with
+            // a verb (get/gets/has/have/gain/gains) right after "you control ",
+            // never the conjunction "and" — so a leading "and " means this
+            // positional split guessed wrong and the real subject is compound
+            // (Dune Chanter: "Lands you control and land cards you own that
+            // aren't on the battlefield are Deserts..."). Decline so dispatch
+            // falls through to a handler that resolves the whole compound
+            // subject correctly (`parse_contextual_continuous_subject_static` for
+            // get/has predicates, `parse_subject_additive_type_static` for
+            // are/is predicates) instead of treating the second conjunct as
+            // unparsed predicate noise that `parse_continuous_gets_has`'s lenient
+            // `parse_additive_type_clause_modifications` fallback can scan past
+            // and silently drop.
+            if tag::<_, _, OracleError<'_>>("and ")
+                .parse(after_prefix.trim_start())
+                .is_ok()
+            {
+                return None;
+            }
             let full_subject = tp.original[..creatures_pos + " creatures you control".len()].trim();
             // CR 509.1h: Strip combat-status prefixes ("Attacking Ninja" → props=[Attacking], subtype="Ninja")
             let mut extra_props = Vec::new();
@@ -39,8 +60,8 @@ pub(crate) fn parse_typed_you_control(
                 parse_property_descriptor(&desc_lower, desc_remaining, &extra_props, is_other)
             {
                 let (prop_filter, after_prefix) =
-                    if let Some((prop, rest)) = strip_counter_condition_prefix(after_prefix) {
-                        (add_property(prop_filter, prop), rest)
+                    if let Some((props, rest)) = strip_with_qualifier_prefix(after_prefix) {
+                        (add_properties(prop_filter, props), rest)
                     } else {
                         (prop_filter, after_prefix)
                     };
@@ -51,10 +72,10 @@ pub(crate) fn parse_typed_you_control(
             if let Some(compound_filter) =
                 try_parse_compound_subtypes(desc_remaining, &extra_props, is_other)
             {
-                // CR 613.7: Check for counter condition before returning
+                // CR 122.1 + CR 208.4b: "with" qualifier (counter or base-P/T designation)
                 let (compound_filter, after_prefix) =
-                    if let Some((prop, rest)) = strip_counter_condition_prefix(after_prefix) {
-                        (add_property(compound_filter, prop), rest)
+                    if let Some((props, rest)) = strip_with_qualifier_prefix(after_prefix) {
+                        (add_properties(compound_filter, props), rest)
                     } else {
                         (compound_filter, after_prefix)
                     };
@@ -96,7 +117,7 @@ pub(crate) fn parse_typed_you_control(
                 // descriptor ("Nontoken creatures you control") or supertype
                 // descriptor ("Legendary creatures you control") is NOT a
                 // subtype. Bail so dispatch falls through to the subject parser,
-                // which routes the full phrase through `parse_type_phrase`.
+                // which routes the full phrase through `parse_type_phrase_folding`.
                 } else if descriptor_is_negation(descriptor) || descriptor_is_supertype(descriptor)
                 {
                     return None;
@@ -104,8 +125,52 @@ pub(crate) fn parse_typed_you_control(
                     TargetFilter::Typed(
                         typed_filter_for_subtype(descriptor).controller(ControllerRef::You),
                     )
+                // CR 105.1 + CR 205.4a: a compound color/supertype descriptor
+                // ("Black legendary", "Legendary black", ...) — the Legends
+                // banding-land cycle (Unholy Citadel, Seafarer's Quay,
+                // Adventurers' Guildhouse, Cathedral of Serra, Mountain
+                // Stronghold): "<Color> legendary creatures you control have
+                // \"bands with other legendary creatures.\"" (issue #6332).
+                // None of the bespoke arms above recognize a compound
+                // descriptor, so delegate the full subject to
+                // `parse_type_phrase_folding` — the general subject-filter grammar
+                // that already composes a color prefix and a supertype prefix
+                // in either order (see its leading and post-negation
+                // supertype/color passes in `oracle_target.rs`) — rather than
+                // growing a second bespoke color+supertype combinator here.
+                //
+                // Accept ONLY when the fully-consumed result carries BOTH a
+                // `HasColor` and a `HasSupertype` property — i.e. genuinely a
+                // color+supertype compound, not merely "some descriptor
+                // `parse_type_phrase_folding` happens to accept." A full-consumption
+                // check alone is not narrow enough: descriptors this function
+                // has no OTHER arm for (e.g. Saryth, the Viper's Fang / Augusta,
+                // Dean of Order's "Other tapped creatures you control .../Other
+                // untapped creatures you control ...") also fully consume
+                // through `parse_type_phrase_folding`, and unconditionally accepting
+                // them here would silently reroute cards that are unrelated to
+                // this fix onto a different (and untested, for them) filter
+                // path. Requiring both properties scopes acceptance to exactly
+                // the class this fix targets.
                 } else {
-                    return None;
+                    let subject_and_type = tp.original[..creatures_pos + " creatures".len()].trim();
+                    let (compound_filter, remainder) = parse_type_phrase_folding(subject_and_type);
+                    match compound_filter {
+                        TargetFilter::Typed(typed)
+                            if remainder.trim().is_empty()
+                                && typed
+                                    .properties
+                                    .iter()
+                                    .any(|p| matches!(p, FilterProp::HasColor { .. }))
+                                && typed
+                                    .properties
+                                    .iter()
+                                    .any(|p| matches!(p, FilterProp::HasSupertype { .. })) =>
+                        {
+                            TargetFilter::Typed(typed.controller(ControllerRef::You))
+                        }
+                        _ => return None,
+                    }
                 }
             } else if desc_remaining.eq_ignore_ascii_case("commander") {
                 // CR 903.3d: Combat-status prefix + "Commander creature" — same
@@ -136,12 +201,12 @@ pub(crate) fn parse_typed_you_control(
             } else {
                 return None;
             };
-            // CR 613.7: Check for "with [counter] on it/them" condition between
-            // "you control" and the predicate (e.g., "Elf creatures you control
+            // CR 122.1 + CR 208.4b: "with" qualifier (counter or base-P/T designation)
+            // between "you control" and the predicate (e.g., "Elf creatures you control
             // with a +1/+1 counter on it has trample").
             let (typed_filter, after_prefix) =
-                if let Some((prop, rest)) = strip_counter_condition_prefix(after_prefix) {
-                    (add_property(typed_filter, prop), rest)
+                if let Some((props, rest)) = strip_with_qualifier_prefix(after_prefix) {
+                    (add_properties(typed_filter, props), rest)
                 } else {
                     (typed_filter, after_prefix)
                 };
@@ -162,6 +227,14 @@ pub(crate) fn parse_typed_you_control(
         let descriptor = before.original.trim();
         if !descriptor.is_empty() {
             let after_prefix = &after.original[" you control ".len()..];
+            // CR 611.3: same compound-subject guard as the "creatures you
+            // control" branch above — see its comment for the full rationale.
+            if tag::<_, _, OracleError<'_>>("and ")
+                .parse(after_prefix.trim_start())
+                .is_ok()
+            {
+                return None;
+            }
             let full_subject = tp.original[..yc_pos + " you control".len()].trim();
             // CR 509.1h: Strip combat-status prefixes
             let mut extra_props = Vec::new();
@@ -176,10 +249,10 @@ pub(crate) fn parse_typed_you_control(
             if let Some(compound_filter) =
                 try_parse_compound_subtypes(desc_remaining, &extra_props, is_other)
             {
-                // CR 613.7: Check for counter condition before returning
+                // CR 122.1 + CR 208.4b: "with" qualifier (counter or base-P/T designation)
                 let (compound_filter, after_prefix) =
-                    if let Some((prop, rest)) = strip_counter_condition_prefix(after_prefix) {
-                        (add_property(compound_filter, prop), rest)
+                    if let Some((props, rest)) = strip_with_qualifier_prefix(after_prefix) {
+                        (add_properties(compound_filter, props), rest)
                     } else {
                         (compound_filter, after_prefix)
                     };
@@ -258,10 +331,10 @@ pub(crate) fn parse_typed_you_control(
             } else {
                 return None;
             };
-            // CR 613.7: Check for "with [counter] on it/them" condition
+            // CR 122.1 + CR 208.4b: "with" qualifier (counter or base-P/T designation)
             let (typed_filter, after_prefix) =
-                if let Some((prop, rest)) = strip_counter_condition_prefix(after_prefix) {
-                    (add_property(typed_filter, prop), rest)
+                if let Some((props, rest)) = strip_with_qualifier_prefix(after_prefix) {
+                    (add_properties(typed_filter, props), rest)
                 } else {
                     (typed_filter, after_prefix)
                 };
@@ -367,10 +440,13 @@ pub(crate) fn parse_subject_continuous_static(text: &str) -> Option<StaticDefini
 
     let modifications = parse_continuous_modifications(&effective_predicate);
     if !modifications.is_empty() {
-        let mut def = StaticDefinition::continuous()
-            .affected(affected)
-            .modifications(modifications)
-            .description(text.to_string());
+        let mut def = with_protection_does_not_remove(
+            StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(modifications)
+                .description(text.to_string()),
+            text,
+        );
         if let Some(cond) = suffix_condition {
             def.condition = Some(cond);
         }
@@ -405,10 +481,9 @@ pub(crate) fn parse_subject_additive_type_static(text: &str) -> Option<StaticDef
     if let Some((before_cond, after_cond)) = predicate_tp.split_around(" as long as ") {
         let modifications = parse_additive_type_clause_modifications(before_cond.original)?;
         let condition_text = after_cond.original.trim().trim_end_matches('.');
-        let condition =
-            parse_static_condition(condition_text).unwrap_or(StaticCondition::Unrecognized {
-                text: condition_text.to_string(),
-            });
+        let condition = parse_static_condition(condition_text).unwrap_or_else(|| {
+            unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive)
+        });
         return Some(
             StaticDefinition::continuous()
                 .affected(affected)
@@ -592,10 +667,9 @@ pub(crate) fn parse_conditional_static(text: &str) -> Option<StaticDefinition> {
     let conditional = text.strip_prefix("As long as ")?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     let (condition_text, remainder) = conditional.split_once(", ")?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
 
-    let condition =
-        parse_static_condition(condition_text).unwrap_or(StaticCondition::Unrecognized {
-            text: condition_text.to_string(),
-        });
+    let condition = parse_static_condition(condition_text).unwrap_or_else(|| {
+        unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive)
+    });
 
     let mut def = parse_static_line(remainder.trim())?;
     // CR 611.3a + CR 118.12a: When the inner static already carries a typed
@@ -814,60 +888,118 @@ pub(crate) fn parse_typed_you_control_subject_filter(
 ///    attached-subject statics (an Aura/Equipment whose "it" refers to the
 ///    enchanted/equipped creature) the pronoun is not the source.
 /// 2. Only the bare source-STATE predicates that `~ is …` already resolves to a
-///    typed condition are rewritten — the tapped/untapped pair plus their
-///    combat-state siblings "attacking"/"blocking"/"blocked" and the compound
-///    "attacking or blocking" (which `~ is …` lowers to
-///    `Or([SourceIsAttacking, SourceIsBlocking])`)
-///    (CR 508.1k / 509.1g / 509.1h). "it" is otherwise overloaded: "it's your
+///    typed condition are rewritten. The list below is the WHOLE list and must
+///    stay in lockstep with the `tag`s in `parse_self_pronoun_rewrite` below,
+///    which is the single combinator implementing every arm:
+///    "tapped" / "untapped", their combat-state siblings "attacking" /
+///    "blocking" / "blocked" and the compound "attacking or blocking" (which
+///    `~ is …` lowers to `Or([SourceIsAttacking, SourceIsBlocking])`)
+///    (CR 508.1k / 509.1g / 509.1h), "modified" (CR 700.9), "equipped"
+///    (CR 301.5a) and "enchanted" (CR 303.4b) — nine phrases — plus the two
+///    non-contraction "it entered …" forms handled below, "it entered this turn"
+///    and "it entered the battlefield this turn" (CR 400.7).
+///    "it" is otherwise overloaded: "it's your
 ///    turn" is impersonal (a turn reference, not the source); "it's a Wall" /
 ///    "it's red" / "it's legendary" are type/characteristic gates with their own
 ///    parse paths. Rewriting those would break or mis-bind them, so they are
 ///    left untouched. The match is EXACT, so "it's attacking alone" keeps its
 ///    trailing word and falls through to `SourceAttackingAlone` rather than
 ///    collapsing to `SourceIsAttacking`.
+///    The same exact-tail treatment covers the combat-history form "it attacked
+///    this turn" (CR 508.1a, Agent Frank Horrigan) handled below.
 ///
-/// Returns the condition unchanged when neither guard matches.
+/// STANDING CONSTRAINT on guard #1. Its premise ("the caller only applies this
+/// when the affected subject is SelfRef, therefore `it` names the source") has
+/// exactly one corpus counterexample today: Hobble ("Enchanted creature can't
+/// block if it's black.") reaches the `CantBlock` dispatch arm, which hardcodes
+/// `affected: SelfRef` even though the printed subject is the enchanted
+/// creature. Its `it` therefore names the RECIPIENT, not the source, and the
+/// only thing holding it inert is that "black" is a CHARACTERISTIC and so is
+/// absent from the exact list above. No characteristic predicate (a color, a
+/// card type, a supertype) may join that list without first re-running the
+/// census of SelfRef-affected statics whose description begins
+/// "Enchanted|Equipped creature".
+///
+/// Returns the condition unchanged when no arm of `parse_self_pronoun_rewrite`
+/// matches.
 pub(crate) fn rewrite_self_pronoun_subject(condition: &str) -> String {
     let lower = condition.to_lowercase();
-    if let Some(rest) =
-        nom_tag_lower(&lower, &lower, "it's ").or_else(|| nom_tag_lower(&lower, &lower, "it is "))
-    {
+    // The combinator reads the lowercase text and emits only canonical
+    // lowercase templating, so no original-case remainder has to be mapped back.
+    nom_parse_lower(&lower, parse_self_pronoun_rewrite).unwrap_or_else(|| condition.to_string())
+}
+
+/// The EXACT-tail contract shared by every arm of `parse_self_pronoun_rewrite`,
+/// as a combinator: the tag must consume the whole remaining condition, so a
+/// trailing word survives instead of being silently dropped ("it's attacking
+/// alone" keeps "alone" and falls through to `SourceAttackingAlone`; "it's
+/// enchanted by two Auras" and "it's modified creature" never reach the arm).
+/// `space0` before `eof` preserves the tolerance the previous `rest.trim()`
+/// had; both production callers already hand this function trimmed, single-line
+/// text. Anchoring each tag individually (rather than wrapping the `alt`) is
+/// what makes the alternatives order-independent, since nom does not backtrack
+/// into an `alt` once a following combinator in the same sequence fails.
+fn exact_tail<'a>(tail: &'static str) -> impl FnMut(&'a str) -> OracleResult<'a, &'a str> {
+    move |input| terminated(tag(tail), (space0, eof)).parse(input)
+}
+
+/// CR 611.3a: the ONE combinator behind `rewrite_self_pronoun_subject` — the
+/// whole closed list of bound-pronoun subjects, in the three grammatical forms
+/// the doc comment on that function enumerates. Runs on lowercase text and
+/// emits the canonical `~ …` templating the context-free grammar
+/// (`oracle_nom::condition`) already types.
+fn parse_self_pronoun_rewrite(input: &str) -> OracleResult<'_, String> {
+    alt((
         // CR 508.1k / CR 509.1g / CR 509.1h: combat-state pronoun siblings of the
         // tapped/untapped rewrite. CR 700.9: "modified" is the self-state sibling
         // for "it's modified" (Obstinate Gargoyle, Skyward Spider). CR 301.5a:
-        // "equipped"; CR 303.4: "enchanted" — self-state predicates for SelfRef
+        // "equipped"; CR 303.4b: "enchanted" — self-state predicates for SelfRef
         // statics (Merry "as long as it's equipped"; Fledgling Osprey "as long as
-        // it's enchanted"). Exact-match only — "attacking alone" keeps its trailing
-        // word and is left for SourceAttackingAlone; "modified creature" and
-        // "enchanted by N Auras" keep their trailing words and never hit this arm.
-        if matches!(
-            rest.trim(),
-            "tapped"
-                | "untapped"
-                | "attacking"
-                | "blocking"
-                | "blocked"
-                | "attacking or blocking"
-                | "modified"
-                | "equipped"
-                | "enchanted"
-        ) {
-            return format!("~ is {}", rest.trim());
-        }
-    }
-    // CR 400.7: the non-contraction "it <verb>" self-state form — "it entered
-    // this turn" / "it entered the battlefield this turn" (Crew Captain's
-    // indestructible gate, Drownyard Behemoth's / Thrasta's / Zurgo and
-    // Ojutai's hexproof gate). Strip the bound-pronoun subject and re-emit the
-    // canonical "~ entered …" templating the context-free grammar resolves to
-    // SourceEnteredThisTurn. Exact match on the tail; only reached on the
-    // SelfRef path, so the attached-subject "it" stays an honest gap.
-    if let Some(rest) = nom_tag_lower(&lower, &lower, "it entered ") {
-        if matches!(rest.trim(), "this turn" | "the battlefield this turn") {
-            return format!("~ entered {}", rest.trim());
-        }
-    }
-    condition.to_string()
+        // it's enchanted").
+        map(
+            preceded(
+                (alt((tag("it's "), tag("it is "))), space0),
+                alt((
+                    exact_tail("tapped"),
+                    exact_tail("untapped"),
+                    exact_tail("attacking"),
+                    exact_tail("blocking"),
+                    exact_tail("blocked"),
+                    exact_tail("attacking or blocking"),
+                    exact_tail("modified"),
+                    exact_tail("equipped"),
+                    exact_tail("enchanted"),
+                )),
+            ),
+            |state: &str| format!("~ is {state}"),
+        ),
+        // CR 400.7: the non-contraction "it <verb>" self-state form — "it entered
+        // this turn" / "it entered the battlefield this turn" (Crew Captain's
+        // indestructible gate, Drownyard Behemoth's / Thrasta's / Zurgo and
+        // Ojutai's hexproof gate). Strip the bound-pronoun subject and re-emit the
+        // canonical "~ entered …" the grammar resolves to SourceEnteredThisTurn.
+        map(
+            preceded(
+                (tag("it entered "), space0),
+                alt((
+                    exact_tail("this turn"),
+                    exact_tail("the battlefield this turn"),
+                )),
+            ),
+            |tail: &str| format!("~ entered {tail}"),
+        ),
+        // CR 508.1a: "it attacked this turn" — the combat-history sibling of the
+        // "it entered …" arm above (Agent Frank Horrigan's indestructible gate,
+        // The Lunar Whale's play-from-top gate). Same SelfRef-only bound-pronoun
+        // contract: re-emit the canonical "~ attacked this turn" the grammar types
+        // as `SourceMatchesFilter(AttackedThisTurn)`. "this combat" is not modeled
+        // (no combat-scoped tracking), and the `eof` anchor is what refuses it.
+        map(
+            preceded((tag("it attacked "), space0), exact_tail("this turn")),
+            |tail: &str| format!("~ attacked {tail}"),
+        ),
+    ))
+    .parse(input)
 }
 
 pub(crate) fn parse_continuous_gets_has(
@@ -880,7 +1012,11 @@ pub(crate) fn parse_continuous_gets_has(
 
     // CR 611.3a: Split "as long as [condition]" BEFORE "for each" — the condition applies
     // to the entire static, not to a quantity count. Mirrors parse_enchanted_equipped_predicate.
-    if let Some((before_cond, after_cond)) = tp.split_around(" as long as ") {
+    // Only peel when the split point sits OUTSIDE a quoted granted ability —
+    // `split_around_outside_quotes` is the single authority for that rule
+    // (Ancestral Katana / Giant's Amulet: the inner "as long as" gates the GRANTED
+    // ability, not the +N/+M).
+    if let Some((before_cond, after_cond)) = tp.split_around_outside_quotes(" as long as ") {
         let continuous_text = before_cond.original;
         let condition_text = after_cond.original.trim().trim_end_matches('.');
         // Recursively parse the continuous part without the condition
@@ -889,14 +1025,12 @@ pub(crate) fn parse_continuous_gets_has(
         {
             // CR 611.3a: only resolve the self-pronoun "it" to the source when the
             // static modifies itself; attached-subject statics keep "it" bound to
-            // the enchanted/equipped creature and stay an honest gap.
-            let typed = if matches!(affected, TargetFilter::SelfRef) {
-                parse_static_condition(&rewrite_self_pronoun_subject(condition_text))
-            } else {
-                parse_static_condition(condition_text)
-            };
-            let condition = typed.unwrap_or(StaticCondition::Unrecognized {
-                text: condition_text.to_string(),
+            // the enchanted/equipped creature and stay an honest gap. That binding
+            // decision has ONE authority — `parse_affected_scoped_static_condition`
+            // (shared.rs) — shared with the "as long as"/"unless"/"if" gate parsers.
+            let typed = parse_affected_scoped_static_condition(condition_text, Some(&affected));
+            let condition = typed.unwrap_or_else(|| {
+                unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive)
             });
             def.condition = Some(condition);
             return Some(def);
@@ -910,25 +1044,18 @@ pub(crate) fn parse_continuous_gets_has(
     // gated on Not(SourceIsAttacking)). Only peel when the split sits OUTSIDE a
     // quoted granted ability — a granted ability's own inner "unless" (e.g. "gains
     // 'counter target spell unless its controller pays {1}'") must stay with the
-    // quoted text; balanced double quotes in the body signal the split is outside
-    // any "...". As with the " as long as " form, the self-pronoun condition
+    // quoted text. `split_around_outside_quotes` is the single authority for that
+    // rule. As with the " as long as " form, the self-pronoun condition
     // subject ("it's attacking"/"it's tapped") is resolved to the source only for
     // SelfRef grants — an attached-subject "it" keeps its enchanted/equipped
     // binding and stays an honest gap.
-    if let Some((before_cond, after_cond)) = tp
-        .split_around(" unless ")
-        .filter(|(body, _)| body.original.chars().filter(|&c| c == '"').count() % 2 == 0)
-    {
+    if let Some((before_cond, after_cond)) = tp.split_around_outside_quotes(" unless ") {
         let continuous_text = before_cond.original;
         let condition_text = after_cond.original.trim().trim_end_matches('.');
         if let Some(mut def) =
             parse_continuous_gets_has(continuous_text, affected.clone(), description)
         {
-            let typed = if matches!(affected, TargetFilter::SelfRef) {
-                parse_static_condition(&rewrite_self_pronoun_subject(condition_text))
-            } else {
-                parse_static_condition(condition_text)
-            };
+            let typed = parse_affected_scoped_static_condition(condition_text, Some(&affected));
             let condition = match typed {
                 Some(inner) => StaticCondition::Not {
                     condition: Box::new(inner),
@@ -989,7 +1116,7 @@ pub(crate) fn parse_continuous_gets_has(
 
         if let Some((p, t)) = parse_pt_mod(pt_source) {
             if let Some(quantity) =
-                super::oracle_quantity::parse_for_each_clause_expr(for_each_clause)
+                super::oracle_quantity::parse_for_each_clause_expr_deferred(for_each_clause)
             {
                 let mut modifications = Vec::new();
                 push_dynamic_pt_modifications(&mut modifications, p, t, quantity);
@@ -1015,12 +1142,13 @@ pub(crate) fn parse_continuous_gets_has(
                         modifications.extend(type_mods);
                     }
                     modifications.extend(parse_quoted_ability_modifications(description));
-                    return Some(
+                    return Some(with_protection_does_not_remove(
                         StaticDefinition::continuous()
                             .affected(affected)
                             .modifications(modifications)
                             .description(description.to_string()),
-                    );
+                        description,
+                    ));
                 }
             }
         }
@@ -1032,12 +1160,13 @@ pub(crate) fn parse_continuous_gets_has(
         return None;
     }
 
-    Some(
+    Some(with_protection_does_not_remove(
         StaticDefinition::continuous()
             .affected(affected)
             .modifications(modifications)
             .description(description.to_string()),
-    )
+        description,
+    ))
 }
 
 pub(crate) fn parse_dynamic_for_each_pt_modifications(
@@ -1054,7 +1183,7 @@ pub(crate) fn parse_dynamic_for_each_pt_modifications(
     let pt_source = nom_tag_lower(pt_text, pt_text, "gets ")
         .or_else(|| nom_tag_lower(pt_text, pt_text, "get "))?;
     let (power, toughness) = parse_pt_mod(pt_source)?;
-    let quantity = super::oracle_quantity::parse_for_each_clause_expr(
+    let quantity = super::oracle_quantity::parse_for_each_clause_expr_deferred(
         strip_trailing_keyword_clause(for_each_clause.trim_end_matches('.')),
     )?;
 
@@ -1522,5 +1651,127 @@ mod l02_bb5_leading_condition_peel_tests {
             parse_compound_turn_counter_animation(&kaito.to_lowercase(), kaito).is_some(),
             "parse_compound_turn_counter_animation must still handle Kaito's animation"
         );
+    }
+}
+
+#[cfg(test)]
+mod rewrite_self_pronoun_subject_tests {
+    use super::*;
+
+    /// The whole closed list the function's doc comment enumerates, pinned arm by
+    /// arm so the single `parse_self_pronoun_rewrite` combinator cannot silently
+    /// widen or narrow it. Every entry here was accepted by the three literal-tail
+    /// `matches!` arms this combinator replaced, and the outputs are byte-identical.
+    #[test]
+    fn rewrite_self_pronoun_accepts_every_closed_list_arm() {
+        // CR 508.1k / 509.1g / 509.1h / 700.9 / 301.5a / 303.4b: the nine bare
+        // source-STATE predicates, in both the contraction and the "it is" form.
+        for state in [
+            "tapped",
+            "untapped",
+            "attacking",
+            "blocking",
+            "blocked",
+            "attacking or blocking",
+            "modified",
+            "equipped",
+            "enchanted",
+        ] {
+            let expected = format!("~ is {state}");
+            for subject in ["it's", "it is"] {
+                let input = format!("{subject} {state}");
+                assert_eq!(
+                    rewrite_self_pronoun_subject(&input),
+                    expected,
+                    "{input:?} must normalize to the canonical source-state form"
+                );
+            }
+            // Same phrase with an uppercase printed subject: the rewrite reads
+            // lowercase and emits canonical lowercase templating.
+            assert_eq!(
+                rewrite_self_pronoun_subject(&format!("It's {state}")),
+                expected
+            );
+        }
+        // CR 400.7: both "it entered …" tails.
+        assert_eq!(
+            rewrite_self_pronoun_subject("it entered this turn"),
+            "~ entered this turn"
+        );
+        assert_eq!(
+            rewrite_self_pronoun_subject("it entered the battlefield this turn"),
+            "~ entered the battlefield this turn"
+        );
+        // CR 508.1a: the combat-history arm.
+        assert_eq!(
+            rewrite_self_pronoun_subject("it attacked this turn"),
+            "~ attacked this turn"
+        );
+    }
+
+    /// The `terminated(tag(..), eof)` anchor is the whole exact-tail contract: a
+    /// trailing word must survive for a later parse path instead of collapsing
+    /// into the canonical form, and an off-list predicate must pass through
+    /// untouched (the Hobble standing constraint in the doc comment).
+    #[test]
+    fn rewrite_self_pronoun_leaves_inexact_tails_alone() {
+        // Positive reach guard: the rewrite itself is live, so the identity
+        // assertions below cannot pass because the function stopped rewriting.
+        assert_eq!(rewrite_self_pronoun_subject("it's tapped"), "~ is tapped");
+        for untouched in [
+            // Trailing words that belong to other parse paths.
+            "it's attacking alone",
+            "it's blocking a creature",
+            "it's modified creature",
+            "it's enchanted by two Auras",
+            "it's equipped by an Equipment",
+            "it's tapped and attacking",
+            "it entered the battlefield",
+            "it entered",
+            "it entered this turn and attacked",
+            "it attacked this combat",
+            "it attacked",
+            // Off-list predicates: characteristics, types, and the impersonal
+            // "it's your turn" turn reference.
+            "it's black",
+            "it's a Wall",
+            "it's legendary",
+            "it's your turn",
+            // A trailing sentence period defeats the exact match by contract —
+            // callers strip it before the rewrite (shared.rs).
+            "it's enchanted.",
+            // Not the bound-pronoun subject at all.
+            "enchanted creature is tapped",
+        ] {
+            assert_eq!(
+                rewrite_self_pronoun_subject(untouched),
+                untouched,
+                "{untouched:?} is outside the closed list and must pass through unchanged"
+            );
+        }
+    }
+
+    /// CR 508.1a (P6): the bound-pronoun rewrite normalizes "it attacked this
+    /// turn" to the canonical "~ attacked this turn" the context-free grammar
+    /// types as `SourceMatchesFilter(AttackedThisTurn)`. Callers reach it only
+    /// on the SelfRef path (`shared.rs` `parse_affected_scoped_static_condition`,
+    /// `dispatch.rs`), so an attached-subject "it" is never rewritten here.
+    ///
+    /// The match is EXACT on the tail: "it attacked this combat" has no engine
+    /// tracking and "it attacked" is not a turn-scoped gate, so both must pass
+    /// through unchanged and stay honest gaps.
+    #[test]
+    fn rewrite_self_pronoun_it_attacked_this_turn() {
+        assert_eq!(
+            rewrite_self_pronoun_subject("it attacked this turn"),
+            "~ attacked this turn"
+        );
+        for untouched in ["it attacked this combat", "it attacked"] {
+            assert_eq!(
+                rewrite_self_pronoun_subject(untouched),
+                untouched,
+                "{untouched:?} has no turn-scoped runtime fact and must stay unrewritten"
+            );
+        }
     }
 }

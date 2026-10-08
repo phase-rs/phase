@@ -48,9 +48,11 @@ pub struct CardSearchQuery {
     /// legality is a separate filter (`legal_format`).
     #[serde(default)]
     pub sets: Vec<String>,
-    /// A legality-format key (e.g. `"modern"`); the card must be `legal` in it.
-    #[serde(default)]
-    pub legal_format: Option<String>,
+    /// The legality table the card must be `legal` in, named by its
+    /// `LegalityFormat::as_key` key. A key no table carries fails
+    /// deserialization instead of searching unfiltered.
+    #[serde(default, deserialize_with = "deserialize_legality_key")]
+    pub legal_format: Option<LegalityFormat>,
     /// Max results returned (defaults to [`DEFAULT_LIMIT`]); `total` is unbounded.
     #[serde(default)]
     pub limit: Option<usize>,
@@ -75,6 +77,18 @@ pub struct CardSearchResults {
     pub total: usize,
 }
 
+fn deserialize_legality_key<'de, D>(deserializer: D) -> Result<Option<LegalityFormat>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(|key| {
+            LegalityFormat::from_key(&key)
+                .ok_or_else(|| serde::de::Error::custom(format!("unknown legality key {key:?}")))
+        })
+        .transpose()
+}
+
 impl CardDatabase {
     /// Filter the loaded cards by the query, deduplicating multi-face cards by
     /// oracle id. Name/text matches sort ahead of incidental oracle-text hits,
@@ -92,17 +106,17 @@ impl CardDatabase {
             .filter_map(|c| parse_color_letter(c))
             .collect();
         let type_needle = query.type_line.trim().to_lowercase();
-        let legal_format = query
-            .legal_format
-            .as_deref()
-            .and_then(LegalityFormat::from_key);
+        let legal_format = query.legal_format;
         let requested_sets: Vec<String> = query.sets.iter().map(|s| s.to_uppercase()).collect();
 
         let mut seen_oracle: HashSet<&str> = HashSet::new();
         // (relevance rank, lowercased name for tiebreak, result)
         let mut matched: Vec<(u8, String, CardSearchResult)> = Vec::new();
 
-        for (key, face) in self.face_index.iter() {
+        for key in &self.search_face_keys {
+            let Some(face) = self.face_index.get(key) else {
+                continue;
+            };
             let name_lower = face.name.to_lowercase();
 
             if !words.is_empty() && !self.text_matches(&name_lower, face, &words) {
@@ -146,9 +160,10 @@ impl CardDatabase {
                 }
             }
 
-            // Deduplicate multi-face cards: keep the first matching face per
-            // oracle id. The frontend re-derives the combined display name from
-            // the image map, so which face won here doesn't affect display.
+            // CR 712.8a: Outside the game or in a zone other than the
+            // battlefield or stack, a double-faced card has only its front-face
+            // characteristics. Deduplicate multi-face cards by oracle id while
+            // scanning the precomputed front-face order.
             if let Some(oracle_id) = face.scryfall_oracle_id.as_deref() {
                 if !seen_oracle.insert(oracle_id) {
                     continue;
@@ -160,7 +175,7 @@ impl CardDatabase {
             } else {
                 1
             };
-            matched.push((rank, name_lower, self.build_result(key, face)));
+            matched.push((rank, name_lower, self.build_result(key.as_str(), face)));
         }
 
         let total = matched.len();
@@ -550,10 +565,101 @@ mod tests {
     fn legal_format_excludes_banned_and_unknown() {
         // Shock is banned in modern; Bolt and Bears are legal.
         let res = sample_db().search(&CardSearchQuery {
-            legal_format: Some("modern".into()),
+            legal_format: Some(LegalityFormat::Modern),
             ..Default::default()
         });
         assert_eq!(result_names(&res), vec!["Grizzly Bears", "Lightning Bolt"]);
+    }
+
+    #[test]
+    fn legal_format_accepts_every_table_key_and_rejects_any_other() {
+        use crate::types::format::GameFormat;
+
+        for t in LegalityFormat::ALL {
+            let query: CardSearchQuery =
+                serde_json::from_value(json!({ "legal_format": t.as_key() })).unwrap();
+            assert_eq!(query.legal_format, Some(t));
+        }
+        let query: CardSearchQuery =
+            serde_json::from_value(json!({ "legal_format": Value::Null })).unwrap();
+        assert_eq!(query.legal_format, None);
+        let query: CardSearchQuery = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(query.legal_format, None);
+
+        for meta in GameFormat::registry() {
+            if meta.legality_key.is_some() {
+                continue;
+            }
+            let key = meta.format.to_string().to_lowercase();
+            let result: Result<CardSearchQuery, _> =
+                serde_json::from_value(json!({ "legal_format": key }));
+            assert!(
+                result.is_err(),
+                "{key:?} must be rejected, not silently unfiltered"
+            );
+        }
+    }
+
+    /// A format whose card data records no legality table (e.g.
+    /// Freeform, Freeform Commander) searches unfiltered rather than through a
+    /// fallthrough — paired against a table-backed format that still filters.
+    #[test]
+    fn a_format_whose_card_data_records_no_table_searches_unfiltered() {
+        use crate::types::format::GameFormat;
+
+        let db = db_from(&[
+            (
+                "unrecorded avatar",
+                card(
+                    "Unrecorded Avatar",
+                    "o-unrecorded",
+                    &["Blue"],
+                    1,
+                    "Creature",
+                    &["Blue"],
+                    "",
+                    json!({}),
+                    &[],
+                ),
+            ),
+            (
+                "recorded avatar",
+                card(
+                    "Recorded Avatar",
+                    "o-recorded",
+                    &["Blue"],
+                    1,
+                    "Creature",
+                    &["Blue"],
+                    "",
+                    json!({ "legacy": "legal" }),
+                    &[],
+                ),
+            ),
+        ]);
+
+        for format in [GameFormat::Freeform, GameFormat::FreeformCommander] {
+            let query: CardSearchQuery = serde_json::from_value(json!({
+                "text": "avatar",
+                "legal_format": format.legality_key(),
+            }))
+            .unwrap();
+            let res = db.search(&query);
+            assert_eq!(
+                result_names(&res),
+                vec!["Recorded Avatar", "Unrecorded Avatar"]
+            );
+        }
+
+        let legacy_query: CardSearchQuery = serde_json::from_value(json!({
+            "text": "avatar",
+            "legal_format": GameFormat::Legacy.legality_key(),
+        }))
+        .unwrap();
+        assert_eq!(
+            result_names(&db.search(&legacy_query)),
+            vec!["Recorded Avatar"]
+        );
     }
 
     #[test]
@@ -603,6 +709,55 @@ mod tests {
         });
         assert_eq!(res.results.len(), 1, "both faces share an oracle id");
         assert_eq!(res.total, 1);
+    }
+
+    #[test]
+    fn transform_dfc_search_dedupes_to_exported_front_face() {
+        let mut front = card(
+            "The Legend of Kyoshi",
+            "o-kyoshi",
+            &["Green", "Green"],
+            4,
+            "Enchantment",
+            &["Green"],
+            "Exile this Saga, then return it to the battlefield transformed under your control.",
+            json!({ "standard": "legal" }),
+            &["TLA"],
+        );
+        front["layout"] = json!("transform");
+        front["face_index"] = json!(0);
+        let mut back = card(
+            "Avatar Kyoshi",
+            "o-kyoshi",
+            &[],
+            0,
+            "Creature",
+            &["Green"],
+            "Lands you control have trample and hexproof.",
+            json!({ "standard": "legal" }),
+            &["TLA"],
+        );
+        back["mana_cost"] = json!({ "type": "NoCost" });
+        back["layout"] = json!("transform");
+        back["face_index"] = json!(1);
+
+        let db = db_from(&[("avatar kyoshi", back), ("the legend of kyoshi", front)]);
+
+        let res = db.search(&CardSearchQuery {
+            text: "avatar kyoshi".into(),
+            ..Default::default()
+        });
+        assert_eq!(res.results.len(), 1);
+        assert_eq!(
+            result_names(&res),
+            vec!["The Legend of Kyoshi"],
+            "CR 712.8a: transform DFCs are represented by their front face outside the battlefield"
+        );
+        assert_eq!(
+            db.get_face_by_oracle_id("o-kyoshi")
+                .map(|face| face.name.as_str()),
+            Some("The Legend of Kyoshi")
+        );
     }
 
     #[test]

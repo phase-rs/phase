@@ -50,7 +50,9 @@
     },
     "preview": {
       "cta": "Vorschau testen",
-      "tooltip": "Spiele den neuesten Vorschau-Build — die neuesten Karten & Fixes landen hier vor jeder Veröffentlichung."
+      "tooltip": "Spiele den neuesten Vorschau-Build — die neuesten Karten & Fixes landen hier vor jeder Veröffentlichung.",
+      "backCta": "Zurück zur stabilen Version",
+      "backTooltip": "Zur aktuellen veröffentlichten Version zurückkehren."
     },
     "coverage": {
       "title": "Abdeckungs-Dashboard öffnen",
@@ -115,6 +117,8 @@
     "coverageThresholdHint": "Decks unterhalb dieser Engine-Unterstützungsschwelle ausschließen",
     "bracket": "Bracket",
     "bracketHint": "Die zufällige KI wählt aus diesen Brackets. Nicht markierte Decks werden beim Filtern ausgeschlossen.",
+    "bracketPoolEmpty": "Keine Decks entsprechen den gewählten Brackets. Die zufällige KI zieht aus allen legalen Decks.",
+    "cedhPoolEmpty": "Keine Bracket-5-Decks verfügbar. Zufällige KI-Gegner können keine Decks erhalten.",
     "opponentLabel": "Gegner {{number}}",
     "deck": "Deck",
     "difficulty": "Schwierigkeit",
@@ -129,7 +133,9 @@
       "feed": "Feed",
       "user": "Benutzer",
       "precon": "Precon"
-    }
+    },
+    "brain": "Gesteuert von",
+    "brainEngine": "Engine-KI"
   },
   "feedManager": {
     "title": "Feeds verwalten",
@@ -141,6 +147,7 @@
     "lastRefreshed": "Zuletzt aktualisiert: {{date}}",
     "addCustomFeed": "Eigenen Feed hinzufügen",
     "add": "Hinzufügen",
+    "offlineUnavailable": "Feed-Aktualisierungen sind offline nicht verfügbar.",
     "done": "Fertig"
   },
   "importDeck": {
@@ -153,9 +160,21 @@
     "urlHint": "Importiert ein öffentliches Deck von Moxfield oder Archidekt.",
     "import": "Importieren",
     "importing": "Wird importiert…",
+    "importAsOathbreaker": "Als Oathbreaker-Deck einrichten",
+    "oathbreakerSetupTitle": "Oathbreaker einrichten",
+    "oathbreakerSetupDescription": "Wähle den Oathbreaker und den Signaturzauber aus dieser Liste.",
+    "oathbreakerLabel": "Oathbreaker",
+    "signatureSpellLabel": "Signaturzauber",
+    "chooseOathbreaker": "Wähle einen Oathbreaker",
+    "chooseSignatureSpell": "Wähle einen Signaturzauber",
+    "confirmOathbreakerImport": "Oathbreaker-Deck importieren",
+    "backToImport": "Zurück zum Import",
     "errorInvalidUrl": "Gib eine gültige Moxfield- oder Archidekt-Deck-URL ein.",
+    "errorOffline": "URL-Importe sind offline nicht verfügbar. Nutze Text einfügen oder Aus Datei.",
     "errorNetworkFailure": "Der Deck-Import-Dienst ist nicht erreichbar. Prüfe deine Verbindung und versuche es erneut.",
     "errorGeneric": "Deck-Import fehlgeschlagen.",
+    "errorNoOathbreaker": "Diese Liste enthält keinen zulässigen Oathbreaker.",
+    "errorNoSignatureSpell": "Dieser Oathbreaker hat in dieser Liste keinen zulässigen Signaturzauber.",
     "errorNoCards": "Keine Karten gefunden. Füge ein Deck im MTGA- oder .dck-Format ein.",
     "fileSupports": "Unterstützt .dck, .dec, .txt und MTGA-Format",
     "chooseFile": "Datei wählen",
@@ -303,6 +322,7 @@
     "online": "Online",
     "draft": "Draft",
     "decks": "Decks",
+    "tournament": "Turniere",
     "alpha": "Alpha",
     "profile": "Profil",
     "settings": "Einstellungen",

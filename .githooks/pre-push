@@ -22,7 +22,7 @@ echo "  [rust] parser combinator gate"
 ./scripts/check-parser-combinators.sh
 
 echo "  [rust] engine parser tests"
-PROPTEST_CASES="${PROPTEST_CASES:-4}" cargo test -p engine --features proptest parser::oracle::tests
+PROPTEST_CASES="${PROPTEST_CASES:-4}" cargo test -p phase-engine --features proptest parser::oracle::tests
 
 echo "  [rust] phase-ai lib tests"
 cargo test -p phase-ai --lib

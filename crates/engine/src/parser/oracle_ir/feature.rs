@@ -43,7 +43,7 @@
 //! `OracleUnitId`s are not document-unique. Restoring sub-item granularity is the
 //! recognizer bring-up plan's job.
 
-use super::doc::{OracleItemId, OracleItemIr, OracleNodeIr};
+use super::doc::{OracleItemId, OracleItemIr, OracleNodeIr, OracleSourceSpan};
 use crate::parser::oracle::ParsedAbilities;
 
 /// A semantic that Oracle text can raise an expectation for, and that the parsed
@@ -108,6 +108,11 @@ pub(crate) enum OracleSemanticFeature {
     Apnap,
     /// CR 700.2: a modal choice whose maximum number of modes is dynamic.
     ModalDynamicMaxDropped,
+    /// CR 608.2f: a damage clause whose subject conjoins a player scope and an
+    /// object scope is ONE action taken on multiple players and/or objects,
+    /// processed simultaneously — so a parse carrying only one of the two
+    /// audiences has silently discarded the other.
+    DamageSubjectConjunction,
 }
 
 impl OracleSemanticFeature {
@@ -140,6 +145,7 @@ impl OracleSemanticFeature {
             Self::ConditionAsLongAs => "Condition_AsLongAs",
             Self::Apnap => "APNAP",
             Self::ModalDynamicMaxDropped => "Modal_DynamicMaxDropped",
+            Self::DamageSubjectConjunction => "DamageSubjectConjunction",
         }
     }
 }
@@ -221,8 +227,26 @@ pub(crate) struct AuditUnit<'a> {
     pub(crate) text: String,
     /// The line this unit's diagnostics are attributed to.
     pub(crate) first_line: usize,
+    /// The card-absolute byte range of the lines this unit OWNS — i.e. of `text`, the
+    /// exact source the detectors were handed.
+    ///
+    /// `Exact` locates the **unit**, not a clause inside it: item spans are whole-line
+    /// (`DocEmitter::exact_span`), so every clause on one line lands in this one unit and
+    /// shares this one span. It is not `first_line`-derived by accident either — the
+    /// first unit absorbs any leading lines no item claimed, so `span.first_line` can be
+    /// SMALLER than `first_line`, and the span is the honest extent of the audited text
+    /// while `first_line` remains the item-start line the diagnostics are attributed to.
+    pub(crate) span: OracleSourceSpan,
     /// Every item starting in this block. Supplies the evidence half.
     items: Vec<&'a OracleItemIr>,
+}
+
+impl AuditUnit<'_> {
+    /// The unit's pooled evidence set, as ids — the provenance a diagnostic carries.
+    /// Legitimately EMPTY for a card that lowered to no items at all.
+    pub(crate) fn item_ids(&self) -> Vec<OracleItemId> {
+        self.items.iter().map(|item| item.id).collect()
+    }
 }
 
 /// Partition a document into audit units: one per source line that starts an item,
@@ -242,22 +266,43 @@ pub(crate) fn audit_units<'a>(
         return Vec::new();
     }
 
+    // Byte offset of the start of each line, mirroring `DocEmitter::line_start` (one
+    // '\n' per prior line). A unit's span must live in the SAME coordinate system as the
+    // item spans it owns, or a consumer cannot relate the two.
+    let mut line_start: Vec<usize> = Vec::with_capacity(lines.len());
+    let mut acc = 0usize;
+    for line in &lines {
+        line_start.push(acc);
+        acc += line.len() + 1;
+    }
+    // The exactly-located card-absolute span of the line block `[start, end)`.
+    let span_of = |start: usize, end: usize| -> OracleSourceSpan {
+        let last = end.max(start + 1) - 1;
+        OracleSourceSpan::exact(
+            start,
+            last,
+            line_start[start],
+            line_start[last] + lines[last].len(),
+            0,
+        )
+    };
+
     // One unit per distinct starting line, in source order. `ir.items` is already in
     // Oracle source order (the document is keyed by source position), so a single pass
-    // suffices and the resulting starts are ascending.
-    let mut units: Vec<AuditUnit<'a>> = Vec::new();
+    // suffices and the resulting starts are ascending. Collected as (line, items) pairs
+    // rather than as `AuditUnit`s because a unit's `text` and `span` are both functions
+    // of the NEXT unit's start, which is not known until the pass is done — and a
+    // half-built `AuditUnit` carrying a placeholder span is exactly the fabrication the
+    // span type exists to prevent.
+    let mut starts: Vec<(usize, Vec<&'a OracleItemIr>)> = Vec::new();
     for item in items {
         let first_line = item.source.span().first_line;
         if first_line >= lines.len() {
             continue;
         }
-        match units.last_mut() {
-            Some(unit) if unit.first_line == first_line => unit.items.push(item),
-            _ => units.push(AuditUnit {
-                text: String::new(),
-                first_line,
-                items: vec![item],
-            }),
+        match starts.last_mut() {
+            Some((line, unit_items)) if *line == first_line => unit_items.push(item),
+            _ => starts.push((first_line, vec![item])),
         }
     }
 
@@ -272,24 +317,32 @@ pub(crate) fn audit_units<'a>(
     // So such a card becomes ONE unit owning all of its text, with no items and
     // therefore NO evidence. Every semantic its text raises is then correctly reported
     // as swallowed, because nothing represents any of it.
-    if units.is_empty() {
-        units.push(AuditUnit {
+    if starts.is_empty() {
+        return vec![AuditUnit {
             text: source_text.to_string(),
             first_line: 0,
+            span: span_of(0, lines.len()),
             items: Vec::new(),
-        });
-        return units;
+        }];
     }
 
     // Give each unit the lines it owns: its own start through the line before the next
     // unit's start. The first unit absorbs any leading lines, and the last unit runs to
     // the end of the card, so the partition covers every line.
-    for i in 0..units.len() {
-        let start = if i == 0 { 0 } else { units[i].first_line };
-        let end = units
+    let mut units: Vec<AuditUnit<'a>> = Vec::with_capacity(starts.len());
+    for i in 0..starts.len() {
+        let first_line = starts[i].0;
+        let start = if i == 0 { 0 } else { first_line };
+        let end = starts
             .get(i + 1)
-            .map_or(lines.len(), |next| next.first_line.min(lines.len()));
-        units[i].text = lines[start..end.max(start)].join("\n");
+            .map_or(lines.len(), |(next, _)| (*next).min(lines.len()))
+            .max(start + 1);
+        units.push(AuditUnit {
+            text: lines[start..end].join("\n"),
+            first_line,
+            span: span_of(start, end),
+            items: std::mem::take(&mut starts[i].1),
+        });
     }
     units
 }
@@ -418,14 +471,17 @@ pub(crate) fn scope_to_unit(
             }
             OracleNodeIr::CastingRestriction(r) => scoped.casting_restrictions.push(r.clone()),
             OracleNodeIr::CastingOption(o) => scoped.casting_options.push(o.clone()),
-            OracleNodeIr::Spell(_)
+            // The residual contributes through the ability id track, while a
+            // relation synthesis contributes solely through the replacement id
+            // track. Adding either here would double-count unit evidence.
+            OracleNodeIr::Unsupported { .. }
+            | OracleNodeIr::RelationSynthesis(_)
+            | OracleNodeIr::Spell(_)
             | OracleNodeIr::Trigger(_)
             | OracleNodeIr::Static(_)
             | OracleNodeIr::Replacement(_)
             | OracleNodeIr::PreLoweredSpell(_)
-            | OracleNodeIr::PreLoweredTrigger(_)
-            | OracleNodeIr::PreLoweredStatic(_)
-            | OracleNodeIr::PreLoweredReplacement(_) => {}
+            | OracleNodeIr::PreLoweredTrigger(_) => {}
         }
     }
     scoped
@@ -560,6 +616,7 @@ mod tests {
             (F::ConditionAsLongAs, "Condition_AsLongAs"),
             (F::Apnap, "APNAP"),
             (F::ModalDynamicMaxDropped, "Modal_DynamicMaxDropped"),
+            (F::DamageSubjectConjunction, "DamageSubjectConjunction"),
         ];
         for (feature, label) in expected {
             assert_eq!(feature.detector_label(), label);
@@ -639,7 +696,7 @@ mod tests {
 /// checkout does not have. Point it at one and run it explicitly:
 ///
 /// ```text
-/// ORACLE_POOL_DIR=/path/to/data cargo test -p engine --lib pool_structure_census \
+/// ORACLE_POOL_DIR=/path/to/data cargo test -p phase-engine --lib pool_structure_census \
 ///     -- --ignored --nocapture
 /// ```
 #[cfg(test)]

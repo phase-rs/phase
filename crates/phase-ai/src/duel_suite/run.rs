@@ -1,19 +1,22 @@
 //! Suite runner — executes every registered `MatchupSpec` and emits a
 //! structured JSON report.
 //!
-//! Deterministic-core results are a pure function of `(binary, spec, seed)`.
-//! Wall-clock fields are retained in `SuiteReport` for operator visibility but
-//! are excluded from [`SuiteReport::deterministic_core`].
+//! Deterministic-core results are a function of `(binary, spec, seed)` **modulo
+//! the run-to-run caveats catalogued at the top of [`super::perf`]** — do not read
+//! this as byte-stability across repeated runs. Wall-clock fields are retained in
+//! `SuiteReport` for operator visibility but are excluded from
+//! [`SuiteReport::deterministic_core`].
 
 use std::collections::{HashMap, HashSet};
-use std::io::BufWriter;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::panic::AssertUnwindSafe;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{
-    load_deck_into_state, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
+    load_and_hydrate_decks, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
 };
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
@@ -26,6 +29,7 @@ use crate::auto_play::run_ai_actions;
 use crate::config::{create_config_for_players, AiConfig, AiDifficulty, Platform};
 
 use super::attribution::{aggregate_events, CaptureLayer, MatchupAttribution};
+use super::harvest::{self, HarvestSink};
 use super::{all_matchups, resolve_deck_ref, Expected, FeatureKind, MatchupSpec};
 
 /// Safety cap on total AI actions per game — matches the constant in
@@ -143,6 +147,51 @@ impl SuiteReport {
                 .collect(),
         }
     }
+
+    /// Matchups that failed their own `Expected` check, judged without reference to any
+    /// baseline.
+    ///
+    /// This is a different question from `CompareReport::any_fail`, which asks "did this
+    /// change make things worse than the baseline". This one asks "is this run fit to
+    /// *become* the baseline" — and only `SuiteStatus::Fail` disqualifies it.
+    ///
+    /// `SuiteStatus::Open` does not, and it has two producers, not one: `Expected::Open`
+    /// is how a matchup declares it has no verdict yet, and `classify` also returns `Open`
+    /// for any matchup with zero games before it ever inspects `Expected`. Neither is a
+    /// failure, so anything keyed on `!= Pass` would conflate a declared no-verdict with a
+    /// regression. The zero-game case is disqualifying for a different reason and is caught
+    /// by `recorded_games`, not here.
+    pub fn failing_matchups(&self) -> impl Iterator<Item = &MatchupResult> {
+        self.results
+            .iter()
+            .filter(|result| result.status == SuiteStatus::Fail)
+    }
+
+    /// Games actually recorded across every matchup.
+    ///
+    /// A report with none is unfit to become a baseline whatever its statuses say:
+    /// comparison pairs by seed, so a baseline holding no games makes every later
+    /// comparison score zero on every axis and the drift signal dies silently — the same
+    /// false-green this guard exists to prevent, arrived at from the other side.
+    ///
+    /// Deliberately counts games rather than checking for all-`Open`: a suite whose
+    /// matchups are all declared `Expected::Open` still records real games, and such a
+    /// report *is* a usable baseline, because the paired-comparison arm decides on `games`,
+    /// not on `status` — an all-`Open` pair therefore still detects outcome drift. (Stated
+    /// as "decides on games" rather than "never reads status": the paired arm gained status
+    /// tiers in #7026, so the stronger wording would have been false the day that merged.)
+    /// Zero games is the property that makes a baseline inert; all-`Open` is not.
+    ///
+    /// Not an exhaustive list of routes, so it does not claim to be one: `--games 0` is
+    /// refused at parse time, a `--suite-filter` matching no matchups lands here, and
+    /// `failed_result` yields an empty `games` vector alongside `SuiteStatus::Fail`, which
+    /// `failing_matchups` reports first because it names the actual setup error. And this is
+    /// a `pub` method, so its audience includes library callers: `SuiteOptions::new` does not
+    /// validate `games_per_matchup`, so a caller can construct a zero-game run without going
+    /// through the CLI at all.
+    pub fn recorded_games(&self) -> usize {
+        self.results.iter().map(|result| result.games.len()).sum()
+    }
 }
 
 /// Controls decision-trace attribution capture during a suite run. When set
@@ -156,12 +205,28 @@ pub enum AttributionMode {
     Enabled,
 }
 
+/// Where a suite run's report is written.
+///
+/// `Reserved` exists because a path is not an identity: an entry that replaces the name after it
+/// was reserved would be followed (symlink) or shared (hard link) by a writer that reopens it.
+/// Holding the descriptor the reservation returned removes the question — the variant carries no
+/// path to reopen.
+#[derive(Debug)]
+pub enum ReportSink {
+    /// Create (truncating) at this path when the report is written.
+    Create(PathBuf),
+    /// Write through a descriptor the caller already opened, positioned at offset 0. The report
+    /// replaces whatever the handle refers to; the handle need not be empty.
+    Reserved(File),
+}
+
 #[derive(Debug)]
 pub struct SuiteOptions {
     pub difficulty: AiDifficulty,
     pub games_per_matchup: usize,
     pub base_seed: u64,
-    pub output_path: PathBuf,
+    /// Destination for the run's JSON report.
+    pub output: ReportSink,
     /// Comma-separated list of id substrings; a matchup is run if its id
     /// contains *any* of them (e.g. `"red-mirror,affinity-mirror"` runs both).
     /// `None` runs every matchup. A single substring keeps the legacy behavior.
@@ -169,6 +234,10 @@ pub struct SuiteOptions {
     pub attribution: AttributionMode,
     pub git_sha: Option<String>,
     pub card_data_hash: Option<String>,
+    /// When set, harvest per-turn eval features to this JSONL path (Texel retrain
+    /// corpus). Like attribution, harvesting forces the sequential branch so a
+    /// single `HarvestSink` owns the file.
+    pub harvest_output: Option<PathBuf>,
 }
 
 impl SuiteOptions {
@@ -177,16 +246,17 @@ impl SuiteOptions {
             difficulty,
             games_per_matchup,
             base_seed,
-            output_path: PathBuf::from("target/duel-suite-results.json"),
+            output: ReportSink::Create(PathBuf::from("target/duel-suite-results.json")),
             filter: None,
             attribution: AttributionMode::Disabled,
             git_sha: None,
             card_data_hash: None,
+            harvest_output: None,
         }
     }
 }
 
-/// Run every registered matchup, write the report to `options.output_path`,
+/// Run every registered matchup, write the report to `options.output`,
 /// and return the in-memory report for the caller to print.
 pub fn run_suite(db: &CardDatabase, options: &SuiteOptions) -> Result<SuiteReport, std::io::Error> {
     let capture = match options.attribution {
@@ -194,24 +264,52 @@ pub fn run_suite(db: &CardDatabase, options: &SuiteOptions) -> Result<SuiteRepor
         AttributionMode::Disabled => None,
     };
 
+    // One sink per suite run: created ONCE here, before the matchup loop, writing
+    // the single file-scoped meta line at construction. `run_all_matchups` (which
+    // harvesting forces onto the sequential branch) appends every game's records
+    // through this same handle.
+    let mut harvest_sink = match &options.harvest_output {
+        Some(path) => {
+            let meta = harvest::HarvestMeta {
+                // schema 2 added the `mana_development_offset` control column as
+                // a SELF-ONLY absolute count; schema 3 keeps the column name and
+                // changes its semantics to a signed self-minus-opponent
+                // DIFFERENTIAL (Unit 5).
+                //
+                // The trainer accepts only schema 3+ shards, preventing it from
+                // pooling this signed differential with schema 2's absolute count.
+                schema: 3,
+                git_sha: options.git_sha.clone(),
+                card_data_hash: options.card_data_hash.clone(),
+                difficulty: format!("{:?}", options.difficulty),
+            };
+            Some(harvest::HarvestSink::create(path, &meta)?)
+        }
+        None => None,
+    };
+
     // Install the subscriber for the duration of this call. When attribution
     // is disabled, skip subscriber installation entirely — the
     // `event_enabled!` gate inside `emit_decision_trace` short-circuits and
     // `PolicyRegistry::verdicts()` is never invoked.
-    if let Some(layer) = capture.as_ref() {
+    let results = if let Some(layer) = capture.as_ref() {
         let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
             tracing_subscriber::EnvFilter::new("phase_ai::decision_trace=debug")
         });
         let subscriber = tracing_subscriber::registry::Registry::default()
             .with(filter)
             .with(layer.clone());
-        let results = tracing::subscriber::with_default(subscriber, || {
-            run_all_matchups(db, options, capture.as_ref())
-        });
-        return finalize_report(options, results);
+        tracing::subscriber::with_default(subscriber, || {
+            run_all_matchups(db, options, capture.as_ref(), harvest_sink.as_mut())
+        })
+    } else {
+        run_all_matchups(db, options, None, harvest_sink.as_mut())
+    };
+
+    if let Some(sink) = harvest_sink.as_mut() {
+        sink.flush()?;
     }
 
-    let results = run_all_matchups(db, options, None);
     finalize_report(options, results)
 }
 
@@ -233,6 +331,7 @@ fn run_all_matchups(
     db: &CardDatabase,
     options: &SuiteOptions,
     capture: Option<&CaptureLayer>,
+    mut harvest_sink: Option<&mut HarvestSink>,
 ) -> Vec<MatchupResult> {
     let matchups = all_matchups();
     let total = matchups.len();
@@ -245,10 +344,12 @@ fn run_all_matchups(
         .filter(|(_, spec)| matchup_selected(spec.id, options.filter.as_deref()))
         .collect();
 
-    // Attribution drains a process-global tracing subscriber between matchups,
-    // so capture runs must stay sequential — concurrent matchups would interleave
-    // their decision-trace events into the one capture layer.
-    if capture.is_some() {
+    // Attribution drains a process-global tracing subscriber between matchups, so
+    // capture runs must stay sequential — concurrent matchups would interleave
+    // their decision-trace events into the one capture layer. Harvesting joins the
+    // same sequential branch: a single `HarvestSink` owns the output file and
+    // parallel writers would interleave records / corrupt the append stream.
+    if capture.is_some() || harvest_sink.is_some() {
         let mut results = Vec::with_capacity(selected.len());
         for (idx, spec) in &selected {
             eprintln!(
@@ -262,7 +363,8 @@ fn run_all_matchups(
                 let _ = layer.drain();
             }
             let matchup_seed = options.base_seed.wrapping_add(*idx as u64 * 1_000);
-            let mut result = run_single_matchup(db, spec, options, matchup_seed);
+            let mut result =
+                run_single_matchup(db, spec, options, matchup_seed, harvest_sink.as_deref_mut());
             if let Some(layer) = capture {
                 let events = layer.drain();
                 result.attribution = Some(aggregate_events(&events));
@@ -273,31 +375,106 @@ fn run_all_matchups(
         return results;
     }
 
-    run_matchups_parallel(db, options, &selected)
+    run_games_parallel(db, options, &selected)
+}
+
+/// Flat `(selection position, game index)` work list for the game-level runner.
+///
+/// A matchup whose decks failed to resolve contributes **no** tasks: it already
+/// has a `failed_result`, and enqueuing games for it would run `drive_game` on a
+/// payload that does not exist. Positions stay aligned with `payloads`/`selected`
+/// so a task can recover its spec, payload and matchup seed by index alone.
+fn game_tasks(
+    payloads: &[Result<DeckPayload, String>],
+    games_per_matchup: usize,
+) -> Vec<(usize, usize)> {
+    payloads
+        .iter()
+        .enumerate()
+        .filter(|(_, payload)| payload.is_ok())
+        .flat_map(|(pos, _)| (0..games_per_matchup).map(move |game| (pos, game)))
+        .collect()
+}
+
+/// Regroup finished games by matchup position, restoring `game_idx` order and
+/// summing per-matchup duration.
+///
+/// The sort is load-bearing, not cosmetic: `MatchupResult::games` is a field of
+/// [`DeterministicSuiteReport`], so games arriving in completion order instead of
+/// `game_idx` order would be a real baseline diff on every parallel run.
+fn regroup_games(
+    matchup_count: usize,
+    mut collected: Vec<(usize, usize, GameResult, u128)>,
+) -> Vec<(Vec<GameResult>, u128)> {
+    // `(pos, game_idx)` pairs are unique, so `game_idx` alone would also be correct
+    // once the bucketing below splits by `pos`. Keying on both is self-documenting:
+    // it says the output order is "matchup, then game", which is what the report is.
+    collected.sort_by_key(|(pos, game_idx, _, _)| (*pos, *game_idx));
+    let mut per_matchup: Vec<(Vec<GameResult>, u128)> =
+        (0..matchup_count).map(|_| (Vec::new(), 0)).collect();
+    for (pos, _, game, elapsed_ms) in collected {
+        let entry = &mut per_matchup[pos];
+        entry.0.push(game);
+        entry.1 += elapsed_ms;
+    }
+    per_matchup
 }
 
 /// Run the selected matchups across all available cores via a work-stealing
-/// atomic cursor (matchups vary widely in length, so a static split would leave
-/// cores idle). Each matchup is a pure function of `(db, spec, options,
-/// matchup_seed)` with its seed derived from the original index, so results are
-/// byte-identical to a sequential run regardless of scheduling — only live
-/// progress order varies. The returned Vec is restored to selection order.
-fn run_matchups_parallel(
+/// atomic cursor over **(matchup, game) pairs**.
+///
+/// The unit of work is one game, not one matchup. Capping the cursor at the
+/// matchup count left every core past the third idle on the quick gate
+/// (`ai_gate.rs`'s `DEFAULT_QUICK_FILTER` selects three matchups) while the
+/// ten games inside each matchup ran strictly one after another. A game is a
+/// function of `(payload, seed, difficulty, action_cap)` **modulo #4878** — see
+/// [`drive_game`] and the run-to-run caveat at the top of `duel_suite::perf` —
+/// and its seed is `base_seed + matchup_idx*1000 + game_idx`, derived from the
+/// matchup's ORIGINAL index, so no game's result depends on which worker picked
+/// it up or when. Only live progress order varies.
+///
+/// Results are regrouped by matchup and re-sorted by `game_idx` before
+/// aggregation, so this runner adds no *new* scheduling dependence to
+/// `SuiteReport::deterministic_core`. That core is not byte-stable across repeat
+/// runs and never was: `RandomState` is seeded per thread from OS randomness and
+/// that iteration order reaches AI tie-breaking (#4878). The verdict is
+/// insulated from it because `compare::paired_seed_shift` keys on `seed`, not on
+/// position.
+///
+/// Output contract (changed by this restructuring): per-GAME lines stream live
+/// from [`play_reported_game`], interleaved across matchups and each tagged with
+/// its matchup id; the per-matchup verdict rows are printed after the join, in
+/// selection order. A killed run therefore still leaves every completed game's
+/// seed, winner, turn count and duration in the log.
+fn run_games_parallel(
     db: &CardDatabase,
     options: &SuiteOptions,
     selected: &[(usize, &MatchupSpec)],
 ) -> Vec<MatchupResult> {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let run_total = selected.len();
+    // Payloads are resolved ONCE per matchup, on this thread, before the fan-out:
+    // deck resolution is pure setup, and re-resolving it per game would add real
+    // work that the sequential runner never did. A matchup whose decks fail to
+    // resolve contributes no game tasks and keeps its `failed_result` — one bad
+    // deck list must not abort the other matchups.
+    let mut payloads: Vec<Result<DeckPayload, String>> = Vec::with_capacity(selected.len());
+    for (_, spec) in selected {
+        payloads.push(build_payload(db, spec));
+    }
+
+    let tasks = game_tasks(&payloads, options.games_per_matchup);
+    let task_total = tasks.len();
     let n_workers = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
-        .min(run_total.max(1));
+        .min(task_total.max(1));
     let cursor = AtomicUsize::new(0);
-    let done = AtomicUsize::new(0);
 
-    let mut collected: Vec<(usize, MatchupResult)> = std::thread::scope(|scope| {
+    let collected: Vec<(usize, usize, GameResult, u128)> = std::thread::scope(|scope| {
+        let payloads = &payloads;
+        let tasks = &tasks;
+        let cursor = &cursor;
         let handles: Vec<_> = (0..n_workers)
             .map(|_| {
                 // The plan-mandated `cargo ai-gate --difficulty hard` runs in a
@@ -308,24 +485,31 @@ fn run_matchups_parallel(
                 // production impact.
                 std::thread::Builder::new()
                     .stack_size(32 << 20)
-                    .spawn_scoped(scope, || {
-                        let mut local: Vec<(usize, MatchupResult)> = Vec::new();
+                    .spawn_scoped(scope, move || {
+                        let mut local: Vec<(usize, usize, GameResult, u128)> = Vec::new();
                         loop {
-                            let pos = cursor.fetch_add(1, Ordering::Relaxed);
-                            if pos >= run_total {
+                            let next = cursor.fetch_add(1, Ordering::Relaxed);
+                            if next >= task_total {
                                 break;
                             }
+                            let (pos, game_idx) = tasks[next];
                             let (idx, spec) = selected[pos];
+                            let payload = payloads[pos]
+                                .as_ref()
+                                .expect("only Ok payloads produce game tasks");
                             let matchup_seed = options.base_seed.wrapping_add(idx as u64 * 1_000);
-                            let result = run_single_matchup(db, spec, options, matchup_seed);
-                            let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
-                            eprintln!(
-                                "[{completed:>2}/{run_total}] {id}  done (games: {games})",
-                                id = spec.id,
-                                games = options.games_per_matchup,
+                            // Parallel path never harvests (harvesting forces the
+                            // sequential branch in `run_all_matchups`).
+                            let (game, elapsed_ms) = play_reported_game(
+                                db,
+                                spec,
+                                payload,
+                                options,
+                                matchup_seed,
+                                game_idx,
+                                None,
                             );
-                            print_matchup_row(&result);
-                            local.push((pos, result));
+                            local.push((pos, game_idx, game, elapsed_ms));
                         }
                         local
                     })
@@ -338,10 +522,32 @@ fn run_matchups_parallel(
             .collect()
     });
 
-    // Parallel completion is unordered; restore the original selection order so
-    // the report and any baseline comparison are stable across runs.
-    collected.sort_by_key(|(pos, _)| *pos);
-    collected.into_iter().map(|(_, result)| result).collect()
+    let per_matchup = regroup_games(selected.len(), collected);
+
+    let results: Vec<MatchupResult> = selected
+        .iter()
+        .zip(payloads.iter())
+        .zip(per_matchup)
+        .map(
+            |(((_, spec), payload), (games, total_duration_ms))| match payload {
+                Err(reason) => failed_result(spec, reason),
+                Ok(_) => assemble_matchup_result(spec, options, games, total_duration_ms),
+            },
+        )
+        .collect();
+
+    let run_total = results.len();
+    for (n, result) in results.iter().enumerate() {
+        eprintln!(
+            "[{n:>2}/{run_total}] {id}  done (games: {games})",
+            n = n + 1,
+            id = result.matchup_id,
+            games = options.games_per_matchup,
+        );
+        print_matchup_row(result);
+    }
+
+    results
 }
 
 fn finalize_report(
@@ -362,51 +568,157 @@ fn finalize_report(
         results,
     };
 
-    write_report(&report, &options.output_path)?;
+    write_report(&report, &options.output)?;
     print_markdown_table(&report);
 
     Ok(report)
 }
 
-fn run_single_matchup(
+/// Wall-clock `HH:MM:SS` in UTC for progress lines.
+///
+/// The suite has no date dependency (`phase-ai/Cargo.toml` pulls neither `chrono`
+/// nor `time`), and a bare elapsed counter is useless once a CI job is killed —
+/// the operator needs to line the last emitted game up against the job's own
+/// timeline. Seconds-of-day arithmetic is enough for that and cannot drift.
+/// Diagnostics only: never parsed, never compared, never part of a verdict.
+fn utc_hms() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        % 86_400;
+    format!(
+        "{:02}:{:02}:{:02}",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    )
+}
+
+/// Progress-line label for a finished game's winner. `None` is a draw *or* an
+/// aborted game — [`play_reported_game`] prints a distinct `aborted:` line on the
+/// panic path, so the two stay distinguishable in a killed run's tail.
+fn winner_label(winner: Option<PlayerId>) -> &'static str {
+    match winner {
+        Some(PlayerId(0)) => "p0",
+        Some(_) => "p1",
+        None => "draw",
+    }
+}
+
+/// Play one suite game and report it. **Sole authority** for what a single game
+/// is: the seed derivation, the panic guard, the harvest side-channel and the
+/// progress lines all live here, so the sequential runner and the parallel
+/// game-level runner cannot drift in `(seed, winner, turns)`.
+///
+/// The returned `GameResult` is derived from `(payload, matchup_seed, game_idx,
+/// difficulty)` alone: no wall clock this function reads (`Instant::now` for
+/// `elapsed_ms`, `utc_hms` for the progress lines) enters it, and neither does
+/// completion order or worker index. It is NOT thread-identity-free in the
+/// absolute sense —
+/// `RandomState` is seeded per thread and leaks into AI tie-breaking (#4878,
+/// documented at the top of `duel_suite::perf`) — but that exposure is identical
+/// under the sequential and the parallel runner. `elapsed_ms` is the only value
+/// this function itself makes scheduling-dependent, and it is excluded from
+/// [`SuiteReport::deterministic_core`].
+fn play_reported_game(
     db: &CardDatabase,
     spec: &MatchupSpec,
+    payload: &DeckPayload,
     options: &SuiteOptions,
     matchup_seed: u64,
-) -> MatchupResult {
-    let payload = match build_payload(db, spec) {
-        Ok(p) => p,
-        Err(reason) => return failed_result(spec, &reason),
-    };
-
-    let mut p0_wins = 0usize;
-    let mut p1_wins = 0usize;
-    let mut draws = 0usize;
-    let mut games = Vec::with_capacity(options.games_per_matchup);
-    let mut total_turns: u64 = 0;
-    let mut total_duration_ms: u128 = 0;
-
-    for game_idx in 0..options.games_per_matchup {
-        let seed = matchup_seed.wrapping_add(game_idx as u64);
-        let start = Instant::now();
-        let (winner, turns) = match std::panic::catch_unwind(AssertUnwindSafe(|| {
-            run_game(&payload, seed, options.difficulty)
-        })) {
+    game_idx: usize,
+    harvest_sink: Option<&mut HarvestSink>,
+) -> (GameResult, u128) {
+    let seed = matchup_seed.wrapping_add(game_idx as u64);
+    let start = Instant::now();
+    eprintln!(
+        "{ts} [{id}] game {n}/{total} seed={seed} start",
+        ts = utc_hms(),
+        id = spec.id,
+        n = game_idx + 1,
+        total = options.games_per_matchup,
+    );
+    let (winner, turns) = if harvest_sink.is_some() {
+        // Harvester declared OUTSIDE catch_unwind. The observe closure's `&mut`
+        // borrow ends when the closure returns; `finish(winner)` then runs
+        // unconditionally (panic → `catch_unwind` Err → winner None → empty
+        // records, partial buffer dropped with the harvester).
+        let mut harvester = harvest::GameHarvester::new(seed, spec.id.to_string(), game_idx);
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            run_game_observed(
+                db,
+                payload,
+                seed,
+                options.difficulty,
+                &mut |state, session| harvester.observe(state, session),
+            )
+        }));
+        let (winner, turns) = match outcome {
             Ok(result) => result,
             Err(_) => {
                 eprintln!("       seed {seed} aborted: AI panic during suite game");
                 (None, 0)
             }
         };
-        total_duration_ms += start.elapsed().as_millis();
-        total_turns += turns as u64;
-        games.push(GameResult {
+        let records = harvester.finish(winner);
+        if let Some(sink) = harvest_sink {
+            if let Err(e) = sink.write_records(&records) {
+                eprintln!("       seed {seed}: harvest write failed: {e}");
+            }
+        }
+        (winner, turns)
+    } else {
+        match std::panic::catch_unwind(AssertUnwindSafe(|| {
+            run_game(db, payload, seed, options.difficulty)
+        })) {
+            Ok(result) => result,
+            Err(_) => {
+                eprintln!("       seed {seed} aborted: AI panic during suite game");
+                (None, 0)
+            }
+        }
+    };
+    let elapsed_ms = start.elapsed().as_millis();
+    eprintln!(
+        "{ts} [{id}] game {n}/{total} seed={seed} done winner={winner} turns={turns} {elapsed_ms}ms",
+        ts = utc_hms(),
+        id = spec.id,
+        n = game_idx + 1,
+        total = options.games_per_matchup,
+        winner = winner_label(winner),
+    );
+    (
+        GameResult {
             seed,
             winner: winner.map(|p| p.0),
             turns,
-        });
-        match winner {
-            Some(PlayerId(0)) => p0_wins += 1,
+        },
+        elapsed_ms,
+    )
+}
+
+/// Fold a matchup's finished games into its [`MatchupResult`]. **Sole authority**
+/// for the win/draw tally and the [`classify`] verdict, shared by both runners.
+///
+/// `games` MUST already be in `game_idx` order — the parallel runner sorts them
+/// back before calling. The report field `games` is part of
+/// [`SuiteReport::deterministic_core`], so any other order would be a visible
+/// baseline diff, not a cosmetic one.
+fn assemble_matchup_result(
+    spec: &MatchupSpec,
+    options: &SuiteOptions,
+    games: Vec<GameResult>,
+    total_duration_ms: u128,
+) -> MatchupResult {
+    let mut p0_wins = 0usize;
+    let mut p1_wins = 0usize;
+    let mut draws = 0usize;
+    let mut total_turns: u64 = 0;
+    for game in &games {
+        total_turns += game.turns as u64;
+        match game.winner {
+            Some(0) => p0_wins += 1,
             Some(_) => p1_wins += 1,
             None => draws += 1,
         }
@@ -435,6 +747,37 @@ fn run_single_matchup(
         fail_reason,
         attribution: None,
     }
+}
+
+fn run_single_matchup(
+    db: &CardDatabase,
+    spec: &MatchupSpec,
+    options: &SuiteOptions,
+    matchup_seed: u64,
+    mut harvest_sink: Option<&mut HarvestSink>,
+) -> MatchupResult {
+    let payload = match build_payload(db, spec) {
+        Ok(p) => p,
+        Err(reason) => return failed_result(spec, &reason),
+    };
+
+    let mut games = Vec::with_capacity(options.games_per_matchup);
+    let mut total_duration_ms: u128 = 0;
+    for game_idx in 0..options.games_per_matchup {
+        let (game, elapsed_ms) = play_reported_game(
+            db,
+            spec,
+            &payload,
+            options,
+            matchup_seed,
+            game_idx,
+            harvest_sink.as_deref_mut(),
+        );
+        total_duration_ms += elapsed_ms;
+        games.push(game);
+    }
+
+    assemble_matchup_result(spec, options, games, total_duration_ms)
 }
 
 fn build_payload(db: &CardDatabase, spec: &MatchupSpec) -> Result<DeckPayload, String> {
@@ -537,27 +880,86 @@ fn wilson_interval(successes: usize, total: usize) -> (f32, f32) {
     )
 }
 
-fn run_game(payload: &DeckPayload, seed: u64, difficulty: AiDifficulty) -> (Option<PlayerId>, u32) {
-    drive_game(payload, seed, difficulty, MAX_TOTAL_ACTIONS)
+fn run_game(
+    db: &CardDatabase,
+    payload: &DeckPayload,
+    seed: u64,
+    difficulty: AiDifficulty,
+) -> (Option<PlayerId>, u32) {
+    drive_game(Some(db), payload, seed, difficulty, MAX_TOTAL_ACTIONS)
+}
+
+/// [`run_game`]'s observing sibling — same `MAX_TOTAL_ACTIONS` cap, so harvested
+/// and unharvested suite games are byte-identical in `(winner, turns)`. Keeping
+/// the action cap in lockstep with `run_game` is what guarantees no drift between
+/// the two paths.
+fn run_game_observed(
+    db: &CardDatabase,
+    payload: &DeckPayload,
+    seed: u64,
+    difficulty: AiDifficulty,
+    observe: &mut dyn FnMut(&GameState, &std::sync::Arc<crate::session::AiSession>),
+) -> (Option<PlayerId>, u32) {
+    drive_game_observed(
+        Some(db),
+        payload,
+        seed,
+        difficulty,
+        MAX_TOTAL_ACTIONS,
+        observe,
+    )
 }
 
 /// Deterministic core game driver shared by the win-rate suite and the perf
-/// gate. Builds the two-player state, installs measurement-mode AI configs, and
+/// gate. Builds the two-player state through the canonical
+/// [`load_and_hydrate_decks`] init path (the same one the WASM bridge and
+/// server-core use), so dual-faced cards get their back faces and the
+/// `#[serde(skip)]` card-name pool behind `NamedChoice { CardName, .. }` is
+/// populated — with the bare loader, a Pithing Needle prompt leaves the AI
+/// with zero legal actions and the game records a draw. `db` is `Option`
+/// only for db-free unit tests; every runner passes `Some`. Installs
+/// measurement-mode AI configs, and
 /// loops `run_ai_actions` until the action stream is empty or `action_cap` total
 /// actions have been taken (checked at `run_ai_actions` batch boundaries, so the
 /// realized count may overshoot the cap within a batch — identical semantics to
 /// the historical `run_game` body, which capped at `MAX_TOTAL_ACTIONS`). The
-/// result `(winner, turn_number)` is a pure function of
-/// `(binary, payload, seed, difficulty, action_cap)`; no wall-clock or thread
-/// scheduling influences it.
+/// result `(winner, turn_number)` is a function of
+/// `(binary, db, payload, seed, difficulty, action_cap)` and nothing this function
+/// itself reads. `projection.rs`'s wall-clock projection cap is now gated on
+/// measurement mode (`projection::projection_deadline` returns
+/// `Deadline::none()` under `ExecutionMode::Measurement`), so projections here
+/// are bounded by `STEP_CAP` and host speed cannot change which creature the AI
+/// targets. The remaining run-to-run caveat is `RandomState` iteration order
+/// (#4878) — see the notes at the top of [`super::perf`].
 pub(crate) fn drive_game(
+    db: Option<&CardDatabase>,
     payload: &DeckPayload,
     seed: u64,
     difficulty: AiDifficulty,
     action_cap: usize,
 ) -> (Option<PlayerId>, u32) {
+    // Delegate with a no-op observer. The `&mut dyn FnMut` closure is called once
+    // per `run_ai_actions` *batch* (a batch spans many engine applies), so at
+    // measurement granularity this is perf-neutral vs the historical body — the
+    // unchanged `ai-perf-gate` baseline is the witness.
+    drive_game_observed(db, payload, seed, difficulty, action_cap, &mut |_, _| {})
+}
+
+/// [`drive_game`] with an observer seam: `observe(&state, &ai_session)` fires
+/// after every `run_ai_actions` batch. The observer receives an immutable
+/// `&GameState` (read-only by construction) and the per-game `AiSession` p0's
+/// planner consumes. With a no-op closure the results are byte-identical to the
+/// historical `drive_game` body.
+pub(crate) fn drive_game_observed(
+    db: Option<&CardDatabase>,
+    payload: &DeckPayload,
+    seed: u64,
+    difficulty: AiDifficulty,
+    action_cap: usize,
+    observe: &mut dyn FnMut(&GameState, &std::sync::Arc<crate::session::AiSession>),
+) -> (Option<PlayerId>, u32) {
     let mut state = GameState::new_two_player(seed);
-    load_deck_into_state(&mut state, payload);
+    load_and_hydrate_decks(&mut state, payload, db);
     engine::game::engine::start_game(&mut state);
 
     let ai_players: HashSet<PlayerId> = [PlayerId(0), PlayerId(1)].into_iter().collect();
@@ -578,6 +980,7 @@ pub(crate) fn drive_game(
             &mut ai_rng,
             &ai_session,
         );
+        observe(&state, &ai_session);
         if results.is_empty() {
             break;
         }
@@ -594,13 +997,31 @@ pub(crate) fn drive_game(
     (winner, state.turn_number)
 }
 
-fn write_report(report: &SuiteReport, path: &Path) -> Result<(), std::io::Error> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+fn write_report(report: &SuiteReport, sink: &ReportSink) -> Result<(), std::io::Error> {
+    match sink {
+        ReportSink::Create(path) => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            write_through(&File::create(path)?, report)
+        }
+        ReportSink::Reserved(file) => write_through(file, report),
     }
-    let file = std::fs::File::create(path)?;
-    serde_json::to_writer_pretty(BufWriter::new(file), report).map_err(std::io::Error::other)?;
-    Ok(())
+}
+
+/// Serialize into an already-open handle and put it on disk.
+fn write_through(file: &File, report: &SuiteReport) -> Result<(), std::io::Error> {
+    // The report replaces the file's contents, so a shorter report must not leave the tail of a
+    // longer one behind. This is what lets any caller hand this function a destination rather
+    // than only an empty file.
+    file.set_len(0)?;
+    let mut writer = BufWriter::new(file);
+    serde_json::to_writer_pretty(&mut writer, report).map_err(std::io::Error::other)?;
+    // `BufWriter`'s drop-flush discards its error, so a short write would otherwise return Ok
+    // over a truncated report; and the bytes must be on disk before a caller renames this file
+    // into place.
+    writer.flush()?;
+    file.sync_all()
 }
 
 fn print_matchup_row(r: &MatchupResult) {
@@ -770,6 +1191,128 @@ mod tests {
         }
     }
 
+    /// Reuses `report_with_timing`'s matchup as the field template so these tests state
+    /// only the axes they exercise: each matchup's status and reason.
+    fn report_with_statuses(statuses: &[(&str, SuiteStatus, Option<&str>)]) -> SuiteReport {
+        let mut report = report_with_timing(1, 100);
+        let template = report.results[0].clone();
+        report.results = statuses
+            .iter()
+            .map(|(id, status, reason)| MatchupResult {
+                matchup_id: (*id).to_string(),
+                status: *status,
+                fail_reason: reason.map(str::to_string),
+                ..template.clone()
+            })
+            .collect();
+        report
+    }
+
+    #[test]
+    fn a_clean_run_has_no_failing_matchups() {
+        let report = report_with_statuses(&[
+            ("red-mirror", SuiteStatus::Pass, None),
+            ("affinity-mirror", SuiteStatus::Pass, None),
+        ]);
+
+        assert_eq!(report.failing_matchups().count(), 0);
+    }
+
+    /// Transcribed from the recorded gate run that motivated this guard (`.ab/noC-1.json`,
+    /// the A+B+D leg of #6969): the statuses and the verbatim `fail_reason` are that run's,
+    /// not invented. Refreshing the baseline from this exact report is what would have
+    /// blessed a broken matchup permanently. The artifact is untracked, so it is
+    /// transcribed rather than loaded — a test that read the file would fail in CI.
+    #[test]
+    fn the_recorded_failing_run_is_disqualified_as_a_baseline() {
+        let report = report_with_statuses(&[
+            ("red-mirror", SuiteStatus::Pass, None),
+            ("affinity-mirror", SuiteStatus::Pass, None),
+            (
+                "enchantress-mirror",
+                SuiteStatus::Fail,
+                Some("mirror imbalance: p0=0.10, Wilson 95% CI [0.02, 0.40] excludes 0.50"),
+            ),
+        ]);
+
+        let failing: Vec<_> = report.failing_matchups().collect();
+        assert_eq!(failing.len(), 1, "the one Fail, not every matchup");
+        assert_eq!(failing[0].matchup_id, "enchantress-mirror");
+        // The reason travels with the matchup: the refusal is only actionable if it can say
+        // *why* the run is unfit, not merely that it is.
+        assert_eq!(
+            failing[0].fail_reason.as_deref(),
+            Some("mirror imbalance: p0=0.10, Wilson 95% CI [0.02, 0.40] excludes 0.50")
+        );
+    }
+
+    /// The discriminating case for `recorded_games`: a suite whose matchups are all
+    /// declared `Expected::Open` still played real games, and that report IS a usable
+    /// baseline, because seed-paired drift detection never consults `status`. An
+    /// implementation that disqualified all-`Open` reports instead of gameless ones would
+    /// pass every other test here and fail this one.
+    #[test]
+    fn an_all_open_run_that_played_games_is_still_a_usable_baseline() {
+        let mut report = report_with_statuses(&[
+            ("experimental-a", SuiteStatus::Open, None),
+            ("experimental-b", SuiteStatus::Open, None),
+        ]);
+        // Uneven on purpose. With one game each, the total (2) equals the MATCHUP count, so
+        // "sum of games" and "number of matchups that played" are indistinguishable — two
+        // mutants with that wrong contract survived the earlier version of this test. Three
+        // games across two matchups separates them.
+        let extra = report.results[0].games[0].clone();
+        report.results[0].games.push(GameResult {
+            seed: extra.seed + 1,
+            ..extra
+        });
+
+        assert_eq!(report.failing_matchups().count(), 0);
+        assert_eq!(
+            report.recorded_games(),
+            3,
+            "two games in the first matchup plus one in the second — a SUM, not a matchup count"
+        );
+    }
+
+    #[test]
+    fn a_gameless_run_records_nothing_however_many_matchups_it_has() {
+        let mut report = report_with_statuses(&[
+            ("red-mirror", SuiteStatus::Open, None),
+            ("affinity-mirror", SuiteStatus::Open, None),
+        ]);
+        // What `--games 0` produces: matchups exist, none of them played anything.
+        for result in &mut report.results {
+            result.games.clear();
+        }
+
+        assert_eq!(report.recorded_games(), 0);
+        // And it is NOT a failure — the two disqualifiers are independent, so a guard that
+        // conflated them would let one of the two holes back open.
+        assert_eq!(report.failing_matchups().count(), 0);
+    }
+
+    #[test]
+    fn a_run_that_selected_no_matchups_records_nothing() {
+        // What a `--suite-filter` matching nothing produces: no matchups at all.
+        let report = report_with_statuses(&[]);
+
+        assert_eq!(report.recorded_games(), 0);
+    }
+
+    #[test]
+    fn an_open_matchup_is_not_a_failure() {
+        // `Expected::Open` classifies as `SuiteStatus::Open`: a matchup that has no verdict
+        // yet, which must not block a refresh. This is the test that dies if the filter is
+        // ever written as the plausible `!= SuiteStatus::Pass` — the other two survive it.
+        let report = report_with_statuses(&[
+            ("red-mirror", SuiteStatus::Pass, None),
+            ("experimental-mirror", SuiteStatus::Open, None),
+        ]);
+
+        assert_eq!(report.failing_matchups().count(), 0);
+    }
+
     #[test]
     fn deterministic_core_excludes_wall_clock_fields() {
         let first = report_with_timing(1, 100);
@@ -792,5 +1335,257 @@ mod tests {
 
         assert_eq!(status, SuiteStatus::Fail);
         assert!(reason.unwrap().contains("Wilson 95% CI"));
+    }
+
+    fn game(seed: u64, winner: Option<u8>, turns: u32) -> GameResult {
+        GameResult {
+            seed,
+            winner,
+            turns,
+        }
+    }
+
+    /// A matchup whose decks failed to resolve must enqueue ZERO games — it
+    /// already carries a `failed_result`, and its `payloads` slot holds no
+    /// `DeckPayload` for a worker to run.
+    ///
+    /// Discriminating: dropping the `payload.is_ok()` filter makes position 1
+    /// appear in the output and the `expect("only Ok payloads produce game
+    /// tasks")` in the worker becomes reachable. Verified by deleting the
+    /// filter — the equality below then sees the extra `(1, 0)`/`(1, 1)` pair.
+    #[test]
+    fn game_tasks_skip_matchups_whose_payload_failed() {
+        let payloads = vec![
+            Ok(DeckPayload::default()),
+            Err("p0 load: no such deck".to_string()),
+            Ok(DeckPayload::default()),
+        ];
+
+        let tasks = game_tasks(&payloads, 2);
+
+        assert_eq!(tasks, vec![(0, 0), (0, 1), (2, 0), (2, 1)]);
+    }
+
+    /// Every matchup's games must land in `game_idx` order no matter what order
+    /// the workers finished them in. `MatchupResult::games` is a
+    /// `deterministic_core` field, so completion order leaking into it would be a
+    /// baseline diff on every parallel run.
+    ///
+    /// Discriminating by construction: the input is deliberately shuffled
+    /// (matchup 0's games arrive 2,0,1 and are interleaved with matchup 1's), so
+    /// removing `regroup_games`' `sort_by_key` yields `[2,0,1]` and the first
+    /// assertion fails. Verified by deleting the sort.
+    #[test]
+    fn regroup_games_restores_game_index_order_from_shuffled_completion() {
+        let collected = vec![
+            (0, 2, game(102, Some(1), 12), 30),
+            (1, 1, game(1101, None, 21), 100),
+            (0, 0, game(100, Some(0), 10), 10),
+            (1, 0, game(1100, Some(0), 20), 200),
+            (0, 1, game(101, Some(0), 11), 20),
+        ];
+
+        let per_matchup = regroup_games(2, collected);
+
+        assert_eq!(
+            per_matchup[0].0,
+            vec![
+                game(100, Some(0), 10),
+                game(101, Some(0), 11),
+                game(102, Some(1), 12)
+            ],
+        );
+        assert_eq!(
+            per_matchup[1].0,
+            vec![game(1100, Some(0), 20), game(1101, None, 21)],
+        );
+        // Durations are summed per matchup, not mixed between them.
+        assert_eq!(per_matchup[0].1, 60);
+        assert_eq!(per_matchup[1].1, 300);
+    }
+
+    /// A matchup that produced no games at all (its payload failed) must still
+    /// get an empty slot rather than shifting later matchups' games onto it.
+    #[test]
+    fn regroup_games_keeps_an_empty_slot_for_a_matchup_with_no_games() {
+        let collected = vec![(2, 0, game(2100, Some(0), 7), 5)];
+
+        let per_matchup = regroup_games(3, collected);
+
+        assert!(per_matchup[0].0.is_empty());
+        assert!(per_matchup[1].0.is_empty());
+        assert_eq!(per_matchup[2].0, vec![game(2100, Some(0), 7)]);
+    }
+
+    /// `assemble_matchup_result` is the sole authority for BOTH halves of a
+    /// matchup row: the win/draw tally (read off the games vector) and the
+    /// [`classify`] verdict plus the two averages (divided by
+    /// `options.games_per_matchup`, NOT by `games.len()`).
+    ///
+    /// The 4-games-against-`games_per_matchup: 16` mismatch is deliberate — it is
+    /// what makes the denominator observable. Every one of the three uses flips
+    /// if it is switched to `games.len()`: `avg_turns` 1.625 → 6.5,
+    /// `avg_duration_ms` 25.0 → 100.0, and the verdict PASS-vs-FAIL, because the
+    /// Wilson 95% interval for 2/16 excludes 0.50 while the interval for 2/4
+    /// (which is centred on 0.50) cannot. A real run always has
+    /// `games.len() == games_per_matchup`, so the two are indistinguishable there.
+    #[test]
+    fn assemble_matchup_result_tallies_from_games_and_divides_by_games_per_matchup() {
+        let spec = crate::duel_suite::find_matchup("red-mirror").expect("red-mirror must resolve");
+        let options = SuiteOptions::new(AiDifficulty::Medium, 16, 7);
+        let games = vec![
+            game(7, Some(0), 5),
+            game(8, Some(1), 6),
+            game(9, None, 7),
+            game(10, Some(0), 8),
+        ];
+
+        let result = assemble_matchup_result(spec, &options, games.clone(), 400);
+
+        assert_eq!((result.p0_wins, result.p1_wins, result.draws), (2, 1, 1));
+        assert_eq!(result.total_turns, 26);
+        assert_eq!(result.games, games);
+        assert_eq!(result.total_duration_ms, 400);
+        // Denominator is `games_per_matchup` (16), not `games.len()` (4).
+        assert_eq!(result.avg_turns, 1.625);
+        assert_eq!(result.avg_duration_ms, 25.0);
+        assert_eq!(result.status, SuiteStatus::Fail);
+        assert!(
+            result
+                .fail_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("mirror imbalance")),
+            "classify must be fed games_per_matchup; got {:?}",
+            result.fail_reason,
+        );
+    }
+
+    /// Observer seam is inert: for the same `(payload, seed)`, a no-op observer
+    /// yields an identical `(winner, turns)` to the un-observed driver. Uses an
+    /// empty `DeckPayload` (both libraries empty → deterministic draw-from-empty
+    /// loss), so the test needs no card database and runs in CI.
+    ///
+    /// Scope caveat: `drive_game` IS `drive_game_observed` with a no-op closure,
+    /// so both calls execute the same code — this catches nondeterminism in the
+    /// shared driver, not observer-induced drift (impossible by construction:
+    /// the observer receives only `&GameState`). The load-bearing inertness
+    /// evidence is the unchanged duel-suite win-rate baseline with harvest off.
+    #[test]
+    fn observer_seam_is_inert_for_noop_observer() {
+        let payload = DeckPayload::default();
+        let seed = 4242;
+        let baseline = drive_game(None, &payload, seed, AiDifficulty::Easy, 200);
+        let observed = drive_game_observed(
+            None,
+            &payload,
+            seed,
+            AiDifficulty::Easy,
+            200,
+            &mut |_, _| {},
+        );
+        assert_eq!(
+            baseline, observed,
+            "no-op observer must not perturb (winner, turns)"
+        );
+    }
+
+    /// A reserved sink writes into the inode it was handed, never into whatever its former path
+    /// names now.
+    ///
+    /// Guards the finding that the writer reopened the staging path by name: an entry placed
+    /// there after the reservation was followed (symlink) or shared (hard link), so the report
+    /// landed on a file the run never chose.
+    #[cfg(unix)]
+    #[test]
+    fn a_reserved_sink_writes_through_its_descriptor_after_the_path_is_replaced() {
+        const VICTIM: &str = "VICTIM-BYTES";
+        let report = report_with_timing(1, 1);
+
+        for kind in ["symlink", "hardlink"] {
+            let dir = std::env::temp_dir()
+                .join(format!("phase-reserved-sink-{kind}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+
+            let victim = dir.join("victim.json");
+            std::fs::write(&victim, VICTIM).expect("seed victim");
+
+            let reserved_path = dir.join("report.staging.json");
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&reserved_path)
+                .expect("reserve staging");
+            // A second name for the reserved inode, so it stays readable once its own name is
+            // taken away below.
+            let witness = dir.join("witness.json");
+            std::fs::hard_link(&reserved_path, &witness).expect("witness link");
+
+            std::fs::remove_file(&reserved_path).expect("drop the reserved name");
+            if kind == "symlink" {
+                std::os::unix::fs::symlink(&victim, &reserved_path).expect("symlink");
+            } else {
+                std::fs::hard_link(&victim, &reserved_path).expect("hard link");
+            }
+
+            // PREMISE: the replacement really does redirect that name at the victim, and the
+            // reserved inode is still empty — so neither assertion below can pass vacuously.
+            assert_eq!(
+                std::fs::read_to_string(&reserved_path).expect("read through replacement"),
+                VICTIM,
+                "{kind}: the replacement must resolve to the victim"
+            );
+            assert!(
+                std::fs::read_to_string(&witness)
+                    .expect("read witness")
+                    .is_empty(),
+                "{kind}: the reserved inode must still be empty"
+            );
+
+            write_report(&report, &ReportSink::Reserved(file)).expect("reserved write");
+
+            assert_eq!(
+                std::fs::read_to_string(&victim).expect("read victim"),
+                VICTIM,
+                "{kind}: the reserved sink followed its replaced path onto the victim"
+            );
+            let landed: SuiteReport =
+                serde_json::from_str(&std::fs::read_to_string(&witness).expect("read witness"))
+                    .expect("the reserved inode must hold the report");
+            assert_eq!(landed.results[0].matchup_id, "red-mirror");
+
+            // CONTROL, same fixture, other arm: opening that path by name DOES reach the victim,
+            // which is what makes the survival above a property of the retained descriptor
+            // rather than of an inert fixture.
+            write_report(&report, &ReportSink::Create(reserved_path)).expect("create write");
+            assert_ne!(
+                std::fs::read_to_string(&victim).expect("read victim"),
+                VICTIM,
+                "{kind}: the fixture is inert — writing by name did not reach the victim"
+            );
+
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        // A reserved handle is only positioned at offset 0, not necessarily empty. The report
+        // replaces the contents, so no tail of a longer predecessor may survive it.
+        let dir =
+            std::env::temp_dir().join(format!("phase-reserved-sink-padded-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let padded = dir.join("padded.json");
+        std::fs::write(&padded, "A".repeat(64 * 1024)).expect("seed padding");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&padded)
+            .expect("open padded");
+
+        write_report(&report, &ReportSink::Reserved(file)).expect("reserved write");
+
+        let landed: SuiteReport =
+            serde_json::from_str(&std::fs::read_to_string(&padded).expect("read padded"))
+                .expect("the padded file must parse as the report, with no tail left behind");
+        assert_eq!(landed.results[0].matchup_id, "red-mirror");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

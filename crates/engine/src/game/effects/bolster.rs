@@ -102,7 +102,7 @@ pub fn resolve(
             controller,
         );
 
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation)));
+        state.park_ability_continuation(PendingContinuation::new(Box::new(continuation), state));
         state.waiting_for = WaitingFor::ChooseFromZoneChoice {
             player: controller,
             cards: tied,
@@ -110,6 +110,7 @@ pub fn resolve(
             up_to: false,
             constraint: None,
             source_id,
+            reciprocal_role: None,
         };
 
         events.push(GameEvent::EffectResolved {
@@ -211,7 +212,7 @@ mod tests {
             other => panic!("Expected ChooseFromZoneChoice, got {:?}", other),
         }
         // Continuation should be set for PutCounter
-        assert!(state.pending_continuation.is_some());
+        assert!(state.active_ability_continuation().is_some());
     }
 
     #[test]

@@ -11,12 +11,15 @@ use engine::game::effects::resolve_ability_chain;
 use engine::game::game_object::BackFaceData;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle_effect::parse_effect_chain;
-use engine::types::ability::AbilityKind;
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, Effect, QuantityExpr, ReplacementDefinition, TargetFilter,
+};
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::counter::CounterType;
 use engine::types::identifiers::CardId;
 use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
 const SHEOLDRED_ACTIVATE: &str = "{4}{B}: Exile this permanent, then return it to the battlefield transformed. Activate only as a sorcery.\n\
@@ -24,10 +27,13 @@ Activate only if an opponent has eight or more cards in their graveyard.";
 
 fn true_scriptures_back_face() -> BackFaceData {
     BackFaceData {
+        is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: "The True Scriptures".to_string(),
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: CardType {
             supertypes: vec![],
@@ -38,7 +44,25 @@ fn true_scriptures_back_face() -> BackFaceData {
         keywords: vec![],
         abilities: vec![],
         trigger_definitions: Default::default(),
-        replacement_definitions: Default::default(),
+        // CR 714.3a: every Saga carries the intrinsic "enters with a lore
+        // counter" replacement (`parser::oracle_saga::parse_saga_chapters`).
+        // On a transformed entry the CR 614.12 projection makes the back
+        // face's own replacement definitions the single authority for its
+        // lore counter; real card data carries this replacement on "the true
+        // scriptures", so this synthetic back face carries it too.
+        replacement_definitions: vec![ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Lore,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                },
+            ))
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Battlefield)
+            .description("Saga ETB lore counter".to_string())]
+        .into(),
         static_definitions: Default::default(),
         color: vec![ManaColor::Black],
         printed_ref: None,
@@ -48,6 +72,7 @@ fn true_scriptures_back_face() -> BackFaceData {
         casting_restrictions: vec![],
         casting_options: vec![],
         layout_kind: None,
+        parse_warnings: vec![],
     }
 }
 

@@ -54,8 +54,8 @@ fn brash_taunter_does_not_retrigger_when_damage_hits_opponent() {
     let p1_life_before = runner.life(P1);
 
     let trigger = &runner.state().objects[&taunter].trigger_definitions[0];
-    assert_eq!(trigger.mode, TriggerMode::DamageReceived);
-    assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(trigger.definition.mode, TriggerMode::DamageReceived);
+    assert_eq!(trigger.definition.valid_card, Some(TargetFilter::SelfRef));
 
     let mut events = Vec::new();
     deal_damage::resolve(

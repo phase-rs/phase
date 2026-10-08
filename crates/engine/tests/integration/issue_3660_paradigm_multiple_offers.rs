@@ -38,6 +38,31 @@ fn seed_targetless_paradigm_source(
     id
 }
 
+fn assert_fresh_paradigm_cast(
+    state: &engine::types::game_state::GameState,
+    copy_id: ObjectId,
+    journal_index: u32,
+) {
+    let occurrence = state.objects[&copy_id]
+        .cast_occurrence
+        .expect("the cast paradigm copy must carry fresh cast provenance");
+    assert_eq!(occurrence.caster, P0);
+    assert_eq!(occurrence.turn_journal_index, journal_index);
+    assert_eq!(
+        state.stack[0]
+            .ability()
+            .expect("the spell copy has a resolved ability")
+            .cast_occurrence,
+        Some(occurrence),
+        "the stack ability graph must carry the same cast occurrence"
+    );
+    assert_eq!(
+        state.spells_cast_this_turn_by_player[&P0][journal_index as usize].spell_object_id,
+        Some(copy_id),
+        "the occurrence must name the newly synthesized copy in the cast ledger"
+    );
+}
+
 /// CR 702.xxx + CR 707.10c: Each paradigm source is offered independently; casting
 /// one copy must leave the CastOffer window open for the rest.
 #[test]
@@ -87,6 +112,8 @@ fn paradigm_cast_re_offers_remaining_sources_through_engine() {
         1,
         "the accepted paradigm copy must be on the stack"
     );
+    let copy_id = runner.state().stack[0].id;
+    assert_fresh_paradigm_cast(runner.state(), copy_id, 0);
 }
 
 fn seed_targeted_paradigm_source(
@@ -130,6 +157,9 @@ fn paradigm_targeted_copy_re_offers_after_retarget() {
     runner
         .act(GameAction::CastParadigmCopy { source: source_a })
         .expect("targeted paradigm copy must open CopyRetarget");
+
+    let copy_id = runner.state().stack[0].id;
+    assert_fresh_paradigm_cast(runner.state(), copy_id, 0);
 
     match runner.state().waiting_for.clone() {
         WaitingFor::CopyRetarget { .. } => {}

@@ -33,16 +33,6 @@
 </p>
 <!-- coverage-badges:end -->
 
-<p align="center">
-  <a href="https://gittensor.io/miners/repository?name=phase-rs%2Fphase">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/phase-rs/phase/gittensor-impact-assets/gittensor-impact-dark.svg">
-      <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/phase-rs/phase/gittensor-impact-assets/gittensor-impact-light.svg">
-      <img src="https://raw.githubusercontent.com/phase-rs/phase/gittensor-impact-assets/gittensor-impact-light.svg" alt="Gittensor contributor impact for phase.rs" width="600">
-    </picture>
-  </a>
-</p>
-
 ---
 
 <p align="center">
@@ -84,6 +74,8 @@ Read https://raw.githubusercontent.com/phase-rs/phase/main/docs/AI-CONTRIBUTOR.m
 and follow it end-to-end to implement {a card I name, or pick one for me}.
 Use the $engine-implementer skill. Use high thinking. Don't stop for my input.
 Open a PR when done.
+Use the repository's .github/PULL_REQUEST_TEMPLATE.md for the PR body and fill
+every section.
 ```
 
 Full procedure, two tracks (developer / non-developer), and copy-paste prompts for LLM UIs without web fetch: [docs/AI-CONTRIBUTOR.md](docs/AI-CONTRIBUTOR.md).
@@ -94,7 +86,7 @@ Full procedure, two tracks (developer / non-developer), and copy-paste prompts f
 
 - [Rust toolchain](https://rustup.rs/)
 - wasm32 target: `rustup target add wasm32-unknown-unknown` (Windows: see below)
-- wasm-bindgen-cli: `cargo install wasm-bindgen-cli@0.2.114`
+- wasm-bindgen-cli: `cargo install wasm-bindgen-cli@0.2.121` (must match the `wasm-bindgen` version in `Cargo.lock`)
 - wasm-opt (optional): `brew install binaryen` or `apt install binaryen`
 - [Node.js](https://nodejs.org/) 22+ and [pnpm](https://pnpm.io/): `npm i -g pnpm`
 
@@ -136,6 +128,163 @@ If `tilt` is installed, `setup.sh` skips the eager WASM + card-data build and `t
 cd client && pnpm install && pnpm dev # Start frontend
 ```
 
+### Linux Desktop Audio
+
+WebKitGTK has no audio stack of its own — the desktop app's sound effects and
+music are GStreamer pipelines it assembles at runtime. The **AppImage bundles
+that runtime itself** (`bundle.linux.appimage.bundleMediaFramework`), so it
+needs nothing installed. The **`.deb` declares it** and apt pulls it in. The
+**Flatpak inherits it from `org.gnome.Platform`** (see [Flatpak](#flatpak)).
+Running from source, or repackaging for another distribution, needs these
+installed:
+
+```bash
+sudo apt-get install gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
+```
+
+Between them they provide the elements WebKit looks up — `appsrc`/`appsink`,
+`decodebin`, `giostreamsrc`, `autoaudiosink`, and the `qtdemux`/`avdec_aac` pair
+the bundled `.m4a` tracks decode through. Without them the app starts and plays
+normally but stays silent, and prints the missing plugins and their packages to
+the terminal on launch.
+
+Release-time verification that the shipped AppImage's bundled plugin set really
+resolves those elements is tracked separately, in
+[#8357](https://github.com/phase-rs/phase/issues/8357) — it lives in the release
+workflow, which is maintainer-owned.
+
+### Flatpak
+
+`packaging/flatpak/` holds a Flatpak manifest for the desktop shell and a
+`build-local.sh` that builds it from an already-released `.deb` or `.AppImage`:
+
+```bash
+./packaging/flatpak/build-local.sh --appimage ~/Downloads/Phase-Desktop-Linux-x86_64.AppImage --install
+```
+
+On an arm64 machine, pass the matching `Phase-Desktop-Linux-aarch64` artifact instead.
+
+That needs a release whose shell already carries the update guard described
+below; the script refuses older artifacts rather than package them. Run
+`--help` for the full options.
+
+**Why a third Linux artifact.** The two existing ones each leave users out. The
+AppImage pegs a CPU core at idle on the NVIDIA proprietary driver, and the
+`.deb` installs cleanly only on Debian-family distributions — everyone else
+needs the AppImage or a conversion workaround. A Flatpak covers both gaps at
+once: it installs the same way on any distribution that has `flatpak`, and it
+inherits a working WebKitGTK and GStreamer stack from the runtime.
+
+It compiles nothing. Every library `phase-tauri` links against is already in
+`org.gnome.Platform//50`, so the script stages the exact binary from a release
+artifact — the packaged binary stays identical to the one `.deb`/`.AppImage`
+users run — and the package inherits the runtime's WebKitGTK and GStreamer
+plugin set instead of vendoring its own. Concretely, that buys three things —
+the first from the packaging format, the other two from that inheritance:
+
+- **Distribution coverage.** The `.deb` is Debian-family only. A Flatpak is the
+  one artifact that installs identically on Fedora, openSUSE, Arch, the
+  immutable/atomic desktops, and Debian/Ubuntu alike, without asking the user
+  to convert a package or fall back to the AppImage.
+- **NVIDIA idle CPU ([#8614](https://github.com/phase-rs/phase/issues/8614)).**
+  The AppImage's bundled, Ubuntu-built WebKitGTK burns close to a full core at
+  idle on the NVIDIA proprietary driver. Measured on the reporter's machine, the
+  Flatpak idles in the same range as a healthy host-WebKit build, while still
+  rendering on the NVIDIA driver rather than falling back to software. The root
+  cause is still unknown — this routes around the bug rather than fixing it, and
+  the measurement covers one machine, one driver version, and one distribution.
+  The AppImage is unaffected on other GPU stacks, so this is not a deprecation —
+  but **NVIDIA users are the ones to point here.**
+- **Audio ([#8615](https://github.com/phase-rs/phase/issues/8615)).** The
+  runtime supplies every element the section above lists, `avdec_aac` included,
+  from the base runtime rather than the optional
+  `org.freedesktop.Platform.codecs-extra` extension. (That is the decoder whose
+  absence makes the AppImage silent; end-to-end playback in the Flatpak has not
+  been verified. The AppImage-side fix is tracked separately.)
+
+A packaged shell must not self-update: `/app` is read-only and `flatpak update`
+owns upgrades. `client/src-tauri/src/update_authority.rs` detects the sandbox
+and declines every release the updater offers. That guard is compiled **into the
+shell binary**, so it only holds for artifacts built from a release that
+contains it — `build-local.sh` refuses to stage an older binary rather than
+produce a package that tries to rewrite its own read-only `/app`. Most releases
+do not touch the package at all: the shell is a thin bootstrap that loads the
+current web channel over the network, so web-app releases arrive without any
+package update.
+
+The package is X11-only — it pins `GDK_BACKEND=x11` and grants no Wayland
+socket, so a Wayland session needs Xwayland (the default nearly everywhere).
+
+CI does not build this package today, so there is no prebuilt Flatpak for users
+to install yet — the manifest and script are for local and manual builds. Adding
+a build step to the release workflow, which is maintainer-owned, is what would
+attach a `.flatpak` to each release and make this an artifact users can actually
+get.
+
+### Android APKs
+
+Android builds require Node.js 22, pnpm 9.15.9, JDK 17, Android SDK platform
+36/build-tools 36.0.0, Android NDK 28.2.13676358, and the Rust Android targets:
+
+```bash
+rustup target add aarch64-linux-android armv7-linux-androideabi
+sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358"
+```
+
+Install dependencies and invoke only the lock-installed Tauri CLI through an
+absolute Node executable. Initialization is deterministic and reapplies the
+maintained Gradle integration:
+
+```bash
+cd client
+corepack pnpm@9.15.9 install --frozen-lockfile
+NODE_BIN="$(realpath "$(command -v node)")"
+TAURI_JS="$(pwd)/node_modules/@tauri-apps/cli/tauri.js"
+export ORG_GRADLE_PROJECT_phaseNodeExecutable="$NODE_BIN"
+"$NODE_BIN" "$TAURI_JS" android build --debug --target aarch64 --apk
+```
+
+The generated Android project is checked in at `client/src-tauri/gen/android`
+and its Gradle/Rust integration is maintained by the repository. Do not run
+`android init` during normal development. If a Tauri upgrade requires
+regeneration, do it on a throwaway branch, review the complete generated diff,
+and explicitly preserve the signing/version guards in `app/build.gradle.kts`.
+The Rust test `generated_android_gradle_keeps_release_invariants` fails if those
+load-bearing edits are lost.
+
+Debug APKs are written below
+`client/src-tauri/gen/android/app/build/outputs/apk/`. Install and cold-launch
+the ARM64 build on a selected device without relying on adb's implicit target:
+
+```bash
+adb -s <serial> install -r path/to/debug.apk
+adb -s <serial> shell am force-stop rs.phase.app.debug
+adb -s <serial> shell monkey -p rs.phase.app.debug -c android.intent.category.LAUNCHER 1
+```
+
+Official releases publish separately signed `Phase-Android-ARM64.apk` and
+`Phase-Android-ARMv7.apk` files. Release builds fail closed unless all four
+local signing inputs are nonempty: `PHASE_ANDROID_KEYSTORE_FILE`,
+`PHASE_ANDROID_KEYSTORE_PASSWORD`, `PHASE_ANDROID_KEY_ALIAS`, and
+`PHASE_ANDROID_KEY_PASSWORD` (equivalent Gradle properties use the
+`phase.android.*` names in `app/build.gradle.kts`). The local keystore path must
+name an existing file. CI builds release APKs when all five Android secrets are
+configured, skips APK attachment when none are configured, and fails on a
+partial configuration without blocking publication of the desktop release.
+The required secret names are `ANDROID_KEYSTORE_BASE64`,
+`ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`
+plus `ANDROID_CERTIFICATE_SHA256`. CI decodes the first into a runner-local
+keystore, maps the next three to the Gradle inputs, and verifies that both APKs
+use the certificate identified by the final digest. Secret values are never
+committed.
+
+Android `versionCode` is derived strictly from `major.minor.patch` as
+`major * 1_000_000 + minor * 1_000 + patch`; minor and patch must each fit a
+three-digit slot and overflow is rejected (`0.60.0` maps to `60000`). Android
+supports APK delivery only (ARM64 and ARMv7): AAB/Play Store publishing and
+automatic updater manifests/keys are intentionally not supported. Desktop
+artifacts continue to use the existing signed `update.json` flow.
+
 ## Dedicated Server
 
 The easiest way to run a dedicated multiplayer server is the Docker image:
@@ -143,7 +292,6 @@ The easiest way to run a dedicated multiplayer server is the Docker image:
 ```bash
 docker volume create phase-server-data
 docker run -d \
-  --platform linux/amd64 \
   --name phase-server \
   --restart unless-stopped \
   -p 9374:9374 \
@@ -153,7 +301,8 @@ docker run -d \
   ghcr.io/phase-rs/phase-server:latest
 ```
 
-The image includes the server binary and generated card data. It exposes:
+The image (linux/amd64 and linux/arm64) includes the server binary; card data is
+downloaded into the data volume on first boot. It exposes:
 
 - `http://localhost:9374/health` for health checks
 - `ws://localhost:9374/ws` for WebSocket clients
@@ -178,7 +327,7 @@ Docker uses environment variables for the common options:
 You can also pass server flags after the image name:
 
 ```bash
-docker run --rm --platform linux/amd64 -p 9374:9374 ghcr.io/phase-rs/phase-server:latest --lobby-only --cors-origin '*'
+docker run --rm -p 9374:9374 ghcr.io/phase-rs/phase-server:latest --lobby-only --cors-origin '*'
 ```
 
 For public internet play, put the container behind a TLS reverse proxy and give
@@ -187,7 +336,6 @@ same host, bind Docker to localhost instead:
 
 ```bash
 docker run -d \
-  --platform linux/amd64 \
   --name phase-server \
   --restart unless-stopped \
   -p 127.0.0.1:9374:9374 \
@@ -198,6 +346,17 @@ docker run -d \
 ```
 
 The same flags work when running the `phase-server` release binary directly.
+
+To build the image yourself (cross-compiles on the build host, no emulated
+cargo):
+
+```bash
+docker buildx create --use   # once: multi-platform builds need a docker-container builder
+docker buildx build --platform linux/amd64,linux/arm64 --build-arg PHASE_CHANNEL=release \
+  -t <registry>/phase-server:latest --push .
+```
+
+For Kubernetes, see the Helm chart in [`deploy/helm/phase-server`](deploy/helm/phase-server).
 
 ## Architecture
 

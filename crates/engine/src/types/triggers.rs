@@ -196,6 +196,14 @@ pub enum AttackTargetFilter {
     /// `PlayerOrPlaneswalker`, which excludes battles. Control of the defended
     /// planeswalker/battle is compared per CR 109.4.
     PlayerOrPermanents,
+    /// CR 508.1a + CR 725.1: "attacks the monarch" — a Player-type attack whose
+    /// defending player must currently hold the monarch designation
+    /// (`state.monarch`). The monarch is a single dynamic player identity, so
+    /// unlike the other scope variants this cannot be evaluated by the pure type
+    /// matcher — it is resolved in the stateful `attack_target_matches` against
+    /// `state.monarch` (The Spear of Bashenga). If there is no monarch
+    /// (CR 725.1 — no monarch until an effect creates one), it never matches.
+    Monarch,
 }
 
 /// CR 701.31 + CR 701.31d: which role the trigger's source must occupy in the
@@ -208,6 +216,19 @@ pub enum PlaneswalkRole {
     From,
     To,
     Any,
+}
+
+/// CR 603.2 + CR 608.2: the point in another ability's lifecycle that a
+/// meta-trigger observes. The two points are distinct events with distinct
+/// timing consequences: an ability that triggers may still be countered
+/// (CR 701.5) or have its intervening-if fail (CR 603.4) and therefore never
+/// resolve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AbilityLifecyclePoint {
+    /// CR 603.2: the observed ability's trigger condition was met.
+    Triggered,
+    /// CR 608.2: the observed ability finished resolving.
+    Resolved,
 }
 
 /// All trigger modes from Forge's TriggerType enum (CR 603).
@@ -404,18 +425,15 @@ pub enum TriggerMode {
     /// ability tagged by `AbilityTag`. Parameterized to avoid per-keyword sibling proliferation:
     /// `AbilityTag::Boast`, `AbilityTag::Exhaust`, `AbilityTag::Outlast` are the current values.
     KeywordAbilityActivated(AbilityTag),
-    /// CR 602.1 + CR 605.1a: Triggers when any activated ability is activated.
-    /// Listens to `GameEvent::AbilityActivated`, which is emitted only for
-    /// stack-using activated abilities — by CR 605.3b, mana abilities resolve
-    /// without using the stack and do not produce this event. The
-    /// "that isn't a mana ability" qualifier on cards like Burning-Tree Shaman
-    /// and Flamescroll Celebrant is thus automatically satisfied by listening
-    /// here, and is additionally preserved in the AST via
-    /// `TriggerCondition::ActivatedAbilityIsNonMana` for future-proofing should
-    /// the event family ever widen. Player scope (`a player` / `an opponent` /
-    /// `you`) lives on `valid_target` (`TargetFilter`); source-object filters
-    /// (e.g., "an ability of an artifact source") live on `valid_card` — both
-    /// reuse existing infrastructure shared with `KeywordAbilityActivated`.
+    /// CR 602.2b + CR 605.3: Triggers when any activated ability is activated —
+    /// stack-using and mana abilities alike (activating a mana ability follows
+    /// CR 602.2; Elrond, Moon-Reader's ruling). Listens to
+    /// `GameEvent::AbilityActivated`; the "that isn't a mana ability" qualifier
+    /// (Burning-Tree Shaman, Flamescroll Celebrant) is
+    /// `TriggerCondition::ActivatedAbilityIsNonMana`, checked against the
+    /// event's `kind`. Player scope (`a player` / `an opponent` / `you`) lives on
+    /// `valid_target` (`TargetFilter`); the activated source's filter ("an
+    /// ability of an artifact they control") lives on `valid_card`.
     AbilityActivated,
     /// CR 606.2 + CR 603.2: Triggers when a player activates a loyalty ability
     /// (a planeswalker activated ability paid with loyalty counters). Listens to
@@ -437,6 +455,9 @@ pub enum TriggerMode {
     // Mana
     /// CR 106.4: Triggers when mana is added to a player's mana pool.
     ManaAdded,
+    /// CR 605.1b: Triggers once when a qualifying activated mana ability
+    /// resolves and produces mana, including non-tap mana abilities.
+    ManaAbilityProduced,
     ManaExpend,
 
     // Land
@@ -590,6 +611,30 @@ pub enum TriggerMode {
     /// `game::haunt::match_haunted_creature_dies`.
     HauntedCreatureDies,
 
+    /// CR 714.2e: a meta-trigger on another permanent's FINAL chapter ability —
+    /// "whenever the final chapter ability of a Saga you control resolves"
+    /// (Narci, Fable Singer; Tom Bombadil) / "… triggers" (Historian's Boon).
+    /// CR 714.2e defines a Saga's final chapter ability as the chapter ability
+    /// whose chapter symbol carries its final chapter number (CR 714.2d).
+    ///
+    /// `lifecycle` is the one axis the printed class actually varies over. It is
+    /// deliberately NOT parameterized on *which* chapter ability is observed:
+    /// all three printed cards say "the final chapter ability", and an
+    /// unqualified "a chapter ability" observer could not be modeled correctly
+    /// here anyway. CR 714.2b makes each chapter symbol its own triggered
+    /// ability, so one lore-counter addition that crosses several chapter
+    /// numbers triggers that many chapter abilities — an observer of all of them
+    /// must fire once per crossed ability, which an event-keyed matcher reading
+    /// a single `CounterAdded` cannot express. Adding that scope needs an
+    /// occurrence-level chapter event first, not a wider enum.
+    ///
+    /// The Saga itself is constrained by the trigger's ordinary `valid_card`
+    /// filter ("a Saga you control"), so no Saga-specific filter axis is needed
+    /// here.
+    FinalSagaChapterAbility {
+        lifecycle: AbilityLifecyclePoint,
+    },
+
     /// Fallback for unrecognized trigger mode strings.
     Unknown(String),
 }
@@ -704,6 +749,7 @@ impl FromStr for TriggerMode {
             "LifeLostAll" => TriggerMode::LifeLostAll,
             "LosesGame" => TriggerMode::LosesGame,
             "ManaAdded" => TriggerMode::ManaAdded,
+            "ManaAbilityProduced" => TriggerMode::ManaAbilityProduced,
             "ManaExpend" => TriggerMode::ManaExpend,
             "ManifestDread" => TriggerMode::ManifestDread,
             "Mentored" => TriggerMode::Mentored,
@@ -1044,6 +1090,7 @@ mod tests {
             "LosesGame",
             "LoyaltyAbilityActivated",
             "ManaAdded",
+            "ManaAbilityProduced",
             "ManaExpend",
             "ManifestDread",
             "Mentored",

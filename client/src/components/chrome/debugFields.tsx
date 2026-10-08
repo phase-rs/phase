@@ -89,20 +89,22 @@ export function SelectInput<T extends string>({
   value,
   onChange,
   options,
+  getOptionLabel,
 }: {
   value: T;
   onChange: (v: T) => void;
   options: readonly T[];
+  getOptionLabel?: (option: T) => string;
 }) {
   const items = useMemo(
-    () => options.map((opt) => ({ value: opt, label: opt })),
-    [options],
+    () => options.map((opt) => ({ value: opt, label: getOptionLabel?.(opt) ?? opt })),
+    [getOptionLabel, options],
   );
 
   return (
     <MenuSelect
       {...DEBUG_MENU_PROPS}
-      label={value}
+      label={getOptionLabel?.(value) ?? value}
       items={items}
       selectedValue={value}
       onSelect={(next) => onChange(next as T)}

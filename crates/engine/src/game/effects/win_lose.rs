@@ -64,6 +64,18 @@ pub fn resolve_lose(
     };
 
     for pid in players_to_eliminate {
+        // CR 104.3e + CR 810.8a: An effect-stated loss is still a loss, so a
+        // "can't lose the game" continuous effect precludes it (CR 810.8a's
+        // Platinum Angel example: "Neither that player nor their teammate can
+        // lose the game" — the same clause Angel's Grace and Gideon of the
+        // Trials' emblem grant). Mirrors the `player_has_cant_win` gate on the
+        // sibling `resolve_win` path (CR 104.2b). The concede (CR 104.3a) and
+        // SBA (CR 104.3b-d) paths do not route through here: concede must
+        // never be blocked, and the SBA loop pre-filters via the same
+        // `player_has_cant_lose` predicate.
+        if crate::game::sba::player_has_cant_lose(state, pid) {
+            continue;
+        }
         // CR 104.3e: A player who loses the game leaves the game.
         eliminate_player(state, pid, events);
     }
@@ -366,6 +378,56 @@ mod tests {
                 winner: Some(PlayerId(0))
             }
         ));
+    }
+
+    /// CR 104.3e + CR 810.8a: An effect-stated loss ("you lose the game",
+    /// Pact triggers, Door to Nothingness) is precluded by a `CantLoseTheGame`
+    /// static on the affected player — the "can't lose" half of the Platinum
+    /// Angel / Angel's Grace / Gideon-emblem clause. RED if `resolve_lose`
+    /// eliminates unconditionally. The untargeted elimination test above is
+    /// the live-path sibling proving the loss path executes without the
+    /// static (reach guard).
+    #[test]
+    fn lose_effect_blocked_by_cant_lose_static() {
+        let mut state = GameState::new_two_player(42);
+        let angel = create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(0),
+            "Platinum Angel".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&angel)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantLoseTheGame).affected(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+            ));
+
+        // PlayerId(0)'s own "you lose the game" effect resolves but the loss
+        // is precluded (CR 810.8a's Platinum Angel example).
+        let ability = ResolvedAbility::new(
+            Effect::LoseTheGame { target: None },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_lose(&mut state, &ability, &mut events).unwrap();
+
+        assert!(!state.players[0].is_eliminated);
+        assert!(!state.players[1].is_eliminated);
+        assert!(!matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::EffectResolved {
+                kind: EffectKind::LoseTheGame,
+                ..
+            }
+        )));
     }
 
     /// CR 104.2b: Platinum Angel's full clause — the permanent's controller

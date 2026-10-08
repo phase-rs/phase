@@ -1,0 +1,121 @@
+name: Action Pin Audit
+
+# The pin gate inside CI runs from the pull request's own checkout, so a change
+# to a privileged workflow and a change that defeats the checker can arrive in
+# the same commit and the gate still reports success. That makes it regression
+# coverage, not an authority.
+#
+# This workflow is the authority. `workflow_run` only triggers a workflow that
+# exists on the default branch, and its checkout defaults to the default branch,
+# so the checker executed here is always the reviewed one.
+#
+# The evaluated commit is attacker-controlled: for a fork pull request the
+# tarball is that fork's. Two rules keep that safe, and they are why this is
+# split into two jobs. The tree is data -- only `.github` is unpacked and
+# nothing in it is ever executed -- and the job that touches it holds no write
+# permission at all. Publishing the status is a separate job that never sees
+# the tree.
+# `workflows:` matches the CI workflow's `name:`, which a pull request can edit,
+# and a renamed CI would never trigger this audit -- absence looks exactly like
+# success. Dropping the filter does not fix that: every documented form of this
+# trigger carries it, and actionlint rejects its omission, so a filterless
+# version risks never running at all, which is the same hole made certain. What
+# closes it is requiring the `Action Pin Audit` status, since a status that
+# never arrives blocks rather than passes. The id check below is defence in
+# depth for the case where some other workflow is also named CI.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  audit:
+    name: Audit action pins from base
+    # 246030356 is .github/workflows/ci.yml. Opaque, but a pull request can
+    # rename that workflow and cannot renumber it.
+    if: github.event.workflow_run.workflow_id == 246030356
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Read-only. This job handles the untrusted tree.
+    permissions:
+      contents: read
+    steps:
+      # No `ref:` on purpose: the default is the default branch, which is what
+      # makes the checker below the reviewed one.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Extract the evaluated commit's workflow files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+        run: |
+          set -euo pipefail
+
+          # Both values reach a URL, so they are shape-checked before use rather
+          # than trusted because GitHub supplied them.
+          case "$HEAD_SHA" in
+            *[!0-9a-f]* | "") echo "::error::head_sha is not a commit SHA: $HEAD_SHA" >&2; exit 1 ;;
+          esac
+          [ ${#HEAD_SHA} -eq 40 ] || { echo "::error::head_sha is not 40 hex: $HEAD_SHA" >&2; exit 1; }
+          printf '%s' "$HEAD_REPO" | grep -qE '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$' \
+            || { echo "::error::head_repository is not owner/repo: $HEAD_REPO" >&2; exit 1; }
+
+          mkdir -p audited
+          # Only `.github` is unpacked. The checker needs the workflow and
+          # composite-action files and nothing else, and in particular the
+          # evaluated commit's `scripts/` never reaches disk.
+          gh api "repos/$HEAD_REPO/tarball/$HEAD_SHA" > src.tar.gz
+          tar -xzf src.tar.gz --strip-components=1 -C audited --wildcards '*/.github/*'
+          test -d audited/.github/workflows
+
+          # git stores symlinks, so the evaluated commit can ship one under
+          # `.github` that points outside this directory; the checker would then
+          # read whatever it targets and could echo a matching line into the log.
+          # A workflow file has no reason to be a symlink, so refuse rather than
+          # silently unlink -- a tree shaped like this is worth seeing.
+          links=$(find audited -type l)
+          if [ -n "$links" ]; then
+            echo "::error::the evaluated commit has symlinks under .github; refusing to read them" >&2
+            printf '  %s\n' $links >&2
+            exit 1
+          fi
+
+      - name: Check action pins in the evaluated commit
+        env:
+          PIN_CHECK_ROOT: ${{ github.workspace }}/audited
+        run: python3 scripts/check_action_pins.py
+
+  report:
+    name: Report the audit result
+    needs: audit
+    if: always() && github.event.workflow_run.workflow_id == 246030356
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # The only job with a write token, and it never fetches or reads the
+    # evaluated tree -- it publishes a verdict the audit job already reached.
+    permissions:
+      statuses: write
+    steps:
+      - name: Publish the commit status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          REPO: ${{ github.repository }}
+          STATE: ${{ needs.audit.result == 'success' && 'success' || 'failure' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          case "$HEAD_SHA" in
+            *[!0-9a-f]* | "") echo "::error::head_sha is not a commit SHA" >&2; exit 1 ;;
+          esac
+          [ ${#HEAD_SHA} -eq 40 ] || { echo "::error::head_sha is not 40 hex" >&2; exit 1; }
+          gh api "repos/$REPO/statuses/$HEAD_SHA" \
+            -f state="$STATE" \
+            -f context="Action Pin Audit" \
+            -f target_url="$RUN_URL" \
+            -f description="Pins checked with the default branch's checker" >/dev/null

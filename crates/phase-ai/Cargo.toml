@@ -5,7 +5,7 @@ edition = "2021"
 license.workspace = true
 
 [dependencies]
-engine = { path = "../engine" }
+engine = { path = "../engine", package = "phase-engine" }
 serde = { workspace = true }
 serde_json = "1"
 rand = "0.9"
@@ -15,13 +15,35 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 web-time = "1"
 rayon = { version = "1", optional = true }
 
+# Native-binary throughput lever (pod-lab loop-3 Q5). Target-gated, not a
+# plain [dependencies] entry: `engine-wasm`/`draft-wasm` both depend on this
+# crate's lib for their wasm32 builds, which are explicitly size-tuned
+# (`opt-level = 'z'`, the #6313 25 MiB pages-deploy guard) -- an ungated
+# entry would pull mimalloc's C sources into those builds too. `[[bin]]`
+# targets are never part of that wasm-bindgen graph, so no further per-bin
+# cfg is needed once the dependency itself is scoped here.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+mimalloc = "0.1"
+
+# Windows file identity for the ai-gate baseline-alias guard: volume serial + file
+# index via `GetFileInformationByHandle`, which std exposes only behind the unstable
+# `windows_by_handle` feature. Already in the lock (walkdir -> same-file), and gated
+# to windows so no other target's graph changes.
+[target.'cfg(windows)'.dependencies]
+same-file = "1"
+
 [features]
 tune = ["rayon"]
+# Scenario-backed benchmark binaries are opt-in: build them with
+# `cargo check -p phase-ai --features scenario-benches --bin combat-priority-bench --bin attack-scaling-bench`.
+scenario-benches = ["engine/test-support"]
 
 [[bin]]
 name = "ai-duel"
+# No `test = false`: that key suppresses a bin's unittest target entirely, so it belongs only on a
+# bin with no `#[cfg(test)]` code. This one carries unit tests over the CLI option parser, the
+# per-game budget, the elimination ledger, the paired seed schedule and the outcome classifier.
 path = "src/bin/ai_duel.rs"
-test = false
 
 [[bin]]
 name = "ai-tune"
@@ -31,7 +53,6 @@ test = false
 [[bin]]
 name = "ai-commander"
 path = "src/bin/ai_commander.rs"
-test = false
 
 [[bin]]
 name = "ai-bench-state"
@@ -40,8 +61,10 @@ test = false
 
 [[bin]]
 name = "ai-gate"
+# No `test = false`: that key suppresses a bin's unittest target entirely, so it belongs only on a
+# bin with no `#[cfg(test)]` code. This one carries unit tests over the staging-path and aliasing
+# predicates, which have to be built before they can run.
 path = "src/bin/ai_gate.rs"
-test = false
 
 [[bin]]
 name = "ai-perf-gate"
@@ -53,4 +76,35 @@ name = "legal-actions-bench"
 path = "src/bin/legal_actions_bench.rs"
 test = false
 
+[[bin]]
+name = "mana-board-bench"
+path = "src/bin/mana_board_bench.rs"
+required-features = ["scenario-benches"]
+test = false
+
+[[bin]]
+name = "combat-priority-bench"
+path = "src/bin/combat_priority_bench.rs"
+required-features = ["scenario-benches"]
+test = false
+
+[[bin]]
+name = "attack-scaling-bench"
+path = "src/bin/attack_scaling_bench.rs"
+required-features = ["scenario-benches"]
+test = false
+
+[[bin]]
+name = "candelabra-target-walk-bench"
+path = "src/bin/candelabra_target_walk_bench.rs"
+required-features = ["scenario-benches"]
+test = false
+
 [dev-dependencies]
+# cfg(test) modules place objects with the raw zone API (sealed in production builds).
+engine = { path = "../engine", package = "phase-engine", features = ["test-support"] }
+flate2 = "1"
+# `DeckArchetype::iter()` in the mana-development floor test — exhaustiveness comes
+# from the enum, not a hand-written array, so a sixth archetype cannot escape the
+# floor guarantee. Test-only: the derive is `cfg_attr(test, ..)`-gated.
+strum = { version = "0.27", features = ["derive"] }

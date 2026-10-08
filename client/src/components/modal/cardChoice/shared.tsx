@@ -104,6 +104,7 @@ export type EffectZoneMode =
   | "Sacrifice"
   | "Topdeck"
   | "Hand"
+  | "Exile"
   | "Battlefield"
   | "Untap"
   | "Tap"
@@ -127,6 +128,11 @@ export const EFFECT_ZONE_VISUAL_CLASSES: Record<
     ring: "ring-sky-300/80",
     overlay: "bg-sky-500/20",
     badge: "bg-sky-500/90",
+  },
+  Exile: {
+    ring: "ring-violet-300/80",
+    overlay: "bg-violet-500/20",
+    badge: "bg-violet-500/90",
   },
   Battlefield: {
     ring: "ring-emerald-400/80",
@@ -154,6 +160,7 @@ export const EFFECT_ZONE_ACTION_LABEL_KEYS: Record<EffectZoneMode, string> = {
   Sacrifice: "cardChoice.effectZone.labelConfirm",
   Topdeck: "cardChoice.effectZone.labelTop",
   Hand: "cardChoice.effectZone.labelReturn",
+  Exile: "cardChoice.effectZone.labelExile",
   Battlefield: "cardChoice.effectZone.labelPut",
   Untap: "cardChoice.effectZone.labelConfirm",
   Tap: "cardChoice.effectZone.labelConfirm",
@@ -164,6 +171,7 @@ export const EFFECT_ZONE_BADGE_KEYS: Record<EffectZoneMode, string> = {
   Sacrifice: "cardChoice.badges.sacrifice",
   Topdeck: "cardChoice.badges.put",
   Hand: "cardChoice.badges.return",
+  Exile: "cardChoice.badges.exile",
   Battlefield: "cardChoice.badges.put",
   Untap: "cardChoice.badges.untap",
   Tap: "cardChoice.badges.tap",

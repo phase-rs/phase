@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 799
 expression: "&ir"
 ---
 {
@@ -23,77 +22,229 @@ expression: "&ir"
         "fragment": "At the beginning of your draw step, you may draw two additional cards. If you do, choose two cards in your hand drawn this turn. For each of those cards, pay 4 life or put the card on top of your library."
       },
       "node": {
-        "PreLoweredTrigger": {
-          "mode": "Phase",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "Draw",
-              "count": {
-                "type": "Fixed",
-                "value": 2
+        "Trigger": {
+          "Parsed": {
+            "condition": "Phase",
+            "partial_def": {
+              "mode": "Phase",
+              "execute": null,
+              "valid_card": null,
+              "origin": null,
+              "destination": null,
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "phase": "Draw",
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": null,
+              "constraint": {
+                "type": "OnlyDuringYourTurn"
               },
-              "target": {
-                "type": "Controller"
+              "condition": null,
+              "batched": false
+            },
+            "body": {
+              "EffectChain": {
+                "clauses": [
+                  {
+                    "id": 0,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 1
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 0,
+                        "end_byte": 33,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 0
+                      },
+                      "fragment": "you may draw two additional cards"
+                    },
+                    "disposition": {
+                      "Emit": {
+                        "followup": null,
+                        "intrinsic": null
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "Draw",
+                        "count": {
+                          "type": "Fixed",
+                          "value": 2
+                        },
+                        "target": {
+                          "type": "Controller"
+                        }
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": "Sentence",
+                    "condition": null,
+                    "is_optional": true,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  },
+                  {
+                    "id": 1,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 2
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 35,
+                        "end_byte": 91,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 1
+                      },
+                      "fragment": "If you do, choose two cards in your hand drawn this turn"
+                    },
+                    "disposition": {
+                      "Emit": {
+                        "followup": null,
+                        "intrinsic": null
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "ChooseDrawnThisTurnPayOrTopdeck",
+                        "count": {
+                          "type": "Fixed",
+                          "value": 2
+                        },
+                        "life_payment": {
+                          "type": "Fixed",
+                          "value": 4
+                        },
+                        "player": {
+                          "type": "Controller"
+                        }
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": "Sentence",
+                    "condition": {
+                      "type": "EffectOutcome",
+                      "signal": "OptionalEffectPerformed"
+                    },
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  },
+                  {
+                    "id": 2,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 3
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 93,
+                        "end_byte": 167,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 2
+                      },
+                      "fragment": "For each of those cards, pay 4 life or put the card on top of your library"
+                    },
+                    "disposition": {
+                      "DrawnThisTurnFollowup": {
+                        "life_payment": {
+                          "type": "Fixed",
+                          "value": 4
+                        }
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "Unimplemented",
+                        "name": "drawn_this_turn_pay_or_topdeck_placeholder",
+                        "description": null
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": null,
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  }
+                ],
+                "kind": "Spell",
+                "continuation_kind": null,
+                "player_scope_rewrite": "Apply",
+                "chain_rounding": null,
+                "actor": null,
+                "in_trigger": true,
+                "repeat_until": null
               }
             },
-            "cost": null,
-            "sub_ability": {
-              "kind": "Spell",
-              "effect": {
-                "type": "ChooseDrawnThisTurnPayOrTopdeck",
-                "count": {
-                  "type": "Fixed",
-                  "value": 2
-                },
-                "life_payment": {
-                  "type": "Fixed",
-                  "value": 4
-                },
-                "player": {
-                  "type": "Controller"
-                }
+            "modifiers": {
+              "optional": true,
+              "unless_pay": null,
+              "intervening_if": null,
+              "trigger_subject": {
+                "type": "Any"
               },
-              "cost": null,
-              "sub_ability": null,
-              "duration": null,
-              "description": null,
-              "target_prompt": null,
-              "condition": {
-                "type": "EffectOutcome",
-                "signal": "OptionalEffectPerformed"
-              },
-              "optional_targeting": false,
-              "optional": false,
-              "forward_result": false,
-              "sub_link": "SequentialSibling"
+              "first_time_limit": null,
+              "constraint": null,
+              "has_up_to": false,
+              "effect_lower": "you may draw two additional cards. if you do, choose two cards in your hand drawn this turn. for each of those cards, pay 4 life or put the card on top of your library.",
+              "relative_player_scope": null
             },
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": true,
-            "forward_result": false
-          },
-          "valid_card": null,
-          "origin": null,
-          "destination": null,
-          "trigger_zones": [
-            "Battlefield"
-          ],
-          "phase": "Draw",
-          "optional": true,
-          "damage_kind": "Any",
-          "secondary": false,
-          "valid_target": null,
-          "valid_source": null,
-          "description": "At the beginning of your draw step, you may draw two additional cards. If you do, choose two cards in your hand drawn this turn. For each of those cards, pay 4 life or put the card on top of your library.",
-          "constraint": {
-            "type": "OnlyDuringYourTurn"
-          },
-          "condition": null,
-          "batched": false
+            "source_text": "At the beginning of your draw step, you may draw two additional cards. If you do, choose two cards in your hand drawn this turn. For each of those cards, pay 4 life or put the card on top of your library.",
+            "die_results": []
+          }
         }
       }
     }

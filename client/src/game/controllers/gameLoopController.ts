@@ -2,11 +2,12 @@ import { getPlayerId } from "../../hooks/usePlayerId";
 import { useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { useUiStore } from "../../stores/uiStore";
-import { pressureMultiplier, STACK_PRESSURE_ELEVATED } from "../../utils/stackPressure";
+import { pressureMultiplier } from "../../utils/stackPressure";
 import { effectiveStackPressure } from "../../utils/stackThroughput";
 import { shouldAutoPass } from "../autoPass";
-import { dispatchAction, dispatchResolveAll } from "../dispatch";
+import { dispatchAction } from "../dispatch";
 import { createAIController, type AISeatBinding } from "./aiController";
+import { createStaleStateWatchdog } from "../staleStateWatchdog";
 import type { OpponentController } from "./types";
 
 const AUTO_PASS_BEAT_MS = 200;
@@ -46,6 +47,9 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
 
   let active = false;
   let opponentController: OpponentController | null = null;
+  // Heals a screen that missed a state delivery (all modes: the adapter is
+  // always the newest state this client holds, so the check is uniform).
+  const staleStateWatchdog = createStaleStateWatchdog();
   let unsubscribe: (() => void) | null = null;
   let autoPassTimeout: ReturnType<typeof setTimeout> | null = null;
 
@@ -66,13 +70,6 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
     if (!("data" in waitingFor)) return;
     if (!gameState) return;
 
-    const stackLen = gameState.stack?.length ?? 0;
-
-    if (config.mode === "ai" && stackLen >= STACK_PRESSURE_ELEVATED) {
-      scheduleBatchResolve();
-      return;
-    }
-
     if (gameState.priority_player !== getPlayerId()) return;
 
     const { fullControl } = useUiStore.getState();
@@ -80,22 +77,6 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
     if (shouldAutoPass(gameState, waitingFor, fullControl, autoPassRecommended)) {
       scheduleAutoPass();
     }
-  }
-
-  function scheduleBatchResolve(): void {
-    clearAutoPassTimeout();
-    autoPassTimeout = setTimeout(() => {
-      autoPassTimeout = null;
-      if (!active) return;
-      const playerId = getPlayerId();
-      const playerCount = useGameStore.getState().gameState?.players?.length ?? 2;
-      const aiSeats = usePreferencesStore.getState().aiSeats;
-      const seats = Array.from({ length: playerCount - 1 }, (_, i) => ({
-        playerId: i + 1,
-        difficulty: aiSeats[i]?.difficulty ?? config.difficulty ?? "Medium",
-      }));
-      dispatchResolveAll(playerId, seats);
-    }, 0);
   }
 
   function scheduleAutoPass(): void {
@@ -126,7 +107,13 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
       ) {
         return;
       }
-      dispatchAction({ type: "PassPriority" });
+      // The auto-pass beat has no caller to propagate to, and `dispatchAction`
+      // already surfaces the failure itself through `reportActionError`. Every
+      // rejecting submission path therefore has to be absorbed here or it
+      // escapes as an unhandled rejection: a P2P guest sitting in auto-pass now
+      // rejects on `action_rejected` / `action_failed` / host disconnect AND on
+      // the guest adapter's submission timeout (`SUBMISSION_TIMEOUT_MS`).
+      void dispatchAction({ type: "PassPriority" }, getPlayerId(), { automated: true }).catch(() => undefined);
     }, beat);
   }
 
@@ -144,6 +131,10 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
         return {
           playerId,
           difficulty: config.aiSeats?.[i]?.difficulty ?? fallbackDifficulty,
+          // `i` is this seat's index in `preferencesStore.aiSeats`, which is the
+          // same index `llmStore.seatBindings` is keyed by. Passing it keeps one
+          // seat-numbering authority across both stores.
+          llmSeatIndex: i,
         };
       });
       opponentController = createAIController({ seats });
@@ -157,11 +148,14 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
 
     // Process current state immediately
     onWaitingForChanged();
+
+    staleStateWatchdog.start();
   }
 
   function stop(): void {
     active = false;
 
+    staleStateWatchdog.stop();
     clearAutoPassTimeout();
 
     if (opponentController) {

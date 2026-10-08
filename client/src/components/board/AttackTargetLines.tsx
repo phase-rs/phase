@@ -2,9 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
+import type { MultiplayerBoardLayout } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { GAME_Z_LAYER } from "../../constants/ui.ts";
 import { objectAnchorSelector } from "../../utils/objectAnchorSelector.ts";
 import { getVisibleBoardPlayerIds, isOneOnOne } from "../../viewmodel/gameStateView.ts";
 import {
@@ -61,13 +63,16 @@ function AttackArrowPath({ arrow, isMinimal }: { arrow: AttackArrowData; isMinim
  *
  *  Player-target arrows only draw in multiplayer (>2 players); in 1v1 the
  *  player attack is implicit and drawing would be visual noise. */
-export function AttackTargetLines() {
+export function AttackTargetLines({
+  effectiveMultiplayerBoardLayout,
+}: {
+  effectiveMultiplayerBoardLayout: MultiplayerBoardLayout;
+}) {
   const gameState = useGameStore((s) => s.gameState);
   const combat = gameState?.combat ?? null;
   const objects = gameState?.objects;
   const focusedOpponent = useUiStore((s) => s.focusedOpponent) as PlayerId | null;
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
-  const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
   const localPlayerId = usePlayerId();
   const isMinimal = vfxQuality === "minimal";
 
@@ -77,9 +82,9 @@ export function AttackTargetLines() {
       gameState,
       localPlayerId,
       focusedOpponent,
-      multiplayerBoardLayout,
+      effectiveMultiplayerBoardLayout,
     )),
-    [focusedOpponent, gameState, localPlayerId, multiplayerBoardLayout],
+    [effectiveMultiplayerBoardLayout, focusedOpponent, gameState, localPlayerId],
   );
 
   const blockedAttackerIds = useMemo<Set<number>>(() => {
@@ -156,7 +161,7 @@ export function AttackTargetLines() {
   if (creatureArrowData.length === 0 && hudIndicators.length === 0) return null;
 
   return createPortal(
-    <svg className="pointer-events-none fixed inset-0 z-30 h-full w-full">
+    <svg className={`pointer-events-none fixed inset-0 ${GAME_Z_LAYER.combatArrow} h-full w-full`}>
       <defs>
         {!isMinimal && (
           <filter id="attack-target-glow">

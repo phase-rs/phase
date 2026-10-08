@@ -16,5 +16,11 @@
     "thread_id": "1510834912180047973",
     "archive": "helix-pinnacle-x-spam.zip",
     "expected_action_type": "ActivateAbility"
+  },
+  {
+    "id": "priority-failed-proposals",
+    "thread_id": "1535520247610871899",
+    "archive": "game-state-turn-22-2026-08-08T05-28-08-309Z.zip",
+    "expected_action_type": "PassPriority"
   }
 ]

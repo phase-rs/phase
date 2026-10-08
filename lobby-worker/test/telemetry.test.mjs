@@ -7,6 +7,7 @@ import {
   sanitizeTelemetryBatch,
   toDataPoint,
 } from "../src/telemetry.ts";
+import { serverProbeEvents } from "../src/directory.ts";
 
 /** Minimal valid envelope helper. */
 function batch(events, overrides = {}) {
@@ -45,7 +46,7 @@ test("sanitizeTelemetryBatch accepts the Tier 2 report/usage events with their c
     batch([
       { event: "card_report", oracle_id: "abc", face_name: "Front", name: "Colossal Dreadmaw", zone: "Battlefield", game_mode: "ai", turn: 5, supported: 2, total: 3 },
       { event: "session_start", route: "/game" },
-      { event: "game_start", game_mode: "ai", player_count: 2, ai_count: 1 },
+      { event: "game_start", game_mode: "ai", format: "HistoricBrawl", player_count: 2, ai_count: 1 },
       { event: "route_view", route: "/deck-builder" },
     ]),
   );
@@ -60,7 +61,7 @@ test("sanitizeTelemetryBatch accepts the Tier 2 report/usage events with their c
   assert.deepEqual(report.doubles, [5, 2, 3]);
   assert.deepEqual(session.blobs, ["/game"]);
   assert.deepEqual(session.doubles, []);
-  assert.deepEqual(gameStart.blobs, ["ai"]);
+  assert.deepEqual(gameStart.blobs, ["ai", "HistoricBrawl", "", ""]);
   assert.deepEqual(gameStart.doubles, [2, 1]);
   assert.deepEqual(route.blobs, ["/deck-builder"]);
   assert.deepEqual(route.doubles, []);
@@ -81,13 +82,48 @@ test("toDataPoint prepends the envelope blobs and sets the single index", () => 
   );
   const point = toDataPoint(e);
   assert.deepEqual(point.indexes, ["chunk_reload"]);
-  // blobs: [event, app_version, build_hash, platform, ...schema.blobs]
-  assert.deepEqual(point.blobs, ["chunk_reload", "0.42.1", "02b26c3", "web", "preload-error", "c.js"]);
+  // blobs: [event, app_version, build_hash, platform, ...schema.blobs].
+  // Absent probe_* fields project as ""/0 in their appended positions.
+  assert.deepEqual(point.blobs, [
+    "chunk_reload",
+    "0.42.1",
+    "02b26c3",
+    "web",
+    "preload-error",
+    "c.js",
+    "",
+    "",
+  ]);
   // deferred=true coerces to 1.
-  assert.deepEqual(point.doubles, [1]);
+  assert.deepEqual(point.doubles, [1, 0, 0]);
   assert.equal(point.indexes.length, 1);
   assert.ok(point.blobs.length <= 20);
   assert.ok(point.doubles.length <= 20);
+});
+
+test("chunk_reload probe fields land in the appended columns", () => {
+  const [e] = sanitizeTelemetryBatch(
+    batch([
+      {
+        event: "chunk_reload",
+        reason: "loop-abort",
+        deferred: false,
+        chunk: "Failed to fetch dynamically imported module: https://x/a.js",
+        probe_cache: "HIT",
+        probe_ray: "8f3a2-SJC",
+        probe_status: 200,
+        probe_sw: 1,
+      },
+    ]),
+  );
+  const point = toDataPoint(e);
+  assert.deepEqual(point.blobs.slice(4), [
+    "loop-abort",
+    "Failed to fetch dynamically imported module: https://x/a.js",
+    "HIT",
+    "8f3a2-SJC",
+  ]);
+  assert.deepEqual(point.doubles, [0, 200, 1]);
 });
 
 test("unknown events are dropped, not errors", () => {
@@ -99,6 +135,21 @@ test("unknown events are dropped, not errors", () => {
   );
   assert.equal(out.length, 1);
   assert.equal(out[0].event, "stuck_decision");
+});
+
+test("P2P disconnect diagnostics preserve column order and discard payload fields", () => {
+  const [event] = sanitizeTelemetryBatch(batch([{
+    event: "p2p_disconnect", reason: "ping-timeout", connection_state: "connected",
+    ice_state: "connected", visibility: "visible", last_message_type: "state_update",
+    pong_age_ms: 10000, receive_age_ms: 50, pending_sends: 2, pending_decodes: 1,
+    buffered_bytes: 16300, channel_open: true,
+    peer_id: "private", room_code: "private", payload: "private",
+  }]));
+  assert.deepEqual(toDataPoint(event), {
+    indexes: ["p2p_disconnect"],
+    blobs: ["p2p_disconnect", "0.42.1", "02b26c3", "web", "ping-timeout", "connected", "connected", "visible", "state_update", "", "", "", ""],
+    doubles: [10000, 50, 2, 1, 16300, 1, 0, 0, 0],
+  });
 });
 
 test("unknown fields are dropped from a known event", () => {
@@ -165,8 +216,8 @@ test("booleans and numbers coerce; missing/other values default", () => {
     batch([{ event: "game_end", result: "draw", winner_kind: null, game_mode: "ai", turn_count: 7, unimplemented_oracle_ids: ["x", 5, "y"] }]),
   );
   // winner_kind null → ""; array keeps only strings, comma-joined;
-  // pending_trigger_abandons absent → "".
-  assert.deepEqual(drawn.blobs, ["draw", "", "ai", "x,y", ""]);
+  // pending_trigger_abandons and engine-mode fields absent → "".
+  assert.deepEqual(drawn.blobs, ["draw", "", "ai", "x,y", "", "", ""]);
   assert.deepEqual(drawn.doubles, [7]);
 });
 
@@ -187,4 +238,90 @@ test("the game_end pending_trigger_abandons list survives the join at the client
     batch([{ event: "game_end", result: "draw", winner_kind: null, game_mode: "ai", turn_count: 1, pending_trigger_abandons: ["a", 5, "b"] }]),
   );
   assert.equal(mixed.blobs[4], "a,b");
+});
+
+test("game event engine-mode fields occupy appended columns for current and older clients", () => {
+  const [gameEnd, gameStart, olderGameEnd, olderGameStart] = sanitizeTelemetryBatch(
+    batch([
+      {
+        event: "game_end",
+        result: "winner",
+        winner_kind: "human",
+        game_mode: "ai",
+        turn_count: 12,
+        engine_mode: "wasm",
+        native_fallback_reason: "native_engine_unavailable",
+      },
+      {
+        event: "game_start",
+        game_mode: "ai",
+        format: "Commander",
+        player_count: 2,
+        ai_count: 1,
+        engine_mode: "wasm",
+        native_fallback_reason: "native_engine_unavailable",
+      },
+      { event: "game_end", result: "draw", game_mode: "ai", turn_count: 8 },
+      { event: "game_start", game_mode: "ai", format: "Standard", player_count: 2, ai_count: 1 },
+    ]),
+  );
+
+  assert.deepEqual(toDataPoint(gameEnd).blobs.slice(4), [
+    "winner",
+    "human",
+    "ai",
+    "",
+    "",
+    "wasm",
+    "native_engine_unavailable",
+  ]);
+  assert.deepEqual(toDataPoint(gameStart).blobs.slice(4), [
+    "ai",
+    "Commander",
+    "wasm",
+    "native_engine_unavailable",
+  ]);
+  assert.deepEqual(toDataPoint(olderGameEnd).blobs.slice(4), ["draw", "", "ai", "", "", "", ""]);
+  assert.deepEqual(toDataPoint(olderGameStart).blobs.slice(4), ["ai", "Standard", "", ""]);
+});
+
+// V-U13e. The `server_probe` column layout, asserted through the SAME
+// `toDataPoint` projection every other event uses. Analytics Engine columns
+// are positional and permanent, so an inserted (rather than appended) column
+// silently re-labels historical data.
+test("V-U13e: server_probe events land in the documented AE columns", () => {
+  const [point] = serverProbeEvents([
+    { url: "wss://known.example/ws", outcome: "connect_ok", rtt_ms: 42, game_code: "ABC123" },
+  ]).map(toDataPoint);
+
+  assert.deepEqual(point.indexes, ["server_probe"]);
+  // The first four blobs are the shared envelope (event, app version, build
+  // hash, platform); the event-specific columns start at index 4.
+  assert.deepEqual(point.blobs.slice(0, 4), ["server_probe", "", "", ""]);
+  assert.deepEqual(point.blobs.slice(4), ["wss://known.example/ws", "connect_ok", "ABC123"]);
+  assert.deepEqual(point.doubles, [42]);
+
+  // An event with no latency: `0` is this file's documented "unknown", never
+  // "0 ms". Paired with the case above so a projection that dropped the
+  // column entirely fails.
+  const [noRtt] = serverProbeEvents([
+    { url: "wss://known.example/ws", outcome: "connect_fail" },
+  ]).map(toDataPoint);
+  assert.deepEqual(noRtt.blobs.slice(4), ["wss://known.example/ws", "connect_fail", ""]);
+  assert.deepEqual(noRtt.doubles, [0]);
+
+  // The column COUNTS come from the schema, so a schema edit moves both sides
+  // together rather than leaving a stale literal here.
+  assert.equal(point.blobs.length - 4, EVENT_SCHEMAS.server_probe.blobs.length);
+  assert.equal(point.doubles.length, EVENT_SCHEMAS.server_probe.doubles.length);
+});
+
+
+test("WASM guard telemetry allows only bounded diagnostic fields", () => {
+  const [event] = sanitizeTelemetryBatch(batch([{
+    event: "wasm_not_initialized", operation: "getState", initializing: true,
+    disposed: false, observed_at: 123, message: "secret", stack: "secret",
+  }]));
+  assert.deepEqual(event.blobs, ["getState"]);
+  assert.deepEqual(event.doubles, [1, 0, 123]);
 });

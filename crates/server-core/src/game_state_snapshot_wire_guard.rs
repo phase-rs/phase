@@ -107,6 +107,7 @@ mod tests {
             phase: Phase::PreCombatMain,
             category: LogCategory::Game,
             segments: vec![LogSegment::Text("test".to_string())],
+            presentation: Default::default(),
         }
     }
 

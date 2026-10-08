@@ -298,17 +298,11 @@ mod tests {
 
         let cand_zero = CandidateAction {
             action: GameAction::ChooseX { value: 0 },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Selection,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
         };
         let cand_three = CandidateAction {
             action: GameAction::ChooseX { value: 3 },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Selection,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
         };
 
         let score_zero = XValuePolicy.score(&make_ctx(
@@ -355,10 +349,7 @@ mod tests {
         let candidates: Vec<CandidateAction> = (0..=3)
             .map(|value| CandidateAction {
                 action: GameAction::ChooseX { value },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Selection,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
             })
             .collect();
 
@@ -410,17 +401,11 @@ mod tests {
 
         let cand_zero = CandidateAction {
             action: GameAction::ChooseX { value: 0 },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Selection,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
         };
         let cand_four = CandidateAction {
             action: GameAction::ChooseX { value: 4 },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Selection,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
         };
 
         let score_zero = XValuePolicy.score(&make_ctx(
@@ -476,10 +461,7 @@ mod tests {
         let candidates: Vec<CandidateAction> = (0..=5)
             .map(|value| CandidateAction {
                 action: GameAction::ChooseX { value },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Selection,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
             })
             .collect();
 
@@ -525,10 +507,7 @@ mod tests {
         let candidates: Vec<CandidateAction> = (0..=4)
             .map(|value| CandidateAction {
                 action: GameAction::ChooseX { value },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Selection,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
             })
             .collect();
 
@@ -618,10 +597,7 @@ mod tests {
 
         let cand_three = CandidateAction {
             action: GameAction::ChooseX { value: 3 },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Selection,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
         };
 
         let score = XValuePolicy.score(&make_ctx(

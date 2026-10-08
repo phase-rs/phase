@@ -1,0 +1,22 @@
+{
+  "interactionId": "i-1.0.1",
+  "response": {
+    "type": "shortcut",
+    "data": {
+      "decision": { "type": "fixed", "data": { "iterations": 18 } },
+      "pins": [
+        { "group": 0, "choiceIds": ["i-1.0.1.k0"], "amounts": [] },
+        { "group": 1, "choiceIds": ["i-1.0.1.k2"], "amounts": [] },
+        {
+          "group": 2,
+          "choiceIds": ["i-1.0.1.k4", "i-1.0.1.k5", "i-1.0.1.k6"],
+          "amounts": [
+            { "choiceId": "i-1.0.1.k4", "amount": 6 },
+            { "choiceId": "i-1.0.1.k5", "amount": 6 },
+            { "choiceId": "i-1.0.1.k6", "amount": 6 }
+          ]
+        }
+      ]
+    }
+  }
+}

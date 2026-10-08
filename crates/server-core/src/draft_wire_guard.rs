@@ -5,26 +5,44 @@
 //! through `lobby_broker::validate_lobby_message`, so client-supplied names,
 //! codes, passwords, and tokens must be bounded before clone-heavy work.
 
+use draft_core::types::{DraftKind, TournamentFormat, MAX_PACK_COUNT};
 use lobby_broker::validation::{
     validate_optional_token, validate_required_label, validate_token, MAX_DISPLAY_NAME_LEN,
-    MAX_DRAFT_SET_CODE_LEN, MAX_GAME_CODE_LEN, MAX_PASSWORD_LEN, MAX_PLAYER_COUNT,
-    MAX_TIMER_SECONDS, MAX_TOKEN_LEN,
+    MAX_DRAFT_SET_CODE_LEN, MAX_GAME_CODE_LEN, MAX_PASSWORD_LEN, MAX_TIMER_SECONDS, MAX_TOKEN_LEN,
 };
 
 /// Validate `CreateDraftWithSettings` wire fields before pool lookup and lobby
 /// registration.
 pub fn guard_create_draft_with_settings(
     display_name: &str,
-    set_code: &str,
+    set_codes: &[String],
     password: &Option<String>,
     timer_seconds: Option<u32>,
     pod_size: u8,
+    kind: DraftKind,
+    tournament_format: TournamentFormat,
 ) -> Result<(), String> {
     validate_required_label("display_name", display_name, MAX_DISPLAY_NAME_LEN)?;
-    validate_token("set_code", set_code, MAX_DRAFT_SET_CODE_LEN)?;
+    // Bound the source's set tokens before any pool lookup: each code costs a
+    // map probe and a pool clone on the accept path. Chaos carries candidates
+    // here, never the server-owned assignment matrix.
+    if !(1..=usize::from(MAX_PACK_COUNT)).contains(&set_codes.len()) {
+        return Err(format!(
+            "set_codes must name between 1 and {MAX_PACK_COUNT} packs"
+        ));
+    }
+    for code in set_codes {
+        validate_token("set_code", code, MAX_DRAFT_SET_CODE_LEN)?;
+    }
     validate_optional_token("password", password.as_deref(), MAX_PASSWORD_LEN)?;
-    if pod_size == 0 || pod_size > MAX_PLAYER_COUNT {
-        return Err(format!("pod_size must be between 1 and {MAX_PLAYER_COUNT}"));
+    let procedure = kind.procedure();
+    if !procedure.allows_pod_size(tournament_format, pod_size) {
+        let allowed = procedure.allowed_pod_size_range(tournament_format);
+        return Err(format!(
+            "pod_size must be between {} and {}",
+            allowed.start(),
+            allowed.end(),
+        ));
     }
     if let Some(secs) = timer_seconds {
         if secs > MAX_TIMER_SECONDS {
@@ -32,6 +50,26 @@ pub fn guard_create_draft_with_settings(
         }
     }
     Ok(())
+}
+
+/// Refuse a Chaos set layout for a kind whose procedure cannot carry one.
+///
+/// Asked at admission, BEFORE the OS entropy draw and before the pod is
+/// registered and broadcast. The reducer asks the same question again at
+/// `StartDraft` via `DraftProcedure::validate_source`, but its answer would
+/// arrive on a lobby players have already joined and which can never start.
+///
+/// The engine owns both the verdict and its wording — this is a call to
+/// `allows_chaos_layout` and a clone of `CHAOS_LAYOUT_REFUSAL`, never a second
+/// opinion about which kinds take a Chaos layout. Deliberately its own function
+/// rather than a leg of `guard_create_draft_with_settings`: that guard's job is
+/// bounding client-supplied strings and sizes before clone-heavy work, and
+/// `draft_session.rs` records the decision that it does not grow kind policy.
+pub fn guard_chaos_layout_for_kind(kind: DraftKind) -> Result<(), String> {
+    if kind.procedure().allows_chaos_layout() {
+        return Ok(());
+    }
+    Err(draft_core::types::CHAOS_LAYOUT_REFUSAL.to_string())
 }
 
 /// Validate `JoinDraftWithPassword` wire fields before draft session mutation.
@@ -60,23 +98,231 @@ pub fn guard_draft_action(draft_code: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use lobby_broker::validation::MAX_GAME_CODE_LEN;
+    use draft_core::types::{DraftKind, TournamentFormat, MAX_PACK_COUNT};
+    use lobby_broker::validation::{MAX_DRAFT_SET_CODE_LEN, MAX_GAME_CODE_LEN};
 
     use super::{
-        guard_create_draft_with_settings, guard_draft_action, guard_join_draft_with_password,
-        guard_reconnect_draft,
+        guard_chaos_layout_for_kind, guard_create_draft_with_settings, guard_draft_action,
+        guard_join_draft_with_password, guard_reconnect_draft,
     };
 
     #[test]
     fn create_draft_accepts_valid_fields() {
-        assert!(guard_create_draft_with_settings("Alice", "TST", &None, None, 4).is_ok());
+        assert!(guard_create_draft_with_settings(
+            "Alice",
+            &["TST".to_string()],
+            &None,
+            None,
+            4,
+            DraftKind::Premier,
+            TournamentFormat::Swiss,
+        )
+        .is_ok());
+    }
+
+    /// CR 903.13a + CR 800.1: a Commander pod's floor is three seats — the
+    /// smallest pod that can still deliver the multiplayer game the format is
+    /// defined as — so the four-seat product default must pass the wire guard.
+    ///
+    /// This is the REACH-GUARD half of the pod-floor claim: the guard reads
+    /// `kind.procedure().min_pod_size`, so this test fails if that derivation
+    /// is ever replaced by a literal 8 (the four older kinds' pod size).
+    #[test]
+    fn wire_guard_admits_four_seat_commander_pod() {
+        assert!(guard_create_draft_with_settings(
+            "Alice",
+            &["CMM".to_string()],
+            &None,
+            None,
+            4,
+            DraftKind::CommanderDraft,
+            TournamentFormat::Swiss,
+        )
+        .is_ok());
+    }
+
+    /// The paired negative: two seats is not a multiplayer game (CR 800.1), so
+    /// the floor must refuse it — and must say so by naming `pod_size`, not by
+    /// failing on some unrelated field.
+    #[test]
+    fn wire_guard_refuses_two_seat_commander_pod() {
+        let err = guard_create_draft_with_settings(
+            "Alice",
+            &["CMM".to_string()],
+            &None,
+            None,
+            2,
+            DraftKind::CommanderDraft,
+            TournamentFormat::Swiss,
+        )
+        .unwrap_err();
+        assert!(err.contains("pod_size"), "unexpected rejection: {err}");
+        assert!(
+            err.contains('3'),
+            "the floor must name the CR 800.1 minimum: {err}"
+        );
+    }
+
+    #[test]
+    fn wire_guard_keeps_remote_quick_drafts_inside_the_public_range() {
+        for pod_size in [1, 9] {
+            let err = guard_create_draft_with_settings(
+                "Alice",
+                &["TST".to_string()],
+                &None,
+                None,
+                pod_size,
+                DraftKind::Quick,
+                TournamentFormat::Swiss,
+            )
+            .expect_err("remote Quick Draft must use the public 2..=8 range");
+            assert!(err.contains("pod_size"), "unexpected rejection: {err}");
+            assert!(
+                err.contains('2') && err.contains('8'),
+                "unexpected range: {err}"
+            );
+        }
+    }
+
+    /// The multi-set claim at the guard: an ordered, repeating sequence is a
+    /// legal pod pool, so the guard must admit one rather than only the
+    /// single-code shape it was written for.
+    #[test]
+    fn create_draft_accepts_an_ordered_multi_set_sequence() {
+        assert!(guard_create_draft_with_settings(
+            "Alice",
+            &["ISD".to_string(), "DKA".to_string(), "ISD".to_string(),],
+            &None,
+            None,
+            8,
+            DraftKind::Premier,
+            TournamentFormat::Swiss,
+        )
+        .is_ok());
+    }
+
+    /// Both ends of the sequence bound, checked BEFORE any pool lookup: an
+    /// empty sequence names no booster at all, and an unbounded one would cost
+    /// a map probe and a pool clone per entry on the accept path.
+    #[test]
+    fn create_draft_rejects_an_empty_or_oversized_sequence() {
+        for codes in [
+            Vec::new(),
+            vec!["TST".to_string(); usize::from(MAX_PACK_COUNT) + 1],
+        ] {
+            let err = guard_create_draft_with_settings(
+                "Alice",
+                &codes,
+                &None,
+                None,
+                8,
+                DraftKind::Premier,
+                TournamentFormat::Swiss,
+            )
+            .unwrap_err();
+            assert!(err.contains("set_codes"), "unexpected rejection: {err}");
+        }
+    }
+
+    /// Every entry is bounded, not just the first — a sequence whose LAST code
+    /// is junk must be refused as loudly as one whose first is.
+    #[test]
+    fn create_draft_rejects_an_oversized_code_anywhere_in_the_sequence() {
+        let err = guard_create_draft_with_settings(
+            "Alice",
+            &["TST".to_string(), "z".repeat(MAX_DRAFT_SET_CODE_LEN + 1)],
+            &None,
+            None,
+            8,
+            DraftKind::Premier,
+            TournamentFormat::Swiss,
+        )
+        .unwrap_err();
+        assert!(err.contains("set_code"), "unexpected rejection: {err}");
+    }
+
+    #[test]
+    fn create_draft_validates_chaos_candidates_before_pool_lookup() {
+        let accepted = ["AAA".to_string(), "BBB".to_string()];
+        assert!(guard_create_draft_with_settings(
+            "Alice",
+            &accepted,
+            &None,
+            None,
+            4,
+            DraftKind::Premier,
+            TournamentFormat::Swiss,
+        )
+        .is_ok());
+
+        let rejected = ["A".repeat(MAX_DRAFT_SET_CODE_LEN + 1)];
+        assert!(guard_create_draft_with_settings(
+            "Alice",
+            &rejected,
+            &None,
+            None,
+            4,
+            DraftKind::Premier,
+            TournamentFormat::Swiss,
+        )
+        .is_err());
     }
 
     #[test]
     fn create_draft_rejects_oversized_display_name() {
-        let err =
-            guard_create_draft_with_settings(&"a".repeat(21), "TST", &None, None, 4).unwrap_err();
+        let err = guard_create_draft_with_settings(
+            &"a".repeat(21),
+            &["TST".to_string()],
+            &None,
+            None,
+            4,
+            DraftKind::Premier,
+            TournamentFormat::Swiss,
+        )
+        .unwrap_err();
         assert!(err.contains("display_name"));
+    }
+
+    #[test]
+    fn wire_guard_uses_the_procedure_for_ceiling_and_pairing_bracket() {
+        assert!(guard_create_draft_with_settings(
+            "Alice",
+            &["CMM".to_string()],
+            &None,
+            None,
+            3,
+            DraftKind::CommanderDraft,
+            TournamentFormat::SingleElimination,
+        )
+        .is_ok());
+
+        for (pod_size, tournament_format) in [
+            (9, TournamentFormat::Swiss),
+            (7, TournamentFormat::SingleElimination),
+        ] {
+            let err = guard_create_draft_with_settings(
+                "Alice",
+                &["TST".to_string()],
+                &None,
+                None,
+                pod_size,
+                DraftKind::Premier,
+                tournament_format,
+            )
+            .unwrap_err();
+            assert!(err.contains("pod_size"), "unexpected rejection: {err}");
+        }
+
+        assert!(guard_create_draft_with_settings(
+            "Alice",
+            &["TST".to_string()],
+            &None,
+            None,
+            1,
+            DraftKind::Quick,
+            TournamentFormat::Swiss,
+        )
+        .is_err());
     }
 
     #[test]
@@ -101,5 +347,39 @@ mod tests {
     fn draft_action_rejects_oversized_code() {
         let err = guard_draft_action(&"x".repeat(MAX_GAME_CODE_LEN + 1)).unwrap_err();
         assert!(err.contains("draft_code"));
+    }
+    /// A Winston pod opens every booster into ONE face-down stack, so there is
+    /// no per-seat, per-round slot for a Chaos assignment to fill. Refused here
+    /// so the refusal lands before the entropy draw and before the lobby is
+    /// registered and broadcast -- not at `StartDraft`, on a full pod.
+    #[test]
+    fn a_shared_stack_kind_is_refused_a_chaos_layout_before_the_entropy_draw() {
+        let err = guard_chaos_layout_for_kind(DraftKind::Winston)
+            .expect_err("Winston cannot carry a Chaos layout");
+        // The engine owns the wording; this boundary only asks earlier.
+        assert_eq!(err, draft_core::types::CHAOS_LAYOUT_REFUSAL);
+    }
+
+    /// Paired positive, and the reach guard for the refusal above: every kind
+    /// that deals a pack per seat still takes a Chaos layout, so the test above
+    /// is demonstrably about the shared stack and not about the guard refusing
+    /// everything.
+    #[test]
+    fn every_pack_dealing_kind_still_takes_a_chaos_layout() {
+        let mut refused = 0;
+        for kind in DraftKind::ALL {
+            match guard_chaos_layout_for_kind(kind) {
+                Ok(()) => assert!(
+                    kind.procedure().allows_chaos_layout(),
+                    "{kind:?} was admitted but its procedure says otherwise"
+                ),
+                Err(_) => refused += 1,
+            }
+        }
+        assert!(refused > 0, "no kind was refused, so the guard is inert");
+        assert!(
+            refused < DraftKind::ALL.len(),
+            "every kind was refused, so the guard is not discriminating"
+        );
     }
 }

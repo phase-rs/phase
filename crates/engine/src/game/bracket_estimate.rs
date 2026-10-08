@@ -1,6 +1,13 @@
 //! Commander bracket estimator. Profiles a Commander deck along four axes
 //! (Game Changers, Mass Land Denial, Extra Turns, Efficient Tutors) and
-//! returns a `BracketEstimate` placing the deck in bracket B1–B4.
+//! returns a `BracketEstimate` placing the deck in bracket B2–B4.
+//!
+//! The estimate is a **floor**, not an exact tier: a deck with no Game
+//! Changers still estimates B2 even if its pilot would call it B3 — only
+//! the pilot can declare upward. B1 (Exhibition) and B5 (cEDH) are
+//! manual self-declarations the estimator never returns: Exhibition depends
+//! on the pilot's theme and intended play experience, which card counts
+//! cannot establish; cEDH reflects participation in the competitive metagame.
 //!
 //! Pure: no game state, no I/O, no randomness. Same `(deck, db)` →
 //! identical `BracketEstimate`.
@@ -15,8 +22,9 @@ use serde::{Deserialize, Serialize};
 use crate::database::CardDatabase;
 use crate::game::deck_loading::PlayerDeckList;
 
-/// Commander bracket tier. The estimator never returns `Cedh` — that is a
-/// meta self-declaration kept on the frontend's existing manual picker.
+/// Commander bracket tier. The estimator returns only `Core`–`Optimized`
+/// (B2–B4). `Exhibition` and `Cedh` are manual self-declarations kept on
+/// the frontend's existing manual picker — the estimator never returns them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommanderBracketTier {
@@ -199,8 +207,14 @@ const TIERS: [CommanderBracketTier; 4] = [
     CommanderBracketTier::Optimized,
 ];
 
-/// Walks `axes` against the per-axis cap table. For each axis whose count
-/// exceeds at least one tier ceiling, emits exactly one `BracketViolation`
+/// Index into `TIERS` where the estimator starts. B1 (Exhibition) is a
+/// manual self-declaration, never an inferred tier (see the module docs),
+/// so every estimate floors at B2 (Core) — the most common casual tier.
+const ESTIMATOR_FLOOR_INDEX: usize = 1;
+
+/// Walks `axes` against the per-axis cap table, starting from
+/// `ESTIMATOR_FLOOR_INDEX`. For each axis whose count exceeds at least one
+/// tier ceiling *above the floor*, emits exactly one `BracketViolation`
 /// recording the highest ceiling crossed. The returned tier is the max
 /// floor across axes. Violations are keyed by `BracketAxis` (at most one
 /// per axis — the type expresses this invariant). Callers that need display
@@ -211,7 +225,7 @@ fn decide_tier(
     CommanderBracketTier,
     BTreeMap<BracketAxis, BracketViolation>,
 ) {
-    let mut floor_index: usize = 0;
+    let mut floor_index: usize = ESTIMATOR_FLOOR_INDEX;
     let mut violations: BTreeMap<BracketAxis, BracketViolation> = BTreeMap::new();
 
     for (axis, caps) in CAPS {
@@ -227,15 +241,20 @@ fn decide_tier(
             }
         }
         if let Some((cap, forced_floor)) = highest_crossed {
-            violations.insert(
-                *axis,
-                BracketViolation {
-                    axis: *axis,
-                    count,
-                    prior_cap: cap,
-                    forced_floor,
-                },
-            );
+            // A crossing that merely reaches the estimator floor (e.g. 1–2
+            // efficient tutors over the B1 cap) is the default, not a
+            // violation. Only crossings that push *above* the floor are recorded.
+            if forced_floor.as_u8() > TIERS[ESTIMATOR_FLOOR_INDEX].as_u8() {
+                violations.insert(
+                    *axis,
+                    BracketViolation {
+                        axis: *axis,
+                        count,
+                        prior_cap: cap,
+                        forced_floor,
+                    },
+                );
+            }
         }
     }
 
@@ -327,11 +346,14 @@ mod tests {
     }
 
     #[test]
-    fn clean_deck_is_b1_exhibition() {
+    fn clean_deck_is_b2_core() {
+        // B1 (Exhibition) is manual-declaration only: a card-list estimator
+        // cannot distinguish it from B2, so even a fully clean deck floors
+        // at Core. The estimator never returns Exhibition.
         let db = db_with_signals(&[]);
         let d = deck(vec!["Atraxa, Praetors' Voice"], vec!["Forest", "Island"]);
         let e = estimate_bracket(&d, &db).unwrap();
-        assert_eq!(e.tier, CommanderBracketTier::Exhibition);
+        assert_eq!(e.tier, CommanderBracketTier::Core);
         assert_eq!(e.axes, BracketAxisCounts::default());
         assert!(e.violations.is_empty());
     }
@@ -361,6 +383,10 @@ mod tests {
         let e = estimate_bracket(&d, &db).unwrap();
         assert_eq!(e.tier, CommanderBracketTier::Core);
         assert_eq!(e.axes.efficient_tutors, 2);
+        assert!(
+            e.violations.is_empty(),
+            "crossings that merely reach the Core floor are not violations"
+        );
     }
 
     #[test]
@@ -395,6 +421,11 @@ mod tests {
         let e = estimate_bracket(&d, &db).unwrap();
         assert_eq!(e.tier, CommanderBracketTier::Upgraded);
         assert_eq!(e.axes.efficient_tutors, 3);
+        assert_eq!(
+            e.violations[&BracketAxis::EfficientTutors].forced_floor,
+            CommanderBracketTier::Upgraded,
+            "crossings above the Core floor are still recorded"
+        );
     }
 
     #[test]
@@ -589,6 +620,7 @@ mod tests {
         let e = estimate_bracket(&d, &db).unwrap();
         assert_eq!(e.tier, CommanderBracketTier::Core);
         assert_eq!(e.axes.efficient_tutors, 1);
+        assert!(e.violations.is_empty());
     }
 
     #[test]

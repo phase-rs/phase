@@ -87,13 +87,26 @@ pub(crate) fn resolve_fight_fighters(
     // two distinct object slots; otherwise fall through untouched, protecting
     // incumbent single-fighter `Fight{ParentTarget}` cards (time to feed,
     // ezuri's predation, joust, …) whose root has <2 object slots (slot 1 → None).
+    //
+    // The DECLARED slots decide the shape; the live slot authority decides
+    // participation. CR 701.14b: "If one or both creatures are illegal targets
+    // for a resolving spell or ability that instructs them to fight, neither of
+    // them fights or deals damage" — so a declared pair with an illegal (CR
+    // 608.2b) or departed (CR 400.7) fighter is no fight, never a fall-through
+    // to the single-fighter shape below.
     if object_targets.len() < 2 {
         if let (Some(TargetRef::Object(a)), Some(TargetRef::Object(b))) = (
             crate::game::targeting::resolve_parent_slot_from_root(state, ability, 0),
             crate::game::targeting::resolve_parent_slot_from_root(state, ability, 1),
         ) {
             if a != b {
-                return Ok(Some((a, b)));
+                let slot_is_live = |index| {
+                    crate::game::targeting::resolve_live_parent_slot_from_root(
+                        state, ability, index,
+                    )
+                    .is_some()
+                };
+                return Ok((slot_is_live(0) && slot_is_live(1)).then_some((a, b)));
             }
         }
     }
@@ -695,8 +708,7 @@ mod tests {
         // A continuation was stashed for the second direction — previously this
         // branch silently returned Ok(()) and the second direction was dropped.
         let cont = state
-            .pending_continuation
-            .as_ref()
+            .active_ability_continuation()
             .expect("expected pending_continuation for second-direction fight damage");
         // Continuation is a single-target DealDamage from wolf to bear.
         match &cont.chain.effect {
@@ -779,6 +791,9 @@ mod tests {
                 source_name: String::new(),
                 description: "Shield".to_string(),
             }],
+            kind: Default::default(),
+            last_applied_decides: false,
+            remember_identity: None,
         };
 
         // Accept the replacement for bear → wolf (first direction).
@@ -805,7 +820,7 @@ mod tests {
             "second direction (wolf → bear, 2 damage) must apply via pending_continuation + accept"
         );
         assert!(
-            state.pending_continuation.is_none(),
+            state.active_ability_continuation().is_none(),
             "continuation must be consumed"
         );
 

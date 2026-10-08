@@ -1,9 +1,62 @@
-// CR 613.3d (Layer 4) — type-changing static abilities.
+// CR 613.1d (Layer 4) — type-changing static abilities.
 
 #[allow(unused_imports)]
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+
+/// CR 611.3a + CR 613.1d/f + CR 613.4b: an inverted conditional type change
+/// whose base P/T follows the type name and is followed by granted abilities.
+/// Goddric's Celebration is the type specimen; quoted pump text must not be
+/// mistaken for a modification of the source itself.
+pub(crate) fn parse_inverted_base_pt_type_grant(
+    text: &str,
+    raw_lower: &str,
+) -> Option<StaticDefinition> {
+    let body = super::oracle_modal::strip_ability_word_with_name(text)
+        .filter(|(word, _)| super::oracle_modal::is_known_ability_word(word))
+        .map_or_else(|| text.to_string(), |(_, body)| body);
+    let lower = body.to_lowercase();
+    let split = super::shared::try_split_inverted_as_long_as(&TextPair::new(&body, &lower))?;
+
+    let effect_lower = split.effect_text.to_lowercase();
+    let effect = TextPair::new(&split.effect_text, &effect_lower);
+    let typed = nom_tag_tp(&effect, "~ is a ").or_else(|| nom_tag_tp(&effect, "~ is an "))?;
+    let (type_text, base_text) = typed.split_around(" with base power and toughness ")?;
+    let (tail, (power, toughness)) =
+        super::grammar::parse_pt_mod_with_remainder(base_text.original).ok()?;
+
+    let mut modifications = Vec::new();
+    if nom_primitives::scan_contains(raw_lower, "loses all other creature types") {
+        modifications.push(ContinuousModification::RemoveAllSubtypes {
+            set: SubtypeSet::Creature,
+        });
+    }
+    modifications.extend(
+        super::oracle_effect::animation::parse_becomes_type_modifications(type_text.original),
+    );
+    modifications.push(ContinuousModification::SetPower { value: power });
+    modifications.push(ContinuousModification::SetToughness { value: toughness });
+
+    let grants = tail.trim().trim_start_matches(',').trim();
+    if !grants.is_empty() {
+        modifications.extend(super::keyword_grant::parse_continuous_modifications(
+            &format!("has {grants}"),
+        ));
+    }
+    if modifications.is_empty() {
+        return None;
+    }
+
+    let condition = super::shared::parse_static_condition(&split.condition_text)?;
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(modifications)
+            .condition(condition)
+            .description(text.to_string()),
+    )
+}
 
 /// CR 607.2d: Parse a self-chosen type static ability line.
 pub(crate) fn parse_self_chosen_type_static(input: &str) -> OracleResult<'_, ChosenSubtypeKind> {
@@ -67,6 +120,11 @@ pub(crate) enum ChosenCreatureTypeStaticScope {
     Creatures,
     EachCreature,
     VehicleCreatures,
+    /// CR 109.2a: a description naming a card plus a zone ("each creature card in
+    /// your graveyard") means a card matching it in that stated zone — so this scope
+    /// selects creature CARDS in the owner's graveyard (CR 400.3 + CR 109.5), never
+    /// permanents on the battlefield (Ashes of the Fallen).
+    GraveyardCreatureCards,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +145,27 @@ impl ChosenCreatureTypeStaticScope {
                 TypedFilter::new(TypeFilter::Subtype("Vehicle".to_string()))
                     .controller(ControllerRef::You),
             ),
+            // CR 109.2a: "each creature card in your graveyard" names a card plus a
+            // zone, so it matches creature CARDS in that stated zone.
+            //
+            // CR 400.3 + CR 109.5: a graveyard is an owner-defined zone — a card only
+            // ever rests in its owner's graveyard — and "your" on a card that has no
+            // controller resolves to its OWNER (CR 109.5). So the subject is scoped by
+            // ownership (`FilterProp::Owned`), NOT `.controller(...)`: off the
+            // battlefield a card has no meaningful controller, and the continuous-effect
+            // matcher (layers.rs) evaluates a Typed filter's `controller` against the
+            // effective-controller field. `Owned` matches `obj.owner` directly, paired
+            // with the `InAnyZone` zone fold to select creature cards in your graveyard.
+            Self::GraveyardCreatureCards => {
+                TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                    FilterProp::InAnyZone {
+                        zones: vec![Zone::Graveyard],
+                    },
+                ]))
+            }
         }
     }
 }
@@ -116,8 +195,12 @@ pub(crate) fn parse_arcane_adaptation_chosen_type_static(
             kind: ChosenSubtypeKind::CreatureType,
         }],
         ChosenCreatureTypeApplication::Replacing => match scope {
+            // The graveyard sibling shares the creature-card subject, so a SET
+            // printing would replace its creature types identically (no such
+            // printing exists today — Ashes of the Fallen is additive).
             ChosenCreatureTypeStaticScope::Creatures
-            | ChosenCreatureTypeStaticScope::EachCreature => {
+            | ChosenCreatureTypeStaticScope::EachCreature
+            | ChosenCreatureTypeStaticScope::GraveyardCreatureCards => {
                 vec![
                     ContinuousModification::RemoveAllSubtypes {
                         set: crate::types::card_type::SubtypeSet::Creature,
@@ -197,11 +280,6 @@ fn parse_chosen_creature_type_static_sentence_with_scope(
     Ok((input, (scope, application)))
 }
 
-pub(crate) fn parse_chosen_creature_type_static_prefix(input: &str) -> OracleResult<'_, ()> {
-    let (input, _) = parse_chosen_creature_type_static_scope_body(input)?;
-    Ok((input, ()))
-}
-
 /// CR 205.1a / CR 205.1b + CR 607.2d: Parse the "<scope> are the chosen [creature]
 /// type [in addition to their other types]" body, returning the affected scope and
 /// whether the effect is additive (CR 205.1b "in addition") or replacing (CR 205.1a
@@ -262,6 +340,13 @@ pub(crate) fn parse_chosen_creature_type_static_subject(
         value(
             ("their", ChosenCreatureTypeStaticScope::VehicleCreatures),
             tag("vehicle creatures you control are"),
+        ),
+        // CR 109.2a: the graveyard-scoped sibling names a card plus its zone, and so
+        // reads "has" (a single card) rather than "are", with retention pronoun "its"
+        // (Ashes of the Fallen).
+        value(
+            ("its", ChosenCreatureTypeStaticScope::GraveyardCreatureCards),
+            tag("each creature card in your graveyard has"),
         ),
     ))
     .parse(input)
@@ -326,43 +411,14 @@ fn parse_compound_chosen_type_additive_predicate(input: &str) -> OracleResult<'_
     Ok((input, ()))
 }
 
-/// Prefix matcher for the `oracle.rs` "The same is true for ..." tail splitter:
-/// consumes "`<compound subject>` are the chosen [creature ]type in addition to
-/// their other [creature ]types[.]" so Rukarumel's trailing sentence is preserved
-/// as an `Unimplemented` residual (matching Arcane Adaptation / Maskwood Nexus)
-/// rather than collapsing the whole line into a strict-fail. Verifies the subject
-/// is a genuine compound `Or` before claiming, so single-subject chosen-type lines
-/// stay with [`parse_chosen_creature_type_static_prefix`].
-pub(crate) fn parse_compound_you_control_chosen_type_static_prefix(
-    input: &str,
-) -> OracleResult<'_, ()> {
-    let (after_subject, subject) =
-        take_until::<_, _, OracleError<'_>>(" are the chosen").parse(input)?;
-    match parse_continuous_subject_filter(subject) {
-        Some(TargetFilter::Or { filters }) if filters.len() >= 2 => {}
-        _ => {
-            return Err(nom::Err::Error(OracleError::new(
-                input,
-                nom::error::ErrorKind::Verify,
-            )));
-        }
-    }
-    let (input, _) = tag(" are ").parse(after_subject)?;
-    let (input, _) = alt((tag("the chosen creature type"), tag("the chosen type"))).parse(input)?;
-    let (input, ()) = parse_chosen_type_additive_suffix(input, "their")?;
-    let (input, _) = opt(tag(".")).parse(input)?;
-    Ok((input, ()))
-}
-
 // CR 613.1d + CR 205.3m: "<creatures you control are> every creature type" —
 // Layer 4 type-changing effect that adds every creature type (CR 205.3m) to each
 // creature the controller has on the battlefield. Maskwood Nexus is the
 // canonical printing; the static is the class of "<your creatures> are every
 // creature type" effects, paralleling `parse_arcane_adaptation_chosen_type_static`
-// for "the chosen type". Maskwood's "The same is true for creature spells you
-// control and creature cards you own that aren't on the battlefield" tail is
-// stripped upstream by `oracle.rs` (it's reported as `Unimplemented` because
-// continuous effects on non-battlefield zones aren't currently modeled).
+// for "the chosen type". The full two-sentence continuation is recognized by
+// `same_is_true::parse_same_is_true_type_static` before this battlefield-only
+// parser, so this function remains the single-sentence form's fallback.
 pub(crate) fn parse_every_creature_type_static(
     tp: &TextPair<'_>,
     description: &str,
@@ -402,11 +458,12 @@ pub(crate) fn parse_collection_counter_play_permission_static(
 ) -> Option<StaticDefinition> {
     let ((), _) = nom_on_lower(tp.original, tp.lower, |input| {
         let (input, _) = tag("once each turn, you may play a card from exile with a collection counter on it if it was exiled by an ability you controlled").parse(input)?;
-        let (input, _) = alt((
-            tag(", and mana of any type can be spent to cast that spell"),
-            tag(", and you may spend mana as though it were mana of any color to cast it"),
-        ))
-        .parse(input)?;
+        // CR 609.4b: the collection-counter grant carries Evelyn's printed
+        // any-color concession. A broader "mana of any type" spelling is
+        // declined (an honest gap) rather than silently narrowed.
+        let (input, _) =
+            tag(", and you may spend mana as though it were mana of any color to cast it")
+                .parse(input)?;
         let (input, _) = opt(tag(".")).parse(input)?;
         let (input, _) = eof.parse(input)?;
         Ok((input, ()))
@@ -416,6 +473,72 @@ pub(crate) fn parse_collection_counter_play_permission_static(
         StaticDefinition::new(StaticMode::LinkedCollectionCounterPlayPermission)
             .description(description.to_string()),
     )
+}
+
+/// CR 613.4b (Layer 7b base P/T) + CR 613.1f (Layer 6 keywords): recover the
+/// two characteristic axes that word-classifying an additive-type span cannot
+/// express.
+///
+/// The pre-marker span of an additive clause — "a 4/4 Gorgon creature with
+/// deathtouch and lifelink" in "…is a 4/4 Gorgon creature with deathtouch and
+/// lifelink in addition to its other types" — is word-split by the caller, and
+/// `classify_additive_type_word` returns `None` for every token it does not
+/// recognize as a color, core type, supertype or subtype. Dropping stray words
+/// is deliberate, but it also swallows the `4/4` and the whole `with <keywords>`
+/// tail: exactly the CR 205.1b-retained characteristics the clause exists to
+/// state. `parse_animation_spec` already parses that shape.
+///
+/// **This is STRICTLY ADDITIVE — it never replaces the word-split result.**
+/// That is not a stylistic choice, it is a correctness requirement: a span may
+/// be COMPOUND ("1/1 green Saproling creatures **and Forest lands**" — Life and
+/// Limb), and `parse_animation_spec` parses only the first type sequence, so
+/// substituting its output for the word-split would silently drop
+/// `AddType{Land}` and `AddSubtype{Forest}`. Word-splitting is crude but it sees
+/// every type token in the span; the animation spec is precise but sees only the
+/// first clause. Taking the P/T and keywords from the spec and the types from the
+/// word-split uses each for what it is actually good at.
+///
+/// **Keyed on a LEADING fixed `N/M`, and that key is the double-emit guard.**
+/// The other P/T shape an additive clause can carry — "with base power and
+/// toughness N/M" — states its P/T *after* the type words, and the callers that
+/// see that form already emit the P/T themselves (Kudo, King Among Bears;
+/// Graaz, Unstoppable Juggernaut; March of the World Ooze; Raised by Giants).
+/// Requiring the P/T at the head of the span keeps the two routes disjoint, so
+/// no caller can receive a second `SetPower`.
+///
+/// Returns an empty vector for every span without a leading `N/M`, so all such
+/// clauses keep the word-split path byte-for-byte.
+fn animated_additive_span_pt_and_keywords(
+    span: &str,
+    span_lower: &str,
+) -> Vec<ContinuousModification> {
+    // The article belongs to the span ("a 4/4 …"), so peel it with the shared
+    // `parse_article` primitive before testing for the leading P/T.
+    let after_article_lower =
+        nom_primitives::parse_article(span_lower).map_or(span_lower, |(rest, ())| rest);
+    if super::oracle_effect::animation::parse_fixed_become_pt_prefix(after_article_lower).is_none()
+    {
+        return Vec::new();
+    }
+    let Some(spec) =
+        super::oracle_effect::animation::parse_animation_spec(span, &mut ParseContext::default())
+    else {
+        return Vec::new();
+    };
+    // Keep ONLY the two axes the word-split cannot produce. Types, subtypes,
+    // supertypes and color are deliberately left to the word-split, which is the
+    // only one of the two that sees a compound span in full.
+    super::oracle_effect::animation::animation_modifications(&spec)
+        .into_iter()
+        .filter(|modification| {
+            matches!(
+                modification,
+                ContinuousModification::SetPower { .. }
+                    | ContinuousModification::SetToughness { .. }
+                    | ContinuousModification::AddKeyword { .. }
+            )
+        })
+        .collect()
 }
 
 /// CR 205.1 / CR 205.3a: Extract additive-type modifications from a predicate
@@ -498,20 +621,22 @@ pub(crate) fn parse_additive_type_clause_modifications(
     if normalized_type_words == "every land type" {
         return Some(vec![ContinuousModification::AddAllLandTypes]);
     }
-    let granted_lower = opt(preceded(
-        alt((tag::<_, _, VE>(" and have "), tag::<_, _, VE>(" and has "))),
-        rest::<_, VE>,
-    ))
-    .parse(after_suffix_lower)
-    .ok()?
-    .1;
-    let granted_original = granted_lower
-        .map(|granted| &clause_original[clause_original.len() - granted.len()..])
-        .map(str::trim);
-    let granted_modifications = granted_original
-        .map(parse_quoted_ability_modifications)
-        .unwrap_or_default();
+    // CR 613.1f: route the trailing "and has <X>" conjunct through the shared
+    // `parse_continuous_modifications` authority — the same one the sibling
+    // `parse_enchanted_is_type` uses for its own trailing clause — rather than the
+    // quoted-ability-only `parse_quoted_ability_modifications`. It subsumes the
+    // quoted-ability parse and adds bare keyword handling, so a bare "and has
+    // <keyword>" (Aurification's "…other creature types and has defender") composes
+    // an `AddKeyword` instead of being silently dropped. Safe from the mutual
+    // recursion with this function: the trailing clause carries no
+    // "in addition to … types" phrase, so the additive fallback inside it declines.
+    let after_suffix_original =
+        &clause_original[clause_original.len() - after_suffix_lower.len()..];
+    let granted_modifications = parse_continuous_modifications(after_suffix_original);
 
+    // The word-split is the BASE and stays authoritative for every type token in
+    // the span — it is the only reader that sees a compound span ("… creatures
+    // and Forest lands") in full.
     let mut modifications = Vec::new();
     for raw_word in type_words.split_whitespace() {
         let word = raw_word.trim_matches(|c: char| c == ',' || c == '.');
@@ -523,10 +648,17 @@ pub(crate) fn parse_additive_type_clause_modifications(
         }
     }
 
-    modifications.extend(granted_modifications);
-    if let Some(granted) = granted_original {
-        push_base_pt_mana_value_dynamic_modifications(&mut modifications, &granted.to_lowercase());
+    // CR 613.4b (Layer 7b) + CR 613.1f (Layer 6): then recover the base P/T and
+    // the pre-marker keyword tail, which word-classification silently swallows.
+    // Additive only — a span with no leading `N/M` contributes nothing here and
+    // keeps byte-identical output.
+    for modification in animated_additive_span_pt_and_keywords(type_words, type_words_lower) {
+        if !modifications.contains(&modification) {
+            modifications.push(modification);
+        }
     }
+
+    modifications.extend(granted_modifications);
     (!modifications.is_empty()).then_some(modifications)
 }
 
@@ -710,7 +842,13 @@ pub(crate) fn parse_enchanted_becomes_type_with_ability(
     let (r, _) = alt((tag::<_, _, OracleError<'_>>(" is a "), tag(" is an ")))
         .parse(r)
         .ok()?;
-    let (r, _) = tag::<_, _, OracleError<'_>>("colorless ").parse(r).ok()?;
+    // CR 105.2: "colorless" is optional. Minimus Containment ("is a Treasure
+    // artifact with ...") sets a card type without recoloring; Imprisoned in the
+    // Moon / Sugar Coat ("colorless land" / "colorless Food artifact") also make
+    // the permanent colorless. Only emit `SetColor([])` when it is stated.
+    let (r, colorless) = opt(tag::<_, _, OracleError<'_>>("colorless "))
+        .parse(r)
+        .ok()?;
     // CR 205.3: optional subtype(s) preceding the core card type — Sugar Coat
     // ("colorless Food artifact ...") vs Imprisoned ("colorless land ...").
     // `parse_subtype` is case-insensitive (runs on the lowered slice) and a core
@@ -751,20 +889,42 @@ pub(crate) fn parse_enchanted_becomes_type_with_ability(
         .parse(after_quote)
         .ok()?;
     let (after_quote, _) = tag::<_, _, OracleError<'_>>("\"").parse(after_quote).ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>("and loses all other card types and abilities")
+    // Trailing ability-strip clause — two attested shapes, composed from optional
+    // spans rather than enumerated:
+    //   "and loses all other card types and abilities" (Imprisoned in the Moon)
+    //   "and it loses all other abilities"              (Minimus Containment)
+    // The "it" subject and the "card types and " span are each optional; the
+    // effect is a full Layer-6 ability wipe either way (the `SetCardTypes` above
+    // already replaced the card types, so an unstated "card types" phrase loses
+    // nothing). A comma may sit between the closing quote and the clause.
+    let after_strip = opt(tag::<_, _, OracleError<'_>>(","))
         .parse(after_quote.trim_start())
+        .ok()?
+        .0
+        .trim_start();
+    let (rest, _) = tag::<_, _, OracleError<'_>>("and ")
+        .parse(after_strip)
         .ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("it ")).parse(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("loses all other ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("card types and "))
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("abilities").parse(rest).ok()?;
     let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
     if !rest.trim().is_empty() {
         return None;
     }
 
-    let mut modifications = vec![
-        ContinuousModification::SetCardTypes {
-            core_types: vec![core_type],
-        },
-        ContinuousModification::SetColor { colors: Vec::new() },
-    ];
+    let mut modifications = vec![ContinuousModification::SetCardTypes {
+        core_types: vec![core_type],
+    }];
+    // CR 105.2 (Layer 5): only recolor to colorless when the text states it.
+    if colorless.is_some() {
+        modifications.push(ContinuousModification::SetColor { colors: Vec::new() });
+    }
     // CR 205.1a (Layer 4): grant each parsed subtype (Sugar Coat → Food). Placed
     // with the other type-identity modifications, before the Layer-6 ability wipe.
     // Setting a subtype REPLACES the object's existing subtypes from the same
@@ -1024,14 +1184,29 @@ pub(crate) fn parse_enchanted_is_type(
         (type_part, None)
     };
 
-    // Parse optional color
-    let (type_part, opt_color) = if let Ok((rest, color)) = nom_primitives::parse_color(type_part) {
-        (rest.trim(), Some(color))
+    // CR 105.2 + CR 613.1e: Parse every color in a color list. Witness
+    // Protection's "green and white Citizen creature" must preserve both
+    // colors before the type phrase is parsed.
+    let mut color_rest = type_part;
+    let mut colors = Vec::new();
+    while let Ok((rest, color)) = nom_primitives::parse_color(color_rest) {
+        colors.push(color);
+        let rest = rest.trim_start();
+        let (candidate, _) = opt(tag::<_, _, VE>("and ")).parse(rest).ok()?;
+        if nom_primitives::parse_color(candidate).is_ok() {
+            color_rest = candidate;
+        } else {
+            color_rest = rest;
+            break;
+        }
+    }
+    let (type_part, colors) = if !colors.is_empty() {
+        (color_rest.trim(), colors)
     } else if let Ok((rest, _)) = tag::<_, _, VE>("colorless ").parse(type_part) {
         // "colorless" removes all colors — handled via SetColor([])
-        (rest.trim(), None)
+        (rest.trim(), Vec::new())
     } else {
-        (type_part, None)
+        (type_part, Vec::new())
     };
     let is_colorless = nom_primitives::scan_contains(is_rest_lower, "colorless");
 
@@ -1128,9 +1303,9 @@ pub(crate) fn parse_enchanted_is_type(
                 mods.push(ContinuousModification::SetCardTypes {
                     core_types: granted_core_types,
                 });
-                if let Some(color) = opt_color {
+                if !colors.is_empty() {
                     mods.push(ContinuousModification::SetColor {
-                        colors: vec![color],
+                        colors: colors.clone(),
                     });
                 } else if is_colorless {
                     mods.push(ContinuousModification::SetColor { colors: vec![] });
@@ -1226,12 +1401,17 @@ pub(crate) fn parse_enchanted_is_type(
         // CR 105.3 + CR 613.1e (Layer 5): a new color replaces all previous
         // colors unless the effect is "in addition"; additive "in addition to
         // its other types" appends via AddColor.
-        if let Some(color) = opt_color {
+        if !colors.is_empty() {
             if is_additive {
-                modifications.push(ContinuousModification::AddColor { color });
+                modifications.extend(
+                    colors
+                        .iter()
+                        .copied()
+                        .map(|color| ContinuousModification::AddColor { color }),
+                );
             } else {
                 modifications.push(ContinuousModification::SetColor {
-                    colors: vec![color],
+                    colors: colors.clone(),
                 });
             }
         } else if is_colorless {
@@ -1271,6 +1451,23 @@ pub(crate) fn parse_enchanted_is_type(
         //    RemoveAllSubtypes wipe.
         for sub in granted_subtypes {
             modifications.push(ContinuousModification::AddSubtype { subtype: sub });
+        }
+
+        // CR 612.8 + CR 613.1c: "named X" on a continuous type-changing
+        // effect replaces the enchanted object's name in Layer 3. Preserve
+        // printed capitalization from the original description.
+        let lower_description = description.to_ascii_lowercase();
+        if let Some((_, name)) = super::oracle_nom::bridge::split_once_on_lower(
+            description,
+            &lower_description,
+            " named ",
+        ) {
+            let name = name.trim().trim_end_matches('.').trim();
+            if !name.is_empty() {
+                modifications.push(ContinuousModification::SetTextName {
+                    name: name.to_string(),
+                });
+            }
         }
 
         if modifications.is_empty() {
@@ -1526,13 +1723,41 @@ pub(crate) fn parse_bare_becomes_type_replacement_modifications(
     modifications
 }
 
+/// CR 613.1f (Layer 6): resolve an animation conjunct tail to the modifications
+/// it grants, or `None` if no authority can model it.
+///
+/// Two shapes, each delegated to the authority that already owns it rather than
+/// re-implemented here:
+///   1. a bare keyword list ("trample", "vigilance and menace") →
+///      `parse_animation_conjunct_keywords`, which shares the token splitter and
+///      keyword mapper used by the sibling `" with "` tail;
+///   2. a quoted granted ability (`"When this creature dies, draw a card."`) →
+///      the shared `parse_quoted_ability_modifications` (CR 604.1), which
+///      classifies triggers, keywords, statics and activated abilities.
+///
+/// `None` when neither claims the tail, so the caller declines the line instead
+/// of emitting the animation with its ability clause silently dropped.
+fn parse_animation_conjunct_modifications(tail: &str) -> Option<Vec<ContinuousModification>> {
+    if let Some(keywords) = super::oracle_effect::animation::parse_animation_conjunct_keywords(tail)
+    {
+        return Some(
+            keywords
+                .into_iter()
+                .map(|keyword| ContinuousModification::AddKeyword { keyword })
+                .collect(),
+        );
+    }
+    let granted = super::keyword_grant::parse_quoted_ability_modifications(tail);
+    (!granted.is_empty()).then_some(granted)
+}
+
 /// CR 613.1d + CR 613.1g: "[pronoun]'s a/an <descriptor> [as long as <condition>]"
 /// — self-referential conditional animation static. Covers:
 ///   - Dynamic-P/T-by-mana-value: "it's an artifact creature with power and
 ///     toughness each equal to its mana value" (Animate Artifact)
 ///   - Fixed P/T + types + keywords: "he's a 7/7 Dragon God creature with flying
 ///     and indestructible" (Grand Master of Flowers — CR 613.4b fixed P/T,
-///     CR 613.1d type grant, CR 613.1g keyword grant)
+///     CR 613.1d type grant, CR 613.1f keyword grant)
 ///
 /// Accepts gender-neutral and gendered pronouns ("it's", "~'s", "they're",
 /// "he's", "she's"). Delegates body parsing to
@@ -1595,15 +1820,42 @@ pub(crate) fn parse_pronoun_becomes_type_static(
         .or_else(|| nom_tag_tp(&effect_tp, "she's a "))
         .or_else(|| nom_tag_tp(&effect_tp, "she's an "))?;
 
+    // STEP B.1 — peel a conjoined ability clause ("… and it has annihilator 2",
+    // "… and they gain flying") off the animation body.
+    //
+    // CR 613.1d + CR 613.4b + CR 613.1f: one printed sentence yields type
+    // (Layer 4), base P/T (Layer 7b) and keyword (Layer 6) modifications;
+    // CR 205.1b retains the prior types. Left in place the conjunct defeats the
+    // animation parse and the type/P/T half is lost (Idol of False Gods).
+    //
+    // A conjunct no authority can model declines the WHOLE line (the `?` below)
+    // rather than emitting the animation and silently dropping the granted
+    // ability. The line then falls through to the unclassified path and surfaces
+    // `Effect::unimplemented`, which is honest.
+    let body_text = body.original.trim().trim_end_matches('.');
+    let (body_text, conjunct_modifications) =
+        match super::oracle_effect::animation::split_animation_conjunct_clause(body_text) {
+            Some((animation_body, tail)) => (
+                animation_body,
+                Some(parse_animation_conjunct_modifications(tail)?),
+            ),
+            None => (body_text, None),
+        };
+
     // STEP C — delegate body parsing to parse_animation_spec which handles
     // fixed P/T (CR 613.4b), dynamic P/T-by-mana-value, types (CR 613.1d),
-    // subtypes (CR 205.3), and keyword tails (CR 613.1g) in one composable pass.
-    let body_text = body.original.trim().trim_end_matches('.');
+    // subtypes (CR 205.3), and keyword tails (CR 613.1f) in one composable pass.
     let modifications = if let Some(spec) = super::oracle_effect::animation::parse_animation_spec(
         body_text,
         &mut ParseContext::default(),
     ) {
         super::oracle_effect::animation::animation_modifications(&spec)
+    } else if conjunct_modifications.is_some() {
+        // A conjunct WAS peeled but the spec parser cannot claim the animation
+        // half. The legacy fallback below is not an alternative here: it reads
+        // the unpeeled `body` TextPair, so it would parse the conjunct's words
+        // as type tokens. Decline instead of fabricating.
+        return None;
     } else {
         // Fallback: type-token parse + mana-value dynamic P/T. Handles edge
         // cases where parse_animation_spec returns None (e.g., unusual clause
@@ -1631,7 +1883,12 @@ pub(crate) fn parse_pronoun_becomes_type_static(
     // card-type change with no retention marker therefore REPLACES — Arixmethes,
     // Slumbering Isle's "it's a land. (It's not a creature.)" must stop the
     // Kraken from being a creature, not leave it a "Creature Land" (issue #5213).
-    let modifications = maybe_replace_card_types(modifications, body.lower);
+    let mut modifications = maybe_replace_card_types(modifications, body.lower);
+
+    // CR 613.1f (Layer 6): append the conjoined ability clause AFTER the
+    // CR 205.1a replacement decision above, which is a question about card types
+    // alone — a granted keyword must not perturb it.
+    modifications.extend(conjunct_modifications.unwrap_or_default());
 
     // STEP D — attach the condition(s). The leading "during your turn, " timing
     // peel (STEP A.0) and the trailing " as long as <cond>" peel (STEP A) are
@@ -1641,9 +1898,8 @@ pub(crate) fn parse_pronoun_becomes_type_static(
     // permanent retains its Planeswalker type while it is also a creature).
     let trailing_condition = condition_tp.map(|cond_tp| {
         let cond_text = cond_tp.original.trim().trim_end_matches('.');
-        parse_static_condition(cond_text).unwrap_or(StaticCondition::Unrecognized {
-            text: cond_text.to_string(),
-        })
+        parse_static_condition(cond_text)
+            .unwrap_or_else(|| unparsed_gate_condition(cond_text, ConditionGatePolarity::Positive))
     });
     let condition = match (turn_condition, trailing_condition) {
         // CR 611.3a: when both a leading turn restriction and a trailing
@@ -1803,10 +2059,8 @@ pub(crate) fn parse_each_noncreature_subject_is_creature_with_pt_mv(
         .description(description.to_string());
     if let Some(cond_tp) = condition_tp {
         let cond_text = cond_tp.original.trim().trim_end_matches('.');
-        let condition =
-            parse_static_condition(cond_text).unwrap_or(StaticCondition::Unrecognized {
-                text: cond_text.to_string(),
-            });
+        let condition = parse_static_condition(cond_text)
+            .unwrap_or_else(|| unparsed_gate_condition(cond_text, ConditionGatePolarity::Positive));
         def = def.condition(condition);
     }
     Some(def)
@@ -1829,7 +2083,7 @@ pub(crate) fn parse_each_noncreature_subject_is_creature_with_pt_mv(
 /// resolved through a hand-rolled conjunct splitter), this class has a SINGLE
 /// leading `each` quantifier and per-conjunct negated-type exclusions
 /// ("non-Equipment", "non-Aura") — so the subject is delegated wholesale to
-/// the general target-phrase grammar (`parse_type_phrase`) instead. That
+/// the general target-phrase grammar (`parse_type_phrase_folding`) instead. That
 /// grammar already recurses per "and"-leg (restarting its own leading `non-`
 /// scan on each recursive call — see `starts_with_type_word`'s `non-` arm) and
 /// backfills the shared trailing qualifiers (controller, mana value) from the
@@ -1837,20 +2091,18 @@ pub(crate) fn parse_each_noncreature_subject_is_creature_with_pt_mv(
 /// `distribute_properties_to_or`. Reusing it is a straight class-coverage win
 /// over re-deriving that machinery in a bespoke splitter.
 ///
-/// The predicate composes three parsers: `parse_animation_spec` (base P/T +
-/// leading type/subtype grant, CR 613.4b + CR 205.1b layer 7b/4),
-/// `parse_additive_type_clause_modifications` (any EXTRA type noun the
-/// animation spec stops short of before "in addition to ..." — none for
-/// Bello, present for a Life-and-Limb-shaped sibling), and — kept LOCAL to
-/// this function rather than folded into that shared helper, which has
-/// several other call sites this change must not perturb — the same
-/// `split_keyword_list` + `push_grant_clause_modifications` +
-/// `parse_quoted_ability_modifications` composition `parse_continuous_modifications`
-/// already uses elsewhere, applied to the "and has ..." tail so a MIXED list
-/// of bare keywords and a quoted granted ability (CR 604.1 trigger / CR 702
-/// keyword) are both captured — today `parse_additive_type_clause_modifications`
-/// extracts only the quoted portion of that tail, silently dropping any bare
-/// keywords listed alongside it.
+/// The predicate composes two parsers: `parse_animation_spec` (base P/T +
+/// leading type/subtype grant, CR 613.4b + CR 205.1b layer 7b/4) and
+/// `parse_additive_type_clause_modifications` — the SINGLE owner of everything
+/// past that leading grant. The additive helper captures any EXTRA type noun
+/// before "in addition to ..." (none for Bello, present for a Life-and-Limb-shaped
+/// sibling) AND routes the trailing "... and has <X>" conjunct through
+/// `parse_continuous_modifications`, which subsumes both the bare-keyword list
+/// and the quoted-ability parse (CR 604.1 trigger / CR 702 keyword). A prior
+/// revision parsed that tail a SECOND time locally to recover bare keywords the
+/// helper then dropped; the helper no longer drops them, so the local re-parse
+/// was pure duplication (it emitted each bare keyword twice) and has been
+/// removed — the tail now has exactly one owner.
 pub(crate) fn parse_each_compound_subject_type_change(
     tp: &TextPair<'_>,
     text: &str,
@@ -1872,7 +2124,7 @@ pub(crate) fn parse_each_compound_subject_type_change(
 
     // STEP D — delegate the ENTIRE subject phrase to the general target-phrase
     // grammar instead of hand-rolling a conjunct splitter (see doc comment).
-    let (affected, subject_rest) = parse_type_phrase(subject_tp.original);
+    let (affected, subject_rest) = parse_type_phrase_folding(subject_tp.original);
     if !subject_rest.trim().is_empty() {
         return None;
     }
@@ -1910,36 +2162,19 @@ pub(crate) fn parse_each_compound_subject_type_change(
         return None;
     }
 
-    // STEP G — any EXTRA type/subtype noun the animation spec stops short of
-    // before "in addition to ...".
+    // STEP G — the shared additive-type-clause helper is the SINGLE owner of
+    // everything after the animation spec's leading grant: any EXTRA type/subtype
+    // noun before "in addition to ...", AND the full "... and has <X>" tail
+    // (bare keywords + a quoted granted ability, CR 604.1 trigger / CR 702
+    // keyword). The helper routes that tail through `parse_continuous_modifications`,
+    // which subsumes both the bare-keyword list and the quoted-ability parse — so
+    // this one call captures the mixed list without a second, redundant tail
+    // parser here. Dedup against the animation spec keeps the shared leading
+    // type/subtype (AddType Creature / AddSubtype Elemental) single.
     if let Some(additive) = parse_additive_type_clause_modifications(&format!("~ is {predicate}")) {
         for modification in additive {
             if !modifications.contains(&modification) {
                 modifications.push(modification);
-            }
-        }
-    }
-
-    // STEP H — the granted-ability tail after "... in addition to its/their
-    // other types": a mixed bare-keyword / quoted-ability list (CR 604.1 +
-    // CR 702). Located directly via " and has "/" and have " rather than
-    // re-deriving STEP E's marker word-list grammar.
-    if let Some((_, granted_tp)) = predicate_tp
-        .split_around(" and has ")
-        .or_else(|| predicate_tp.split_around(" and have "))
-    {
-        let granted_original = granted_tp.original.trim().trim_end_matches('.');
-        if !granted_original.is_empty() {
-            let stripped = strip_quoted_segments(granted_original);
-            for part in split_keyword_list(&stripped) {
-                if !part.trim().is_empty() {
-                    push_grant_clause_modifications(&mut modifications, part.as_ref(), None);
-                }
-            }
-            for modification in parse_quoted_ability_modifications(granted_original) {
-                if !modifications.contains(&modification) {
-                    modifications.push(modification);
-                }
             }
         }
     }
@@ -2090,6 +2325,201 @@ fn and_modification_boundary(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// CR 105.3: the additive "in addition to `<pronoun>` other colors" retain-
+/// suffix, shared by the single-subject ([`parse_subject_is_color`]) and
+/// multi-zone-compound ([`parse_compound_multi_zone_color_static`]) color
+/// handlers. Mirrors [`parse_chosen_type_additive_suffix`] for the type axis.
+fn parse_chosen_color_additive_suffix<'a>(input: &'a str, pronoun: &str) -> OracleResult<'a, ()> {
+    let (input, _) = tag(" in addition to ").parse(input)?;
+    let (input, _) = tag(pronoun).parse(input)?;
+    let (input, _) = tag(" other colors").parse(input)?;
+    Ok((input, ()))
+}
+
+/// CR 109.2 + CR 400.1 + CR 611.3a: off-battlefield card population for the
+/// Painter's Servant / Mycosynth Lattice Oxford subject. "Cards that aren't on
+/// the battlefield" means every zone where a card can sit *except* the
+/// battlefield and the stack (stack objects are spells, covered by a sibling
+/// leg). Matches the zone set used by off-battlefield keyword grants
+/// (`keyword_grant` "cards you own that aren't on the battlefield") plus
+/// Library (Painter applies in all zones globally, not only "you own").
+fn off_battlefield_card_zones() -> Vec<Zone> {
+    vec![
+        Zone::Library,
+        Zone::Hand,
+        Zone::Graveyard,
+        Zone::Exile,
+        Zone::Command,
+    ]
+}
+
+/// CR 109.2 + CR 400.1: one Oxford leg of the multi-zone color subject class.
+/// Built for the category of legs that appear in Painter's Servant / Mycosynth
+/// Lattice — not a single card. Bare "spells" lowers via the same stack scoping
+/// that Secret Arcade's spell conjunct uses (`TargetFilter::StackSpell`).
+fn parse_multi_zone_color_subject_leg(input: &str) -> OracleResult<'_, TargetFilter> {
+    // "cards that aren't on the battlefield" — optional plural spelling.
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("cards that aren't on the battlefield"),
+        tag("card that isn't on the battlefield"),
+        tag("cards that are not on the battlefield"),
+    ))
+    .parse(input)
+    {
+        return Ok((
+            rest,
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InAnyZone {
+                zones: off_battlefield_card_zones(),
+            }])),
+        ));
+    }
+
+    // Bare "spells" / "spell" → stack objects (CR 109.2).
+    if let Ok((rest, _)) = alt((tag::<_, _, OracleError<'_>>("spells"), tag("spell"))).parse(input)
+    {
+        return Ok((rest, TargetFilter::StackSpell));
+    }
+
+    // Bare "permanents" / "permanent" → battlefield permanents.
+    if let Ok((rest, _)) =
+        alt((tag::<_, _, OracleError<'_>>("permanents"), tag("permanent"))).parse(input)
+    {
+        return Ok((
+            rest,
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)),
+        ));
+    }
+
+    Err(nom::Err::Error(OracleError::new(
+        input,
+        nom::error::ErrorKind::Tag,
+    )))
+}
+
+/// CR 611.3a: peel an Oxford / dual-leg multi-zone color subject into a genuine
+/// `Or` of 2+ zone-scoped filters. Accepts the Painter's Servant / Mycosynth
+/// Lattice canonical form
+/// `"All cards that aren't on the battlefield, spells, and permanents"` and the
+/// dual-leg `"…spells and permanents"` compression. Declines a single-leg
+/// subject so Shifting Sky / Darkest Hour stay with the single-subject color
+/// handlers.
+fn parse_multi_zone_oxford_color_subject(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (input, _) = opt(alt((tag::<_, _, OracleError<'_>>("all "), tag("each ")))).parse(input)?;
+
+    let (mut remaining, first) = parse_multi_zone_color_subject_leg(input)?;
+    let mut filters = vec![first];
+
+    // ", <leg>" middle legs (Oxford comma list).
+    loop {
+        let Ok((after_comma, _)) = tag::<_, _, OracleError<'_>>(", ").parse(remaining) else {
+            break;
+        };
+        // Optional "and " after the final Oxford comma.
+        let after_and = match tag::<_, _, OracleError<'_>>("and ").parse(after_comma) {
+            Ok((rest, _)) => rest,
+            Err(_) => after_comma,
+        };
+        let Ok((rest, leg)) = parse_multi_zone_color_subject_leg(after_and) else {
+            break;
+        };
+        filters.push(leg);
+        remaining = rest;
+    }
+
+    // Dual-leg / trailing " and <leg>" without a preceding comma.
+    if let Ok((after_and, _)) = tag::<_, _, OracleError<'_>>(" and ").parse(remaining) {
+        let (rest, leg) = parse_multi_zone_color_subject_leg(after_and)?;
+        filters.push(leg);
+        remaining = rest;
+    }
+
+    let remaining = remaining.trim();
+    if !remaining.is_empty() {
+        return Err(nom::Err::Error(OracleError::new(
+            remaining,
+            nom::error::ErrorKind::Eof,
+        )));
+    }
+    if filters.len() < 2 {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    Ok((remaining, TargetFilter::Or { filters }))
+}
+
+/// CR 105.3 + CR 613.1e: additive chosen-color predicate
+/// `"the chosen color in addition to their other colors[.]"`.
+fn parse_chosen_color_additive_predicate(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("the chosen color").parse(input)?;
+    let (input, ()) = parse_chosen_color_additive_suffix(input, "their")?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    eof.parse(input)?;
+    Ok((input, ()))
+}
+
+/// CR 105.2c / CR 105.1 / CR 105.3 + CR 613.1e: color predicate owned by the
+/// multi-zone compound handler — additive chosen color (Painter's Servant) or
+/// a fully-consumed fixed/colorless expression (Mycosynth Lattice).
+fn parse_multi_zone_color_predicate(input: &str) -> OracleResult<'_, Vec<ContinuousModification>> {
+    if let Ok((rest, ())) = parse_chosen_color_additive_predicate(input) {
+        // CR 105.3: Painter's Servant retain-suffix → add (not replace).
+        return Ok((
+            rest,
+            vec![ContinuousModification::AddChosenColor {
+                mode: ColorChangeMode::Add,
+            }],
+        ));
+    }
+
+    let (input, predicate) = alt((
+        terminated(take_until::<_, _, OracleError<'_>>("."), tag(".")),
+        rest,
+    ))
+    .parse(input)?;
+    eof::<_, OracleError<'_>>(input)?;
+    let colors = parse_color_predicate(predicate.trim())
+        .ok_or_else(|| nom::Err::Error(OracleError::new(predicate, nom::error::ErrorKind::Fail)))?;
+    Ok((input, vec![ContinuousModification::SetColor { colors }]))
+}
+
+/// CR 611.3 + CR 611.3a + CR 105.3 + CR 613.1e: compound-subject sibling of
+/// [`parse_subject_is_color`]. "`All cards that aren't on the battlefield,
+/// spells, and permanents are <color predicate>`" (Painter's Servant /
+/// Mycosynth Lattice) — an Oxford multi-zone subject the single-subject color
+/// dispatcher can't reach because (1) `parse_continuous_subject_filter` has no
+/// Oxford peeler for this class and (2) Painter's additive chosen-color suffix
+/// rejects `all_consuming("the chosen color")`.
+///
+/// Structural mirror of [`parse_compound_you_control_chosen_type_static`] (#5406):
+/// own only the color predicate, require a genuine `Or` of 2+ zone-scoped legs,
+/// reuse the fully-wired `AddChosenColor` / `SetColor` runtime — no new variant.
+pub(crate) fn parse_compound_multi_zone_color_static(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    let (subject_tp, predicate_tp) = tp.split_around(" are ")?;
+    let (_, affected) = parse_multi_zone_oxford_color_subject(subject_tp.lower.trim()).ok()?;
+    match &affected {
+        TargetFilter::Or { filters } if filters.len() >= 2 => {}
+        _ => return None,
+    }
+
+    let (modifications, _) = nom_on_lower(
+        predicate_tp.original,
+        predicate_tp.lower,
+        parse_multi_zone_color_predicate,
+    )?;
+
+    Some(
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(modifications)
+            .description(description.to_string()),
+    )
+}
+
 /// CR 613.1e (Layer 5) + CR 105.2 / CR 105.3: Parse a color-defining static of
 /// the form "[subject] is/are [color expression]." for an ARBITRARY filter
 /// subject — generalizing [`parse_all_subject_are_color`] (which only accepts the
@@ -2104,6 +2534,8 @@ fn and_modification_boundary(input: &str) -> OracleResult<'_, ()> {
 /// - "the chosen color" → `AddChosenColor`, reading the source's
 ///   `ChosenAttribute::Color` (Shimmerwilds Growth: "Enchanted land is the chosen
 ///   color" — a preceding `As ~ enters, choose a color` binds the attribute).
+///   The additive retain-suffix `"in addition to their/its other colors"`
+///   (CR 105.3) is accepted via [`parse_chosen_color_additive_suffix`].
 ///
 /// The copula is " is " (singular subject) or " are " (plural subject); both
 /// route to the same color modification. Dispatched AFTER the specialized
@@ -2112,7 +2544,8 @@ fn and_modification_boundary(input: &str) -> OracleResult<'_, ()> {
 /// (self-referential CDA color lines, all-zone + `characteristic_defining`), so
 /// those keep ownership of their cases and this branch only claims the residual
 /// general-filter subjects. A self-referential subject is declined here outright
-/// (it must be a CDA, never a plain Layer-5 static).
+/// (it must be a CDA, never a plain Layer-5 static). Multi-zone Oxford compounds
+/// belong to [`parse_compound_multi_zone_color_static`].
 pub(crate) fn parse_subject_is_color(
     tp: &TextPair<'_>,
     description: &str,
@@ -2126,6 +2559,12 @@ pub(crate) fn parse_subject_is_color(
     let subject = subject_tp.original.trim();
     let predicate = predicate_tp.original.trim().trim_end_matches('.');
     let predicate_lower = predicate.to_lowercase();
+
+    // Decline the multi-zone Oxford compound subject so the dedicated compound
+    // handler owns it (Painter's Servant / Mycosynth Lattice).
+    if parse_multi_zone_oxford_color_subject(subject_tp.lower.trim()).is_ok() {
+        return None;
+    }
 
     // The subject must resolve to a concrete filter — otherwise this is not a
     // color-defining static (a bare "It is ..." / "this is ..." anaphor falls
@@ -2155,15 +2594,37 @@ pub(crate) fn parse_subject_is_color(
         return None;
     }
 
-    // CR 105.3: "the chosen color" reads the source's chosen color attribute.
-    if all_consuming(tag::<_, _, OracleError<'_>>("the chosen color"))
-        .parse(predicate_lower.as_str())
-        .is_ok()
-    {
+    // CR 105.3: "the chosen color" [+ optional additive retain-suffix] reads the
+    // source's chosen color attribute. Bare form → set/replace
+    // ([`ColorChangeMode::Set`], Shimmerwilds Growth / Shifting Sky). Additive
+    // "in addition to their/its other colors" → retain
+    // ([`ColorChangeMode::Add`], Painter's Servant class). One composed
+    // all_consuming parser owns both forms.
+    let chosen_color_mode = all_consuming(|i| {
+        let (i, _) = tag::<_, _, OracleError<'_>>("the chosen color").parse(i)?;
+        let (i, additive) = opt(alt((
+            |i| parse_chosen_color_additive_suffix(i, "their"),
+            |i| parse_chosen_color_additive_suffix(i, "its"),
+        )))
+        .parse(i)?;
+        Ok((
+            i,
+            if additive.is_some() {
+                ColorChangeMode::Add
+            } else {
+                ColorChangeMode::Set
+            },
+        ))
+    })
+    .parse(predicate_lower.as_str())
+    .ok()
+    .map(|(_, mode)| mode);
+
+    if let Some(mode) = chosen_color_mode {
         return Some(
             StaticDefinition::continuous()
                 .affected(affected)
-                .modifications(vec![ContinuousModification::AddChosenColor])
+                .modifications(vec![ContinuousModification::AddChosenColor { mode }])
                 .description(description.to_string()),
         );
     }

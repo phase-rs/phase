@@ -14,5 +14,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export CARGO_TARGET_DIR="$ROOT/target/ai"
 
-cargo build --release --bin ai-gate
-exec "$CARGO_TARGET_DIR/release/ai-gate" "$@"
+# server-release, matching the `cargo ai-gate` alias CI runs. NOT `--release`:
+# that is this workspace's WASM-size profile (opt-level 'z', panic = 'abort').
+cargo build --profile server-release --bin ai-gate
+exec "$CARGO_TARGET_DIR/server-release/ai-gate" "$@"

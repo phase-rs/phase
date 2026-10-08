@@ -1,0 +1,165 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 440
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 54,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "You may look at the top card of your library any time."
+      },
+      "node": {
+        "Static": {
+          "definition": {
+            "mode": "MayLookAtTopOfLibrary",
+            "affected": {
+              "type": "Typed",
+              "type_filters": [],
+              "controller": "You",
+              "properties": []
+            },
+            "modifications": [],
+            "condition": null,
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "You may look at the top card of your library any time."
+          },
+          "source_text": "You may look at the top card of your library any time.",
+          "body_ir": null
+        }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 55,
+          "end_byte": 263,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Would You Like A...? — Once each turn, you may play a historic land or cast a historic spell from the top of your library. When you do, create a Food token. (Artifacts, legendaries, and Sagas are historic.)"
+      },
+      "node": {
+        "Static": {
+          "definition": {
+            "mode": {
+              "TopOfLibraryCastPermission": {
+                "play_mode": "Play",
+                "frequency": "OncePerTurn",
+                "alt_cost": null
+              }
+            },
+            "affected": {
+              "type": "Or",
+              "filters": [
+                {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Land"
+                  ],
+                  "controller": null,
+                  "properties": [
+                    {
+                      "type": "Historic"
+                    }
+                  ]
+                },
+                {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Card"
+                  ],
+                  "controller": null,
+                  "properties": [
+                    {
+                      "type": "Historic"
+                    }
+                  ]
+                }
+              ]
+            },
+            "modifications": [],
+            "condition": null,
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "Would You Like A...? — Once each turn, you may play a historic land or cast a historic spell from the top of your library. When you do, create a Food token."
+          },
+          "source_text": "Would You Like A...? — Once each turn, you may play a historic land or cast a historic spell from the top of your library. When you do, create a Food token.",
+          "body_ir": null
+        }
+      }
+    },
+    {
+      "id": 2,
+      "source": {
+        "id": {
+          "item": 2,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 55,
+          "end_byte": 263,
+          "precision": "Exact",
+          "ordinal_within_span": 1
+        },
+        "fragment": "Would You Like A...? — Once each turn, you may play a historic land or cast a historic spell from the top of your library. When you do, create a Food token. (Artifacts, legendaries, and Sagas are historic.)"
+      },
+      "node": {
+        "Trigger": {
+          "Assembled": {
+            "definition": {
+              "mode": {
+                "Unknown": "when you do"
+              },
+              "execute": null,
+              "valid_card": null,
+              "origin": null,
+              "destination": null,
+              "trigger_zones": [],
+              "phase": null,
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": "Would You Like A...? — Once each turn, you may play a historic land or cast a historic spell from the top of your library. When you do, create a Food token.",
+              "constraint": null,
+              "condition": null,
+              "batched": false
+            },
+            "source_text": "Would You Like A...? — Once each turn, you may play a historic land or cast a historic spell from the top of your library. When you do, create a Food token."
+          }
+        }
+      }
+    }
+  ],
+  "source_text": "You may look at the top card of your library any time.\nWould You Like A...? — Once each turn, you may play a historic land or cast a historic spell from the top of your library. When you do, create a Food token. (Artifacts, legendaries, and Sagas are historic.)",
+  "card_name": "The Fourth Doctor"
+}

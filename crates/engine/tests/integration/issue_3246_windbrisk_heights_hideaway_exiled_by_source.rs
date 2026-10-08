@@ -233,12 +233,41 @@ fn windbrisk_heights_plays_correct_hidden_card_across_unrelated_tracked_set_acti
          via ExiledBySource, got {:?}",
         runner.state().objects[&shock].casting_permissions
     );
+    let shock_has_play_from_exile_permission = runner.state().objects[&shock]
+        .casting_permissions
+        .iter()
+        .any(|p| {
+            matches!(
+                p,
+                CastingPermission::PlayFromExile {
+                    granted_to,
+                    exiled_by_ability_controller,
+                    card_filter,
+                    ..
+                } if *granted_to == P0
+                    && *exiled_by_ability_controller == Some(P0)
+                    && card_filter.is_none()
+            )
+        });
+    assert!(
+        shock_has_play_from_exile_permission,
+        "Windbrisk must also grant a PlayFromExile look/play permission on the hidden Shock \
+         (face-down exile authority), got {:?}",
+        runner.state().objects[&shock].casting_permissions
+    );
     assert!(
         runner.state().objects[&bolt_decoy]
             .casting_permissions
             .is_empty(),
         "the unrelated TrackedSet(0) decoy must NOT receive a play permission, got {:?}",
         runner.state().objects[&bolt_decoy].casting_permissions
+    );
+    assert!(
+        !runner.state().objects[&bolt_decoy]
+            .casting_permissions
+            .iter()
+            .any(|p| matches!(p, CastingPermission::PlayFromExile { .. })),
+        "the unrelated TrackedSet(0) decoy must not receive PlayFromExile"
     );
     assert_eq!(
         runner.state().objects.get(&bolt_decoy).map(|o| o.zone),

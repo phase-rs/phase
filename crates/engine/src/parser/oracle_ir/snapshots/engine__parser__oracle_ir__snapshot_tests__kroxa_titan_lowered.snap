@@ -76,6 +76,9 @@ expression: "&lowered"
             "amount": {
               "type": "Fixed",
               "value": 3
+            },
+            "target": {
+              "type": "ScopedPlayer"
             }
           },
           "cost": null,
@@ -83,13 +86,37 @@ expression: "&lowered"
           "duration": null,
           "description": null,
           "target_prompt": null,
-          "condition": null,
+          "condition": {
+            "type": "And",
+            "conditions": [
+              {
+                "type": "Not",
+                "condition": {
+                  "type": "ZoneChangedThisWay",
+                  "filter": {
+                    "type": "Typed",
+                    "type_filters": [
+                      "Card",
+                      {
+                        "Non": "Land"
+                      }
+                    ],
+                    "controller": null,
+                    "properties": []
+                  }
+                }
+              },
+              {
+                "type": "ScopedPlayerMatches",
+                "filter": {
+                  "type": "Opponent"
+                }
+              }
+            ]
+          },
           "optional_targeting": false,
           "optional": false,
-          "forward_result": false,
-          "player_scope": {
-            "type": "Opponent"
-          }
+          "forward_result": false
         },
         "duration": null,
         "description": null,

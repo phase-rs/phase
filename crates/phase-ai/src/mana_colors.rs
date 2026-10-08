@@ -6,10 +6,15 @@
 //! (`subtypes` + `abilities`) so a `GameObject` view and a `CardFace` view share
 //! a single implementation, mirroring the `*_parts` pattern in `features`.
 
+use engine::ai_support::CandidateAction;
 use engine::game::mana_payment::{land_subtype_to_mana_type, outer_cost_color_demand, ColorDemand};
 use engine::game::mana_sources::mana_color_to_type;
-use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, ManaProduction};
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, CostCategory, Effect, ManaProduction,
+};
+use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
+use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaType;
 
 /// Distinct colored-mana types a land can produce, unioning (a) intrinsic mana
@@ -78,6 +83,7 @@ pub(crate) fn collect_mana_production_colors(
         }
         ManaProduction::Colorless { .. }
         | ManaProduction::ChosenColor { .. }
+        | ManaProduction::NotedType { .. }
         | ManaProduction::OpponentLandColors { .. }
         | ManaProduction::AnyTypeProduceableBy { .. }
         | ManaProduction::ChoiceAmongExiledColors { .. }
@@ -97,111 +103,98 @@ fn push_color(colors: &mut Vec<ManaType>, mana_type: ManaType) {
     }
 }
 
-/// Pick which color a flexible mana source (dual land, Mox Opal, City of Brass)
-/// should produce when answering a `ManaChoicePrompt::SingleColor` *during a
-/// pending cast*. The AI must produce the color the in-flight spell actually
-/// demands, not the first option in the list: tapping a U/R source for {R} when
-/// the spell needs {U} strands the colored pip and dead-ends the ManaPayment.
-///
-/// Returns the first option whose WUBRG colored demand of the pending cast is
-/// nonzero; if none of the options match a demanded color (generic-only cost, no
-/// pending cast), falls back to the first option — identical to the old `first()`
-/// behavior, so this is a strict improvement everywhere.
-///
-/// Limitation: `pending_cast.cost` is the FULL locked outer cost, not decremented
-/// per-pip as colors are produced. Demand is therefore exact for single-colored-pip
-/// costs (the repro: {2}{U}, {5}{U}) and a strict improvement over `first()` for
-/// all costs. Incremental per-pip demand tracking for multi-colored-pip costs
-/// (e.g. {U}{U}{R}, where two blues must be produced before red) is a documented
-/// follow-up, out of scope here.
-pub(crate) fn demand_aware_single_color(
-    options: &[ManaType],
-    state: &GameState,
-) -> Option<ManaType> {
-    let demand: ColorDemand = state
-        .pending_cast
-        .as_deref()
-        .map(|pc| outer_cost_color_demand(&pc.cost))
-        .unwrap_or([0u32; 5]);
-
-    options
-        .iter()
-        .copied()
-        .find(|&opt| match opt {
-            // WUBRG demand slot per color; Colorless has none, so it never
-            // satisfies a colored pip.
-            ManaType::White => demand[0] > 0,
-            ManaType::Blue => demand[1] > 0,
-            ManaType::Black => demand[2] > 0,
-            ManaType::Red => demand[3] > 0,
-            ManaType::Green => demand[4] > 0,
-            ManaType::Colorless => false,
-        })
-        .or_else(|| options.first().copied())
+/// Whether `mana_type` satisfies a colored pip the in-flight cost still demands.
+/// WUBRG demand slot per color; Colorless has no slot, so it never satisfies a
+/// colored pip.
+fn color_is_demanded(demand: ColorDemand, mana_type: ManaType) -> bool {
+    match mana_type {
+        ManaType::White => demand[0] > 0,
+        ManaType::Blue => demand[1] > 0,
+        ManaType::Black => demand[2] > 0,
+        ManaType::Red => demand[3] > 0,
+        ManaType::Green => demand[4] > 0,
+        ManaType::Colorless => false,
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
-    use engine::types::game_state::PendingCast;
-    use engine::types::identifiers::{CardId, ObjectId};
-    use engine::types::mana::{ManaCost, ManaCostShard};
-    use engine::types::player::PlayerId;
-
-    fn state_with_cost(shards: Vec<ManaCostShard>, generic: u32) -> GameState {
-        let mut state = GameState::new_two_player(42);
-        state.pending_cast = Some(Box::new(PendingCast::new(
-            ObjectId(100),
-            CardId(100),
-            ResolvedAbility::new(
-                Effect::Draw {
-                    count: QuantityExpr::Fixed { value: 0 },
-                    target: TargetFilter::Controller,
-                },
-                Vec::new(),
-                ObjectId(100),
-                PlayerId(0),
-            ),
-            ManaCost::Cost { shards, generic },
-        )));
-        state
+/// CR 702.51a (Convoke) / CR 702.126a (Improvise) / Waterbend: whether tapping
+/// `object_id` for its Colorless convoke-family marker should be rejected
+/// because a currently-legal sibling candidate at this exact `ManaPayment`
+/// decision lets `object_id` instead pay a colored pip the pending cast still
+/// demands, via its own native mana ability.
+///
+/// This is zero-cost dominance, not a preference: both actions spend the SAME
+/// single tap on the SAME permanent, but the native ability can still cover
+/// the trailing generic slot once colored demand clears (or pay the colored
+/// pip directly), while the Colorless marker can never retroactively produce
+/// a stranded color. A dual-purpose permanent (e.g. an artifact land that
+/// also taps for a color) could otherwise be spent via the marker first,
+/// permanently stranding a colored pip and dead-ending `ManaPayment`.
+pub(crate) fn convoke_native_tap_still_demanded(
+    state: &GameState,
+    candidates: &[CandidateAction],
+    object_id: ObjectId,
+) -> bool {
+    let Some(pending_cast) = state.pending_cast.as_deref() else {
+        return false;
+    };
+    let demand = outer_cost_color_demand(&pending_cast.cost);
+    if demand == [0u32; 5] {
+        return false;
     }
+    candidates
+        .iter()
+        .any(|c| sibling_native_tap_pays_demand(state, &c.action, object_id, demand))
+}
 
-    #[test]
-    fn picks_demanded_blue_over_first_red() {
-        // {2}{U}: a U/R source offered [Red, Blue] must produce Blue (the
-        // demanded color), not Red (the first option).
-        let state = state_with_cost(vec![ManaCostShard::Blue], 2);
-        assert_eq!(
-            demand_aware_single_color(&[ManaType::Red, ManaType::Blue], &state),
-            Some(ManaType::Blue)
-        );
-    }
-
-    #[test]
-    fn generic_only_cost_falls_back_to_first() {
-        // {2}: no colored demand, so the first option (Red) is fine.
-        let state = state_with_cost(Vec::new(), 2);
-        assert_eq!(
-            demand_aware_single_color(&[ManaType::Red, ManaType::Blue], &state),
-            Some(ManaType::Red)
-        );
-    }
-
-    #[test]
-    fn no_pending_cast_falls_back_to_first() {
-        let state = GameState::new_two_player(42);
-        assert!(state.pending_cast.is_none());
-        assert_eq!(
-            demand_aware_single_color(&[ManaType::Red, ManaType::Blue], &state),
-            Some(ManaType::Red)
-        );
-    }
-
-    #[test]
-    fn empty_options_returns_none() {
-        let state = state_with_cost(vec![ManaCostShard::Blue], 2);
-        assert_eq!(demand_aware_single_color(&[], &state), None);
+fn sibling_native_tap_pays_demand(
+    state: &GameState,
+    action: &GameAction,
+    object_id: ObjectId,
+    demand: ColorDemand,
+) -> bool {
+    match action {
+        GameAction::TapLandForMana { selection } => {
+            selection.source.object_id == object_id
+                && color_is_demanded(demand, selection.mana_type)
+        }
+        // Only a tap-cost native ability actually competes for this same tap:
+        // a tapless ability (e.g. a sacrifice-based mana ability) can still be
+        // activated AFTER paying the Colorless marker, so it never strands a
+        // colored pip and must not gate the Colorless action. Use the cost's
+        // own category classification (CR 118) rather than re-matching cost
+        // shapes by hand -- it already flattens Composite costs correctly.
+        GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+        } if *source_id == object_id => state
+            .objects
+            .get(source_id)
+            .and_then(|obj| obj.abilities.get(*ability_index))
+            .is_some_and(|ability| {
+                let taps_self = ability
+                    .cost
+                    .as_ref()
+                    .is_some_and(|cost| cost.categories().contains(&CostCategory::TapsSelf));
+                if !taps_self {
+                    return false;
+                }
+                let mut colors = Vec::new();
+                if let Effect::Mana { produced, .. } = &*ability.effect {
+                    collect_mana_production_colors(&mut colors, produced);
+                }
+                colors.iter().any(|&c| color_is_demanded(demand, c))
+            }),
+        // CR 702.51a: Convoke (unlike Improvise/Waterbend) offers a colored
+        // marker per color the creature has, alongside the Colorless one --
+        // `mana_payment_actions` emits both for the same object. A colored
+        // `TapForConvoke` on the SAME object is just as dominating a sibling
+        // as a native land/ability tap: it pays a matching colored pip, so
+        // the Colorless marker is never the only way to spend this creature.
+        GameAction::TapForConvoke {
+            object_id: sibling_id,
+            mana_type,
+        } if *sibling_id == object_id => color_is_demanded(demand, *mana_type),
+        _ => false,
     }
 }

@@ -10,13 +10,316 @@ import re
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pr_review
+import pr_review_dashboard
 
 
 class PrReviewTests(unittest.TestCase):
+    def test_scan_candidate_keeps_github_url_for_dashboard_navigation(self) -> None:
+        context = type(
+            "DashboardContext",
+            (),
+            {
+                "local_latest_events": {},
+                "local_latest_observations": {},
+                "local_latest_looks": {},
+                "local_latest_actions": {},
+            },
+        )()
+        candidate = pr_review.scan_candidate(
+            {
+                "number": 44,
+                "title": "Useful change",
+                "url": "https://github.com/phase-rs/phase/pull/44",
+                "headRefOid": "head",
+            },
+            {
+                "pr": {"author_login": "author", "self_authored": False},
+                "classification": {"surface": "backend", "gate": "review", "hard_stop_paths": []},
+                "ci": {"state": "green"},
+                "parse_diff": {},
+                "recommendation": {"advisory_action": "review", "reason": "unreviewed"},
+                "policy_trace": [],
+            },
+            context,
+        )
+
+        self.assertEqual(candidate["url"], "https://github.com/phase-rs/phase/pull/44")
+
+    def test_dashboard_history_separates_observations_from_material_actions(self) -> None:
+        events = [
+            {
+                "event_type": "review",
+                "pr": 52,
+                "head_sha": "old-head",
+                "timestamp": "2026-07-10T00:00:00Z",
+                "summary": "Requested a regression test",
+            },
+            {
+                "event_type": "observation",
+                "pr": 52,
+                "head_sha": "current-head",
+                "timestamp": "2026-07-11T00:00:00Z",
+                "summary": "Confirmed the author follow-up",
+            },
+        ]
+        context = type(
+            "DashboardContext",
+            (),
+            {
+                "local_latest_events": pr_review.latest_events_by_pr(events),
+                "local_latest_observations": pr_review.latest_observations_by_pr(events),
+                "local_latest_looks": pr_review.latest_looks_by_pr(events),
+                "local_latest_actions": pr_review.latest_material_actions_by_pr(events),
+            },
+        )()
+
+        history = pr_review.dashboard_local_history(context, 52, "current-head")
+
+        self.assertEqual(
+            history["last_recorded_observation"]["summary"],
+            "Confirmed the author follow-up",
+        )
+        self.assertEqual(
+            history["last_recorded_look"]["summary"],
+            "Confirmed the author follow-up",
+        )
+        self.assertEqual(
+            history["last_material_action"]["summary"],
+            "Requested a regression test",
+        )
+        self.assertFalse(history["last_material_action"]["head_matches_current"])
+
+    def test_dashboard_material_action_also_counts_as_a_recorded_look(self) -> None:
+        events = [
+            {
+                "event_type": "blocked",
+                "pr": 52,
+                "head_sha": "current-head",
+                "timestamp": "2026-07-11T00:00:00Z",
+                "summary": "Waiting for a rules fix",
+            }
+        ]
+        context = type(
+            "DashboardContext",
+            (),
+            {
+                "local_latest_events": pr_review.latest_events_by_pr(events),
+                "local_latest_observations": pr_review.latest_observations_by_pr(events),
+                "local_latest_looks": pr_review.latest_looks_by_pr(events),
+                "local_latest_actions": pr_review.latest_material_actions_by_pr(events),
+            },
+        )()
+
+        history = pr_review.dashboard_local_history(context, 52, "current-head")
+
+        self.assertIsNone(history["last_recorded_observation"])
+        self.assertEqual(history["last_recorded_look"]["event_type"], "blocked")
+        self.assertEqual(
+            history["last_recorded_look"]["summary"],
+            "Waiting for a rules fix",
+        )
+
+    def test_observation_does_not_replace_current_head_hold_or_review_label(self) -> None:
+        held = {
+            "event_type": "held",
+            "outcome": "held",
+            "pr": 52,
+            "head_sha": "current-head",
+            "timestamp": "2026-07-11T00:00:00Z",
+            "review_routing_label": "pr:approved-for-review",
+        }
+        observation = {
+            "event_type": "observation",
+            "pr": 52,
+            "head_sha": "current-head",
+            "timestamp": "2026-07-11T01:00:00Z",
+        }
+        current = pr_review.latest_events_by_pr_head([held, observation])
+        self.assertIs(current[(52, "current-head")], held)
+        self.assertIs(pr_review.latest_events_by_pr([held, observation])[52], observation)
+
+        recommendation = pr_review.recommend_from_packet(
+            {
+                "pr": {
+                    "number": 52,
+                    "state": "OPEN",
+                    "headRefOid": "current-head",
+                    "reviewDecision": "CHANGES_REQUESTED",
+                    "labels": ["pr:approved-for-review"],
+                },
+                "classification": {"hard_stop_paths": [], "surface": "backend"},
+                "ci": {"state": "failed"},
+                "parse_diff": {"state": "baseline_pending"},
+                "policy": {"labels": {"approved_for_review": "pr:approved-for-review"}},
+                "local_current_event": current[(52, "current-head")],
+            }
+        )
+        self.assertEqual(recommendation["advisory_action"], "hold_ci")
+
+        new_head = pr_review.latest_events_by_pr_head(
+            [held, {**observation, "head_sha": "new-head"}]
+        )
+        self.assertNotIn((52, "new-head"), new_head)
+
+    def test_dashboard_terminal_sections_keep_old_closed_prs_in_archive(self) -> None:
+        reference = datetime(2026, 7, 15, tzinfo=UTC)
+        sections = pr_review.dashboard_terminal_sections(
+            [
+                {"pr": 1, "state": "CLOSED", "closed_at": "2026-07-14T00:00:00Z"},
+                {"pr": 2, "state": "CLOSED", "closed_at": "2026-07-10T00:00:00Z"},
+                {"pr": 3, "state": "MERGED", "merged_at": "2026-07-01T00:00:00Z"},
+            ],
+            reference,
+        )
+
+        self.assertEqual([row["pr"] for row in sections["closed_recent"]], [1])
+        self.assertEqual([row["pr"] for row in sections["closed_archive"]], [2])
+        self.assertEqual([row["pr"] for row in sections["merged"]], [3])
+
+    def test_dashboard_renderer_escapes_snapshot_content_and_auto_refreshes(self) -> None:
+        rendered = pr_review_dashboard.render_dashboard(
+            {
+                "generated_at": "2026-07-15T00:00:00Z",
+                "action_counts": {"review": 1},
+                "candidates_by_action": {
+                    "review": [
+                        {
+                            "pr": 44,
+                            "title": "<script>alert(1)</script>",
+                            "url": "https://example.test/pull/44",
+                            "advisory_action": "review",
+                            "reason": "fresh_head",
+                            "ci": "green",
+                            "local_history": {},
+                        }
+                    ]
+                },
+                "dashboard": {"closed_unmerged": {"recent": [], "archive": []}, "merged": []},
+            }
+        )
+
+        self.assertIn('http-equiv="refresh" content="60"', rendered)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", rendered)
+        self.assertNotIn("<script>alert(1)</script>", rendered)
+        self.assertIn("<table>", rendered)
+        self.assertIn('data-detail-target="open-details-44"', rendered)
+        self.assertIn('id="pr-review-dashboard"', rendered)
+        self.assertIn('href="https://example.test/pull/44"', rendered)
+        self.assertIn('target="_blank"', rendered)
+        self.assertIn('class="status-label ready"', rendered)
+        self.assertNotIn('class="badge ready"', rendered)
+        self.assertIn('aria-label="CI passing"', rendered)
+        self.assertIn(">✓</span>", rendered)
+        self.assertIn('id="pr-search"', rendered)
+        self.assertIn('data-status-filter="review"', rendered)
+        self.assertIn('id="ci-filter"', rendered)
+        self.assertIn('const syncFilterUrl', rendered)
+
+    def test_dashboard_data_updates_terminal_archive_and_removes_reopened_prs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "review-dashboard.json"
+            pr_review.write_json_atomically(
+                output,
+                {
+                    "terminal_archive": [
+                        {"pr": 7, "state": "CLOSED", "closed_at": "2026-07-01T00:00:00Z"}
+                    ]
+                },
+            )
+            args = type(
+                "DashboardArgs",
+                (),
+                {
+                    "output": output,
+                    "html_output": None,
+                    "state_dir": Path(temp),
+                    "repo": "phase-rs/phase",
+                    "terminal_limit": 200,
+                    "limit": 100,
+                },
+            )()
+            scan_output = {
+                "generated_at": "2026-07-15T00:00:00Z",
+                "candidates_by_action": {"review": [{"pr": 7}]},
+            }
+            terminal_row = {
+                "pr": 8,
+                "state": "CLOSED",
+                "closed_at": pr_review.now_iso(),
+            }
+            context = type(
+                "DashboardContext",
+                (),
+                {
+                    "local_latest_events": {},
+                    "local_latest_observations": {},
+                    "local_latest_looks": {},
+                    "local_latest_actions": {},
+                },
+            )()
+            with (
+                mock.patch.object(pr_review, "load_review_context", return_value=context),
+                mock.patch.object(pr_review, "build_scan_output", return_value=scan_output),
+                mock.patch.object(pr_review, "fetch_terminal_prs", return_value=[{"number": 8}]),
+                mock.patch.object(pr_review, "dashboard_terminal_row", return_value=terminal_row),
+            ):
+                self.assertEqual(pr_review.command_dashboard_data(args), 0)
+
+            snapshot = json.loads(output.read_text())
+            self.assertEqual([row["pr"] for row in snapshot["terminal_archive"]], [8])
+            self.assertEqual([row["pr"] for row in snapshot["dashboard"]["closed_unmerged"]["recent"]], [8])
+            self.assertTrue(output.with_suffix(".html").exists())
+
+    def test_gh_user_uses_graphql_viewer_query(self) -> None:
+        with mock.patch.object(
+            pr_review,
+            "run_json",
+            return_value={"data": {"viewer": {"login": "maintainer"}}},
+        ) as run_json:
+            self.assertEqual(pr_review.gh_user(), "maintainer")
+
+        self.assertEqual(
+            run_json.call_args.args[0],
+            [
+                "gh",
+                "api",
+                "graphql",
+                "-f",
+                "query=query { viewer { login } }",
+            ],
+        )
+
+    def test_required_status_checks_use_effective_graphql_branch_rule(self) -> None:
+        with mock.patch.object(
+            pr_review,
+            "run_json",
+            return_value={
+                "data": {
+                    "repository": {
+                        "ref": {
+                            "branchProtectionRule": {
+                                "requiredStatusCheckContexts": ["Rust", "Frontend"]
+                            }
+                        }
+                    }
+                }
+            },
+        ) as run_json:
+            self.assertEqual(
+                pr_review.required_status_check_names("phase-rs/phase", "main"),
+                {"Rust", "Frontend"},
+            )
+
+        command = run_json.call_args.args[0]
+        self.assertIn("graphql", command)
+        self.assertIn("qualifiedName=refs/heads/main", command)
+        self.assertNotIn("protection/required_status_checks", command)
+
     def test_event_record_is_idempotent_and_compacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state_dir = Path(temp)
@@ -60,8 +363,99 @@ class PrReviewTests(unittest.TestCase):
             [".claude/skills/pr-review-loop/SKILL.md"],
         )
 
-    def test_packet_exposes_quality_label_from_policy(self) -> None:
-        policy = pr_review.Policy({"labels": {"quality": "quality"}})
+    def test_approved_for_review_label_forces_one_review_before_hard_stop(self) -> None:
+        packet = {
+            "pr": {
+                "number": 7029,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "labels": ["pr:approved-for-review"],
+                "self_authored": False,
+            },
+            "classification": {
+                "hard_stop_paths": [".github/workflows/ci.yml"],
+                "surface": "hard_stop",
+            },
+            "policy": {
+                "labels": {"approved_for_review": "pr:approved-for-review"}
+            },
+            "ci": {"state": "green"},
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(recommendation["reason"], "approved_for_review_label")
+
+        packet["local_current_event"] = {
+            "event_type": "changes_requested",
+            "review_routing_label": "pr:approved-for-review",
+        }
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "request_changes")
+        self.assertEqual(recommendation["reason"], "hard_stop")
+
+    def test_approved_for_review_label_yields_to_self_review_and_admission_gates(
+        self,
+    ) -> None:
+        base = {
+            "pr": {
+                "number": 7030,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "labels": ["pr:approved-for-review"],
+                "self_authored": False,
+            },
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "policy": {"labels": {"approved_for_review": "pr:approved-for-review"}},
+            "ci": {"state": "green"},
+        }
+
+        # Positive control: without a competing gate this packet does reach review,
+        # so a non-review result below is the gate winning, not a malformed packet.
+        self.assertEqual(
+            pr_review.recommend_from_packet(base)["advisory_action"], "review"
+        )
+
+        recommendation = pr_review.recommend_from_packet(
+            {**base, "pr": {**base["pr"], "self_authored": True}}
+        )
+        self.assertEqual(recommendation["advisory_action"], "skip")
+        self.assertEqual(recommendation["reason"], "self_authored")
+
+        for key, profile, action, reason in (
+            ("artifacts", {"hold": True}, "hold", "insufficient_admission_data"),
+            (
+                "artifacts",
+                {"decline": True},
+                "decline",
+                "required_artifacts_current_head",
+            ),
+            (
+                "architecture_scope",
+                {"decline": True},
+                "decline",
+                "architecture_scope_not_authorized",
+            ),
+        ):
+            with self.subTest(gate=f"{key}:{sorted(profile)[0]}"):
+                recommendation = pr_review.recommend_from_packet(
+                    {**base, key: profile}
+                )
+
+                self.assertEqual(recommendation["advisory_action"], action)
+                self.assertEqual(recommendation["reason"], reason)
+
+    def test_packet_exposes_review_labels_from_policy(self) -> None:
+        policy = pr_review.Policy(
+            {
+                "labels": {
+                    "quality": "quality",
+                    "approved_for_review": "pr:approved-for-review",
+                }
+            }
+        )
         packet = pr_review.make_packet(
             {
                 "number": 5200,
@@ -77,6 +471,10 @@ class PrReviewTests(unittest.TestCase):
         )
 
         self.assertEqual(packet["policy"]["labels"]["quality"], "quality")
+        self.assertEqual(
+            packet["policy"]["labels"]["approved_for_review"],
+            "pr:approved-for-review",
+        )
 
     def test_stale_approval_recommends_dequeue_when_queued(self) -> None:
         packet = {
@@ -969,7 +1367,11 @@ class PrReviewTests(unittest.TestCase):
         self.assertEqual(recommendation["advisory_action"], "defer")
         self.assertEqual(recommendation["reason"], "frontend_policy")
 
-    def test_current_head_hold_does_not_suppress_green_review(self) -> None:
+    def test_current_head_bare_hold_is_honored(self) -> None:
+        # A recorded hold on the current head with nothing new — green CI, no
+        # author follow-up, no parse-diff — is honored rather than re-reviewed.
+        # (Resurfacing on a real change is covered by the parse-diff and
+        # head-change tests below.)
         packet = {
             "pr": {
                 "number": 4574,
@@ -991,8 +1393,269 @@ class PrReviewTests(unittest.TestCase):
 
         recommendation = pr_review.recommend_from_packet(packet)
 
+        self.assertEqual(recommendation["advisory_action"], "hold")
+        self.assertEqual(recommendation["reason"], "local_hold_current_head")
+
+    def test_ci_hold_rechecks_after_required_ci_settles(self) -> None:
+        packet = {
+            "pr": {
+                "number": 4576,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "reviewDecision": "",
+                "isInMergeQueue": False,
+            },
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": None,
+            "local_current_event": {
+                "event_type": "held",
+                "outcome": "hold_ci",
+                "head_sha": "head",
+            },
+            "policy_trace": [],
+        }
+
+        for ci_state in ("green", "failed"):
+            with self.subTest(ci_state=ci_state):
+                recommendation = pr_review.recommend_from_packet(
+                    {**packet, "ci": {"state": ci_state}}
+                )
+
+                self.assertEqual(
+                    recommendation["advisory_action"], "recheck_ci_hold_for_handler"
+                )
+                self.assertEqual(recommendation["reason"], "ci_hold_settled")
+
+    def test_ci_hold_remains_held_while_required_ci_is_pending(self) -> None:
+        packet = {
+            "pr": {
+                "number": 4577,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "reviewDecision": "",
+                "isInMergeQueue": False,
+            },
+            "ci": {"state": "pending"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": None,
+            "local_current_event": {
+                "event_type": "held",
+                "outcome": "hold_ci",
+                "head_sha": "head",
+            },
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "hold_ci")
+        self.assertEqual(recommendation["reason"], "local_hold_current_head")
+
+    def test_ci_hold_recheck_does_not_hide_a_current_head_conflict(self) -> None:
+        packet = {
+            "pr": {
+                "number": 4578,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "reviewDecision": "",
+                "isInMergeQueue": False,
+                "mergeStateStatus": "DIRTY",
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": None,
+            "local_current_event": {
+                "event_type": "held",
+                "outcome": "hold_ci",
+                "head_sha": "head",
+            },
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "blocked")
+        self.assertEqual(recommendation["reason"], "local_hold_current_head")
+
+    def test_bare_local_hold_resurfaces_on_parse_diff(self) -> None:
+        # A parse-diff update landing after the hold re-surfaces the same head.
+        packet = {
+            "pr": {
+                "number": 4575,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "reviewDecision": "",
+                "isInMergeQueue": False,
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": None,
+            "local_current_event": {
+                "event_type": "held",
+                "outcome": "held",
+                "head_sha": "head",
+                "timestamp": self._minutes_ago(5),
+            },
+            "parse_diff": {"updated_at": self._minutes_ago(1)},
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(recommendation["reason"], "parse_diff_after_local_hold")
+
+    def test_member_commented_last_helper(self) -> None:
+        # A review outranks an older comment; a member review last -> True.
+        self.assertTrue(
+            pr_review.member_commented_last(
+                {
+                    "comments": [
+                        {"authorAssociation": "CONTRIBUTOR", "createdAt": self._days_ago(1)},
+                    ],
+                    "reviews": [
+                        {"authorAssociation": "MEMBER", "submittedAt": self._minutes_ago(1)},
+                    ],
+                }
+            )
+        )
+        # Missing authorAssociation (e.g. a bot or cached payload) is not a
+        # member, so the guard never suppresses on absent data.
+        self.assertFalse(
+            pr_review.member_commented_last(
+                {
+                    "comments": [
+                        {"createdAt": self._minutes_ago(1)},
+                    ],
+                    "reviews": [],
+                }
+            )
+        )
+        # No dated activity at all -> False.
+        self.assertFalse(pr_review.member_commented_last({"comments": [], "reviews": []}))
+
+    def test_member_commented_last_holds_redundant_review(self) -> None:
+        # No state trigger fires and a repo member spoke last -> hold, so the
+        # sweep does not dispatch a redundant review of the same head.
+        packet = {
+            "pr": {
+                "number": 6262,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "",
+                "isInMergeQueue": False,
+                "commentsComplete": True,
+                "comments": [
+                    {
+                        "author": "contributor",
+                        "authorAssociation": "CONTRIBUTOR",
+                        "createdAt": self._days_ago(2),
+                        "updatedAt": self._days_ago(2),
+                    },
+                    {
+                        "author": "maintainer",
+                        "authorAssociation": "MEMBER",
+                        "createdAt": self._minutes_ago(5),
+                        "updatedAt": self._minutes_ago(5),
+                    },
+                ],
+                "reviews": [],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "hold")
+        self.assertEqual(
+            recommendation["reason"], "redundant_review_member_commented_last"
+        )
+
+    def test_contributor_commented_last_still_reviews(self) -> None:
+        # The converse of the guard: the contributor spoke last, so there is an
+        # unacknowledged follow-up and the PR must still surface for review.
+        packet = {
+            "pr": {
+                "number": 6263,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "",
+                "isInMergeQueue": False,
+                "commentsComplete": True,
+                "comments": [
+                    {
+                        "author": "maintainer",
+                        "authorAssociation": "MEMBER",
+                        "createdAt": self._days_ago(2),
+                        "updatedAt": self._days_ago(2),
+                    },
+                    {
+                        "author": "contributor",
+                        "authorAssociation": "CONTRIBUTOR",
+                        "createdAt": self._minutes_ago(5),
+                        "updatedAt": self._minutes_ago(5),
+                    },
+                ],
+                "reviews": [],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
         self.assertEqual(recommendation["advisory_action"], "review")
         self.assertEqual(recommendation["reason"], "needs_review")
+
+    def test_member_guard_never_overrides_head_change(self) -> None:
+        # A member spoke last, but the head advanced since the recorded event: a
+        # mandatory state trigger must win over the redundancy guard.
+        previous_event = {
+            "event_type": "reviewed",
+            "outcome": "reviewed",
+            "head_sha": "old-head",
+            "timestamp": self._minutes_ago(10),
+        }
+        pr = {
+            "number": 6264,
+            "state": "OPEN",
+            "headRefOid": "new-head",
+            "author_login": "contributor",
+            "reviewDecision": "",
+            "isInMergeQueue": False,
+            "commentsComplete": True,
+            "comments": [
+                {
+                    "author": "maintainer",
+                    "authorAssociation": "MEMBER",
+                    "createdAt": self._minutes_ago(5),
+                    "updatedAt": self._minutes_ago(5),
+                },
+            ],
+            "reviews": [],
+        }
+        packet = {
+            "pr": pr,
+            "acting_login": "maintainer",
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "old-head",
+            "local_current_event": None,
+            "freshness": pr_review.review_freshness(pr, "maintainer", None, previous_event),
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(recommendation["reason"], "head_changed_since_local_event")
 
     def test_author_followup_after_local_block_resurfaces_same_head(self) -> None:
         packet = {
@@ -1025,7 +1688,148 @@ class PrReviewTests(unittest.TestCase):
         recommendation = pr_review.recommend_from_packet(packet)
 
         self.assertEqual(recommendation["advisory_action"], "review")
-        self.assertEqual(recommendation["reason"], "author_followup_after_local_block")
+        self.assertEqual(
+            recommendation["reason"], "author_followup_after_maintainer_activity"
+        )
+
+    def test_edited_author_followup_is_not_acknowledged_by_later_hold_event(self) -> None:
+        local_event = {
+            "event_type": "held",
+            "outcome": "held",
+            "head_sha": "head",
+            "timestamp": self._minutes_ago(1),
+        }
+        pr = {
+            "number": 5015,
+            "state": "OPEN",
+            "headRefOid": "head",
+            "author_login": "contributor",
+            "reviewDecision": "CHANGES_REQUESTED",
+            "isInMergeQueue": False,
+            "commentsComplete": True,
+            "comments": [
+                {
+                    "author": "maintainer",
+                    "createdAt": self._days_ago(1),
+                    "updatedAt": self._days_ago(1),
+                },
+                {
+                    "author": "contributor",
+                    "createdAt": self._days_ago(2),
+                    "updatedAt": self._minutes_ago(2),
+                },
+            ],
+            "reviews": [],
+        }
+        packet = {
+            "pr": pr,
+            "acting_login": "maintainer",
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "local_current_event": local_event,
+            "freshness": pr_review.review_freshness(
+                pr, "maintainer", local_event, local_event
+            ),
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(
+            recommendation["reason"], "author_followup_after_maintainer_activity"
+        )
+
+    def test_changed_head_never_inherits_previous_hold(self) -> None:
+        previous_event = {
+            "event_type": "held",
+            "outcome": "held",
+            "head_sha": "old-head",
+            "timestamp": self._minutes_ago(5),
+        }
+        pr = {
+            "number": 5016,
+            "state": "OPEN",
+            "headRefOid": "new-head",
+            "author_login": "contributor",
+            "reviewDecision": "CHANGES_REQUESTED",
+            "isInMergeQueue": False,
+            "commentsComplete": True,
+            "comments": [],
+            "reviews": [],
+        }
+        packet = {
+            "pr": pr,
+            "acting_login": "maintainer",
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "old-head",
+            "local_current_event": None,
+            "freshness": pr_review.review_freshness(
+                pr, "maintainer", None, previous_event
+            ),
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(recommendation["reason"], "head_changed_since_local_event")
+
+    def test_incomplete_author_history_does_not_preserve_hold(self) -> None:
+        packet = {
+            "pr": {
+                "number": 5017,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "CHANGES_REQUESTED",
+                "isInMergeQueue": False,
+                "comments": [],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "local_current_event": {
+                "event_type": "held",
+                "outcome": "held",
+                "head_sha": "head",
+                "timestamp": self._minutes_ago(2),
+            },
+            "freshness": {"comment_history_incomplete": True},
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(recommendation["reason"], "author_activity_history_incomplete")
+
+    def test_author_followup_resurfaces_queued_pr(self) -> None:
+        packet = {
+            "pr": {
+                "number": 5018,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "APPROVED",
+                "isInMergeQueue": True,
+                "comments": [],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "freshness": {"author_followup_after_maintainer_activity": True},
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(
+            recommendation["reason"], "author_followup_after_maintainer_activity"
+        )
 
     def test_local_block_without_author_followup_stays_blocked(self) -> None:
         packet = {
@@ -1612,6 +2416,62 @@ class PrReviewTests(unittest.TestCase):
         self.assertIn("legacy-ci", summary["failures"])
         self.assertIn("clippy", summary["successes"])
 
+    def test_status_summary_ignores_non_required_failed_checks(self) -> None:
+        summary = pr_review.status_summary(
+            [
+                {
+                    "name": "Rust (fmt, clippy, test, coverage-gate)",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                },
+                {
+                    "name": "Frontend (lint, type-check, test)",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                },
+                {
+                    "name": "Contributor trust",
+                    "status": "COMPLETED",
+                    "conclusion": "ACTION_REQUIRED",
+                },
+            ],
+            {
+                "Rust (fmt, clippy, test, coverage-gate)",
+                "Frontend (lint, type-check, test)",
+            },
+        )
+
+        self.assertEqual(summary["state"], "green")
+        self.assertEqual(summary["failures"], [])
+        self.assertEqual(
+            summary["advisory"],
+            [
+                {
+                    "name": "Contributor trust",
+                    "status": "COMPLETED",
+                    "conclusion": "ACTION_REQUIRED",
+                }
+            ],
+        )
+
+    def test_status_summary_waits_for_missing_required_check(self) -> None:
+        summary = pr_review.status_summary(
+            [
+                {
+                    "name": "Rust (fmt, clippy, test, coverage-gate)",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                }
+            ],
+            {
+                "Rust (fmt, clippy, test, coverage-gate)",
+                "Frontend (lint, type-check, test)",
+            },
+        )
+
+        self.assertEqual(summary["state"], "pending")
+        self.assertEqual(summary["pending"], ["Frontend (lint, type-check, test)"])
+
     def test_recommend_defer_fe_is_case_insensitive(self) -> None:
         for outcome in ("DEFER-FE", "defer-fe"):
             packet = {
@@ -2196,7 +3056,7 @@ class PrReviewTests(unittest.TestCase):
             "crates/phase-server/src/main.rs",
         ]
         self.assertEqual(policy.architecture_scope_patterns, expected)
-        self.assertEqual(policy.architecture_scope_mode, "enforce")
+        self.assertEqual(policy.architecture_scope_mode, "review")
         self.assertEqual(policy.architecture_accepted_issue_label, "accepted")
         for pattern in expected:
             path = "crates/server-core/src/session.rs" if pattern.endswith("/**") else pattern
@@ -2205,6 +3065,8 @@ class PrReviewTests(unittest.TestCase):
                     {"author": {"login": "author"}}, [path], policy, {}
                 )
                 self.assertTrue(profile["triggered"])
+                self.assertTrue(profile["requires_maintainer_review"])
+                self.assertFalse(profile["decline"])
                 self.assertEqual(profile["evidence"]["matched_paths"], [path])
 
     def test_enforce_policy_requires_valid_cutoff_but_audit_allows_empty(self) -> None:
@@ -2458,7 +3320,6 @@ class PrReviewTests(unittest.TestCase):
                 "crates/engine/src/game/casting.rs",
                 "crates/engine/src/types/ability.rs",
                 "crates/phase-ai/src/policies/payment_selection.rs",
-                "crates/mtgish-import/src/convert/action.rs",
             ],
             policy,
             {},
@@ -2476,7 +3337,7 @@ class PrReviewTests(unittest.TestCase):
         self.assertFalse(pass_5552["triggered"])
         self.assertFalse(pass_5610["triggered"])
 
-    def test_architecture_scope_authorizes_only_private_author_or_accepted_closing_issue(self) -> None:
+    def test_architecture_scope_authorizes_private_author_or_accepted_label(self) -> None:
         policy = pr_review.Policy(
             {
                 "admission": {"mode": "audit", "accepted_issue_label": "accepted"},
@@ -2497,6 +3358,9 @@ class PrReviewTests(unittest.TestCase):
         private = pr_review.architecture_scope_profile(
             base_pr, ["central.rs"], policy, {"architecture_scope_authors": ["Contrib"]}
         )
+        direct_pr = copy.deepcopy(base_pr)
+        direct_pr["labels"] = [{"name": "accepted"}]
+        direct = pr_review.architecture_scope_profile(direct_pr, ["central.rs"], policy, {})
         issue_pr = copy.deepcopy(base_pr)
         issue_pr["closingIssuesReferences"] = [
             {"number": 42, "labels": [{"name": "accepted"}]}
@@ -2510,6 +3374,8 @@ class PrReviewTests(unittest.TestCase):
         self.assertTrue(denied["would_decline"])
         self.assertFalse(denied["authorized"])
         self.assertTrue(private["authorized"])
+        self.assertTrue(direct["authorized"])
+        self.assertTrue(direct["evidence"]["accepted_pr_label"])
         self.assertTrue(issue["authorized"])
         self.assertEqual(issue["evidence"]["accepted_closing_issues"], [42])
         self.assertFalse(incomplete["authorized"])
@@ -2639,25 +3505,108 @@ class PrReviewTests(unittest.TestCase):
         parse_step = workflow.split("- name: Parse-detail diff vs base baseline", 1)[1]
         self.assertNotIn("PAYLOAD_BASE_SHA", parse_step)
 
-    def test_gate_a_actual_success_output_is_sha_bound(self) -> None:
-        head = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+    def _rev_parse(self, rev: str) -> str:
+        return subprocess.run(
+            ["git", "rev-parse", rev],
             cwd=pr_review.REPO_ROOT,
             check=True,
             text=True,
             capture_output=True,
         ).stdout.strip()
-        result = subprocess.run(
-            [str(pr_review.REPO_ROOT / "scripts/check-parser-combinators.sh"), head],
+
+    def _run_parser_gate(self, base: str) -> "subprocess.CompletedProcess[str]":
+        return subprocess.run(
+            [str(pr_review.REPO_ROOT / "scripts/check-parser-combinators.sh"), base],
+            cwd=pr_review.REPO_ROOT,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
+    def test_gate_a_actual_success_output_is_sha_bound(self) -> None:
+        """A real base..head window prints the SHA-bound PASS evidence line.
+
+        The window is `HEAD~1..HEAD` — a genuine range — rather than `HEAD`
+        against itself. `base == head` names an empty range, which the gate now
+        refuses to certify (see the companion test below), so it is the wrong
+        window to assert success on.
+
+        The match is per-line (`re.MULTILINE`). The gate prints `Gate G` before
+        `Gate A`, so a whole-string `^...$` match can never succeed no matter
+        what the gate emits; the previous anchoring made this assertion
+        unsatisfiable rather than strict.
+        """
+        head = self._rev_parse("HEAD")
+        base = self._rev_parse("HEAD~1")
+        result = self._run_parser_gate(base)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(
+            result.stdout,
+            rf"(?m)^Gate A PASS head={re.escape(head)} base={re.escape(base)}$",
+        )
+
+    def test_gate_a_pass_line_is_the_line_pr_review_matches(self) -> None:
+        """The emitted evidence line is the one the review tool parses.
+
+        Two independent readers of one format drift silently. Asserting the
+        real gate output against `pr_review`'s own pattern is what makes the
+        format a contract rather than a coincidence.
+        """
+        head = self._rev_parse("HEAD")
+        base = self._rev_parse("HEAD~1")
+        result = self._run_parser_gate(base)
+        match = re.search(
+            r"(?m)^Gate A PASS head=([0-9a-f]{40}) base=([0-9a-f]{40})$",
+            result.stdout,
+        )
+        self.assertIsNotNone(match, result.stdout)
+        assert match is not None  # narrowing for type checkers
+        self.assertEqual(match.group(1), head)
+        self.assertEqual(match.group(2), base)
+
+    def test_gate_a_refuses_to_certify_an_unknowable_window(self) -> None:
+        """`base == head` with nothing staged scans zero lines, so it cannot PASS.
+
+        This is the defect the gate change addresses: an empty range plus an
+        empty index reads no input, and printing the same green as a real scan
+        reports a verdict the run never earned.
+
+        The exit-3 path is reachable only with `GIT_INDEX_FILE` unset — setting
+        it selects the pre-commit branch — so this case necessarily reads the
+        real index, which belongs to whoever runs the suite. The assertions are
+        therefore split: the diagnostic contract is asserted on a clean index,
+        and the invariant that holds in EVERY index state is asserted always.
+        See the companion test for a deterministic staged scan.
+        """
+        head = self._rev_parse("HEAD")
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--name-only", "--", "crates/engine/src/parser"],
             cwd=pr_review.REPO_ROOT,
             check=True,
             text=True,
             capture_output=True,
-        )
-        self.assertRegex(
-            result.stdout.strip(),
-            rf"^Gate A PASS head={re.escape(head)} base={re.escape(head)}$",
-        )
+        ).stdout.strip()
+        result = self._run_parser_gate(head)
+
+        # Holds regardless of what the runner has staged: the evidence line is
+        # never emitted except on a clean exit. A staged violation exits 1, so
+        # requiring exit 0 here would report a false red about the runner's
+        # index rather than about the gate.
+        if re.search(r"(?m)^Gate A PASS head=", result.stdout):
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+        if staged:
+            return
+
+        self.assertEqual(result.returncode, 3, result.stdout)
+        self.assertNotRegex(result.stdout, r"(?m)^Gate A PASS head=")
+        # The diagnostic is the deliverable of exit 3, not a courtesy: a bare
+        # non-zero exit would leave the caller unable to act. Assert the parts
+        # that make it actionable, on the stream the gate writes them to.
+        self.assertIn("Gate A CANNOT ANSWER", result.stderr)
+        self.assertIn(head, result.stderr)
+        self.assertIn("cannot tell clean parser work from parser work it never saw", result.stderr)
+        self.assertIn("scripts/check-parser-combinators.sh", result.stderr)
 
     def test_parse_diff_base_selects_non_head_parent_and_never_falls_back(self) -> None:
         script = pr_review.REPO_ROOT / "scripts/parse-diff-base.sh"

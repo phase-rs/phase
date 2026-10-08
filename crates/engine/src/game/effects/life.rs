@@ -5,18 +5,43 @@ use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, LifeTotalReading};
 use crate::types::game_state::{
     GameState, PendingEffectResolutionEvent, PendingEffectResolved, PendingLifeTotalAssignment,
     WaitingFor,
 };
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
+use crate::types::resolved_commands::ResolvedPlayerEdit;
 
-/// Signals that a replacement effect requires player choice before the event can proceed.
-/// Callers receiving this must yield control (the engine will re-enter after the choice).
-#[derive(Debug)]
-pub struct ReplacementDeferred;
+/// Why a replacement-routed life change could not complete synchronously.
+///
+/// Typed so phase-transition owners can distinguish the replacement-ordering
+/// round trip from a substitute effect that has already begun resolving and
+/// paused on its own interactive continuation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplacementDeferred {
+    /// CR 616.1: paused on the ordering choice BEFORE anything was applied.
+    /// The pipeline reports the real amount when the choice resumes.
+    ReplacementChoice,
+    /// CR 614.6: the root event already finished for `applied`; what paused is
+    /// the substitute effect that must resolve before the original resolution
+    /// may continue.
+    ///
+    /// Carrying the amount is load-bearing, not decorative: a caller that needs
+    /// to narrate WHY the life changed (the empty-pool drain's mana burn) learns
+    /// the true figure here and nowhere else. Dropping it forced that caller to
+    /// park provenance and hope a later resume would hand the number back — and
+    /// the resume that completes a substitute is not the one that applied the
+    /// root, so the number never came.
+    SubstitutionContinuation { applied: u32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubstitutionDrainOutcome {
+    Completed,
+    Deferred,
+}
 
 /// CR 119.1: Gain life — increase the player's life total.
 pub fn resolve_gain(
@@ -67,27 +92,7 @@ pub fn resolve_gain(
     // CR 614.1a: Route life gain through replacement pipeline.
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
-            if let ProposedEvent::LifeGain {
-                player_id,
-                amount: gain_amount,
-                ..
-            } = event
-            {
-                let player = state
-                    .players
-                    .iter_mut()
-                    .find(|p| p.id == player_id)
-                    .ok_or(EffectError::PlayerNotFound)?;
-                player.life += gain_amount as i32;
-                // CR 119.9: Track life gained this turn for triggered ability matching.
-                player.life_gained_this_turn += gain_amount;
-                crate::game::layers::mark_layers_full(state);
-
-                events.push(GameEvent::LifeChanged {
-                    player_id,
-                    amount: gain_amount as i32,
-                });
-            }
+            apply_life_gain_after_replacement(state, event, events);
         }
         ReplacementResult::Prevented => {
             // CR 614.1a + CR 614.6 — Issue #317: Cross-event-type
@@ -96,10 +101,18 @@ pub fn resolve_gain(
             // the substitute effect (e.g., Draw) as a post-replacement
             // continuation. Drain it now so the replacement actually
             // runs in the same resolution step.
-            drain_substitution_continuation(state, events);
+            if matches!(
+                drain_substitution_continuation(state, events),
+                SubstitutionDrainOutcome::Deferred
+            ) {
+                return Ok(());
+            }
         }
         ReplacementResult::NeedsChoice(player) => {
-            // TODO(CR 614.7): When multiple replacement effects apply to life gain, controller should choose which applies first. Currently falls through unconditionally.
+            // CR 616.1: two or more applicable life-gain replacements — the affected
+            // player chooses which applies first. Unlike every other arm here, this
+            // one returns WITHOUT pushing `EffectResolved`: the prompt owns the rest
+            // of the resolution.
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(player, state);
             return Ok(());
@@ -118,7 +131,7 @@ pub fn resolve_gain(
 /// Apply life gain, running through the replacement pipeline.
 /// Returns the actual amount of life gained (may differ due to replacements like Leyline of Hope).
 /// Returns `Err(ReplacementDeferred)` when multiple replacement effects compete and
-/// the player must choose which applies first (CR 614.7).
+/// the player must choose which applies first (CR 616.1).
 pub fn apply_life_gain(
     state: &mut GameState,
     player_id: PlayerId,
@@ -149,20 +162,30 @@ pub fn apply_life_gain(
             // life gain and its substitute. Mirrors the drain pattern in
             // `effects/draw.rs::draw_through_replacement`. The `Prevented` arm
             // below already drains via `drain_substitution_continuation`.
-            drain_substitution_continuation(state, events);
-            Ok(gained)
+            match drain_substitution_continuation(state, events) {
+                SubstitutionDrainOutcome::Completed => Ok(gained),
+                SubstitutionDrainOutcome::Deferred => {
+                    Err(ReplacementDeferred::SubstitutionContinuation { applied: gained })
+                }
+            }
         }
         ReplacementResult::Prevented => {
             // CR 614.1a + CR 614.6 — Issue #317: Drain substitute effect
             // stashed by cross-event-type replacement (Lich-class).
-            drain_substitution_continuation(state, events);
-            Ok(0)
+            match drain_substitution_continuation(state, events) {
+                SubstitutionDrainOutcome::Completed => Ok(0),
+                SubstitutionDrainOutcome::Deferred => {
+                    // Fully prevented: the root gained nothing, whatever the
+                    // substitute goes on to do.
+                    Err(ReplacementDeferred::SubstitutionContinuation { applied: 0 })
+                }
+            }
         }
         ReplacementResult::NeedsChoice(player) => {
             // CR 616.1: Multiple competing replacements — player must choose.
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(player, state);
-            Err(ReplacementDeferred)
+            Err(ReplacementDeferred::ReplacementChoice)
         }
     }
 }
@@ -177,11 +200,35 @@ pub fn apply_life_gain(
 /// `EventContextAmount` in the substitute reads `state.last_effect_count`
 /// (CR 615.5 fallback path), which the applier stamps with the prevented
 /// amount before returning.
-fn drain_substitution_continuation(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    if state.has_post_replacement_drain() {
-        let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+fn drain_substitution_continuation(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> SubstitutionDrainOutcome {
+    if !state.has_post_replacement_drain() {
+        return SubstitutionDrainOutcome::Completed;
+    }
+
+    // A life payment and several other production callers enter this authority
+    // while their own prompt is still the ambient `waiting_for`. That prompt is
+    // not evidence that the replacement continuation deferred. Run the
+    // substitute from a clean synchronous sentinel, then restore the caller's
+    // prompt only when the substitute itself completed without raising one.
+    let prior_waiting_for = std::mem::replace(
+        &mut state.waiting_for,
+        WaitingFor::Priority {
+            player: state.active_player,
+        },
+    );
+    if let Some(waiting_for) =
+        crate::game::engine_replacement::apply_pending_post_replacement_effect(
             state, None, None, None, events,
-        );
+        )
+    {
+        state.waiting_for = waiting_for;
+        SubstitutionDrainOutcome::Deferred
+    } else {
+        state.waiting_for = prior_waiting_for;
+        SubstitutionDrainOutcome::Completed
     }
 }
 
@@ -207,23 +254,42 @@ pub fn apply_life_gain_after_replacement(
         );
         return 0;
     };
-    if let Some(player) = state.players.iter_mut().find(|p| p.id == pid) {
-        player.life += gain_amount as i32;
-        player.life_gained_this_turn += gain_amount;
+    // CR 119.8: gaining 0 life doesn't count as gaining life — no state
+    // mutation and no journal command; the event below still fires as before.
+    if gain_amount != 0 {
+        state
+            .resolve_and_apply_player_edit(
+                pid,
+                ResolvedPlayerEdit::Life {
+                    delta: gain_amount as i32,
+                },
+            )
+            .expect("post-replacement life gain must target a live player");
     }
-    crate::game::layers::mark_layers_full(state);
+    // CR 611.3a + CR 119: gate escalation on a live life-reading static.
+    crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
     events.push(GameEvent::LifeChanged {
         player_id: pid,
         amount: gain_amount as i32,
+        // CR 119.1: read back after the edit, so a run of life changes carries
+        // each intermediate total rather than only the final snapshot's.
+        new_total: LifeTotalReading(
+            state
+                .players
+                .iter()
+                .find(|player| player.id == pid)
+                .map(|player| player.life),
+        ),
     });
     gain_amount
 }
 
-/// CR 120.3: Damage to a player causes that much life loss.
+/// CR 119.3: An effect that causes a player to lose life subtracts that much
+/// from the player's life total.
 /// Returns the actual amount of life lost (may differ due to replacements like doubling).
-/// Returns `Err(ReplacementDeferred)` when multiple replacement effects compete and
-/// the player must choose which applies first (CR 614.7).
-pub fn apply_damage_life_loss(
+/// Returns `Err(ReplacementDeferred)` whenever the replacement/substitution
+/// pipeline pauses for player input.
+pub fn apply_life_loss(
     state: &mut GameState,
     player_id: PlayerId,
     amount: u32,
@@ -232,8 +298,8 @@ pub fn apply_damage_life_loss(
     if amount == 0 {
         return Ok(0);
     }
-    // CR 119.8 + CR 120.3: When a player "can't lose life," damage-to-life-loss
-    // conversion is suppressed. Short-circuit BEFORE the replacement pipeline.
+    // CR 119.8: A player who can't lose life is unaffected. Short-circuit
+    // before the replacement pipeline.
     if crate::game::static_abilities::player_has_cant_lose_life(state, player_id) {
         return Ok(0);
     }
@@ -244,26 +310,54 @@ pub fn apply_damage_life_loss(
     };
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
-            Ok(apply_life_loss_after_replacement(state, event, events))
+            let lost = apply_life_loss_after_replacement(state, event, events);
+            // CR 614.6: A replacement that substitutes another effect must
+            // finish that effect before the original resolution may continue.
+            match drain_substitution_continuation(state, events) {
+                SubstitutionDrainOutcome::Completed => Ok(lost),
+                SubstitutionDrainOutcome::Deferred => {
+                    // The root loss is FINAL at this point — `lost` is what the
+                    // player actually paid. Only the substitute is unfinished.
+                    Err(ReplacementDeferred::SubstitutionContinuation { applied: lost })
+                }
+            }
         }
         ReplacementResult::Prevented => {
             // CR 614.1a + CR 614.6 — Issue #317: Drain substitute effect
             // stashed by cross-event-type replacement.
-            drain_substitution_continuation(state, events);
-            Ok(0)
+            match drain_substitution_continuation(state, events) {
+                SubstitutionDrainOutcome::Completed => Ok(0),
+                SubstitutionDrainOutcome::Deferred => {
+                    // Fully prevented: no life left the player, so nothing
+                    // downstream may narrate a loss.
+                    Err(ReplacementDeferred::SubstitutionContinuation { applied: 0 })
+                }
+            }
         }
         ReplacementResult::NeedsChoice(player) => {
             // CR 616.1: Multiple competing replacements — player must choose.
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(player, state);
-            Err(ReplacementDeferred)
+            Err(ReplacementDeferred::ReplacementChoice)
         }
     }
 }
 
-/// CR 120.3: Apply a post-replacement `ProposedEvent::LifeLoss` to the game state.
+/// CR 120.3a: Damage dealt to a player normally causes that player to lose
+/// that much life. This damage-specific seam delegates the resulting life-loss
+/// event to the generic CR 119.3 authority.
+pub fn apply_damage_life_loss(
+    state: &mut GameState,
+    player_id: PlayerId,
+    amount: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<u32, ReplacementDeferred> {
+    apply_life_loss(state, player_id, amount, events)
+}
+
+/// CR 119.3: Apply a post-replacement `ProposedEvent::LifeLoss` to the game state.
 ///
-/// Extracted from `apply_damage_life_loss`'s Execute arm so the same mutation can
+/// Extracted from `apply_life_loss`'s Execute arm so the same mutation can
 /// be invoked by `handle_replacement_choice` when a player accepts a life-loss
 /// replacement choice. Caller is responsible for emitting `EffectResolved`.
 pub fn apply_life_loss_after_replacement(
@@ -283,14 +377,44 @@ pub fn apply_life_loss_after_replacement(
         );
         return 0;
     };
-    if let Some(player) = state.players.iter_mut().find(|p| p.id == pid) {
-        player.life -= loss_amount as i32;
-        player.life_lost_this_turn += loss_amount;
+    // CR 119.8: losing 0 life doesn't count as losing life — no state
+    // mutation and no journal command; the event below still fires as before.
+    if loss_amount != 0 {
+        let before = crate::game::players::team_life_total(state, pid);
+        state
+            .resolve_and_apply_player_edit(
+                pid,
+                ResolvedPlayerEdit::Life {
+                    delta: -(loss_amount as i32),
+                },
+            )
+            .expect("post-replacement life loss must target a live player");
+        let after = crate::game::players::team_life_total(state, pid);
+        // The clone-local preview observes the real edit before events or a
+        // substitution continuation can introduce later, unrelated work.
+        crate::game::life_safety::record_life_mutation_receipt(
+            state,
+            pid,
+            before,
+            after,
+            loss_amount,
+        );
     }
-    crate::game::layers::mark_layers_full(state);
+    // CR 611.3a + CR 119 + CR 120.3a: gate escalation on a live life-reading
+    // static. Also the sink for non-infect player damage (deal_damage.rs).
+    crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
     events.push(GameEvent::LifeChanged {
         player_id: pid,
         amount: -(loss_amount as i32),
+        // CR 119.3: read back after the edit, so a run of combat-damage life
+        // losses carries each intermediate total rather than only the final one.
+        new_total: LifeTotalReading(
+            state
+                .players
+                .iter()
+                .find(|player| player.id == pid)
+                .map(|player| player.life),
+        ),
     });
     loss_amount
 }
@@ -314,7 +438,7 @@ pub enum LifeAssignmentOutcome {
 /// becomes `resulting_life` by *gaining or losing the difference* from a snapshot
 /// taken before any mutation (so the permutation is simultaneous and each delta
 /// is measured against the pre-resolution total, per CR 701.12c). The changes
-/// route through `apply_life_gain` / `apply_damage_life_loss` — not a raw
+/// route through `apply_life_gain` / `apply_life_loss` — not a raw
 /// `player.life = ...` set — so replacement effects may modify them and triggered
 /// abilities (Blood Artist-likes) trigger on the resulting gain/loss.
 ///
@@ -348,14 +472,14 @@ pub fn apply_life_totals_assignment(
     for (index, (pid, diff)) in deltas.iter().copied().enumerate() {
         let deferred = match diff.signum() {
             1 => apply_life_gain(state, pid, diff as u32, events).err(),
-            -1 => apply_damage_life_loss(state, pid, (-diff) as u32, events).err(),
+            -1 => apply_life_loss(state, pid, (-diff) as u32, events).err(),
             _ => None,
         };
         if deferred.is_some() {
             // CR 616.1: a competing replacement required a player choice; the
             // helper installed the WaitingFor and the resume path completes the
             // remaining assignments.
-            state.pending_life_total_assignment = Some(PendingLifeTotalAssignment {
+            state.push_life_total_assignment(PendingLifeTotalAssignment {
                 completion_player,
                 remaining: deltas[index + 1..].to_vec(),
                 completion: completion.clone(),
@@ -370,7 +494,7 @@ pub(crate) fn drain_pending_life_total_assignment(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) {
-    while let Some(mut pending) = state.pending_life_total_assignment.take() {
+    while let Some(mut pending) = state.take_active_life_total_assignment() {
         state.waiting_for = WaitingFor::Priority {
             player: pending.completion_player,
         };
@@ -384,11 +508,11 @@ pub(crate) fn drain_pending_life_total_assignment(
         };
 
         pending.remaining.remove(0);
-        state.pending_life_total_assignment = Some(pending);
+        state.push_life_total_assignment(pending);
 
         let deferred = match diff.signum() {
             1 => apply_life_gain(state, pid, diff as u32, events).err(),
-            -1 => apply_damage_life_loss(state, pid, (-diff) as u32, events).err(),
+            -1 => apply_life_loss(state, pid, (-diff) as u32, events).err(),
             _ => None,
         };
         if deferred.is_some() || !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
@@ -432,6 +556,9 @@ fn complete_pending_life_total_assignment(
             events.push(GameEvent::PlayerPerformedAction {
                 player_id: action.player_id,
                 action: action.action,
+                look_count: None,
+                scry_bottom_count: None,
+                scry_top_count: None,
             });
         }
     }
@@ -455,56 +582,8 @@ pub fn resolve_lose(
 
     let target_player_id = resolve_life_loss_target(state, ability, target_filter);
 
-    // CR 119.8: "If an effect says that a player can't lose life ... in that case,
-    // the exchange won't happen." Short-circuit BEFORE the replacement pipeline.
-    if crate::game::static_abilities::player_has_cant_lose_life(state, target_player_id) {
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::from(&ability.effect),
-            source_id: ability.source_id,
-            subject: None,
-        });
+    if apply_life_loss(state, target_player_id, amount.max(0) as u32, events).is_err() {
         return Ok(());
-    }
-
-    let proposed = ProposedEvent::LifeLoss {
-        player_id: target_player_id,
-        amount: amount as u32,
-        applied: HashSet::new(),
-    };
-
-    match replacement::replace_event(state, proposed, events) {
-        ReplacementResult::Execute(event) => {
-            if let ProposedEvent::LifeLoss {
-                player_id,
-                amount: loss_amount,
-                ..
-            } = event
-            {
-                let player = state
-                    .players
-                    .iter_mut()
-                    .find(|p| p.id == player_id)
-                    .ok_or(EffectError::PlayerNotFound)?;
-                player.life -= loss_amount as i32;
-                player.life_lost_this_turn += loss_amount;
-                crate::game::layers::mark_layers_full(state);
-
-                events.push(GameEvent::LifeChanged {
-                    player_id,
-                    amount: -(loss_amount as i32),
-                });
-            }
-        }
-        ReplacementResult::Prevented => {
-            // CR 614.1a + CR 614.6 — Issue #317: Drain substitute effect
-            // stashed by cross-event-type replacement.
-            drain_substitution_continuation(state, events);
-        }
-        ReplacementResult::NeedsChoice(player) => {
-            state.waiting_for =
-                crate::game::replacement::replacement_choice_waiting_for(player, state);
-            return Ok(());
-        }
     }
 
     events.push(GameEvent::EffectResolved {
@@ -516,7 +595,7 @@ pub fn resolve_lose(
     Ok(())
 }
 
-fn resolve_life_loss_target(
+pub(super) fn resolve_life_loss_target(
     state: &GameState,
     ability: &ResolvedAbility,
     target_filter: Option<&TargetFilter>,
@@ -533,10 +612,11 @@ fn resolve_life_loss_target(
 
     // Non-context-ref filters (e.g., explicit Player target on "target opponent
     // loses 2 life"): the chosen player is in `ability.targets`.
-    if let Some(player) = ability.targets.iter().find_map(|target| match target {
-        TargetRef::Player(player) => Some(*player),
-        _ => None,
-    }) {
+    // CR 601.2c: the read skips a separately announced quantity slot, so the
+    // primary target keeps its distinct slot identity.
+    if let Some(player) =
+        crate::game::ability_utils::primary_announced_player(&ability.targets, ability)
+    {
         return player;
     }
 
@@ -550,7 +630,7 @@ fn resolve_life_loss_target(
 /// Per CR 119.5: "If an effect sets a player's life total to a specific number,
 /// the player gains or loses the necessary amount of life to end up with the
 /// new total." The delta is therefore dispatched as either a `LifeGain` or
-/// `LifeLoss` event through [`apply_life_gain`] / [`apply_damage_life_loss`] so
+/// `LifeLoss` event through [`apply_life_gain`] / [`apply_life_loss`] so
 /// the full replacement pipeline fires and the CantGainLife / CantLoseLife
 /// short-circuits are consistent with every other life-change event.
 pub fn resolve_set_life_total(
@@ -584,7 +664,7 @@ pub fn resolve_set_life_total(
     };
 
     // CR 119.5: Set each player's life total one at a time, decomposing into the
-    // matching gain/loss event. apply_life_gain / apply_damage_life_loss each
+    // matching gain/loss event. apply_life_gain / apply_life_loss each
     // handle their own CR 119.7 / CR 119.8 short-circuits and replacement
     // pipeline routing.
     for target_player_id in target_player_ids {
@@ -619,7 +699,7 @@ pub fn resolve_set_life_total(
 
         let deferred = match diff.signum() {
             1 => apply_life_gain(state, target_player_id, diff as u32, events).err(),
-            -1 => apply_damage_life_loss(state, target_player_id, (-diff) as u32, events).err(),
+            -1 => apply_life_loss(state, target_player_id, (-diff) as u32, events).err(),
             _ => None,
         };
         if deferred.is_some() {
@@ -879,6 +959,7 @@ mod tests {
                 attacker,
                 crate::game::combat::AttackTarget::Player(PlayerId(0)),
             )],
+            declaration_records: Vec::new(),
         });
         let ability = ResolvedAbility::new(
             Effect::LoseLife {
@@ -967,6 +1048,56 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::LifeChanged { amount, .. } if *amount == -2)));
+    }
+
+    /// CR 119.1 + CR 119.3: every `LifeChanged` reports the player's life total
+    /// as it stands once that one change is applied — not the total after the
+    /// whole action. A run of changes is therefore replayable one at a time,
+    /// which is what lets a presentation layer show intermediate totals without
+    /// summing amounts (a sum diverges once a replacement alters one of them).
+    #[test]
+    fn life_changed_reports_the_total_after_each_individual_change() {
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+
+        for amount in [3, 4] {
+            let ability = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: amount },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            resolve_gain(&mut state, &ability, &mut events).unwrap();
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                target: None,
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        resolve_lose(&mut state, &ability, &mut events).unwrap();
+
+        let totals: Vec<(i32, Option<i32>)> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::LifeChanged {
+                    player_id,
+                    amount,
+                    new_total,
+                } if *player_id == PlayerId(0) => Some((*amount, new_total.0)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(totals, vec![(3, Some(23)), (4, Some(27)), (-5, Some(22))]);
+        assert_eq!(state.players[0].life, 22);
     }
 
     /// CR 119.7: "can't gain life" suppresses life gain, life total unchanged.
@@ -1101,6 +1232,15 @@ mod tests {
         let WaitingFor::ReplacementChoice { player, .. } = state.waiting_for.clone() else {
             panic!("expected replacement choice");
         };
+        let serialized = serde_json::to_string(
+            &crate::types::resolution::ResolutionStateWire::from_game_state(state),
+        )
+        .expect("life-total assignment prompt serializes as v2 frames");
+        let mut state =
+            serde_json::from_str::<crate::types::resolution::ResolutionStateWire>(&serialized)
+                .expect("life-total assignment prompt restores from v2 frames")
+                .into_game_state();
+        state.rehydrate_rng();
         state.active_player = player;
         state.priority_player = player;
 
@@ -1109,7 +1249,7 @@ mod tests {
 
         assert_eq!(state.players[0].life, 5);
         assert_eq!(state.players[1].life, 20);
-        assert!(state.pending_life_total_assignment.is_none());
+        assert!(state.active_life_total_assignment().is_none());
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert!(result.events.iter().any(|event| matches!(
             event,
@@ -1579,6 +1719,123 @@ mod tests {
             !state.has_post_replacement_drain(),
             "post_replacement_continuation must be drained after life-gain replacement"
         );
+    }
+
+    #[test]
+    fn interactive_gain_life_substitution_defers_original_completion() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, PlayerFilter, ReplacementDefinition,
+        };
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(700),
+            PlayerId(0),
+            "Interactive Lich".to_string(),
+            Zone::Battlefield,
+        );
+        let branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::GainLife)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches: vec![branch],
+                },
+            ))]
+        .into();
+
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(701),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_gain(&mut state, &ability, &mut events).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ChooseOneOfBranch { .. }
+        ));
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::GainLife,
+                    source_id: ObjectId(701),
+                    ..
+                }
+            )),
+            "the replaced GainLife must not complete before its substitute choice"
+        );
+    }
+
+    #[test]
+    fn apply_life_gain_reports_interactive_substitution_continuation() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, PlayerFilter, ReplacementDefinition,
+        };
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(702),
+            PlayerId(0),
+            "Interactive Lich".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::GainLife)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches: vec![AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: TargetFilter::Controller,
+                        },
+                    )],
+                },
+            ))]
+        .into();
+
+        let outcome = apply_life_gain(&mut state, PlayerId(0), 4, &mut Vec::new());
+
+        // The branch prompt fully REPLACES the gain, so the root added nothing
+        // before pausing. The deferral says so, which is the point of carrying
+        // the figure: a caller narrating this event must report what actually
+        // happened (0), not the 4 that was proposed.
+        assert_eq!(
+            outcome,
+            Err(ReplacementDeferred::SubstitutionContinuation { applied: 0 })
+        );
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ChooseOneOfBranch { .. }
+        ));
     }
 
     /// Issue #317: A scaling-shape replacement (`Effect::GainLife { amount:

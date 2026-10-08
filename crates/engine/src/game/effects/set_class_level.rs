@@ -112,7 +112,7 @@ mod tests {
 
     #[test]
     fn class_level_is_restriction_permits_correct_level() {
-        // CR 716.4: ClassLevelIs restriction permits at exactly the specified level.
+        // CR 716.2a: ClassLevelIs restriction permits at exactly the specified level.
         let restriction_level_1 = ActivationRestriction::ClassLevelIs { level: 1 };
         let restriction_level_2 = ActivationRestriction::ClassLevelIs { level: 2 };
 

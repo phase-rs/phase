@@ -15,7 +15,9 @@ mod prelude {
     pub(super) use nom::sequence::{preceded, terminated};
     pub(super) use nom::Parser;
 
-    pub(super) use super::super::oracle_cost::parse_oracle_cost;
+    pub(super) use super::super::oracle_cost::{
+        line_reduces_colored_mana_only, parse_gerund_cost, parse_oracle_cost,
+    };
     pub(super) use super::super::oracle_effect::subject::{
         parse_restriction_modes, static_mode_needs_grant_propagation,
     };
@@ -36,7 +38,7 @@ mod prelude {
     };
     pub(super) use super::super::oracle_target::{
         distribute_controller_to_or, parse_combat_status_prefix, parse_counter_suffix,
-        parse_mana_value_suffix, parse_target, parse_that_clause_suffix, parse_type_phrase,
+        parse_mana_value_suffix, parse_target, parse_that_clause_suffix, parse_type_phrase_folding,
         scope_target_spell_phrase,
     };
     pub(super) use super::super::oracle_util::{
@@ -46,16 +48,18 @@ mod prelude {
     };
     pub(super) use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationRestriction,
-        AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, CombatRelation,
-        CombatRelationSubject, Comparator, ContinuousModification, ControllerRef, CostCategory,
-        CountScope, FilterProp, ObjectScope, ParsedCondition, PlayerFilter, PtStat, PtValueScope,
-        QuantityExpr, QuantityRef, RoundingMode, SharedQuality, SharedQualityRelation,
-        StaticCondition, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, ColorChangeMode,
+        CombatRelation, CombatRelationSubject, Comparator, ContinuousModification, ControllerRef,
+        CostCategory, CountScope, FilterProp, ObjectScope, ParsedCondition, PlayerFilter, PtStat,
+        PtValueScope, QuantityExpr, QuantityRef, RoundingMode, SharedQuality,
+        SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     pub(super) use crate::types::card_type::{
         noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
     };
     pub(super) use crate::types::counter::{parse_counter_type, CounterMatch};
+    pub(super) use crate::types::events::ActivatedAbilityKind;
     pub(super) use crate::types::keywords::{Keyword, KeywordKind};
     pub(super) use crate::types::mana::{ManaColor, ManaCost, ManaType, SpecialAction};
     pub(super) use crate::types::phase::Phase;
@@ -63,8 +67,9 @@ mod prelude {
         ActivationExemption, AdditionalCostTaxAction, AttackDefenderScope, BlockExceptionKind,
         CastCostMode, CastExtraCost, CastFreeOrigin, CastFrequency, CastingProhibitionCondition,
         CombatAloneAction, CombatAloneRequirement, CostModifyMode, CostPaymentProhibition,
-        CrewAction, CrewContributionKind, ExileCardPool, ExileCastCost, ExileCastTiming,
-        HandSizeModification, ProhibitionScope, StaticMode, SuppressedTriggerEvent, TriggerCause,
+        CostReductionReach, CrewAction, CrewContributionKind, ExileCardPool, ExileCastCost,
+        ExileCastGrantee, ExileCastTiming, GraveyardPermissionPool, HandSizeModification,
+        ProhibitionScope, RequiredDefender, StaticMode, SuppressedTriggerEvent, TriggerCause,
         ZoneChangeQualifier,
     };
     pub(super) use crate::types::zones::Zone;
@@ -85,17 +90,22 @@ mod keyword_grant;
 mod loyalty;
 mod mana_transform;
 mod restriction;
+mod same_is_true;
 mod shared;
 mod static_helpers;
 mod type_change;
 
+pub(crate) use shared::add_property;
 pub(crate) use shared::parse_commander_subject_filter_prefix;
+pub(crate) use shared::peel_color_quality_prefix;
 
 pub(crate) use dispatch::is_speed_unlock_sentence;
 pub(crate) use dispatch::parse_may_look_at_face_down_filter;
 pub(crate) use dispatch::try_parse_counts_as_named_static;
 use dispatch::{parse_static_line_inner, InvertedAsLongAs};
 use prelude::StaticIr;
+pub(crate) use restriction::is_control_players_during_own_library_search;
+pub(crate) use restriction::is_graveyard_cast_permission_lead;
 
 mod support {
     pub(super) use super::anthem::{
@@ -109,25 +119,26 @@ mod support {
     pub(super) use super::evasion::{
         classify_block_exception, parse_compound_subject_keyword_static,
         parse_compound_subject_rule_static, parse_leading_except_for_rule_static,
-        parse_property_descriptor, parse_rule_static_separator_nom, try_parse_compound_subtypes,
+        parse_property_descriptor, parse_rule_static_separator_nom,
+        try_defender_exception_with_companion, try_parse_compound_subtypes,
         try_parse_scoped_must_attack_block, try_split_and_can_attack_despite_defender,
         try_split_and_can_block_additional, try_split_and_cant_activate_abilities,
         try_split_and_cant_attack, try_split_and_cant_attack_or_block,
         try_split_and_cant_attack_scoped, try_split_and_cant_be_attached,
         try_split_and_cant_be_blocked, try_split_and_cant_be_sacrificed,
         try_split_and_cant_be_targeted, try_split_and_cant_block, try_split_and_doesnt_untap,
-        try_split_and_foreign_keyword_grant, try_split_and_must_attack_block,
+        try_split_and_foreign_subject_grant, try_split_and_must_attack_block,
     };
     pub(super) use super::grammar::*;
     pub(super) use super::keyword_grant::{
         apply_spell_keyword_subject_constraints, fold_grant_cap_rider,
         parse_chosen_qualifier_subject, parse_continuous_modifications,
         parse_quoted_ability_modifications, push_grant_clause_modifications, split_keyword_list,
-        RuleStaticPredicate,
+        with_protection_does_not_remove, RuleStaticPredicate,
     };
     pub(super) use super::restriction::{
         parse_cant_be_activated_exemption_in_text, parse_cast_and_activate_only_during,
-        strip_casting_prohibition_subject,
+        parse_relative_count_typed_cast_prohibitions, strip_casting_prohibition_subject,
     };
     pub(super) use super::shared::*;
     pub(super) use super::static_helpers::*;
@@ -142,7 +153,7 @@ mod support {
 pub(crate) use cost_mod::{
     parse_activated_ability_cost_head, parse_alt_cost_frequency_prefix,
     parse_alternative_keyword_cost, parse_cast_spells_alternative_cost_multi,
-    parse_collect_evidence_alt_cost, parse_spells_alternative_cost,
+    parse_collect_evidence_alt_cost, parse_spells_alternative_cost, ActivatedAbilityCostHead,
 };
 pub(crate) use evasion::{
     classify_block_exception, is_extra_blockers_static_candidate, is_forced_block_static_candidate,
@@ -150,13 +161,18 @@ pub(crate) use evasion::{
 };
 pub(crate) use grammar::map_keyword;
 pub(crate) use grammar::parse_pt_mod;
+pub(crate) use grammar::promote_nested_ability_quotes;
+pub(crate) use grammar::typed_filter_for_subtype;
 pub(crate) use keyword_grant::{
     classify_quoted_inner, parse_chosen_qualifier_subject, parse_continuous_modifications,
     parse_graveyard_granted_keyword_kind, parse_quoted_ability_modifications, split_keyword_list,
     try_parse_graveyard_keyword_grant_clause, try_parse_graveyard_keyword_grant_static,
 };
-pub(crate) use mana_transform::try_parse_retain_unspent_mana_static;
+pub(crate) use mana_transform::{
+    is_unspent_mana_loss_causes_life_loss_static, try_parse_retain_unspent_mana_static,
+};
 pub(crate) use restriction::parse_cant_be_activated_exemption_in_text;
+pub(crate) use restriction::parse_passive_cant_be_cast_spell_filter;
 pub(crate) use restriction::try_parse_top_of_library_cast_permission;
 pub(crate) use shared::canonicalize_anchor_label;
 pub(crate) use shared::parse_activated_abilities_cant_be_activated;
@@ -166,6 +182,7 @@ pub(crate) use shared::parse_continuous_subject_filter;
 pub(crate) use shared::parse_dynamic_x_clause;
 pub use shared::parse_static_line_multi;
 pub(crate) use shared::parse_subtype_or_list_insensitive_prefix;
+pub(crate) use shared::parse_targeting_bypass_tail;
 pub(crate) use shared::target_filter_is_your_graveyard;
 pub(crate) use shared::GrantedCastKeywordKind;
 pub(crate) use shared::{
@@ -174,11 +191,11 @@ pub(crate) use shared::{
 };
 pub(crate) use static_helpers::apply_raw_parenthetical_cant_cast_gate;
 pub(crate) use static_helpers::parse_basic_land_type_plural;
+pub(crate) use static_helpers::parse_leading_turn_scope;
 pub(crate) use static_helpers::peel_compound_all_quantified_conjuncts;
-pub(crate) use type_change::{
-    parse_additive_type_clause_modifications, parse_chosen_creature_type_static_prefix,
-    parse_compound_you_control_chosen_type_static_prefix, parse_every_creature_type_static_prefix,
-};
+pub(crate) use static_helpers::unenforceable_gate_marker;
+pub(crate) use type_change::parse_additive_type_clause_modifications;
+pub(crate) use type_change::parse_inverted_base_pt_type_grant;
 
 /// Parse a static/continuous ability line into a `StaticDefinition`.
 #[tracing::instrument(level = "debug")]
@@ -214,9 +231,28 @@ pub(crate) fn parse_static_line_ir(text: &str) -> Option<StaticIr> {
 }
 
 /// Lowering: apply post-parse transforms to produce the final `StaticDefinition`.
+///
+/// **Every transform added here must be idempotent.** Recognizers that already
+/// call `parse_static_line` (which lowers internally, above) and then hand the
+/// result to `StaticIr::from_definition` cause this function to run a second
+/// time over an already-lowered definition — the Class level-section arms in
+/// `oracle_class.rs` are the current example, and they interpose
+/// `wrap_static_with_class_level` between the two passes, so a transform must
+/// also be stable under a condition it did not see on the first pass. Both
+/// transforms below satisfy this today: `populate_active_zones_from_condition`
+/// self-guards on `active_zones.is_empty()` and its collector ignores
+/// `ClassLevelGE`, and `bind_counter_anaphor_to_recipient` rewrites only
+/// `ObjectScope::Anaphoric`, of which none survive the first pass. A
+/// non-idempotent transform added here would silently double-apply across every
+/// such site.
 pub(crate) fn lower_static_ir(ir: &StaticIr) -> crate::types::ability::StaticDefinition {
     let mut def = ir.definition.clone();
     shared::populate_active_zones_from_condition(&mut def);
+    // CR 611.3a: a bare counter anaphor in a per-recipient continuous static
+    // names the affected object, not the source. Rebound here — after every
+    // builder has produced its definition — so the transform is single-authority
+    // rather than repeated in anthem / type_change / grammar.
+    shared::bind_counter_anaphor_to_recipient(&mut def);
     def
 }
 

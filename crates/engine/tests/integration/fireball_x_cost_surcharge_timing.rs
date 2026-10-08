@@ -38,13 +38,16 @@
 //! test focused strictly on the runtime distribute-route timing seam.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::TargetRef;
+use engine::game::zones;
+use engine::types::ability::{CardPlayMode, CastingPermission, ManaSpendPermission, TargetRef};
 use engine::types::actions::GameAction;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, CastingPermissionIndex, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
-use engine::types::PlayerId;
+use engine::types::statics::CastFrequency;
+use engine::types::zones::{EtbTapState, Zone};
+use engine::types::{Duration, PlayerId};
 
 const FIREBALL_ORACLE: &str =
     "Fireball deals X damage divided evenly, rounded down, among any number of targets.";
@@ -68,6 +71,12 @@ fn strive_one_generic() -> ManaCost {
 fn red_pool(amount: usize) -> Vec<ManaUnit> {
     (0..amount)
         .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+        .collect()
+}
+
+fn blue_pool(amount: usize) -> Vec<ManaUnit> {
+    (0..amount)
+        .map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]))
         .collect()
 }
 
@@ -274,21 +283,9 @@ fn fireball_unpayable_recomputed_cost_rolls_back_cleanly() {
         "reach guard: a pending cast must exist before the failing distribution"
     );
 
-    // CR 601.2d: the handler stashes the announced division into
-    // `pending.ability.distribution` BEFORE it clones `pending_for_restore`, so a
-    // correct clean restore carries exactly that stash (and nothing else changes).
-    // Build the expected post-failure pending from the pre-failure snapshot plus
-    // that one stash — a full structural check that both (i) proves the restore is
-    // not a subtly-wrong `Some(_)`, and (ii) proves the distribution stash is
-    // present (a restore that dropped it would fail here just as a bare
-    // pre-snapshot compare would).
+    // The action boundary is transactional: the failed choice must restore the
+    // exact pre-action pending cast, including the absence of a distribution.
     let distribution = even_distribution(total, &targets);
-    let mut expected_pending = pre_pending.clone();
-    expected_pending
-        .as_mut()
-        .expect("reach guard set above")
-        .ability
-        .distribution = Some(distribution.clone());
 
     let result = runner.act(GameAction::DistributeAmong { distribution });
 
@@ -297,13 +294,12 @@ fn fireball_unpayable_recomputed_cost_rolls_back_cleanly() {
         result.is_err(),
         "recomputed 6-mana cost must be unpayable from a 4-mana pool (CR 601.2h)"
     );
-    // (b) full structural restore of pending_cast — not just is_some(): catches a
-    // restore that pushes back a subtly-wrong PendingCast (e.g. a dropped
-    // `.ability.distribution` stash, or a cost/target field mutated in place).
+    // (b) Full structural restore of the pre-action pending cast — not just
+    // `is_some()`: catches a retry state leaked from the rejected action.
     assert_eq!(
         runner.state().pending_cast,
-        expected_pending,
-        "pending_cast must be restored exactly (pre-failure state + the CR 601.2d distribution stash)"
+        pre_pending,
+        "pending_cast must be restored exactly to its pre-action state"
     );
     // (c) waiting_for is unchanged — a clean, retryable/cancellable DistributeAmong
     // state, not a corrupted stale one.
@@ -319,4 +315,89 @@ fn fireball_unpayable_recomputed_cost_rolls_back_cleanly() {
         ),
         "state must remain at DistributeAmong for a clean retry/cancel"
     );
+}
+
+/// CR 601.2a + CR 609.4b: the exact exile permission elected at announcement
+/// survives the ChooseX -> target selection -> distribution pause. The first
+/// sibling is deliberately ineligible during announcement and made eligible
+/// before resumption; losing the index would make legacy first-match lookup
+/// select that sibling and drop the elected permission's AnyColor concession.
+#[test]
+fn fireball_distribution_resume_preserves_elected_exile_permission() {
+    const X: u32 = 2;
+    let (mut runner, spell, card_id, creatures) = fireball_scenario(3);
+    zones::move_to_zone(runner.state_mut(), spell, Zone::Exile, &mut Vec::new());
+    runner.state_mut().players[0].mana_pool.mana = blue_pool(3);
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .casting_permissions = vec![
+        CastingPermission::PlayFromExile {
+            provenance: engine::types::ability::PlayFromExileProvenance::Impulse,
+            duration: Duration::Permanent,
+            granted_to: P1,
+            mode: CardPlayMode::Play,
+            frequency: CastFrequency::Unlimited,
+            source_id: None,
+            invalidation: None,
+            exiled_by_ability_controller: None,
+            mana_spend_permission: None,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
+            cast_cost_modifier: None,
+            alt_ability_cost: None,
+            land_enter_tapped: EtbTapState::Unspecified,
+        },
+        CastingPermission::PlayFromExile {
+            provenance: engine::types::ability::PlayFromExileProvenance::Impulse,
+            duration: Duration::Permanent,
+            granted_to: P0,
+            mode: CardPlayMode::Play,
+            frequency: CastFrequency::Unlimited,
+            source_id: None,
+            invalidation: None,
+            exiled_by_ability_controller: None,
+            mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
+            cast_cost_modifier: None,
+            alt_ability_cost: None,
+            land_enter_tapped: EtbTapState::Unspecified,
+        },
+    ];
+
+    let (total, targets) = drive_to_distribute(&mut runner, spell, card_id, X, &creatures[..1]);
+    assert_eq!(total, X);
+    assert_eq!(
+        runner
+            .state()
+            .pending_cast
+            .as_ref()
+            .and_then(|pending| pending.casting_permission_index),
+        Some(CastingPermissionIndex(1)),
+        "the second permission must remain elected across X and target pauses"
+    );
+
+    let CastingPermission::PlayFromExile { granted_to, .. } = &mut runner
+        .state_mut()
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .casting_permissions[0]
+    else {
+        panic!("hostile sibling must be a PlayFromExile permission");
+    };
+    *granted_to = P0;
+
+    runner
+        .act(GameAction::DistributeAmong {
+            distribution: even_distribution(total, &targets),
+        })
+        .expect("resume must retain the elected AnyColor permission");
+    assert!(runner.state().stack.iter().any(|entry| entry.id == spell));
+    assert_eq!(pool_total(&runner, P0), 0, "blue mana must pay {{2}}{{R}}");
 }

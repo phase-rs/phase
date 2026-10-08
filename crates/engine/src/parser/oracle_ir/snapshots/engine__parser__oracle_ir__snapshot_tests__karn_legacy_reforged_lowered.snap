@@ -81,16 +81,19 @@ expression: "&lowered"
           "value": {
             "type": "Ref",
             "qty": {
-              "type": "Aggregate",
+              "type": "PropertyAggregate",
               "function": "Max",
               "property": "ManaValue",
-              "filter": {
-                "type": "Typed",
-                "type_filters": [
-                  "Artifact"
-                ],
-                "controller": "You",
-                "properties": []
+              "source": {
+                "type": "Objects",
+                "filter": {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Artifact"
+                  ],
+                  "controller": "You",
+                  "properties": []
+                }
               }
             }
           }
@@ -100,16 +103,19 @@ expression: "&lowered"
           "value": {
             "type": "Ref",
             "qty": {
-              "type": "Aggregate",
+              "type": "PropertyAggregate",
               "function": "Max",
               "property": "ManaValue",
-              "filter": {
-                "type": "Typed",
-                "type_filters": [
-                  "Artifact"
-                ],
-                "controller": "You",
-                "properties": []
+              "source": {
+                "type": "Objects",
+                "filter": {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Artifact"
+                  ],
+                  "controller": "You",
+                  "properties": []
+                }
               }
             }
           }

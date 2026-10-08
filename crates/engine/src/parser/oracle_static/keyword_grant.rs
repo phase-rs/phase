@@ -4,6 +4,8 @@
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use nom::character::complete::alphanumeric1;
+use nom::combinator::not;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RuleStaticPredicate {
@@ -75,7 +77,7 @@ pub(crate) fn try_parse_graveyard_keyword_grant_clause(
     )?
     .0;
 
-    let (filter, remainder) = parse_type_phrase(subject);
+    let (filter, remainder) = parse_type_phrase_folding(subject);
     // CR 113.6b: the affected filter's zone must match the keyword's functional
     // zone (graveyard for flashback/escape/…, hand for foretell/miracle). A
     // mismatch (foretell-in-graveyard, flashback-in-hand) declines the grant.
@@ -245,7 +247,14 @@ pub(crate) fn parse_spells_have_keyword_for_test(text: &str) -> Option<StaticDef
 ///     Replicate functions end-to-end with no engine change.
 fn parse_granted_self_cost_keyword(keyword_str: &str) -> Option<Keyword> {
     [
-        ("blitz", Keyword::Blitz as fn(ManaCost) -> Keyword),
+        // CR 702.152a: Blitz's cost enum (`BlitzCost`) admits a non-mana residual
+        // (Sabin/Underdog), but a *granted* self-referential blitz is always pure
+        // mana ("equal to its mana cost"), so the grant binds `BlitzCost::Mana`.
+        (
+            "blitz",
+            (|c| Keyword::Blitz(crate::types::keywords::BlitzCost::Mana(c)))
+                as fn(ManaCost) -> Keyword,
+        ),
         ("replicate", Keyword::Replicate as fn(ManaCost) -> Keyword),
     ]
     .into_iter()
@@ -339,26 +348,30 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
     // [keyword]" — a once-per-turn keyword grant gated on the first qualifying
     // spell of the turn (Peri Brown, The Twelfth Doctor, Maelstrom Nexus,
     // Wild-Magic Sorcerer, Current Curriculum). Reuses the same
-    // `parse_first_qualified_spell_filter` grammar + `first_qualified_spell_condition`
+    // `parse_nth_qualified_spell_filter` grammar + `nth_qualified_spell_condition`
     // gate as the paired cost-modifier consumer, so the qualifying spell filter,
     // cast-origin restriction, and `SpellsCastThisTurn == 0` gate are all preserved
     // instead of collapsing to "every spell you cast".
-    match parse_first_qualified_spell_filter(subject) {
-        // Not a first-qualified-spell line — fall through to the ordinary
+    match parse_nth_qualified_spell_filter(subject) {
+        // Not an Nth-qualified-spell line — fall through to the ordinary
         // "[type] spells you cast [from zone] have [keyword]" patterns below.
-        FirstQualifiedSpell::NotApplicable => {}
+        NthQualifiedSpell::NotApplicable => {}
         // The shape is present but the qualifier/timing isn't representable. Fall
         // through (NOT a `return None`) so the existing gateless static is
         // preserved for not-yet-representable qualifiers — no regression.
-        FirstQualifiedSpell::UnsupportedQualifier => {}
-        FirstQualifiedSpell::Supported(filter, timing) => {
-            // CR 601.2f: trailing-residue guard. `parse_first_qualified_spell_filter`
+        NthQualifiedSpell::UnsupportedQualifier => {}
+        NthQualifiedSpell::Supported {
+            filter,
+            timing,
+            ordinal,
+        } => {
+            // CR 601.2f: trailing-residue guard. `parse_nth_qualified_spell_filter`
             // discards any text after the timing phrase; if that region is
             // non-empty an unrepresentable qualifier was dropped (Rain of Riches'
             // "that mana from a Treasure was spent to cast"; TARDIS Bay's
             // post-timing "with mana value 2 or greater"). Decline rather than emit
             // a residue-blind gate — fall through to the existing gateless static.
-            if first_qualified_spell_subject_fully_consumed(subject) {
+            if nth_qualified_spell_subject_fully_consumed(subject) {
                 // CR 601.2a: scope `ControllerRef::You` to every leaf (And/Not
                 // recursion) so an opponent's qualifying spell never qualifies.
                 let affected =
@@ -369,12 +382,12 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
                 // TARDIS Bay itself declines above because its MV qualifier follows
                 // the timing). When a leading "during your turn," scope was already
                 // stripped, combine both rather than dropping either.
-                let first_qualified = first_qualified_spell_condition(&filter, &timing);
+                let nth_qualified = nth_qualified_spell_condition(&filter, &timing, ordinal);
                 let combined_condition = match condition.clone() {
                     Some(leading) => StaticCondition::And {
-                        conditions: vec![leading, first_qualified],
+                        conditions: vec![leading, nth_qualified],
                     },
-                    None => first_qualified,
+                    None => nth_qualified,
                 };
                 return Some(
                     StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
@@ -410,15 +423,10 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
         // correctly. Each qualifier consumes its own bytes.
         let mut cursor = after_spells;
 
-        // Parse optional zone qualifier: "from exile", "from your graveyard"
-        let zone_filter = if let Ok((rest, zone)) = alt((
-            value(Zone::Exile, tag::<_, _, VE<'_>>("from exile")),
-            value(Zone::Hand, tag("from your hand")),
-        ))
-        .parse(cursor)
-        {
-            cursor = rest.trim_start();
-            Some(FilterProp::InZone { zone })
+        // Parse optional zone qualifier via the shared authority below.
+        let zone_filter = if let Some((rest, prop)) = parse_cast_origin_zone_qualifier(cursor) {
+            cursor = rest;
+            Some(prop)
         } else {
             None
         };
@@ -459,10 +467,10 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
             // "Spells you cast" (no type prefix) — applies to all spells
             TargetFilter::Typed(TypedFilter::card())
         } else {
-            // CR 205.4a: peel leading supertype word(s) BEFORE parse_type_phrase, which only
+            // CR 205.4a: peel leading supertype word(s) BEFORE parse_type_phrase_folding, which only
             // emits HasSupertype for a supertype prefixed before a type word (requires a trailing
             // space); a bare "legendary" would otherwise be dropped, and an un-peeled prefix would
-            // double-emit. Peel here (emit once) and pass only the remainder to parse_type_phrase.
+            // double-emit. Peel here (emit once) and pass only the remainder to parse_type_phrase_folding.
             let type_prefix_original = tp.original[..marker_pos].trim();
             let lower_prefix = type_prefix_original.to_lowercase();
             let prefix_tp = TextPair::new(type_prefix_original, &lower_prefix);
@@ -495,7 +503,7 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
             if type_remainder.is_empty() {
                 TargetFilter::Typed(TypedFilter::card())
             } else {
-                parse_type_phrase(type_remainder).0
+                parse_type_phrase_folding(type_remainder).0
             }
         };
         let mut extra_props = supertype_props;
@@ -522,23 +530,12 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
     }
 
     // Pattern 2: "Creature cards you own that aren't on the battlefield have flash"
-    // This grants flash to cards in non-battlefield zones.
+    // This grants flash to cards in non-battlefield zones. The subject-to-filter
+    // grammar is shared with the land type-change compound handler (Dune
+    // Chanter) via `parse_owned_off_battlefield_subject_filter`.
     if nom_primitives::scan_contains(subject, "cards you own that aren't on the battlefield") {
-        let (prefix, _) = nom_primitives::scan_split_at_phrase(subject, |i| tag("cards").parse(i))?;
-        let type_end = prefix.len();
-        let type_part = &tp.original[..type_end];
-        let (base_filter, _) = parse_type_phrase(type_part);
-        let affected = match base_filter {
-            TargetFilter::Typed(mut typed) => {
-                typed = typed.controller(ControllerRef::You);
-                // "aren't on the battlefield" means any zone except battlefield
-                typed.properties.push(FilterProp::InAnyZone {
-                    zones: vec![Zone::Hand, Zone::Graveyard, Zone::Exile, Zone::Command],
-                });
-                TargetFilter::Typed(typed)
-            }
-            _ => base_filter,
-        };
+        let subject_original = &tp.original[..subject.len()];
+        let affected = parse_owned_off_battlefield_subject_filter(subject_original)?;
         let mut def = StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
             .affected(affected)
             .description(text.to_string())
@@ -555,7 +552,7 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
     // path (`effective_off_zone_keywords`) sees the grant and the card becomes
     // castable from the graveyard.
     {
-        let (base_filter, rest) = parse_type_phrase(subject);
+        let (base_filter, rest) = parse_type_phrase_folding(subject);
         if rest.trim().is_empty() && target_filter_is_your_graveyard(&base_filter) {
             let keyword = finalize_graveyard_zone_grant_keyword(keyword, where_x.clone());
             let mut def = StaticDefinition::continuous()
@@ -598,7 +595,7 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
         let base_filter = if type_part.is_empty() {
             TargetFilter::Typed(TypedFilter::card())
         } else {
-            parse_type_phrase(type_part).0
+            parse_type_phrase_folding(type_part).0
         };
         let mut def = StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
             .affected(base_filter)
@@ -669,7 +666,7 @@ pub(crate) fn parse_cast_as_though_flash_static(
         TargetFilter::Typed(TypedFilter::card())
     } else {
         let phrase = format!("{type_text} spells");
-        parse_type_phrase(&phrase).0
+        parse_type_phrase_folding(&phrase).0
     };
     let affected = if all_players {
         base_filter
@@ -685,6 +682,28 @@ pub(crate) fn parse_cast_as_though_flash_static(
         .description(text.to_string())
         .active_zones(vec![Zone::Battlefield]),
     )
+}
+
+/// CR 601.2a: Optional origin-zone qualifier on a "spell(s) you cast" subject —
+/// "from exile" / "from your hand". Single authority for the recognized zone
+/// list, shared by the keyword-grant subject walk and the alternative-cost
+/// grant lowering (`parse_spells_alternative_cost`). The runtime spell-filter
+/// path compares `FilterProp::InZone` against the cast's ORIGIN zone
+/// (`spell_object_matches_filter_inner`), so the lowered prop means "cast from
+/// that zone", not "currently in that zone".
+pub(crate) fn parse_cast_origin_zone_qualifier(input: &str) -> Option<(&str, FilterProp)> {
+    // Word boundary: "from exile" must not accept "from exiled..." (the repo's
+    // parser doctrine — near-miss tokens reject, PR #7543's pattern).
+    terminated(
+        alt((
+            value(Zone::Exile, tag::<_, _, OracleError<'_>>("from exile")),
+            value(Zone::Hand, tag("from your hand")),
+        )),
+        not(alphanumeric1),
+    )
+    .parse(input)
+    .ok()
+    .map(|(rest, zone)| (rest.trim_start(), FilterProp::InZone { zone }))
 }
 
 pub(crate) fn apply_spell_keyword_subject_constraints(
@@ -1014,20 +1033,9 @@ fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::abili
             ),
             tag("all creatures your opponents control"),
         ),
-        // CR 613.1f: "all creature cards in all graveyards" (Necrotic Ooze)
-        value(
-            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
-                zone: Zone::Graveyard,
-            }])),
-            tag("all creature cards in all graveyards"),
-        ),
-        // CR 613.1f: "all land cards in all graveyards"
-        value(
-            TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::InZone {
-                zone: Zone::Graveyard,
-            }])),
-            tag("all land cards in all graveyards"),
-        ),
+        // CR 613.1f + CR 108.3: "all <type> cards in your graveyard | all
+        // graveyards" (Necrotic Ooze, Thranduil, the Elvenking).
+        grant_graveyard_source,
         // CR 613.1f: "all lands on the battlefield" (Manascape Refractor)
         // — zone is explicit in the phrase; encode it so graveyard/hand land
         // cards are excluded from the runtime provider scan.
@@ -1055,25 +1063,23 @@ fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::abili
             ),
             tag("all legendary creatures you control"),
         ),
-        // CR 613.1f: "all artifact cards in your graveyard"
-        // CR 108.3: Graveyard cards are "yours" by ownership, not control —
-        // use FilterProp::Owned rather than TypedFilter::controller here.
+        // CR 607.2a + CR 607.2d: "the last chosen card" (Koh, the Face Stealer) —
+        // the card most recently recorded on the host via `Effect::RememberCard`
+        // (`ChosenAttribute::Card`, CR 608.2c) AND still in the exile zone. The
+        // CR 607.2a exile pinning of the linked reference is composed here so
+        // the shared `ChosenCard` reader stays zone-agnostic (CR 607.2d).
         value(
-            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![
-                FilterProp::Owned {
-                    controller: ControllerRef::You,
-                },
-                FilterProp::InZone {
-                    zone: Zone::Graveyard,
-                },
-            ])),
-            tag("all artifact cards in your graveyard"),
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::ChosenCard,
+                    TargetFilter::Typed(
+                        TypedFilter::default()
+                            .properties(vec![FilterProp::InZone { zone: Zone::Exile }]),
+                    ),
+                ],
+            },
+            tag("the last chosen card"),
         ),
-        // CR 613.1f + CR 611.2c: "the last chosen card" (Koh, the Face Stealer) —
-        // the single card most recently recorded on the host via
-        // `Effect::RememberCard` (`ChosenAttribute::Card`). Resolved live each
-        // layer pass by `TargetFilter::ChosenCard`.
-        value(TargetFilter::ChosenCard, tag("the last chosen card")),
     ))
     .parse(input)
 }
@@ -1099,26 +1105,85 @@ fn grant_exiled_source(input: &str) -> OracleResult<'_, crate::types::ability::T
             ),
         ),
         value(TargetFilter::ExiledBySource, tag("the exiled card")),
-        // "all [creature] cards exiled with it/~". The optional "creature"
-        // qualifier intersects `ExiledBySource` with the Creature type filter
-        // (CR 205.3 — a creature card is type Creature in exile) so Agatha grants
-        // only creature cards' abilities; the untyped form (Myr Welder, Territory
+        // "all [creature|land] cards exiled with it/~". The optional card-type
+        // qualifier intersects `ExiledBySource` with the matching type filter
+        // (CR 205.2a — a creature/land card is type Creature/Land in exile) so
+        // Agatha grants only creature cards' abilities and Steward of the
+        // Harvest only land cards'; the untyped form (Myr Welder, Territory
         // Forge) stays a bare `ExiledBySource`.
         (
             tag("all "),
-            opt(tag("creature ")),
+            opt(grant_exiled_card_type_qualifier),
             tag("cards exiled with "),
             alt((tag("it"), tag("~"))),
         )
-            .map(|(_, creature_qualifier, _, _)| match creature_qualifier {
-                Some(_) => TargetFilter::And {
-                    filters: vec![
-                        TargetFilter::Typed(TypedFilter::creature()),
-                        TargetFilter::ExiledBySource,
-                    ],
+            .map(|(_, qualifier, _, _)| match qualifier {
+                Some(typed) => TargetFilter::And {
+                    filters: vec![TargetFilter::Typed(typed), TargetFilter::ExiledBySource],
                 },
                 None => TargetFilter::ExiledBySource,
             }),
+    ))
+    .parse(input)
+}
+
+/// CR 205.2a + CR 607.2a: card-type qualifier of the exiled-cards grant set.
+/// Only card types printed with this phrase are accepted; any other word
+/// (nonland, artifact, ...) fails the following `cards exiled with ` tag so the
+/// whole clause declines rather than mis-scoping the set. The trailing space is
+/// part of each tag so "lands"/"landfall" cannot match.
+fn grant_exiled_card_type_qualifier(input: &str) -> OracleResult<'_, TypedFilter> {
+    alt((
+        value(TypedFilter::creature(), tag("creature ")),
+        value(TypedFilter::land(), tag("land ")),
+    ))
+    .parse(input)
+}
+
+/// CR 613.1f + CR 113.3: "all <type> cards in your graveyard | all graveyards" —
+/// the graveyard-card source set of an ability-grant-by-reference static
+/// (Necrotic Ooze: creature cards in all graveyards; Thranduil, the Elvenking:
+/// Elf cards in your graveyard). Composed along two independent axes rather
+/// than one arm per printed type:
+///   - the type word, via the shared [`nom_target::parse_type_filter_word`]
+///     alphabet — a card type ("creature", "land", "artifact") or a subtype
+///     (CR 205.3m: the creature type "Elf");
+///   - the graveyard owner scope ([`grant_graveyard_owner`]).
+///
+/// CR 109.2a: a description naming "card" and a zone means a card matching it
+/// in that zone, so the set is pinned to `Zone::Graveyard`.
+fn grant_graveyard_source(input: &str) -> OracleResult<'_, TargetFilter> {
+    (
+        tag("all "),
+        nom_target::parse_type_filter_word,
+        tag(" cards in "),
+        grant_graveyard_owner,
+    )
+        .map(|(_, type_filter, _, owner)| {
+            // CR 108.3: a card in a graveyard is "yours" by ownership, not
+            // control — scope with `FilterProp::Owned`, never
+            // `TypedFilter::controller`. "All graveyards" carries no owner axis.
+            let properties = owner
+                .map(|controller| FilterProp::Owned { controller })
+                .into_iter()
+                .chain(std::iter::once(FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                }))
+                .collect();
+            TargetFilter::Typed(TypedFilter::new(type_filter).properties(properties))
+        })
+        .parse(input)
+}
+
+/// CR 108.3 + CR 109.5: the graveyard owner axis of [`grant_graveyard_source`].
+/// "your graveyard" names the graveyard of the player who controls the object
+/// with the ability (`ControllerRef::You` resolves against the recipient's
+/// controller in the layer-6 expansion); "all graveyards" spans every
+/// player's (`None`).
+fn grant_graveyard_owner(input: &str) -> OracleResult<'_, Option<ControllerRef>> {
+    alt((
+        value(Some(ControllerRef::You), tag("your graveyard")),
+        value(None, tag("all graveyards")),
     ))
     .parse(input)
 }
@@ -1283,12 +1348,17 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
 
     let mut modifications = Vec::new();
 
-    // CR 205.1a + CR 613.1d/f: "loses all [other] abilities, card types, and
-    // creature types" — a comma-and enumeration parsed with nom. Each member
-    // maps to one modification. `CardTypes` requires the granted core-type
-    // list, which only the "is a [type]" caller (`parse_enchanted_is_type`)
-    // owns — in the standalone path it has no type set and is a no-op (such
-    // text does not occur outside the "is a [type]" frame).
+    // CR 205.1a + CR 205.3i + CR 613.1d/f: "loses all [other] abilities, card
+    // types, creature types, and land types" — a comma-and enumeration parsed
+    // with nom. Each member maps to one modification. `CardTypes` requires the
+    // granted core-type list, which only the "is a [type]" caller
+    // (`parse_enchanted_is_type`) owns — in the standalone path it has no type
+    // set and is a no-op (such text does not occur outside the "is a [type]"
+    // frame). `LandTypes` (Alpine Moon, Lithoform Blight, Ultima, Origin of
+    // Oblivion — "loses all land types and abilities") reuses the same
+    // `RemoveAllSubtypes` runtime the `CreatureTypes` arm already exercises;
+    // `game/layers.rs` already has a working `SubtypeSet::Land` arm, so this is
+    // pure parser wiring, no engine change.
     for member in scan_loss_enumeration(unquoted_tp.lower) {
         match member {
             LossMember::Abilities => {
@@ -1297,6 +1367,11 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
             LossMember::CreatureTypes => {
                 modifications.push(ContinuousModification::RemoveAllSubtypes {
                     set: crate::types::card_type::SubtypeSet::Creature,
+                });
+            }
+            LossMember::LandTypes => {
+                modifications.push(ContinuousModification::RemoveAllSubtypes {
+                    set: crate::types::card_type::SubtypeSet::Land,
                 });
             }
             LossMember::CardTypes => {}
@@ -1644,6 +1719,11 @@ fn rebind_source_scope_to_recipient(
         } => QuantityRef::Power {
             scope: ObjectScope::Recipient,
         },
+        QuantityRef::BasePower {
+            scope: ObjectScope::Source,
+        } => QuantityRef::BasePower {
+            scope: ObjectScope::Recipient,
+        },
         QuantityRef::Toughness {
             scope: ObjectScope::Source,
         } => QuantityRef::Toughness {
@@ -1667,9 +1747,11 @@ pub(crate) fn push_grant_clause_modifications(
     // BARE (unquoted) keyword token — granted activated/triggered abilities are
     // quoted and stripped to a separate path (strip_quoted_segments at :645 +
     // parse_quoted_ability_modifications at :798) before extract_keyword_clause
-    // runs, so any ". " here can only introduce a trailing inert prose sentence
+    // runs, so any ". " here can only introduce a trailing rider sentence
     // (e.g. Benevolent Blessing's SBA-exemption "This effect doesn't remove ...").
-    // Drop it so the keyword sentence reaches map_keyword clean.
+    // Drop it so the keyword sentence reaches map_keyword clean; the rider itself
+    // is recovered onto the hosting `StaticDefinition` via
+    // `parse_protection_does_not_remove` (CR 702.16n/p).
     let part =
         match super::oracle_nom::bridge::split_once_on_lower(part, &part.to_lowercase(), ". ") {
             Some((first, _)) => first,
@@ -1753,7 +1835,7 @@ pub(crate) fn push_grant_clause_modifications(
     // equip {0}") is the equip activated ability — not an inert AddKeyword.
     // Mirrors `classify_quoted_inner`'s pre-keyword equip dispatch.
     if nom_tag_lower(&part_lower, &part_lower, "equip").is_some() {
-        if let Some(ability) = super::oracle::try_parse_equip(part_trimmed) {
+        if let Some(ability) = super::oracle::try_parse_equip_lowered(part_trimmed) {
             modifications.push(ContinuousModification::GrantAbility {
                 definition: Box::new(ability),
             });
@@ -1830,17 +1912,40 @@ pub(crate) fn parse_quoted_ability_modifications(text: &str) -> Vec<ContinuousMo
 ///   3. CR 113.3d + CR 604.1: static-line text ("enchanted creature gets +N/+M",
 ///      "creatures you control have ...") → one or more
 ///      `ContinuousModification::GrantStaticAbility` / `AddStaticMode`.
-///   4. CR 113 / CR 117 (fallback): spell/activated text → `GrantAbility`
+///   4. Fallback (no static/trigger/keyword/replacement shape matched):
+///      parse the remaining text as an ability body → `GrantAbility`
 ///      wrapping the parsed `AbilityDefinition`.
 ///
 /// Visibility: `pub(crate)` so external crate-local callers can reuse the
 /// canonical inner classifier without exposing the private
 /// `parse_quoted_ability` / `parse_quoted_rule_static_modifications` helpers.
 pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModification> {
-    let ability_text = ability_text.trim();
+    // Oracle's punctuation convention carries the *enclosing* sentence's comma
+    // INSIDE the closing quote of a granted ability when a clause follows — e.g.
+    // Bronzehide Lion's `..."{G}{W}: Enchanted creature gains indestructible until
+    // end of turn," and it loses all other abilities.` That trailing `,` is
+    // sentence punctuation, not part of the ability; left attached it defeats the
+    // inner duration combinator ("until end of turn," ≠ "until end of turn") and
+    // the phrase falls through to prose, silently dropping the UntilEndOfTurn
+    // duration. Strip it here, at the single boundary every quoted-grant caller
+    // funnels through (aura grants, token grants, keyword-list grants), so a
+    // quoted ability parses identically to its unquoted form.
+    //
+    // Only the comma is stripped — a trailing PERIOD is the ability's own terminal
+    // punctuation ("{T}: Add {G}." / "...equal to the difference.") that must be
+    // preserved in the serialized `description` (#5599), and it does not defeat
+    // any inner combinator. `split_keyword_list` strips `['.', ',']` because there
+    // the text is consumed structurally, not surfaced as a description.
+    let ability_text = ability_text.trim().trim_end_matches(',').trim();
     if ability_text.is_empty() {
         return Vec::new();
     }
+
+    // CR 114.1 + CR 113.3d: Nested single-quoted granted abilities inside a
+    // double-quoted grant body must be promoted to double quotes before
+    // dispatch so static-line and activated parsers recognise the inner ability
+    // boundary (Koth emblem, Roar of the Fifth People chapter II — #5978).
+    let ability_text = super::grammar::promote_nested_ability_quotes(ability_text);
 
     // CR 207.2c: A granted ability's text may carry an italicized ability-word
     // prefix ("Landfall — Whenever a land you control enters, ..."). Ability
@@ -1850,7 +1955,8 @@ pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModific
     // (otherwise the ability-word prefix masks the trigger keyword and the line
     // falls through to the GrantAbility catch-all as an unimplemented effect).
     // Gated on a known ability word so a legitimate em-dash body is untouched.
-    if let Some((aw_name, body)) = super::oracle_modal::strip_ability_word_with_name(ability_text) {
+    if let Some((aw_name, body)) = super::oracle_modal::strip_ability_word_with_name(&ability_text)
+    {
         if super::oracle_modal::is_known_ability_word(&aw_name) {
             return classify_quoted_inner(&body);
         }
@@ -1864,7 +1970,7 @@ pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModific
         || nom_tag_lower(&lower, &lower, "at the beginning of ").is_some()
         || nom_tag_lower(&lower, &lower, "at the end of ").is_some()
     {
-        return super::oracle_trigger::parse_trigger_lines(ability_text, "~")
+        return super::oracle_trigger::parse_trigger_lines(&ability_text, "~")
             .into_iter()
             .map(|trigger| ContinuousModification::GrantTrigger {
                 trigger: Box::new(trigger),
@@ -1882,7 +1988,7 @@ pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModific
     // `starts_with` guard is required — without it any quoted line would be
     // mis-parsed as equip.
     if nom_tag_lower(&lower, &lower, "equip").is_some() {
-        if let Some(ability) = super::oracle::try_parse_equip(ability_text) {
+        if let Some(ability) = super::oracle::try_parse_equip_lowered(&ability_text) {
             return vec![ContinuousModification::GrantAbility {
                 definition: Box::new(ability),
             }];
@@ -1896,13 +2002,39 @@ pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModific
     }
 
     // CR 113.3d + CR 604.1: Static-line text → GrantStaticAbility / AddStaticMode.
-    if let Some(static_modifications) = parse_quoted_rule_static_modifications(ability_text) {
+    if let Some(static_modifications) = parse_quoted_rule_static_modifications(&ability_text) {
         return static_modifications;
     }
 
-    // CR 113 / CR 117 fallback: spell/activated text → GrantAbility.
+    // CR 614.1a + CR 614.6 + CR 201.5b: Object-hosted replacement rider — "If ~
+    // would leave the battlefield, exile it instead of putting it anywhere else."
+    // (`~` because `normalize_card_name_refs` rewrote the "this creature/permanent/
+    // land" self-reference card-wide). The parser IS the detector: route through
+    // the shared `try_parse_leave_battlefield_exile_replacement` combinator and,
+    // on a hit, grant the replacement to the recipient via `GrantReplacement` so
+    // the `~` binds to the object that gains the ability (the reanimated
+    // permanent), not the granting source.
+    //
+    // CR 611.2a + CR 613.1f: the granted definition is built from the UNSTAMPED
+    // `leave_battlefield_exile_replacement` constructor, never from the detector's
+    // `AddTargetReplacement` payload — that standalone payload carries
+    // `RestrictionExpiry::UntilHostLeavesPlay` (#6538). A granted replacement's
+    // lifetime is governed by the granting continuous effect's duration and is
+    // re-derived every layer pass, so it must not carry a host-lifetime stamp:
+    // #6538's `is_runtime_host_lifetime_replacement` keys base-install /
+    // non-copiable / host-exit-prune off exactly that stamp, and a base-installed
+    // granted rider would survive the granting effect lapsing (Elemental
+    // Expressionist's "until end of turn" grant would become permanent).
+    if super::oracle_effect::try_parse_leave_battlefield_exile_replacement(&lower).is_some() {
+        return vec![ContinuousModification::GrantReplacement {
+            replacement: Box::new(super::oracle_effect::leave_battlefield_exile_replacement()),
+        }];
+    }
+
+    // Fallback: no static/trigger/keyword/replacement shape matched above —
+    // parse the remaining text as an ability body and wrap it in GrantAbility.
     vec![ContinuousModification::GrantAbility {
-        definition: Box::new(parse_quoted_ability(ability_text)),
+        definition: Box::new(parse_quoted_ability(&ability_text)),
     }]
 }
 
@@ -1932,4 +2064,88 @@ pub(crate) fn split_keyword_list(text: &str) -> Vec<Cow<'_, str>> {
     // Reuses the building block from oracle_keyword.rs which handles inline,
     // comma-continuation, and Oxford comma protection patterns.
     super::oracle_keyword::expand_protection_parts(&parts)
+}
+
+/// CR 702.16n / CR 702.16p: Parse the trailing "This effect doesn't remove …"
+/// rider that accompanies a protection grant (Flickering Ward, Ward cycle,
+/// Spectra Ward, Benevolent Blessing). Returns `None` when the rider is absent.
+///
+/// Combinator-based word-boundary scan (parser-combinator gate): tries the
+/// fixed rider prefix at each word start so the sentence may follow any
+/// protection grant phrasing.
+pub(crate) fn parse_protection_does_not_remove(
+    text: &str,
+) -> Option<crate::types::ability::ProtectionDoesNotRemove> {
+    use nom::branch::alt;
+    use nom::bytes::complete::tag;
+    use nom::combinator::value;
+    use nom::Parser;
+
+    let lower = text.to_lowercase();
+    let mut remaining = lower.as_str();
+    while !remaining.is_empty() {
+        if let Ok((rest, ())) = value(
+            (),
+            alt((
+                tag::<_, _, nom::error::Error<&str>>("this effect doesn't remove "),
+                tag("this effect does not remove "),
+            )),
+        )
+        .parse(remaining)
+        {
+            let rest = rest.trim().trim_end_matches('.').trim();
+            return parse_does_not_remove_object(rest);
+        }
+        remaining = remaining
+            .find(' ')
+            .map_or("", |i| remaining[i + 1..].trim_start());
+    }
+    None
+}
+
+/// CR 702.16n / CR 702.16p: Object phrase after "doesn't remove ".
+fn parse_does_not_remove_object(
+    rest: &str,
+) -> Option<crate::types::ability::ProtectionDoesNotRemove> {
+    use crate::types::ability::ProtectionDoesNotRemove;
+    use nom::branch::alt;
+    use nom::bytes::complete::tag;
+    use nom::combinator::value;
+    use nom::Parser;
+
+    // Longest matches first so Benevolent Blessing doesn't collapse to Auras.
+    // `~` is the post-normalization form of "this Aura" (SELF_REF_TYPE_PHRASES):
+    // `parse_oracle_text` rewrites self-refs before static dispatch, so Source
+    // must match both the raw Oracle phrase and the tilde form.
+    alt((
+        value(
+            ProtectionDoesNotRemove::ControlledAttachmentsAlreadyAttached,
+            alt((
+                tag::<_, _, nom::error::Error<&str>>(
+                    "auras and equipment you control that are already attached to it",
+                ),
+                tag("auras and equipment you control that are already attached to them"),
+            )),
+        ),
+        value(
+            ProtectionDoesNotRemove::Source,
+            alt((tag("this aura"), tag("~"))),
+        ),
+        value(ProtectionDoesNotRemove::Auras, tag("auras")),
+    ))
+    .parse(rest)
+    .ok()
+    .and_then(|(leftover, exemption)| leftover.trim().is_empty().then_some(exemption))
+}
+
+/// CR 702.16n / CR 702.16p: Stamp a parsed protection SBA-exemption rider onto
+/// a continuous static when the Oracle text carries one.
+pub(crate) fn with_protection_does_not_remove(
+    def: crate::types::ability::StaticDefinition,
+    text: &str,
+) -> crate::types::ability::StaticDefinition {
+    match parse_protection_does_not_remove(text) {
+        Some(exemption) => def.protection_does_not_remove(exemption),
+        None => def,
+    }
 }

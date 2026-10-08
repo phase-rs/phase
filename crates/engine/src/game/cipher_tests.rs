@@ -13,6 +13,7 @@ use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
+use crate::types::resolution::{CipherEncodeStage, PendingCipherEncode, ResolutionFrame};
 use crate::types::zones::Zone;
 
 fn creature(state: &mut GameState, card: u64, owner: PlayerId, name: &str, zone: Zone) -> ObjectId {
@@ -189,7 +190,12 @@ fn begin_encode_choice_pauses_then_accept_encodes() {
     let host = creature(&mut state, 1, PlayerId(0), "Host", Zone::Battlefield);
     let spell = cipher_spell(&mut state, 2, PlayerId(0));
 
-    assert!(begin_encode_choice(&mut state, spell, PlayerId(0)));
+    assert!(begin_encode_choice(
+        &mut state,
+        spell,
+        PlayerId(0),
+        &mut Vec::new(),
+    ));
     match &state.waiting_for {
         WaitingFor::CipherEncodeChoice {
             player,
@@ -214,7 +220,12 @@ fn begin_encode_choice_pauses_then_accept_encodes() {
 fn begin_encode_choice_skipped_without_host() {
     let mut state = GameState::new_two_player(1);
     let spell = cipher_spell(&mut state, 1, PlayerId(0));
-    assert!(!begin_encode_choice(&mut state, spell, PlayerId(0)));
+    assert!(!begin_encode_choice(
+        &mut state,
+        spell,
+        PlayerId(0),
+        &mut Vec::new(),
+    ));
 }
 
 /// CR 608.2n: declining the encode puts the card into its owner's graveyard.
@@ -223,11 +234,60 @@ fn handle_encode_choice_decline_routes_to_graveyard() {
     let mut state = GameState::new_two_player(1);
     let _host = creature(&mut state, 1, PlayerId(0), "Host", Zone::Battlefield);
     let spell = cipher_spell(&mut state, 2, PlayerId(0));
-    assert!(begin_encode_choice(&mut state, spell, PlayerId(0)));
+    assert!(begin_encode_choice(
+        &mut state,
+        spell,
+        PlayerId(0),
+        &mut Vec::new(),
+    ));
 
     handle_encode_choice(&mut state, spell, None, &mut Vec::new());
     assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
     assert!(state.exile_links.is_empty());
+}
+
+/// CR 702.99a + CR 608.2n: A host that left while the spell's own prompt was
+/// resolving leaves a parked offer with no legal target. The production resume
+/// dispatcher must decline the card through its caller's event buffer, so the
+/// zone move remains visible to the normal trigger pipeline.
+#[test]
+fn host_loss_before_arming_emits_the_decline_zone_change() {
+    let mut state = GameState::new_two_player(1);
+    let host = creature(&mut state, 1, PlayerId(0), "Host", Zone::Battlefield);
+    let spell = cipher_spell(&mut state, 2, PlayerId(0));
+    state
+        .resolution_stack
+        .push_inner(ResolutionFrame::CipherEncode(PendingCipherEncode {
+            stage: CipherEncodeStage::Parked,
+            card_id: spell,
+            controller: PlayerId(0),
+            creatures: vec![host],
+        }));
+
+    // This is the interleaving the parked frame represents: the host was legal
+    // when the offer parked, then the spell's remaining work removed it before
+    // `resume_resolution_frames` could arm the offer.
+    super::zones::move_to_zone(&mut state, host, Zone::Graveyard, &mut Vec::new());
+
+    let mut events = Vec::new();
+    super::effects::resume_resolution_frames(&mut state, &mut events);
+
+    assert!(state.resolution_stack.is_empty());
+    assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Stack),
+                    to: Zone::Graveyard,
+                    ..
+                } if *object_id == spell
+            )
+        }),
+        "the production resume path must publish the declined cipher card's zone move"
+    );
 }
 
 // ── Combat-damage recast ──────────────────────────────────────────────────

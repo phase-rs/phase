@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +12,51 @@ use super::mtgjson::Ruling;
 use crate::types::card::{CardFace, CardRules, LayoutKind, PrintedCardRef};
 use crate::types::card_type::CoreType;
 
-use std::io::BufReader;
+use std::io::{BufReader, Read};
+
+/// Shared, cheaply-cloneable handle to the loaded [`CardDatabase`].
+///
+/// Exists so `GameState` can carry the database for resolvers that must query
+/// the whole card corpus at resolution time (Momir's random creature draw)
+/// rather than pre-staging a copy of it into state. `Arc` keeps
+/// `GameState::clone()` during AI search O(1), matching the `Arc` on
+/// `card_face_registry` / `all_card_names`.
+///
+/// `Debug` is hand-written as a one-line summary: `GameState` derives `Debug`,
+/// and a derived impl here would dump every loaded card face on any `{:?}` of
+/// a game state.
+#[derive(Clone)]
+pub struct CardDbHandle(Arc<CardDatabase>);
+
+impl CardDbHandle {
+    pub fn new(db: Arc<CardDatabase>) -> Self {
+        Self(db)
+    }
+
+    pub fn arc(&self) -> &Arc<CardDatabase> {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for CardDbHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CardDbHandle({} faces)", self.0.face_index.len())
+    }
+}
+
+impl std::ops::Deref for CardDbHandle {
+    type Target = CardDatabase;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<Arc<CardDatabase>> for CardDbHandle {
+    fn from(db: Arc<CardDatabase>) -> Self {
+        Self(db)
+    }
+}
 
 #[derive(Default)]
 pub struct CardDatabase {
@@ -18,6 +64,14 @@ pub struct CardDatabase {
     pub(crate) face_index: HashMap<String, CardFace>,
     pub(crate) name_alias_index: HashMap<String, String>,
     pub(crate) oracle_id_index: HashMap<String, Vec<String>>,
+    /// Maps face key (lowercased card name) to its original zero-based position
+    /// inside MTGJSON's multi-face record. Export loading flattens faces into a
+    /// JSON object, whose iteration order is not a rules authority.
+    pub(crate) face_order_index: HashMap<String, usize>,
+    /// Deterministic card-search scan order. Built once by database loaders so
+    /// interactive search does not allocate and sort the full face index on
+    /// every query.
+    pub(crate) search_face_keys: Vec<String>,
     /// Maps oracle_id → runtime LayoutKind for multi-face cards.
     /// Populated only from the export path (the MTGJSON path uses `cards` directly).
     /// Enables `rehydrate_game_from_card_db` to determine the correct layout kind
@@ -63,7 +117,15 @@ impl CardDatabase {
     pub fn from_export(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let file = std::fs::File::open(path)?;
         let reader = BufReader::new(file);
-        let entries: HashMap<String, CardExportEntry> = serde_json::from_reader(reader)?;
+        Self::from_export_reader(reader)
+    }
+
+    /// Load a pre-processed card-data export from an already-open reader.
+    /// Keeps compressed test fixtures on the same deserialization path as the
+    /// production file loader without changing production's buffered-file flow.
+    pub fn from_export_reader<R: Read>(reader: R) -> Result<Self, Box<dyn std::error::Error>> {
+        let entries: HashMap<String, CardExportEntry> =
+            serde_json::from_reader(BufReader::new(reader))?;
         Ok(Self::from_export_entries(entries))
     }
 
@@ -77,6 +139,7 @@ impl CardDatabase {
     fn from_export_entries(entries: HashMap<String, CardExportEntry>) -> Self {
         let mut face_index = HashMap::with_capacity(entries.len());
         let mut oracle_id_index: HashMap<String, Vec<String>> = HashMap::new();
+        let mut face_order_index: HashMap<String, usize> = HashMap::new();
         let mut layout_index: HashMap<String, LayoutKind> = HashMap::new();
         let mut legalities = HashMap::new();
         let mut printings_index: HashMap<String, Vec<String>> = HashMap::new();
@@ -86,6 +149,9 @@ impl CardDatabase {
 
         for (export_key, entry) in entries {
             let storage_key = export_key.to_lowercase();
+            if let Some(face_order) = entry.face_index {
+                face_order_index.insert(storage_key.clone(), face_order);
+            }
             if let Some(oracle_id) = entry.face.scryfall_oracle_id.clone() {
                 oracle_id_index
                     .entry(oracle_id.clone())
@@ -111,6 +177,10 @@ impl CardDatabase {
                 legalities.insert(storage_key.clone(), normalized);
             }
         }
+        for keys in oracle_id_index.values_mut() {
+            keys.sort_by_key(|key| face_order_index.get(key).copied().unwrap_or(usize::MAX));
+        }
+        let search_face_keys = build_search_face_keys(&face_index, &face_order_index);
         let name_alias_index = build_name_alias_index(face_index.keys());
         let creature_type_vocabulary = collect_creature_type_vocabulary(face_index.values());
 
@@ -119,6 +189,8 @@ impl CardDatabase {
             face_index,
             name_alias_index,
             oracle_id_index,
+            face_order_index,
+            search_face_keys,
             layout_index,
             legalities,
             printings_index,
@@ -163,6 +235,7 @@ impl CardDatabase {
                 face: face.clone(),
                 legalities: HashMap::new(),
                 layout,
+                face_index: self.face_order_index.get(&key).copied(),
                 printings: self.printings_index.get(&key).cloned().unwrap_or_default(),
                 rulings: self.rulings_index.get(&key).cloned().unwrap_or_default(),
                 bracket_signals: self
@@ -171,7 +244,12 @@ impl CardDatabase {
                     .copied()
                     .unwrap_or_default(),
             };
-            out.insert(face.name.clone(), entry);
+            // Preserve the database storage key, not merely the printed face
+            // name. Meld pairs have two distinct combined-back records with the
+            // same printed name and different oracle ids; oracle-gen keeps the
+            // loser under a hidden `[oracle-id]` key. Re-keying both by
+            // `face.name` here collapsed one half in AI-worker subsets.
+            out.insert(key, entry);
         }
         serde_json::to_string(&out).expect("CardExportEntry serialization is infallible")
     }
@@ -229,6 +307,30 @@ impl CardDatabase {
         self.printings_index.get(&key).map(Vec::as_slice)
     }
 
+    /// CR 712.2 + CR 601.3e: whether the face stored under `key` (a
+    /// `face_iter` key, already normalized) is the card's FRONT face — the one
+    /// a printed card presents outside the battlefield.
+    ///
+    /// Back faces are stored in `face_index` alongside their fronts and inherit
+    /// the whole card's `printings`/`rarities`, so any consumer that enumerates
+    /// printings (booster collation, set browsing) must exclude them or the
+    /// same physical card is counted twice. Single-faced cards record no face
+    /// order and are fronts by definition.
+    pub fn is_front_face_key(&self, key: &str) -> bool {
+        self.face_order_index.get(key).copied().unwrap_or(0) == 0
+    }
+
+    /// Set codes recorded for a `face_iter` key, without the name normalization
+    /// [`printings_for`](Self::printings_for) performs. Callers iterating
+    /// `face_iter` already hold the storage key; re-deriving it per card costs a
+    /// lowercase allocation and an alias lookup for every face in the corpus.
+    pub fn printings_for_key(&self, key: &str) -> &[String] {
+        self.printings_index
+            .get(key)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
     /// Returns the official WotC rulings for a card. Returns an empty slice
     /// when the card has no recorded rulings, when the card was loaded via a
     /// path that doesn't record rulings, or when looking up a back-face name
@@ -262,6 +364,77 @@ impl CardDatabase {
                 ));
             }
         }
+        errors.extend(self.unenforceable_static_condition_errors());
+        errors
+    }
+
+    /// CR 118.12a + CR 601.2f: no exported static ability may carry a condition
+    /// whose truth is decided by a round-trip its OWN mode's enforcement point
+    /// never runs (`StaticCondition::is_unenforceable_on`).
+    ///
+    /// Such a condition is a false green, not a bug the player can see: the
+    /// layer pipeline hard-codes those leaves to `false`, so the static silently
+    /// never applies while coverage reports the gate fully supported. Awesome
+    /// Presence (CR 509.1b `CantBeBlocked` + an `UnlessPay` no block-declaration
+    /// prompt ever offers) and Hipparion (`BlockRestriction`, same) shipped that
+    /// way for exactly as long as the parser-side gate was the only check.
+    ///
+    /// This is the CORPUS-WIDE half of that gate, and it exists because the
+    /// parser-side half is a call-site discipline that has been breached three
+    /// times. `oracle_static::static_helpers::gate_static_condition` fires only
+    /// where a parser route calls it; this fires on the shipped export no matter
+    /// which route built the definition, so a fourth bypass fails CI on the
+    /// first card that reaches it. Both read the same predicate, so they cannot
+    /// drift apart.
+    ///
+    /// Reported as an integrity error rather than repaired in place on purpose:
+    /// the honest repair needs the clause's Oracle text, which only the parser
+    /// has (see `unenforceable_gate_marker`, which labels the gap with it).
+    /// Silently substituting a marker here would hide the bypass instead of
+    /// surfacing it.
+    ///
+    /// CR 613.1f + CR 604.1: the walk is over
+    /// [`StaticDefinition::walk_self_and_granted`], not over
+    /// `face.static_abilities` alone. A `ContinuousModification::
+    /// GrantStaticAbility` owns a whole nested `StaticDefinition` — its own
+    /// mode, its own scope, and its own `condition` — so the top-level view
+    /// leaves every granted definition unchecked, and an unofferable
+    /// `UnlessPay` inside one bypasses this backstop exactly the way the
+    /// parser-side gate was bypassed three times before it existed. Nesting is
+    /// transitive (a granted static may itself grant one), which is why the
+    /// recursion lives in the shared walk rather than being open-coded here.
+    fn unenforceable_static_condition_errors(&self) -> Vec<String> {
+        let mut errors: Vec<String> = self
+            .face_index
+            .values()
+            .flat_map(|face| {
+                let mut face_errors = Vec::new();
+                for root in &face.static_abilities {
+                    // The collector never breaks, so the traversal always runs
+                    // to completion and the `ControlFlow` result carries no
+                    // information.
+                    let _: ControlFlow<()> = root.walk_self_and_granted(&mut |def| {
+                        let unenforceable = def
+                            .condition
+                            .as_ref()
+                            .filter(|condition| condition.is_unenforceable_on(&def.mode));
+                        if let Some(condition) = unenforceable {
+                            face_errors.push(format!(
+                                "{}: static {:?} carries a condition its enforcement point can \
+                                 never satisfy ({:?}) — it must be routed through \
+                                 oracle_static::static_helpers::gate_static_condition",
+                                face.name, def.mode, condition
+                            ));
+                        }
+                        ControlFlow::Continue(())
+                    });
+                }
+                face_errors
+            })
+            .collect();
+        // `face_index` is a HashMap, so the natural order is nondeterministic;
+        // a CI failure list that reshuffles between runs is unreadable.
+        errors.sort();
         errors
     }
 
@@ -275,6 +448,20 @@ impl CardDatabase {
 
     pub fn face_iter(&self) -> impl Iterator<Item = (&str, &CardFace)> {
         self.face_index.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    /// Every loaded face in the database's deterministic scan order.
+    ///
+    /// `face_iter` walks a `HashMap` and so yields a different order per
+    /// process; this walks the precomputed `search_face_keys` (sorted by
+    /// oracle id, then face order, then key), which is identical for any two
+    /// loads of the same card data. Use this — never `face_iter` — whenever
+    /// the ORDER is load-bearing, such as an RNG draw whose result has to
+    /// match across peers and replays.
+    pub fn faces_in_scan_order(&self) -> impl Iterator<Item = &CardFace> {
+        self.search_face_keys
+            .iter()
+            .filter_map(|key| self.face_index.get(key))
     }
 
     /// CR 205.3m: Returns the full creature subtype vocabulary derived from
@@ -316,8 +503,49 @@ impl CardDatabase {
     /// single-face fast path. `lookup_key` collapses combined names to their
     /// front face, so without this pre-split a back-face signal would be
     /// silently dropped whenever the front face is in the export map.
+    ///
+    /// The split is `split_composite_name`, the one [`Self::lookup_key`] uses.
+    /// A narrower split would leave a composite name it does not accept
+    /// aggregating only its front face's signals, silently losing a back-face
+    /// Game Changer / mass-land-denial / extra-turn signal in Commander
+    /// bracket classification.
+    ///
+    /// A single-faced card whose printed name contains a separator
+    /// (`"SP//dr, Piloted by Peni"`, `"Summon: Choco/Mog"`) must NOT be split,
+    /// so the whole-name lookup is tried first — the same false-positive
+    /// guard, and the same ordering, that `lookup_key` documents. "Whole name"
+    /// here spans every source this function reads, `bracket_lists` included,
+    /// since a curated list entry may name a card the export map does not
+    /// carry, and the unaccented-alias index, which `lookup_key` folds through
+    /// before it splits.
     pub fn bracket_signals_for(&self, name: &str) -> BracketSignals {
-        if let Some((a, b)) = name.split_once(" // ") {
+        // Exact-match guard only: a name that is ITSELF an indexed card must
+        // not be split. Deliberately not `lookup_key`, which collapses a
+        // composite name to its front face and would therefore report every
+        // composite name whose front face is indexed as a "whole name",
+        // suppressing the very aggregation this function exists to perform.
+        let lower = name.to_lowercase();
+        // `bracket_lists` is a third source of whole printed names: it keys on
+        // the raw lowercased name with no index membership, so a curated-list
+        // card that is absent from the export map is known ONLY here. Omitting
+        // it would split such a name on its literal `//` into two nonexistent
+        // faces and report all-false, dropping its real signal. It takes the
+        // ORIGINAL `name`, not `lower`: `contains` owns its own case folding,
+        // so passing the pre-folded copy would fold twice and imply the lookup
+        // is case-sensitive to a future caller.
+        // The unaccented-alias index is a fourth whole-name source, and
+        // `lookup_key` folds through it BEFORE its composite split. Omitting
+        // it here would make the two functions disagree about what is a
+        // composite name — the exact failure `lookup_key`'s doc warns is
+        // wrong by construction — for a single-faced card whose printed name
+        // carries a separator and a diacritic, typed unaccented.
+        let is_indexed_whole_name = self.face_index.contains_key(&lower)
+            || self.cards.contains_key(&lower)
+            || self.bracket_lists.contains(name)
+            || self
+                .name_alias_index
+                .contains_key(&fold_card_name_key(name));
+        if let Some((a, b)) = split_composite_name(name).filter(|_| !is_indexed_whole_name) {
             let sa = self.signals_for_single_face(a.trim());
             let sb = self.signals_for_single_face(b.trim());
             return BracketSignals {
@@ -344,25 +572,177 @@ impl CardDatabase {
         }
     }
 
-    fn lookup_key(&self, name: &str) -> String {
+    /// Single authority for resolving any caller-supplied card name — including
+    /// a multi-face composite name (`"Front // Back"`) — to a key in
+    /// `face_index` / `cards`. Every name-keyed accessor on `CardDatabase`
+    /// routes through here or through the [`Self::resolve_name`] it wraps; no
+    /// caller may re-implement composite-name splitting.
+    ///
+    /// Resolution order is significant and must be preserved:
+    /// 1. Exact (lowercased) match. This MUST precede the composite split so a
+    ///    single-faced card whose printed name contains a separator
+    ///    (`"SP//dr, Piloted by Peni"`, `"Summon: Choco/Mog"`) is not mistaken
+    ///    for a composite name.
+    /// 2. Alias fold (`build_name_alias_index`).
+    /// 3. Composite split (`split_composite_name`), taking the **front** face,
+    ///    then retrying steps 1 and 2 against that front segment.
+    ///
+    /// Collapsing to the front face is correct for decklist *identity*
+    /// resolution: a composite name denotes exactly one card. CR 709.2: although
+    /// split cards have two castable halves, each split card is only one card,
+    /// so a deck entry for `"Fire // Ice"` is one copy of that card, not two.
+    /// It is deliberately lossy in the other direction — the back half is not
+    /// reachable through this function, and CR 709.4a (each split card has two
+    /// names, and an effect choosing a name must choose one half, not both)
+    /// means name-choice effects must not be routed through this collapse.
+    /// Callers that genuinely need per-face data for a composite name must
+    /// split the name themselves and query each face, the way
+    /// [`Self::bracket_signals_for`] does; do not widen `lookup_key` to return
+    /// multiple keys. Such a caller must split with `split_composite_name` and
+    /// apply the same exact-match-first guard, or it will disagree with
+    /// `lookup_key` about what is a composite name — `bracket_signals_for` is
+    /// the worked example.
+    ///
+    /// `data/card-data.json` stores each face under its own key and contains no
+    /// composite `"A // B"` keys, so composite-name support rests entirely on
+    /// the composite split in [`Self::resolve_name`] with no data-level
+    /// backstop. The regression barrier is therefore the `get_face_by_name`
+    /// tests in this module; any refactor of this function must keep them
+    /// passing.
+    ///
+    /// `pub(crate)` so in-crate name-keyed code (notably deck validation, which
+    /// keys copy counts and coverage buckets by resolved name) can reuse this
+    /// one resolution instead of re-implementing the composite split with a
+    /// different — and therefore wrong — ordering.
+    pub(crate) fn lookup_key(&self, name: &str) -> String {
+        self.resolve_name(name)
+            .map_or_else(|| name.to_lowercase(), |resolved| resolved.key)
+    }
+
+    /// [`Self::lookup_key`]'s resolution, also reporting which step matched;
+    /// `None` when no step did.
+    fn resolve_name(&self, name: &str) -> Option<ResolvedName> {
         let lower = name.to_lowercase();
         if self.face_index.contains_key(&lower) || self.cards.contains_key(&lower) {
-            return lower;
+            return Some(ResolvedName {
+                key: lower,
+                matched: NameMatch::WholeName,
+            });
         }
         if let Some(alias) = self.name_alias_index.get(&fold_card_name_key(name)) {
-            return alias.clone();
+            return Some(ResolvedName {
+                key: alias.clone(),
+                matched: NameMatch::WholeName,
+            });
         }
-        if let Some((front, _)) = lower.split_once("//") {
+        if let Some((front, _)) = split_composite_name(&lower) {
             let front = front.trim();
             if self.face_index.contains_key(front) || self.cards.contains_key(front) {
-                return front.to_string();
+                return Some(ResolvedName {
+                    key: front.to_string(),
+                    matched: NameMatch::CompositeFront,
+                });
             }
             if let Some(alias) = self.name_alias_index.get(&fold_card_name_key(front)) {
-                return alias.clone();
+                return Some(ResolvedName {
+                    key: alias.clone(),
+                    matched: NameMatch::CompositeFront,
+                });
             }
         }
-        lower
+        None
     }
+
+    /// The printed spelling of the card `name` resolves to, in the shape
+    /// `name` has: a name that resolves whole yields that face's printed
+    /// name, and a composite name whose segments name every face of one
+    /// card, in face order, yields those faces' printed names joined with
+    /// `" // "`. A name that resolves to a single face is never widened to a
+    /// composite.
+    ///
+    /// `None` when `name` does not resolve, when a composite name's segments
+    /// are not exactly its card's faces (a partner pair, a reversed or
+    /// partial spelling), or when the printed spelling would not resolve back
+    /// to the same key through [`Self::lookup_key`].
+    pub fn canonical_name(&self, name: &str) -> Option<String> {
+        let resolved = self.resolve_name(name)?;
+        let face = self.face_index.get(&resolved.key)?;
+        let printed = match resolved.matched {
+            NameMatch::WholeName => face.name.clone(),
+            NameMatch::CompositeFront => {
+                let faces = self.faces_of_card(face);
+                let segments = composite_name_segments(name);
+                let names_every_face = segments.len() == faces.len()
+                    && segments.iter().zip(&faces).all(|(segment, card_face)| {
+                        self.get_face_by_name(segment)
+                            .is_some_and(|named| named.name == card_face.name)
+                    });
+                if !names_every_face {
+                    return None;
+                }
+                faces
+                    .iter()
+                    .map(|card_face| card_face.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" // ")
+            }
+        };
+        (self.lookup_key(&printed) == resolved.key).then_some(printed)
+    }
+
+    /// The faces stored under `face`'s oracle id, in `oracle_id_index` order;
+    /// just `face` when it has no oracle id or none of that id's keys is
+    /// indexed.
+    fn faces_of_card<'a>(&'a self, face: &'a CardFace) -> Vec<&'a CardFace> {
+        let siblings: Vec<&CardFace> = face
+            .scryfall_oracle_id
+            .as_deref()
+            .and_then(|oracle_id| self.oracle_id_index.get(oracle_id))
+            .map(|keys| {
+                keys.iter()
+                    .filter_map(|key| self.face_index.get(key))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if siblings.is_empty() {
+            vec![face]
+        } else {
+            siblings
+        }
+    }
+}
+
+pub(crate) fn build_search_face_keys(
+    face_index: &HashMap<String, CardFace>,
+    face_order_index: &HashMap<String, usize>,
+) -> Vec<String> {
+    let mut keys: Vec<String> = face_index.keys().cloned().collect();
+    keys.sort_by(|left_key, right_key| {
+        let left_oracle = face_index
+            .get(left_key)
+            .and_then(|face| face.scryfall_oracle_id.as_deref())
+            .unwrap_or("");
+        let right_oracle = face_index
+            .get(right_key)
+            .and_then(|face| face.scryfall_oracle_id.as_deref())
+            .unwrap_or("");
+        left_oracle
+            .cmp(right_oracle)
+            .then_with(|| {
+                face_order_index
+                    .get(left_key)
+                    .copied()
+                    .unwrap_or(usize::MAX)
+                    .cmp(
+                        &face_order_index
+                            .get(right_key)
+                            .copied()
+                            .unwrap_or(usize::MAX),
+                    )
+            })
+            .then_with(|| left_key.cmp(right_key))
+    });
+    keys
 }
 
 /// CR 205.2b + CR 205.3m + CR 308.1: subtype categories are disjoint — a
@@ -428,11 +808,62 @@ pub(crate) fn build_name_alias_index<'a>(
         if let Some(stripped) = key.strip_prefix("the ").filter(|s| !s.is_empty()) {
             register_alias(fold_card_name_key(stripped));
         }
+
+        // Decks saved while the client's deck repair rewrote a bare `/` to
+        // ` // ` carry a name like "Summon: Choco/Mog" as "Summon: Choco // Mog".
+        // Register that spelling as an alias of the printed name; the composite
+        // split would otherwise read it as a multi-face name.
+        if !key.contains("//") {
+            let segments: Vec<&str> = key
+                .split('/')
+                .map(str::trim)
+                .filter(|segment| !segment.is_empty())
+                .collect();
+            if segments.len() > 1 {
+                register_alias(fold_card_name_key(&segments.join(" // ")));
+            }
+        }
     }
     aliases
         .into_iter()
         .filter_map(|(alias, key)| key.map(|key| (alias, key)))
         .collect()
+}
+
+/// The face separator of a composite multi-face name: the first `//` (spaced
+/// or glued) when the name contains one, otherwise the first single `/`.
+/// Returns the text before and after it, untrimmed. A printed name can itself
+/// contain either separator (`"SP//dr, Piloted by Peni"`, `"Summon: Choco/Mog"`),
+/// so a caller must try the whole name as a key before splitting.
+fn split_composite_name(name: &str) -> Option<(&str, &str)> {
+    name.split_once("//").or_else(|| name.split_once('/'))
+}
+
+/// `name` split at every separator [`split_composite_name`] finds, each
+/// segment trimmed.
+fn composite_name_segments(name: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut rest = name;
+    while let Some((head, tail)) = split_composite_name(rest) {
+        segments.push(head.trim());
+        rest = tail;
+    }
+    segments.push(rest.trim());
+    segments
+}
+
+/// Which step of [`CardDatabase::resolve_name`] matched a name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NameMatch {
+    /// The whole name, exactly or through `name_alias_index`.
+    WholeName,
+    /// Only the front segment of a composite name.
+    CompositeFront,
+}
+
+struct ResolvedName {
+    key: String,
+    matched: NameMatch,
 }
 
 fn fold_card_name_key(name: &str) -> String {
@@ -483,6 +914,10 @@ struct CardExportEntry {
     /// MTGJSON layout string for multi-face cards (e.g. "modal_dfc", "transform").
     #[serde(default)]
     layout: Option<String>,
+    /// Original zero-based position of this face within MTGJSON's multi-face
+    /// record. Optional so older card-data exports remain loadable.
+    #[serde(default)]
+    face_index: Option<usize>,
     /// Set codes the card has been printed in (from MTGJSON `printings`).
     #[serde(default)]
     printings: Vec<String>,
@@ -591,6 +1026,148 @@ mod tests {
             rarities: Default::default(),
             attraction_lights: vec![],
         }
+    }
+
+    /// CR 118.12a: the corpus-wide half of the unenforceable-gate authority.
+    ///
+    /// Both directions matter and neither is exercised by the shipped export
+    /// today (the parser gate defers every such condition before it reaches
+    /// here), so this is the only thing that proves the gate is not vacuous:
+    /// the ACCEPT direction pins that a legitimate `UnlessPay` on a combat-taxed
+    /// mode — Ghostly Prison, the card the whole enforcement-point axis exists
+    /// to keep working — is not swept up, and the REJECT direction pins that the
+    /// same leaf on a mode with no payment prompt fails the export.
+    #[test]
+    fn export_integrity_rejects_only_conditions_their_mode_can_never_satisfy() {
+        use crate::types::ability::{StaticCondition, UnlessPayScaling};
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::StaticMode;
+
+        let pay_gate = || StaticCondition::UnlessPay {
+            cost: ManaCost::NoCost,
+            scaling: UnlessPayScaling::default(),
+            defended: None,
+        };
+        let face_with = |name: &str, mode: StaticMode| {
+            let mut face = test_face(name);
+            let mut def = StaticDefinition::new(mode);
+            def.condition = Some(pay_gate());
+            face.static_abilities = vec![def];
+            face
+        };
+
+        // ACCEPT: CR 508.1h — `WaitingFor::CombatTaxPayment` prompts the
+        // attacking player at declaration, so the gate is satisfiable.
+        let mut taxed = HashMap::new();
+        taxed.insert(
+            "ghostly prison".to_string(),
+            face_with("Ghostly Prison", StaticMode::CantAttack),
+        );
+        let db =
+            CardDatabase::from_json_str(&serde_json::to_string(&taxed).unwrap()).expect("parses");
+        assert!(
+            db.export_integrity_errors().is_empty(),
+            "a payment gate on a combat-taxed mode is enforceable and must pass: {:?}",
+            db.export_integrity_errors()
+        );
+
+        // REJECT: CR 509.1b — no prompt exists at block declaration against an
+        // evasion static, so the layer pipeline hard-codes the leaf `false`.
+        let mut untaxed = HashMap::new();
+        untaxed.insert(
+            "probe".to_string(),
+            face_with("Untaxed Probe", StaticMode::CantBeBlocked),
+        );
+        let db =
+            CardDatabase::from_json_str(&serde_json::to_string(&untaxed).unwrap()).expect("parses");
+        let errors = db.export_integrity_errors();
+        assert!(
+            errors.iter().any(|e| e.contains("Untaxed Probe")),
+            "a payment gate on a mode with no payment prompt must fail the export \
+             no matter which parser route built it, got {errors:?}"
+        );
+    }
+
+    /// CR 613.1f + CR 604.1 + CR 118.12a: a granted static ability is a static
+    /// ability, so the unenforceable-gate backstop must reach the condition on
+    /// the definition a `ContinuousModification::GrantStaticAbility` nests —
+    /// and on the definition THAT one nests, transitively.
+    ///
+    /// Regression for the top-level-only view: the outer definition here is
+    /// deliberately clean (no condition at all, and a mode that WOULD accept a
+    /// payment gate), so the only thing that can fail the export is the inner
+    /// definition's leaf. Before the walk existed this face shipped reported as
+    /// fully supported while the inner `CantBeBlocked` gate was hard-coded
+    /// `false` by the layer pipeline — the exact Awesome Presence shape, one
+    /// level down.
+    #[test]
+    fn export_integrity_reaches_conditions_on_nested_granted_statics() {
+        use crate::types::ability::{ContinuousModification, StaticCondition, UnlessPayScaling};
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::StaticMode;
+
+        let pay_gate = || StaticCondition::UnlessPay {
+            cost: ManaCost::NoCost,
+            scaling: UnlessPayScaling::default(),
+            defended: None,
+        };
+
+        // Innermost: CR 509.1b — no block-declaration prompt exists, so this
+        // leaf is the unofferable gate.
+        let mut inner = StaticDefinition::new(StaticMode::CantBeBlocked);
+        inner.condition = Some(pay_gate());
+
+        // Middle: a granted static that is itself clean, proving the walk does
+        // not stop at the first level of nesting.
+        let mut middle = StaticDefinition::continuous();
+        middle.modifications = vec![ContinuousModification::GrantStaticAbility {
+            definition: Box::new(inner),
+        }];
+
+        // Outer/top-level: clean, and on `CantAttack`, whose CR 508.1h combat-tax
+        // prompt makes a payment gate legitimately enforceable — so a top-level
+        // -only check finds nothing to report on this face.
+        let mut outer = StaticDefinition::new(StaticMode::CantAttack);
+        outer.modifications = vec![ContinuousModification::GrantStaticAbility {
+            definition: Box::new(middle),
+        }];
+
+        let mut faces = HashMap::new();
+        let mut face = test_face("Nested Grant Probe");
+        face.static_abilities = vec![outer];
+        faces.insert("nested grant probe".to_string(), face);
+        let db =
+            CardDatabase::from_json_str(&serde_json::to_string(&faces).unwrap()).expect("parses");
+
+        let errors = db.export_integrity_errors();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("Nested Grant Probe") && e.contains("CantBeBlocked")),
+            "an unofferable payment gate two levels inside GrantStaticAbility must fail \
+             the export rather than leaving the card falsely supported, got {errors:?}"
+        );
+
+        // ACCEPT direction at depth: the same nesting with an enforceable inner
+        // mode must still pass, so the recursion is not a blanket rejection of
+        // every nested condition.
+        let mut inner_ok = StaticDefinition::new(StaticMode::CantAttack);
+        inner_ok.condition = Some(pay_gate());
+        let mut outer_ok = StaticDefinition::continuous();
+        outer_ok.modifications = vec![ContinuousModification::GrantStaticAbility {
+            definition: Box::new(inner_ok),
+        }];
+        let mut ok_faces = HashMap::new();
+        let mut ok_face = test_face("Nested Taxed Probe");
+        ok_face.static_abilities = vec![outer_ok];
+        ok_faces.insert("nested taxed probe".to_string(), ok_face);
+        let ok_db = CardDatabase::from_json_str(&serde_json::to_string(&ok_faces).unwrap())
+            .expect("parses");
+        assert!(
+            ok_db.export_integrity_errors().is_empty(),
+            "a nested payment gate on a combat-taxed mode is enforceable and must pass: {:?}",
+            ok_db.export_integrity_errors()
+        );
     }
 
     #[test]
@@ -986,6 +1563,97 @@ mod tests {
     }
 
     #[test]
+    fn bracket_signals_for_glued_combined_name_picks_up_back_face_signal() {
+        // Regression: the pre-split accepted only the spaced " // " form, so a
+        // hand-typed glued composite name ("Front//Back") fell through to the
+        // single-face fast path, where lookup_key collapses it to the front
+        // face — silently dropping a back-face Game Changer signal from
+        // Commander bracket classification. The split must accept every
+        // composite form lookup_key resolves.
+        let json = r#"{
+            "halana, kessig ranger": {
+                "name": "Halana, Kessig Ranger",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+                "bracket_signals": {
+                    "game_changer": false, "mass_land_denial": false,
+                    "extra_turn": false, "efficient_tutor": false
+                }
+            },
+            "alena, trapper founder": {
+                "name": "Alena, Trapper Founder",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+                "bracket_signals": {
+                    "game_changer": true, "mass_land_denial": false,
+                    "extra_turn": false, "efficient_tutor": false
+                }
+            }
+        }"#;
+        let db = CardDatabase::from_json_str(json).unwrap();
+        assert!(
+            db.bracket_signals_for("Halana, Kessig Ranger//Alena, Trapper Founder")
+                .game_changer,
+            "glued composite name must aggregate both faces, like the spaced form"
+        );
+    }
+
+    #[test]
+    fn bracket_signals_for_single_face_name_containing_double_slash_is_not_split() {
+        // The false-positive guard (issue #4790) applied to bracket signals:
+        // "SP//dr, Piloted by Peni" is ONE indexed card whose printed name
+        // contains "//". Splitting it would look up two nonexistent faces and
+        // report all-false, losing its real signal.
+        let json = r#"{
+            "sp//dr, piloted by peni": {
+                "name": "SP//dr, Piloted by Peni",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+                "bracket_signals": {
+                    "game_changer": true, "mass_land_denial": false,
+                    "extra_turn": false, "efficient_tutor": false
+                }
+            }
+        }"#;
+        let db = CardDatabase::from_json_str(json).unwrap();
+        assert!(
+            db.bracket_signals_for("SP//dr, Piloted by Peni")
+                .game_changer,
+            "an indexed whole name containing // must not be split into faces"
+        );
+    }
+
+    #[test]
+    fn bracket_signals_for_glued_single_face_name_known_only_to_bracket_lists_is_not_split() {
+        use crate::database::bracket_lists::BracketLists;
+        // Glued-form twin of the spaced-form fallback test below, for the
+        // false-positive guard: "SP//dr, Piloted by Peni" is ONE printed card
+        // whose name contains "//", and here it is known only to the curated
+        // lists (empty export map). The whole-name guard must consult
+        // `bracket_lists` too, or the name is split into two nonexistent faces
+        // and its real mass-land-denial signal is lost.
+        let lists = BracketLists::from_json_str(
+            r#"{"version":"t","mass_land_denial":["SP//dr, Piloted by Peni"]}"#,
+        )
+        .unwrap();
+        let db = CardDatabase::default().with_bracket_lists(lists);
+        assert!(
+            db.bracket_signals_for("SP//dr, Piloted by Peni")
+                .mass_land_denial,
+            "a lists-only whole name containing // must not be split into faces"
+        );
+    }
+
+    #[test]
     fn bracket_signals_for_partner_pair_falls_back_to_bracket_lists_when_not_in_export() {
         use crate::database::bracket_lists::BracketLists;
         // No export entries — bracket_lists is the source of truth.
@@ -1200,6 +1868,443 @@ mod tests {
         assert!(
             !vocab.contains(&"Equipment".to_string()),
             "Equipment is an artifact type (appears on a pure Artifact face) — must not leak, got {vocab:?}"
+        );
+    }
+
+    #[test]
+    fn single_face_name_containing_slash_resolves_to_itself() {
+        let mut map = HashMap::new();
+        map.insert(
+            "summon: choco/mog".to_string(),
+            test_face("Summon: Choco/Mog"),
+        );
+        map.insert("summon: choco".to_string(), test_face("Summon: Choco"));
+        let json = serde_json::to_string(&map).unwrap();
+        let db = CardDatabase::from_json_str(&json).unwrap();
+        assert_eq!(
+            db.get_face_by_name("Summon: Choco/Mog")
+                .map(|face| face.name.as_str()),
+            Some("Summon: Choco/Mog")
+        );
+    }
+
+    #[test]
+    fn single_slash_combined_face_name_resolves_front_face() {
+        let mut map = HashMap::new();
+        map.insert("revival".to_string(), test_face("Revival"));
+        map.insert("revenge".to_string(), test_face("Revenge"));
+        map.insert("who".to_string(), test_face("Who"));
+        map.insert("what".to_string(), test_face("What"));
+        let json = serde_json::to_string(&map).unwrap();
+        let db = CardDatabase::from_json_str(&json).unwrap();
+        assert_eq!(
+            db.get_face_by_name("Revival/Revenge")
+                .map(|face| face.name.as_str()),
+            Some("Revival")
+        );
+        assert_eq!(
+            db.get_face_by_name("Who / What / When / Where / Why")
+                .map(|face| face.name.as_str()),
+            Some("Who")
+        );
+        assert_eq!(
+            db.get_face_by_name("Who/What/When/Where/Why")
+                .map(|face| face.name.as_str()),
+            Some("Who")
+        );
+        // Reach guard: "Revenge" must still resolve to itself.
+        assert_eq!(
+            db.get_face_by_name("Revenge")
+                .map(|face| face.name.as_str()),
+            Some("Revenge")
+        );
+    }
+
+    #[test]
+    fn spaced_spelling_of_a_slash_name_resolves_to_the_printed_name() {
+        let mut map = HashMap::new();
+        map.insert(
+            "summon: choco/mog".to_string(),
+            test_face("Summon: Choco/Mog"),
+        );
+        let json = serde_json::to_string(&map).unwrap();
+        let db = CardDatabase::from_json_str(&json).unwrap();
+        assert_eq!(
+            db.get_face_by_name("Summon: Choco // Mog")
+                .map(|face| face.name.as_str()),
+            Some("Summon: Choco/Mog")
+        );
+        assert_eq!(
+            db.get_face_by_name("summon: choco // mog")
+                .map(|face| face.name.as_str()),
+            Some("Summon: Choco/Mog")
+        );
+        assert!(
+            db.get_face_by_name("Summon: Choco").is_none(),
+            "the front segment alone is not the alias's printed name"
+        );
+    }
+
+    #[test]
+    fn spaced_slash_aliases_skip_ambiguous_folds() {
+        let mut map = HashMap::new();
+        map.insert("x/y".to_string(), test_face("X/Y"));
+        map.insert("x / y".to_string(), test_face("X / Y"));
+        let json = serde_json::to_string(&map).unwrap();
+        let db = CardDatabase::from_json_str(&json).unwrap();
+        assert_eq!(
+            db.get_face_by_name("X/Y").map(|face| face.name.as_str()),
+            Some("X/Y")
+        );
+        assert_eq!(
+            db.get_face_by_name("X / Y").map(|face| face.name.as_str()),
+            Some("X / Y")
+        );
+        assert!(
+            db.get_face_by_name("X // Y").is_none(),
+            "two distinct keys fold to the same spaced alias, so it must not resolve to either"
+        );
+    }
+
+    #[test]
+    fn bracket_signals_for_single_slash_combined_name_picks_up_back_face_signal() {
+        let json = r#"{
+            "halana, kessig ranger": {
+                "name": "Halana, Kessig Ranger",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+                "bracket_signals": {
+                    "game_changer": false, "mass_land_denial": false,
+                    "extra_turn": false, "efficient_tutor": false
+                }
+            },
+            "alena, trapper founder": {
+                "name": "Alena, Trapper Founder",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+                "bracket_signals": {
+                    "game_changer": true, "mass_land_denial": false,
+                    "extra_turn": false, "efficient_tutor": false
+                }
+            }
+        }"#;
+        let db = CardDatabase::from_json_str(json).unwrap();
+        assert!(
+            db.bracket_signals_for("Halana, Kessig Ranger/Alena, Trapper Founder")
+                .game_changer,
+            "single-slash composite name must aggregate both faces, like the spaced and glued forms"
+        );
+    }
+
+    #[test]
+    fn bracket_signals_for_single_face_name_containing_slash_is_not_split() {
+        let json = r#"{
+            "summon: choco/mog": {
+                "name": "Summon: Choco/Mog",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+                "bracket_signals": {
+                    "game_changer": true, "mass_land_denial": false,
+                    "extra_turn": false, "efficient_tutor": false
+                }
+            }
+        }"#;
+        let db = CardDatabase::from_json_str(json).unwrap();
+        assert!(
+            db.bracket_signals_for("Summon: Choco/Mog").game_changer,
+            "a single-face name containing a bare slash must not be split"
+        );
+        assert!(
+            db.bracket_signals_for("Summon: Choco // Mog").game_changer,
+            "the alias-registered spaced spelling must resolve to the same whole name"
+        );
+    }
+
+    /// Builds a card-data export JSON string from `(key, name, oracle_id, face_index)`
+    /// rows, setting `scryfall_oracle_id` and `face_index` on each face (both are
+    /// `CardExportEntry` fields; `face` is `#[serde(flatten)]`).
+    fn export_json(entries: &[(&str, &str, Option<&str>, Option<usize>)]) -> String {
+        let mut map = serde_json::Map::new();
+        for (key, name, oracle_id, face_index) in entries {
+            let mut face = serde_json::to_value(test_face(name)).unwrap();
+            if let Some(oracle_id) = oracle_id {
+                face["scryfall_oracle_id"] = serde_json::json!(oracle_id);
+            }
+            if let Some(face_index) = face_index {
+                face["face_index"] = serde_json::json!(face_index);
+            }
+            map.insert(key.to_string(), face);
+        }
+        serde_json::Value::Object(map).to_string()
+    }
+
+    fn multi_face_db() -> CardDatabase {
+        CardDatabase::from_json_str(&export_json(&[
+            ("revival", "Revival", Some("o-rr"), Some(0)),
+            ("revenge", "Revenge", Some("o-rr"), Some(1)),
+            (
+                "delver of secrets",
+                "Delver of Secrets",
+                Some("o-dv"),
+                Some(0),
+            ),
+            (
+                "insectile aberration",
+                "Insectile Aberration",
+                Some("o-dv"),
+                Some(1),
+            ),
+            ("summon: choco/mog", "Summon: Choco/Mog", Some("o-cm"), None),
+            ("lightning bolt", "Lightning Bolt", Some("o-lb"), None),
+            ("lim-dûl's vault", "Lim-Dûl's Vault", Some("o-ld"), None),
+            (
+                "the eleventh doctor",
+                "The Eleventh Doctor",
+                Some("o-ed"),
+                None,
+            ),
+            (
+                "sp//dr, piloted by peni",
+                "SP//dr, Piloted by Peni",
+                Some("o-sp"),
+                None,
+            ),
+            (
+                "halana, kessig ranger",
+                "Halana, Kessig Ranger",
+                Some("o-ha"),
+                None,
+            ),
+            (
+                "alena, trapper founder",
+                "Alena, Trapper Founder",
+                Some("o-al"),
+                None,
+            ),
+        ]))
+        .unwrap()
+    }
+
+    #[test]
+    fn canonical_name_returns_the_printed_name_of_a_whole_name() {
+        let db = multi_face_db();
+        assert_eq!(
+            db.canonical_name("Summon: Choco/Mog"),
+            Some("Summon: Choco/Mog".to_string())
+        );
+        assert_eq!(
+            db.canonical_name("Summon: Choco // Mog"),
+            Some("Summon: Choco/Mog".to_string())
+        );
+        assert_eq!(
+            db.canonical_name("lightning bolt"),
+            Some("Lightning Bolt".to_string())
+        );
+        assert_eq!(
+            db.canonical_name("Lim-Dul's Vault"),
+            Some("Lim-Dûl's Vault".to_string())
+        );
+        assert_eq!(
+            db.canonical_name("Eleventh Doctor"),
+            Some("The Eleventh Doctor".to_string())
+        );
+        assert_eq!(
+            db.canonical_name("sp//dr, piloted by peni"),
+            Some("SP//dr, Piloted by Peni".to_string())
+        );
+        assert_eq!(db.canonical_name("Summon: Choco"), None);
+        assert_eq!(db.canonical_name("Not A Card"), None);
+    }
+
+    #[test]
+    fn canonical_name_joins_every_face_of_a_composite_spelling() {
+        let db = multi_face_db();
+        for input in [
+            "Revival/Revenge",
+            "revival // revenge",
+            "Revival//Revenge",
+            "Revival // Revenge",
+        ] {
+            assert_eq!(
+                db.canonical_name(input),
+                Some("Revival // Revenge".to_string()),
+                "input {input:?} must canonicalize to the composite"
+            );
+        }
+        assert_eq!(
+            db.canonical_name("Delver of Secrets/Insectile Aberration"),
+            Some("Delver of Secrets // Insectile Aberration".to_string())
+        );
+    }
+
+    #[test]
+    fn canonical_name_keeps_a_single_face_spelling_of_a_multi_face_card() {
+        let db = multi_face_db();
+        assert_eq!(db.canonical_name("Revival"), Some("Revival".to_string()));
+        assert_eq!(db.canonical_name("revenge"), Some("Revenge".to_string()));
+        assert_eq!(
+            db.canonical_name("delver of secrets"),
+            Some("Delver of Secrets".to_string())
+        );
+        assert_eq!(
+            db.canonical_name("Insectile Aberration"),
+            Some("Insectile Aberration".to_string())
+        );
+    }
+
+    #[test]
+    fn canonical_name_refuses_a_composite_that_is_not_one_cards_faces() {
+        let db = multi_face_db();
+        for input in [
+            "Halana, Kessig Ranger // Alena, Trapper Founder",
+            "Revenge // Revival",
+            "Revival // Delver of Secrets",
+            "Revival // Revenge // Delver of Secrets",
+        ] {
+            assert!(
+                db.get_face_by_name(input).is_some(),
+                "reach guard: {input:?} must still resolve through lookup_key"
+            );
+            assert_eq!(
+                db.canonical_name(input),
+                None,
+                "input {input:?} does not name one card's faces"
+            );
+        }
+    }
+
+    #[test]
+    fn faces_of_card_falls_back_to_the_face_itself() {
+        let db = multi_face_db();
+        let revival = db.face_index.get("revival").unwrap();
+        let mut names: Vec<&str> = db
+            .faces_of_card(revival)
+            .into_iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["Revenge", "Revival"]);
+
+        let lonely = test_face("Lonely");
+        let faces = db.faces_of_card(&lonely);
+        assert_eq!(faces.len(), 1);
+        assert!(std::ptr::eq(faces[0], &lonely));
+
+        let mut orphan = test_face("Orphan");
+        orphan.scryfall_oracle_id = Some("not-in-index".to_string());
+        let faces = db.faces_of_card(&orphan);
+        assert_eq!(faces.len(), 1);
+        assert!(std::ptr::eq(faces[0], &orphan));
+    }
+
+    #[test]
+    fn canonical_name_keeps_the_card_its_input_resolves_to() {
+        let db = CardDatabase::from_json_str(&export_json(&[
+            ("fire", "Fire", Some("o-fi"), Some(0)),
+            ("ice", "Ice", Some("o-fi"), Some(1)),
+            ("fire [o-sf]", "Fire", Some("o-sf"), Some(1)),
+            ("start [o-sf]", "Start", Some("o-sf"), Some(0)),
+        ]))
+        .unwrap();
+        // Reach guard: the hidden key resolves through get_face_by_name.
+        assert_eq!(
+            db.get_face_by_name("fire [o-sf]").map(|f| f.name.as_str()),
+            Some("Fire")
+        );
+        assert_eq!(db.canonical_name("fire [o-sf]"), None);
+        assert_eq!(db.canonical_name("Fire"), Some("Fire".to_string()));
+    }
+
+    #[test]
+    fn canonical_name_is_a_fixed_point_on_every_printed_name() {
+        // allow-full-card-db: whole-corpus canonical-name drift guard — must check every printed name
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
+        if !path.exists() {
+            eprintln!(
+                "SKIP canonical_name_is_a_fixed_point_on_every_printed_name: card-data.json missing"
+            );
+            return;
+        }
+        let db = CardDatabase::from_export(&path).expect("card-data export should load");
+
+        let mut checked_faces = 0;
+        for (_, face) in db.face_iter() {
+            assert_eq!(
+                db.canonical_name(&face.name),
+                Some(face.name.clone()),
+                "every printed face name must be a fixed point of canonical_name"
+            );
+            checked_faces += 1;
+        }
+        assert!(checked_faces > 0, "reach guard: the export must load faces");
+
+        let mut checked_groups_with_some = 0;
+        let mut current_oracle_id: Option<&str> = None;
+        let mut group: Vec<&CardFace> = Vec::new();
+        let mut groups: Vec<Vec<&CardFace>> = Vec::new();
+        for face in db.faces_in_scan_order() {
+            match (current_oracle_id, face.scryfall_oracle_id.as_deref()) {
+                (Some(a), Some(b)) if a == b => group.push(face),
+                (_, Some(b)) => {
+                    if group.len() >= 2 {
+                        groups.push(std::mem::take(&mut group));
+                    } else {
+                        group.clear();
+                    }
+                    group.push(face);
+                    current_oracle_id = Some(b);
+                }
+                (_, None) => {
+                    if group.len() >= 2 {
+                        groups.push(std::mem::take(&mut group));
+                    } else {
+                        group.clear();
+                    }
+                    current_oracle_id = None;
+                }
+            }
+        }
+        if group.len() >= 2 {
+            groups.push(group);
+        }
+
+        for group in &groups {
+            let names: Vec<&str> = group.iter().map(|f| f.name.as_str()).collect();
+            let composite = names.join(" // ");
+            match db.canonical_name(&composite) {
+                None => {}
+                Some(resolved) => {
+                    assert_eq!(
+                        resolved, composite,
+                        "a composite of a group's own faces must canonicalize to itself or None"
+                    );
+                    checked_groups_with_some += 1;
+                    let slash_spelling = names.join("/");
+                    assert_eq!(
+                        db.canonical_name(&slash_spelling),
+                        Some(composite.clone()),
+                        "the single-slash spelling of a fixed composite must canonicalize the same way"
+                    );
+                    assert_eq!(
+                        db.lookup_key(&slash_spelling),
+                        db.lookup_key(&composite),
+                        "lookup_key must agree on both spellings"
+                    );
+                }
+            }
+        }
+        assert!(
+            checked_groups_with_some > 0,
+            "reach guard: at least one multi-face group must canonicalize to its composite"
         );
     }
 

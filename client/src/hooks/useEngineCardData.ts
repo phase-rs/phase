@@ -3,10 +3,8 @@ import { useEffect, useState } from "react";
 import {
   type CardRuling,
   ensureCardLocale,
-  getCardFaceData,
-  getCardParseDetails,
-  getCardRulings,
 } from "../services/engineRuntime";
+import { getSharedAdapter } from "../adapter/wasm-adapter";
 import { usePreferencesStore } from "../stores/preferencesStore";
 
 /**
@@ -64,7 +62,7 @@ export function useEngineCardData(cardName: string | null): EngineCardFace | nul
     let cancelled = false;
 
     void (async () => {
-      const result = (await getCardFaceData(cardName)) as EngineCardFace | null;
+      const result = (await getSharedAdapter().getCardFaceData(cardName)) as EngineCardFace | null;
       if (cancelled) return;
       if (!result || language === "en") {
         setData(result ?? null);
@@ -145,10 +143,10 @@ export function useCardParseDetails(cardName: string | null): ParsedItem[] | nul
 
     let cancelled = false;
 
-    getCardParseDetails(cardName)
+    getSharedAdapter().getCardParseDetails(cardName)
       .then((result) => {
         if (cancelled) return;
-        setItems(result ?? null);
+        setItems((result as ParsedItem[] | null) ?? null);
       })
       .catch(() => {
         if (cancelled) return;
@@ -177,10 +175,10 @@ export function useCardRulings(cardName: string | null): CardRuling[] {
 
     let cancelled = false;
 
-    getCardRulings(cardName)
+    getSharedAdapter().getCardRulings(cardName)
       .then((result) => {
         if (cancelled) return;
-        setRulings(result);
+        setRulings((result as CardRuling[] | null) ?? []);
       })
       .catch(() => {
         if (cancelled) return;

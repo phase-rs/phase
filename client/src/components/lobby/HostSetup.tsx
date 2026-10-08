@@ -1,29 +1,75 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { LanServers } from "./LanServers";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { FormatConfig, FormatGroup, GameFormat, LoopDetectionMode, MatchType } from "../../adapter/types";
+import type {
+  CustomFormatDef,
+  FormatConfig,
+  FormatGroup,
+  GameFormat,
+  LoopDetectionMode,
+  MatchType,
+} from "../../adapter/types";
 import { AI_DIFFICULTIES } from "../../constants/ai";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
-import { FORMAT_DEFAULTS, useMultiplayerStore } from "../../stores/multiplayerStore";
-import type { AiSeatConfig, HostingSettings } from "../../stores/multiplayerStore";
+import {
+  directoryLobbySources,
+  FORMAT_DEFAULTS,
+  isKnownFormat,
+  isServerCompatible,
+  lobbySources,
+  useMultiplayerStore,
+} from "../../stores/multiplayerStore";
+import type {
+  AiSeatConfig,
+  ConnectionMode,
+  HostingSettings,
+  LobbySource,
+} from "../../stores/multiplayerStore";
+import { refreshServerDirectory, type DirectorySource } from "../../services/serverDirectory";
+import type { HostSeed } from "../../pages/multiplayerPageState";
+import { DEFAULT_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
+import { bestOfThreeCeilingForFormat } from "../../services/engineRuntime";
+import {
+  deleteSavedCustomFormat,
+  loadSavedCustomFormats,
+  saveCustomFormat,
+  type SavedCustomFormat,
+} from "../../services/customFormats";
+import { getHostAdapter } from "../../adapter/wasm-adapter";
+import { isFormatConfigShape } from "../../adapter/format-config-shape";
 import { expandParsedDeck } from "../../services/deckParser";
 import { menuButtonClass } from "../menu/buttonStyles";
+import { ConnectionModeSwitch } from "./ConnectionModeSwitch";
+import { IntegerField } from "../ui/IntegerField";
 import { MenuSelect, type MenuSelectGroup } from "../ui/MenuSelect";
 
 export type { AiSeatConfig };
 export type HostSettings = HostingSettings;
 
 interface HostSetupProps {
-  onHost: (settings: HostSettings) => void | Promise<boolean>;
+  /**
+   * `serverUrl` is the server this submit chose to host on, and `null` means
+   * exactly one thing: this submit chose no server, which is the P2P case.
+   *
+   * P2P broker selection happens when the parent executes the action, after
+   * any deck-selection step. It is independent of this dedicated server pick.
+   */
+  onHost: (settings: HostSettings, serverUrl: string | null) => void | Promise<boolean>;
   onBack: () => void;
-  connectionMode: "server" | "p2p";
+  connectionMode: ConnectionMode;
+  /** Host Game owns this choice; browsing and joining use either transport. */
+  onConnectionModeChange: (mode: ConnectionMode) => void;
   /** When true, the host-submit button is disabled (e.g. live deck check
    * says the active deck is illegal for the chosen format, or a check is
    * still in flight). The parent surfaces the *reason* via the legality
    * chip above the form, so this only needs to gate the submit itself. */
   hostDisabled?: boolean;
   hostDisabledReason?: string;
+  /** Discord-link prefill, applied once at mount. Fixes the connection mode,
+   *  the server and the privacy settings; format and count are used when valid. */
+  seed?: HostSeed;
 }
 
 // Format options derive from the engine-authored FORMAT_REGISTRY so new
@@ -47,6 +93,78 @@ const GROUP_ORDER: Record<FormatGroup, number> = {
 };
 
 const FFA_DECK_SIZE_OPTIONS = [60, 40] as const;
+
+/** One row of the host-target picker. The two listing fields answer different
+ *  questions and are keyed differently on purpose. */
+interface HostCandidate {
+  source: LobbySource;
+  /** The row announcing this URL, whoever owns the source. Supplies the `Full`
+   *  mode hint only. */
+  announced: DirectorySource | null;
+  /** The listing whose protocol verdict applies to this source, or `null` when
+   *  no directory listing owns it. */
+  listing: DirectorySource | null;
+}
+
+/**
+ * The servers this client may place a hosted game on, best-evidenced first.
+ *
+ * A candidate runs games: either its handshake reported `Full`, or its
+ * directory row announces `mode: "Full"`. A `LobbyOnly` broker only brokers
+ * peer ids — it cannot run a match however well it scores, which is why the
+ * filter is on the mode and never on the rank.
+ *
+ * A candidate this client cannot handshake with is KEPT and rendered with its
+ * reason, the way `ServerPicker` renders an incompatible listing, rather than
+ * dropped: a server missing from the list reads as "not announced", while a
+ * greyed one with its version reads as what it is. {@link hostRejection} is
+ * what keeps it out of the submission.
+ *
+ * Ordering matches `compareLobbyGameEntries`' convention (`?? -1`), so an
+ * unranked server sorts last rather than first.
+ */
+function fullHostCandidates(
+  state: Parameters<typeof lobbySources>[0] & { directorySources: DirectorySource[] },
+): HostCandidate[] {
+  // The mode hint reads the RAW projection: an announcement that a URL runs
+  // games is true whoever owns the source, and it only ever ADMITS a candidate.
+  const announced = new Map(
+    state.directorySources.map((entry) => [entry.source.url, entry]),
+  );
+  // The verdict reads the SHADOWING-AWARE list, because it EXCLUDES. A preset
+  // or hand-added URL the directory also lists is judged at its handshake —
+  // the same rule `ensureSubscriptionSocket`'s dial gate states, resolved
+  // through the same single shadowing predicate.
+  const owned = new Map(
+    directoryLobbySources(state).map(({ entry }) => [entry.source.url, entry]),
+  );
+  return lobbySources(state)
+    .map((source) => ({
+      source,
+      announced: announced.get(source.url) ?? null,
+      listing: owned.get(source.url) ?? null,
+    }))
+    .filter(
+      (candidate) =>
+        candidate.source.kind === "Full" || candidate.announced?.row.mode === "Full",
+    )
+    .sort((a, b) => (b.source.score ?? -1) - (a.source.score ?? -1));
+}
+
+/**
+ * Why this client cannot place a hosted game on `listing`, or `null` when it
+ * can.
+ *
+ * BOTH surfaces, because hosting uses both: the parent opens the browse socket
+ * (`ensureSubscriptionSocket`, LOBBY surface) before it hosts, and
+ * `openServerHostSocket` then dials the same server on the FULL surface.
+ * Neither verdict is computed here — both were produced by
+ * `serverProtocolRejection` in `projectDirectoryRow` and are only read.
+ */
+function hostRejection(listing: DirectorySource | null): string | null {
+  if (!listing) return null;
+  return listing.rejection ?? listing.fullRejection;
+}
 
 /** P2P uses a hub-and-spoke topology (see `p2p-adapter.ts` `P2PHostAdapter`):
  * the host holds one connection per guest and fans out filtered state, which
@@ -91,10 +209,14 @@ function Field({
 /** iOS-style toggle switch (mirrors the mockup's Host-setup `Toggle`). The
  *  on-state accent follows the connection mode (emerald server / cyan P2P). */
 function Toggle({
+  label,
+  describedBy,
   on,
   onChange,
   accent,
 }: {
+  label: string;
+  describedBy?: string;
   on: boolean;
   onChange: (next: boolean) => void;
   accent: "emerald" | "cyan";
@@ -105,11 +227,15 @@ function Toggle({
     <button
       type="button"
       role="switch"
+      aria-label={label}
+      aria-describedby={describedBy}
       aria-checked={on}
       onClick={() => onChange(!on)}
-      className={`flex h-6 w-[42px] shrink-0 items-center rounded-full p-0.5 transition-colors ${on ? onBg : "bg-white/12"}`}
+      className="flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-full"
     >
-      <span className={`h-5 w-5 rounded-full transition-transform duration-150 ${knob} ${on ? "translate-x-[18px]" : ""}`} />
+      <span aria-hidden="true" className={`flex h-6 w-[42px] items-center rounded-full p-0.5 transition-colors ${on ? onBg : "bg-white/12"}`}>
+        <span className={`h-5 w-5 rounded-full transition-transform duration-150 ${knob} ${on ? "translate-x-[18px]" : ""}`} />
+      </span>
     </button>
   );
 }
@@ -129,13 +255,14 @@ function OptionRow({
   onChange: (next: boolean) => void;
   accent: "emerald" | "cyan";
 }) {
+  const descriptionId = useId();
   return (
     <div className="flex items-center justify-between gap-4">
       <div className="min-w-0">
         <div className="text-sm text-fg-card-body">{label}</div>
-        {desc && <div className="mt-0.5 text-xs text-fg-meta">{desc}</div>}
+        {desc && <div id={descriptionId} className="mt-0.5 text-xs text-fg-meta">{desc}</div>}
       </div>
-      <Toggle on={on} onChange={onChange} accent={accent} />
+      <Toggle label={label} describedBy={desc ? descriptionId : undefined} on={on} onChange={onChange} accent={accent} />
     </div>
   );
 }
@@ -163,12 +290,45 @@ function BotGlyph({ className = "h-4 w-4" }: { className?: string }) {
   );
 }
 
+/**
+ * The engine's best-of-three ceiling for `format`, or `null` until it resolves
+ * for exactly this format. A failed lookup answers `"Bo1"` so Bo3 is never
+ * offered on an unknown ceiling.
+ */
+export function useBestOfThreeCeiling(format: GameFormat | null): MatchType | null {
+  const [answer, setAnswer] = useState<{ format: GameFormat; ceiling: MatchType } | null>(null);
+  useEffect(() => {
+    if (format === null) return;
+    let cancelled = false;
+    void (async () => {
+      let ceiling: MatchType;
+      try {
+        ceiling = await bestOfThreeCeilingForFormat(format);
+      } catch {
+        ceiling = "Bo1";
+      }
+      if (!cancelled) setAnswer({ format, ceiling });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [format]);
+  return format !== null && answer?.format === format ? answer.ceiling : null;
+}
+
+/** Bo3 is the one value the engine's answer admits; anything else plays Bo1. */
+export function cappedMatchType(selected: MatchType, ceiling: MatchType | null): MatchType {
+  return ceiling === "Bo3" ? selected : "Bo1";
+}
+
 export function HostSetup({
   onHost,
   onBack,
   connectionMode,
+  onConnectionModeChange,
   hostDisabled = false,
   hostDisabledReason,
+  seed,
 }: HostSetupProps) {
   const { t } = useTranslation(["multiplayer", "menu"]);
   // Player name is edited in `PlayerIdentityBanner` above this form (see
@@ -181,6 +341,13 @@ export function HostSetup({
     (s) => s.setCompatibilityPlayerCount,
   );
   const hostingStatus = useMultiplayerStore((s) => s.hostingStatus);
+  // The host-target picker's inputs. Read through selectors rather than
+  // `getState()` so a directory refresh re-renders the list.
+  const hostingServer = useMultiplayerStore((s) => s.hostingServer);
+  const userLobbySources = useMultiplayerStore((s) => s.userLobbySources);
+  const sourceStatus = useMultiplayerStore((s) => s.sourceStatus);
+  const directorySources = useMultiplayerStore((s) => s.directorySources);
+  const disabledDirectorySources = useMultiplayerStore((s) => s.disabledDirectorySources);
 
   // Seed the format picker from whatever the user last selected (persisted
   // in the store). This means navigating away and back to host-setup keeps
@@ -189,27 +356,110 @@ export function HostSetup({
   const storeFormatConfig = useMultiplayerStore((s) => s.formatConfig);
   const lastHostConfig = useMultiplayerStore((s) => s.lastHostConfig);
   const rememberHostConfig = useMultiplayerStore((s) => s.rememberHostConfig);
+  const clearRememberedHostConfig = useMultiplayerStore((s) => s.clearRememberedHostConfig);
 
-  const isP2P = connectionMode === "p2p";
+  const hostCandidates = useMemo(
+    () => fullHostCandidates({
+      userLobbySources, sourceStatus, directorySources, disabledDirectorySources,
+    }),
+    [userLobbySources, sourceStatus, directorySources, disabledDirectorySources],
+  );
+  const selectableCandidates = hostCandidates.filter((candidate) => {
+    const status = sourceStatus.get(candidate.source.url);
+    return hostRejection(candidate.listing) === null
+      && status?.state === "open"
+      && status.serverInfo?.mode === "Full"
+      && isServerCompatible(status.serverInfo);
+  });
+  const dedicatedAvailable = selectableCandidates.length > 0;
+  // A Discord link fixes the mode: a `server` param means a dedicated game.
+  const isP2P = seed
+    ? seed.serverUrl === null
+    : connectionMode === "p2p" || !dedicatedAvailable;
+
+  // Host setup is also a direct entry point. Discover and connect here as
+  // well as in LobbyView, using the store's shared sockets and directory TTL.
+  const sourceUrls = JSON.stringify(lobbySources({
+    userLobbySources, sourceStatus, directorySources, disabledDirectorySources,
+  }).map((source) => source.url).sort());
+  const checkConnections = useCallback(() => {
+    void refreshServerDirectory();
+    const urls: string[] = JSON.parse(sourceUrls);
+    for (const url of urls) {
+      void useMultiplayerStore.getState().ensureSubscriptionSocket(url);
+    }
+  }, [sourceUrls]);
+  useEffect(() => {
+    checkConnections();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") checkConnections();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [checkConnections]);
+
+  // Persist the fallback so recovery never switches the form back underneath
+  // the player. A submitted action separately retains its chosen transport.
+  useEffect(() => {
+    if (connectionMode === "server" && !dedicatedAvailable) {
+      onConnectionModeChange("p2p");
+    }
+  }, [connectionMode, dedicatedAvailable, onConnectionModeChange]);
 
   // Restore the player's last host-setup choices across sessions — but only
   // when they're still hostable in this connection mode. A remembered format
   // whose minimum exceeds the P2P mesh ceiling can't run over P2P, so we drop
   // back to defaults rather than seed an unhostable configuration.
+  //
+  // `FORMAT_DEFAULTS` is built from the BUILT-IN registry and has no entry for
+  // any `Custom:<id>` key, so indexing it with a remembered custom format
+  // returns `undefined` and reading `.min_players` off that throws — a hard
+  // crash on mount for anyone whose last hosted game used a custom format.
+  // Guard with `isKnownFormat` (the same predicate `normalizeRememberedHostConfig`
+  // uses) and fall back to the format's OWN already-resolved `FormatConfig`,
+  // which for a custom format is the only source of truth for these fields.
+  // A Discord seed's format and count apply only when this mode can host them;
+  // otherwise they fall back to the defaults and the form says so.
+  const seedFormat: FormatConfig | null =
+    seed?.format != null
+    && isKnownFormat(seed.format)
+    && (!isP2P || FORMAT_DEFAULTS[seed.format].min_players <= P2P_MAX_PEERS)
+      ? FORMAT_DEFAULTS[seed.format]
+      : null;
+  const seedPlayers: number | null =
+    seedFormat !== null
+    && seed?.playerCount != null
+    && seed.playerCount >= seedFormat.min_players
+    && seed.playerCount <= (isP2P ? Math.min(seedFormat.max_players, P2P_MAX_PEERS) : seedFormat.max_players)
+      ? seed.playerCount
+      : null;
+  const seedIgnored =
+    seed !== undefined
+    && ((seed.format !== null && seedFormat === null) || (seed.playerCount !== null && seedPlayers === null));
+
+  const rememberedMinPlayers =
+    lastHostConfig == null
+      ? null
+      : isKnownFormat(lastHostConfig.format)
+        ? FORMAT_DEFAULTS[lastHostConfig.format].min_players
+        : lastHostConfig.formatConfig.min_players;
+  // A Discord game must not inherit remembered AI seats, visibility or count.
   const remembered =
-    lastHostConfig != null &&
-    (!isP2P || FORMAT_DEFAULTS[lastHostConfig.format].min_players <= P2P_MAX_PEERS)
+    seed === undefined
+    && lastHostConfig != null
+    && rememberedMinPlayers != null
+    && (!isP2P || rememberedMinPlayers <= P2P_MAX_PEERS)
       ? lastHostConfig
       : null;
   const initialFormatConfig =
-    remembered?.formatConfig ?? storeFormatConfig ?? FORMAT_DEFAULTS.Commander;
+    seedFormat ?? remembered?.formatConfig ?? storeFormatConfig ?? FORMAT_DEFAULTS.Commander;
   // Clamp a remembered player count to what this mode/format can actually seat.
   const seatCeiling = isP2P
     ? Math.min(initialFormatConfig.max_players, P2P_MAX_PEERS)
     : initialFormatConfig.max_players;
 
-  const [roomName, setRoomName] = useState("");
-  const [isPublic, setIsPublic] = useState(remembered?.isPublic ?? true);
+  const [roomName, setRoomName] = useState(seed?.roomName?.slice(0, 40) ?? "");
+  const [isPublic, setIsPublic] = useState(seed ? false : (remembered?.isPublic ?? true));
   const [showPassword, setShowPassword] = useState(false);
   const [password, setPassword] = useState("");
   const [selectedFormat, setSelectedFormat] = useState<GameFormat>(
@@ -218,7 +468,7 @@ export function HostSetup({
   const [formatConfig, setLocalFormatConfig] =
     useState<FormatConfig>(initialFormatConfig);
   const [playerCount, setPlayerCount] = useState(
-    Math.min(remembered?.playerCount ?? initialFormatConfig.min_players, seatCeiling),
+    seedPlayers ?? Math.min(remembered?.playerCount ?? initialFormatConfig.min_players, seatCeiling),
   );
   const [matchType, setMatchType] = useState<MatchType>(remembered?.matchType ?? "Bo1");
   // CR 732.2a: combo (infinite-loop) detector opt-in, chosen at match creation and
@@ -229,7 +479,30 @@ export function HostSetup({
   const [aiSeats, setAiSeats] = useState<AiSeatConfig[]>(remembered?.aiSeats ?? []);
   const [startWhenFull, setStartWhenFull] = useState(remembered?.startWhenFull ?? true);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const effectiveMatchType = playerCount === 2 ? matchType : "Bo1";
+
+  // ── Axis A: saved custom formats (client-persisted) ────────────────────
+  // `savedCustomFormatId` is what identifies WHICH saved definition is active:
+  // every Axis-A save carries the engine's reserved sentinel `CustomFormatId(0)`
+  // by design, so `selectedFormat` is the string "Custom:0" for all of them and
+  // cannot tell two apart.
+  const [savedFormats, setSavedFormats] = useState<SavedCustomFormat[]>(() =>
+    loadSavedCustomFormats(),
+  );
+  const [savedCustomFormatId, setSavedCustomFormatId] = useState<string | null>(
+    remembered?.savedCustomFormatId ?? null,
+  );
+  const [customFormatName, setCustomFormatName] = useState("");
+  /** True while a saved format's `FormatConfig` is being resolved by the engine.
+   *  Gates the picker and the submit button so no partially-resolved config can
+   *  be selected or hosted. */
+  const [isResolvingFormat, setIsResolvingFormat] = useState(false);
+  const [customFormatError, setCustomFormatError] = useState<string | null>(null);
+  /** Monotonic token for format resolves. A resolve that finishes after a newer
+   *  one started must not write its stale config into state. */
+  const formatResolveSeq = useRef(0);
+  const ceiling = useBestOfThreeCeiling(formatConfig.format);
+  const effectiveMatchType = playerCount === 2 ? cappedMatchType(matchType, ceiling) : "Bo1";
+  const bo3Disabled = playerCount !== 2 || ceiling !== "Bo3";
   const aiDeckCatalog = useAiDeckCatalog({
     selectedFormat: formatConfig.format,
     selectedMatchType: effectiveMatchType,
@@ -237,7 +510,10 @@ export function HostSetup({
   const defaultAiDeck = aiDeckCatalog.candidates[0]
     ? { type: "DeckList" as const, data: expandParsedDeck(aiDeckCatalog.candidates[0].deck) }
     : null;
-  const aiSeatsSupported = !formatConfig.team_based && formatConfig.format !== "Planechase";
+  // No AI seats in a Discord game: its seats are promised to the Discord
+  // players, and an all-AI table would never register the requested code.
+  const aiSeatsSupported =
+    seed === undefined && !formatConfig.team_based && formatConfig.format !== "Planechase";
   const effectiveAiSeats = aiSeatsSupported ? aiSeats : [];
 
   // Mirror the in-flight format to the store on every change so sibling
@@ -257,20 +533,113 @@ export function HostSetup({
     ? Math.min(formatConfig.max_players, P2P_MAX_PEERS)
     : formatConfig.max_players;
   const accentTone = isP2P ? "cyan" : "emerald";
-
-  const handleFormatSelect = (format: GameFormat) => {
-    const defaults = FORMAT_DEFAULTS[format];
+  /** Apply a freshly-resolved format config. Shared by the built-in picker and
+   *  the saved-custom-format picker so both reset the same dependent state. */
+  const applyResolvedFormat = (
+    format: GameFormat,
+    config: FormatConfig,
+    savedId: string | null,
+  ) => {
     setSelectedFormat(format);
-    setLocalFormatConfig(defaults);
+    setLocalFormatConfig(config);
+    setSavedCustomFormatId(savedId);
     // Let multi-seat formats start at their own minimum (e.g. Commander's
     // min is 2, so it still defaults to a duel but users can bump up to 4).
-    const newCount = defaults.min_players;
+    const newCount = config.min_players;
     setPlayerCount(newCount);
     setCompatibilityPlayerCount(newCount);
     if (newCount !== 2) {
       setMatchType("Bo1");
     }
     setAiSeats([]);
+  };
+
+  const handleFormatSelect = (format: GameFormat) => {
+    // Only built-in formats reach here: `formatMenuGroups` is built from
+    // `availableFormats`, itself derived from the engine's built-in registry.
+    // Guarded anyway so a future caller cannot reintroduce the
+    // `FORMAT_DEFAULTS[custom]` crash.
+    if (!isKnownFormat(format)) return;
+    // A built-in selection supersedes any in-flight custom resolve.
+    formatResolveSeq.current += 1;
+    setIsResolvingFormat(false);
+    setCustomFormatError(null);
+    applyResolvedFormat(format, FORMAT_DEFAULTS[format], null);
+  };
+
+  /**
+   * Select a saved custom format.
+   *
+   * Deliberately `async`, and NO state setter runs before the engine's resolver
+   * has answered: `FormatConfig::for_custom_rules` is the single authority for
+   * turning saved rules into an active config, and a half-applied selection
+   * (new format string, old config) is exactly the mixed state that would be
+   * submitted if the user clicked Host mid-resolve. While this is in flight the
+   * picker and the submit button are disabled, and the pre-selection config
+   * remains intact and hostable.
+   */
+  const handleSavedFormatSelect = async (saved: SavedCustomFormat) => {
+    const token = formatResolveSeq.current + 1;
+    formatResolveSeq.current = token;
+    setIsResolvingFormat(true);
+    setCustomFormatError(null);
+    try {
+      const resolved = await getHostAdapter().formatConfigForCustomRules(saved.def.rules);
+      // A newer selection started while this was resolving — discard.
+      if (formatResolveSeq.current !== token) return;
+      if (!isFormatConfigShape(resolved)) {
+        setCustomFormatError(t("hostSetup.customFormatResolveFailed"));
+        return;
+      }
+      applyResolvedFormat(resolved.format, resolved, saved.id);
+    } catch {
+      if (formatResolveSeq.current !== token) return;
+      setCustomFormatError(t("hostSetup.customFormatResolveFailed"));
+    } finally {
+      if (formatResolveSeq.current === token) setIsResolvingFormat(false);
+    }
+  };
+
+  /**
+   * Capture the current lobby setup as a saved custom format.
+   *
+   * The ENGINE builds the definition (`customFormatFromLobbyConfig`); this only
+   * persists what it returns. Its rejection message is surfaced verbatim —
+   * Planechase / Archenemy / Momir carry an auxiliary deck or component that
+   * `StructuralRules` cannot represent, an already-custom source would silently
+   * lose its own legality rules, and an empty name has nothing to label. The
+   * frontend must not re-derive any of those conditions.
+   */
+  const handleSaveAsCustomFormat = async () => {
+    const name = customFormatName.trim();
+    setCustomFormatError(null);
+    try {
+      const def = await getHostAdapter().customFormatFromLobbyConfig(name, formatConfig);
+      const saved = saveCustomFormat(name, def as CustomFormatDef);
+      setSavedFormats(loadSavedCustomFormats());
+      setCustomFormatName("");
+      await handleSavedFormatSelect(saved);
+    } catch (err) {
+      setCustomFormatError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleDeleteSavedFormat = (id: string) => {
+    // A selection may still be resolving when its saved definition is removed.
+    // Invalidate that resolver before changing the local record so its delayed
+    // result cannot restore a definition that no longer exists.
+    formatResolveSeq.current += 1;
+    setIsResolvingFormat(false);
+    deleteSavedCustomFormat(id);
+    setSavedFormats(loadSavedCustomFormats());
+    if (lastHostConfig?.savedCustomFormatId === id) {
+      clearRememberedHostConfig();
+    }
+    // Deleting the active selection falls back to a built-in, so the form is
+    // never left pointing at a definition that no longer exists.
+    if (savedCustomFormatId === id) {
+      handleFormatSelect("Commander");
+    }
   };
 
   const handlePlayerCountChange = (count: number) => {
@@ -283,8 +652,55 @@ export function HostSetup({
     setAiSeats((prev) => prev.filter((s) => s.seatIndex < count));
   };
 
+  // A format whose MINIMUM exceeds the P2P ceiling cannot be clamped into
+  // range — only replaced. The mount path above screens the REMEMBERED config
+  // for this, but not the store `formatConfig` it falls back to, and it cannot
+  // see a switch made while this form stays mounted — so this effect covers
+  // both a store-seeded mount and the live flip. Without it the seat clamp
+  // below drives `playerCount` under
+  // `formatConfig.min_players`: the seat picker renders an empty range
+  // (`Array.from` coerces the negative length to 0) and Host submits a
+  // configuration the format itself rejects. Only a custom format can reach
+  // this — every built-in one seats at most `P2P_MAX_PEERS` — so the fallback
+  // is the same default the mount path uses, applied through
+  // `applyResolvedFormat` so every dependent field resets with it. Both effects
+  // run in the SAME commit, so the clamp below would otherwise read this
+  // render's stale `playerCount` and overwrite the seat count set here —
+  // landing on the ceiling rather than the replacement format's own minimum.
+  // It yields to this guard instead; see its own comment.
+  useEffect(() => {
+    if (!isP2P || formatConfig.min_players <= P2P_MAX_PEERS) return;
+    applyResolvedFormat("Commander", FORMAT_DEFAULTS.Commander, null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isP2P, formatConfig.min_players]);
+
+  // The mode switch above this form can lower the seat ceiling while the form
+  // is mounted (P2P seats at most `P2P_MAX_PEERS`), and this component is not
+  // remounted on a mode change — so the mount-time clamp on `playerCount`
+  // above is not enough. Anchored to the LIVE ceiling (`maxPlayers`, which is
+  // also what the seat buttons render from), and routed through
+  // `handlePlayerCountChange` so the AI seats past the new count are pruned
+  // with it rather than being submitted from `effectiveAiSeats`.
+  //
+  // Guarded on the comparison and depending on the VALUES it reads, never on
+  // `handlePlayerCountChange`: that is a component-body function whose identity
+  // changes every render, so depending on it would re-render forever.
+  useEffect(() => {
+    if (playerCount <= maxPlayers) return;
+    // Yield to the format guard above when it is firing in this same commit:
+    // it replaces the whole format and seats it at the replacement's own
+    // minimum, and clamping to the ceiling here would overwrite that. The next
+    // render re-evaluates both against the format that actually landed.
+    if (isP2P && formatConfig.min_players > P2P_MAX_PEERS) return;
+    handlePlayerCountChange(maxPlayers);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playerCount, maxPlayers, isP2P, formatConfig.min_players]);
+
   const handleDeckSizeChange = (deckSize: number) => {
-    setLocalFormatConfig((prev) => ({ ...prev, deck_size: deckSize }));
+    // Variant-preserving: the engine is the authority for whether the format's
+    // rule is a minimum or an exact count (CR 100.5 / CR 903.5a); this picker
+    // edits only the count.
+    setLocalFormatConfig((prev) => ({ ...prev, deck_size: { ...prev.deck_size, data: deckSize } }));
   };
 
   const toggleAiSeat = (seatIndex: number) => {
@@ -304,7 +720,11 @@ export function HostSetup({
   };
 
   const handleHost = async () => {
-    if (isSubmitting || hostingStatus !== "idle") return;
+    if (submitDisabled) return;
+    // A format resolve in flight means `formatConfig` is still the previous
+    // (valid) selection. `submitDisabled` already blocks the button; this is
+    // the belt-and-braces guard for a programmatic form submit.
+    if (isResolvingFormat) return;
     setIsSubmitting(true);
     // `finalConfig` is the submission payload — `max_players` here is the
     // user's chosen count, not the format ceiling. Do NOT mirror this
@@ -327,37 +747,51 @@ export function HostSetup({
     // instead of resetting to defaults. Persist the format's own config (with
     // its true `max_players` ceiling), not `finalConfig` — the latter's
     // `max_players` is the chosen player count and would cap the slider on
-    // restore. Room name and password are intentionally not persisted.
-    rememberHostConfig({
-      format: selectedFormat,
-      formatConfig,
-      playerCount,
-      matchType: effectiveMatchType,
-      loopDetection,
-      isPublic,
-      startWhenFull,
-      // Ranked rating updates aren't implemented in the engine — the room is
-      // always casual. The transport field is retained for protocol parity.
-      ranked: false,
-      aiSeats: effectiveAiSeats,
-    });
-    try {
-      const ok = await onHost({
-        displayName,
-        public: isPublic,
-        password: showPassword ? password : "",
-        timerSeconds: null,
-        formatConfig: finalConfig,
-        matchType: effectiveMatchType,
+    // restore. Room name and password are intentionally not persisted. A
+    // Discord game's pinned, private settings must not become the defaults.
+    if (!seed) {
+      rememberHostConfig({
+        format: selectedFormat,
+        formatConfig,
+        // Persisted so rehydration can resolve WHICH saved definition this was —
+        // `selectedFormat` is "Custom:0" for every Axis-A save and cannot.
+        savedCustomFormatId,
+        playerCount,
+        matchType,
         loopDetection,
-        aiSeats: effectiveAiSeats.map((seat) => ({
-          ...seat,
-          ...(defaultAiDeck ? { deck: defaultAiDeck } : {}),
-        })),
+        isPublic,
         startWhenFull,
+        // Ranked rating updates aren't implemented in the engine — the room is
+        // always casual. The transport field is retained for protocol parity.
         ranked: false,
-        roomName: resolvedRoomName,
+        aiSeats: effectiveAiSeats,
       });
+    }
+    try {
+      const ok = await onHost(
+        {
+          displayName,
+          public: isPublic,
+          password: showPassword ? password : "",
+          timerSeconds: null,
+          formatConfig: finalConfig,
+          matchType: effectiveMatchType,
+          loopDetection,
+          aiSeats: effectiveAiSeats.map((seat) => ({
+            ...seat,
+            ...(defaultAiDeck ? { deck: defaultAiDeck } : {}),
+          })),
+          startWhenFull,
+          ranked: false,
+          roomName: resolvedRoomName,
+          ...(seed ? { requestedCode: seed.code } : {}),
+        },
+        // `null` in P2P — this submit chose no server, and the parent then
+        // makes the same live `hostingServer` read it makes today. Passing the
+        // anchor here instead would latch it at submit time, which is wrong for
+        // a flow that can route through deck-select before it runs.
+        isP2P ? null : selected,
+      );
       if (ok !== false) return;
     } catch {
       // The parent surfaces the specific failure as a toast/dialog.
@@ -381,6 +815,28 @@ export function HostSetup({
     [isP2P],
   );
 
+  /**
+   * The user's explicit pick, when they have made one. Session-local: choosing
+   * a game server for one match must not repoint `hostingServer`, which is the
+   * P2P broker target, the direct-codes sentinel and the browsing anchor all at
+   * once.
+   */
+  const [hostServerUrl, setHostServerUrl] = useState<string>(
+    () =>
+      selectableCandidates.find((candidate) => candidate.source.url === hostingServer)
+        ?.source.url
+      ?? selectableCandidates[0]?.source.url
+      ?? DEFAULT_MULTIPLAYER_SERVER_URL,
+  );
+
+  /** Retain an explicit pick while connected, otherwise use the best available
+   * server. With no candidates, the form uses P2P and submits a null URL. */
+  const selected =
+    seed?.serverUrl
+    ?? (selectableCandidates.some((candidate) => candidate.source.url === hostServerUrl)
+      ? hostServerUrl
+      : (selectableCandidates[0]?.source.url ?? DEFAULT_MULTIPLAYER_SERVER_URL));
+
   // Shared field-input grammar (mockup Host-setup inputs).
   const inp =
     "w-full rounded-[12px] border border-hairline bg-black/28 px-3.5 py-2.5 text-sm text-white placeholder-gray-500 outline-none transition-colors focus:border-hairline-hover";
@@ -390,6 +846,20 @@ export function HostSetup({
       on ? "bg-white/10 text-white" : "text-fg-meta hover:text-slate-200"
     } ${extra}`;
   const formatMeta = availableFormats.find((f) => f.format === selectedFormat);
+  const activeSavedFormat = savedFormats.find((s) => s.id === savedCustomFormatId) ?? null;
+  const availableSavedFormats = isP2P
+    ? savedFormats.filter(
+        (saved) => saved.def.rules.structural.min_players <= P2P_MAX_PEERS,
+      )
+    : savedFormats;
+  // A custom format has no registry metadata, so its label/description come
+  // from the engine-authored `CustomFormatDef` instead.
+  const formatLabel = activeSavedFormat
+    ? activeSavedFormat.def.label
+    : (formatMeta?.label ?? selectedFormat);
+  const formatDescription = activeSavedFormat
+    ? activeSavedFormat.def.description
+    : formatMeta?.description;
   const formatMenuGroups = useMemo((): MenuSelectGroup[] => {
     const groups: MenuSelectGroup[] = [];
     for (const group of (Object.keys(GROUP_ORDER) as FormatGroup[]).sort(
@@ -415,19 +885,69 @@ export function HostSetup({
       })),
     [t],
   );
+  // No CustomFormatRules deck-validation resolver exists yet (Phase 1d) —
+  // `validate_deck_for_format` (the authoritative game-creation gate) rejects
+  // EVERY Custom-format deck unconditionally, for any deck, so hosting or
+  // joining with a saved custom format deterministically fails at
+  // initialization today. The live-check chip reports this format as
+  // "idle" (deliberately not "illegal" — the engine has no opinion, not a
+  // rejection), so `hostDisabled` alone never catches this case. Block
+  // submission locally instead of letting the user walk the full
+  // save/select/deck-pick flow into a guaranteed dead end.
+  const customFormatHostUnavailable = activeSavedFormat !== null;
   const submitDisabled =
-    hostDisabled || isSubmitting || hostingStatus !== "idle" || (effectiveAiSeats.length > 0 && !defaultAiDeck);
+    hostDisabled
+    || customFormatHostUnavailable
+    || isSubmitting
+    || isResolvingFormat
+    || hostingStatus !== "idle"
+    || (effectiveAiSeats.length > 0 && !defaultAiDeck);
 
   return (
     <form
       onSubmit={(e) => { e.preventDefault(); void handleHost(); }}
       className="relative z-10 flex w-full flex-col gap-5"
     >
-      {isP2P && (
-        <p className="max-w-2xl text-sm leading-6 text-slate-400">
-          {t("hostSetup.p2pNotice")}
-        </p>
+      {/* Mode first: it changes what every control below it means, so it sits
+          above format and seats rather than among the option rows. */}
+      {seed ? (
+        // A Discord game's connection and privacy come from the post.
+        <div className="flex max-w-2xl flex-col gap-1 text-sm leading-6">
+          <p className="text-slate-200">{t("hostSetup.botGameNotice", { code: seed.code })}</p>
+          {seedIgnored && (
+            <p role="status" className="text-amber-200">{t("hostSetup.botSeedIgnored")}</p>
+          )}
+        </div>
+      ) : (
+        <>
+          <Field label={t("connectionMode.label")}>
+            <div className="max-w-sm">
+              <ConnectionModeSwitch
+                value={isP2P ? "p2p" : "server"}
+                onChange={onConnectionModeChange}
+                dedicatedAvailable={dedicatedAvailable}
+              />
+            </div>
+            {!dedicatedAvailable && (
+              <div className="flex flex-wrap items-center gap-x-3 text-sm text-slate-400">
+                <p role="status">{t("hostSetup.dedicatedUnavailable")}</p>
+                <button type="button" onClick={checkConnections} className="min-h-11 px-2 text-slate-200 underline underline-offset-4 hover:text-white">
+                  {t("connectionToast.retry")}
+                </button>
+              </div>
+            )}
+          </Field>
+
+          <LanServers />
+        </>
       )}
+
+      <p className="max-w-2xl text-sm leading-6 text-slate-400">
+        {/* A Discord game is listed by its post, so its copy drops the lobby sentence. */}
+        {t(seed
+          ? (isP2P ? "hostSetup.botP2PNotice" : "hostSetup.botServerNotice")
+          : (isP2P ? "hostSetup.p2pNotice" : "hostSetup.hostServerHelp"))}
+      </p>
 
       {/* Two-column table-setup grammar (design mockup HostScreen): form panel
           beside a sticky seat panel + primary CTA. Stacks to one column below lg. */}
@@ -461,10 +981,10 @@ export function HostSetup({
             {/* Format — grouped MenuSelect mirrors the engine's FormatGroup
                 taxonomy. fitContainer keeps the trigger inside the grid column;
                 menuLayout="dropdown" anchors below the trigger on all widths. */}
-            <Field label={t("hostSetup.format")} hint={formatMeta?.description}>
+            <Field label={t("hostSetup.format")} hint={formatDescription}>
               <MenuSelect
                 ariaLabel={t("hostSetup.format")}
-                label={formatMeta?.label ?? selectedFormat}
+                label={isResolvingFormat ? t("hostSetup.loadingCustomFormat") : formatLabel}
                 selectedValue={selectedFormat}
                 groups={formatMenuGroups}
                 onSelect={(value) => handleFormatSelect(value as GameFormat)}
@@ -475,18 +995,20 @@ export function HostSetup({
               />
             </Field>
 
+            {customFormatHostUnavailable && (
+              <p role="status" className="text-xs text-amber-300 sm:col-span-2">
+                {t("hostSetup.customFormatHostingUnavailable")}
+              </p>
+            )}
+
             <Field label={t("hostSetup.startingLife")} htmlFor="host-setup-life">
-              <input
+              <IntegerField
                 id="host-setup-life"
-                type="number"
                 value={formatConfig.starting_life}
-                onChange={(e) =>
-                  setLocalFormatConfig((prev) => ({
-                    ...prev,
-                    starting_life: Math.max(1, parseInt(e.target.value) || 1),
-                  }))
-                }
                 min={1}
+                onCommit={(starting_life) =>
+                  setLocalFormatConfig((prev) => ({ ...prev, starting_life }))
+                }
                 className={inp}
               />
             </Field>
@@ -513,14 +1035,14 @@ export function HostSetup({
 
             <Field label={t("hostSetup.matchType")}>
               <div className={segWrap}>
-                <button type="button" onClick={() => setMatchType("Bo1")} className={seg(matchType === "Bo1")}>
+                <button type="button" onClick={() => setMatchType("Bo1")} className={seg(effectiveMatchType === "Bo1")}>
                   {t("hostSetup.bo1")}
                 </button>
                 <button
                   type="button"
                   onClick={() => setMatchType("Bo3")}
-                  disabled={playerCount !== 2}
-                  className={seg(matchType === "Bo3", playerCount !== 2 ? "cursor-not-allowed opacity-40" : "")}
+                  disabled={bo3Disabled}
+                  className={seg(effectiveMatchType === "Bo3", bo3Disabled ? "cursor-not-allowed opacity-40" : "")}
                 >
                   {t("hostSetup.bo3")}
                 </button>
@@ -540,13 +1062,6 @@ export function HostSetup({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setLoopDetection({ type: "On" })}
-                  className={seg(loopDetection.type === "On")}
-                >
-                  {t("common:comboDetector.on")}
-                </button>
-                <button
-                  type="button"
                   onClick={() => setLoopDetection({ type: "Interactive" })}
                   className={seg(loopDetection.type === "Interactive")}
                 >
@@ -555,6 +1070,14 @@ export function HostSetup({
               </div>
             </Field>
           </div>
+          {/* The seat ceiling is a live consequence of the mode switch above,
+              so say so rather than letting seats vanish from the picker. The
+              number is `P2P_MAX_PEERS` — never a literal. */}
+          {isP2P && formatConfig.max_players > P2P_MAX_PEERS && (
+            <p role="status" className="-mt-1 text-xs text-fg-meta">
+              {t("hostSetup.p2pSeatCap", { max: P2P_MAX_PEERS })}
+            </p>
+          )}
           {playerCount !== 2 && <p className="-mt-1 text-xs text-fg-meta">{t("hostSetup.bo3Note")}</p>}
 
           {/* Free-for-all deck size (FFA only) */}
@@ -562,7 +1085,7 @@ export function HostSetup({
             <Field label={t("hostSetup.deckSize")}>
               <div className={segWrap}>
                 {FFA_DECK_SIZE_OPTIONS.map((deckSize) => (
-                  <button type="button" key={deckSize} onClick={() => handleDeckSizeChange(deckSize)} className={seg(formatConfig.deck_size === deckSize)}>
+                  <button type="button" key={deckSize} onClick={() => handleDeckSizeChange(deckSize)} className={seg(formatConfig.deck_size.data === deckSize)}>
                     {deckSize}
                   </button>
                 ))}
@@ -573,17 +1096,16 @@ export function HostSetup({
           {/* Commander damage threshold (Commander only) */}
           {formatConfig.commander_damage_threshold != null && (
             <Field label={t("hostSetup.commanderDamage")} htmlFor="host-setup-cmd-dmg">
-              <input
+              <IntegerField
                 id="host-setup-cmd-dmg"
-                type="number"
                 value={formatConfig.commander_damage_threshold ?? 21}
-                onChange={(e) =>
+                min={1}
+                onCommit={(threshold) =>
                   setLocalFormatConfig((prev) => ({
                     ...prev,
-                    commander_damage_threshold: Math.max(1, parseInt(e.target.value) || 21),
+                    commander_damage_threshold: threshold,
                   }))
                 }
-                min={1}
                 className={inp}
               />
             </Field>
@@ -591,8 +1113,140 @@ export function HostSetup({
 
           <div className="border-t border-hairline-strong" />
 
-          {/* Privacy / timing options — iOS-toggle rows (design mockup). */}
-          {!isP2P && (
+          {/* Axis A — save the current setup as a reusable custom format, and
+              pick from previously saved ones. Definitions are built by the
+              ENGINE and persisted client-side; there is no server registry. */}
+          <div className="flex flex-col gap-2.5">
+            <Field
+              label={t("hostSetup.savedFormats")}
+              htmlFor="host-setup-custom-format-name"
+            >
+              <div className="flex gap-2">
+                <input
+                  id="host-setup-custom-format-name"
+                  type="text"
+                  value={customFormatName}
+                  onChange={(e) => setCustomFormatName(e.target.value)}
+                  onKeyDown={(e) => {
+                    // This field lives inside the Host Game <form>, whose
+                    // onSubmit calls handleHost(). Without this, pressing
+                    // Enter to confirm a format name would instead submit the
+                    // form and start hosting immediately.
+                    if (e.key !== "Enter") return;
+                    e.preventDefault();
+                    if (customFormatName.trim().length === 0 || isResolvingFormat) return;
+                    void handleSaveAsCustomFormat();
+                  }}
+                  placeholder={t("hostSetup.customFormatNamePlaceholder")}
+                  maxLength={40}
+                  className={inp}
+                />
+                <button
+                  type="button"
+                  onClick={() => void handleSaveAsCustomFormat()}
+                  disabled={customFormatName.trim().length === 0 || isResolvingFormat}
+                  className={`${menuButtonClass({ tone: accentTone, size: "sm" })} shrink-0 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-50`}
+                >
+                  {t("hostSetup.saveAsCustomFormat")}
+                </button>
+              </div>
+            </Field>
+
+            {customFormatError && (
+              <p role="alert" className="text-xs text-rose-300">
+                {customFormatError}
+              </p>
+            )}
+
+            {availableSavedFormats.length === 0 ? (
+              <p className="text-xs text-fg-meta">{t("hostSetup.noSavedCustomFormats")}</p>
+            ) : (
+              <ul className="flex flex-col gap-1.5">
+                {availableSavedFormats.map((saved) => (
+                  <li
+                    key={saved.id}
+                    className="flex items-center gap-2.5 rounded-[12px] border border-hairline bg-black/20 px-3 py-2"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-[13px] text-fg-card-body">{saved.name}</div>
+                      <div className="truncate text-[11px] text-fg-meta">
+                        {saved.def.description}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void handleSavedFormatSelect(saved)}
+                      disabled={isResolvingFormat || savedCustomFormatId === saved.id}
+                      className={`${menuButtonClass({ tone: accentTone, size: "sm" })} shrink-0 disabled:cursor-not-allowed disabled:opacity-50`}
+                    >
+                      {savedCustomFormatId === saved.id
+                        ? t("hostSetup.customFormatInUse")
+                        : t("hostSetup.useCustomFormat")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteSavedFormat(saved.id)}
+                      aria-label={t("hostSetup.deleteCustomFormat")}
+                      className={`${menuButtonClass({ tone: "neutral", size: "sm" })} shrink-0`}
+                    >
+                      {t("hostSetup.deleteCustomFormat")}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="border-t border-hairline-strong" />
+
+          {/* Host target — which server runs this match. Server mode only:
+              P2P has no server to place the game on, so there is no selection
+              to make and none is reported. */}
+          {!isP2P && !seed && (
+            <Field
+              label={t("hostSetup.hostServer")}
+            >
+              <MenuSelect
+                ariaLabel={t("hostSetup.hostServer")}
+                label={
+                  hostCandidates.find((candidate) => candidate.source.url === selected)
+                    ?.source.name
+                  ?? selected
+                }
+                selectedValue={selected}
+                items={hostCandidates.map((candidate) => ({
+                  value: candidate.source.url,
+                  disabled: !selectableCandidates.includes(candidate),
+                  // A rejected candidate reads as `ServerPicker` renders one —
+                  // the same `serverPicker.incompatibleVersion` line, off the
+                  // same announced version — in place of a rank it cannot be
+                  // chosen on. Otherwise the score is the directory's own
+                  // 0–100 rank, rendered rather than recomputed; `undefined` is
+                  // its "unranked".
+                  label: hostRejection(candidate.listing) !== null
+                    ? `${candidate.source.name} — ${t("serverPicker.incompatibleVersion", {
+                        version: candidate.listing?.row.server_version,
+                      })}`
+                    : !selectableCandidates.includes(candidate)
+                      ? `${candidate.source.name} — ${t("connectionDot.disconnected")}`
+                    : candidate.source.score === undefined
+                      ? t("hostSetup.hostServerUnscored", { name: candidate.source.name })
+                      : t("hostSetup.hostServerScore", {
+                          name: candidate.source.name,
+                          score: candidate.source.score,
+                        }),
+                }))}
+                onSelect={setHostServerUrl}
+                menuLayout="dropdown"
+                fitContainer
+                wrapperClassName="w-full min-w-0"
+                className={`${inp} min-h-[44px] w-full cursor-pointer font-medium`}
+              />
+            </Field>
+          )}
+
+          {/* Visibility is independent of who runs the game. */}
+          {!seed && (
             <OptionRow
               label={t("hostSetup.listInLobby")}
               on={isPublic}
@@ -610,27 +1264,30 @@ export function HostSetup({
             onChange={(v) => setLocalFormatConfig((prev) => ({ ...prev, allow_debug_actions: v }))}
             accent={accentTone}
           />
-          <div className="flex flex-col gap-2.5">
-            <OptionRow
-              label={t("hostSetup.setPassword")}
-              on={showPassword}
-              onChange={(v) => {
-                setShowPassword(v);
-                if (!v) setPassword("");
-              }}
-              accent={accentTone}
-            />
-            {showPassword && (
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder={t("hostSetup.passwordPlaceholder")}
-                maxLength={32}
-                className={inp}
+          {!seed && (
+            <div className="flex flex-col gap-2.5">
+              <OptionRow
+                label={t("hostSetup.setPassword")}
+                on={showPassword}
+                onChange={(v) => {
+                  setShowPassword(v);
+                  if (!v) setPassword("");
+                }}
+                accent={accentTone}
               />
-            )}
-          </div>
+              {showPassword && (
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder={t("hostSetup.passwordPlaceholder")}
+                  aria-label={t("hostSetup.passwordPlaceholder")}
+                  maxLength={32}
+                  className={inp}
+                />
+              )}
+            </div>
+          )}
         </div>
 
         {/* ----- right: seat panel + primary CTA (sticky on lg) ----- */}
@@ -662,7 +1319,7 @@ export function HostSetup({
                         <button
                           type="button"
                           onClick={() => toggleAiSeat(seatIndex)}
-                          className={`rounded-badge px-2 py-0.5 text-[11px] font-semibold transition-colors ${
+                          className={`shrink-0 whitespace-nowrap rounded-badge px-2 py-0.5 text-[11px] font-semibold transition-colors ${
                             aiSeat ? "bg-amber-500/20 text-amber-300" : "bg-cyan-500/20 text-cyan-300"
                           }`}
                         >
@@ -696,7 +1353,13 @@ export function HostSetup({
           <button
             type="submit"
             disabled={submitDisabled}
-            title={hostDisabled ? hostDisabledReason : undefined}
+            title={
+              customFormatHostUnavailable
+                ? t("hostSetup.customFormatHostingUnavailable")
+                : hostDisabled
+                  ? hostDisabledReason
+                  : undefined
+            }
             aria-disabled={submitDisabled || undefined}
             className={`${menuButtonClass({ tone: accentTone, size: "md" })} w-full disabled:cursor-not-allowed disabled:opacity-50`}
           >

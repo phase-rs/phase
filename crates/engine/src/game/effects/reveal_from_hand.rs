@@ -16,7 +16,7 @@ use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingContinuation, WaitingFor};
 
-use crate::game::ability_utils::build_resolved_from_def;
+use crate::game::ability_utils::build_resolved_from_def_with_chain_root;
 
 /// CR 701.20a: Resolve `Effect::RevealFromHand`.
 ///
@@ -64,7 +64,14 @@ pub fn resolve(
     // CR 701.20a: No eligible card to reveal → the "if you don't" branch fires.
     // This is equivalent to the player declining the optional reveal.
     if eligible.is_empty() {
-        run_on_decline_now(state, on_decline.as_deref(), controller, source_id, events);
+        run_on_decline_now(
+            state,
+            on_decline.as_deref(),
+            controller,
+            source_id,
+            ability.context.chain_root_targets.clone(),
+            events,
+        );
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Reveal,
             source_id,
@@ -84,13 +91,22 @@ pub fn resolve(
     // resolves correctly when drained. Mirrors `apply_post_replacement_effect`'s
     // convention of threading the source object as the default target.
     if let Some(def) = on_decline {
-        let mut resolved = build_resolved_from_def(&def, source_id, controller);
+        // CR 608.2h: propagate the creating ability's chain-root target list
+        // (see `build_resolved_from_def_with_chain_root`'s doc).
+        let mut resolved = build_resolved_from_def_with_chain_root(
+            &def,
+            source_id,
+            controller,
+            ability.context.chain_root_targets.clone(),
+        );
         if resolved.targets.is_empty() {
             resolved.targets.push(TargetRef::Object(source_id));
         }
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(resolved)));
+        state.park_ability_continuation(PendingContinuation::new(Box::new(resolved), state));
     } else {
-        state.pending_continuation = None;
+        let _ = state
+            .take_active_ability_continuation()
+            .expect("reveal continuation must be the active frame");
     }
 
     state.waiting_for = WaitingFor::RevealChoice {
@@ -118,6 +134,7 @@ fn run_on_decline_now(
     on_decline: Option<&AbilityDefinition>,
     controller: crate::types::player::PlayerId,
     source_id: crate::types::identifiers::ObjectId,
+    chain_root_targets: Vec<TargetRef>,
     events: &mut Vec<GameEvent>,
 ) {
     let Some(def) = on_decline else {
@@ -136,7 +153,11 @@ fn run_on_decline_now(
     // on `AbilityCondition::ControllerControlsMatching { negated: true }` — the
     // Tap fires only when the controller doesn't already control a [filter]
     // permanent. Bypassing the chain would skip that check.
-    let mut resolved = build_resolved_from_def(def, source_id, controller);
+    //
+    // CR 608.2h: propagate the creating ability's chain-root target list (see
+    // `build_resolved_from_def_with_chain_root`'s doc).
+    let mut resolved =
+        build_resolved_from_def_with_chain_root(def, source_id, controller, chain_root_targets);
     if resolved.targets.is_empty() {
         resolved.targets.push(TargetRef::Object(source_id));
     }
@@ -264,7 +285,7 @@ mod tests {
         }
         // The decline branch is stashed for the empty-pick path.
         assert!(
-            state.pending_continuation.is_some(),
+            state.active_ability_continuation().is_some(),
             "on_decline should be stashed as pending continuation"
         );
     }
@@ -414,5 +435,92 @@ mod tests {
             !state.objects.get(&source).unwrap().tapped,
             "should NOT tap when controller already controls a Soldier"
         );
+    }
+
+    /// The eligible set is drawn from the CONTROLLER'S HAND, and only then filtered — the seam
+    /// the block-(3) `execute` firewall relief
+    /// (`analysis::resource::reveal_from_hand_execute_provably_excludes_class`) rests its
+    /// universe argument on: a growing-class member that is a battlefield object (CR 110.1) can
+    /// never be in the eligible set, WHATEVER the filter says, because the pool is a hand.
+    /// Widening it to `state.objects` would make the relief unsound while every filter-level
+    /// test stayed green, so the pool is pinned here, at its own seam.
+    ///
+    /// The three decoys discriminate: each MATCHES the filter (asserted below, so the row cannot
+    /// pass because they were filtered out) and each is excluded by the POOL alone. The controller
+    /// is `PlayerId(1)`, so "the controller's hand" is distinguishable from "player zero's hand".
+    ///
+    /// REVERT / MUTATION PROBE: widen `resolve`'s universe to `state.objects` in any zone ⇒
+    /// **this row FAILS** (the prompt offers all three matches instead of the one).
+    #[test]
+    fn reveal_from_hand_eligible_set_is_a_subset_of_the_controllers_hand() {
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(1);
+
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            controller,
+            "Gilt-Leaf Palace".to_string(),
+            Zone::Battlefield,
+        );
+
+        let make_elf = |state: &mut GameState, card: u64, owner: PlayerId, zone: Zone| {
+            let id = create_object(
+                state,
+                CardId(card),
+                owner,
+                "Llanowar Elves".to_string(),
+                zone,
+            );
+            let obj = state.objects.get_mut(&id).expect("just created");
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.subtypes = vec!["Elf".to_string()];
+            id
+        };
+
+        // (i) a MATCHING battlefield permanent, (ii) a MATCHING card in the OTHER player's
+        // hand, (iii) the one matching card in the controller's own hand.
+        let battlefield_elf = make_elf(&mut state, 2, controller, Zone::Battlefield);
+        let other_hand_elf = make_elf(&mut state, 3, PlayerId(0), Zone::Hand);
+        let controller_hand_elf = make_elf(&mut state, 4, controller, Zone::Hand);
+
+        let ability = reveal_ability(source, controller);
+
+        // ⟨G⟩ reach-guard: every decoy MATCHES the filter, so each one's absence from the
+        // eligible set below is attributable to the POOL and to nothing else. Without this
+        // the row passes for a filter that happened to reject them.
+        let ctx = FilterContext::from_ability(&ability);
+        for (label, id) in [
+            ("battlefield permanent", battlefield_elf),
+            ("other player's hand", other_hand_elf),
+            ("controller's hand", controller_hand_elf),
+        ] {
+            assert!(
+                matches_target_filter(&state, id, &elf_filter(), &ctx),
+                "⟨G⟩ reach-guard: the {label} decoy must MATCH the reveal filter, else its \
+                 exclusion below proves nothing about the subject pool"
+            );
+        }
+        // ⟨G⟩ reach-guard: the two hands are genuinely distinct, so "controller's hand" is
+        // not accidentally satisfied by "player zero's hand".
+        assert_ne!(controller, PlayerId(0));
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::RevealChoice { player, cards, .. } => {
+                assert_eq!(*player, controller);
+                assert_eq!(
+                    cards,
+                    &vec![controller_hand_elf],
+                    "S6-P2a: the eligible set is EXACTLY the controller's hand, filtered. \
+                     A matching battlefield permanent and a matching card in another \
+                     player's hand are both out of the pool. Widening the universe to \
+                     `state.objects` makes this FAIL"
+                );
+            }
+            other => panic!("expected optional RevealChoice, got {:?}", other),
+        }
     }
 }

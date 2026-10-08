@@ -4,6 +4,24 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { usePreferencesStore } from "../preferencesStore";
 
 describe("preferencesStore", () => {
+  it.each([
+    ["water_frozen_aurora", "water_moonlit_ocean_temple"],
+    ["shadow_haunted_graveyard", "shadow_moon_coven_sanctum"],
+    ["shadow_ruined_archway", "shadow_moon_coven_sanctum"],
+    ["earth_jurassic", "earth_snowy_forest"],
+    ["air_angelic_sky", "air_angelic_sky"],
+    ["none", "none"],
+    ["custom", "custom"],
+    ["auto-wubrg", "auto-wubrg"],
+  ])("migrates saved background %s to %s", (previous, expected) => {
+    localStorage.setItem("phase-preferences", JSON.stringify({
+      state: { boardBackground: previous },
+      version: 36,
+    }));
+    usePreferencesStore.persist.rehydrate();
+    expect(usePreferencesStore.getState().boardBackground).toBe(expected);
+  });
+
   beforeEach(() => {
     // Reset store state between tests
     act(() => {
@@ -11,18 +29,25 @@ describe("preferencesStore", () => {
         cardSize: "medium",
         hudLayout: "inline",
         followActiveOpponent: false,
-        logDefaultState: "closed",
+        logPanelLastChoice: "closed",
+        logDockSide: "right",
         boardBackground: "auto-wubrg",
         vfxQuality: "full",
+        cardAnimationStyle: "webgl",
         animationSpeedMultiplier: 1.0,
+        showCardPreviewFooter: true,
+        draftDoubleClickConfirmPick: true,
         pacingMultipliers: { effects: 1.0, combat: 1.0, banners: 1.0 },
+        priorityPassingMode: "Standard",
+        experimentalTournamentsEnabled: false,
         masterVolume: 100,
         sfxVolume: 70,
         musicVolume: 40,
         sfxMuted: false,
         musicMuted: false,
         masterMuted: false,
-        multiplayerBoardLayout: "focused",
+        multiplayerBoardLayout: "auto",
+        multiplayerSplitLayoutNudgeDismissed: true,
         aiSeats: [{ difficulty: "Medium", deckId: "Random" }],
         aiBracketFilter: [],
       });
@@ -36,10 +61,19 @@ describe("preferencesStore", () => {
     expect(state.cardSize).toBe("medium");
     expect(state.hudLayout).toBe("inline");
     expect(state.followActiveOpponent).toBe(false);
-    expect(state.logDefaultState).toBe("closed");
+    expect(usePreferencesStore.getInitialState().logPanelLastChoice).toBe("open");
+    expect(usePreferencesStore.getInitialState().logDockSide).toBe("right");
     expect(state.boardBackground).toBe("auto-wubrg");
-    expect(state.multiplayerBoardLayout).toBe("focused");
+    // Read the store's real initialization snapshot (the getInitialState idiom
+    // used below): the shared beforeEach writes its own defaults snapshot, so a
+    // getState() read here would assert that snapshot, not buildDefaultPreferences().
+    expect(usePreferencesStore.getInitialState().multiplayerBoardLayout).toBe("auto");
+    expect(usePreferencesStore.getInitialState().multiplayerSplitLayoutNudgeDismissed).toBe(true);
     expect(state.aiSeats).toEqual([{ difficulty: "Medium", deckId: "Random" }]);
+    expect(state.priorityPassingMode).toBe("Standard");
+    expect(state.experimentalTournamentsEnabled).toBe(false);
+    expect(state.draftDoubleClickConfirmPick).toBe(true);
+    expect(usePreferencesStore.getInitialState().cardAnimationStyle).toBe("webgl");
   });
 
   it("setAiSeatDifficulty updates the target seat", () => {
@@ -100,6 +134,33 @@ describe("preferencesStore", () => {
     expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe("split");
   });
 
+  it("persists the experimental tournaments navigation preference", () => {
+    act(() => {
+      usePreferencesStore.getState().setExperimentalTournamentsEnabled(true);
+    });
+
+    expect(usePreferencesStore.getState().experimentalTournamentsEnabled).toBe(true);
+    expect(JSON.parse(localStorage.getItem("phase-preferences")!).state.experimentalTournamentsEnabled).toBe(true);
+  });
+
+  it("persists the card animation style preference", () => {
+    act(() => {
+      usePreferencesStore.getState().setCardAnimationStyle("classic");
+    });
+
+    expect(usePreferencesStore.getState().cardAnimationStyle).toBe("classic");
+    expect(JSON.parse(localStorage.getItem("phase-preferences")!).state.cardAnimationStyle).toBe("classic");
+  });
+
+  it("updates the multiplayer split-layout nudge dismissal independently", () => {
+    act(() => {
+      usePreferencesStore.getState().setMultiplayerSplitLayoutNudgeDismissed(false);
+    });
+
+    expect(usePreferencesStore.getState().multiplayerSplitLayoutNudgeDismissed).toBe(false);
+    expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe("auto");
+  });
+
   it("setFollowActiveOpponent updates the value", () => {
     act(() => {
       usePreferencesStore.getState().setFollowActiveOpponent(true);
@@ -108,12 +169,27 @@ describe("preferencesStore", () => {
     expect(usePreferencesStore.getState().followActiveOpponent).toBe(true);
   });
 
-  it("setLogDefaultState updates log default state", () => {
+  it("setLogPanelLastChoice updates the remembered log visibility", () => {
     act(() => {
-      usePreferencesStore.getState().setLogDefaultState("open");
+      usePreferencesStore.getState().setLogPanelLastChoice("open");
     });
 
-    expect(usePreferencesStore.getState().logDefaultState).toBe("open");
+    expect(usePreferencesStore.getState().logPanelLastChoice).toBe("open");
+  });
+
+  it("persists the game-log dock side and reset restores the right dock", () => {
+    act(() => {
+      usePreferencesStore.getState().setLogDockSide("left");
+    });
+
+    expect(usePreferencesStore.getState().logDockSide).toBe("left");
+    expect(JSON.parse(localStorage.getItem("phase-preferences")!).state.logDockSide).toBe("left");
+
+    act(() => {
+      usePreferencesStore.getState().resetAllPreferences();
+    });
+
+    expect(usePreferencesStore.getState().logDockSide).toBe("right");
   });
 
   it("setBoardBackground updates board background", () => {
@@ -146,6 +222,36 @@ describe("preferencesStore", () => {
     });
 
     expect(usePreferencesStore.getState().vfxQuality).toBe("minimal");
+  });
+
+  it("keeps the card animation style independent of VFX quality", () => {
+    act(() => {
+      usePreferencesStore.getState().setVfxQuality("minimal");
+    });
+
+    expect(usePreferencesStore.getState().vfxQuality).toBe("minimal");
+    expect(usePreferencesStore.getState().cardAnimationStyle).toBe("webgl");
+
+    act(() => {
+      usePreferencesStore.getState().setCardAnimationStyle("classic");
+    });
+
+    expect(usePreferencesStore.getState().cardAnimationStyle).toBe("classic");
+    expect(usePreferencesStore.getState().vfxQuality).toBe("minimal");
+  });
+
+  it("shows the card preview footer by default and persists changes", () => {
+    // Read the store's actual initialization snapshot so the shared beforeEach
+    // reset cannot mask a regression in buildDefaultPreferences().
+    expect(usePreferencesStore.getInitialState().showCardPreviewFooter).toBe(true);
+
+    act(() => {
+      usePreferencesStore.getState().setShowCardPreviewFooter(false);
+    });
+
+    expect(usePreferencesStore.getState().showCardPreviewFooter).toBe(false);
+    const stored = JSON.parse(localStorage.getItem("phase-preferences")!);
+    expect(stored.state.showCardPreviewFooter).toBe(false);
   });
 
   it("setAnimationSpeedMultiplier updates the value", () => {
@@ -213,6 +319,9 @@ describe("preferencesStore", () => {
       usePreferencesStore.getState().setCardSize("large");
       usePreferencesStore.getState().setMasterVolume(20);
       usePreferencesStore.getState().setPacingMultiplier("combat", 1.5);
+      usePreferencesStore.getState().setPriorityPassingMode("SkipLowUseWindows");
+      usePreferencesStore.getState().setDraftDoubleClickConfirmPick(false);
+      usePreferencesStore.getState().setCardAnimationStyle("classic");
     });
 
     act(() => {
@@ -223,6 +332,9 @@ describe("preferencesStore", () => {
     expect(state.cardSize).toBe("medium");
     expect(state.masterVolume).toBe(100);
     expect(state.pacingMultipliers).toEqual({ effects: 1.0, combat: 1.0, banners: 1.0 });
+    expect(state.priorityPassingMode).toBe("Standard");
+    expect(state.draftDoubleClickConfirmPick).toBe(true);
+    expect(state.cardAnimationStyle).toBe("webgl");
   });
 
   it("existing preferences are unchanged after setting animation prefs", () => {
@@ -234,7 +346,7 @@ describe("preferencesStore", () => {
     const state = usePreferencesStore.getState();
     expect(state.cardSize).toBe("medium");
     expect(state.hudLayout).toBe("inline");
-    expect(state.logDefaultState).toBe("closed");
+    expect(state.logPanelLastChoice).toBe("closed");
     expect(state.boardBackground).toBe("auto-wubrg");
   });
 
@@ -243,6 +355,7 @@ describe("preferencesStore", () => {
       usePreferencesStore.getState().setCardSize("small");
       usePreferencesStore.getState().setFollowActiveOpponent(true);
       usePreferencesStore.getState().setAiSeatDifficulty(0, "VeryHard");
+      usePreferencesStore.getState().setDraftDoubleClickConfirmPick(false);
     });
 
     // Zustand persist writes to localStorage
@@ -253,6 +366,68 @@ describe("preferencesStore", () => {
     expect(parsed.state.cardSize).toBe("small");
     expect(parsed.state.followActiveOpponent).toBe(true);
     expect(parsed.state.aiSeats[0].difficulty).toBe("VeryHard");
+    expect(parsed.state.draftDoubleClickConfirmPick).toBe(false);
+  });
+
+  it("normalizes a current-version persisted locale before consumers can use it", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({ state: { language: "pt-BR" }, version: 34 }),
+    );
+
+    act(() => usePreferencesStore.persist.rehydrate());
+
+    expect(usePreferencesStore.getState().language).toBe("pt");
+  });
+
+  it("falls back from an unsupported current-version persisted locale", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({ state: { language: "zh-Hans" }, version: 34 }),
+    );
+
+    act(() => usePreferencesStore.persist.rehydrate());
+
+    expect(["en", "es", "fr", "de", "it", "pt", "pl", "ja"]).toContain(
+      usePreferencesStore.getState().language,
+    );
+  });
+
+  it("migrates pre-log-dock preferences to the prior right dock", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({ state: { logDockSide: "left" }, version: 32 }),
+    );
+
+    act(() => usePreferencesStore.persist.rehydrate());
+
+    expect(usePreferencesStore.getState().logDockSide).toBe("right");
+  });
+
+  it("migrates a pre-v34 closed log default to open", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({ state: { logDefaultState: "closed" }, version: 33 }),
+    );
+
+    act(() => usePreferencesStore.persist.rehydrate());
+
+    expect(usePreferencesStore.getState().logPanelLastChoice).toBe("open");
+    expect(usePreferencesStore.getState()).not.toHaveProperty("logDefaultState");
+  });
+
+  it.each([undefined, "middle", 7])("resets an invalid current log-dock value (%j) to right", (logDockSide) => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({
+        state: logDockSide === undefined ? {} : { logDockSide },
+        version: 34,
+      }),
+    );
+
+    act(() => usePreferencesStore.persist.rehydrate());
+
+    expect(usePreferencesStore.getState().logDockSide).toBe("right");
   });
 
   it("migrates v1 enum animationSpeed='instant' to multiplier 0", () => {
@@ -379,6 +554,24 @@ describe("preferencesStore", () => {
     expect(usePreferencesStore.getState().phaseStops).toEqual([]);
   });
 
+  it.each([24, 25])("migrates the legacy Smart value from v%i", (version) => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({ state: { priorityPassingMode: "Smart" }, version }),
+    );
+    act(() => usePreferencesStore.persist.rehydrate());
+    expect(usePreferencesStore.getState().priorityPassingMode).toBe("SkipLowUseWindows");
+  });
+
+  it("safely normalizes invalid v25 priority-passing modes", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({ state: { priorityPassingMode: "Aggressive" }, version: 25 }),
+    );
+    act(() => usePreferencesStore.persist.rehydrate());
+    expect(usePreferencesStore.getState().priorityPassingMode).toBe("Standard");
+  });
+
   // --- Audio preferences ---
 
   it("has correct audio defaults", () => {
@@ -473,7 +666,6 @@ describe("preferencesStore", () => {
         cardSize: "large",
         hudLayout: "floating",
         followActiveOpponent: true,
-        logDefaultState: "open",
         boardBackground: "green",
       },
       version: 0,
@@ -489,7 +681,10 @@ describe("preferencesStore", () => {
     expect(state.cardSize).toBe("large");
     expect(state.hudLayout).toBe("floating");
     expect(state.followActiveOpponent).toBe(true);
-    expect(state.logDefaultState).toBe("open");
+    // `logPanelLastChoice` is deliberately NOT asserted here: the v33→v34 migration
+    // rewrites it unconditionally, so on this legacy blob it would pass whatever
+    // the seed said and would measure nothing. The real default is asserted via
+    // getInitialState() above, and the migration itself has its own test.
     expect(state.boardBackground).toBe("green");
   });
 
@@ -553,7 +748,7 @@ describe("preferencesStore", () => {
     expect(usePreferencesStore.getState().aiBracketFilter).toEqual([]);
   });
 
-  it("v20 → v21 migration defaults multiplayerBoardLayout to focused", () => {
+  it("v20 → v21 migration keeps pre-existing stores on the focused layout", () => {
     localStorage.setItem(
       "phase-preferences",
       JSON.stringify({
@@ -569,5 +764,70 @@ describe("preferencesStore", () => {
     });
 
     expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe("focused");
+  });
+
+  it("v29 → v30 migration defaults draft card previews to none", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({
+        state: { cardPreviewMode: "follow" },
+        version: 29,
+      }),
+    );
+
+    act(() => {
+      usePreferencesStore.persist.rehydrate();
+    });
+
+    expect(usePreferencesStore.getState().draftCardPreviewMode).toBe("none");
+  });
+
+  it("v30 → v31 migration enables draft double-click confirmation", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({
+        state: { draftCardPreviewMode: "none" },
+        version: 30,
+      }),
+    );
+
+    act(() => {
+      usePreferencesStore.persist.rehydrate();
+    });
+
+    expect(usePreferencesStore.getState().draftDoubleClickConfirmPick).toBe(true);
+  });
+
+  it("v35 → v36 migration gives existing stores the New card animations", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({
+        state: { cardSize: "large" },
+        version: 35,
+      }),
+    );
+
+    act(() => {
+      usePreferencesStore.persist.rehydrate();
+    });
+
+    expect(usePreferencesStore.getState().cardSize).toBe("large");
+    expect(usePreferencesStore.getState().cardAnimationStyle).toBe("webgl");
+  });
+
+  it("hydrates a stored Classic card animation style", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({
+        state: { cardAnimationStyle: "classic" },
+        version: 36,
+      }),
+    );
+
+    act(() => {
+      usePreferencesStore.persist.rehydrate();
+    });
+
+    expect(usePreferencesStore.getState().cardAnimationStyle).toBe("classic");
   });
 });

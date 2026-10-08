@@ -1,20 +1,35 @@
 [package]
-name = "engine"
+name = "phase-engine"
 version.workspace = true
 edition = "2021"
 license.workspace = true
+description = "A Magic: The Gathering rules engine implementing the Comprehensive Rules for native and WASM."
+repository = "https://github.com/phase-rs/phase"
+homepage = "https://github.com/phase-rs/phase"
+documentation = "https://github.com/phase-rs/phase"
+
+[lib]
+name = "engine"
 
 [features]
 cli = ["tracing-subscriber"]
 audit = []
 forge = []
 proptest = ["dep:proptest"]
+# Exposes raw zone placement for test crates; never enabled by production consumers.
+test-support = []
+# Generates only the self-contained interaction DTO contract. Production
+# consumers do not enable this feature and continue to use the existing action
+# transport until the explicit adapter cutover.
+interaction-bindings = ["dep:ts-rs"]
 # Compiles the shared combo corpus (`analysis::corpus`) into the lib + the
-# `combo-verify` tool bin. Excluded from the default lib / WASM surface.
-combo-verify = []
+# `combo-verify` tool bin, including the scenario harness it drives. Excluded
+# from the default lib / WASM surface.
+combo-verify = ["test-support"]
 
 [dependencies]
 serde = { workspace = true }
+serde_ignored = "0.1"
 tracing = { workspace = true }
 thiserror = "2"
 rand = "0.9"
@@ -27,11 +42,16 @@ proptest = { version = "1", optional = true }
 
 nom = "8.0"
 serde_json = "1"
+sha2 = "0.10"
 strum = { version = "0.27", features = ["derive"] }
 web-time = "1"
 im = { version = "15", features = ["serde"] }
 rustc-hash = "2"
 smallvec = { version = "1", features = ["serde", "union"] }
+ts-rs = { version = "=12.0.1", optional = true, features = ["serde-compat"] }
+
+[target.'cfg(windows)'.dependencies]
+same-file = "1"
 
 [[bin]]
 name = "coverage-report"
@@ -41,6 +61,12 @@ test = false
 [[bin]]
 name = "set-check"
 path = "src/bin/set_check.rs"
+
+[[bin]]
+name = "preset-audit"
+path = "src/bin/preset_audit.rs"
+# Test-enabled: inline tests pin how Scryfall responses are classified, with
+# canned bodies and no network access.
 
 [[bin]]
 name = "parser-gap-analyzer"
@@ -70,6 +96,17 @@ path = "src/bin/card_data_validate.rs"
 test = false
 
 [[bin]]
+name = "deck-check"
+path = "src/bin/deck_check.rs"
+# Test-enabled: inline tests exercise ordered DTO output and input/output failures.
+
+[[bin]]
+name = "interaction-bindings"
+path = "src/bin/interaction_bindings.rs"
+required-features = ["interaction-bindings"]
+test = false
+
+[[bin]]
 name = "tokens-gen"
 path = "src/bin/tokens_gen.rs"
 test = false
@@ -80,6 +117,11 @@ path = "src/bin/coverage_parse_diff.rs"
 # `test = true` (default): this bin carries non-trivial diff logic with inline
 # unit tests, unlike the logic-free tool bins above that set `test = false`.
 
+[[bin]]
+name = "resolution-face-census"
+path = "src/bin/resolution_face_census.rs"
+required-features = ["test-support"]
+
 [build-dependencies]
 # build.rs converts data/known-tokens.toml → JSON in OUT_DIR so the runtime
 # embed avoids the ~1s-per-process debug-mode toml_edit parse (see build.rs).
@@ -87,7 +129,15 @@ toml = "0.8"
 serde_json = "1"
 
 [dev-dependencies]
+flate2 = "1"
+# Test-only. `game_state_stack_high_water.rs` queries the running thread's real
+# stack bounds (`pthread_getattr_np` / `pthread_get_stackaddr_np`) instead of
+# inferring them from a local address. Already in Cargo.lock transitively, so
+# this vendors nothing new.
+libc = "0.2"
+engine = { path = ".", package = "phase-engine", features = ["test-support"] }
 tempfile = "3"
 insta = { version = "1", features = ["json"] }
 assert_matches = "1.5"
 pretty_assertions = "1"
+syn = { version = "2", features = ["full"] }

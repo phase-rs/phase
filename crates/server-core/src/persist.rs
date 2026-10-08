@@ -1,25 +1,45 @@
 use std::collections::HashMap;
 
-use engine::types::game_state::PersistedGameState;
+use engine::types::game_state::{PersistedGameState, PlayerDeckPool};
 use phase_ai::config::AiDifficulty;
 use serde::{Deserialize, Serialize};
 
-use draft_core::types::{DraftConfig, DraftSession as DraftCoreSession};
+use draft_core::types::{DraftConfig, DraftSession as DraftCoreSession, DraftSource, SetLayout};
+
+use seat_reducer::types::DeckChoice;
 
 use crate::lobby::RegisterGameRequest;
 use crate::protocol::DraftLobbyMetadata;
+use crate::session::AiDriverFault;
 
 /// Serializable snapshot of a game session for disk persistence.
 ///
 /// Fields that can be reconstructed at restore time are excluded:
 /// - `connected` — all players are disconnected on restore
 /// - `ai_configs` — reconstructed from `ai_difficulties` + `player_count`
-/// - `decks` — consumed at game start, data lives in `state` after that
+/// - `decks` — the resolved payloads are rebuilt from `deck_choices`, which
+///   carries the same cards in the far smaller name-only form
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedSession {
     pub game_code: String,
+    #[serde(default)]
+    pub state_revision: u64,
+    /// A persisted native-driver failure remains terminal across process
+    /// restart; omitting it decodes historical snapshots as healthy.
+    #[serde(default)]
+    pub ai_driver_fault: Option<AiDriverFault>,
+    #[serde(default = "default_next_ai_driver_fault_id")]
+    pub next_ai_driver_fault_id: u64,
     pub state: PersistedGameState,
     pub player_tokens: Vec<String>,
+    /// Each seat's unresolved deck form, re-resolved on restore. `#[serde(default)]`
+    /// is the migration mechanism, as for `state_revision` and `ranked`: a
+    /// pre-field snapshot restores with no seat decks and refuses to start.
+    /// Empty for a started snapshot, which nothing re-resolves. On the wire
+    /// that still differs from a pre-field snapshot — the key is written, not
+    /// omitted — but the two are load-equivalent, both resizing to all-`None`.
+    #[serde(default)]
+    pub deck_choices: Vec<Option<DeckChoice>>,
     pub display_names: Vec<String>,
     pub timer_seconds: Option<u32>,
     pub player_count: u8,
@@ -34,8 +54,23 @@ pub struct PersistedSession {
     pub start_when_full: bool,
     #[serde(default)]
     pub ranked: bool,
+    /// Host-private native Cube source. Older persisted sessions restore as
+    /// `None`; the list itself intentionally preserves order and duplicates.
+    #[serde(default)]
+    pub booster_pack_pool: Option<Vec<String>>,
     /// Lobby metadata for games still waiting for players.
     pub lobby_meta: Option<PersistedLobbyMeta>,
+    /// The deck-pool half of a persisted session, lifted out of `state` so a
+    /// mutation-time persist re-serializes only the dynamic remainder. Stored
+    /// in its own `deck_pools_json` column, never in a payload column.
+    ///
+    /// `skip_serializing` keeps the field out of the dynamic payload, which is
+    /// the point of the lift; `default` lets a payload decoded without it
+    /// produce an empty list that the reader then fills from the column. There
+    /// is exactly one restorable row shape, so no precedence rule lives here
+    /// or anywhere else.
+    #[serde(default, skip_serializing)]
+    pub deck_pools: Vec<PlayerDeckPool>,
 }
 
 /// Lobby metadata persisted alongside a waiting game.
@@ -53,6 +88,10 @@ pub struct PersistedLobbyMeta {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_next_ai_driver_fault_id() -> u64 {
+    1
 }
 
 /// Serializable snapshot of a draft session for disk persistence.
@@ -79,6 +118,26 @@ impl PersistedDraftSession {
     }
 }
 
+/// Display-safe source label for draft lobby rows.
+///
+/// A persisted Chaos source retains its private assignment matrix for exact
+/// restart behavior. Lobby discovery advertises candidate intent instead, so
+/// `DraftSource::set_code()` cannot disclose the actual assignment union
+/// before a player opens their booster.
+pub fn draft_lobby_source_label(source: &DraftSource) -> String {
+    match source {
+        DraftSource::Set {
+            layout: SetLayout::Chaos {
+                candidate_codes, ..
+            },
+        } => format!("Chaos:{}", candidate_codes.join("+")),
+        DraftSource::Set {
+            layout: SetLayout::UniformByRound { .. },
+        }
+        | DraftSource::Cube { .. } => source.set_code(),
+    }
+}
+
 /// Build the lobby-broker registration payload for a restored draft, if and
 /// only if the persisted snapshot is still joinable. This is the single
 /// production seam used by startup restore in `phase-server` — callers must
@@ -99,10 +158,30 @@ pub fn restored_draft_lobby_register_request(
         current_players: filled as u32,
         max_players: ps.config.pod_size as u32,
         draft_metadata: Some(DraftLobbyMetadata {
-            set_code: ps.config.set_code.clone(),
+            set_code: draft_lobby_source_label(&ps.config.source),
             draft_kind: format!("{:?}", ps.config.kind),
             cube_name: None,
         }),
         ..Default::default()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::draft_lobby_source_label;
+    use draft_core::types::{DraftSource, SetLayout};
+
+    #[test]
+    fn chaos_lobby_label_exposes_candidates_not_resolved_assignments() {
+        let source = DraftSource::Set {
+            layout: SetLayout::Chaos {
+                candidate_codes: vec!["AAA".to_string(), "BBB".to_string()],
+                // The actual union is intentionally only BBB. A lobby label
+                // based on DraftSource::set_code would leak that draw.
+                assignments: vec![vec!["BBB".to_string()]],
+            },
+        };
+
+        assert_eq!(draft_lobby_source_label(&source), "Chaos:AAA+BBB");
+    }
 }

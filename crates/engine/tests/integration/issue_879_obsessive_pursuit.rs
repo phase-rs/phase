@@ -21,7 +21,7 @@ fn record_sacrifice(runner: &mut engine::game::scenario::GameRunner, id: ObjectI
     let state = runner.state_mut();
     let record =
         state.objects[&id].snapshot_for_zone_change(id, Some(Zone::Battlefield), Zone::Graveyard);
-    state.sacrificed_permanents_this_turn.push(record);
+    state.sacrificed_permanents_this_turn.push_back(record);
 }
 
 fn p1p1_counters(runner: &engine::game::scenario::GameRunner, id: ObjectId) -> u32 {

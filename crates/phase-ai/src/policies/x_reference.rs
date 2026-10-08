@@ -21,8 +21,8 @@
 //! covered.
 
 use engine::types::ability::{
-    AbilityDefinition, ContinuousModification, Effect, FilterProp, QuantityExpr, QuantityRef,
-    ReplacementDefinition, StaticDefinition, TargetFilter, TriggerDefinition,
+    AbilityDefinition, ContinuousModification, Effect, FilterProp, PtValue, QuantityExpr,
+    QuantityRef, ReplacementDefinition, StaticDefinition, TargetFilter, TriggerDefinition,
 };
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
@@ -42,7 +42,11 @@ pub(crate) fn spell_object_references_x(state: &GameState, object_id: ObjectId) 
         return false;
     };
     // Spell-cast triggers / dies / etc. on the stack object.
-    for trigger in obj.trigger_definitions.iter_unchecked() {
+    for trigger in obj
+        .trigger_definitions
+        .iter_unchecked()
+        .map(|entry| &entry.definition)
+    {
         if let Some(exec) = &trigger.execute {
             if ability_definition_references_x(exec) {
                 return true;
@@ -163,6 +167,9 @@ fn continuous_modification_references_x(modification: &ContinuousModification) -
         ContinuousModification::GrantStaticAbility { definition } => {
             static_definition_references_x(definition)
         }
+        ContinuousModification::GrantReplacement { replacement } => {
+            replacement_definition_references_x(replacement)
+        }
         // RC1: dynamic P/T, keyword, and enter-counter magnitudes may reference
         // the chosen X either directly (`Variable "X"`) or via `CostXPaid` (the
         // announced X carried on the granting object — Mirror Entity's
@@ -178,7 +185,10 @@ fn continuous_modification_references_x(modification: &ContinuousModification) -
         | ContinuousModification::AddCounterOnEnter { count: value, .. } => {
             expr_references_chosen_x(value)
         }
-        ContinuousModification::SetName { .. }
+        // CR 707.2c (Metamorphic Alteration): inert copy marker references no X.
+        ContinuousModification::CopyChosen
+        | ContinuousModification::SetName { .. }
+        | ContinuousModification::SetTextName { .. }
         | ContinuousModification::AddPower { .. }
         | ContinuousModification::AddToughness { .. }
         | ContinuousModification::SetPower { .. }
@@ -198,7 +208,7 @@ fn continuous_modification_references_x(modification: &ContinuousModification) -
         | ContinuousModification::AddAllBasicLandTypes
         | ContinuousModification::AddAllLandTypes
         | ContinuousModification::AddChosenSubtype { .. }
-        | ContinuousModification::AddChosenColor
+        | ContinuousModification::AddChosenColor { .. }
         | ContinuousModification::RemoveChosenKeyword
         | ContinuousModification::AddChosenKeyword
         | ContinuousModification::SetColor { .. }
@@ -212,8 +222,10 @@ fn continuous_modification_references_x(modification: &ContinuousModification) -
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
+        | ContinuousModification::SubstituteTextWord { .. }
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
         | ContinuousModification::SetStartingLoyalty { .. }
@@ -271,6 +283,17 @@ pub(crate) fn effect_references_x(effect: &Effect) -> bool {
             enter_with_counters,
             ..
         } => count.contains_x() || enter_with_counters.iter().any(|(_, qty)| qty.contains_x()),
+        // A pump's magnitude is a `PtValue`, the one effect payload that can
+        // carry X outside a `QuantityExpr` — the parser encodes the sign in the
+        // variable NAME, so "-X/-X" (Slice from the Shadows) arrives as
+        // `Variable("-X")`. Without this arm the ramp policy scored every X the
+        // same and the fallback announced X = 0, casting the spell for nothing.
+        Effect::Pump {
+            power, toughness, ..
+        }
+        | Effect::PumpAll {
+            power, toughness, ..
+        } => pt_value_references_x(power) || pt_value_references_x(toughness),
         // RC1: `GenericEffect` carries its X payoff inside granted static
         // definitions (Mirror Entity's dynamic P/T via `CostXPaid`; Day of
         // Black Sun's `RemoveAllAbilities` over an `X`-filtered subject) or in a
@@ -284,6 +307,19 @@ pub(crate) fn effect_references_x(effect: &Effect) -> bool {
                 || target.as_ref().is_some_and(target_filter_references_x)
         }
         _ => false,
+    }
+}
+
+/// True when a `Pump` power/toughness modifier scales with the chosen X.
+/// `PtValue::Quantity` delegates to the engine's `contains_x` authority like
+/// every other detector in this module; `PtValue::Variable` is the one
+/// non-`QuantityExpr` carrier, and its name embeds the sign ("X" for a buff,
+/// "-X" for a shrink), so the sign is stripped before the comparison.
+fn pt_value_references_x(value: &PtValue) -> bool {
+    match value {
+        PtValue::Fixed(_) => false,
+        PtValue::Variable(name) => name.strip_prefix('-').unwrap_or(name) == "X",
+        PtValue::Quantity(expr) => expr.contains_x(),
     }
 }
 
@@ -343,9 +379,18 @@ fn is_cost_x_paid(qty: &QuantityRef) -> bool {
 }
 
 fn is_previous_amount(qty: &QuantityRef) -> bool {
-    // CR 120.6 / CR 120.10: both channels (total and excess) are amounts left by
-    // the preceding effect, so the AI's X-reference detection treats them alike —
-    // it cares that the value is chain-derived, not which tally it came from.
+    // Both channels (total and excess) are amounts left by the preceding
+    // effect, so the AI's X-reference detection treats them alike — it cares
+    // that the value is chain-derived, not which tally it came from, and every
+    // aggregate reduces the same table, so the detection is aggregate-agnostic
+    // too.
+    //
+    // The former CR 120.10 tag is STRUCK, not relocated. Read in full, that
+    // rule scopes triggered abilities that check whether a permanent has been
+    // dealt EXCESS DAMAGE; it says nothing about amounts one effect leaves for
+    // the next, and nothing about aggregate-agnostic detection. An AI scoring
+    // heuristic implements no game rule and needs no CR annotation. The
+    // rationale above is kept verbatim.
     matches!(qty, QuantityRef::PreviousEffectAmount { .. })
 }
 
@@ -393,5 +438,146 @@ fn filter_prop_references_x(prop: &FilterProp) -> bool {
         FilterProp::Cmc { value, .. } => value.contains_x(),
         FilterProp::Counters { count, .. } => count.contains_x(),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod pump_x_tests {
+    use super::*;
+    use engine::parser::oracle::parse_oracle_text;
+    use engine::types::ability::AbilityKind;
+
+    fn pump(power: PtValue, toughness: PtValue) -> Effect {
+        Effect::Pump {
+            power,
+            toughness,
+            target: TargetFilter::Any,
+        }
+    }
+
+    /// Slice from the Shadows: without a `Pump` arm every X scored identically
+    /// and `XValuePolicy`'s fallback announced X = 0, casting a `-0/-0` spell.
+    #[test]
+    fn pump_with_negative_x_references_x() {
+        let parsed = parse_oracle_text(
+            "Target creature gets -X/-X until end of turn.",
+            "Slice from the Shadows",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let spell = parsed
+            .abilities
+            .iter()
+            .find(|a| a.kind == AbilityKind::Spell)
+            .expect("Slice from the Shadows parses to a spell ability");
+        assert!(effect_references_x(&spell.effect));
+        // The whole-ability walker mirrors `XValuePolicy`'s own `ability_references_x`.
+        assert!(ability_definition_references_x(spell));
+    }
+
+    /// The unsigned variable is the same carrier, so the sign strip must not be
+    /// what makes the detector fire.
+    #[test]
+    fn pump_with_positive_x_references_x() {
+        assert!(effect_references_x(&pump(
+            PtValue::Variable("X".to_string()),
+            PtValue::Variable("X".to_string()),
+        )));
+    }
+
+    /// Discriminator: a variable that is not X (a `*` characteristic-defining
+    /// P/T, "-1" style names) must not be mistaken for the announced X.
+    #[test]
+    fn pump_with_non_x_variable_does_not_reference_x() {
+        assert!(!effect_references_x(&pump(
+            PtValue::Variable("*".to_string()),
+            PtValue::Fixed(0),
+        )));
+        assert!(!effect_references_x(&pump(
+            PtValue::Fixed(1),
+            PtValue::Fixed(1),
+        )));
+    }
+
+    /// The `QuantityExpr` carrier still routes through the engine's
+    /// `contains_x` authority, including under the negating `Multiply`.
+    #[test]
+    fn pump_with_negated_quantity_x_references_x() {
+        let negated = PtValue::Quantity(QuantityExpr::Multiply {
+            factor: -1,
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            }),
+        });
+        assert!(effect_references_x(&pump(negated, PtValue::Fixed(0))));
+        // Boundary: this detector keeps the module's discipline of delegating
+        // to the engine's `contains_x`, so the post-announcement `CostXPaid`
+        // form is NOT in class here (it is `expr_references_chosen_x`'s job on
+        // granted statics).
+        assert!(!effect_references_x(&pump(
+            PtValue::Quantity(QuantityExpr::Multiply {
+                factor: -1,
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid,
+                }),
+            }),
+            PtValue::Fixed(0),
+        )));
+    }
+
+    /// `PumpAll` shares the P/T slots, so the mass form scales with X too.
+    #[test]
+    fn pump_all_references_x() {
+        assert!(effect_references_x(&Effect::PumpAll {
+            power: PtValue::Variable("-X".to_string()),
+            toughness: PtValue::Variable("-X".to_string()),
+            target: TargetFilter::Any,
+        }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The `CR 120.10` strike on `is_previous_amount` is load-bearing, so it is
+    /// asserted rather than left to review. Read in full, CR 120.10 governs
+    /// triggered abilities that check whether a permanent has been dealt excess
+    /// damage — it does not govern "amounts left by the preceding effect", and
+    /// an AI scoring heuristic implements no game rule at all.
+    ///
+    /// Reads this file's own source so the assertion is about the annotation as
+    /// shipped, not about a value re-derived from it.
+    ///
+    /// REVERT PROBE (RUN, not reasoned): restore the tag, i.e. change the
+    /// comment's first line back to `// CR 120.10: both channels (total and
+    /// excess) are amounts left by`. Observed failure — "an AI scoring heuristic
+    /// implements no game rule, so it carries no CR annotation".
+    #[test]
+    fn previous_amount_detection_carries_its_rationale_without_a_cr_tag() {
+        let source = include_str!("x_reference.rs");
+        let start = source
+            .find("fn is_previous_amount(")
+            .expect("the detection helper exists");
+        let body = &source[start..start + 900];
+
+        assert!(
+            body.contains("chain-derived"),
+            "the rationale for treating both channels alike must survive the strike"
+        );
+        // Matched on the ANNOTATION FORM, not on one punctuation variant: an
+        // earlier revision asserted only on `"CR 120.10:"`, which a re-added
+        // `// CR 120.10 both channels …` (no colon) would have slipped past —
+        // while the surrounding window deliberately contains the prose "The
+        // former CR 120.10 tag is STRUCK", so a bare substring test cannot be
+        // used either. Any comment line whose first token after `//` is the
+        // citation is a restored annotation.
+        assert!(
+            !body
+                .lines()
+                .any(|line| line.trim_start().starts_with("// CR 120.10")),
+            "an AI scoring heuristic implements no game rule, so it carries no CR annotation"
+        );
     }
 }

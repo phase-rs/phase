@@ -1,21 +1,45 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
-import { useNavigate, useSearchParams } from "react-router";
+import { useLocation, useNavigate, useSearchParams } from "react-router";
 
-import { useDraftStore } from "../stores/draftStore";
-import { CardPreview } from "../components/card/CardPreview";
+import {
+  useDraftStore,
+  type DraftPackChoice,
+  type DraftPickDestination,
+  type DraftPickPlacementHint,
+} from "../stores/draftStore";
+import { setPackSequence } from "../adapter/draft-adapter";
+import { usePreferencesStore } from "../stores/preferencesStore";
 import type { CardHoverInfo } from "../components/card/CardPreview";
+import { HoverCardPreview } from "../components/card/HoverCardPreview";
 import { BotDifficultySelector } from "../components/draft/BotDifficultySelector";
 import { CubeSetupPanel } from "../components/draft/CubeSetupPanel";
 import { DraftIntro } from "../components/draft/DraftIntro";
 import { DraftSteps } from "../components/draft/DraftSteps";
 import { SetSelector } from "../components/draft/SetSelector";
-import { PackDisplay } from "../components/draft/PackDisplay";
-import { PoolPanel } from "../components/draft/PoolPanel";
+import { PackDisplay, type PackDisplayController } from "../components/draft/PackDisplay";
+import { DraftWorkspace } from "../components/draft/workspace/DraftWorkspace";
+import { resolveWorkspacePickPlacement } from "../components/draft/workspace/workspacePlacement";
+import {
+  useDraftWorkspaceDrag,
+  type DraftDropRequest,
+  type DraftPickInteractionSnapshot,
+} from "../components/draft/workspace/useDraftWorkspaceDrag";
+import {
+  getResponsiveDraftLayout,
+  loadDraftWorkspacePreferences,
+  repairDraftWorkspacePackScale,
+  saveDraftWorkspacePreferences,
+  setArrivingCardBoardPreferences,
+  type DraftWorkspacePreferences,
+  type ResponsiveDraftLayout,
+} from "../components/draft/workspace/workspacePreferences";
 import { DraftProgress } from "../components/draft/DraftProgress";
 import { LimitedDeckBuilder } from "../components/draft/LimitedDeckBuilder";
+import { SealedPackOpening } from "../components/draft/SealedPackOpening";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
+import { useDraftShellChrome, useInShell } from "../components/chrome/ShellContext";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import { MenuShell } from "../components/menu/MenuShell";
 import { runLimits } from "../services/quickDraftPersistence";
@@ -29,9 +53,34 @@ const FORMAT_OPTIONS: Array<{ value: DraftRunFormat; labelKey: string; descKey: 
   { value: "run", labelKey: "formatPicker.run.label", descKey: "formatPicker.run.description" },
 ];
 
-type DraftSetupMode = "set" | "cube";
+type DraftSetupMode = "quick" | "sealed" | "cube";
 
-function FormatPicker({ onLaunch }: { onLaunch: () => void }) {
+/** Boosters a Sealed event opens — fixed by the engine (`SEALED_PACK_COUNT`). */
+const SEALED_PACK_COUNT = 6;
+/** Boosters a draft opens by default; the player may line up a different count. */
+const DRAFT_PACK_COUNT = 3;
+function readPickInteraction(): DraftPickInteractionSnapshot {
+  const state = useDraftStore.getState();
+  return {
+    interactionGeneration: state.interactionGeneration,
+    pickInteractionLocked: state.pickInteractionLocked,
+    pendingPickIntent: state.pendingPickIntent,
+  };
+}
+
+function subscribePickInteraction(listener: () => void): () => void {
+  return useDraftStore.subscribe((state, previous) => {
+    if (
+      state.interactionGeneration !== previous.interactionGeneration
+      || state.pickInteractionLocked !== previous.pickInteractionLocked
+      || state.pendingPickIntent !== previous.pendingPickIntent
+    ) listener();
+  });
+}
+
+function FormatPicker({
+  onLaunch, onEnd, supportsBo3, pending, error, endError,
+}: { onLaunch: () => void; onEnd: () => void; supportsBo3: boolean; pending: boolean; error: string | null; endError: boolean }) {
   const { t } = useTranslation("draft");
   const runFormat = useDraftStore((s) => s.runFormat);
   const setRunFormat = useDraftStore((s) => s.setRunFormat);
@@ -44,11 +93,12 @@ function FormatPicker({ onLaunch }: { onLaunch: () => void }) {
       </div>
 
       <div className="flex w-full max-w-lg flex-col gap-3">
-        {FORMAT_OPTIONS.map((opt) => (
+        {(supportsBo3 ? FORMAT_OPTIONS : FORMAT_OPTIONS.filter((opt) => opt.value !== "bo3")).map((opt) => (
           <button
             key={opt.value}
             type="button"
             onClick={() => setRunFormat(opt.value)}
+            disabled={pending}
             className={`group flex w-full cursor-pointer items-start gap-4 rounded-card border surface-card p-4 text-left transition-all duration-150 ${
               runFormat === opt.value
                 ? "border-jade/45 ring-1 ring-jade/20 shadow-panel"
@@ -76,20 +126,36 @@ function FormatPicker({ onLaunch }: { onLaunch: () => void }) {
         ))}
       </div>
 
-      <button
-        type="button"
-        onClick={onLaunch}
-        className={menuButtonClass({ tone: "emerald", size: "lg" })}
-      >
-        {t("formatPicker.startMatch")}
-      </button>
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          onClick={onLaunch}
+          disabled={pending}
+          aria-busy={pending}
+          className={menuButtonClass({ tone: "emerald", size: "lg", disabled: pending })}
+        >
+          {t("formatPicker.startMatch")}{pending ? "…" : ""}
+        </button>
+        <button
+          type="button"
+          onClick={onEnd}
+          disabled={pending}
+          aria-busy={pending}
+          className={menuButtonClass({ tone: "neutral", size: "md", disabled: pending })}
+        >
+          {endError ? t("run.retryEndRun") : t("run.endRun")}
+        </button>
+      </div>
+      {error && <p role="alert" className="text-sm text-red-200">{error}</p>}
     </div>
   );
 }
 
 // ── Between Matches ───────────────────────────────────────────────────
 
-function BetweenMatches({ onNext, onEnd }: { onNext: () => void; onEnd: () => void }) {
+function BetweenMatches({
+  onNext, onEnd, pending, error, endError,
+}: { onNext: () => void; onEnd: () => void; pending: boolean; error: string | null; endError: boolean }) {
   const { t } = useTranslation("draft");
   const runState = useDraftStore((s) => s.runState);
   const runFormat = useDraftStore((s) => s.runFormat);
@@ -114,25 +180,29 @@ function BetweenMatches({ onNext, onEnd }: { onNext: () => void; onEnd: () => vo
         <button
           type="button"
           onClick={onNext}
-          className={menuButtonClass({ tone: "emerald", size: "lg" })}
+          disabled={pending}
+          aria-busy={pending}
+          className={menuButtonClass({ tone: "emerald", size: "lg", disabled: pending })}
         >
-          {t("run.nextMatch")}
+          {t("run.nextMatch")}{pending ? "…" : ""}
         </button>
         <button
           type="button"
           onClick={onEnd}
-          className={menuButtonClass({ tone: "neutral", size: "md" })}
+          disabled={pending}
+          className={menuButtonClass({ tone: "neutral", size: "md", disabled: pending })}
         >
-          {t("run.endRun")}
+          {endError ? t("run.retryEndRun") : t("run.endRun")}
         </button>
       </div>
+      {error && <p role="alert" className="text-sm text-red-200">{error}</p>}
     </div>
   );
 }
 
 // ── Run Complete ──────────────────────────────────────────────────────
 
-function RunComplete({ onDone }: { onDone: () => void }) {
+function RunComplete({ onDone, pending, error }: { onDone: () => void; pending: boolean; error: string | null }) {
   const { t } = useTranslation("draft");
   const runState = useDraftStore((s) => s.runState);
   const runFormat = useDraftStore((s) => s.runFormat);
@@ -180,10 +250,13 @@ function RunComplete({ onDone }: { onDone: () => void }) {
       <button
         type="button"
         onClick={onDone}
-        className={menuButtonClass({ tone: "neutral", size: "lg" })}
+        disabled={pending}
+        aria-busy={pending}
+        className={menuButtonClass({ tone: "neutral", size: "lg", disabled: pending })}
       >
-        {t("run.done")}
+        {error ? t("run.retryEndRun") : t("run.endRun")}
       </button>
+      {error && <p role="alert" className="text-sm text-red-200">{error}</p>}
     </motion.div>
   );
 }
@@ -300,38 +373,129 @@ function MatchHistory({ results }: { results: DraftRunState["results"] }) {
 export function DraftPage() {
   const { t } = useTranslation("draft");
   const phase = useDraftStore((s) => s.phase);
+  const draftView = useDraftStore((s) => s.view);
+  const selectedCard = useDraftStore((s) => s.selectedCard);
+  const workspaceState = useDraftStore((s) => s.workspaceState);
+  const pendingPickIntent = useDraftStore((s) => s.pendingPickIntent);
+  const interactionGeneration = useDraftStore((s) => s.interactionGeneration);
+  const pickInteractionLocked = useDraftStore((s) => s.pickInteractionLocked);
+  const draftCardPreviewMode = usePreferencesStore((s) => s.draftCardPreviewMode);
+  const draftDoubleClickConfirmPick = usePreferencesStore((s) => s.draftDoubleClickConfirmPick);
   const reset = useDraftStore((s) => s.reset);
   const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams] = useSearchParams();
   const requestedSetupMode = searchParams.get("mode");
   const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
   const [introDismissed, setIntroDismissed] = useState(false);
   const [resumeLoading, setResumeLoading] = useState(false);
+  const [launchPending, setLaunchPending] = useState(false);
+  const [launchError, setLaunchError] = useState<string | null>(null);
+  const [resumeProblem, setResumeProblem] = useState<{ draftId?: string; reason: string } | null>(null);
+  const [endPending, setEndPending] = useState(false);
+  const [endError, setEndError] = useState<string | null>(null);
+  const launchInFlight = useRef(false);
+  const endInFlight = useRef(false);
+  const [workspacePreferences, setWorkspacePreferences] = useState<DraftWorkspacePreferences>(loadDraftWorkspacePreferences);
+  const [responsiveViewport, setResponsiveViewport] = useState(() => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  }));
+  const [mobileWorkspaceOpen, setMobileWorkspaceOpen] = useState(false);
   const [setupMode, setSetupMode] = useState<DraftSetupMode>(() =>
-    requestedSetupMode === "cube" ? "cube" : "set",
+    requestedSetupMode === "cube" || requestedSetupMode === "sealed"
+      ? requestedSetupMode
+      : "quick",
   );
+  const responsiveLayout: ResponsiveDraftLayout = getResponsiveDraftLayout(
+    responsiveViewport.width,
+    responsiveViewport.height,
+  );
+  const phoneLayout = responsiveLayout === "phone-portrait" || responsiveLayout === "phone-landscape";
+  const tabletLayout = responsiveLayout === "tablet-portrait" || responsiveLayout === "tablet-landscape";
+  const responsiveDrafting = phase === "drafting" && responsiveLayout !== "desktop";
+  const phoneDeckbuilding = phase === "deckbuilding" && phoneLayout;
+  const tabletDeckbuilding = phase === "deckbuilding" && tabletLayout;
+  const fillEmbeddedHeight = useInShell()
+    && (responsiveDrafting || phoneDeckbuilding || tabletDeckbuilding);
+  const compactSteps = responsiveDrafting || phoneDeckbuilding || tabletDeckbuilding;
+  useDraftShellChrome(
+    phoneLayout && phase === "drafting"
+      ? "phone-drafting"
+      : phoneDeckbuilding
+        ? "phone-deckbuilding"
+        : tabletDeckbuilding
+          ? "tablet-deckbuilding"
+        : responsiveDrafting
+          ? "tablet-drafting"
+        : "default",
+      undefined,
+      "quick",
+      !phoneLayout,
+  );
+
+  useEffect(() => {
+    const refreshViewport = () => setResponsiveViewport({
+      width: window.innerWidth,
+      height: window.innerHeight,
+    });
+    window.addEventListener("resize", refreshViewport);
+    window.addEventListener("orientationchange", refreshViewport);
+    return () => {
+      window.removeEventListener("resize", refreshViewport);
+      window.removeEventListener("orientationchange", refreshViewport);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (responsiveLayout !== "phone-portrait" && responsiveLayout !== "phone-landscape") {
+      setMobileWorkspaceOpen(false);
+    }
+  }, [responsiveLayout]);
+
+  const routeError = location.state as { draftId?: unknown; draftStartError?: unknown } | null;
+  const attemptResume = useCallback(async (isCancelled: () => boolean = () => false) => {
+    setResumeLoading(true);
+    try {
+      const outcome = await useDraftStore.getState().resumeDraft();
+      if (isCancelled()) return;
+      if (outcome?.status === "unavailable") {
+        setResumeProblem({ draftId: outcome.draftId, reason: outcome.reason });
+      } else if (outcome?.status === "resumed") {
+        setIntroDismissed(true);
+        setResumeProblem(null);
+        setLaunchError(routeError?.draftId === outcome.draftId
+          ? (typeof routeError.draftStartError === "string" ? routeError.draftStartError : t("run.startUnavailable"))
+          : null);
+      } else {
+        setResumeProblem(routeError?.draftId && typeof routeError.draftId === "string"
+          ? { draftId: routeError.draftId, reason: t("run.resumeUnavailable") }
+          : null);
+      }
+    } catch (error) {
+      if (isCancelled()) return;
+      const draftId = useDraftStore.getState().draftId;
+      const routeDraftId = typeof routeError?.draftId === "string" ? routeError.draftId : undefined;
+      setResumeProblem({ draftId: draftId ?? routeDraftId,
+        reason: error instanceof Error ? error.message : String(error) });
+    } finally {
+      if (!isCancelled()) setResumeLoading(false);
+    }
+  }, [routeError?.draftId, routeError?.draftStartError, t]);
 
   useEffect(() => {
     if (searchParams.get("resume") !== "1") return;
     let cancelled = false;
-
-    async function doResume() {
-      setResumeLoading(true);
-      try {
-        await useDraftStore.getState().resumeDraft();
-        if (!cancelled) setIntroDismissed(true);
-      } catch {
-        await useDraftStore.getState().abandonDraft();
-      } finally {
-        if (!cancelled) setResumeLoading(false);
-      }
-    }
-    doResume();
+    void attemptResume(() => cancelled);
     return () => { cancelled = true; };
-  }, [searchParams]);
+  }, [searchParams, attemptResume]);
 
   useEffect(() => {
-    setSetupMode(requestedSetupMode === "cube" ? "cube" : "set");
+    setSetupMode(
+      requestedSetupMode === "cube" || requestedSetupMode === "sealed"
+        ? requestedSetupMode
+        : "quick",
+    );
   }, [requestedSetupMode]);
 
   useEffect(() => {
@@ -341,80 +505,266 @@ export function DraftPage() {
   }, [reset]);
 
   const handleStartDraft = useCallback(
-    async (setCode: string, setName: string) => {
-      const { difficulty, startDraft } = useDraftStore.getState();
+    async (packs: DraftPackChoice[]) => {
+      const { difficulty, startDraft, startSealedDraft } = useDraftStore.getState();
 
       const resp = await fetch(__DRAFT_POOLS_URL__);
       if (!resp.ok) throw new Error(`Failed to load draft pools: ${resp.status}`);
       const allPools: Record<string, unknown> = await resp.json();
-      const setPool = allPools[setCode.toLowerCase()] ?? allPools[setCode.toUpperCase()];
-      if (!setPool) throw new Error(`No pool data for set: ${setCode}`);
 
-      await startDraft(JSON.stringify(setPool), setCode, setName, difficulty);
+      // One pool per distinct set — a set drafted in several packs still
+      // crosses the WASM boundary once. `sequence` (built in the store from
+      // `packs`) is what repeats.
+      const { pools } = setPackSequence(packs, allPools);
+
+      const selection = { packs, pools };
+      if (setupMode === "sealed") {
+        await startSealedDraft(selection, difficulty);
+      } else {
+        await startDraft(selection, difficulty);
+      }
     },
-    [],
+    [setupMode],
   );
 
-  const handleLaunchMatch = useCallback(async () => {
-    await useDraftStore.getState().launchMatch(navigate);
+  const handleLaunch = useCallback(async (next: boolean) => {
+    if (launchInFlight.current || endInFlight.current) return;
+    launchInFlight.current = true;
+    setLaunchPending(true);
+    setLaunchError(null);
+    try {
+      if (next) await useDraftStore.getState().launchNextMatch(navigate);
+      else await useDraftStore.getState().launchMatch(navigate);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setLaunchError(message);
+    } finally {
+      launchInFlight.current = false;
+      setLaunchPending(false);
+    }
   }, [navigate]);
 
-  const handleLaunchNextMatch = useCallback(async () => {
-    await useDraftStore.getState().launchNextMatch(navigate);
-  }, [navigate]);
+  const handleLaunchMatch = useCallback(() => { void handleLaunch(false); }, [handleLaunch]);
+  const handleLaunchNextMatch = useCallback(() => { void handleLaunch(true); }, [handleLaunch]);
 
   const handleEndRun = useCallback(async () => {
-    await useDraftStore.getState().endRun();
-    navigate("/draft");
-  }, [navigate]);
+    if (endInFlight.current || launchInFlight.current) return;
+    const draftId = resumeProblem?.draftId ?? useDraftStore.getState().draftId;
+    if (!draftId) return;
+    endInFlight.current = true;
+    setEndPending(true);
+    setEndError(null);
+    try {
+      await useDraftStore.getState().endRun(draftId);
+      navigate("/draft");
+    } catch (error) {
+      setEndError(error instanceof Error ? error.message : String(error));
+    } finally {
+      endInFlight.current = false;
+      setEndPending(false);
+    }
+  }, [navigate, resumeProblem?.draftId]);
+
+  const handleWorkspacePreferencesChange = useCallback((next: DraftWorkspacePreferences) => {
+    if (useDraftStore.getState().pickInteractionLocked) return;
+    setWorkspacePreferences(next);
+    saveDraftWorkspacePreferences(next);
+    // SYNCHRONOUSLY, not from an effect. An effect runs after commit, and an
+    // install landing in that window would place its arriving cards against the
+    // PREVIOUS columns. A pick is not the case to worry about here — the guard
+    // above returns while `pickInteractionLocked` is set, which
+    // `draftStore.performPick` sets before its first await — but a `kind:
+    // "state"` install takes no such lock, so `resumeDraft` finishing in that
+    // window would lay out the whole restored pool against stale columns.
+    // The drafting screen's `handlePreferencesChange` in `DraftPodPage` — one of
+    // three same-named handlers there, and the only one that publishes —
+    // publishes synchronously for the same reason, against its own unguarded
+    // `viewUpdated` broadcasts.
+    //
+    // This is the only path that changes `deck`; `setPackScale` below spreads
+    // `workspacePreferences` and touches one numeric field.
+    setArrivingCardBoardPreferences(next.deck);
+  }, []);
+  // Mount only. The change path publishes for itself, above.
+  useEffect(() => {
+    setArrivingCardBoardPreferences(loadDraftWorkspacePreferences().deck);
+  }, []);
+
+  const handleDrop = useCallback((request: DraftDropRequest) => {
+    const state = useDraftStore.getState();
+    const outcome = request.source.kind === "pick"
+      ? state.pickCard(request.source.instanceIds[0], request.destination, request.placementHint)
+      : state.pickCardWithDraftEffect(
+        request.source.authorityId,
+        request.source.instanceIds,
+        request.destination,
+        request.placementHint,
+      );
+    return {
+      requestToken: request.requestToken,
+      interactionGeneration: request.interactionGeneration,
+      outcome,
+    };
+  }, []);
+
+  const resolveCollapsedSideboardColumn = useCallback((sourceInstanceId: string) => {
+    const placement = useDraftStore.getState().workspaceState?.placements[sourceInstanceId];
+    return Math.min(
+      workspacePreferences.sideboard.columnCount - 1,
+      Math.max(0, placement?.column ?? 0),
+    );
+  }, [workspacePreferences.sideboard.columnCount]);
+
+  const dragController = useDraftWorkspaceDrag({
+    enabled: phase === "drafting" && introDismissed && !pickInteractionLocked,
+    workspaceProjectionEnabled: responsiveLayout === "desktop",
+    retainLastValidWorkspaceTarget: true,
+    readPickInteraction,
+    subscribePickInteraction,
+    onDrop: handleDrop,
+    resolveCollapsedSideboardColumn,
+  });
+
+  const handleConfirmPick = useCallback((
+    destination: DraftPickDestination,
+    placementHint?: DraftPickPlacementHint,
+  ) => {
+    const state = useDraftStore.getState();
+    if (placementHint !== undefined || destination !== "deck") {
+      return state.confirmPick(destination, placementHint);
+    }
+    const card = state.view?.current_pack?.find((entry) => entry.instance_id === state.selectedCard);
+    const resolvedPlacement = card !== undefined && state.view !== null && state.workspaceState !== null
+      ? resolveWorkspacePickPlacement(
+        card,
+        destination,
+        state.view.pool,
+        state.view.pool_groups,
+        state.workspaceState,
+        workspacePreferences.deck,
+      )
+      : { column: 0 };
+    return state.confirmPick(destination, resolvedPlacement);
+  }, [workspacePreferences.deck]);
+
+  const handleAutoPick = useCallback(() => {
+    const state = useDraftStore.getState();
+    const { view, workspaceState } = state;
+    const placementHints = view !== null && view.current_pack !== null && workspaceState !== null
+      ? Object.fromEntries(view.current_pack.map((card) => [
+        card.instance_id,
+        resolveWorkspacePickPlacement(
+          card,
+          "deck",
+          view.pool,
+          view.pool_groups,
+          workspaceState,
+          workspacePreferences.deck,
+        ),
+      ]))
+      : undefined;
+    return state.autoPickCard("deck", placementHints);
+  }, [workspacePreferences.deck]);
+
+  const packController = useMemo<PackDisplayController>(() => ({
+    kind: "local-workspace",
+    view: draftView,
+    selectedCard,
+    pendingIntent: pendingPickIntent,
+    interactionGeneration,
+    interactionLocked: pickInteractionLocked,
+    doubleClickPick: draftDoubleClickConfirmPick,
+    dragController,
+    selectCard: (instanceId) => useDraftStore.getState().selectCard(instanceId),
+    pickCard: (instanceId, destination, placementHint) => useDraftStore.getState().pickCard(instanceId, destination, placementHint),
+    pickCardStep: (instanceIds, destination, placementHint) => instanceIds.length === 1
+      ? useDraftStore.getState().pickCard(instanceIds[0], destination, placementHint)
+      : Promise.resolve({ status: "rejected", reason: "invalid-request" }),
+    confirmPick: handleConfirmPick,
+    pickCardWithDraftEffect: (effectInstanceId, instanceIds, destination, placementHint) => useDraftStore.getState().pickCardWithDraftEffect(effectInstanceId, instanceIds, destination, placementHint),
+    autoPickCard: handleAutoPick,
+  }), [
+    draftView, dragController, handleAutoPick, handleConfirmPick, interactionGeneration, pendingPickIntent, pickInteractionLocked,
+    selectedCard, draftDoubleClickConfirmPick,
+  ]);
+
+  const packPresentation = useMemo(() => ({
+    packScale: workspacePreferences.packScale,
+    setPackScale: (next: number) => handleWorkspacePreferencesChange({
+      ...workspacePreferences,
+      packScale: repairDraftWorkspacePackScale(next),
+    }),
+  }), [handleWorkspacePreferencesChange, workspacePreferences]);
 
   return (
-    <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
+    <div className={`menu-scene relative flex flex-col overflow-hidden ${fillEmbeddedHeight ? "h-full min-h-0 flex-1" : phoneLayout && phase === "drafting" && introDismissed ? "h-dvh min-h-0 overscroll-none" : tabletLayout && phase === "drafting" && introDismissed ? "h-full min-h-0" : "min-h-screen"}`}>
       <ScreenChrome onBack={() => navigate("/draft")} />
       {phase === "drafting" && introDismissed && (
-        <CardPreview cardName={hoveredCard?.name ?? null} sourcePrinting={hoveredCard?.sourcePrinting} />
+        <HoverCardPreview
+          card={hoveredCard}
+          mode={draftCardPreviewMode}
+          hoverDelayMs={0}
+        />
       )}
 
-      {/* Centered MenuShell column — identical framing to home/setup/online so
-          the draft flow sits in the same responsive, centered container. The
-          per-phase blocks below render their own headings, so no MenuShell
-          title is passed. */}
-      <MenuShell layout="stacked">
-        <div className="flex w-full flex-col">
+        {/* Keep the shell's responsive padding while allowing card-heavy draft
+          phases to use all available width. Narrow setup phases retain their
+          own local max-widths. */}
+        <MenuShell
+          layout="stacked"
+          contentWidthClass="max-w-none"
+          compactTopPadding={
+            (phoneLayout && (phase === "drafting" || phase === "deckbuilding"))
+            || tabletDeckbuilding
+          }
+          fillEmbeddedHeight={fillEmbeddedHeight}
+        >
+        <div className={`flex w-full flex-col ${fillEmbeddedHeight ? "h-full min-h-0 flex-1" : ""}`}>
         {resumeLoading ? (
           <div className="flex items-center justify-center py-24">
             <div className="h-8 w-8 animate-spin rounded-full border-2 border-gray-500 border-t-white" />
           </div>
-        ) : (
-          <div className="mb-12">
+        ) : !compactSteps ? (
+          <div
+            className={phase === "drafting" && introDismissed
+                ? "mb-4"
+                : "mb-12"}
+            data-draft-steps-spacing
+          >
             <DraftSteps phase={phase} />
           </div>
-        )}
+        ) : null}
 
-        {!resumeLoading && phase === "setup" && (
+        {!resumeLoading && phase === "setup" && !resumeProblem && (
           <div className="mx-auto w-full max-w-4xl">
             <h1 className="mb-8 menu-display text-3xl text-white">
-              {setupMode === "cube" ? t("page.cubeDraftTitle") : t("page.quickDraftTitle")}
+              {setupMode === "cube"
+                ? t("page.cubeDraftTitle")
+                : setupMode === "sealed"
+                  ? t("page.sealedTitle")
+                  : t("page.quickDraftTitle")}
             </h1>
             <div className="mb-5 inline-flex rounded-lg border border-white/10 bg-black/25 p-1">
-              {(["set", "cube"] as const).map((mode) => (
+              {(["quick", "sealed", "cube"] as const).map((mode) => (
                 <button
                   key={mode}
                   type="button"
                   onClick={() => setSetupMode(mode)}
-                  className={`rounded-md px-4 py-2 text-sm font-medium transition-colors ${
+                  className={`min-h-11 rounded-md px-4 py-2 text-sm font-medium transition-colors ${
                     setupMode === mode
                       ? "bg-emerald-400/18 text-emerald-100"
                       : "text-white/50 hover:bg-white/6 hover:text-white/75"
                   }`}
                 >
-                  {mode === "set" ? t("page.setDraftTab") : t("page.cubeTab")}
+                  {mode === "quick"
+                    ? t("page.quickDraftTitle")
+                    : mode === "sealed"
+                      ? t("page.sealedTitle")
+                      : t("page.cubeDraftTitle")}
                 </button>
               ))}
             </div>
-            {setupMode === "set" ? (
-              <SetSelector onStartDraft={handleStartDraft} />
-            ) : (
+            {setupMode === "cube" ? (
               <div className="flex flex-col gap-6">
                 <BotDifficultySelector />
                 <CubeSetupPanel
@@ -424,40 +774,155 @@ export function DraftPage() {
                   }}
                 />
               </div>
+            ) : (
+              <SetSelector
+                onStartDraft={handleStartDraft}
+                defaultPackCount={setupMode === "sealed" ? SEALED_PACK_COUNT : DRAFT_PACK_COUNT}
+                fixedPackCount={setupMode === "sealed"}
+                startLabel={
+                  setupMode === "sealed"
+                    ? t("setSelector.startSealed")
+                    : t("setSelector.startDraft")
+                }
+              />
             )}
           </div>
         )}
 
-        {phase === "drafting" && !introDismissed && (
-          <DraftIntro mode="quick" onContinue={() => setIntroDismissed(true)} />
+        {phase === "drafting" && !introDismissed && draftView && (
+          <DraftIntro
+            mode="quick"
+            podSize={draftView.seats.length}
+            packCount={draftView.pack_count}
+            cardsPerPack={draftView.cards_per_pack}
+            packSizes={draftView.pack_sizes}
+            minDeckSize={draftView.min_deck_size}
+            onContinue={() => setIntroDismissed(true)}
+          />
         )}
 
         {phase === "drafting" && introDismissed && (
-          <div className="flex gap-4">
-            <div className="flex-1">
-              <div className="mb-4">
+          <div
+            data-responsive-draft-layout={responsiveLayout}
+            className={responsiveLayout === "desktop"
+              ? "flex w-full min-w-0 flex-col gap-4"
+              : responsiveLayout === "phone-portrait"
+                ? "relative flex h-[calc(100dvh_-_11rem)] min-h-0 w-full min-w-0 flex-col"
+                : responsiveLayout === "phone-landscape"
+                  ? "relative block h-[calc(100dvh_-_4rem)] w-full min-w-0 overflow-hidden pb-[58px]"
+                  : responsiveLayout === "tablet-portrait"
+                    ? "grid h-[calc(100dvh_-_8rem)] w-full min-w-0 grid-rows-[minmax(0,56%)_minmax(0,44%)] gap-2"
+                    : "grid h-[calc(100dvh_-_8rem)] w-full min-w-0 grid-cols-[minmax(340px,40%)_minmax(0,60%)] gap-2"}
+          >
+            <div className={responsiveLayout === "desktop" ? "w-full min-w-0" : "h-full min-h-0 w-full min-w-0 overflow-hidden"}>
+              {responsiveLayout === "desktop" && (
                 <DraftProgress />
-              </div>
-              <PackDisplay onCardHover={setHoveredCard} showAutoPick />
+              )}
+              <PackDisplay
+                controller={packController}
+                presentation={packPresentation}
+                onCardHover={setHoveredCard}
+                responsiveLayout={responsiveLayout}
+                phoneToolbarPinned={phoneLayout && !mobileWorkspaceOpen}
+                mobileWorkspaceOpen={mobileWorkspaceOpen}
+                enableDraftEffects
+              />
             </div>
-            <PoolPanel onCardHover={setHoveredCard} />
+            {draftView && workspaceState && (
+              <div className={responsiveLayout === "desktop"
+                ? "w-full min-w-0"
+                : phoneLayout
+                  ? "h-0 min-h-0 w-full min-w-0"
+                  : "h-full min-h-0 w-full min-w-0"}
+              >
+                <DraftWorkspace
+                  pool={draftView.pool}
+                  poolGroups={draftView.pool_groups}
+                  workspace={workspaceState}
+                  preferences={workspacePreferences}
+                  interactionLocked={pickInteractionLocked}
+                  dragController={dragController}
+                  responsiveLayout={responsiveLayout}
+                  mobileOverlay
+                  mobileWorkspaceOpen={mobileWorkspaceOpen}
+                  onMobileWorkspaceOpenChange={setMobileWorkspaceOpen}
+                  onWorkspaceChange={(next) => useDraftStore.getState().setWorkspaceState(next)}
+                  onPreferencesChange={handleWorkspacePreferencesChange}
+                  onCardHover={setHoveredCard}
+                />
+              </div>
+            )}
           </div>
         )}
 
-        {phase === "deckbuilding" && (
-          <LimitedDeckBuilder />
+        {phase === "deckbuilding" && draftView && workspaceState && (
+          <LimitedDeckBuilder
+            responsiveLayout={responsiveLayout}
+            local={{
+              view: draftView,
+              workspace: workspaceState,
+              preferences: workspacePreferences,
+              interactionLocked: pickInteractionLocked,
+              onWorkspaceChange: (next) => useDraftStore.getState().setWorkspaceState(next),
+              onPreferencesChange: handleWorkspacePreferencesChange,
+              onAddBasicLand: (name) => useDraftStore.getState().addBasicLand(name),
+              onRemoveBasicLand: (name) => useDraftStore.getState().removeBasicLand(name),
+              onAutoSuggestDeck: () => useDraftStore.getState().autoSuggestDeck(),
+              onAutoSuggestLands: () => useDraftStore.getState().autoSuggestLands(),
+              onSubmitDeck: () => useDraftStore.getState().submitDeck(),
+              onCardHover: setHoveredCard,
+            }}
+          />
+        )}
+
+        {phase === "opening" && draftView && (
+          <SealedPackOpening
+            view={draftView}
+            onComplete={() => useDraftStore.getState().completeSealedOpening()}
+          />
+        )}
+
+        {!resumeLoading && resumeProblem && phase === "setup" && (
+          <div className="flex flex-col items-center gap-4 py-16">
+            <p role="alert" className="text-sm text-red-200">{endError ?? resumeProblem.reason}</p>
+            <div className="flex gap-3">
+              <button type="button" onClick={() => void attemptResume()} disabled={endPending || resumeLoading}
+                className={menuButtonClass({ tone: "emerald", size: "md", disabled: endPending || resumeLoading })}>
+                {t("run.retryResume")}
+              </button>
+              {resumeProblem.draftId && (
+                <button type="button" onClick={() => void handleEndRun()} disabled={endPending}
+                  className={menuButtonClass({ tone: "neutral", size: "md", disabled: endPending })}>
+                  {endError ? t("run.retryEndRun") : t("run.endRun")}
+                </button>
+              )}
+            </div>
+          </div>
         )}
 
         {phase === "launching" && (
-          <FormatPicker onLaunch={handleLaunchMatch} />
+          <FormatPicker
+            onLaunch={handleLaunchMatch}
+            onEnd={handleEndRun}
+            supportsBo3={draftView?.match_config.match_type === "Bo3"}
+            pending={launchPending || endPending}
+            error={endError ?? launchError}
+            endError={endError !== null}
+          />
         )}
 
         {!resumeLoading && phase === "playing" && (
-          <BetweenMatches onNext={handleLaunchNextMatch} onEnd={handleEndRun} />
+          <BetweenMatches
+            onNext={handleLaunchNextMatch}
+            onEnd={handleEndRun}
+            pending={launchPending || endPending}
+            error={endError ?? launchError}
+            endError={endError !== null}
+          />
         )}
 
         {!resumeLoading && phase === "complete" && (
-          <RunComplete onDone={handleEndRun} />
+          <RunComplete onDone={handleEndRun} pending={endPending} error={endError ?? launchError} />
         )}
         </div>
       </MenuShell>

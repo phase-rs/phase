@@ -7,10 +7,16 @@
 # TIMES the cold build and every gate run so the executor can apply the CI-budget
 # check with MEASURED numbers rather than asserted estimates.
 #
-# Runs the DEBUG binary — the authoritative gate profile CI runs
-# (`cargo ai-perf-gate`). Under debug, the parent's current_exe() resolves to
-# target/debug/ai-perf-gate, so the K spawned children are debug too
-# (profile-consistent parent and children).
+# Runs the SERVER-RELEASE binary — the authoritative gate profile CI runs
+# (`cargo ai-perf-gate`). This script isolates CARGO_TARGET_DIR to target/ai, so
+# the parent's current_exe() resolves to target/ai/server-release/ai-perf-gate
+# and the K spawned children are server-release too (profile-consistent parent
+# and children).
+#
+# The profile here is load-bearing and must track the `cargo ai-perf-gate` alias:
+# this script hardcodes a target/<profile>/ path while the binary re-spawns ITSELF
+# by current_exe(). If the alias and this path ever name different profiles, the
+# script silently measures the wrong binary (or a stale one) instead of failing.
 #
 # ONLY commit the generated baseline if this script PASSES (margin + all N band
 # runs exit 0) AND the executor's CI-budget arithmetic passes (see the echoed
@@ -19,13 +25,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export CARGO_TARGET_DIR="$ROOT/target/ai"     # isolated: no Tilt lock contention (mirrors ai-perf-gate.sh)
 
-# DEBUG profile — the authoritative gate profile CI runs (`cargo ai-perf-gate`).
+# SERVER-RELEASE profile — the authoritative gate profile CI runs (`cargo ai-perf-gate`).
 # Time the cold isolated build: cold-isolated >= CI's warm rust-ai-gate cache
 # hit, so this is a conservative T_build ceiling for the budget check.
 build_start=$(date +%s)
-cargo build --bin ai-perf-gate                # BUILD ONCE (debug, default profile)
-echo "T_build (cold isolated debug build) = $(( $(date +%s) - build_start ))s"
-BIN="$CARGO_TARGET_DIR/debug/ai-perf-gate"    # current_exe() -> debug children (profile-consistent)
+cargo build --profile server-release --bin ai-perf-gate
+echo "T_build (cold isolated server-release build) = $(( $(date +%s) - build_start ))s"
+BIN="$CARGO_TARGET_DIR/server-release/ai-perf-gate"   # current_exe() -> server-release children
 
 "$BIN" --refresh-baseline                     # 1) generate the median-of-K baseline
 
@@ -49,6 +55,7 @@ if [ "$band_fail" -ne 0 ] || [ "$margin_rc" -ne 0 ]; then
   exit 1
 fi
 echo "REPRO VALIDATION PASSED (margin+band) — now apply the CI-budget check before committing:"
-echo "  T_run_max = max over 'run i wall' above; W_debug = T_run_max / PERF_SAMPLE_COUNT(5)."
-echo "  Option (c) commit iff  T_run_max*2.5 + T_build < 25min  (see plan 3.4)."
-echo "  Else fall back to option (b): release + cache-shared-key rust-ai-perf-release; re-measure."
+echo "  T_run_max = max over 'run i wall' above; W_run = T_run_max / PERF_SAMPLE_COUNT(5)."
+echo "  Commit iff  T_run_max*2.5 + T_build < 25min."
+echo "  (The former 'fall back to --release' option is gone: all four gate"
+echo "   authorities now build server-release, and --release is the WASM-size profile.)"

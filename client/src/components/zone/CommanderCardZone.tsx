@@ -1,22 +1,29 @@
-import { useMemo, useRef } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import { motion } from "framer-motion";
 import type { PanInfo } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import type { GameObject, PlayerId } from "../../adapter/types.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
+import { previewAutomaticManaPayment } from "../../game/manaPaymentPreview.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useLocalizedCardName } from "../../hooks/useEngineCardData.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
+import { getPlayerId, useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useDragToCast } from "../../hooks/useDragToCast.ts";
+import { objectImageProps } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import {
   collectObjectActions,
+  deriveActivationAffordances,
   resolveSingleActionDispatch,
 } from "../../viewmodel/cardActionChoice.ts";
 import { CASTABLE_AFFORDANCE_ACTIVE } from "../../viewmodel/castableAffordance.ts";
-import { commandersInZone } from "../../viewmodel/commanderColumn.ts";
+import { commandZoneLeaders } from "../../viewmodel/commanderColumn.ts";
+import { CardArtFallback } from "../card/CardArtFallback.tsx";
+import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 
 interface CommanderCardZoneProps {
@@ -37,14 +44,19 @@ export function CommanderCardZone({ playerId, splitOverview = false }: Commander
   const gameState = useGameStore((s) => s.gameState);
 
   const commanders = useMemo(
-    () => (gameState ? commandersInZone(gameState, playerId) : []),
+    () => (gameState ? commandZoneLeaders(gameState, playerId) : []),
     [gameState, playerId],
   );
 
   if (commanders.length === 0) return null;
 
+  // Lay the leaders out horizontally (commander(s) + any Oathbreaker signature
+  // spell, and partner/background pairs) rather than stacking them. A vertical
+  // stack doubles the command dock's height, and the middle row is
+  // `items-stretch`, so that height propagates to the whole battlefield row and
+  // breaks the layout globally. A row keeps the dock one card tall.
   return (
-    <div className="flex flex-col gap-1">
+    <div className="flex flex-row items-end gap-1">
       {commanders.map((cmd) => (
         <CommanderCard key={cmd.id} commander={cmd} splitOverview={splitOverview} />
       ))}
@@ -60,6 +72,8 @@ function CommanderCard({
   splitOverview: boolean;
 }) {
   const { t } = useTranslation("game");
+  const isSignatureSpell = commander.signature_spell != null;
+  const displayName = useLocalizedCardName(commander.name) ?? commander.name;
   const isCompactHeight = useIsCompactHeight();
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const effectiveCost = useGameStore(
@@ -67,7 +81,23 @@ function CommanderCard({
   );
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
-  const { src } = useCardImage(commander.name, { size: "normal" });
+  // Canonical art path (services/cardImageLookup): resolve by the engine's
+  // `printed_ref.oracle_id` + face name, exactly as every other object surface
+  // (PermanentCard, StackEntry, GraveyardPile, CardPreview) does. The bare
+  // `commander.name` lookup this replaced is documented as the legacy fallback
+  // for objects carrying no `printed_ref` — command-zone leaders always carry
+  // one — and it indexes faces numerically, so a leader whose active face is
+  // not Scryfall's front resolved to the wrong face's art.
+  const imageProps = objectImageProps(commander);
+  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(imageProps.cardName, {
+    size: "normal",
+    faceIndex: imageProps.faceIndex,
+    isToken: imageProps.isToken,
+    tokenFilters: imageProps.tokenFilters,
+    tokenImageRef: imageProps.tokenImageRef,
+    oracleId: imageProps.oracleId,
+    faceName: imageProps.faceName,
+  });
   const { handlers: hoverHandlers, firedRef } = useCardHover(commander.id);
   const tax = commander.commander_tax ?? 0;
 
@@ -88,8 +118,31 @@ function CommanderCard({
     [commanderActions],
   );
 
-  const canCast = castAction !== null;
-  const canNinjutsu = ninjutsuActions.length > 0;
+  // THE single authority — the same one the emblem chip adopts one file over.
+  // `castAction !== null` / `ninjutsuActions.length > 0` were raw-bucket tests
+  // with NEITHER a `WaitingFor` gate NOR a seat gate, and `PlayerArea` renders a
+  // `<CommanderCardZone playerId={opponentId}/>` from the same `CommandDock`
+  // subtree for every seat. In local/AI mode `legalActionsByObject` is computed
+  // for the STATE's priority player rather than the viewer, so an opponent's
+  // commander chip was clickable — and dispatched — from this seat.
+  //
+  // Only the non-mana ring is consulted: CastSpell and ActivateNinjutsu are both
+  // non-mana, so CR 113.3b ("whenever they have priority") is the whole gate.
+  // The mana ring would be dead weight here — a command-zone card publishes no
+  // mana action — and consulting it would re-open the cast affordance during a
+  // cost-payment prompt.
+  const waitingFor = useGameStore((s) => s.waitingFor);
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const canActForWaitingState = useCanActForWaitingState();
+  const affordances = useMemo(
+    () =>
+      deriveActivationAffordances(waitingFor, canActForWaitingState, legalActionsByObject, objects),
+    [waitingFor, canActForWaitingState, legalActionsByObject, objects],
+  );
+  const activationOffered = affordances.activatableObjectIds.has(commander.id);
+
+  const canCast = activationOffered && castAction !== null;
+  const canNinjutsu = activationOffered && ninjutsuActions.length > 0;
 
   // CR 702.49d: commander ninjutsu returns an unblocked attacker and puts this
   // commander onto the battlefield tapped and attacking. The engine emits one
@@ -109,6 +162,34 @@ function CommanderCard({
   // priority + mana + timing all permit the cast. Reuse it as the drag gate
   // rather than threading a separate hasPriority check through.
   const dragCast = useDragToCast({ castAction, hasPriority: canCast, useDistanceThreshold: true });
+  const manaPaymentPreviewRequestId = useRef(0);
+  const startManaPaymentPreview = useCallback(() => {
+    const requestId = ++manaPaymentPreviewRequestId.current;
+    if (!castAction) {
+      useGameStore.getState().clearManaPaymentPreview();
+      return;
+    }
+
+    void previewAutomaticManaPayment(castAction, getPlayerId())
+      .then((sourceIds) => {
+        const store = useGameStore.getState();
+        if (manaPaymentPreviewRequestId.current !== requestId) return;
+        if (sourceIds === null) {
+          store.clearManaPaymentPreview();
+        } else {
+          store.setManaPaymentPreviewSourceIds(sourceIds);
+        }
+      })
+      .catch(() => {
+        if (manaPaymentPreviewRequestId.current === requestId) {
+          useGameStore.getState().clearManaPaymentPreview();
+        }
+      });
+  }, [castAction]);
+  const stopManaPaymentPreview = useCallback(() => {
+    manaPaymentPreviewRequestId.current += 1;
+    useGameStore.getState().clearManaPaymentPreview();
+  }, []);
   // Framer Motion does not suppress the synthetic click that follows a
   // drag gesture on a <motion.button>. Without this guard, a successful
   // drag-cast would immediately trigger the click handler and open the
@@ -116,6 +197,7 @@ function CommanderCard({
   // fires and read-reset it on the next click.
   const dragCastedRef = useRef(false);
   const onDragEnd = (event: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) => {
+    stopManaPaymentPreview();
     const fired = dragCast(event, info);
     if (fired) dragCastedRef.current = true;
   };
@@ -131,7 +213,12 @@ function CommanderCard({
         if (firedRef.current) return;
         if (useUiStore.getState().debugInteractionMode) {
           e.stopPropagation();
-          useUiStore.getState().openDebugContextMenu({ objectId: commander.id, x: e.clientX, y: e.clientY });
+          useUiStore.getState().openDebugContextMenu({
+            objectId: commander.id,
+            x: e.clientX,
+            y: e.clientY,
+            surface: "game",
+          });
           return;
         }
         // Commander ninjutsu is a click affordance (unlike drag-to-cast): a
@@ -145,37 +232,57 @@ function CommanderCard({
       onDoubleClick={canCast ? () => dispatchAction(castAction) : undefined}
       drag={canCast || false}
       dragSnapToOrigin
+      onDragStart={startManaPaymentPreview}
       onDragEnd={onDragEnd}
       whileDrag={{ cursor: "grabbing", scale: 1.04 }}
+      data-object-id={commander.id}
       className={`group relative ${
         canCast ? "cursor-grab" : canNinjutsu ? "cursor-pointer" : "cursor-default"
       }`}
       title={
         canCast
-          ? tax > 0
-            ? t("zone.castCommanderTax", { name: commander.name, tax })
-            : t("zone.castCommander", { name: commander.name })
-          : canNinjutsu
-            ? t("zone.ninjutsuCommander", { name: commander.name })
+          ? isSignatureSpell
+            ? tax > 0
+              ? t("zone.castSignatureSpellTax", { name: displayName, tax })
+              : t("zone.castSignatureSpell", { name: displayName })
             : tax > 0
-              ? t("zone.commanderTitleTax", { name: commander.name, tax })
-              : t("zone.commanderTitle", { name: commander.name })
+              ? t("zone.castCommanderTax", { name: displayName, tax })
+              : t("zone.castCommander", { name: displayName })
+          : canNinjutsu
+            ? t("zone.ninjutsuCommander", { name: displayName })
+            : isSignatureSpell
+              ? tax > 0
+                ? t("zone.signatureSpellTitleTax", { name: displayName, tax })
+                : t("zone.signatureSpellTitle", { name: displayName })
+              : tax > 0
+                ? t("zone.commanderTitleTax", { name: displayName, tax })
+                : t("zone.commanderTitle", { name: displayName })
       }
       style={{ width: "var(--card-w)", height: "var(--card-h)" }}
     >
       {/* Card image */}
       <div className="relative h-full w-full overflow-hidden rounded-lg border border-amber-400/60 shadow-md">
-        {src ? (
+        {/* Three-state art contract, mirroring StackEntry: a pulsing skeleton
+            while resolution is in flight, the shared name tile only once we know
+            there is no art, then the image. Collapsing the first two — the bare
+            name tile stood in for BOTH — made the multi-second
+            `scryfall-data.json` fetch look like permanently broken commander
+            art, which is how it got reported. */}
+        {isLoading ? (
+          <div className="h-full w-full animate-pulse bg-gray-700" />
+        ) : src ? (
           <img
             src={src}
-            alt={commander.name}
+            {...getCardImageSrcSetProps(src, rungs)}
+            alt={displayName}
             className="h-full w-full object-cover"
             draggable={false}
+            onError={() => advanceFailedSource?.(src)}
           />
         ) : (
-          <div className="flex h-full w-full items-center justify-center bg-gray-700 text-[10px] text-gray-400">
-            {commander.name}
-          </div>
+          /* `artCrop` centres and wraps the name; `fullCard` top-aligns and
+             truncates it, which this tile is too narrow to read. */
+          <CardArtFallback name={displayName} variant="artCrop" className="h-full w-full" />
         )}
 
         {/* Translucent overlay — amber tint, lighter when actionable (castable
@@ -193,7 +300,7 @@ function CommanderCard({
           card and hide the cost pips. */}
       {!splitOverview && (
         <div className="absolute -top-1 left-1/2 z-10 -translate-x-1/2 whitespace-nowrap rounded-sm bg-amber-700 px-1.5 py-px text-[8px] font-bold text-amber-100 shadow">
-          {t("zone.commander")}
+          {isSignatureSpell ? t("zone.signatureSpell") : t("zone.commander")}
         </div>
       )}
 

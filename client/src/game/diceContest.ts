@@ -1,7 +1,6 @@
-import type { GameEvent, PlayerId } from "../adapter/types";
+import type { GameEvent, PlayerId, TurnOrderSlotView } from "../adapter/types";
 import { useUiStore } from "../stores/uiStore";
 
-type DieRolledEvent = Extract<GameEvent, { type: "DieRolled" }>;
 type CoinFlippedEvent = Extract<GameEvent, { type: "CoinFlipped" }>;
 type StartingPlayerContestEvent = Extract<GameEvent, { type: "StartingPlayerContest" }>;
 
@@ -18,7 +17,12 @@ type StartingPlayerContestEvent = Extract<GameEvent, { type: "StartingPlayerCont
  * equals the event's `winner` by construction. No-ops when no contest ran
  * (explicit play/draw choice).
  */
-export function flashStartingPlayerContest(events: GameEvent[], startingPlayer: PlayerId): void {
+export function flashStartingPlayerContest(
+  events: GameEvent[],
+  startingPlayer: PlayerId,
+  turnOrder: TurnOrderSlotView[] | undefined,
+  viewerTurnNumber?: number,
+): void {
   const contest = events.find(
     (e): e is StartingPlayerContestEvent => e.type === "StartingPlayerContest",
   );
@@ -35,36 +39,76 @@ export function flashStartingPlayerContest(events: GameEvent[], startingPlayer: 
     rounds,
     context: "startingPlayer",
     winner: startingPlayer,
+    turnOrder,
+    viewerTurnNumber,
   });
 }
 
 /**
  * Fire the in-game roll overlay for an action's event batch. Groups all
- * `DieRolled` into one die overlay (e.g. a Krark's Thumb double) and otherwise
- * shows the first `CoinFlipped`. Always `context: "ability"`. No-ops when the
- * batch contains neither.
+ * `DieRolled` into one die overlay (e.g. a Krark's Thumb double) and queues
+ * every `CoinFlipped` after it. Always `context: "ability"`. CR 706.6-ignored
+ * dice (`DieRollIgnored`) join the SAME overlay, marked ignored, in batch
+ * order — players see what the lowest roll was. No-ops when the batch
+ * contains neither dice nor coins.
  */
 export function flashInGameRolls(events: GameEvent[]): void {
-  const dice = events.filter((e): e is DieRolledEvent => e.type === "DieRolled");
-  const coin = events.find((e): e is CoinFlippedEvent => e.type === "CoinFlipped");
+  const coins = events.filter((e): e is CoinFlippedEvent => e.type === "CoinFlipped");
   const flash = useUiStore.getState().flashDiceRoll;
   // All dice in the batch group into one overlay (e.g. a Krark's Thumb double);
   // a co-occurring coin queues behind them and plays after (the overlay FIFO
   // serializes both rather than dropping either).
   // CR 901.9d / CR 706.7: the symbolic planar die emits DieRolled with a null
   // result (no numeric face to animate); drop those before building the overlay.
-  const numericDice = dice.filter(
-    (e): e is DieRolledEvent & { data: { result: number } } => e.data.result !== null,
-  );
-  if (numericDice.length > 0) {
+  // The engine emits surviving rolls and ignored display mirrors in die order.
+  const rolls = events.flatMap((event) => {
+    if (event.type === "DieRolled") {
+      return event.data.result === null
+        ? []
+        : [{ playerId: event.data.player_id, value: event.data.result, sides: event.data.sides, ignored: false }];
+    }
+    if (event.type === "DieRollIgnored") {
+      return [{ playerId: event.data.player_id, value: event.data.result, sides: event.data.sides, ignored: true }];
+    }
+    return [];
+  });
+  if (rolls.length > 0) {
     flash({
       kind: "die",
-      sides: numericDice[0].data.sides,
-      rolls: numericDice.map((e) => ({ playerId: e.data.player_id, value: e.data.result })),
+      sides: rolls[0].sides,
+      rolls: rolls.map(({ playerId, value, sides, ignored }) => ({
+        playerId,
+        value,
+        sides,
+        ...(ignored ? { ignored: true } : {}),
+      })),
       context: "ability",
     });
   }
-  if (coin) {
+  for (const coin of coins) {
     flash({ kind: "coin", playerId: coin.data.player_id, won: coin.data.won, context: "ability" });
+  }
+}
+
+/**
+ * Surface a completed scry using the engine's public top/bottom counts. A
+ * partially-resolved scry has no event yet, and non-scry player actions have
+ * no display effect.
+ */
+export function flashCompletedScry(events: GameEvent[]): void {
+  for (const scry of events) {
+    if (
+      scry.type !== "PlayerPerformedAction" ||
+      scry.data.action !== "Scry" ||
+      scry.data.scry_top_count === undefined ||
+      scry.data.scry_bottom_count === undefined
+    ) {
+      continue;
+    }
+    useUiStore.getState().flashScryOutcome({
+      playerId: scry.data.player_id,
+      topCount: scry.data.scry_top_count,
+      bottomCount: scry.data.scry_bottom_count,
+    });
   }
 }

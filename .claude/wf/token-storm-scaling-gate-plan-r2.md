@@ -30,7 +30,7 @@ Add a permanent CI regression gate proving the `StaticModePresence` O(1) index k
 
 ## Applicable skills
 
-No new engine surface is introduced (no new effect, keyword, trigger, static, variant, or parser pattern). This is a **test-only** change composing existing pub APIs, so `/add-engine-effect`, `/add-engine-variant`, and the parser skills do not apply. The governing guidance is `/card-test`'s foot-gun list (adapted: these are enumeration/perf tests, not cast-pipeline tests) and the CLAUDE.md verification-matrix contract. No `mtgish` involvement.
+No new engine surface is introduced (no new effect, keyword, trigger, static, variant, or parser pattern). This is a **test-only** change composing existing pub APIs, so `/add-engine-effect`, `/add-engine-variant`, and the parser skills do not apply. The governing guidance is `/card-test`'s foot-gun list (adapted: these are enumeration/perf tests, not cast-pipeline tests) and the CLAUDE.md verification-matrix contract.
 
 ## Analogous trace (hard gate)
 

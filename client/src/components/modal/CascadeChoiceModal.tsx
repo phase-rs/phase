@@ -1,8 +1,9 @@
 import { useTranslation } from "react-i18next";
 
-import type { GameAction } from "../../adapter/types.ts";
+import type { GameAction, ManaCost } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { manaCostToShards } from "../../viewmodel/costLabel.ts";
 import { DialogShell } from "./DialogShell.tsx";
 
 /**
@@ -39,9 +40,11 @@ export function CascadeChoiceModal() {
     );
   }
 
-  // CR 608.2g + CR 609.4b: paid graveyard cast (Quistis Trepe, Tinybones the
-  // Pickpocket) — accepting pays the card's real cost with any-type mana, so the
-  // copy differs from the free Cascade/Ripple/Discover casts. No misses to count.
+  // CR 608.2g: paid graveyard cast — accepting pays the card's real cost, so
+  // the copy differs from the free Cascade/Ripple/Discover casts. The offer
+  // may carry a payment concession (CR 609.4b: Quistis Trepe, Tinybones the
+  // Pickpocket) and an additional cost (CR 601.2b: Ogre Battlecaster); both
+  // are named when present. No misses to count.
   if (kind.type === "GraveyardPaidCast") {
     return (
       <CascadeChoiceContent
@@ -49,6 +52,8 @@ export function CascadeChoiceModal() {
         hitCardId={kind.hit_card}
         missCount={0}
         promptKind="GraveyardPaidCast"
+        manaSpendPermission={kind.mana_spend_permission}
+        additionalCost={kind.additional_cost}
         dispatch={dispatch}
       />
     );
@@ -86,6 +91,8 @@ function CascadeChoiceContent({
   missCount,
   promptKind,
   sourceMv,
+  manaSpendPermission,
+  additionalCost,
   dispatch,
 }: {
   actionType: "CascadeChoice" | "DiscoverChoice" | "RippleChoice" | "GraveyardPaidCastChoice";
@@ -93,12 +100,43 @@ function CascadeChoiceContent({
   missCount: number;
   promptKind: "Cascade" | "Discover" | "Ripple" | "GraveyardPaidCast";
   sourceMv?: number;
+  // CR 609.4b: the paid offer's payment concession, kept as the engine's
+  // variant — `AnyColor` relaxes colored requirements only, `AnyTypeOrColor`
+  // also lets colored mana pay {C}. The plain paid offer (Ogre Battlecaster,
+  // Helmut Zemo, Toshiro Umezawa) carries none and must not claim one.
+  manaSpendPermission?: "AnyTypeOrColor" | "AnyColor";
+  // CR 601.2b: an additional mana cost paid on top of the printed cost.
+  additionalCost?: ManaCost;
   dispatch: (action: GameAction) => Promise<unknown>;
 }) {
   const { t } = useTranslation("game");
   const obj = useGameStore((s) => s.gameState?.objects[hitCardId]);
 
   if (!obj) return null;
+
+  // CR 601.2b + CR 609.4b: the paid offer's copy is composed from fragments
+  // so every combination of an additional cost and a payment concession is
+  // named — the two are independent fields of the offer.
+  const extraCostText = additionalCost
+    ? manaCostToShards(additionalCost)
+        .map((shard) => `{${shard}}`)
+        .join("")
+    : "";
+  const paidExtra = extraCostText
+    ? t("cascadeChoice.paidExtraFragment", { extra: extraCostText })
+    : "";
+  const paidSubtitleConcession =
+    manaSpendPermission === "AnyTypeOrColor"
+      ? t("cascadeChoice.paidAnyTypeSubtitleFragment")
+      : manaSpendPermission === "AnyColor"
+        ? t("cascadeChoice.paidAnyColorSubtitleFragment")
+        : "";
+  const paidSuffixConcession =
+    manaSpendPermission === "AnyTypeOrColor"
+      ? t("cascadeChoice.paidAnyTypeSuffixFragment")
+      : manaSpendPermission === "AnyColor"
+        ? t("cascadeChoice.paidAnyColorSuffixFragment")
+        : "";
 
   const subtitle =
     promptKind === "Cascade"
@@ -115,6 +153,8 @@ function CascadeChoiceContent({
         : promptKind === "GraveyardPaidCast"
           ? t("cascadeChoice.subtitleGraveyardPaid", {
               name: obj.name,
+              extra: paidExtra,
+              concession: paidSubtitleConcession,
             })
           : t("cascadeChoice.subtitleDiscover", {
               name: obj.name,
@@ -151,7 +191,10 @@ function CascadeChoiceContent({
           </span>
           <span className="ml-2 text-xs text-slate-400">
             {promptKind === "GraveyardPaidCast"
-              ? t("cascadeChoice.castPaidSuffix")
+              ? t("cascadeChoice.castPaidSuffix", {
+                  extra: paidExtra,
+                  concession: paidSuffixConcession,
+                })
               : t("cascadeChoice.castSuffix")}
           </span>
         </button>

@@ -84,6 +84,7 @@ export function useLongPress(
       // Ignore capture-release mismatches from browsers/test harnesses.
     }
     clear();
+    firedRef.current = false;
   }, [clear]);
 
   const onPointerLeave = useCallback((e: React.PointerEvent) => {

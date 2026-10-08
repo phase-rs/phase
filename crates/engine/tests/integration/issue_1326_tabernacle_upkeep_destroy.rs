@@ -103,7 +103,7 @@ fn tabernacle_grant_trigger_survives_consecutive_layer_flush() {
             .trigger_definitions
             .as_slice()
             .iter()
-            .any(|t| t.unless_pay.is_some()),
+            .any(|t| t.definition.unless_pay.is_some()),
         "Tabernacle GrantTrigger must survive back-to-back layer flushes"
     );
 }

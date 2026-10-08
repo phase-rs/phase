@@ -48,10 +48,11 @@ export const CLICK_THROUGH_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> = 
   "TriggerTargetSelection",
   "CopyTargetChoice",
   "CopyRetarget",
-  "RetargetChoice",
   "ExploreChoice",
   "PopulateChoice",
   "ReturnAsAuraTarget",
+  "UntapChoice",
+  "ChooseUntapSubset",
 ]);
 
 // CR 118.3 + CR 605.3b: a `PayCost` prompt is click-through only for the
@@ -62,6 +63,12 @@ export function isClickThroughWaitingFor(
   objects?: Record<ObjectId, GameObject | undefined>,
 ): boolean {
   if (!waitingFor) return false;
+  // CR 115.7: only a one-target retarget uses the board-picker. An `All`
+  // retarget renders RetargetChoiceModal, whose card choices and confirmation
+  // button need the host to retain pointer events.
+  if (waitingFor.type === "RetargetChoice") {
+    return waitingFor.data.scope.type === "Single";
+  }
   if (CLICK_THROUGH_WAITING_FOR_TYPES.has(waitingFor.type)) return true;
   return getBoardChoiceView(waitingFor, objects) != null;
 }
@@ -169,9 +176,13 @@ export function DialogHost({ children }: { children: ReactNode }) {
   const isNarrow = useIsNarrowViewport();
   // Only apply the peek slide transform while peeked. Framer-motion keeps a
   // residual `transform` (even at `{ x: 0, y: 0 }`) whenever `animate` is set,
-  // which breaks `<input type="range">` hit-testing in bottom-anchored panels
-  // such as ChooseXValueUI — the slider looks fine but ignores drags until
-  // something else reflows the tree (issue #2427).
+  // which breaks pointer hit-testing in bottom-anchored panels — the control
+  // looks fine but ignores input until something else reflows the tree
+  // (issue #2427). Originally hit `<input type="range">` in ChooseXValueUI;
+  // that slider no longer exists, and the live subjects are now the amount box
+  // and its ± steppers (AmountInput), which ChooseXValueUI's mount-integration
+  // test drives for exactly this reason. The guard is NOT obsolete just because
+  // the control it was written for is gone.
   const slideTransform = peeked
     ? isNarrow
       ? { x: 0, y: "calc(100vh - 64px)" }

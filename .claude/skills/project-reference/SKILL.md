@@ -9,13 +9,13 @@ Lookup material for build commands, the verification cadence, architecture, envi
 
 ## Tilt resources & operational rules
 
-**Tilt is always running and continuously rebuilds on file changes.** Do NOT run `cargo build`, `cargo clippy`, `cargo test -p engine`, `pnpm run type-check`, or `pnpm lint` directly — they compete for cargo target locks. Check Tilt logs instead.
+**Tilt is always running and continuously rebuilds on file changes.** Do NOT run `cargo build`, `cargo clippy`, `cargo test -p phase-engine`, `pnpm run type-check`, or `pnpm lint` directly — they compete for cargo target locks. Check Tilt logs instead.
 
 **Available Tilt resources** (defined in `Tiltfile`):
 | Resource | What it does | Triggers on |
 |----------|-------------|-------------|
 | `clippy` | `cargo clippy --all-targets -- -D warnings` | `crates/` changes |
-| `test-engine` | `cargo test -p engine` | `crates/engine/src/` changes |
+| `test-engine` | `cargo test -p phase-engine` | `crates/engine/src/` changes |
 | `test-ai` | `cargo test -p phase-ai` | `crates/engine/src/` or `crates/phase-ai/src/` changes |
 | `wasm` | WASM build (depends on clippy) | engine/AI/WASM src changes |
 | `card-data` | `./scripts/gen-card-data.sh` | `crates/engine/src/` changes |
@@ -82,7 +82,7 @@ if tilt get uiresource clippy >/dev/null 2>&1; then
   ./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data
 else
   cargo clippy --all-targets -- -D warnings
-  cargo test -p engine
+  cargo test -p phase-engine
   ./scripts/gen-card-data.sh
 fi
 
@@ -107,8 +107,8 @@ Run `./scripts/setup.sh` for full onboarding (Scryfall sidecars → card data �
 ### Rust Engine
 ```bash
 cargo test --all                    # Run all Rust tests
-cargo test -p engine                # Test engine crate only
-cargo test -p engine -- test_name   # Run single test
+cargo test -p phase-engine                # Test engine crate only
+cargo test -p phase-engine -- test_name   # Run single test
 cargo clippy --all-targets -- -D warnings  # Lint
 cargo fmt --all -- --check          # Format check
 cargo fmt --all                     # Auto-format
@@ -264,6 +264,10 @@ State is filtered per-player (`filter_state_for_player`) to hide opponent's hand
 - `PHASE_LOG_DIR` — Log directory for phase-server. When set, logs to files instead of stdout (main log: `<dir>/phase-server.log`, per-game logs: `<dir>/games/<code>.log`)
 - `PHASE_CORS_ORIGIN` — Custom CORS origin for phase-server (default: allows common dev ports)
 - `PHASE_LOG_JSON` — Enable JSON-formatted log output for phase-server
+- `PHASE_MAX_CONNECTIONS` — phase-server concurrent WebSocket cap before upgrades get 503 (default `200`; `--max-connections`)
+- `PHASE_MAX_GAMES` — phase-server concurrent game-session cap before `CreateGame` is refused (default `100`; `--max-games`)
+- `PHASE_METRICS_PORT` — When set, phase-server serves Prometheus metrics at `/metrics` on a second listener on this port (`--metrics-port`). Unset means no metrics listener; keep it off the public port
+- `PHASE_REPLICA_ORDINAL` — This process's ordinal within a replica set, exposed as the `phase_replica_ordinal` gauge so an autoscaler can identify the highest replica still holding players (`--replica-ordinal`)
 
 ## GitHub / git CLI (automation)
 

@@ -7,18 +7,20 @@ use crate::game::game_object::{AttachTarget, DisplaySource};
 use super::counter::CounterType;
 
 use super::ability::{
-    ContinuousModification, CopiableValues, Duration, FaceDownProfile, StaticDefinition, TargetRef,
+    ContinuousModification, CopiableValues, DieRollIgnoreRule, Duration, FaceDownProfile,
+    StaticDefinition, TargetRef,
 };
-use super::card::{PrintedCardRef, TokenImageRef};
+use super::card::{PrintedCardRef, TokenArtDescriptor, TokenImageRef};
 use super::card_type::{CoreType, Supertype};
-use super::identifiers::ObjectId;
+use super::events::EventObjectSnapshot;
+use super::identifiers::{ObjectId, ObjectIncarnationRef};
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaType, UnitDecision};
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
 use super::zones::Zone;
 
-pub use super::zones::EtbTapState;
+pub use super::zones::{ChainReferentIntent, EtbTapState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ReplacementId {
@@ -26,20 +28,98 @@ pub struct ReplacementId {
     pub index: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+/// CR 701.23a + CR 614.6: Final disposition of one found card after the
+/// replacement pipeline. The modified form snapshots the selected source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SearchFoundDisposition {
+    Original,
+    Modified(BoundSearchFoundDisposition),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundSearchFoundDisposition {
+    pub destination: Zone,
+    /// CR 400.7: exact incarnation of the selected replacement source. A
+    /// resumed choice consumes this snapshot without rebinding to a new object
+    /// that later reused the same id.
+    pub source: ObjectIncarnationRef,
+    /// CR 611.2b + CR 609.4b: A permission rider bound at replacement
+    /// selection time and installed only after the found card actually reaches
+    /// exile. It contains no found-object identity; delivery supplies that
+    /// independently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<BoundSearchFoundGrant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundSearchFoundGrant {
+    /// CR 400.7: exact incarnation of the replacement source whose effect
+    /// created the permission.
+    pub source: ObjectIncarnationRef,
+    pub controller: PlayerId,
+    pub grantee: PlayerId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mana_spend_permission: Option<super::ability::ManaSpendPermission>,
+}
+
+/// CR 616.1: Candidate data frozen when a SearchFound ordering
+/// prompt is offered. Resume consumes this snapshot without consulting the
+/// live source object or replacement registry again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundSearchFoundCandidate {
+    pub replacement_id: ReplacementId,
+    pub disposition: BoundSearchFoundDisposition,
+    pub source_name: String,
+    pub description: String,
+    /// Whether the snapshotted definition may be declined. This is carried per
+    /// candidate because a CR 616.1 ordering prompt can contain more than one
+    /// optional SearchFound replacement; collapsing optionality onto the whole
+    /// pending prompt would force one of them to apply.
+    #[serde(default)]
+    pub is_optional: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(tag = "type")]
 pub enum AppliedReplacementKey {
-    Object { source: ObjectId, index: usize },
-    Floating { index: usize },
-    StepEndMana { index: usize },
+    Object {
+        source: ObjectId,
+        index: usize,
+    },
+    Floating {
+        index: usize,
+    },
+    StepEndMana {
+        index: usize,
+    },
+    /// CR 614.12a: The selected controller for an as-enters replacement.
+    /// This rides the event's existing replacement provenance so the selected
+    /// answer remains distinguishable from an originating controller override.
+    EntryControllerChoice {
+        source: ObjectId,
+        index: usize,
+        controller: PlayerId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(tag = "type")]
 enum TaggedAppliedReplacementKey {
-    Object { source: ObjectId, index: usize },
-    Floating { index: usize },
-    StepEndMana { index: usize },
+    Object {
+        source: ObjectId,
+        index: usize,
+    },
+    Floating {
+        index: usize,
+    },
+    StepEndMana {
+        index: usize,
+    },
+    EntryControllerChoice {
+        source: ObjectId,
+        index: usize,
+        controller: PlayerId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -68,6 +148,17 @@ impl AppliedReplacementKeyCompat {
             AppliedReplacementKeyCompat::Tagged(TaggedAppliedReplacementKey::StepEndMana {
                 index,
             }) => AppliedReplacementKey::StepEndMana { index },
+            AppliedReplacementKeyCompat::Tagged(
+                TaggedAppliedReplacementKey::EntryControllerChoice {
+                    source,
+                    index,
+                    controller,
+                },
+            ) => AppliedReplacementKey::EntryControllerChoice {
+                source,
+                index,
+                controller,
+            },
             AppliedReplacementKeyCompat::Legacy(ReplacementId {
                 source: ObjectId(0),
                 index,
@@ -107,7 +198,8 @@ impl AppliedReplacementKey {
 
     pub fn source(self) -> ObjectId {
         match self {
-            AppliedReplacementKey::Object { source, .. } => source,
+            AppliedReplacementKey::Object { source, .. }
+            | AppliedReplacementKey::EntryControllerChoice { source, .. } => source,
             AppliedReplacementKey::Floating { .. } | AppliedReplacementKey::StepEndMana { .. } => {
                 ObjectId(0)
             }
@@ -118,7 +210,8 @@ impl AppliedReplacementKey {
         match self {
             AppliedReplacementKey::Object { index, .. }
             | AppliedReplacementKey::Floating { index }
-            | AppliedReplacementKey::StepEndMana { index } => index,
+            | AppliedReplacementKey::StepEndMana { index }
+            | AppliedReplacementKey::EntryControllerChoice { index, .. } => index,
         }
     }
 
@@ -157,6 +250,32 @@ where
 pub enum CounterMoveStage {
     Remove,
     Add,
+}
+
+/// CR 121.2 + CR 121.2a: which stage of a draw a `ProposedEvent::Draw` is at.
+///
+/// "Draw N cards" is one instruction performed as N individual card draws
+/// (CR 121.2), and a replacement that refers to the number of cards drawn
+/// modifies the instruction "before considering any of the individual card
+/// draws" (CR 121.2a). The draw sequence proposes the instruction once, whole,
+/// then proposes each surviving individual draw. A definition's
+/// [`DrawReplacementScope`](super::ability::DrawReplacementScope) names the one
+/// stage it watches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum DrawEventStage {
+    /// The whole draw instruction, carrying its full count.
+    Instruction,
+    /// One individual card draw.
+    #[default]
+    Individual,
+}
+
+impl DrawEventStage {
+    /// Keeping the default omitted preserves the existing wire shape of an
+    /// individual draw event.
+    pub fn is_individual(&self) -> bool {
+        matches!(self, Self::Individual)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -221,6 +340,14 @@ pub struct TokenCharacteristics {
     pub power: Option<i32>,
     /// CR 208.2: Fixed toughness, or `None` for non-creature tokens.
     pub toughness: Option<i32>,
+    /// CR 306.5b: Printed loyalty, or `None` for non-planeswalker tokens.
+    ///
+    /// The token's *printed* loyalty, as `CardFace::loyalty` is for a card-backed
+    /// planeswalker. Battlefield loyalty itself remains counter-derived (CR 306.5c).
+    /// Seeding a token's entry loyalty counters from this value (CR 306.5b) is not
+    /// yet done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loyalty: Option<u32>,
     pub core_types: Vec<CoreType>,
     pub subtypes: Vec<String>,
     pub supertypes: Vec<Supertype>,
@@ -265,12 +392,73 @@ pub struct TokenSpec {
     /// creating the token (distinct from `owner`, the player to whom the
     /// token belongs).
     pub controller: PlayerId,
-    /// CR 303.4 + CR 303.7: When the token is an Aura/Role created "attached to" a
-    /// host, the resolved host (object or player). `None` for ordinary tokens.
-    /// Resolved once at propose time so the replacement-safe apply path attaches
-    /// each created token without re-reading ability.targets.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attach_to: Option<AttachTarget>,
+    /// CR 303.4 + CR 303.4i: The token instruction's "attached to …" clause and
+    /// its binding outcome, resolved once at propose time so the
+    /// replacement-safe apply path attaches each created token without
+    /// re-reading `ability.targets`.
+    #[serde(default, skip_serializing_if = "TokenHostRequest::is_not_requested")]
+    pub attach_to: TokenHostRequest,
+}
+
+/// CR 303.4i: what the token instruction asked for as a host, and whether
+/// anything bound it.
+///
+/// The distinction is load-bearing, which is why it is a type rather than an
+/// `Option<AttachTarget>`: CR 303.4i denies the entry of an Aura token whose
+/// named host is *undefined*, while an ordinary token that never named a host
+/// is created normally. Both were `None` before, so the seam that had to tell
+/// them apart could not. [`TokenHostRequest::Unbound`] is the state that
+/// `None` could not express.
+///
+/// Carried through the CR 614 replacement pipeline rather than consumed before
+/// it: a replacement effect may change the entering token's characteristics,
+/// so whether CR 303.4i applies is a question about the ACTUAL entrant and can
+/// only be answered per token, after replacements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TokenHostRequest {
+    /// The instruction named no host. An ordinary token.
+    #[default]
+    NotRequested,
+    /// The instruction named a host and it resolved to this object or player.
+    /// Whether that host can legally be enchanted is a separate question,
+    /// owned by `effects::attach`.
+    Bound(AttachTarget),
+    /// CR 303.4i: the instruction named a host and nothing bound it — the host
+    /// is undefined.
+    Unbound,
+}
+
+impl TokenHostRequest {
+    /// Whether the instruction named no host. Keeping this default omitted
+    /// preserves the existing wire shape for ordinary token creation events.
+    pub fn is_not_requested(&self) -> bool {
+        matches!(self, Self::NotRequested)
+    }
+
+    /// The resolved host, if one bound. `None` for both of the other states —
+    /// use the variant itself when the difference matters.
+    pub fn bound(self) -> Option<AttachTarget> {
+        match self {
+            Self::Bound(target) => Some(target),
+            Self::NotRequested | Self::Unbound => None,
+        }
+    }
+
+    /// Did the instruction name a host at all?
+    pub fn is_requested(self) -> bool {
+        !matches!(self, Self::NotRequested)
+    }
+
+    /// Build the request from a named-host flag and its binding outcome. The
+    /// single place the three states are derived, so no caller re-encodes the
+    /// mapping.
+    pub fn from_binding(named: bool, bound: Option<AttachTarget>) -> Self {
+        match (named, bound) {
+            (_, Some(target)) => Self::Bound(target),
+            (true, None) => Self::Unbound,
+            (false, None) => Self::NotRequested,
+        }
+    }
 }
 
 /// CR 707.2 + CR 707.5: Copy-token creation payload carried by the same
@@ -290,6 +478,16 @@ pub struct CopyTokenSpec {
     /// back to a name+filter Scryfall search. `None` for printed-card sources.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_image_ref: Option<TokenImageRef>,
+    /// Intrinsic token-art body of the copy source, captured alongside
+    /// `token_image_ref` by the enter-as-copy replacement selection. Carried
+    /// so an enter-as-copy recipient (which keeps its own base and never
+    /// runs the token creation injectors) renders from the source's printed
+    /// shape even when no exact ref matched. `None` for printed-card
+    /// sources, departed (LKI) sources, and created copy-tokens — the
+    /// latter derive their descriptor from their own base at injection,
+    /// which also reflects copy exceptions the source never had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_art: Option<TokenArtDescriptor>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_keywords: Vec<Keyword>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -300,6 +498,24 @@ pub struct CopyTokenSpec {
     pub sacrifice_at: Option<Duration>,
     pub source_id: ObjectId,
     pub controller: PlayerId,
+}
+
+/// CR 701.31 + CR 901.9c + CR 701.31c: Which rules path is proposing a
+/// planeswalk event. Scoped replacements (Fixed Point in Time) match only
+/// [`PlanarDie`]; generic "if you would planeswalk" replacements (Susan Foreman)
+/// match every cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PlaneswalkCause {
+    /// CR 901.8 / CR 901.9c: Planeswalker symbol on the planar die.
+    PlanarDie,
+    /// CR 701.31: Planeswalk from a spell or ability instruction (including
+    /// chained "then planeswalk" riders).
+    Instruction,
+    /// CR 701.31c / CR 312.5 / CR 704.6f: Phenomenon encounter, phenomenon
+    /// state-based planeswalk, and other rules-process planeswalks that are not
+    /// the planar-die ability and not an ability resolving on the stack.
+    #[default]
+    RulesProcess,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -321,6 +537,11 @@ pub enum ProposedEvent {
         /// `Unspecified` preserves any non-replacement tapped seed from the originating effect.
         #[serde(default)]
         enter_tapped: EtbTapState,
+        /// CR 508.4: Whether this permanent enters the battlefield attacking.
+        /// Carried through the replacement pipeline because an ETB-counter or
+        /// replacement-ordering pause resumes from the approved ZoneChange.
+        #[serde(default)]
+        enters_attacking: bool,
         /// Counters to place on this permanent as it enters the battlefield.
         /// Each entry is (counter_type, count). Set by ETB-counter replacements.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -341,6 +562,41 @@ pub enum ProposedEvent {
         /// `ProposedEvent` (and the `Result<_, ProposedEvent>` pipeline).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         face_down_profile: Option<Box<FaceDownProfile>>,
+        /// Typed SearchLibrary intent. This is delivery metadata, not a
+        /// battlefield `FaceDownProfile`, and survives replacement pauses.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::types::ability::ExileConcealment::is_public"
+        )]
+        face_down_in_exile: crate::types::ability::ExileConcealment,
+        /// CR 608.2c: whether this entry is the producer a following
+        /// demonstrative anaphor binds to. Rides the event so a CR 616.1
+        /// pause/resume delivers the same answer the effect asked for.
+        #[serde(default, skip_serializing_if = "ChainReferentIntent::is_silent")]
+        chain_referent: ChainReferentIntent,
+        /// CR 614.12a + CR 616.1c + CR 707.2: Pre-entry copy payload for
+        /// Mystic Reflection-style replacements. The copied values ride the
+        /// event so later replacement passes can match the entering permanent
+        /// as it would exist after the copy effect, before the zone change is
+        /// delivered.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enter_as_copy: Option<Box<CopyTokenSpec>>,
+        /// CR 701.9a + CR 614.1: Preserves an operation-owned discard frame
+        /// through the inner hand-to-destination move and any replacement
+        /// choices. Unrelated zone changes omit it from the wire.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        discard_frame: Option<crate::types::identifiers::DiscardFrameId>,
+        /// CR 608.2c: the player performing the instruction that moves this
+        /// object ("that player exiles that card" names the drawer; a
+        /// controller-worded instruction names the controller). Rides the
+        /// event through replacement and CR 616.1 pause/resume so delivery can
+        /// record, per CR 406.6 + CR 400.8, who exiled the new exile object.
+        /// `None` for moves no player performs (rules processes, raw movers).
+        /// A Hand delivery out of a shared zone also reads it as the taker who
+        /// becomes the card's owner under `HandEntryOwnership::ReceiverOwns`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        performed_by: Option<PlayerId>,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     Damage {
@@ -348,11 +604,29 @@ pub enum ProposedEvent {
         target: TargetRef,
         amount: u32,
         is_combat: bool,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     Draw {
         player_id: PlayerId,
         count: u32,
+        /// CR 121.2a: the instruction, or one of its individual draws.
+        #[serde(default, skip_serializing_if = "DrawEventStage::is_individual")]
+        stage: DrawEventStage,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
+        applied: HashSet<AppliedReplacementKey>,
+    },
+    /// CR 701.23a + CR 614.1: One card found during a search, before the
+    /// search instruction sends it to its printed destination.
+    SearchFound {
+        searcher: PlayerId,
+        /// Semantic owner of the library participating in this search. `None`
+        /// when Library was not among the effective searched zones.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library_owner: Option<PlayerId>,
+        object_id: ObjectId,
+        disposition: SearchFoundDisposition,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 701.22a + CR 614.1a: A player is about to scry cards. Replacement
@@ -360,6 +634,7 @@ pub enum ProposedEvent {
     Scry {
         player_id: PlayerId,
         count: u32,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 701.17a + CR 614.1a: A player is about to mill cards. Count-level
@@ -369,6 +644,7 @@ pub enum ProposedEvent {
         player_id: PlayerId,
         count: u32,
         destination: Zone,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 705.1 + CR 614.1a: A player is about to flip a single coin. Carried
@@ -378,12 +654,46 @@ pub enum ProposedEvent {
     CoinFlip {
         player_id: PlayerId,
         count: u32,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
+        applied: HashSet<AppliedReplacementKey>,
+    },
+    /// CR 706.1 + CR 614.1a: A player is about to roll one or more dice as a
+    /// single instruction. Carried through the replacement pipeline so
+    /// count-modifying "instead roll that many dice plus one" effects
+    /// (Barbarian Class, Pixie Guide, Wyll) raise the count before the RNG runs.
+    ///
+    /// CR 706.1: The event is per-INSTRUCTION, not per-die — one "roll two
+    /// six-sided dice" instruction proposes ONE `RollDice { count: 2 }`. This
+    /// matches the once-per-batch firing of die-roll triggers. Contrast
+    /// `CoinFlip`, which is per-flip per Krark's Thumb's own ruling.
+    RollDice {
+        player_id: PlayerId,
+        count: u32,
+        sides: u8,
+        /// CR 706.6: What the die-roll resolver must do with the extra dice the
+        /// applied replacements caused to be rolled — ONE entry per applied
+        /// replacement, in application order. Appended by `roll_dice_applier`
+        /// from each matched `ReplacementDefinition.die_ignore_rule`; empty when
+        /// no applied replacement carried an ignore instruction. This field is
+        /// the ONLY channel by which the rules reach `roll_die.rs` —
+        /// `ApplyResult` carries nothing but the modified event.
+        ///
+        /// A `Vec` rather than an `Option` because CR 706.6 applies once per
+        /// INSTRUCTING effect: two stacked die-roll replacements (Barbarian
+        /// Class + Pixie Guide) each raise the count by one AND each instruct
+        /// the roller to ignore a roll, so three dice are rolled and TWO are
+        /// ignored. Collapsing to a single rule would leave the extra die
+        /// surviving and inflate every aggregate.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ignore_rules: Vec<DieRollIgnoreRule>,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 701.37a + CR 614.1a: A creature is about to explore. Replacement
     /// effects can modify the explore action (e.g., add a scry prelude).
     Explore {
         object_id: ObjectId,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 701.50a + CR 614.1a: A creature is about to connive (draw N, discard N,
@@ -394,7 +704,13 @@ pub enum ProposedEvent {
     /// already resolved from `QuantityExpr` at propose time.
     Connive {
         object_id: ObjectId,
+        /// CR 400.7 + CR 701.50b/f: the exact permanent that proposed this
+        /// action. A replacement-ordering pause must not recapture a later
+        /// incarnation that reused `object_id`. Intentionally no serde default:
+        /// a legacy raw-id-only parked event cannot reconstruct this authority.
+        subject: Box<EventObjectSnapshot>,
         count: u32,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 701.34a + CR 614.1a: A player is about to proliferate. Replacement
@@ -403,16 +719,19 @@ pub enum ProposedEvent {
     Proliferate {
         player_id: PlayerId,
         count: u32,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     LifeGain {
         player_id: PlayerId,
         amount: u32,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     LifeLoss {
         player_id: PlayerId,
         amount: u32,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     AddCounter {
@@ -422,12 +741,14 @@ pub enum ProposedEvent {
         #[serde(flatten)]
         placement: CounterPlacement,
         count: u32,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     RemoveCounter {
         object_id: ObjectId,
         counter_type: CounterType,
         count: u32,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 122.5: Moving a counter is atomic: remove it from one object and put
@@ -442,6 +763,7 @@ pub enum ProposedEvent {
         remove_count: u32,
         add_count: u32,
         stage: CounterMoveStage,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 111.1 + CR 614.1a: Token creation event carrying the full
@@ -470,6 +792,7 @@ pub enum ProposedEvent {
         enter_tapped: EtbTapState,
         /// CR 614.1a: Number of tokens to create. May be modified by replacement effects.
         count: u32,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     TokenEntry {
@@ -478,6 +801,7 @@ pub enum ProposedEvent {
         enter_tapped: EtbTapState,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         enter_with_counters: Vec<(CounterType, u32)>,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     Discard {
@@ -490,20 +814,29 @@ pub enum ProposedEvent {
         /// actions (cleanup hand-size discard).
         #[serde(default)]
         caused_by_effect: bool,
+        /// CR 701.9a + CR 614.1: Operation-owned provenance for an in-flight
+        /// discard. `None` preserves ordinary discard/cost behavior; Recruit
+        /// installs an id before the event enters replacement processing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        discard_frame: Option<crate::types::identifiers::DiscardFrameId>,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     Tap {
         object_id: ObjectId,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     Untap {
         object_id: ObjectId,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 614.1e + CR 708.11: a permanent is being turned face up. "As ~ is turned
     /// face up" replacement effects apply here (megamorph/disguise).
     TurnFaceUp {
         object_id: ObjectId,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     Destroy {
@@ -511,11 +844,13 @@ pub enum ProposedEvent {
         source: Option<ObjectId>,
         /// CR 701.19c: When true, regeneration shields cannot prevent this destruction.
         cant_regenerate: bool,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     Sacrifice {
         object_id: ObjectId,
         player_id: PlayerId,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 500.1 + CR 614.1b + CR 614.10: A turn is about to begin. Carried
@@ -527,6 +862,7 @@ pub enum ProposedEvent {
     BeginTurn {
         player_id: PlayerId,
         is_extra_turn: bool,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 500.1 + CR 614.1b: A phase/step is about to begin. Carried through
@@ -537,6 +873,7 @@ pub enum ProposedEvent {
     BeginPhase {
         player_id: PlayerId,
         phase: Phase,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 106.3 + CR 614.1a: Mana is about to be produced by a source and added
@@ -554,6 +891,7 @@ pub enum ProposedEvent {
         /// ability with the tap symbol in its cost.
         #[serde(default)]
         tapped_for_mana: bool,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 703.4q + CR 614.1a + CR 616.1: A player's step-end "empty unspent
@@ -568,25 +906,49 @@ pub enum ProposedEvent {
     /// affected player chooses ordering. The pipeline serializes choices in
     /// APNAP order across players via `pending_phase_transition_progress`.
     ///
-    /// Expiry-bound units (`EndOfTurn` / `EndOfCombat`) do **not** enter
-    /// this event — they are cleared by `clear_expiring_at_step_end` before
-    /// event construction (preserves the H2 invariant from commit
-    /// `e92fd3e19`).
+    /// CR 500.5 + CR 514.2: A unit whose `EndOfCombat` duration reaches this
+    /// boundary, or whose `EndOfTurn` duration ended during the cleanup action,
+    /// enters this event after its expiry marker is cleared. This lets the
+    /// ordinary empty-pool action count actual loss and compose with any other
+    /// retention or transformation effect still active.
     EmptyManaPool {
         player_id: PlayerId,
         units: Vec<UnitDecision>,
-        #[serde(default, deserialize_with = "deserialize_applied_keys_step_end_mana")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_applied_keys_step_end_mana",
+            serialize_with = "crate::types::deterministic_serde::hash_set"
+        )]
         applied: HashSet<AppliedReplacementKey>,
     },
-    /// CR 701.31 + CR 901.9c + CR 614.1a: A player is about to planeswalk as a
-    /// result of rolling the Planeswalker symbol on the planar die (the
-    /// CR 901.8 "planeswalking ability" resolving). This is the ONLY planeswalk
-    /// cause routed through the replacement pipeline — encounter / SBA /
-    /// leave-game planeswalks (CR 701.31c) call `planechase::planeswalk`
-    /// directly and are never replaced. "Chaos ensues instead" (Fixed Point in
-    /// Time) replaces this event.
+    /// CR 701.31 + CR 614.1a: A player is about to planeswalk. All CR 701.31c
+    /// causes except the starting-plane reveal route through
+    /// `planechase::resolve_planeswalk_via_replacements`. Encounter / SBA /
+    /// leave-game paths use [`PlaneswalkCause::RulesProcess`]; ability
+    /// resolutions use [`PlaneswalkCause::Instruction`] or [`PlaneswalkCause::PlanarDie`].
     Planeswalk {
         player_id: PlayerId,
+        /// Distinguishes planar-die planeswalks (CR 901.9c) from ability-
+        /// instructed ones so scoped replacements (Fixed Point in Time) match
+        /// only the cause their Oracle text names.
+        #[serde(default)]
+        cause: PlaneswalkCause,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
+        applied: HashSet<AppliedReplacementKey>,
+    },
+    /// CR 701.3a + CR 614.1a: An Aura, Equipment, or Fortification is about to
+    /// become attached to an object via `Effect::Attach` (Equip activation, or
+    /// any other "attach ~ to" effect). Carried through the replacement
+    /// pipeline so "as it becomes attached, choose …" replacements
+    /// (`ReplacementEvent::Attached`, Psychic Paper) can bind their choice as
+    /// the attachment resolves, mirroring the "as ~ enters, choose" ETB
+    /// analogue. Auras attaching to a PLAYER host use `attach_to_player`
+    /// directly and never propose this event — only object hosts route
+    /// through `Effect::Attach::resolve`.
+    Attach {
+        attachment_id: ObjectId,
+        target_id: ObjectId,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
 }
@@ -605,10 +967,16 @@ impl ProposedEvent {
             cause,
             attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+            chain_referent: ChainReferentIntent::default(),
+            enter_as_copy: None,
+            discard_frame: None,
+            performed_by: None,
             applied: HashSet::new(),
         }
     }
@@ -634,9 +1002,21 @@ impl ProposedEvent {
     /// CR 701.31 + CR 901.9c + CR 614.1a: Construct a `Planeswalk` proposed
     /// event for the planar-die planeswalking ability (CR 901.8).
     pub fn planeswalk(player_id: PlayerId) -> Self {
+        Self::planeswalk_with_applied(player_id, PlaneswalkCause::PlanarDie, HashSet::new())
+    }
+
+    /// CR 701.31 + CR 614.5: Construct a `Planeswalk` proposed event with an
+    /// explicit cause and already-applied replacement keys (chained "then
+    /// planeswalk" riders retain the originating replacement's applied set).
+    pub fn planeswalk_with_applied(
+        player_id: PlayerId,
+        cause: PlaneswalkCause,
+        applied: HashSet<AppliedReplacementKey>,
+    ) -> Self {
         Self::Planeswalk {
             player_id,
-            applied: HashSet::new(),
+            cause,
+            applied,
         }
     }
 
@@ -696,9 +1076,11 @@ impl ProposedEvent {
             ProposedEvent::ZoneChange { applied, .. }
             | ProposedEvent::Damage { applied, .. }
             | ProposedEvent::Draw { applied, .. }
+            | ProposedEvent::SearchFound { applied, .. }
             | ProposedEvent::Scry { applied, .. }
             | ProposedEvent::Mill { applied, .. }
             | ProposedEvent::CoinFlip { applied, .. }
+            | ProposedEvent::RollDice { applied, .. }
             | ProposedEvent::Explore { applied, .. }
             | ProposedEvent::Connive { applied, .. }
             | ProposedEvent::Proliferate { applied, .. }
@@ -719,7 +1101,8 @@ impl ProposedEvent {
             | ProposedEvent::BeginPhase { applied, .. }
             | ProposedEvent::ProduceMana { applied, .. }
             | ProposedEvent::EmptyManaPool { applied, .. }
-            | ProposedEvent::Planeswalk { applied, .. } => applied,
+            | ProposedEvent::Planeswalk { applied, .. }
+            | ProposedEvent::Attach { applied, .. } => applied,
         }
     }
 
@@ -728,9 +1111,11 @@ impl ProposedEvent {
             ProposedEvent::ZoneChange { applied, .. }
             | ProposedEvent::Damage { applied, .. }
             | ProposedEvent::Draw { applied, .. }
+            | ProposedEvent::SearchFound { applied, .. }
             | ProposedEvent::Scry { applied, .. }
             | ProposedEvent::Mill { applied, .. }
             | ProposedEvent::CoinFlip { applied, .. }
+            | ProposedEvent::RollDice { applied, .. }
             | ProposedEvent::Explore { applied, .. }
             | ProposedEvent::Connive { applied, .. }
             | ProposedEvent::Proliferate { applied, .. }
@@ -751,7 +1136,8 @@ impl ProposedEvent {
             | ProposedEvent::BeginPhase { applied, .. }
             | ProposedEvent::ProduceMana { applied, .. }
             | ProposedEvent::EmptyManaPool { applied, .. }
-            | ProposedEvent::Planeswalk { applied, .. } => applied,
+            | ProposedEvent::Planeswalk { applied, .. }
+            | ProposedEvent::Attach { applied, .. } => applied,
         }
     }
 
@@ -788,14 +1174,14 @@ impl ProposedEvent {
             | ProposedEvent::TurnFaceUp { object_id, .. }
             | ProposedEvent::Destroy { object_id, .. }
             | ProposedEvent::RemoveCounter { object_id, .. }
-            | ProposedEvent::Explore { object_id, .. }
-            // CR 701.50a: The conniving permanent's controller is the affected
-            // player — they draw/discard and choose the connive replacement order.
-            | ProposedEvent::Connive { object_id, .. } => state
+            | ProposedEvent::Explore { object_id, .. } => state
                 .objects
                 .get(object_id)
                 .map(|o| o.controller)
                 .unwrap_or(PlayerId(0)),
+            // CR 701.50a: The conniving permanent's controller is the affected
+            // player — they draw/discard and choose the connive replacement order.
+            ProposedEvent::Connive { subject, .. } => subject.controller,
             ProposedEvent::AddCounter { placement, .. } => match placement {
                 CounterPlacement::Object { object_id, .. } => state
                     .objects
@@ -834,6 +1220,7 @@ impl ProposedEvent {
             | ProposedEvent::Mill { player_id, .. }
             | ProposedEvent::Proliferate { player_id, .. }
             | ProposedEvent::CoinFlip { player_id, .. }
+            | ProposedEvent::RollDice { player_id, .. }
             | ProposedEvent::LifeGain { player_id, .. }
             | ProposedEvent::LifeLoss { player_id, .. }
             | ProposedEvent::Discard { player_id, .. }
@@ -843,11 +1230,28 @@ impl ProposedEvent {
             | ProposedEvent::ProduceMana { player_id, .. }
             | ProposedEvent::EmptyManaPool { player_id, .. }
             | ProposedEvent::Planeswalk { player_id, .. } => *player_id,
+            // CR 616.1: a card in a library has no controller, so its owner
+            // chooses among applicable replacements. `None` is reserved for a
+            // nonlibrary selection, where no SearchFound replacement applies.
+            ProposedEvent::SearchFound {
+                searcher,
+                library_owner,
+                ..
+            } => library_owner.unwrap_or(*searcher),
             ProposedEvent::CreateToken { owner, .. } => *owner,
             ProposedEvent::TokenEntry { entry_ref, .. } => state
                 .liminal_entries
                 .get(entry_ref)
-                .map(|entry| entry.object.controller)
+                .map(|entry| entry.object.projected().controller)
+                .unwrap_or(PlayerId(0)),
+            // CR 701.3a: The attaching Aura/Equipment's controller is the
+            // affected player — they are the one who would choose a
+            // replacement order (CR 616.1) and bind any "as it becomes
+            // attached, choose" continuation.
+            ProposedEvent::Attach { attachment_id, .. } => state
+                .objects
+                .get(attachment_id)
+                .map(|o| o.controller)
                 .unwrap_or(PlayerId(0)),
         }
     }
@@ -864,6 +1268,7 @@ impl ProposedEvent {
             | ProposedEvent::Discard { object_id, .. }
             | ProposedEvent::Sacrifice { object_id, .. }
             | ProposedEvent::Explore { object_id, .. }
+            | ProposedEvent::SearchFound { object_id, .. }
             // CR 614.1a: the conniving permanent is the affected object the
             // `valid_card` filter ("a creature you control") is matched against.
             | ProposedEvent::Connive { object_id, .. } => Some(*object_id),
@@ -890,6 +1295,7 @@ impl ProposedEvent {
             | ProposedEvent::Mill { .. }
             | ProposedEvent::Proliferate { .. }
             | ProposedEvent::CoinFlip { .. }
+            | ProposedEvent::RollDice { .. }
             | ProposedEvent::LifeGain { .. }
             | ProposedEvent::LifeLoss { .. }
             | ProposedEvent::CreateToken { .. }
@@ -899,6 +1305,10 @@ impl ProposedEvent {
             // CR 701.31: a planeswalk has no affected object — the planar deck
             // rotation is not an object-scoped event.
             | ProposedEvent::Planeswalk { .. } => None,
+            // CR 701.3a: the attaching Aura/Equipment is the object
+            // `valid_card` filters (and "as it becomes attached" replacements)
+            // match against.
+            ProposedEvent::Attach { attachment_id, .. } => Some(*attachment_id),
         }
     }
 }
@@ -906,158 +1316,6 @@ impl ProposedEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn proposed_event_variants_compile() {
-        // Verify all variants compile, including the parameterized counter
-        // placement recipients.
-        let events: Vec<ProposedEvent> = vec![
-            ProposedEvent::zone_change(ObjectId(1), Zone::Battlefield, Zone::Graveyard, None),
-            ProposedEvent::Damage {
-                source_id: ObjectId(1),
-                target: TargetRef::Player(PlayerId(0)),
-                amount: 3,
-                is_combat: false,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::Draw {
-                player_id: PlayerId(0),
-                count: 1,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::Scry {
-                player_id: PlayerId(0),
-                count: 1,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::Mill {
-                player_id: PlayerId(0),
-                count: 1,
-                destination: Zone::Graveyard,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::CoinFlip {
-                player_id: PlayerId(0),
-                count: 1,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::LifeGain {
-                player_id: PlayerId(0),
-                amount: 3,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::LifeLoss {
-                player_id: PlayerId(0),
-                amount: 3,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::AddCounter {
-                placement: CounterPlacement::Object {
-                    actor: PlayerId(0),
-                    object_id: ObjectId(1),
-                    counter_type: CounterType::Plus1Plus1,
-                },
-                count: 1,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::AddCounter {
-                placement: CounterPlacement::Player {
-                    actor: PlayerId(0),
-                    player_id: PlayerId(0),
-                    counter_kind: PlayerCounterKind::Poison,
-                },
-                count: 1,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::AddCounter {
-                placement: CounterPlacement::Energy {
-                    actor: PlayerId(0),
-                    player_id: PlayerId(0),
-                },
-                count: 1,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::RemoveCounter {
-                object_id: ObjectId(1),
-                counter_type: CounterType::Plus1Plus1,
-                count: 1,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::MoveCounter {
-                actor: PlayerId(0),
-                source_id: ObjectId(1),
-                destination_id: ObjectId(2),
-                counter_type: CounterType::Plus1Plus1,
-                remove_count: 1,
-                add_count: 1,
-                stage: CounterMoveStage::Remove,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::CreateToken {
-                owner: PlayerId(0),
-                spec: Box::new(TokenSpec {
-                    characteristics: TokenCharacteristics {
-                        display_name: "Soldier".to_string(),
-                        power: Some(1),
-                        toughness: Some(1),
-                        core_types: Vec::new(),
-                        subtypes: Vec::new(),
-                        supertypes: Vec::new(),
-                        colors: Vec::new(),
-                        keywords: Vec::new(),
-                    },
-                    script_name: "w_1_1_soldier".to_string(),
-                    static_abilities: Vec::new(),
-                    enter_with_counters: Vec::new(),
-                    tapped: false,
-                    enters_attacking: false,
-                    sacrifice_at: None,
-                    source_id: ObjectId(1),
-                    controller: PlayerId(0),
-                    attach_to: None,
-                }),
-                copy: None,
-                enter_tapped: EtbTapState::Unspecified,
-                count: 1,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::Discard {
-                player_id: PlayerId(0),
-                object_id: ObjectId(2),
-                source_id: None,
-                caused_by_effect: false,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::Tap {
-                object_id: ObjectId(1),
-                applied: HashSet::new(),
-            },
-            ProposedEvent::Untap {
-                object_id: ObjectId(1),
-                applied: HashSet::new(),
-            },
-            ProposedEvent::Destroy {
-                object_id: ObjectId(1),
-                source: None,
-                cant_regenerate: false,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::Sacrifice {
-                object_id: ObjectId(1),
-                player_id: PlayerId(0),
-                applied: HashSet::new(),
-            },
-            ProposedEvent::begin_turn(PlayerId(0), false),
-            ProposedEvent::begin_phase(PlayerId(0), Phase::Untap),
-            ProposedEvent::produce_mana(ObjectId(1), PlayerId(0), ManaType::Green),
-            ProposedEvent::EmptyManaPool {
-                player_id: PlayerId(0),
-                units: Vec::new(),
-                applied: HashSet::new(),
-            },
-        ];
-        assert_eq!(events.len(), 23);
-    }
 
     #[test]
     fn replacement_id_equality_and_hash() {
@@ -1158,6 +1416,7 @@ mod tests {
         let mut event = ProposedEvent::Draw {
             player_id: PlayerId(0),
             count: 1,
+            stage: DrawEventStage::Individual,
             applied: HashSet::new(),
         };
         let rid = ReplacementId {

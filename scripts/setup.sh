@@ -7,8 +7,9 @@ set -euo pipefail
 #
 #   Mode axis — what gets fetched/built:
 #     * Full mode (default): everything an interactive human dev needs to run
-#       the app in a browser, including the three Scryfall image/printing
-#       sidecars consumed at runtime by the React frontend for card art.
+#       the app in a browser, including the five Scryfall sidecars —
+#       image/printing data and the set-icon catalog — consumed at runtime by
+#       the React frontend.
 #     * Agent mode (--agent, env PHASE_SETUP_AGENT=1): skips the Scryfall
 #       sidecars. They are runtime-only image data — no Rust or frontend test
 #       depends on them (the one vitest test that names them mocks `fetch`).
@@ -91,6 +92,25 @@ if [ "${#missing[@]}" -ne 0 ]; then
   exit 1
 fi
 
+# --- Preflight: pnpm major must match client/package.json's packageManager ---
+# pnpm >= 10 stopped reading the "pnpm" field in package.json. Running it in
+# client/ silently drops that file's `pnpm.overrides` (the supply-chain pins for
+# serialize-javascript, ws, brace-expansion, postcss, …) from pnpm-lock.yaml,
+# writes a stray client/pnpm-workspace.yaml, and then fails `pnpm install` with
+# ERR_PNPM_IGNORED_BUILDS because `onlyBuiltDependencies` is ignored too. That
+# leaves a dirty tree and a lockfile that would ship without its security
+# overrides, so treat a major mismatch as fatal.
+#
+# The check resolves pnpm from client/, not from here: `packageManager` is
+# directory-scoped, so corepack and pnpm >= 10 pick it up only when the working
+# directory is under client/. The root can legitimately resolve a different,
+# newer pnpm while client/ resolves the pin — measuring the root would reject
+# that valid setup before installing anything. See scripts/lib/pnpm-preflight.sh.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/pnpm-preflight.sh
+source "$SCRIPT_DIR/lib/pnpm-preflight.sh"
+pnpm_preflight_check client || exit 1
+
 # --- Preflight: soft tool (tilt-dev/tilt, NOT other CLIs named "tilt") ---
 # Multiple unrelated binaries ship as `tilt` (e.g. Go template tools). The
 # tilt-dev/tilt binary is the only one whose help text references the
@@ -121,10 +141,20 @@ else
   ./scripts/gen-scryfall-images.sh         & PID_IMAGES=$!
   ./scripts/gen-scryfall-token-images.sh   & PID_TOKEN_IMAGES=$!
   ./scripts/gen-scryfall-printings.sh      & PID_PRINTINGS=$!
+  # Locale card-art maps. Sourced from MTGJSON rather than Scryfall bulk, but
+  # the same category of artifact: runtime-only frontend image data, needed
+  # only when a non-English UI language is selected.
+  ./scripts/gen-scryfall-locale-images.sh  & PID_LOCALE_IMAGES=$!
+  # Set-icon catalog (icon_svg_uri + release dates) for the draft/Sealed set
+  # picker — metadata that drives set-icon images. Fetched from the small
+  # /sets endpoint, not the bulk download.
+  ./scripts/gen-scryfall-sets.sh           & PID_SETS=$!
 
   wait $PID_IMAGES        || FAIL=1
   wait $PID_TOKEN_IMAGES  || FAIL=1
   wait $PID_PRINTINGS     || FAIL=1
+  wait $PID_LOCALE_IMAGES || FAIL=1
+  wait $PID_SETS          || FAIL=1
   if [ $FAIL -ne 0 ]; then
     echo "ERROR: Scryfall sidecar fetch failed." >&2
     exit 1
@@ -144,6 +174,18 @@ echo "Step 2: Installing frontend dependencies..."
 (cd client && pnpm install) &
 PID_PNPM=$!
 
+# The lobby worker is a separate npm project (its own package-lock.json), and
+# Tilt's 'lobby-worker' resource runs `npm run dev` from it. Without this the
+# resource comes up red on a fresh clone and deck URL import stays broken.
+# Guarded on presence for the same reason release.yml guards its deploy job:
+# commits older than the Worker have no lobby-worker/, and setup must not hard
+# fail there.
+PID_WORKER=""
+if [ -d lobby-worker ]; then
+  (cd lobby-worker && npm install) &
+  PID_WORKER=$!
+fi
+
 # --- Card-data + WASM ---
 if [ "$USE_TILT" = 1 ]; then
   echo ""
@@ -161,6 +203,9 @@ else
 fi
 
 wait $PID_PNPM || FAIL=1
+if [ -n "$PID_WORKER" ]; then
+  wait $PID_WORKER || FAIL=1
+fi
 if [ $FAIL -ne 0 ]; then
   echo "ERROR: setup step failed (see logs above)." >&2
   exit 1

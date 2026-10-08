@@ -25,6 +25,7 @@
 use engine::ai_support::legal_actions;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::types::ability::TapCreaturesSelectionMode;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{CastPaymentMode, PayCostKind, WaitingFor};
@@ -74,7 +75,7 @@ fn cast_and_reach_tap_paycost(runner: &mut GameRunner, spell: ObjectId) -> i32 {
             WaitingFor::PayCost {
                 kind:
                     PayCostKind::TapCreatures {
-                        aggregate: Some(aggregate),
+                        mode: TapCreaturesSelectionMode::Aggregate(aggregate),
                     },
                 ..
             } => return aggregate.value,

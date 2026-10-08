@@ -12,6 +12,7 @@
 use crate::database::mtgjson::{AtomicCard, AtomicIdentifiers};
 use crate::types::ability::{AbilityKind, Effect};
 use crate::types::card::CardFace;
+use crate::types::keywords::Keyword;
 use crate::types::triggers::TriggerMode;
 
 /// Build an `AtomicCard` for a single card face from its oracle `text`.
@@ -53,6 +54,90 @@ fn parse_face(card: &AtomicCard) -> CardFace {
     crate::database::synthesis::build_oracle_face(card, None)
 }
 
+#[test]
+fn goddric_conditional_flying_is_not_a_printed_keyword() {
+    let text = "Haste\nCelebration — As long as two or more nonland permanents entered the battlefield under your control this turn, Goddric is a Dragon with base power and toughness 4/4, flying, and \"{R}: Dragons you control get +1/+0 until end of turn.\" (It loses all other creature types.)";
+    let mut card = atomic(
+        "Goddric, Cloaked Reveler",
+        "Legendary Creature — Human Noble",
+        &["Creature"],
+        text,
+    );
+    card.subtypes = vec!["Human".to_string(), "Noble".to_string()];
+    card.keywords = Some(vec!["Flying".to_string(), "Haste".to_string()]);
+
+    let face = parse_face(&card);
+    // allow-raw-authority: this asserts the synthesized CardFace's printed keywords, not a live object's effective keywords
+    assert!(face.keywords.contains(&Keyword::Haste));
+    // allow-raw-authority: this asserts the synthesized CardFace's printed keywords, not a live object's effective keywords
+    assert!(!face.keywords.contains(&Keyword::Flying));
+    let celebration = face
+        .static_abilities
+        .iter()
+        .find(|definition| definition.condition.is_some())
+        .expect("Goddric must retain its conditional Celebration static");
+    assert!(celebration.modifications.contains(
+        &crate::types::ability::ContinuousModification::AddKeyword {
+            keyword: Keyword::Flying
+        }
+    ));
+    assert!(celebration.modifications.contains(
+        &crate::types::ability::ContinuousModification::RemoveAllSubtypes {
+            set: crate::types::card_type::SubtypeSet::Creature
+        }
+    ));
+}
+
+#[test]
+fn subtype_loss_rider_stays_with_its_own_conditional_static() {
+    let text = "Celebration — As long as two or more nonland permanents entered the battlefield under your control this turn, Goddric is a Dragon with base power and toughness 4/4, flying, and \"{R}: Dragons you control get +1/+0 until end of turn.\" (It loses all other creature types.)\nAs long as you control an artifact, Goddric is a Wizard with base power and toughness 2/2.";
+    let mut card = atomic(
+        "Goddric, Cloaked Reveler",
+        "Legendary Creature — Human Noble",
+        &["Creature"],
+        text,
+    );
+    card.subtypes = vec!["Human".to_string(), "Noble".to_string()];
+
+    let face = parse_face(&card);
+    let celebration_static = face
+        .static_abilities
+        .iter()
+        .find(|definition| {
+            definition.modifications.contains(
+                &crate::types::ability::ContinuousModification::AddSubtype {
+                    subtype: "Dragon".to_string(),
+                },
+            )
+        })
+        .expect("the conditional Celebration static must parse");
+    let wizard_static = face
+        .static_abilities
+        .iter()
+        .find(|definition| {
+            definition.modifications.contains(
+                &crate::types::ability::ContinuousModification::AddSubtype {
+                    subtype: "Wizard".to_string(),
+                },
+            )
+        })
+        .expect("the independent conditional Wizard static must parse");
+
+    assert!(celebration_static.modifications.contains(
+        &crate::types::ability::ContinuousModification::RemoveAllSubtypes {
+            set: crate::types::card_type::SubtypeSet::Creature,
+        },
+    ));
+    assert!(
+        !wizard_static.modifications.contains(
+            &crate::types::ability::ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature,
+            },
+        ),
+        "a rider on the Celebration static must not alter a separate conditional subtype grant"
+    );
+}
+
 /// Find an `Effect::Meld` anywhere in a face's abilities or trigger payloads,
 /// descending sub/else/mode branches so a gated meld sub-ability (the optional-cost
 /// Vanille form, where the meld lives under an "If you do" `PayCost`) is found.
@@ -62,6 +147,7 @@ fn find_meld(face: &CardFace) -> Option<(String, String, String)> {
             source,
             partner,
             result,
+            ..
         } = def.effect.as_ref()
         {
             return Some((source.clone(), partner.clone(), result.clone()));
@@ -94,6 +180,10 @@ const HANWEIR_TEXT: &str = "{T}: Add {R}.\n\
     {3}{R}{R}, {T}: If you both own and control this land and a creature named Hanweir Garrison, \
     exile them, then meld them into Hanweir, the Writhing Township. Activate only as a sorcery.";
 
+const URZA_TEXT: &str = "Artifact, instant, and sorcery spells you cast cost {1} less to cast.\n\
+    {7}: If you both own and control Urza, Lord Protector and an artifact named The Mightstone and \
+    Weakstone, exile them, then meld them into Urza, Planeswalker. Activate only as a sorcery.";
+
 /// The optional-cost triggered meld form (Vanille / Fang): the own/control gate
 /// is followed by a reflexive "you may pay {C}. If you do," additional cost before
 /// the meld sentinel. The gate models this (CR 118.12): the own/control gate
@@ -105,18 +195,91 @@ const VANILLE_TEXT: &str = "When Vanille enters, mill two cards, then return a p
     creature named Fang, Fearless l'Cie, you may pay {3}{B}{G}. If you do, exile them, then \
     meld them into Ragnarok, Divine Deliverance.";
 
+const MISHRA_TEXT: &str = "Whenever you attack, each opponent loses X life and you gain X life, \
+    where X is the number of attacking creatures. If Mishra, Claimed by Gix and a creature named \
+    Phyrexian Dragon Engine are attacking, and you both own and control them, exile them, then meld \
+    them into Mishra, Lost to Phyrexia. It enters tapped and attacking.";
+
+/// CR 608.2d + CR 701.42 + CR 508.4: Mishra's later conditional remains a
+/// resolution-time child after the unconditional life-swing, and carries the
+/// live attacking pair filters plus the typed tapped-and-attacking entry mode.
+#[test]
+fn mishra_later_conditional_meld_is_fully_lowered() {
+    use crate::types::ability::{
+        EntryAttackDestination, FilterProp, PermanentEntryMode, TargetFilter,
+    };
+
+    fn in_def(def: &crate::types::ability::AbilityDefinition) -> Option<&Effect> {
+        if matches!(def.effect.as_ref(), Effect::Meld { .. }) {
+            return Some(def.effect.as_ref());
+        }
+        def.sub_ability
+            .as_deref()
+            .and_then(in_def)
+            .or_else(|| def.else_ability.as_deref().and_then(in_def))
+            .or_else(|| def.mode_abilities.iter().find_map(in_def))
+    }
+
+    let mishra = parse_face(&atomic(
+        "Mishra, Claimed by Gix",
+        "Legendary Creature — Phyrexian Human Artificer",
+        &["Creature"],
+        MISHRA_TEXT,
+    ));
+    let meld = mishra
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .find_map(in_def)
+        .expect("Mishra's attack trigger contains a meld child");
+    let Effect::Meld {
+        source,
+        partner,
+        result,
+        source_filter,
+        partner_filter,
+        entry,
+    } = meld
+    else {
+        unreachable!("finder only returns Meld")
+    };
+    assert_eq!(source, "Mishra, Claimed by Gix");
+    assert_eq!(partner, "Phyrexian Dragon Engine");
+    assert_eq!(result, "Mishra, Lost to Phyrexia");
+    assert!(matches!(
+        entry,
+        PermanentEntryMode::TappedAndAttacking {
+            destination: EntryAttackDestination::AnyDefender
+        }
+    ));
+    assert!(matches!(source_filter, TargetFilter::And { .. }));
+    let TargetFilter::Typed(partner_typed) = partner_filter else {
+        panic!("partner filter must be one typed live-filter")
+    };
+    assert!(partner_typed
+        .properties
+        .iter()
+        .any(|prop| matches!(prop, FilterProp::Attacking { .. })));
+    assert!(partner_typed.properties.iter().any(|prop| matches!(
+        prop,
+        FilterProp::Owned {
+            controller: crate::types::ability::ControllerRef::You
+        }
+    )));
+    assert!(
+        !crate::game::coverage::card_face_has_unimplemented_parts(&mishra),
+        "Mishra's attack trigger must not retain an Unimplemented residual"
+    );
+}
+
 /// CR 701.42a: the triggered instigator (Gisela, creature partner) parses to an
 /// `Effect::Meld { source, partner, result }` carrying the correct source,
 /// partner, and result names. The own/control gate is hoisted to the trigger's
 /// intervening-if, so the bare residual "exile them, then meld them into R"
 /// parses cleanly.
 ///
-/// The activated / inline-gate form (Hanweir Battlements) is DEFERRED: its text
-/// leads with the inline "if you both own and control ..." gate, which the meld
-/// effect interception does not strip (stripping it would swallow the
-/// `Condition_If` — a coverage-honesty regression). It therefore yields NO
-/// `Effect::Meld` and remains Unimplemented until a real activated-ability
-/// condition node is added (follow-up).
+/// Activated inline gates lower through the same typed AbilityCondition seam as
+/// other resolution-time conditions; they are not intervening-if triggers.
 #[test]
 fn synthesize_or_parse_derives_self_partner_result() {
     let gisela = parse_face(&atomic(
@@ -136,11 +299,23 @@ fn synthesize_or_parse_derives_self_partner_result() {
         &["Land"],
         HANWEIR_TEXT,
     ));
-    assert!(
-        find_meld(&hanweir).is_none(),
-        "the activated/inline-gate form is deferred (must NOT swallow the inline \
-         Condition_If by emitting an Effect::Meld)"
-    );
+    let (source, partner, result) =
+        find_meld(&hanweir).expect("Hanweir's activated inline gate parses Meld");
+    assert_eq!(source, "Hanweir Battlements");
+    assert_eq!(partner, "Hanweir Garrison");
+    assert_eq!(result, "Hanweir, the Writhing Township");
+
+    let urza = parse_face(&atomic(
+        "Urza, Lord Protector",
+        "Legendary Creature — Human Artificer",
+        &["Creature"],
+        URZA_TEXT,
+    ));
+    let (source, partner, result) =
+        find_meld(&urza).expect("Urza's activated inline gate parses Meld");
+    assert_eq!(source, "Urza, Lord Protector");
+    assert_eq!(partner, "The Mightstone and Weakstone");
+    assert_eq!(result, "Urza, Planeswalker");
 }
 
 /// CR 118.12 + CR 701.42a: the optional-cost meld form (Vanille / Fang) carries a
@@ -217,10 +392,14 @@ fn triggered_vs_activated_shape() {
         HANWEIR_TEXT,
     ));
     assert!(
-        !hanweir.abilities.iter().any(|a| {
-            a.kind == AbilityKind::Activated && matches!(a.effect.as_ref(), Effect::Meld { .. })
+        hanweir.abilities.iter().any(|a| {
+            a.kind == AbilityKind::Activated
+                && (matches!(a.effect.as_ref(), Effect::Meld { .. })
+                    || a.sub_ability
+                        .as_ref()
+                        .is_some_and(|sub| matches!(sub.effect.as_ref(), Effect::Meld { .. })))
         }),
-        "the activated/inline-gate form is deferred — no activated Effect::Meld is emitted"
+        "the activated inline-gate form emits a conditioned Meld"
     );
 }
 

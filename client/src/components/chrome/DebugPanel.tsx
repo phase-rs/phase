@@ -3,20 +3,23 @@ import type { ChangeEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { GameState } from "../../adapter/types";
+import type { PersistedGameState } from "../../adapter/types";
+import { persistedGameStateView, supportsServerRewind } from "../../adapter/types";
 import { audioManager } from "../../audio/AudioManager";
 import { restoreGameState } from "../../game/dispatch";
 import { usePlayerId } from "../../hooks/usePlayerId";
 import { getSeatColor } from "../../hooks/useSeatColor";
 import {
   copyGameStateDebugSnapshot,
+  exportAuthoritativeGameStateZip,
   exportGameStateDebugZip,
 } from "../../services/gameStateExport";
 import { gameStateFromImportText, readImportFile } from "../../services/gameStateImport";
-import { useGameStore } from "../../stores/gameStore";
+import { canExportAuthoritativeState, useGameStore } from "../../stores/gameStore";
 import { getPlayerDisplayName } from "../../stores/multiplayerStore";
 import { useUiStore } from "../../stores/uiStore";
 import { DebugActions } from "./DebugActions";
+import { copyText } from "../../services/copyText";
 
 const SCROLL_THRESHOLD = 40; // px from bottom to count as "at bottom"
 
@@ -57,12 +60,23 @@ function patchConsole(): void {
 // Patch immediately so we capture logs from app startup
 patchConsole();
 
-export function DebugPanel() {
-  const { t } = useTranslation();
+export function DebugPanel({
+  aiDecisionDiagnosticsAvailable = false,
+}: {
+  aiDecisionDiagnosticsAvailable?: boolean;
+}) {
+  const { t } = useTranslation(["common", "game"]);
   const open = useUiStore((s) => s.debugPanelOpen);
   const turnCheckpoints = useGameStore((s) => s.turnCheckpoints);
+  const rewindTargets = useGameStore((s) => s.rewindTargets);
+  const adapter = useGameStore((s) => s.adapter);
   const gameState = useGameStore((s) => s.gameState);
   const gameMode = useGameStore((s) => s.gameMode);
+  const canExportAuthoritative = canExportAuthoritativeState(gameMode)
+    && adapter?.exportPersistenceState !== undefined;
+  // The transport, not the mode, decides whether a rollback request can be
+  // bound to an authenticated session — same idiom as `supportsMatchConcede`.
+  const rewindAdapter = supportsServerRewind(adapter) ? adapter : null;
   const localPlayerId = usePlayerId();
   const [importText, setImportText] = useState("");
   const [status, setStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
@@ -75,7 +89,6 @@ export function DebugPanel() {
     () => new Set<ConsoleLevel>(["log", "warn", "error"]),
   );
   const consoleContainerRef = useRef<HTMLDivElement>(null);
-  const consoleEndRef = useRef<HTMLDivElement>(null);
 
   // Smart scroll tracking: only auto-scroll if user is at the bottom
   const isAtBottomRef = useRef(true);
@@ -87,9 +100,17 @@ export function DebugPanel() {
   // can open the panel straight to "actions" via `openSandboxTools()`.
   const activeTab = useUiStore((s) => s.debugPanelTab);
   const setActiveTab = useUiStore((s) => s.setDebugPanelTab);
+  const aiDecisionCaptureEnabled = useUiStore((s) => s.aiDecisionCaptureEnabled);
+  const setAiDecisionCaptureEnabled = useUiStore((s) => s.setAiDecisionCaptureEnabled);
+  // Deliberately NOT `!hasRemoteHumans(gameMode)`, despite reading like a
+  // company question. This is the set of modes whose adapter implements
+  // `restoreState`: `WasmAdapter` does; `WebSocketAdapter.restoreState`
+  // throws, as does the P2P adapter. Widening it to `native-ai` would light
+  // up a button that throws. Server-authoritative restore for
+  // wire-authoritative sessions is a separate piece of work.
   const canRestoreCheckpoints = gameMode === "ai" || gameMode === "local";
 
-  const handleRestore = useCallback(async (state: GameState) => {
+  const handleRestore = useCallback(async (state: PersistedGameState) => {
     setStatus(null);
     const err = await restoreGameState(state, { preserveCheckpoints: true });
     if (err) {
@@ -153,15 +174,33 @@ export function DebugPanel() {
       .catch(() => setStatus({ type: "error", message: "Failed to copy" }));
   }, [gameState]);
 
-  const handleExportGameState = useCallback(() => {
-    if (!gameState) return;
-    exportGameStateDebugZip(gameState)
-      .then((filename) => setStatus({ type: "success", message: `Exported ${filename}` }))
+  const handleExportGameState = useCallback((kind: "authoritative" | "display") => {
+    const exported = kind === "authoritative"
+      ? adapter && exportAuthoritativeGameStateZip(adapter)
+      : gameState && exportGameStateDebugZip(gameState);
+    if (!exported) return;
+    exported
+      .then((result) => {
+        // Under the desktop shell the message waits for the real destination;
+        // a browser can only ever name the file it asked for.
+        if (result.kind === "failed") {
+          return setStatus({ type: "error", message: t("help.status.exportFailed") });
+        }
+        const message =
+          result.kind === "requested"
+            ? t("help.status.exportRequested", { filename: result.filename })
+            : result.path
+              ? t("help.status.exportedTo", { path: result.path })
+              : t("help.status.exported", { filename: result.filename });
+        setStatus({ type: "success", message });
+      })
       .catch((err: unknown) => {
         if (err instanceof DOMException && err.name === "AbortError") return;
-        setStatus({ type: "error", message: "Failed to export game state" });
+        console.error("Game state export failed:", err);
+        const detail = err instanceof Error ? err.message : String(err);
+        setStatus({ type: "error", message: `${t("help.status.exportFailed")} ${detail}` });
       });
-  }, [gameState]);
+  }, [adapter, gameState, t]);
 
   // Same destination as the top-left report flag. Close this panel first — it
   // renders at z-[9999], above the report dialog's z-50 overlay, so leaving it
@@ -171,11 +210,20 @@ export function DebugPanel() {
     useUiStore.getState().openCardReportDialog();
   }, []);
 
+  // Do not use `scrollIntoView()` here. The panel is rendered inside the
+  // paint-contained game board, so that method can also scroll the locked game
+  // viewport and leave the battlefield displaced after the panel closes.
+  const scrollConsoleToBottom = useCallback(() => {
+    const container = consoleContainerRef.current;
+    if (!container) return;
+    container.scrollTop = container.scrollHeight;
+  }, []);
+
   const scrollToBottom = useCallback(() => {
-    consoleEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    scrollConsoleToBottom();
     setNewMessageCount(0);
     setShowJumpToBottom(false);
-  }, []);
+  }, [scrollConsoleToBottom]);
 
   const visibleEntries = consoleSnapshot.filter((e) => enabledLevels.has(e.level));
 
@@ -202,9 +250,10 @@ export function DebugPanel() {
       setStatus({ type: "error", message: "No console entries to copy" });
       return;
     }
-    navigator.clipboard.writeText(formatEntries(visibleEntries))
-      .then(() => setStatus({ type: "success", message: `Copied ${visibleEntries.length} entries` }))
-      .catch(() => setStatus({ type: "error", message: "Failed to copy console" }));
+    void copyText(formatEntries(visibleEntries)).then((copied) =>
+      setStatus(copied
+        ? { type: "success", message: `Copied ${visibleEntries.length} entries` }
+        : { type: "error", message: "Failed to copy console" }));
   }, [visibleEntries, formatEntries]);
 
   const handleExportZip = useCallback(() => {
@@ -268,11 +317,11 @@ export function DebugPanel() {
     if (added <= 0) return;
 
     if (isAtBottomRef.current) {
-      consoleEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      scrollConsoleToBottom();
     } else {
       setNewMessageCount((prev) => prev + added);
     }
-  }, [visibleEntries]);
+  }, [scrollConsoleToBottom, visibleEntries]);
 
   if (!open) return null;
 
@@ -336,6 +385,21 @@ export function DebugPanel() {
         </button>
       </section>
 
+      <section className="border-b border-gray-700 px-3 py-2">
+        <label className="flex items-center justify-between gap-2 text-xs text-gray-300">
+          <span>{t("game:debugPanel.aiDecisionVisibility")}</span>
+          <input
+            type="checkbox"
+            disabled={!aiDecisionDiagnosticsAvailable}
+            checked={aiDecisionCaptureEnabled}
+            onChange={(event) => setAiDecisionCaptureEnabled(event.target.checked)}
+          />
+        </label>
+        {!aiDecisionDiagnosticsAvailable ? (
+          <p className="mt-1 text-xs text-gray-500">{t("game:debugPanel.aiDecisionUnavailable")}</p>
+        ) : null}
+      </section>
+
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
         {activeTab === "actions" ? (
           <section className="flex-1 overflow-y-auto px-3 py-2">
@@ -348,17 +412,67 @@ export function DebugPanel() {
           <h3 className="mb-1 font-mono text-xs font-bold uppercase tracking-wider text-gray-500">
             Turn Checkpoints
           </h3>
-          {!canRestoreCheckpoints ? (
-            <p className="text-xs text-gray-600">Restore disabled in multiplayer</p>
+          {rewindAdapter && rewindTargets.length > 0 ? (
+            /* Server-published boundaries. Labelled from the SNAPSHOT's own
+               fields — exactly like the local list below — so the label and
+               the state a player gets cannot disagree.
+
+               Gated on `length > 0` deliberately: an online table has the
+               capability but a permanently empty list (the server scopes turn
+               rewind to a `SingleUser` sidecar), so falling through leaves its
+               behaviour byte-identical to before rather than promising a list
+               that will never fill. */
+            <div className="flex flex-col gap-1">
+              {rewindTargets.map((target) => {
+                const activePlayerName = getPlayerDisplayName(target.active_player, localPlayerId);
+                const activePlayerColor = getSeatColor(
+                  target.active_player,
+                  gameState?.seat_order,
+                );
+                return (
+                  <button
+                    key={target.turn_number}
+                    onClick={() =>
+                      rewindAdapter.sendRequestTakeback({
+                        kind: "turn_start",
+                        turn_number: target.turn_number,
+                      })}
+                    className="flex min-h-11 items-center justify-between gap-2 rounded bg-gray-800 px-2 py-1 text-left text-xs transition-colors hover:bg-gray-700"
+                  >
+                    <span>Turn {target.turn_number}</span>
+                    <span
+                      className="max-w-36 truncate rounded px-1.5 py-0.5 font-semibold"
+                      style={{
+                        backgroundColor: `${activePlayerColor}22`,
+                        color: activePlayerColor,
+                      }}
+                    >
+                      {activePlayerName}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          ) : !canRestoreCheckpoints ? (
+            /* Misleading twice over before: desktop solo-vs-AI is not
+               multiplayer, and the real reason is a transport limit rather
+               than a mode policy. Names the actual cause and points at the
+               affordance that does work. Hardcoded rather than `t()`-wrapped:
+               `client/src/i18n/README.md` lists dev/debug strings under
+               "Never wrap with t()". */
+            <p className="text-xs text-gray-600">
+              Restore needs the in-browser engine. Use Takeback to undo your last action.
+            </p>
           ) : turnCheckpoints.length === 0 ? (
             <p className="text-xs text-gray-600">No checkpoints yet (saved at turn start)</p>
           ) : (
             <div className="flex flex-col gap-1">
               {turnCheckpoints.map((cp, i) => {
-                const activePlayerName = getPlayerDisplayName(cp.active_player, localPlayerId);
+                const view = persistedGameStateView(cp);
+                const activePlayerName = getPlayerDisplayName(view.active_player, localPlayerId);
                 const activePlayerColor = getSeatColor(
-                  cp.active_player,
-                  cp.seat_order ?? gameState?.seat_order,
+                  view.active_player,
+                  view.seat_order ?? gameState?.seat_order,
                 );
                 return (
                   <button
@@ -366,7 +480,7 @@ export function DebugPanel() {
                     onClick={() => handleRestore(cp)}
                     className="flex items-center justify-between gap-2 rounded bg-gray-800 px-2 py-1 text-left text-xs transition-colors hover:bg-gray-700"
                   >
-                    <span>Turn {cp.turn_number}</span>
+                    <span>Turn {view.turn_number}</span>
                     <span
                       className="max-w-36 truncate rounded px-1.5 py-0.5 font-semibold"
                       style={{
@@ -383,7 +497,10 @@ export function DebugPanel() {
           )}
         </section>
 
-        {/* Import — only available in AI/local modes */}
+        {/* Import — stays gated on `canRestoreCheckpoints`, deliberately.
+            Importing an arbitrary state over a wire session is a different
+            (and much larger) capability than rolling back to a state the
+            server itself published, and is out of scope here. */}
         {canRestoreCheckpoints && (
           <section className="border-b border-gray-800 px-3 py-2">
             <h3 className="mb-1 font-mono text-xs font-bold uppercase tracking-wider text-gray-500">
@@ -427,15 +544,22 @@ export function DebugPanel() {
             disabled={!gameState}
             className="w-full rounded bg-gray-800 px-2 py-1 text-xs transition-colors hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            Copy Current State to Clipboard
+            {t("debug.copyDisplaySnapshot")}
           </button>
           <button
-            onClick={handleExportGameState}
+            onClick={() => handleExportGameState("display")}
             disabled={!gameState}
             className="mt-1 w-full rounded bg-gray-800 px-2 py-1 text-xs transition-colors hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-40"
-            title="Download the current debug game state as minified JSON inside a compressed ZIP"
           >
-            Export Game State
+            {t("game:engineLost.exportClientSnapshot")}
+          </button>
+          <button
+            onClick={() => handleExportGameState("authoritative")}
+            disabled={!canExportAuthoritative}
+            className="mt-1 w-full rounded bg-gray-800 px-2 py-1 text-xs transition-colors hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-40"
+            title={t("debug.exportAuthoritativeTitle")}
+          >
+            {t("debug.exportAuthoritative")}
           </button>
         </section>
 
@@ -533,7 +657,6 @@ export function DebugPanel() {
                   {entry.message}
                 </div>
               ))}
-              <div ref={consoleEndRef} />
             </div>
             {showJumpToBottom && (
               <button

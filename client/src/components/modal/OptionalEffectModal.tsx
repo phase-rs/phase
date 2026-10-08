@@ -22,23 +22,33 @@ export function OptionalEffectModalContent({
 }: OptionalEffectModalProps) {
   const { t } = useTranslation("game");
   const [remember, setRemember] = useState(false);
+  const [sameCard, setSameCard] = useState(false);
 
   useEffect(() => {
     setRemember(false);
+    setSameCard(false);
   }, [waitingFor]);
 
   const sourceObj = objects?.[waitingFor.data.source_id];
   const sourceName = sourceObj?.name ?? t("optionalEffect.sourceFallback");
+  const decisionSubjectObj =
+    waitingFor.data.decision_subject_id == null
+      ? undefined
+      : objects?.[waitingFor.data.decision_subject_id];
+  const previewObj = decisionSubjectObj ?? sourceObj;
   const description = waitingFor.data.description as string | undefined;
   const canRemember =
     waitingFor.type === "OptionalEffectChoice" && waitingFor.data.may_trigger_key != null;
+  const sameCardAvailable =
+    waitingFor.type === "OptionalEffectChoice" &&
+    waitingFor.data.same_card_may_trigger_choice_available === true;
 
   return (
     <ChoiceModal
       title={t("optionalEffect.title", { name: sourceName })}
       subtitle={description}
-      previewCardName={sourceObj?.name}
-      previewObjectId={waitingFor.data.source_id}
+      previewCardName={previewObj?.name}
+      previewObjectId={previewObj?.id}
       options={[
         { id: "accept", label: t("optionalEffect.yes") },
         { id: "decline", label: t("optionalEffect.no") },
@@ -48,7 +58,10 @@ export function OptionalEffectModalContent({
         if (remember && canRemember) {
           dispatch({
             type: "DecideOptionalEffectAndRemember",
-            data: { choice: { type: accept ? "Accept" : "Decline" } },
+            data: {
+              choice: { type: accept ? "Accept" : "Decline" },
+              scope: { type: sameCard ? "SameCard" : "ExactInstance" },
+            },
           });
           return;
         }
@@ -56,15 +69,34 @@ export function OptionalEffectModalContent({
       }}
       footer={
         canRemember ? (
-          <label className="flex items-center gap-2 rounded-[10px] border border-white/8 bg-black/20 px-3 py-2 text-sm text-slate-200">
-            <input
-              type="checkbox"
-              checked={remember}
-              onChange={(event) => setRemember(event.currentTarget.checked)}
-              className="h-4 w-4 accent-cyan-400"
-            />
-            <span>{t("optionalEffect.dontAskAgain")}</span>
-          </label>
+          <div className="space-y-2 rounded-[10px] border border-white/8 bg-black/20 px-3 py-2 text-sm text-slate-200">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={remember}
+                onChange={(event) => {
+                  setRemember(event.currentTarget.checked);
+                  if (!event.currentTarget.checked) setSameCard(false);
+                }}
+                className="h-4 w-4 accent-cyan-400"
+              />
+              <span>{t("optionalEffect.dontAskAgain")}</span>
+            </label>
+            {sameCardAvailable && (
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={sameCard}
+                  onChange={(event) => {
+                    setSameCard(event.currentTarget.checked);
+                    if (event.currentTarget.checked) setRemember(true);
+                  }}
+                  className="h-4 w-4 accent-cyan-400"
+                />
+                <span>{t("optionalEffect.dontAskAgainForSameCard")}</span>
+              </label>
+            )}
+          </div>
         ) : undefined
       }
     />

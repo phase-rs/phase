@@ -6,11 +6,153 @@
 //! the immutable **pre-mutation** `GameState`, so threshold validation and commit
 //! never re-read live power, toughness, or statics after preparation.
 
-use crate::game::engine::EngineError;
+use crate::game::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use crate::game::static_abilities::object_crew_power_contribution;
+use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use crate::types::keywords::Keyword;
 use crate::types::statics::CrewAction;
+
+/// An engine-authored Crew announcement for the Priority preflight. The vehicle
+/// identity remains provider-owned until the Priority facade rebuilds the
+/// reducer primer.
+pub(in crate::game) struct PriorityCrewAnnouncement {
+    vehicle_id: ObjectId,
+}
+
+impl PriorityCrewAnnouncement {
+    fn new(vehicle_id: ObjectId) -> Self {
+        Self { vehicle_id }
+    }
+
+    pub(in crate::game) fn vehicle_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.vehicle_id
+    }
+}
+
+/// An engine-authored Station announcement for the Priority preflight.
+pub(in crate::game) struct PriorityStationAnnouncement {
+    spacecraft_id: ObjectId,
+}
+
+impl PriorityStationAnnouncement {
+    fn new(spacecraft_id: ObjectId) -> Self {
+        Self { spacecraft_id }
+    }
+
+    pub(in crate::game) fn spacecraft_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.spacecraft_id
+    }
+}
+
+/// An engine-authored Saddle announcement for the Priority preflight.
+pub(in crate::game) struct PrioritySaddleAnnouncement {
+    mount_id: ObjectId,
+}
+
+impl PrioritySaddleAnnouncement {
+    fn new(mount_id: ObjectId) -> Self {
+        Self { mount_id }
+    }
+
+    pub(in crate::game) fn mount_id(&self, _access: &PriorityAnnouncementFacadeAccess) -> ObjectId {
+        self.mount_id
+    }
+}
+
+/// The provider's complete, family-partitioned tap-payment announcements.
+pub(in crate::game) struct PriorityTapPaymentAnnouncements {
+    crew: Vec<PriorityCrewAnnouncement>,
+    station: Vec<PriorityStationAnnouncement>,
+    saddle: Vec<PrioritySaddleAnnouncement>,
+}
+
+impl PriorityTapPaymentAnnouncements {
+    pub(in crate::game) fn into_partitioned(
+        self,
+    ) -> (
+        Vec<PriorityCrewAnnouncement>,
+        Vec<PriorityStationAnnouncement>,
+        Vec<PrioritySaddleAnnouncement>,
+    ) {
+        (self.crew, self.station, self.saddle)
+    }
+}
+
+/// Enumerates the tap-payment families that have a possible non-source payer.
+/// The normal reducers remain authoritative for chosen payer legality and for
+/// payment, including all threshold validation.
+pub(in crate::game) fn priority_tap_payment_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> PriorityTapPaymentAnnouncements {
+    let controller = principal.semantic_holder();
+    let can_tap_creature = |object_id: ObjectId| {
+        state.objects.get(&object_id).is_some_and(|object| {
+            object.controller == controller
+                && !object.tapped
+                && object.card_types.core_types.contains(&CoreType::Creature)
+                && !super::restrictions::object_cant_tap(state, object_id)
+        })
+    };
+    let sorcery_speed = super::restrictions::is_sorcery_speed_window(state, controller);
+    let mut crew = Vec::new();
+    let mut station = Vec::new();
+    let mut saddle = Vec::new();
+
+    for &object_id in &state.battlefield {
+        let Some(object) = state.objects.get(&object_id) else {
+            continue;
+        };
+        if object.controller != controller {
+            continue;
+        }
+        let has_other_tappable = state
+            .battlefield
+            .iter()
+            .copied()
+            .any(|candidate_id| candidate_id != object_id && can_tap_creature(candidate_id));
+        if !has_other_tappable {
+            continue;
+        }
+        if object
+            .keywords
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::Crew { .. }))
+        {
+            crew.push(PriorityCrewAnnouncement::new(object_id));
+        }
+        if sorcery_speed
+            && object
+                .keywords
+                .iter()
+                .any(|keyword| matches!(keyword, Keyword::Station))
+        {
+            station.push(PriorityStationAnnouncement::new(object_id));
+        }
+        if sorcery_speed
+            && object
+                .keywords
+                .iter()
+                .any(|keyword| matches!(keyword, Keyword::Saddle(_)))
+        {
+            saddle.push(PrioritySaddleAnnouncement::new(object_id));
+        }
+    }
+
+    PriorityTapPaymentAnnouncements {
+        crew,
+        station,
+        saddle,
+    }
+}
 
 /// CR 702.122a: a prepared, pre-validated Crew/Saddle/Station tap payment. Holds
 /// the payer set keyed by `ObjectIncarnationRef` so a payer that changes zones

@@ -1,0 +1,58 @@
+{{- if .Values.metrics.enabled }}
+{{- /* Gated on the CRD rather than on a value: installing a monitor without
+     prometheus-operator makes `helm install` fail on an unknown kind, and the
+     operator is usually somebody else's release. `metrics.annotations` is the
+     fallback discovery path when these CRDs are absent.
+
+     Each kind is tested by resource, not by API group. A partial operator
+     install can register one and not the other, and a group-level test then
+     renders the missing kind anyway — failing at apply on something the chart
+     could have known was unavailable. */}}
+{{- $fullname := include "phase-server.fullname" . }}
+{{- $podMonitor := include "phase-server.podMonitorRenders" . }}
+{{- $serviceMonitor := include "phase-server.serviceMonitorRenders" . }}
+{{- if $podMonitor }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "phase-server.labels" . | nindent 4 }}
+    {{- with .Values.metrics.podMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  # Per-pod targets, so every replica reports its own occupancy. A Service-level
+  # scrape would load-balance across pods and make the per-ordinal gauges
+  # meaningless.
+  selector:
+    matchLabels:
+      {{- include "phase-server.selectorLabels" . | nindent 6 }}
+  podMetricsEndpoints:
+    - port: metrics
+      path: {{ .Values.metrics.path }}
+      interval: {{ .Values.metrics.interval }}
+{{- end }}
+{{- if $serviceMonitor }}
+{{- if $podMonitor }}
+---
+{{- end }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "phase-server.labels" . | nindent 4 }}
+    {{- with .Values.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "phase-server.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: metrics
+      path: {{ .Values.metrics.path }}
+      interval: {{ .Values.metrics.interval }}
+{{- end }}
+{{- end }}

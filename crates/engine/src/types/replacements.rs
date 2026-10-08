@@ -57,6 +57,9 @@ pub enum ReplacementEvent {
     LifeReduced,
     /// CR 614.1a: Replaces attaching an Aura, Equipment, or Fortification.
     Attached,
+    /// CR 701.23a + CR 614.1: Replaces what happens to one card found during
+    /// a search. Each found card is a separate event for CR 616.1 ordering.
+    SearchFound,
 
     // --- Placeholder variants (recognized, no active logic yet) ---
     /// CR 614.11: Replaces drawing multiple cards at once.
@@ -67,6 +70,13 @@ pub enum ReplacementEvent {
     Scry,
     /// CR 614.1a + CR 705.1: Replaces an individual coin flip.
     CoinFlip,
+    /// CR 706.1 + CR 614.1a: Replaces a die-roll instruction. Count-modifying
+    /// effects ("if you would roll one or more dice, instead roll that many
+    /// dice plus one and ignore the lowest roll" — Barbarian Class, Pixie
+    /// Guide, Wyll) raise the instruction's die count before the RNG runs; the
+    /// paired [`crate::types::ability::DieRollIgnoreRule`] then removes the
+    /// extra rolls under CR 706.6.
+    RollDice,
     /// CR 614.1a: Replaces a transform event.
     Transform,
     /// CR 614.1a: Replaces an explore event.
@@ -131,10 +141,12 @@ impl fmt::Display for ReplacementEvent {
             ReplacementEvent::PayLife => write!(f, "PayLife"),
             ReplacementEvent::LifeReduced => write!(f, "LifeReduced"),
             ReplacementEvent::Attached => write!(f, "Attached"),
+            ReplacementEvent::SearchFound => write!(f, "SearchFound"),
             ReplacementEvent::DrawCards => write!(f, "DrawCards"),
             ReplacementEvent::ProduceMana => write!(f, "ProduceMana"),
             ReplacementEvent::Scry => write!(f, "Scry"),
             ReplacementEvent::CoinFlip => write!(f, "CoinFlip"),
+            ReplacementEvent::RollDice => write!(f, "RollDice"),
             ReplacementEvent::Transform => write!(f, "Transform"),
             ReplacementEvent::Explore => write!(f, "Explore"),
             ReplacementEvent::Connive => write!(f, "Connive"),
@@ -181,10 +193,12 @@ impl FromStr for ReplacementEvent {
             "PayLife" => ReplacementEvent::PayLife,
             "LifeReduced" => ReplacementEvent::LifeReduced,
             "Attached" => ReplacementEvent::Attached,
+            "SearchFound" => ReplacementEvent::SearchFound,
             "DrawCards" => ReplacementEvent::DrawCards,
             "ProduceMana" => ReplacementEvent::ProduceMana,
             "Scry" => ReplacementEvent::Scry,
             "CoinFlip" => ReplacementEvent::CoinFlip,
+            "RollDice" => ReplacementEvent::RollDice,
             "Transform" => ReplacementEvent::Transform,
             "Explore" => ReplacementEvent::Explore,
             "Connive" => ReplacementEvent::Connive,
@@ -268,6 +282,7 @@ mod tests {
             ReplacementEvent::CreateToken,
             ReplacementEvent::DealtDamage,
             ReplacementEvent::CoinFlip,
+            ReplacementEvent::RollDice,
             ReplacementEvent::Other("Custom".to_string()),
         ];
         for event in events {

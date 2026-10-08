@@ -9,25 +9,196 @@
  * Requirements: P2P-01, P2P-03, P2P-05, P2P-06, P2P-07.
  */
 
-import type Peer from "peerjs";
-import type { DataConnection } from "peerjs";
-
-import { DraftAdapter } from "./draft-adapter";
-import type { DraftPlayerView, MultiplayerSeatDescriptor, PairingView, PoolInput, SeatPublicView } from "./draft-adapter";
-import type { PodPolicy, TournamentFormat } from "./draft-adapter";
+import { DraftAdapter, EMPTY_DRAFT_POOL_GROUPS, isSharedStackDistribution } from "./draft-adapter";
+import type { DraftCardInstance, DraftPlayerView, MultiplayerSeatDescriptor, PairingView, PoolInput, SeatPublicView, SharedStackPileDecision } from "./draft-adapter";
+import type { DraftKind, DraftProcedure, PackDistribution, PodPolicy, TournamentFormat } from "./draft-adapter";
 import {
   createDraftPeerSession,
   type DraftPeerSession,
 } from "../network/draftPeerSession";
-import { DRAFT_PROTOCOL_VERSION, DraftPauseReason } from "../network/draftProtocol";
-import type { DraftDeckPayload, DraftMatchDeckPayload, DraftMatchLaunch, DraftP2PMessage } from "../network/draftProtocol";
-import type { MatchConfig, MatchScore } from "./types";
+import { parseRoomCode } from "../network/connection";
+import type { TransportConnection, TransportPeer } from "../network/transport";
+import {
+  deckSubmissionFingerprint,
+  DRAFT_PROTOCOL_VERSION,
+  DraftPauseReason,
+} from "../network/draftProtocol";
+import type {
+  CommanderSeatDecks,
+  DraftCommanderLaunch,
+  DraftDeckPayload,
+  DraftMatchBinding,
+  DraftMatchDeckPayload,
+  DraftMatchLaunch,
+  DraftMatchSettlement,
+  DraftP2PMessage,
+  DraftReconnectRejectionKind,
+} from "../network/draftProtocol";
+import type { DeckCardCount, MatchConfig, MatchScore } from "./types";
 import {
   saveDraftHostSession,
   clearDraftHostSession,
   type PersistedDraftHostSession,
 } from "../services/draftPersistence";
+import {
+  MAX_MATERIALIZED_VIRTUAL_BASICS,
+  validateWorkspaceState,
+  type DraftWorkspaceState,
+} from "../components/draft/workspace/types";
+import { reconcileWorkspaceState } from "../components/draft/workspace/workspacePlacement";
+import { projectWorkspaceMainDeck } from "../components/draft/workspace/workspaceProjection";
+import { assertNever } from "../utils/assertNever";
+
+function matchConfigForView(view: DraftPlayerView): MatchConfig {
+  return view.match_config;
+}
+import {
+  commandAcknowledgement,
+  draftIntergameDigest,
+  IntergameCommandController,
+  matchesCommandAcknowledgement,
+  type DraftIntergameCommand,
+  type DraftIntergameCommandAck,
+} from "../services/intergameCommandLedger";
 import { assignAvatarForSeat } from "../services/playerAvatars";
+
+/**
+ * Prepare a host snapshot for the publicly retrievable P2P backup endpoint.
+ *
+ * IndexedDB keeps the full host snapshot and is the only durable location from
+ * which a host can resume. The HTTP backup is reachable by a derivable host
+ * peer id, so it is a public projection, never an authority. The server
+ * repeats this redaction at its trust boundary.
+ *
+ * That includes a shared-stack draft's `shared_stack`, whose `main_stack` is
+ * the draw order every pile is derived from: publishing it would solve the only
+ * decision that format contains. The engine deliberately refuses to restore a
+ * drafting shared-stack snapshot that has had it removed, so the public backup
+ * is non-resumable for a live shared-stack pod by design — IndexedDB stays the
+ * resumable copy.
+ */
+function sanitizePublicBackup(
+  snapshot: PersistedDraftHostSession,
+): PersistedDraftHostSession {
+  // Never mutate the IndexedDB authority while preparing an upload. JSON is
+  // appropriate here because PersistedDraftHostSession is deliberately a JSON
+  // wire shape; unlike a shallow spread it also isolates nested poolInput and
+  // match launch records.
+  const publicSnapshot = JSON.parse(JSON.stringify(snapshot)) as PersistedDraftHostSession;
+  const rawPublicSnapshot = publicSnapshot as unknown as Record<string, unknown>;
+  delete rawPublicSnapshot.booster_pack_pool;
+
+  redactPoolInputCubeList(publicSnapshot.poolInput);
+  redactMatchLaunchPools(rawPublicSnapshot.matchLaunches);
+  redactIntergameCommandLaunchPools(rawPublicSnapshot.intergameCommands);
+  redactDraftSessionPoolAndChaos(rawPublicSnapshot);
+  return publicSnapshot;
+}
+
+function redactPoolInputCubeList(poolInput: unknown): void {
+  if (!isJsonRecord(poolInput) || !isJsonRecord(poolInput.data)) return;
+  delete poolInput.data.cube_list_text;
+}
+
+function redactMatchLaunchPools(matchLaunches: unknown): void {
+  if (!Array.isArray(matchLaunches)) return;
+  for (const matchLaunch of matchLaunches) {
+    if (!isJsonRecord(matchLaunch) || !isJsonRecord(matchLaunch.launch)) continue;
+    if (!isJsonRecord(matchLaunch.launch.deckPayload)) continue;
+    delete matchLaunch.launch.deckPayload.booster_pack_pool;
+  }
+}
+
+/** Held Bo3 commands retain their original launch payload for recovery. That
+ * payload is just as public in an HTTP backup as an ordinary match launch. */
+function redactIntergameCommandLaunchPools(intergameCommands: unknown): void {
+  if (!Array.isArray(intergameCommands)) return;
+  for (const command of intergameCommands) {
+    if (!isJsonRecord(command) || !isJsonRecord(command.launchPayload)) continue;
+    if (!isJsonRecord(command.launchPayload.deckPayload)) continue;
+    delete command.launchPayload.deckPayload.booster_pack_pool;
+  }
+}
+
+function redactDraftSessionPoolAndChaos(snapshot: Record<string, unknown>): void {
+  const draftSessionJson = snapshot.draftSessionJson;
+  if (typeof draftSessionJson === "string") {
+    try {
+      const session: unknown = JSON.parse(draftSessionJson);
+      if (!isJsonRecord(session)) {
+        delete snapshot.draftSessionJson;
+        return;
+      }
+      redactDraftSessionObject(session);
+      snapshot.draftSessionJson = JSON.stringify(session);
+    } catch {
+      // An opaque string cannot be safely redacted, so it cannot appear in the
+      // public backup projection.
+      delete snapshot.draftSessionJson;
+    }
+  } else if (isJsonRecord(draftSessionJson)) {
+    redactDraftSessionObject(draftSessionJson);
+  } else if (draftSessionJson !== null) {
+    delete snapshot.draftSessionJson;
+  }
+}
+
+function redactDraftSessionObject(session: Record<string, unknown>): void {
+  delete session.booster_pack_pool;
+  delete session.shared_stack;
+  // EVERY SEAT'S DRAFTED CARDS, and the booster a seat is mid-pick on. A pool is
+  // private in every draft kind, and under a shared stack it is the format's
+  // central secret — guessing the opponent's pool is most of what a Winston
+  // player is doing. The backup row is reachable by anyone who can derive the
+  // host peer id, which a guest in the pod can, so this must not travel.
+  //
+  // Mirrors `NESTED_DRAFT_SECRET_KEYS` in `server-core::p2p_backup_guard`, which
+  // strips the same fields again on store and on echo. Two redactors rather than
+  // one because this side is what a host uploads and that side is what any
+  // caller reads back; neither is allowed to rely on the other having run.
+  delete session.pools;
+  delete session.current_pack;
+  // THE BOOSTERS A SEAT HAS NOT OPENED YET. Not a shared-stack field — a
+  // pick-and-pass pod's undealt packs are just as private, and knowing them is
+  // knowing every card still to come. Listed last but redacted on the same
+  // terms: the mirror above is only true if it is complete.
+  delete session.packs_by_seat;
+  if (isJsonRecord(session.config)) {
+    // THE SEED IS THE DRAW ORDER. `main_stack`'s order "is the `rng_seed`'s
+    // secret" (`draft_core::types`), so shipping the seed while stripping the
+    // stack hands back exactly what stripping the stack protected: every pile,
+    // predictable. Zeroed rather than deleted, to match the Rust guard's
+    // `config.insert("rng_seed", 0)` — the public copy stays shaped like a
+    // config and stays deliberately non-resumable.
+    session.config.rng_seed = 0;
+    redactChaosAssignmentsFromSource(session.config.source);
+  }
+}
+
+function redactChaosAssignmentsFromSource(source: unknown): boolean {
+  if (!isJsonRecord(source)) return false;
+
+  let redacted = false;
+  const redactSetLayout = (layout: unknown): void => {
+    if (!isJsonRecord(layout) || !("candidate_codes" in layout) || !("assignments" in layout)) {
+      return;
+    }
+    delete layout.assignments;
+    redacted = true;
+  };
+
+  // `DraftSource`'s canonical serde output is adjacent-tagged. The older
+  // externally tagged form is accepted too so a legacy transport shape cannot
+  // bypass this client defense before the server applies its matching redaction.
+  redactSetLayout(source.Set);
+  if (source.type === "Set") redactSetLayout(source.data);
+  redactSetLayout(source);
+  return redacted;
+}
+
+function isJsonRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -40,6 +211,12 @@ interface Bo3MatchState {
   loserSeat: number | null;
   gameNumber: number;
   score: MatchScore;
+  decks: Array<{ seat: number; main: DeckCardCount[]; sideboard: DeckCardCount[] }>;
+}
+
+interface GuestLandSuggestionReservation {
+  readonly session: DraftPeerSession;
+  readonly requestId: string;
 }
 
 export type DraftHostEvent =
@@ -50,7 +227,8 @@ export type DraftHostEvent =
   | { type: "lobbyUpdate"; seats: SeatPublicView[]; joined: number; total: number }
   | { type: "lobbyFull" }
   | { type: "draftStarted"; view: DraftPlayerView }
-  | { type: "pickReceived"; seatIndex: number; cardInstanceId: string }
+  /** `cardInstanceIds` = the cards this seat drafted in this step, on both the normal and the draft-effect path. */
+  | { type: "pickReceived"; seatIndex: number; cardInstanceIds: string[] }
   | { type: "roundComplete" }
   | { type: "draftComplete" }
   | { type: "deckSubmitted"; seatIndex: number }
@@ -61,9 +239,29 @@ export type DraftHostEvent =
   | { type: "viewUpdated"; view: DraftPlayerView }
   | { type: "pairingsGenerated"; round: number; pairings: PairingView[] }
   | { type: "matchStart"; launch: DraftMatchLaunch }
+  /**
+   * CR 903.13a: a completed Commander pod's launch into ONE shared N-seat game.
+   * The host is always pod seat 0, so this is how the HOST receives its own
+   * launch — `sendCommanderLaunches` includes the local seat in the recipient
+   * set and `sendToSeat`'s seat-0 arm turns that send into this event.
+   */
+  | { type: "commanderLaunch"; launch: DraftCommanderLaunch }
   | { type: "matchResultReceived"; matchId: string; winnerSeat: number | null }
-  | { type: "roundAdvanced"; newRound: number }
+  | { type: "roundAdvanced" }
   | { type: "timerExpired" }
+  /**
+   * The pick clock's current reading, for the HOST'S OWN store.
+   *
+   * The clock lives entirely on the host: `draft-core` publishes
+   * `timer_remaining_ms: None` on every view, and the countdown reaches guests
+   * only through the `draft_timer_sync` broadcast — which by construction does
+   * not reach the host. So without this the one player who owns the clock is
+   * the one player who cannot see it, in every draft kind. That is tolerable
+   * where a timeout picks a card out of a pack the player is already staring
+   * at; it is not tolerable under a shared stack, where expiry TAKES THE PILE,
+   * and the host is half the pod in a two-seat game and all of it against bots.
+   */
+  | { type: "timerTick"; remainingMs: number }
   | {
       type: "bo3SideboardPrompt";
       matchId: string;
@@ -82,12 +280,22 @@ export type DraftHostEvent =
   | { type: "bo3GameStart"; matchId: string; gameNumber: number; firstPlayerSeat: number }
   | { type: "bo3SideboardPromptSent"; matchId: string }
   | { type: "bo3BothSideboardsSubmitted"; matchId: string }
-  | { type: "bo3GameStarted"; matchId: string; gameNumber: number };
+  | { type: "bo3GameStarted"; matchId: string; gameNumber: number }
+  | { type: "bo3AuthorizedCommand"; command: DraftIntergameCommand; acknowledgement: DraftIntergameCommandAck };
 
 type DraftHostEventListener = (event: DraftHostEvent) => void;
 
 /** Default grace window for guest reconnect during draft. */
 const DRAFT_GRACE_PERIOD_MS = 60_000;
+
+/**
+ * Booster size the lobby view advertises before any pack is opened. A POOL
+ * property, not a `DraftProcedure` axis — the host has no session to read one
+ * from, and the authoritative view replaces it the moment the draft starts.
+ * Named so `cards_per_pack` and the `pack_sizes` array it fills cannot drift
+ * apart. See `buildLobbyView`.
+ */
+const LOBBY_PLACEHOLDER_CARDS_PER_PACK = 14;
 
 /** Arena-style escalating pick timer durations (ms). Index = pick number (0-based). */
 const PICK_TIMER_DURATIONS_MS: readonly number[] = [
@@ -99,6 +307,64 @@ function pickTimerDurationMs(pickNumber: number): number {
   return PICK_TIMER_DURATIONS_MS[Math.min(pickNumber, PICK_TIMER_DURATIONS_MS.length - 1)];
 }
 
+/** A host seed controls both card collation and private Chaos assignments. */
+function hostDraftSeed(): number {
+  const values = new Uint32Array(1);
+  crypto.getRandomValues(values);
+  return values[0]!;
+}
+
+/**
+ * A public draft code, drawn from its OWN randomness.
+ *
+ * DELIBERATELY NOT DERIVED FROM `hostDraftSeed()`. The code is public in the
+ * strongest sense available here: it keys the backup row in the URL
+ * (`/p2p-draft-backup/<code>`) and travels inside the backup body. The host
+ * seed is the opposite -- it orders the shared stack, and `main_stack`'s order
+ * "is the `rng_seed`'s secret" (`draft_core::types`), which is why
+ * `redactDraftSessionObject` zeroes `config.rng_seed` out of that very payload.
+ *
+ * A code built as `seed.toString(16)` handed that secret straight back in the
+ * row's own key: `parseInt(code.slice(6), 16)` recovers the seed, and the seed
+ * regenerates every pile. Zeroing the field while publishing a reversible
+ * encoding of it protected nothing. Two independent draws, so the public
+ * identifier carries no information about the private one.
+ */
+function hostDraftCode(): string {
+  const values = new Uint32Array(1);
+  crypto.getRandomValues(values);
+  return `draft-${values[0]!.toString(16).padStart(8, "0")}`;
+}
+
+/**
+ * `count` distinct random cards from `pack`, or the whole pack if it is shorter.
+ * Distinctness is required: `apply_pick_inner` refuses a repeated id with
+ * `DuplicatePickCardId`.
+ *
+ * D-02: random selection in TypeScript is a display-layer violation and is
+ * PRE-EXISTING here. This generalises it from one card to N so a Commander pod
+ * does not deadlock; it does not fix it.
+ *
+ * `count` comes from `DraftPlayerView.required_pick_count`, a REQUIRED field that
+ * production always publishes. The shape guard below exists because
+ * `slice(0, count)` with an `undefined` count returns the WHOLE pack: a future
+ * hand-built stub view that omits the field would silently submit every card in
+ * the pack instead of failing loudly. It gates on the SHAPE only — a legitimate
+ * `0` (an emptied pack) still returns `[]`, which the engine refuses on its own
+ * terms with `WrongPickCardCount`.
+ */
+function randomDistinctCards(pack: DraftCardInstance[], count: number): string[] {
+  if (!Number.isInteger(count)) {
+    throw new Error(`randomDistinctCards: required_pick_count must be an integer, got ${count}`);
+  }
+  const indices = pack.map((_, i) => i);
+  for (let i = indices.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [indices[i], indices[j]] = [indices[j], indices[i]];
+  }
+  return indices.slice(0, count).map((i) => pack[i].instance_id);
+}
+
 interface PickOptions {
   acknowledge?: boolean;
   emit?: boolean;
@@ -108,11 +374,88 @@ interface PickOptions {
 
 interface ExportedDraftSession {
   pools?: Array<Array<{ name: string }>>;
-  submitted_decks?: Record<string, { seat: number; main_deck: string[] }>;
+  submitted_decks?: Record<
+    string,
+    {
+      seat: number;
+      main_deck: string[];
+      /**
+       * CR 903.3: the seat's designated commander(s). Optional because the Rust
+       * field carries `#[serde(default)]` and a session exported before the
+       * plural-submission wire landed has none.
+       */
+      commanders?: string[];
+    }
+  >;
 }
 
-function deckPayload(mainDeck: string[], sideboard: string[]): DraftDeckPayload {
-  return { main_deck: mainDeck, sideboard, commander: [] };
+/**
+ * The single constructor of a `DraftDeckPayload`.
+ *
+ * `commander` defaults to `[]`, so every existing caller is byte-identical in
+ * behaviour and the four CR 905.1a kinds are untouched.
+ */
+function deckPayload(
+  mainDeck: string[],
+  sideboard: string[],
+  commander: string[] = [],
+): DraftDeckPayload {
+  return { main_deck: mainDeck, sideboard, commander };
+}
+
+function deckCardCounts(cards: readonly string[]): DeckCardCount[] {
+  const counts = new Map<string, number>();
+  for (const card of cards) counts.set(card, (counts.get(card) ?? 0) + 1);
+  return [...counts].map(([name, count]) => ({ name, count }));
+}
+
+function deckSubmission(deck: DraftDeckPayload): { main: DeckCardCount[]; sideboard: DeckCardCount[] } {
+  return {
+    main: deckCardCounts(deck.main_deck),
+    sideboard: deckCardCounts(deck.sideboard),
+  };
+}
+
+function workspaceStatesEqual(
+  left: DraftWorkspaceState,
+  right: DraftWorkspaceState,
+): boolean {
+  const leftPlacements = Object.entries(left.placements);
+  const rightPlacements = Object.entries(right.placements);
+  return left.schemaVersion === right.schemaVersion
+    && leftPlacements.length === rightPlacements.length
+    && leftPlacements.every(([instanceId, placement]) => {
+      const candidate = right.placements[instanceId];
+      return candidate !== undefined
+        && candidate.zone === placement.zone
+        && candidate.row === placement.row
+        && candidate.column === placement.column
+        && candidate.order === placement.order;
+    })
+    && left.virtualBasics.length === right.virtualBasics.length
+    && left.virtualBasics.every((basic, index) => {
+      const candidate = right.virtualBasics[index];
+      return candidate.instanceId === basic.instanceId && candidate.name === basic.name;
+    });
+}
+
+/** Sideboarding may move cards between zones, but cannot change a player's pool. */
+function preservesDeckPool(
+  deck: DraftDeckPayload,
+  main: readonly DeckCardCount[],
+  sideboard: readonly DeckCardCount[],
+): boolean {
+  const submitted = new Map<string, number>();
+  for (const card of [...main, ...sideboard]) {
+    if (!Number.isSafeInteger(card.count) || card.count < 0) return false;
+    submitted.set(card.name, (submitted.get(card.name) ?? 0) + card.count);
+  }
+  const original = new Map<string, number>();
+  for (const name of [...deck.main_deck, ...deck.sideboard]) {
+    original.set(name, (original.get(name) ?? 0) + 1);
+  }
+  return submitted.size === original.size
+    && [...submitted].every(([name, count]) => original.get(name) === count);
 }
 
 function hashStringToSeed(value: string): number {
@@ -147,16 +490,30 @@ function sideboardFromPool(
 
 export class P2PDraftHost {
   private adapter = new DraftAdapter();
+
+  /**
+   * The engine-owned per-kind axes, fetched once in `initialize()`. Snapshotted
+   * rather than read live, and correctly so: `procedure()` is a pure function
+   * of the kind, and the kind is immutable for this host's lifetime, so a live
+   * read could not differ.
+   */
+  private procedure: DraftProcedure | null = null;
   private listeners: DraftHostEventListener[] = [];
 
   private guestSessions = new Map<number, DraftPeerSession>();
   private seatTokens = new Map<number, string>();
   private seatNames = new Map<number, string>();
   private kickedTokens = new Set<string>();
+  /**
+   * The absolute end of a guest's current reconnect episode. It survives a
+   * successful tentative reconnect so a later drop cannot grant a new window.
+   */
+  private reconnectDeadlines = new Map<number, number>();
   private disconnectedSeats = new Map<
     number,
-    { disconnectedAt: number; timer: ReturnType<typeof setTimeout> | null }
+    { deadlineAt: number; timer: ReturnType<typeof setTimeout> | null }
   >();
+  private expiredDisconnectedSeats = new Set<number>();
   private picksThisRound = new Set<number>();
 
   private draftStarted = false;
@@ -164,27 +521,76 @@ export class P2PDraftHost {
   private draftSeed: number | null = null;
   private activePodSize: number;
   private hostConnectionUnsub: (() => void) | null = null;
+  /** Explicit host intent, independent from transient disconnected seats. */
+  private manualPause = false;
   private paused = false;
   private timerInterval: ReturnType<typeof setInterval> | null = null;
   private timerRemainingMs = 0;
   private timerEndAt = 0;
   private timerContext: "pick" | "sideboard" | "playdraw" | null = null;
+  private timerTargetMatchId: string | null = null;
+  private frozenTimer: { context: "pick" | "sideboard" | "playdraw"; remainingMs: number; matchId: string | null } | null = null;
   private bo3State = new Map<string, Bo3MatchState>();
+  /** Registered decks are captured at match launch and become the first
+   * authority-owned default for an unchanged sideboard submission. */
+  private matchDecks = new Map<string, Map<number, DraftDeckPayload>>();
+  /** Full launch records let the host mint a timeout command under the same
+   * immutable launch digest the participant originally received. */
+  private matchLaunches = new Map<string, Map<number, DraftMatchLaunch>>();
+  /** Private issuer for the durable Pending → Authorized → Executing → Receipted ledger. */
+  private intergameCommands = new IntergameCommandController();
+  private launchDigests = new Map<string, Map<number, string>>();
+  /** Durable pod-issued authority records, keyed by match ID. */
+  private matchBindings = new Map<string, DraftMatchBinding>();
+  /** Write-ahead settlement records; retained until the reducer accepts them. */
+  private settlementOutbox = new Map<string, DraftMatchSettlement>();
+  /** Immutable receipt per match makes retries idempotent. */
+  private settlementReceipts = new Map<string, { receiptId: string; revision: number }>();
+  /** Submission id → immutable payload receipt. Persisted before its acknowledgement. */
+  private deckSubmissionReceipts = new Map<string, { seat: number; payloadFingerprint: string }>();
+  /** Prevent duplicate local visibility while a connected guest retries its receipt. */
+  private publishedDeckSubmissions = new Set<string>();
 
   // Server backup upload state (D-08)
   private backupEndpoint: string | null = null;
   private picksSinceLastBackup = 0;
   private persistQueue = Promise.resolve();
+  /** Failed post-reducer snapshot retried verbatim before any later state. */
+  private pendingDraftSnapshot: PersistedDraftHostSession | null = null;
+  /** Authoritative guest actions cannot race a snapshot/export boundary. */
+  private mutationQueue = Promise.resolve();
+  private pendingMutations = 0;
+  /** One connected guest may have one queued or in-flight land suggestion. */
+  private guestLandSuggestionReservations = new Map<number, GuestLandSuggestionReservation>();
+  /** Admissions mutate token state before their durability fence, so serialize them. */
+  private admissionQueue = Promise.resolve();
+  private perSeatWorkspaceSnapshots = new Map<number, DraftWorkspaceState>();
   private persistenceClosed = false;
+  /**
+   * The strength this pod's BOT seats play at, as `map_difficulty`'s 0..=4
+   * index — `2` is Medium, the same default (and the same indexing) as
+   * `draftStore`'s `difficulty: 2` and its `DIFFICULTY_NAMES`.
+   *
+   * It is a field rather than a literal at the call site because the engine's
+   * `DIFFICULTY` cell is per-thread and sticky: whatever a pod does NOT say, it
+   * inherits from the last draft this tab ran. One named place to set it is
+   * what a lobby control will need, and that control is a follow-up — until it
+   * exists, every pod deliberately gets Medium rather than a leftover.
+   */
+  private readonly botDifficulty = 2;
+
+  /** Has this host already fetched the card database for its bot seats? See
+   *  `loadCardDatabaseForSharedStackBots`, which owns the reason. */
+  private cardDatabaseLoaded = false;
   private static readonly BACKUP_INTERVAL_PICKS = 5;
 
   constructor(
-    private readonly hostPeer: Peer,
+    private readonly hostPeer: TransportPeer,
     private readonly onGuestConnected: (
-      handler: (conn: DataConnection) => void,
+      handler: (conn: TransportConnection) => void,
     ) => () => void,
     private readonly poolInput: PoolInput,
-    private readonly kind: "Premier" | "Traditional",
+    private readonly kind: Exclude<DraftKind, "Quick">,
     private readonly podSize: number,
     private readonly hostDisplayName: string,
     private readonly tournamentFormat: TournamentFormat,
@@ -194,6 +600,9 @@ export class P2PDraftHost {
     private readonly roomCode?: string,
     backupEndpoint?: string,
   ) {
+    if (persistenceId && (!roomCode || parseRoomCode(roomCode) !== roomCode)) {
+      throw new Error("Persistent draft hosts require a canonical room code");
+    }
     // Host is always seat 0
     this.seatNames.set(0, hostDisplayName);
     this.activePodSize = podSize;
@@ -215,9 +624,61 @@ export class P2PDraftHost {
     }
   }
 
+  /**
+   * One host owns one reducer and one durable timeline.  Guest DataChannels
+   * may deliver concurrently, but their authoritative operations may not
+   * interleave between reducer application, immutable snapshot capture, and
+   * the visibility fence that follows it.
+   */
+  private enqueueAuthoritativeMutation<T>(operation: () => Promise<T>): Promise<T> {
+    // Start the first mutation synchronously.  Timer expiry is observable at
+    // the same tick it reaches zero, while later DataChannel messages still
+    // serialize behind its durable fence.
+    if (this.pendingMutations === 0) {
+      this.pendingMutations++;
+      let task: Promise<T>;
+      try {
+        task = operation();
+      } catch (error) {
+        task = Promise.reject(error);
+      }
+      this.mutationQueue = task.then(() => undefined, () => undefined).finally(() => {
+        this.pendingMutations--;
+      });
+      return task;
+    }
+    this.pendingMutations++;
+    const task = this.mutationQueue.then(operation);
+    this.mutationQueue = task.then(() => undefined, () => undefined).finally(() => {
+      this.pendingMutations--;
+    });
+    return task;
+  }
+
+  /** Reports a failed detached mutation instead of leaking an unhandled rejection. */
+  private reportDetachedMutationFailure(label: string, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[P2PDraftHost] ${label} failed:`, error);
+    this.emit({ type: "error", message: `${label} did not commit: ${message}` });
+  }
+
+  private runDetachedMutation(label: string, operation: () => Promise<unknown>): void {
+    void this.enqueueAuthoritativeMutation(operation).catch((error: unknown) => {
+      this.reportDetachedMutationFailure(label, error);
+    });
+  }
+
   // ── Initialization ─────────────────────────────────────────────────
 
   async initialize(): Promise<void> {
+    // FIRST, before `onGuestConnected` registers the handler behind two of
+    // `buildLobbyView()`'s three callers (the welcome view and the reconnect
+    // ack). That ordering is the binding-time guarantee for those two paths.
+    // The third caller, the public `getHostView()`, is NOT covered by this
+    // ordering — it is covered by `buildLobbyView`'s throw-on-null, which is
+    // why that rule is load-bearing rather than defensive.
+    await this.ensureProcedure();
+
     this.hostConnectionUnsub = this.onGuestConnected((conn) => {
       this.handleNewConnection(conn);
     });
@@ -225,9 +686,70 @@ export class P2PDraftHost {
     this.persistSession();
   }
 
+  /**
+   * The engine-owned per-kind axes, fetched at most once.
+   *
+   * `initialize()` is where this normally happens, but it is NOT the earliest
+   * point that needs the answer: `restoreFromPersisted` runs BEFORE
+   * `initialize()` (`draftPodHostAdapter` step 5 precedes step 6), and a
+   * restored shared-stack pod has to dispatch on the distribution before any
+   * connection is accepted. A `null` procedure is not a neutral default at
+   * those dispatch sites — `resolveBotPicks` and `autoPickAllPending` both fall
+   * THROUGH to a `current_pack` loop that is null for every seat under
+   * `SharedStackPiles`, so an unfetched procedure reads as "nothing to do"
+   * rather than as an error.
+   *
+   * Caching is correct rather than merely cheap: `draftProcedure` is a pure
+   * function of the kind and the tournament format, and both are immutable for
+   * this host's lifetime, so a second read could not differ.
+   */
+  private async ensureProcedure(): Promise<DraftProcedure> {
+    this.procedure ??= await this.adapter.draftProcedure(this.kind, this.tournamentFormat);
+    return this.procedure;
+  }
+
+  /**
+   * Load the WASM CARD_DB when — and only when — a shared-stack pod actually
+   * seats a bot that will read card faces.
+   *
+   * THE single authority for that question, because it is asked from three
+   * places that learn the answer at different times: `startDraftInner` (from
+   * the seat descriptors it just built), `restoreFromPersisted` (from the
+   * engine-published seat list of a session it did not create), and
+   * `replaceSeatWithBotInner` (from the seat list *after* a human became a
+   * bot). A pod that reaches any of the three without a database still plays —
+   * `winston_decision` degrades every card to its rarity prior — but principles
+   * 1 (mana fixing) and 5 (interaction) go silently dead, which is exactly the
+   * failure `winston_decision_degrades_without_a_card_database` pins.
+   *
+   * Dispatched on the DISTRIBUTION and on a COUNT of bot seats, never on `kind`
+   * and never on a `human_seats` scalar: a human-vs-human Winston pod, which is
+   * the common shape, must not pay for a multi-megabyte fetch it would never
+   * read.
+   */
+  private async loadCardDatabaseForSharedStackBots(
+    distribution: PackDistribution,
+    botSeats: number,
+  ): Promise<void> {
+    if (!isSharedStackDistribution(distribution) || botSeats === 0) return;
+    // Idempotent: three paths can seat a bot, and a pod that replaces several
+    // seats in turn would otherwise refetch multiple megabytes it already has.
+    // The flag records the FETCH, not the engine's state, which is why it is set
+    // only after `loadCardDatabase` resolves -- a failed load must stay
+    // retryable rather than latch the pod into the degraded scoring
+    // `winston_decision_degrades_without_a_card_database` pins.
+    if (this.cardDatabaseLoaded) return;
+    const resp = await fetch(__CARD_DATA_URL__);
+    if (!resp.ok) {
+      throw new Error(`Failed to load card data: ${resp.status}`);
+    }
+    await this.adapter.loadCardDatabase(await resp.text());
+    this.cardDatabaseLoaded = true;
+  }
+
   // ── Connection handling ────────────────────────────────────────────
 
-  private handleNewConnection(conn: DataConnection): void {
+  private handleNewConnection(conn: TransportConnection): void {
     const session = createDraftPeerSession(conn, {
       onSessionEnd: () => {
         for (const [seat, s] of this.guestSessions.entries()) {
@@ -245,54 +767,141 @@ export class P2PDraftHost {
       identified = true;
       unsub();
 
-      if (msg.type === "draft_join") {
-        this.handleNewGuest(session, msg.displayName);
-      } else if (msg.type === "draft_reconnect") {
-        this.handleReconnect(session, msg.draftToken);
+      if (msg.type !== "draft_join" && msg.type !== "draft_reconnect") {
+        void this.rejectAndClose(
+          session,
+          "ProtocolMismatch",
+          "Expected draft_join or draft_reconnect as first message",
+          "Protocol violation",
+        ).catch((error: unknown) => this.reportDetachedMutationFailure("first-contact rejection", error));
+      } else if (msg.draftProtocolVersion !== DRAFT_PROTOCOL_VERSION) {
+        // First-contact versioning is a hard gate. Do not allocate a seat,
+        // consume reconnect grace, or attach the session before it passes.
+        void this.rejectAndClose(
+          session,
+          "ProtocolMismatch",
+          `Draft protocol mismatch: host v${DRAFT_PROTOCOL_VERSION}, client v${String(msg.draftProtocolVersion)}. Refresh both windows.`,
+          "Draft protocol mismatch",
+        ).catch((error: unknown) => this.reportDetachedMutationFailure("first-contact rejection", error));
+      } else if (msg.type === "draft_join") {
+        this.runDetachedMutation("guest admission", () => this.handleNewGuest(session, msg.displayName));
       } else {
-        session.send({
-          type: "draft_reconnect_rejected",
-          reason: "Expected draft_join or draft_reconnect as first message",
-        });
-        session.close("Protocol violation");
+        this.runDetachedMutation("guest reconnect", () => this.handleReconnect(session, msg.draftToken));
       }
     });
   }
 
-  private handleNewGuest(session: DraftPeerSession, displayName: string): void {
+  /** Flush a typed rejection before closing its DataConnection. */
+  private async rejectAndClose(
+    session: DraftPeerSession,
+    kind: DraftReconnectRejectionKind,
+    reason: string,
+    closeReason: string,
+  ): Promise<void> {
+    await session.send({
+      type: "draft_reconnect_rejected",
+      kind,
+      reason,
+    });
+    session.close(closeReason);
+  }
+
+  private async handleNewGuest(session: DraftPeerSession, displayName: string): Promise<void> {
+    // This is intentionally outside `admissionQueue`: a connection can close
+    // while waiting behind another guest, before its admission transaction
+    // starts. In that case it must never allocate a provisional token.
+    let firstContactLive = true;
+    const stopWatchingFirstContact = session.onDisconnect(() => {
+      firstContactLive = false;
+    });
+    try {
+      const admission = this.admissionQueue.then(() =>
+        this.admitNewGuest(session, displayName, () => firstContactLive),
+      );
+      this.admissionQueue = admission.catch(() => {});
+      await admission;
+    } finally {
+      stopWatchingFirstContact();
+    }
+  }
+
+  private async admitNewGuest(
+    session: DraftPeerSession,
+    displayName: string,
+    isFirstContactLive: () => boolean,
+  ): Promise<void> {
+    if (!isFirstContactLive()) return;
     if (this.draftStarted) {
-      session.send({ type: "draft_kicked", reason: "Draft already in progress" });
-      session.close("Draft in progress");
+      try {
+        await session.send({ type: "draft_kicked", reason: "Draft already in progress" });
+      } finally {
+        session.close("Draft in progress");
+      }
       return;
     }
 
     const seat = this.firstOpenSeat();
     if (seat === null) {
-      session.send({ type: "draft_kicked", reason: "Pod is full" });
-      session.close("Pod full");
+      try {
+        await session.send({ type: "draft_kicked", reason: "Pod is full" });
+      } finally {
+        session.close("Pod full");
+      }
       return;
     }
 
     const token = crypto.randomUUID();
     this.seatTokens.set(seat, token);
-    this.guestSessions.set(seat, session);
     this.seatNames.set(seat, displayName);
 
-    session.onMessage((msg) => this.handleGuestMessage(seat, msg));
+    try {
+      // The guest receives the capability only after this host can recover the
+      // matching token and seat. Publishing either welcome or lobby state
+      // first would leave a reloaded host unable to honour that capability.
+      await this.persistSessionStrict();
+    } catch (err) {
+      this.seatTokens.delete(seat);
+      this.seatNames.delete(seat);
+      console.warn("[P2PDraftHost] guest admission persistence failed:", err);
+      session.close("Guest admission persistence failed");
+      return;
+    }
+
+    if (!isFirstContactLive()) {
+      await this.rollbackDisconnectedAdmission(seat);
+      return;
+    }
+
+    this.guestSessions.set(seat, session);
+    // A synchronous transport close can occur during registration. The
+    // first-contact watcher remains active until this transaction returns, so
+    // roll back before installing a guest handler or announcing the seat.
+    if (!isFirstContactLive()) {
+      await this.rollbackDisconnectedAdmission(seat, session);
+      return;
+    }
+    session.onMessage((msg) => {
+      this.handleGuestSessionMessage(seat, msg, session);
+    });
 
     // Send welcome with empty view (draft hasn't started)
     const emptyView: DraftPlayerView = this.buildLobbyView();
 
-    session.send({
+    await session.send({
       type: "draft_welcome",
       draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
       draftToken: token,
       seatIndex: seat,
       view: emptyView,
       draftCode: this.draftCode || "pending",
+      workspaceState: null,
     });
 
-    this.persistSession();
+    // `send` yields for wire encoding. A close during that await runs the
+    // registered session-end handler, which removes the seat and persists the
+    // disconnect; do not announce a guest that no longer exists.
+    if (this.guestSessions.get(seat) !== session) return;
+
     this.emit({ type: "seatJoined", seatIndex: seat, displayName });
     this.syncLobbyToGuests();
 
@@ -301,10 +910,25 @@ export class P2PDraftHost {
     }
   }
 
-  private handleReconnect(session: DraftPeerSession, draftToken: string): void {
+  /** Removes a post-fence provisional admission and commits that removal. */
+  private async rollbackDisconnectedAdmission(seat: number, session?: DraftPeerSession): Promise<void> {
+    if (session && this.guestSessions.get(seat) === session) {
+      this.guestSessions.delete(seat);
+    }
+    this.seatTokens.delete(seat);
+    this.seatNames.delete(seat);
+    try {
+      // The admission snapshot already committed this provisional token, so
+      // make the rollback durable before another admission can begin.
+      await this.persistSessionStrict();
+    } catch (err) {
+      console.warn("[P2PDraftHost] disconnected admission rollback failed:", err);
+    }
+  }
+
+  private async handleReconnect(session: DraftPeerSession, draftToken: string): Promise<void> {
     if (this.kickedTokens.has(draftToken)) {
-      session.send({ type: "draft_reconnect_rejected", reason: "Player kicked" });
-      session.close("Kicked");
+      await this.rejectAndClose(session, "Kicked", "Player kicked", "Kicked");
       return;
     }
 
@@ -317,59 +941,109 @@ export class P2PDraftHost {
     }
 
     if (seat === null) {
-      session.send({ type: "draft_reconnect_rejected", reason: "Unknown token" });
-      session.close("Unknown token");
+      await this.rejectAndClose(session, "UnknownToken", "Unknown token", "Unknown token");
       return;
     }
 
     if (!this.disconnectedSeats.has(seat)) {
-      session.send({
-        type: "draft_reconnect_rejected",
-        reason: "No grace window active for this seat",
-      });
-      session.close("Not in grace");
+      await this.rejectAndClose(
+        session,
+        "NoReconnectWindow",
+        "No grace window active for this seat",
+        "Not in grace",
+      );
       return;
     }
 
-    const grace = this.disconnectedSeats.get(seat)!;
-    if (grace.timer !== null) clearTimeout(grace.timer);
-    this.disconnectedSeats.delete(seat);
-    this.guestSessions.set(seat, session);
-
-    session.onMessage((msg) => this.handleGuestMessage(seat!, msg));
-
-    // Send current view. Order matters: sync the engine connection bitmap
-    // BEFORE fetching the view so the reconnect_ack carries the up-to-date
-    // `seats[*].connected` snapshot. Then broadcast to siblings.
-    void (async () => {
-      try {
+    const reconnectSeat = seat;
+    let reconnectDeadlineAt: number | null = null;
+    let live = true;
+    const stopWatching = session.onDisconnect?.(() => { live = false; }) ?? (() => {});
+    try {
+      // Keep the old grace record and do not install an action handler while
+      // the recovered connection is merely tentative. A close between the
+      // engine update and durable save is rolled back below rather than
+      // producing a connected-looking, unrecoverable seat.
+      if (this.draftStarted) await this.adapter.setSeatConnected(reconnectSeat, true);
+      await this.persistSessionStrict();
+      if (!live) {
         if (this.draftStarted) {
-          await this.adapter.setSeatConnected(seat!, true);
+          await this.adapter.setSeatConnected(reconnectSeat, false);
+          await this.persistSessionStrict();
         }
-        const view = this.draftStarted
-          ? await this.adapter.getViewForSeat(seat!)
-          : this.buildLobbyView();
-
-        session.send({
-          type: "draft_reconnect_ack",
-          draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
-          seatIndex: seat!,
-          view,
-          draftCode: this.draftCode,
-        });
-        if (this.draftStarted) {
-          await this.broadcastViews();
-        }
-        if (view.status === "MatchInProgress") {
-          await this.dispatchMatchLaunchesForSeat(view, seat!);
-        }
-      } catch (err) {
-        console.error("[P2PDraftHost] reconnect view failed:", err);
+        return;
       }
-    })();
+      const grace = this.disconnectedSeats.get(reconnectSeat);
+      if (!grace) {
+        if (this.draftStarted) {
+          await this.adapter.setSeatConnected(reconnectSeat, false);
+          await this.persistSessionStrict();
+        }
+        await this.rejectAndClose(session, "NoReconnectWindow", "Reconnect window expired", "Reconnect window expired");
+        return;
+      }
+      reconnectDeadlineAt = grace.deadlineAt;
+      this.clearReconnectGrace(reconnectSeat);
+      this.guestSessions.set(reconnectSeat, session);
+      session.onMessage((msg) => {
+        this.handleGuestSessionMessage(reconnectSeat, msg, session);
+      });
+
+      // The prior fence makes the engine's connected bitmap recoverable while
+      // this reconnect is tentative. This fence records the completed handoff
+      // while retaining its absolute deadline, so a later recovery or drop
+      // can use only the remaining grace window.
+      await this.persistSessionStrict();
+
+      const view = this.draftStarted
+        ? await this.adapter.getViewForSeat(reconnectSeat)
+        : this.buildLobbyView();
+      // Fetching a view yields to the transport. A close or grace expiry that
+      // occurs meanwhile must not publish a recovered workspace or ack.
+      if (!live || this.guestSessions.get(reconnectSeat) !== session) {
+        throw new Error("Reconnect session ended before acknowledgement");
+      }
+      const reconciliation = this.reconcileRetainedWorkspace(reconnectSeat, view.pool);
+      if (reconciliation.changed) await this.persistSessionStrict();
+      await session.send({
+        type: "draft_reconnect_ack",
+        draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
+        seatIndex: reconnectSeat,
+        view,
+        draftCode: this.draftCode,
+        workspaceState: reconciliation.workspaceState,
+      });
+      if (this.draftStarted) await this.broadcastViews();
+      if (view.status === "MatchInProgress") await this.dispatchMatchLaunchesForSeat(view, reconnectSeat);
+    } catch (err) {
+      console.error("[P2PDraftHost] reconnect view failed:", err);
+      if (this.guestSessions.get(reconnectSeat) === session) {
+        this.guestSessions.delete(reconnectSeat);
+      }
+      if (this.draftStarted) {
+        try { await this.adapter.setSeatConnected(reconnectSeat, false); } catch { /* best-effort rollback */ }
+      }
+      if (!this.disconnectedSeats.has(reconnectSeat) && reconnectDeadlineAt !== null) {
+        if (reconnectDeadlineAt > Date.now()) {
+          this.scheduleReconnectGrace(reconnectSeat, reconnectDeadlineAt);
+        } else {
+          this.reconnectDeadlines.delete(reconnectSeat);
+          this.expiredDisconnectedSeats.add(reconnectSeat);
+        }
+      }
+      try {
+        await this.persistSessionStrict();
+      } catch (persistError) {
+        this.reportDetachedMutationFailure("reconnect rollback", persistError);
+      }
+      session.close("Reconnect failed");
+      return;
+    } finally {
+      stopWatching();
+    }
 
     for (const [otherSeat, otherSession] of this.guestSessions) {
-      if (otherSeat === seat) continue;
+      if (otherSeat === reconnectSeat) continue;
       otherSession.send({
         type: "draft_lobby_update",
         seats: this.buildSeatPublicViews(),
@@ -378,29 +1052,123 @@ export class P2PDraftHost {
       });
     }
 
-    this.emit({ type: "seatReconnected", seatIndex: seat });
+    if (!this.guestSessions.has(reconnectSeat)) return;
+    this.emit({ type: "seatReconnected", seatIndex: reconnectSeat });
 
     // Resume if no other seats disconnected
-    if (this.disconnectedSeats.size === 0 && this.paused) {
-      this.paused = false;
-      this.broadcastToGuests({ type: "draft_resumed" });
-      this.emit({ type: "draftResumed" });
-    }
+    this.reconcileEffectivePause();
   }
 
   // ── Message handling ───────────────────────────────────────────────
 
-  private async handleGuestMessage(seat: number, msg: DraftP2PMessage): Promise<void> {
-    switch (msg.type) {
-      case "draft_pick": {
-        if (!this.draftStarted || this.paused) {
-          this.guestSessions.get(seat)?.send({
-            type: "draft_error",
-            reason: this.paused ? "Draft is paused" : "Draft not started",
-          });
-          return;
+  private handleGuestSessionMessage(
+    seat: number,
+    msg: DraftP2PMessage,
+    session: DraftPeerSession,
+  ): void {
+    if (msg.type !== "draft_suggest_lands") {
+      this.runDetachedMutation("guest message", () => this.handleGuestMessage(seat, msg, session));
+      return;
+    }
+
+    // DataChannels can still invoke an old callback after reconnect. It must
+    // not be allowed to alter the replacement session's reservation.
+    if (this.guestSessions.get(seat) !== session) return;
+
+    const existing = this.guestLandSuggestionReservations.get(seat);
+    if (existing?.session === session) {
+      if (existing.requestId === msg.requestId) return;
+      void session.send({
+        type: "draft_suggest_lands_rejected",
+        requestId: msg.requestId,
+        reason: "A land suggestion is already in progress",
+      }).catch(() => undefined);
+      return;
+    }
+
+    const reservation: GuestLandSuggestionReservation = { session, requestId: msg.requestId };
+    this.guestLandSuggestionReservations.set(seat, reservation);
+    this.runDetachedMutation("guest land suggestion", async () => {
+      try {
+        await this.handleGuestLandSuggestion(seat, msg.requestId, reservation);
+      } finally {
+        if (this.guestLandSuggestionReservations.get(seat) === reservation) {
+          this.guestLandSuggestionReservations.delete(seat);
         }
-        await this.handlePick(seat, msg.cardInstanceId);
+      }
+    });
+  }
+
+  private isCurrentGuestLandSuggestion(
+    seat: number,
+    reservation: GuestLandSuggestionReservation,
+  ): boolean {
+    return this.guestSessions.get(seat) === reservation.session
+      && this.guestLandSuggestionReservations.get(seat) === reservation;
+  }
+
+  private async handleGuestLandSuggestion(
+    seat: number,
+    requestId: string,
+    reservation: GuestLandSuggestionReservation,
+  ): Promise<void> {
+    if (!this.isCurrentGuestLandSuggestion(seat, reservation)) return;
+    try {
+      const lands = await this.suggestLandsForSeatInner(
+        seat,
+        () => this.isCurrentGuestLandSuggestion(seat, reservation),
+      );
+      if (!this.isCurrentGuestLandSuggestion(seat, reservation)) return;
+      await reservation.session.send({
+        type: "draft_suggest_lands_result",
+        requestId,
+        lands,
+      });
+    } catch (error) {
+      if (!this.isCurrentGuestLandSuggestion(seat, reservation)) return;
+      const reason = error instanceof Error ? error.message : String(error);
+      await reservation.session.send({
+        type: "draft_suggest_lands_rejected",
+        requestId,
+        reason,
+      });
+    }
+  }
+
+  private async handleGuestMessage(
+    seat: number,
+    msg: DraftP2PMessage,
+    originatingSession = this.guestSessions.get(seat),
+  ): Promise<void> {
+    // A queued message from a replaced DataChannel must never act on the seat
+    // its successor now owns.
+    if (originatingSession && this.guestSessions.get(seat) !== originatingSession) return;
+    switch (msg.type) {
+      case "draft_leave": {
+        await this.handleGuestLeave(seat, msg.draftToken, originatingSession);
+        break;
+      }
+      case "draft_pick": {
+        if (!this.canGuestPick(seat)) return;
+        await this.handlePick(seat, msg.cardInstanceIds);
+        break;
+      }
+      case "draft_pick_with_draft_effect": {
+        if (!this.canGuestPick(seat)) return;
+        await this.handlePickWithDraftEffect(
+          seat,
+          msg.effectCardInstanceId,
+          msg.cardInstanceIds,
+        );
+        break;
+      }
+      case "draft_pile_decision": {
+        if (!this.canGuestPick(seat)) return;
+        // The seat is the SESSION's, never the payload's — the guest names a
+        // pile, not a seat. Whether this seat may decide at all is the
+        // engine's `shared_stack::refusal_for`, and the reducer's refusal
+        // surfaces as `draft_error` through `handleSharedStackDecision`.
+        await this.handleSharedStackDecision(seat, msg.pile, msg.decision);
         break;
       }
       case "draft_submit_deck": {
@@ -408,32 +1176,57 @@ export class P2PDraftHost {
           this.guestSessions.get(seat)?.send({
             type: "draft_error",
             reason: "Draft not started",
+            submissionId: msg.submissionId,
+            submissionDisposition: "Rejected",
           });
           return;
         }
-        await this.handleDeckSubmission(seat, msg.mainDeck);
+        await this.handleDeckSubmission(seat, msg.mainDeck, msg.commanders, msg.submissionId);
+        break;
+      }
+      case "draft_workspace_update": {
+        try {
+          await this.applyWorkspaceUpdate(seat, msg.workspaceState, originatingSession);
+        } catch (err) {
+          if (this.guestSessions.get(seat) !== originatingSession) return;
+          const reason = err instanceof Error ? err.message : String(err);
+          const errorSend = originatingSession?.send({ type: "draft_error", reason });
+          if (errorSend) void errorSend.catch(() => undefined);
+        }
+        break;
+      }
+      case "draft_suggest_lands": {
+        try {
+          const lands = await this.suggestLandsForSeatInner(seat);
+          if (this.guestSessions.get(seat) !== originatingSession) return;
+          await originatingSession?.send({
+            type: "draft_suggest_lands_result",
+            requestId: msg.requestId,
+            lands,
+          });
+        } catch (error) {
+          if (this.guestSessions.get(seat) !== originatingSession) return;
+          const reason = error instanceof Error ? error.message : String(error);
+          await originatingSession?.send({
+            type: "draft_suggest_lands_rejected",
+            requestId: msg.requestId,
+            reason,
+          });
+        }
         break;
       }
       case "draft_match_result": {
-        const hostView = await this.adapter.getViewForSeat(0);
-        const pairing = hostView.pairings.find(
-          (p) => p.match_id === msg.matchId && p.round === hostView.current_round,
-        );
-        if (!pairing) {
-          this.guestSessions.get(seat)?.send({
-            type: "draft_error",
-            reason: "Unknown match",
-          });
-          return;
-        }
-        if (pairing.seat_a !== seat && pairing.seat_b !== seat) {
-          this.guestSessions.get(seat)?.send({
-            type: "draft_error",
-            reason: "Not a participant in this match",
-          });
-          return;
-        }
-        await this.reportMatchResult(msg.matchId, msg.winnerSeat);
+        // A raw match ID is forgeable by any connected seat. Keep the legacy
+        // shape decodable for an in-flight old client, but never settle it.
+        this.guestSessions.get(seat)?.send({ type: "draft_error", reason: "Unbound match result" });
+        break;
+      }
+      case "draft_match_settlement": {
+        await this.acceptMatchSettlement(seat, msg.settlement);
+        break;
+      }
+      case "draft_bo3_between_games": {
+        await this.handleGuestBetweenGames(seat, msg);
         break;
       }
       case "draft_request_advance": {
@@ -441,11 +1234,19 @@ export class P2PDraftHost {
         break;
       }
       case "draft_bo3_sideboard_submit": {
-        this.handleSideboardSubmit(seat, msg.matchId, msg.mainDeck, msg.sideboard);
+        this.guestSessions.get(seat)?.send({ type: "draft_error", reason: "Unbound intergame command" });
         break;
       }
       case "draft_bo3_play_draw_choice": {
-        this.handlePlayDrawChosen(seat, msg.matchId, msg.playFirst);
+        this.guestSessions.get(seat)?.send({ type: "draft_error", reason: "Unbound intergame command" });
+        break;
+      }
+      case "draft_bo3_intergame_command": {
+        await this.holdIntergameCommand(seat, msg.command);
+        break;
+      }
+      case "draft_bo3_intergame_receipt": {
+        await this.receiptIntergameCommand(seat, msg.acknowledgement, msg.receiptId);
         break;
       }
       default:
@@ -460,11 +1261,34 @@ export class P2PDraftHost {
    * (or the host decides to start with fewer players).
    */
   async startDraft(botFillEmptySeats = true): Promise<void> {
-    if (this.draftStarted) return;
+    return this.enqueueAuthoritativeMutation(() => this.startDraftInner(botFillEmptySeats));
+  }
 
-    const seed = Math.floor(Math.random() * 0xffffffff);
+  private async startDraftInner(botFillEmptySeats: boolean): Promise<void> {
+    if (this.draftStarted) return;
+    if (this.disconnectedSeats.size > 0) {
+      throw new Error("Cannot start draft while a player is reconnecting");
+    }
+
+    const seed = hostDraftSeed();
     this.draftSeed = seed;
-    const draftCode = `draft-${seed.toString(16).padStart(8, "0")}`;
+    const draftCode = hostDraftCode();
+    // Bot fill is the HOST'S choice and nothing else. Every distribution the
+    // engine ships now admits a bot seat — a shared-stack pod included, where
+    // `resolve_shared_stack_bot_turns` drives the seat the reducer used to
+    // refuse — so there is no procedure-shaped suppression left to apply here.
+    //
+    // The lesson that OUTLIVED that refusal, and must not be relearned: any
+    // per-kind question asked here is asked of the DISTRIBUTION, never of the
+    // `human_seats` scalar. That scalar merely correlates, and it correlates
+    // WRONGLY: the procedure table seats humans in every seat for Premier,
+    // Traditional and Sealed too (`human_seats == pod_size == 8`), so a guard
+    // written on it silently suppressed bot fill for three kinds that always
+    // permitted it. `p2pDraftHostBotFill.test.ts` is that lesson's revert-probe
+    // and still carries those three rows. Read from the procedure, never from
+    // `kind`.
+    const procedure = await this.ensureProcedure();
+    const botFillAllowed = botFillEmptySeats;
     const seats: MultiplayerSeatDescriptor[] = [];
     for (let i = 0; i < this.podSize; i++) {
       const displayName = this.seatNames.get(i);
@@ -474,14 +1298,30 @@ export class P2PDraftHost {
           player_id: i,
           display_name: displayName,
         });
-      } else if (botFillEmptySeats) {
+      } else if (botFillAllowed) {
         seats.push({ type: "Bot", name: this.botNameForSeat(i, seed) });
       }
     }
-    if (seats.length < 2) {
-      throw new Error("Need at least two seats to start a pod draft");
-    }
-
+    // A shared-stack BOT reads card faces, so it needs the WASM CARD_DB.
+    //
+    // Loaded HERE rather than in `draftPodHostAdapter`'s gate, for two reasons
+    // that are both about what is knowable where. The adapter has only
+    // `config.kind`, and dispatching on kind is exactly the proxy this file
+    // keeps unlearning; the DISTRIBUTION is known only after the procedure
+    // resolves, which happens here. And the BOT-SEAT COUNT is known only after
+    // the descriptor loop above, so a human-vs-human Winston pod — the common
+    // case — pays nothing for a multi-megabyte fetch it would never read.
+    // Widening the adapter's gate instead would also redden its landed
+    // "skips the CARD_DB fetch for Set pods" row, which that gate's own comment
+    // warns about.
+    //
+    // This is only ONE of the three ways a bot comes to occupy a shared-stack
+    // seat; `loadCardDatabaseForSharedStackBots` carries the rule and names the
+    // other two.
+    await this.loadCardDatabaseForSharedStackBots(
+      procedure.distribution,
+      seats.filter((seat) => seat.type === "Bot").length,
+    );
     await this.adapter.createMultiplayerDraft(
       this.poolInput,
       seats,
@@ -490,13 +1330,53 @@ export class P2PDraftHost {
       draftCode,
       this.tournamentFormat,
       this.podPolicy,
+      this.botDifficulty,
     );
 
+    // The started flags go up FIRST, because the bot loop and the persist below
+    // run against a host that has to look started to them -- and they come back
+    // DOWN if either throws. The guard at the top of this function is
+    // `if (this.draftStarted) return`, so a flag left standing over a failure
+    // turns the retry into a silent no-op: the engine holds a draft, no snapshot
+    // exists, no guest was ever told, and pressing Start again does nothing at
+    // all. Rolling back is what makes the retry reach `createMultiplayerDraft`
+    // a second time.
+    const previousPodSize = this.activePodSize;
     this.draftStarted = true;
     this.draftCode = draftCode;
     this.activePodSize = seats.length;
     this.picksThisRound.clear();
-    await this.resolveBotPicks({ emit: false, persist: false });
+    try {
+      const startView = await this.adapter.getViewForSeat(0);
+      if (startView.status === "Drafting") {
+        await this.resolveBotPicks({ emit: false, persist: false });
+      }
+
+      // No client may observe the started draft until the recoverable snapshot
+      // exists.  A refresh between a state update and this fence was the root
+      // cause of the original missing-pod incident.
+      //
+      // `retainFailedDraftSnapshot: false` because THIS start is compensating.
+      // The retain path exists for a snapshot that records a reducer result
+      // already applied and owed to the player -- a pick, a deck submission --
+      // which must be replayed rather than recomputed. A failed start is the
+      // opposite: the rollback below unwinds it, so the draft it describes is
+      // abandoned. Retained, it would sit in `pendingDraftSnapshot` and be
+      // flushed AHEAD of newer state by the next persist, writing the
+      // abandoned draft to IndexedDB where a reload would restore it.
+      await this.persistSessionStrict({ retainFailedDraftSnapshot: false });
+    } catch (err) {
+      this.draftStarted = false;
+      this.draftCode = "";
+      this.activePodSize = previousPodSize;
+      this.picksThisRound.clear();
+      // Belt to the braces above: the option stops THIS failure from queueing a
+      // snapshot, and this clears one queued by anything earlier in the start.
+      // A rollback that leaves an engine-backed snapshot behind has not rolled
+      // back -- the next save resurrects it.
+      this.pendingDraftSnapshot = null;
+      throw err;
+    }
 
     // Send each guest their filtered view
     for (const [seat, session] of this.guestSessions) {
@@ -508,32 +1388,153 @@ export class P2PDraftHost {
       }
     }
 
-    this.persistSession();
     const freshHostView = await this.adapter.getViewForSeat(0);
     this.emit({ type: "draftStarted", view: freshHostView });
-    this.startPickTimer(0);
+    if (freshHostView.status === "Drafting") {
+      this.startPickTimer(0);
+    }
   }
 
   /**
    * Host submits their own pick (seat 0).
    */
-  async submitHostPick(cardInstanceId: string): Promise<DraftPlayerView> {
-    return this.handlePick(0, cardInstanceId);
+  async submitHostPick(cardInstanceIds: string[]): Promise<DraftPlayerView> {
+    return this.enqueueAuthoritativeMutation(() => this.handlePick(0, cardInstanceIds));
+  }
+
+  /** Host submits an effect pick for seat 0. */
+  async submitHostPickWithDraftEffect(
+    effectCardInstanceId: string,
+    cardInstanceIds: string[],
+  ): Promise<DraftPlayerView> {
+    return this.enqueueAuthoritativeMutation(() =>
+      this.handlePickWithDraftEffect(0, effectCardInstanceId, cardInstanceIds));
+  }
+
+  /** Host submits its own shared-stack turn decision (seat 0). */
+  async submitHostSharedStackDecision(
+    pile: number,
+    decision: SharedStackPileDecision,
+  ): Promise<DraftPlayerView> {
+    return this.enqueueAuthoritativeMutation(() =>
+      this.handleSharedStackDecision(0, pile, decision));
   }
 
   /**
    * Host submits their own deck (seat 0).
    */
-  async submitHostDeck(mainDeck: string[]): Promise<DraftPlayerView> {
-    return this.handleDeckSubmission(0, mainDeck);
+  async submitHostDeck(mainDeck: string[], commanders: string[]): Promise<DraftPlayerView> {
+    return this.enqueueAuthoritativeMutation(() => {
+      if (!this.draftStarted) throw new Error("Draft not started");
+      // CR 903.3: the designation is part of the payload's identity, so it
+      // joins the fingerprint. Matching on `mainDeck` alone would let a
+      // resubmit that changes only the commander reuse the prior receipt and
+      // resolve straight to the recovered-receipt branch, never reaching the
+      // reducer with the new designation.
+      const payloadFingerprint = this.deckPayloadFingerprint(mainDeck, commanders);
+      const priorSubmission = [...this.deckSubmissionReceipts.entries()].find(
+        ([, receipt]) => receipt.seat === 0 && receipt.payloadFingerprint === payloadFingerprint,
+      )?.[0];
+      return this.handleDeckSubmission(0, mainDeck, commanders, priorSubmission ?? crypto.randomUUID());
+    });
+  }
+
+  updateHostWorkspace(state: DraftWorkspaceState): Promise<void> {
+    return this.enqueueAuthoritativeMutation(() => this.applyWorkspaceUpdate(0, state));
+  }
+
+  getHostWorkspaceState(): DraftWorkspaceState | null {
+    return this.perSeatWorkspaceSnapshots.get(0) ?? null;
+  }
+
+  suggestLandsForSeat(seat: number): Promise<Record<string, number>> {
+    return this.enqueueAuthoritativeMutation(() => this.suggestLandsForSeatInner(seat));
+  }
+
+  private async suggestLandsForSeatInner(
+    seat: number,
+    isLive: () => boolean = () => true,
+  ): Promise<Record<string, number>> {
+    const view = await this.adapter.getViewForSeat(seat);
+    if (!isLive()) throw new Error("Guest session is no longer current");
+    if (view.status !== "Deckbuilding") {
+      throw new Error("Land suggestions are available only during deckbuilding");
+    }
+    const reconciliation = this.reconcileRetainedWorkspace(seat, view.pool);
+    if (!reconciliation.workspaceState) {
+      throw new Error("No retained workspace is available for this seat");
+    }
+    if (reconciliation.changed) {
+      if (!isLive()) throw new Error("Guest session is no longer current");
+      await this.persistSessionStrict();
+    }
+    if (!isLive()) throw new Error("Guest session is no longer current");
+    return this.adapter.suggestLandsForSeat(
+      seat,
+      projectWorkspaceMainDeck(reconciliation.workspaceState, view.pool),
+    );
+  }
+
+  private async applyWorkspaceUpdate(
+    seat: number,
+    state: DraftWorkspaceState,
+    sourceSession?: DraftPeerSession,
+  ): Promise<void> {
+    const view = await this.adapter.getViewForSeat(seat);
+    // The adapter view await is a transport boundary: a superseded guest may
+    // not mutate its replacement's retained state after it returns.
+    if (sourceSession && this.guestSessions.get(seat) !== sourceSession) return;
+    const validated = validateWorkspaceState(state, {
+      maxPlacementCount: view.pool.length + MAX_MATERIALIZED_VIRTUAL_BASICS,
+    });
+    if ("error" in validated) throw new Error(validated.error);
+    const reconciled = reconcileWorkspaceState(validated, view.pool);
+    this.perSeatWorkspaceSnapshots.set(seat, reconciled);
+    await this.persistSessionStrict();
+  }
+
+  private reconcileRetainedWorkspace(
+    seat: number,
+    pool: DraftPlayerView["pool"],
+  ): { workspaceState: DraftWorkspaceState | null; changed: boolean } {
+    const state = this.perSeatWorkspaceSnapshots.get(seat);
+    if (!state) return { workspaceState: null, changed: false };
+    const validated = validateWorkspaceState(state);
+    if ("error" in validated) {
+      this.perSeatWorkspaceSnapshots.delete(seat);
+      return { workspaceState: null, changed: true };
+    }
+    const reconciled = reconcileWorkspaceState(validated, pool);
+    if (!workspaceStatesEqual(reconciled, state)) {
+      this.perSeatWorkspaceSnapshots.set(seat, reconciled);
+      return { workspaceState: reconciled, changed: true };
+    }
+    return { workspaceState: reconciled, changed: false };
+  }
+
+  private assertPickAllowed(): void {
+    if (!this.draftStarted) throw new Error("Draft not started");
+    if (this.paused) throw new Error("Draft is paused");
+  }
+
+  private canGuestPick(seat: number): boolean {
+    try {
+      this.assertPickAllowed();
+      return true;
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      this.guestSessions.get(seat)?.send({ type: "draft_error", reason });
+      return false;
+    }
   }
 
   private async handlePick(
     seat: number,
-    cardInstanceId: string,
+    cardInstanceIds: string[],
     resolveBots = true,
   ): Promise<DraftPlayerView> {
-    return this.applyPick(seat, cardInstanceId, {
+    this.assertPickAllowed();
+    return this.applyPick(seat, cardInstanceIds, {
       acknowledge: true,
       emit: true,
       persist: true,
@@ -541,14 +1542,169 @@ export class P2PDraftHost {
     });
   }
 
+  private async handlePickWithDraftEffect(
+    seat: number,
+    effectCardInstanceId: string,
+    cardInstanceIds: string[],
+  ): Promise<DraftPlayerView> {
+    this.assertPickAllowed();
+    return this.applyPick(
+      seat,
+      // The cards this seat drafted — NOT the effect card. This positional
+      // slot carries one meaning on both paths; the `submitPick` override
+      // below is what makes the effect path's submission different.
+      cardInstanceIds,
+      {
+        acknowledge: true,
+        emit: true,
+        persist: true,
+        resolveBots: true,
+      },
+      () => this.adapter.submitPickWithDraftEffectForSeat(
+        seat,
+        effectCardInstanceId,
+        cardInstanceIds,
+      ),
+    );
+  }
+
+  /**
+   * Apply one whole shared-stack turn decision.
+   *
+   * A SIBLING of `applyPick`, not a reuse of it, and the differences are all
+   * structural rather than stylistic:
+   *   * there is no round. `picksThisRound` / `allPicksSubmitted` /
+   *     `roundComplete` describe a pick-and-pass step in which every seat owes
+   *     a pick simultaneously; under `SharedStackPiles` exactly one seat owes
+   *     a decision and the turn passes on every applied decision.
+   *   * bot seats ARE resolved here, but not one pick at a time. A shared-stack
+   *     bot owes a whole TURN, and consecutive bot turns chain, so the engine's
+   *     own loop (`resolve_shared_stack_bot_turns`, reached through
+   *     `resolveBotPicks`) runs once after the acknowledgement and before the
+   *     broadcast, with its own persistence fence. `applyPick`'s per-seat sweep
+   *     has no counterpart here because there is no round in which every seat
+   *     owes a move.
+   *   * a decision names no cards, so `pickReceived` (whose payload IS the
+   *     cards) cannot describe it.
+   * Every seat's projection changes on every decision (the active seat moves,
+   * and with it `active_pile` and every `revealed` prefix), so this
+   * broadcasts unconditionally rather than only at a round boundary.
+   *
+   * Legality is the engine's throughout: a refused decision throws out of the
+   * adapter and reaches the deciding seat as `draft_error`, exactly as a
+   * refused pick does.
+   */
+  private async handleSharedStackDecision(
+    seat: number,
+    pile: number,
+    decision: SharedStackPileDecision,
+  ): Promise<DraftPlayerView> {
+    this.assertPickAllowed();
+    try {
+      const view = await this.adapter.submitSharedStackDecisionForSeat(seat, pile, decision);
+
+      // Same fence as `applyPick`: no client may observe an acknowledged
+      // mutation before a host reload can restore the reducer result.
+      await this.persistSessionStrict();
+
+      const session = this.guestSessions.get(seat);
+      if (session) {
+        session.send({ type: "draft_pick_ack", view });
+      }
+
+      // The deciding seat's acknowledgement is its own decision's receipt, so
+      // it is sent BEFORE the bots move — exactly the view the reducer
+      // returned for that seat. Everything the bots then do reaches every seat
+      // through the broadcast below, which is why that broadcast is now the one
+      // that must come after this call rather than before it.
+      //
+      // `emit: false` because there is no per-pick event to raise here: a
+      // decision names no cards, so `pickReceived` cannot describe one.
+      // `persist: true` gives the bot turns their OWN fence, and it fires only
+      // when the engine actually moved — the same rule as the fence above: no
+      // client may observe a reducer result a host reload could not restore.
+      //
+      // ITS OWN FAILURE BOUNDARY, and the boundary is the point. The deciding
+      // seat's decision is already applied, persisted and acknowledged by the
+      // time this runs, so letting an `Err` out of the bot loop fall into the
+      // outer `catch` would tell that seat `draft_error` — "your decision was
+      // refused" — about a decision the engine accepted, and would skip both
+      // the broadcast and the clock re-arm below, leaving the pod with a stale
+      // view and no timer. `resolve_shared_stack_bot_turns` fails LOUDLY by
+      // design (`the_loop_fails_loudly_rather_than_spinning`); a loud failure
+      // must surface as a host `error` and still leave the pod recoverable.
+      // The recovery is the pick clock for a Competitive pod and Pause/Resume
+      // for any pod — see `requestResume`, which re-drives a stuck shared-stack
+      // bot precisely because the clock does not run under `Casual`.
+      try {
+        await this.resolveBotPicks({ emit: false, persist: true });
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        this.emit({ type: "error", message: `Bot turn failed: ${reason}` });
+      }
+
+      await this.broadcastViews();
+
+      // Re-read AFTER the bot turns, deliberately: the bots may have carried
+      // the draft into Deckbuilding, and if they did not, the seat the clock
+      // must be armed against is the HUMAN seat their chain stopped on, not the
+      // seat that was active when this decision was applied.
+      const hostView = await this.adapter.getViewForSeat(0);
+      if (hostView.status === "Deckbuilding") {
+        this.clearActiveTimer();
+        this.emit({ type: "draftComplete" });
+      } else if (hostView.status === "Drafting") {
+        // RE-ARM, on every applied decision. This is `applyPick`'s
+        // round-boundary restart, relocated to the boundary this distribution
+        // actually has: there is no round here, and every applied decision
+        // either passes the turn or advances the cursor, so each one opens a
+        // fresh decision window. Without this the clock ran exactly once per
+        // draft — it expired into a sweep that could not act and never started
+        // again, leaving a stalled Winston seat with no recovery at all. The
+        // reducer now accepts `ReplaceSeatWithBot` for this distribution too,
+        // but that is a HOST action; the clock is the recovery that needs
+        // nobody to be watching.
+        //
+        // `pick_number` is the same axis `applyPick` passes. It does not
+        // advance under `SharedStackPiles` — no reducer path moves it — so
+        // every Winston decision gets `PICK_TIMER_DURATIONS_MS[0]`. That is
+        // deliberate and is not the escalating pack-pick curve: a Winston turn
+        // is one take-or-decline rather than a pick out of a shrinking pack,
+        // so there is no shrinking window to model. Escalating on
+        // `stack.decisions` instead would bottom out at the 15s floor within
+        // the first dozen decisions of a ~90-decision draft, which would be
+        // inventing a timing policy rather than reusing one.
+        this.startPickTimer(hostView.pick_number);
+      }
+      return hostView;
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      this.guestSessions.get(seat)?.send({ type: "draft_error", reason });
+      throw err;
+    }
+  }
+
   private async applyPick(
     seat: number,
-    cardInstanceId: string,
+    cardInstanceIds: string[],
     options: PickOptions,
+    // One whole CR 903.13b pick step: exactly `view.required_pick_count` ids,
+    // the count `pick_pass::apply_pick_inner` enforces. On the draft-effect
+    // path the caller overrides `submitPick`; this parameter still names the
+    // cards the seat drafted, which is what `pickReceived` reports.
+    submitPick = () => this.adapter.submitPickForSeat(seat, cardInstanceIds),
   ): Promise<DraftPlayerView> {
     try {
-      const view = await this.adapter.submitPickForSeat(seat, cardInstanceId);
+      const view = await submitPick();
       this.picksThisRound.add(seat);
+
+      // A pick acknowledgement is externally authoritative: never publish it
+      // until a host reload can restore the reducer result.  Bot sweeps during
+      // initial start intentionally defer to StartDraft's one encompassing
+      // fence (`persist: false`).
+      if (options.persist) {
+        await this.persistSessionStrict();
+      }
 
       // Send pick acknowledgement to the picking player
       const session = this.guestSessions.get(seat);
@@ -557,12 +1713,8 @@ export class P2PDraftHost {
       }
 
       if (options.emit) {
-        this.emit({ type: "pickReceived", seatIndex: seat, cardInstanceId });
+        this.emit({ type: "pickReceived", seatIndex: seat, cardInstanceIds });
       }
-      if (options.persist) {
-        this.persistSession();
-      }
-
       if (options.resolveBots && !this.isBotSeat(seat)) {
         await this.resolveBotPicks({ emit: true, persist: true });
         await this.broadcastViews();
@@ -603,35 +1755,149 @@ export class P2PDraftHost {
     }
   }
 
-  private async handleDeckSubmission(seat: number, mainDeck: string[]): Promise<DraftPlayerView> {
+  private async handleDeckSubmission(
+    seat: number,
+    mainDeck: string[],
+    commanders: string[],
+    submissionId: string,
+  ): Promise<DraftPlayerView> {
+    let submissionAccepted = false;
+    let receiptDurable = false;
     try {
-      const view = await this.adapter.submitDeckForSeat(seat, mainDeck);
-
-      const session = this.guestSessions.get(seat);
-      if (session) {
-        session.send({ type: "draft_state_update", view });
+      const payloadFingerprint = this.deckPayloadFingerprint(mainDeck, commanders);
+      const previous = this.deckSubmissionReceipts.get(submissionId);
+      let view: DraftPlayerView;
+      if (previous) {
+        if (previous.seat !== seat || previous.payloadFingerprint !== payloadFingerprint) {
+          throw new Error("Deck submission id does not match its original payload");
+        }
+        submissionAccepted = true;
+        view = await this.adapter.getViewForSeat(seat);
+        // This is also the retry path after an IDB failure: it flushes the
+        // immutable pending snapshot before issuing a receipt, without ever
+        // submitting the deck to the reducer again.
+        await this.persistSessionStrict();
+        receiptDurable = true;
+      } else {
+        view = await this.adapter.submitDeckForSeat(seat, mainDeck, commanders);
+        // Record before saving the post-reducer snapshot. A retry after a host
+        // reload therefore sees the same result and cannot feed the reducer a
+        // second submission.
+        this.deckSubmissionReceipts.set(submissionId, { seat, payloadFingerprint });
+        submissionAccepted = true;
+        await this.persistSessionStrict();
+        receiptDurable = true;
       }
 
-      this.emit({ type: "deckSubmitted", seatIndex: seat });
-      this.persistSession();
-
-      // Check if all decks are submitted
-      const hostView = await this.adapter.getViewForSeat(0);
-      if (hostView.seats.every((s) => s.has_submitted_deck || s.is_bot)) {
-        this.emit({ type: "allDecksSubmitted" });
-        await this.generatePairings(1);
+      try {
+        await this.sendDeckSubmissionAck(seat, submissionId, view);
+      } catch (error) {
+        // The receipt is already durable. Continue host progression; a later
+        // retry will receive the same acknowledgement without re-reducing.
+        console.warn("[P2PDraftHost] deck submission acknowledgement failed:", error);
       }
+      await this.publishAcceptedDeckSubmission(seat, submissionId, previous !== undefined);
 
-      if (seat === 0) return view;
-      return hostView;
+      return seat === 0 ? view : await this.adapter.getViewForSeat(0);
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       const session = this.guestSessions.get(seat);
-      if (session) {
-        session.send({ type: "draft_error", reason });
+      if (session && !submissionAccepted) {
+        session.send({ type: "draft_error", reason, submissionId, submissionDisposition: "Rejected" });
+      } else if (session && !receiptDurable) {
+        session.send({ type: "draft_error", reason, submissionId, submissionDisposition: "Retryable" });
       }
       throw err;
     }
+  }
+
+  /** Runs delayed downstream deck visibility after a durable receipt retry. */
+  /**
+   * CR 903.3: a deck submission's identity is its main deck AND its commander
+   * designation. Both call sites must agree, or a receipt lookup and a receipt
+   * comparison can disagree about whether two submissions are the same.
+   */
+  private deckPayloadFingerprint(mainDeck: string[], commanders: string[]): string {
+    return `${deckSubmissionFingerprint(mainDeck)}|${deckSubmissionFingerprint(commanders)}`;
+  }
+
+  private async publishAcceptedDeckSubmission(
+    seat: number,
+    submissionId: string,
+    recovered: boolean,
+  ): Promise<void> {
+    if (this.publishedDeckSubmissions.has(submissionId)) return;
+    const hostView = await this.adapter.getViewForSeat(0);
+    // A terminal status means the downstream work already ran — but only for a
+    // RECOVERED receipt. `publishedDeckSubmissions` is in-memory, so after a
+    // host reload it cannot answer this and the status is the only signal
+    // left. It must not answer for a freshly accepted submission: a Commander
+    // Draft pod is PostDraftPlay::CompleteImmediately, so its LAST deck
+    // submission lands on `Complete` on first visit, and treating that as
+    // "already replayed" would swallow the pod's completion for every guest.
+    if (recovered && (hostView.status === "MatchInProgress" || hostView.status === "Complete")) {
+      this.publishedDeckSubmissions.add(submissionId);
+      return;
+    }
+    this.emit({ type: "deckSubmitted", seatIndex: seat });
+    if (hostView.seats.every((candidate) => candidate.has_submitted_deck || candidate.is_bot)) {
+      this.emit({ type: "allDecksSubmitted" });
+      // The reducer owns "may pairings be generated?" (`apply_generate_pairings`
+      // admits only Deckbuilding | Pairing | RoundComplete). State what every
+      // status does rather than sweeping the rest into a fallback.
+      //
+      // `Pairing` is PostDraftPlay::TournamentPairings, the only status this
+      // funnel really reaches besides `Complete`; `generatePairingsInner`
+      // republishes and overwrites it. The other seven are unreachable here —
+      // `apply_submit_deck`'s last-deck arm assigns only Complete or Pairing,
+      // and this branch runs only once every seat has submitted or is a bot —
+      // so they route to the reducer, which refuses whatever it will not
+      // accept.
+      switch (hostView.status) {
+        // PostDraftPlay::CompleteImmediately (Quick Draft, Commander Draft).
+        // The reducer already assigned Complete and `apply_generate_pairings`
+        // refuses it: republish the engine's own view and generate nothing.
+        case "Complete":
+          await this.broadcastViews();
+          break;
+        // PostDraftPlay::TournamentPairings. The reducer assigned Pairing, and
+        // `apply_generate_pairings` immediately overwrites it with
+        // MatchInProgress — so republish BEFORE generating, or nothing ever
+        // publishes Pairing and the pod's trajectory skips a phase.
+        case "Pairing":
+          await this.broadcastViews();
+          await this.generatePairingsInner();
+          break;
+        case "Lobby":
+        case "Drafting":
+        case "Paused":
+        case "Deckbuilding":
+        case "MatchInProgress":
+        case "RoundComplete":
+        case "Abandoned":
+          await this.generatePairingsInner();
+          break;
+        // The exhaustiveness guard: `assertNever`'s parameter is `never`, so
+        // THIS LINE is what fails to compile if a tenth DraftStatus is added
+        // upstream and left unhandled.
+        default:
+          assertNever(hostView.status);
+      }
+    }
+    this.publishedDeckSubmissions.add(submissionId);
+  }
+
+  private async sendDeckSubmissionAck(
+    seat: number,
+    submissionId: string,
+    view: DraftPlayerView,
+  ): Promise<void> {
+    if (seat === 0) return;
+    await this.guestSessions.get(seat)?.send({
+      type: "draft_deck_submit_ack",
+      submissionId,
+      view,
+    });
   }
 
   // ── Broadcast ──────────────────────────────────────────────────────
@@ -679,65 +1945,237 @@ export class P2PDraftHost {
 
   // ── Disconnect / Reconnect ─────────────────────────────────────────
 
+  /**
+   * A participant's explicit exit revokes the capability rather than opening
+   * reconnect grace. Its acknowledgement is deliberately after the durable
+   * mutation, so a guest never drops its recovery state for a leave the host
+   * could lose on refresh.
+   */
+  private async handleGuestLeave(
+    seat: number,
+    draftToken: string,
+    originatingSession?: DraftPeerSession,
+  ): Promise<void> {
+    const session = this.guestSessions.get(seat);
+    if (!session || session !== originatingSession || this.seatTokens.get(seat) !== draftToken) return;
+
+    const priorGraceDeadline = this.disconnectedSeats.get(seat)?.deadlineAt;
+    const priorReconnectDeadline = this.reconnectDeadlines.get(seat);
+    const priorWorkspace = this.perSeatWorkspaceSnapshots.get(seat);
+    const priorToken = this.seatTokens.get(seat);
+    const priorName = this.seatNames.get(seat);
+    const wasKicked = this.kickedTokens.has(draftToken);
+    const wasExpired = this.expiredDisconnectedSeats.has(seat);
+    let sessionEnded = false;
+    let sessionEndedAt: number | null = null;
+    const stopWatchingSession = session.onDisconnect(() => {
+      sessionEnded = true;
+      sessionEndedAt = Date.now();
+    });
+
+    let attemptedDisconnect = false;
+    try {
+      this.guestSessions.delete(seat);
+      this.clearReconnectGrace(seat);
+      this.reconnectDeadlines.delete(seat);
+      this.perSeatWorkspaceSnapshots.delete(seat);
+
+      if (!this.draftStarted) {
+        this.seatTokens.delete(seat);
+        this.seatNames.delete(seat);
+      } else {
+        this.kickedTokens.add(draftToken);
+        this.seatTokens.delete(seat);
+        this.expiredDisconnectedSeats.add(seat);
+        // A rejected adapter call can still have changed the engine. Treat the
+        // attempted transition as needing compensation either way.
+        attemptedDisconnect = true;
+        await this.adapter.setSeatConnected(seat, false);
+      }
+
+      // Leave is a compensating transaction: unlike a reducer command, its
+      // failed snapshot must never be retained and replayed after this branch
+      // restores the participant's recovery capability.
+      await this.persistSessionStrict({ retainFailedDraftSnapshot: false });
+    } catch (error) {
+      // A failed leave transition leaves the prior durable session
+      // authoritative. Restore its complete in-memory counterpart before
+      // returning without an acknowledgement, so the existing recovery
+      // capability stays usable.
+      if (!sessionEnded) this.guestSessions.set(seat, session);
+      const reconnectDeadline = priorGraceDeadline
+        ?? priorReconnectDeadline
+        ?? (sessionEndedAt === null ? undefined : sessionEndedAt + this.gracePeriodMs);
+      if (sessionEnded && reconnectDeadline !== undefined) {
+        this.scheduleReconnectGrace(seat, reconnectDeadline);
+      } else if (priorGraceDeadline !== undefined) {
+        this.scheduleReconnectGrace(seat, priorGraceDeadline);
+      } else if (priorReconnectDeadline !== undefined) {
+        this.reconnectDeadlines.set(seat, priorReconnectDeadline);
+      }
+      if (priorWorkspace !== undefined) this.perSeatWorkspaceSnapshots.set(seat, priorWorkspace);
+      if (priorToken !== undefined) this.seatTokens.set(seat, priorToken);
+      if (priorName !== undefined) this.seatNames.set(seat, priorName);
+      if (wasKicked) this.kickedTokens.add(draftToken);
+      else this.kickedTokens.delete(draftToken);
+      if (wasExpired) this.expiredDisconnectedSeats.add(seat);
+      else this.expiredDisconnectedSeats.delete(seat);
+      if (this.draftStarted && attemptedDisconnect && !sessionEnded) {
+        try {
+          await this.adapter.setSeatConnected(seat, true);
+        } catch (rollbackError) {
+          // The durable state and every local recovery record have already
+          // been restored. Surface the adapter failure without sacrificing the
+          // participant's capability by letting rollback abort halfway through.
+          const message = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+          console.error("[P2PDraftHost] leave rollback connectivity failed:", rollbackError);
+          this.emit({ type: "error", message: `leave rollback connectivity failed: ${message}` });
+        }
+      }
+      if (sessionEnded) {
+        if (this.draftStarted) {
+          try {
+            // A connection that closed during the failed leave is still gone.
+            // Keep the engine paused/disconnected for its recovered grace
+            // window instead of compensating it back to a live seat.
+            await this.adapter.setSeatConnected(seat, false);
+          } catch (disconnectError) {
+            this.reportDetachedMutationFailure("leave disconnect recovery", disconnectError);
+          }
+        }
+        try {
+          await this.persistSessionStrict({ retainFailedDraftSnapshot: false });
+        } catch (persistError) {
+          this.reportDetachedMutationFailure("leave disconnect recovery", persistError);
+        }
+        // A second persistence failure cannot make this lost connection look
+        // live. Pause/synchronize from the restored local state regardless of
+        // whether its recovery snapshot made it to storage.
+        if (this.draftStarted) this.reconcileEffectivePause();
+        else this.syncLobbyToGuests();
+      }
+      throw error;
+    } finally {
+      stopWatchingSession();
+    }
+    try {
+      await session.send({
+        type: "draft_leave_ack",
+        draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
+        draftToken,
+      });
+    } catch (error) {
+      // The leave is already durable. A failed notification cannot skip
+      // terminal cleanup or hide the departure from the remaining seats.
+      console.warn("[P2PDraftHost] leave acknowledgement failed:", error);
+    }
+    session.close("Participant left draft");
+
+    if (this.draftStarted) {
+      await this.broadcastViews();
+      this.reconcileEffectivePause();
+    } else {
+      this.syncLobbyToGuests();
+    }
+    this.emit({ type: "seatDisconnected", seatIndex: seat });
+  }
+
   private handleGuestDisconnect(seat: number): void {
     if (!this.guestSessions.has(seat)) return;
     if (this.disconnectedSeats.has(seat)) return;
 
     this.guestSessions.delete(seat);
 
+    this.scheduleReconnectGrace(
+      seat,
+      this.reconnectDeadlines.get(seat) ?? Date.now() + this.gracePeriodMs,
+    );
+    // The socket callback is synchronous, but all externally visible state
+    // follows the one durable queue: connected bitmap → snapshot → views/pause.
+    this.runDetachedMutation("guest disconnect", async () => {
+      if (this.draftStarted) await this.adapter.setSeatConnected(seat, false);
+      await this.persistSessionStrict();
+      if (this.draftStarted) {
+        await this.broadcastViews();
+        this.reconcileEffectivePause();
+      } else {
+        this.syncLobbyToGuests();
+      }
+      this.emit({ type: "seatDisconnected", seatIndex: seat });
+    });
+  }
+
+  private scheduleReconnectGrace(seat: number, deadlineAt: number): void {
+    this.reconnectDeadlines.set(seat, deadlineAt);
+    const remainingMs = Math.max(0, deadlineAt - Date.now());
+    const timer = setTimeout(() => {
+      this.runDetachedMutation("reconnect grace expiry", () => this.expireReconnectGrace(seat));
+    }, remainingMs);
+    this.disconnectedSeats.set(seat, { deadlineAt, timer });
+  }
+
+  private clearReconnectGrace(seat: number): void {
+    const grace = this.disconnectedSeats.get(seat);
+    if (grace?.timer !== null && grace?.timer !== undefined) clearTimeout(grace.timer);
+    this.disconnectedSeats.delete(seat);
+  }
+
+  /**
+   * Only this derived state controls visibility and timers.  Clearing a
+   * reconnect grace must never accidentally cancel a host's explicit pause.
+   */
+  private reconcileEffectivePause(): void {
+    const shouldPause = this.manualPause || this.disconnectedSeats.size > 0 || this.expiredDisconnectedSeats.size > 0;
+    if (shouldPause === this.paused) return;
+    this.paused = shouldPause;
+    if (shouldPause) {
+      this.freezeActiveTimer();
+      const reason = this.manualPause
+        ? DraftPauseReason.PausedByHost
+        : DraftPauseReason.PlayerDisconnected;
+      this.broadcastToGuests({ type: "draft_paused", reason });
+      this.emit({ type: "draftPaused", reason });
+      return;
+    }
+    this.broadcastToGuests({ type: "draft_resumed" });
+    this.emit({ type: "draftResumed" });
+    if (this.resumeFrozenTimer()) return;
+    if (this.draftStarted && this.podPolicy === "Competitive") {
+      void (async () => {
+        try {
+          const view = await this.adapter.getViewForSeat(0);
+          if (view.status === "Drafting") this.startPickTimer(view.pick_number);
+        } catch { /* A later authoritative operation will retry timer setup. */ }
+      })();
+    }
+  }
+
+  /** One durable terminal transition for live and recovered reconnect grace. */
+  private async expireReconnectGrace(seat: number): Promise<void> {
+    // Grace expiry remains an effective pause: a missing player cannot
+    // silently resume the pod just because their reconnect window ended.
+    if (!this.disconnectedSeats.has(seat)) return;
+    this.clearReconnectGrace(seat);
+    this.reconnectDeadlines.delete(seat);
     if (!this.draftStarted) {
-      // Pre-draft disconnect: free the seat
       this.seatTokens.delete(seat);
       this.seatNames.delete(seat);
-      this.persistSession();
+      this.perSeatWorkspaceSnapshots.delete(seat);
+      await this.persistSessionStrict();
       this.syncLobbyToGuests();
       this.emit({ type: "seatDisconnected", seatIndex: seat });
       return;
     }
-
-    // Mid-draft disconnect: sync the engine connection bitmap first so
-    // `DraftPlayerView.seats[*].connected` reflects the new state, then
-    // broadcast to all guests. Wrapped in a void-IIFE because this method
-    // is sync `: void`; matching the existing convention on lines 342 / 1267.
-    void (async () => {
-      try {
-        await this.adapter.setSeatConnected(seat, false);
-        await this.broadcastViews();
-      } catch (err) {
-        console.error(
-          `[P2PDraftHost] setSeatConnected(false) failed for seat ${seat}:`,
-          err,
-        );
-      }
-    })();
-
-    // Mid-draft disconnect: grace window
-    const timer = setTimeout(() => {
-      // Grace expired — mark seat as abandoned but don't remove from draft
-      // (other players' packs may depend on this seat's position)
-      this.disconnectedSeats.delete(seat);
-      this.emit({
-        type: "seatKicked",
-        seatIndex: seat,
-        reason: DraftPauseReason.DisconnectGraceExpired,
-      });
-    }, this.gracePeriodMs);
-
-    this.disconnectedSeats.set(seat, { disconnectedAt: Date.now(), timer });
-
-    if (!this.paused) {
-      this.paused = true;
-      this.broadcastToGuests({
-        type: "draft_paused",
-        reason: DraftPauseReason.PlayerDisconnected,
-      });
-      this.emit({
-        type: "draftPaused",
-        reason: DraftPauseReason.PlayerDisconnected,
-      });
-    }
-
-    this.emit({ type: "seatDisconnected", seatIndex: seat });
+    await this.adapter.setSeatConnected(seat, false);
+    this.expiredDisconnectedSeats.add(seat);
+    await this.persistSessionStrict();
+    this.broadcastToGuests({
+      type: "draft_paused",
+      reason: DraftPauseReason.DisconnectGraceExpired,
+    });
+    this.emit({ type: "seatKicked", seatIndex: seat, reason: DraftPauseReason.DisconnectGraceExpired });
+    this.emit({ type: "draftPaused", reason: DraftPauseReason.DisconnectGraceExpired });
+    this.reconcileEffectivePause();
   }
 
   // ── Timer management ─────────────────────────────────────────────────
@@ -748,13 +2186,36 @@ export class P2PDraftHost {
       this.timerInterval = null;
     }
     this.timerContext = null;
+    this.timerTargetMatchId = null;
   }
 
-  private startPickTimer(pickNumber: number): void {
+  private freezeActiveTimer(): void {
+    if (this.timerContext) {
+      this.frozenTimer = {
+        context: this.timerContext,
+        remainingMs: Math.max(0, this.timerEndAt - Date.now()),
+        matchId: this.timerTargetMatchId,
+      };
+    }
+    this.clearActiveTimer();
+  }
+
+  private resumeFrozenTimer(): boolean {
+    const timer = this.frozenTimer;
+    this.frozenTimer = null;
+    if (!timer || timer.remainingMs <= 0) return false;
+    switch (timer.context) {
+      case "pick": this.startPickTimer(undefined, timer.remainingMs); return true;
+      case "sideboard": if (timer.matchId) { this.startSideboardTimer(timer.matchId, timer.remainingMs); return true; } return false;
+      case "playdraw": if (timer.matchId) { this.startPlayDrawTimer(timer.matchId, timer.remainingMs); return true; } return false;
+    }
+  }
+
+  private startPickTimer(pickNumber?: number, durationOverride?: number): void {
     this.clearActiveTimer();
     if (this.podPolicy !== "Competitive") return;
     this.timerContext = "pick";
-    const duration = pickTimerDurationMs(pickNumber);
+    const duration = durationOverride ?? pickTimerDurationMs(pickNumber ?? 0);
     this.timerRemainingMs = duration;
     this.timerEndAt = Date.now() + duration;
     this.timerInterval = setInterval(() => {
@@ -765,47 +2226,63 @@ export class P2PDraftHost {
   private onPickTimerTick(): void {
     this.timerRemainingMs = Math.max(0, this.timerEndAt - Date.now());
     this.broadcastToGuests({ type: "draft_timer_sync", remainingMs: this.timerRemainingMs });
+    // The same reading to the host's own store. `broadcastToGuests` cannot
+    // deliver it: the host holds no guest session of its own.
+    this.emit({ type: "timerTick", remainingMs: this.timerRemainingMs });
     if (this.timerRemainingMs <= 0) {
       this.clearActiveTimer();
       this.emit({ type: "timerExpired" });
-      void this.autoPickAllPending();
+      this.runDetachedMutation("pick timer expiry", () => this.autoPickAllPending());
     }
   }
 
-  private startSideboardTimer(matchId: string): void {
+  private startSideboardTimer(matchId: string, durationOverride?: number): void {
     this.clearActiveTimer();
     this.timerContext = "sideboard";
-    const SIDEBOARD_TIMER_MS = 60_000;
-    this.timerRemainingMs = SIDEBOARD_TIMER_MS;
-    this.timerEndAt = Date.now() + SIDEBOARD_TIMER_MS;
+    const duration = durationOverride ?? 60_000;
+    this.timerTargetMatchId = matchId;
+    this.timerRemainingMs = duration;
+    this.timerEndAt = Date.now() + duration;
     this.timerInterval = setInterval(() => {
       this.timerRemainingMs = Math.max(0, this.timerEndAt - Date.now());
       this.broadcastToGuests({ type: "draft_timer_sync", remainingMs: this.timerRemainingMs });
       if (this.timerRemainingMs <= 0) {
         this.clearActiveTimer();
-        this.autoSubmitSideboards(matchId);
+        this.runDetachedMutation("sideboard timer expiry", () => this.autoSubmitSideboards(matchId));
       }
     }, 1_000);
   }
 
-  private startPlayDrawTimer(matchId: string): void {
+  private startPlayDrawTimer(matchId: string, durationOverride?: number): void {
     this.clearActiveTimer();
     this.timerContext = "playdraw";
-    const PLAY_DRAW_TIMER_MS = 10_000;
-    this.timerRemainingMs = PLAY_DRAW_TIMER_MS;
-    this.timerEndAt = Date.now() + PLAY_DRAW_TIMER_MS;
+    const duration = durationOverride ?? 10_000;
+    this.timerTargetMatchId = matchId;
+    this.timerRemainingMs = duration;
+    this.timerEndAt = Date.now() + duration;
     this.timerInterval = setInterval(() => {
       this.timerRemainingMs = Math.max(0, this.timerEndAt - Date.now());
       this.broadcastToGuests({ type: "draft_timer_sync", remainingMs: this.timerRemainingMs });
       if (this.timerRemainingMs <= 0) {
         this.clearActiveTimer();
-        // Auto-choose "play" on expiry
-        this.resolvePlayDrawChoice(matchId, true);
+        this.runDetachedMutation("play-draw timer expiry", () => this.autoChoosePlayDraw(matchId));
       }
     }, 1_000);
   }
 
   private async autoPickAllPending(): Promise<void> {
+    // THE DISPATCH SITS ABOVE the `current_pack` loop below, which is this
+    // function's own dominating conjunct: a shared-stack session leaves
+    // `current_pack` null for EVERY seat, so an arm placed below it would be
+    // dead code and the sweep would silently do nothing. Exactly the placement
+    // and exactly the reason `server-core`'s `pick_random_for_seat` states for
+    // its own `SharedStackPiles` arm; this path is the P2P half of the same
+    // answer, which previously existed only server-side.
+    if (this.procedure !== null && isSharedStackDistribution(this.procedure.distribution)) {
+      await this.autoDecideSharedStackTurn();
+      return;
+    }
+
     // For each seat that still has a current_pack (hasn't picked), auto-pick
     // a random card (D-02). Skip seats already in `picksThisRound` — they've
     // already submitted this round and the engine would reject the duplicate
@@ -824,9 +2301,12 @@ export class P2PDraftHost {
       try {
         const view = await this.adapter.getViewForSeat(seat);
         if (view.current_pack && view.current_pack.length > 0) {
-          const randomIndex = Math.floor(Math.random() * view.current_pack.length);
-          const card = view.current_pack[randomIndex];
-          await this.handlePick(seat, card.instance_id, false);
+          // CR 903.13b: the sweep owes one whole pick step, not one card.
+          await this.handlePick(
+            seat,
+            randomDistinctCards(view.current_pack, view.required_pick_count),
+            false,
+          );
           anyPicked = true;
         }
       } catch (err) {
@@ -842,9 +2322,87 @@ export class P2PDraftHost {
     }
   }
 
+  /**
+   * Drive the ACTIVE shared-stack seat's turn with the move the engine itself
+   * calls always-legal, when the pick clock expires on it.
+   *
+   * A FORCED DECISION IS NOT AN AI OPPONENT. Nothing here evaluates a pile or
+   * prefers an outcome: it reads the engine's published `legality` vector and
+   * takes the first entry the engine marked legal. That vector is built from
+   * `SharedStackPileDecision::ALL` in declaration order and answered by
+   * `shared_stack::refusal_for` — the SAME authority, in the SAME order, that
+   * `shared_stack::forced_decision` folds — so this reproduces the engine's
+   * forced move by reading it rather than by re-deriving it. It is the
+   * shared-stack counterpart of the random pick the pick-and-pass sweep submits
+   * for a timed-out seat, and it mirrors `pick_random_for_seat`'s arm.
+   *
+   * It stays the forced move even now that a Winston BOT exists. The seat this
+   * drives is a HUMAN one that ran out of clock; playing it well on its
+   * occupant's behalf is a policy decision nobody has made, and the engine's
+   * always-legal move is the one that decides nothing. `resolveBotPicks` is
+   * where a seat the engine itself marks `is_bot` gets the evaluated turn.
+   *
+   * Seat 0's view suffices for every field read here: `active_seat`,
+   * `active_pile` and `legality` are all published identically to every viewer
+   * (`legality` is asked for the active seat by construction, and the cursor is
+   * public). Only `revealed` is viewer-scoped, and nothing here reads it —
+   * which is the point, since reading the faces is what would make this an AI.
+   *
+   * `undefined` from the `find` is left as a no-op rather than a thrown error:
+   * the engine's own invariant is that some decision is always legal for the
+   * active seat while drafting, so an empty result means the session is no
+   * longer in that state and forcing anything would be the wrong answer.
+   */
+  private async autoDecideSharedStackTurn(): Promise<void> {
+    try {
+      const hostView = await this.adapter.getViewForSeat(0);
+      if (hostView.status !== "Drafting") return;
+      const stack = hostView.shared_stack;
+      if (!stack) return;
+      // THE ENGINE CHOOSES; THIS ASKS. A timeout is a host concern, so the host
+      // may request a forced resolution -- but which move that is, is a rules
+      // outcome. This used to be `legality.find(entry => entry.refusal === null)`
+      // here, the same algorithm `shared_stack::forced_decision` runs but folded
+      // over a different ordering source: the engine folds
+      // `SharedStackPileDecision::ALL` in declaration order, this folded
+      // whatever order the view happened to serialize. They agreed by
+      // coincidence, and a reordering of either would have silently changed
+      // which move a timed-out seat makes.
+      const forced = await this.adapter.sharedStackForcedDecision(stack.active_seat);
+      if (forced === null) return;
+      // Goes through the ordinary decision path, so the timeout-driven turn is
+      // persisted, acknowledged, broadcast and RE-ARMED by exactly the code a
+      // player-driven one is. A second, quieter path here is how the two would
+      // drift.
+      await this.handleSharedStackDecision(stack.active_seat, stack.active_pile, forced);
+    } catch (err) {
+      console.error("[P2PDraftHost] shared-stack forced decision failed:", err);
+    }
+  }
+
+  /**
+   * Resolve every bot seat's outstanding obligation, whatever shape the
+   * procedure gives it.
+   *
+   * The shared-stack arm sits ABOVE the `current_pack` loop below, which is
+   * that loop's own dominating conjunct: a shared-stack session leaves
+   * `current_pack` null for EVERY seat, so an arm placed below it would be dead
+   * code and a Winston bot would simply never move. Exactly the placement and
+   * exactly the reason `autoPickAllPending` states for its own dispatch, and
+   * the reason `server-core`'s `pick_random_for_seat` states for its.
+   *
+   * Dispatched on the DISTRIBUTION, never on `kind` and never on a
+   * `human_seats` scalar — the two are different questions and only the first
+   * one tracks the turn structure this method has to service.
+   */
   private async resolveBotPicks(options: PickOptions = { emit: true, persist: true }): Promise<void> {
     const hostView = await this.adapter.getViewForSeat(0);
     if (hostView.status !== "Drafting") return;
+
+    if (this.procedure !== null && isSharedStackDistribution(this.procedure.distribution)) {
+      await this.resolveSharedStackBotTurns(hostView, options);
+      return;
+    }
 
     for (const seat of hostView.seats) {
       if (!seat.is_bot) continue;
@@ -852,12 +2410,67 @@ export class P2PDraftHost {
       const pack = view.current_pack;
       if (!pack || pack.length === 0) continue;
 
-      const randomIndex = Math.floor(Math.random() * pack.length);
+      // CR 903.13b: a bot owes one whole pick step, not one card. The count is
+      // the engine's; a one-id pick into a Commander pod is refused by
+      // `apply_pick_inner` with `WrongPickCardCount`, and `resolveBotPicks` has
+      // no try/catch, so it would strand the round.
       await this.applyPick(
         seat.seat_index,
-        pack[randomIndex].instance_id,
+        randomDistinctCards(pack, view.required_pick_count),
         { acknowledge: false, emit: options.emit, persist: options.persist, resolveBots: false },
       );
+    }
+  }
+
+  /**
+   * Hand every consecutive bot-owned shared-stack turn to the engine.
+   *
+   * NOTHING here decides a Winston turn. The pile, the take-or-decline and the
+   * loop that spans consecutive bot seats are all
+   * `resolve_shared_stack_bot_turns`'s, whose bound and termination proof are
+   * compiled and unit-tested in `draft-wasm`; this method forwards the call and
+   * owns only the persistence fence. A second, client-side notion of what a bot
+   * should do is exactly how the two would drift.
+   *
+   * The `is_bot` pre-check is the engine's own published seat flag — the SAME
+   * field the pick-and-pass loop reads — and it is an economy, not a legality
+   * test: the export already returns an empty list when the active seat is
+   * human. It keeps a human-vs-human Winston pod, which is the common shape,
+   * from making an engine round-trip on every single decision.
+   *
+   * Only the LENGTH of the returned deltas is read, and only to decide whether
+   * a fence is owed: an empty list means the engine moved nothing, so there is
+   * no new reducer result to make durable. Views are broadcast by the caller,
+   * which is where the shared-stack path's one broadcast already lives.
+   */
+  private async resolveSharedStackBotTurns(
+    hostView: DraftPlayerView,
+    options: PickOptions,
+  ): Promise<void> {
+    if (!hostView.seats.some((seat) => seat.is_bot)) return;
+    try {
+      const deltas = await this.adapter.resolveSharedStackBotTurns();
+      if (deltas.length === 0) return;
+      if (options.persist) {
+        await this.persistSessionStrict();
+      }
+    } catch (err) {
+      // THE LOOP CAN FAIL AFTER APPLYING DECISIONS. `drive_shared_stack_bot_turns`
+      // mutates the session in place and returns `Err` from wherever it got to,
+      // so a failure on the third bot turn leaves the first two applied in the
+      // reducer. The caller catches, emits, and broadcasts — which would publish
+      // a reducer result no snapshot holds, and a host reload would then rewind
+      // every client past decisions they had already seen. That is exactly the
+      // invariant the fence on the success path exists for, so the failure path
+      // owes the same fence.
+      //
+      // A persist failure here replaces the original error deliberately: losing
+      // durability is the more serious of the two, and it is the one that makes
+      // the broadcast unsafe.
+      if (options.persist) {
+        await this.persistSessionStrict();
+      }
+      throw err;
     }
   }
 
@@ -872,12 +2485,20 @@ export class P2PDraftHost {
   // ── Match coordination ────────────────────────────────────────────────
 
   /**
-   * Generate pairings for a given round and dispatch match start messages.
+   * Generate the next round's pairings and dispatch match start messages.
+   * The engine decides which round that is; we read it back off the view.
    * Called after all decks are submitted or after round advancement.
    */
-  async generatePairings(round: number): Promise<void> {
+  async generatePairings(): Promise<void> {
+    return this.enqueueAuthoritativeMutation(() => this.generatePairingsInner());
+  }
+
+  private async generatePairingsInner(): Promise<void> {
     try {
-      const view = await this.adapter.generatePairings(round);
+      const view = await this.adapter.generatePairings();
+      await this.persistSessionStrict();
+      // The engine owns the round. Read it back; never compute it here.
+      const round = view.current_round;
       const launchablePairings = view.pairings.filter((pairing) =>
         pairing.round === round &&
         (pairing.status === "Pending" || pairing.status === "InProgress")
@@ -908,15 +2529,317 @@ export class P2PDraftHost {
 
       const latestView = await this.adapter.getViewForSeat(0);
 
-      // Broadcast updated views
+      // Launch records may have changed while dispatching. Fence that final
+      // snapshot before either broadcasts or the host UI observe it.
+      await this.persistSessionStrict();
       await this.broadcastViews();
-      this.persistSession();
       this.emit({ type: "pairingsGenerated", round, pairings: latestView.pairings });
       this.emit({ type: "viewUpdated", view: latestView });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      console.error(`[P2PDraftHost] generatePairings failed:`, message);
       this.emit({ type: "error", message: `Failed to generate pairings: ${message}` });
     }
+  }
+
+  private matchBindingFor(pairing: PairingView, matchAuthoritySeat: number): DraftMatchBinding {
+    const existing = this.matchBindings.get(pairing.match_id);
+    if (existing && existing.round === pairing.round) return existing;
+
+    const binding: DraftMatchBinding = {
+      podId: this.draftCode,
+      matchId: pairing.match_id,
+      round: pairing.round,
+      sessionKey: crypto.randomUUID(),
+      lease: crypto.randomUUID(),
+      nonce: crypto.randomUUID(),
+      revision: 0,
+      matchAuthoritySeat,
+    };
+    this.matchBindings.set(pairing.match_id, binding);
+    return binding;
+  }
+
+  private async acceptMatchSettlement(
+    submittingSeat: number,
+    settlement: DraftMatchSettlement,
+  ): Promise<void> {
+    const binding = this.matchBindings.get(settlement.binding.matchId);
+    if (!binding || !this.sameBinding(binding, settlement.binding)) {
+      this.guestSessions.get(submittingSeat)?.send({ type: "draft_error", reason: "Invalid match binding" });
+      return;
+    }
+    const view = await this.adapter.getViewForSeat(0);
+    const pairing = view.pairings.find(
+      (candidate) => candidate.match_id === binding.matchId && candidate.round === binding.round,
+    );
+    if (
+      !pairing ||
+      view.current_round !== binding.round ||
+      submittingSeat !== binding.matchAuthoritySeat ||
+      (settlement.winnerSeat !== null &&
+        settlement.winnerSeat !== pairing.seat_a &&
+        settlement.winnerSeat !== pairing.seat_b)
+    ) {
+      this.guestSessions.get(submittingSeat)?.send({ type: "draft_error", reason: "Unauthorized match settlement" });
+      return;
+    }
+
+    const receipt = this.settlementReceipts.get(binding.matchId);
+    if (receipt) {
+      if (receipt.receiptId === settlement.receiptId) {
+        void this.sendSettlementAck(submittingSeat, binding.matchId, receipt);
+      } else {
+        this.sendToSeat(submittingSeat, {
+          type: "draft_error",
+          reason: "Match already settled",
+        });
+      }
+      return;
+    }
+
+    // Persist the intent before invoking the draft reducer. A recovered pod
+    // can retry this record without applying a second result.
+    this.settlementOutbox.set(settlement.receiptId, settlement);
+    await this.persistSessionStrict();
+    await this.reportMatchResult(binding.matchId, settlement.winnerSeat);
+    const accepted = { receiptId: settlement.receiptId, revision: binding.revision };
+    this.settlementReceipts.set(binding.matchId, accepted);
+    this.settlementOutbox.delete(settlement.receiptId);
+    await this.persistSessionStrict();
+    void this.sendSettlementAck(submittingSeat, binding.matchId, accepted);
+  }
+
+  private sameBinding(left: DraftMatchBinding, right: DraftMatchBinding): boolean {
+    return left.podId === right.podId
+      && left.matchId === right.matchId
+      && left.round === right.round
+      && left.sessionKey === right.sessionKey
+      && left.lease === right.lease
+      && left.nonce === right.nonce
+      && left.revision === right.revision
+      && left.matchAuthoritySeat === right.matchAuthoritySeat;
+  }
+
+  private async sendSettlementAck(
+    seat: number,
+    matchId: string,
+    receipt: { receiptId: string; revision: number },
+  ): Promise<void> {
+    const message: DraftP2PMessage = {
+      type: "draft_match_settlement_ack",
+      matchId,
+      receiptId: receipt.receiptId,
+      revision: receipt.revision,
+    };
+    if (seat === 0) return;
+    try {
+      await this.guestSessions.get(seat)?.send(message);
+    } catch (error) {
+      // The receipt is already durable; an exact retry can acknowledge it
+      // without applying the result to the reducer again.
+      console.warn("[P2PDraftHost] settlement acknowledgement failed:", error);
+    }
+  }
+
+  /**
+   * Partition a completed Commander pod's seats into the ones a human will
+   * actually pilot and the ones the engine must.
+   *
+   * A seat is a LIVE HUMAN iff `!is_bot && connected`; everything else — a bot,
+   * or a human who dropped before the launch — is ENGINE-PILOTED. This is the
+   * single authority for that classification.
+   *
+   * `is_bot` is load bearing and `connected` alone would be wrong: the engine
+   * reports `connected` as `true` UNCONDITIONALLY for bot seats
+   * (`draft-core/src/view.rs`, `DraftSeat::Bot => true`), so a `connected`-only
+   * test classifies every bot as a live human and dispatches launches into the
+   * void.
+   *
+   * Seat 0 (the host) is always live: humans read `get_or(i, true)` over
+   * `connected_seats`, which starts all-true at pod size, and the engine's
+   * `apply_set_seat_connected` rejects bot seats — every client-side
+   * `setSeatConnected(x, false)` site is guest-keyed, so the host never flips.
+   */
+  private commanderSeatPlan(view: DraftPlayerView): {
+    liveHumanSeats: number[];
+    engineSeats: number[];
+  } {
+    const liveHumanSeats: number[] = [];
+    const engineSeats: number[] = [];
+    for (const seat of view.seats) {
+      const live = !this.isBotSeatFromView(view, seat.seat_index) && seat.connected;
+      (live ? liveHumanSeats : engineSeats).push(seat.seat_index);
+    }
+    return { liveHumanSeats, engineSeats };
+  }
+
+  /**
+   * CR 903.13a: every deck a completed Commander pod's launch needs. PURE —
+   * this sends nothing; `sendCommanderLaunches` does that from the result.
+   *
+   * The split exists so a caller can bring the game up (AI seat mutations and
+   * all) BEFORE any guest is invited into it: a guest that joins early takes
+   * the first waiting seat and the mutation then kicks it.
+   *
+   * `view` MUST be the freshest published view, read at call time rather than
+   * taken from a captured closure. There is a real stale-view window this does
+   * not close: `handleGuestDisconnect` deletes the `guestSessions` entry
+   * synchronously while the engine's `connected` flag flips only inside the
+   * detached mutation and reaches the store later still. A launch dispatched
+   * against a view captured inside that window classifies the departed seat
+   * LIVE, `sendToSeat` then silently no-ops for it (no session), the seat gets
+   * no engine pilot either, and the game never fills. Reading the view at call
+   * time is the caller's responsibility.
+   *
+   * Modelled on `dispatchMatchLaunch`: `exportDraftSession()` is called EXACTLY
+   * ONCE and threaded through, so every deck is synthesized exactly once. That
+   * invariant is why `liveSeatDecks` carries EVERY live seat's deck rather than
+   * just the engine-piloted ones — a sender holding only `hostDeck` would have
+   * to export the session a second time to resolve its other recipients.
+   *
+   * `localSeat` is a parameter, never a hardcoded 0, and its entry in
+   * `liveSeatDecks` is the SAME OBJECT as `hostDeck`.
+   *
+   * Throws when `localSeat` has no submitted deck — the existing
+   * `submittedDeckForSeat` throw, not a new error path.
+   */
+  async commanderSeatDecks(view: DraftPlayerView, localSeat: number): Promise<CommanderSeatDecks> {
+    const { liveHumanSeats, engineSeats } = this.commanderSeatPlan(view);
+    const session = await this.exportDraftSession();
+
+    // FIRST, before any other seat's deck: the local seat's missing-deck throw
+    // is the one that must surface, whatever the rest of the pod looks like.
+    const hostDeck = this.submittedDeckForSeat(session, localSeat);
+
+    const engineSeatDecks: Array<{ seat: number; deck: DraftDeckPayload }> = [];
+    for (const seat of engineSeats) {
+      engineSeatDecks.push({
+        seat,
+        deck: this.isBotSeatFromView(view, seat)
+          ? await this.botDeckForSeat(session, seat)
+          : this.submittedDeckForSeat(session, seat),
+      });
+    }
+
+    const liveSeatDecks = liveHumanSeats.map((seat) => ({
+      seat,
+      // `localSeat`'s deck is REUSED, never re-synthesized.
+      deck: seat === localSeat ? hostDeck : this.submittedDeckForSeat(session, seat),
+    }));
+
+    return { hostDeck, liveSeatDecks, engineSeatDecks };
+  }
+
+  /**
+   * CR 903.13a: put one `draft_commander_launch` on every seat a human will
+   * pilot, from decks `commanderSeatDecks` already computed.
+   *
+   * The recipient set is exactly `decks.liveSeatDecks` and INCLUDES the local
+   * seat — the host is always pod seat 0, and `sendToSeat`'s seat-0 arm turns
+   * that send into a local `commanderLaunch` event, which is the ONLY path by
+   * which the host learns of its own launch.
+   *
+   * Takes no `localSeat`: `liveSeatDecks` already carries every live seat's own
+   * deck, the local seat's being the same object as `hostDeck`, so this list is
+   * the single authority for both the recipients and their decks. Re-running
+   * `commanderSeatPlan` here would create a second authority that a view drifting
+   * between the two calls could disagree with, yielding a recipient with no deck.
+   */
+  sendCommanderLaunches(
+    view: DraftPlayerView,
+    gameId: string,
+    roomCode: string,
+    decks: CommanderSeatDecks,
+  ): void {
+    for (const { seat, deck } of decks.liveSeatDecks) {
+      this.sendToSeat(seat, {
+        type: "draft_commander_launch",
+        launch: {
+          gameId,
+          roomCode,
+          localDeck: deck,
+          playerCount: view.seats.length,
+          // CR 903.13f(3): carry the host's own value through. The view's field
+          // is optional while the wire's is required-nullable, so `?? null` is
+          // the required narrowing — NOT `?? []`, which would assert "the draft
+          // contained zero sets" where the host already knows the answer.
+          draftSetCodes: view.draft_set_codes ?? null,
+        },
+      });
+    }
+  }
+
+  /**
+   * RESTORED (it was removed when `commanderSeatDecks` landed, which stranded
+   * 7- and 8-seat pods with no playable outcome at all). The two are NOT
+   * redundant: this one assembles ONE local game's payload in game-player
+   * order, `commanderSeatDecks` assembles per-seat decks for a P2P launch.
+   * Above the transport's seat ceiling only this one applies.
+   *
+   * The N-seat deck payload for a completed Commander pod (CR 903.13a: "a draft
+   * ... followed by a multiplayer game").
+   *
+   * A different SHAPE from `dispatchMatchLaunch`'s pairwise assembly — N seats
+   * in game-player order rather than two — and it is the only place the
+   * seat -> game-player mapping is defined. It lives here rather than in the
+   * store because the three per-seat primitives it composes and
+   * `exportDraftSession` are all private on this class, and because a
+   * game-shaped ordering rule does not belong in the display layer.
+   *
+   * The local seat becomes game player 0; the remaining seats, in ascending
+   * seat order, become game player 1 (`opponent`) and then 2..N-1 (`ai_decks`).
+   * Throws when the local seat has no submitted deck — the existing
+   * `submittedDeckForSeat` throw, not a new error path.
+   */
+  async podCommanderDeckPayload(
+    view: DraftPlayerView,
+    localSeat: number,
+  ): Promise<DraftMatchDeckPayload> {
+    const session = await this.exportDraftSession();
+    const deckForSeat = async (seat: number): Promise<DraftDeckPayload> =>
+      this.isBotSeatFromView(view, seat)
+        ? this.botDeckForSeat(session, seat)
+        : this.submittedDeckForSeat(session, seat);
+
+    const player = await deckForSeat(localSeat);
+    const others = view.seats
+      .map((s) => s.seat_index)
+      .filter((seat) => seat !== localSeat)
+      .sort((a, b) => a - b);
+
+    const decks: DraftDeckPayload[] = [];
+    for (const seat of others) {
+      decks.push(await deckForSeat(seat));
+    }
+
+    const [opponent, ...aiDecks] = decks;
+    return {
+      player,
+      opponent,
+      ai_decks: aiDecks,
+      draft_set_codes: view.draft_set_codes,
+      booster_pack_pool: await this.adapter.boosterPackPoolForGame(),
+    };
+  }
+
+  /** Host-only cube source for a launch assembled outside this coordinator. */
+  async boosterPackPoolForGame(): Promise<string[] | null> {
+    return this.adapter.boosterPackPoolForGame();
+  }
+
+  /**
+   * The booster source for a pairwise launch whose engine runs on
+   * `authoritySeat`. The original Cube multiset is private to this device: the
+   * host is always pod seat 0, and only its own draft session holds the source.
+   * Any other authority is a guest's device, which must never learn the undealt
+   * entries or their duplicate counts, so its launch names no source at all.
+   * That engine then opens ordinary set boosters, exactly as every draft game
+   * did before Cube sources existed; opening from the Cube there would need a
+   * host-side pack request the match authority can call without holding the pool.
+   */
+  private async boosterPackPoolForMatchAuthority(authoritySeat: number): Promise<string[] | null> {
+    return authoritySeat === 0 ? this.adapter.boosterPackPoolForGame() : null;
   }
 
   private async dispatchMatchLaunch(pairing: PairingView, view: DraftPlayerView): Promise<void> {
@@ -924,15 +2847,16 @@ export class P2PDraftHost {
     const seatB = pairing.seat_b;
     const seatAIsBot = this.isBotSeatFromView(view, seatA);
     const seatBIsBot = this.isBotSeatFromView(view, seatB);
-    const session = await this.exportDraftSession();
-
     if (seatAIsBot && seatBIsBot) {
       await this.reportMatchResult(pairing.match_id, Math.min(seatA, seatB));
       return;
     }
 
+    const session = await this.exportDraftSession();
+
     if (seatAIsBot || seatBIsBot) {
       const humanSeat = seatAIsBot ? seatB : seatA;
+      const binding = this.matchBindingFor(pairing, humanSeat);
       const botSeat = seatAIsBot ? seatA : seatB;
       const botName = seatAIsBot ? pairing.name_a : pairing.name_b;
       const humanDeck = this.submittedDeckForSeat(session, humanSeat);
@@ -941,11 +2865,10 @@ export class P2PDraftHost {
         player: humanDeck,
         opponent: botDeck,
         ai_decks: [],
+        booster_pack_pool: await this.boosterPackPoolForMatchAuthority(humanSeat),
       };
 
-      this.sendToSeat(humanSeat, {
-        type: "draft_match_start",
-        launch: {
+      await this.sendMatchLaunch(humanSeat, {
           type: "Bot",
           matchId: pairing.match_id,
           round: pairing.round,
@@ -953,13 +2876,14 @@ export class P2PDraftHost {
           botSeat,
           botName,
           deckPayload,
-          matchConfig: this.matchConfig(),
-        },
+          matchConfig: matchConfigForView(view),
+          binding,
       });
       return;
     }
 
     const matchHostSeat = Math.min(seatA, seatB);
+    const binding = this.matchBindingFor(pairing, matchHostSeat);
     const guestSeat = matchHostSeat === seatA ? seatB : seatA;
     const matchRoomCode = `${this.draftCode ?? "draft"}-${pairing.match_id}`;
     const hostDeck = this.submittedDeckForSeat(session, matchHostSeat);
@@ -970,11 +2894,10 @@ export class P2PDraftHost {
       player: hostDeck,
       opponent: guestDeck,
       ai_decks: [],
+      booster_pack_pool: await this.boosterPackPoolForMatchAuthority(matchHostSeat),
     };
 
-    this.sendToSeat(matchHostSeat, {
-      type: "draft_match_start",
-      launch: {
+    await this.sendMatchLaunch(matchHostSeat, {
         type: "HumanHost",
         matchId: pairing.match_id,
         matchRoomCode,
@@ -984,12 +2907,10 @@ export class P2PDraftHost {
         opponentName: hostOpponentName,
         matchHostPeerId: matchRoomCode,
         deckPayload,
-        matchConfig: this.matchConfig(),
-      },
+        matchConfig: matchConfigForView(view),
+        binding,
     });
-    this.sendToSeat(guestSeat, {
-      type: "draft_match_start",
-      launch: {
+    await this.sendMatchLaunch(guestSeat, {
         type: "HumanGuest",
         matchId: pairing.match_id,
         matchRoomCode,
@@ -999,9 +2920,48 @@ export class P2PDraftHost {
         opponentName: guestOpponentName,
         matchHostPeerId: matchRoomCode,
         localDeck: guestDeck,
-        matchConfig: this.matchConfig(),
-      },
+        matchConfig: matchConfigForView(view),
+        binding,
     });
+  }
+
+  private async sendMatchLaunch(seat: number, launch: DraftMatchLaunch): Promise<void> {
+    this.rememberMatchDecks(launch);
+    let launches = this.matchLaunches.get(launch.matchId);
+    if (!launches) {
+      launches = new Map();
+      this.matchLaunches.set(launch.matchId, launches);
+    }
+    launches.set(seat, launch);
+    let digests = this.launchDigests.get(launch.matchId);
+    if (!digests) {
+      digests = new Map();
+      this.launchDigests.set(launch.matchId, digests);
+    }
+    digests.set(seat, draftIntergameDigest(launch));
+    await this.persistSessionStrict();
+    this.sendToSeat(seat, { type: "draft_match_start", launch });
+  }
+
+  private rememberMatchDecks(launch: DraftMatchLaunch): void {
+    let decks = this.matchDecks.get(launch.matchId);
+    if (!decks) {
+      decks = new Map();
+      this.matchDecks.set(launch.matchId, decks);
+    }
+    switch (launch.type) {
+      case "HumanHost":
+        decks.set(launch.localSeat, launch.deckPayload.player);
+        decks.set(launch.opponentSeat, launch.deckPayload.opponent);
+        break;
+      case "HumanGuest":
+        decks.set(launch.localSeat, launch.localDeck);
+        break;
+      case "Bot":
+        decks.set(launch.localSeat, launch.deckPayload.player);
+        decks.set(launch.botSeat, launch.deckPayload.opponent);
+        break;
+    }
   }
 
   private async dispatchMatchLaunchesForSeat(view: DraftPlayerView, seat: number): Promise<void> {
@@ -1033,6 +2993,7 @@ export class P2PDraftHost {
     return deckPayload(
       submitted.main_deck,
       sideboardFromPool(session, seat, submitted.main_deck),
+      submitted.commanders ?? [],
     );
   }
 
@@ -1047,15 +3008,15 @@ export class P2PDraftHost {
         Array<string>(count).fill(name),
       ),
     ];
+    // CR 903.3: the designation is a member of `suggested.main_deck` (the
+    // engine guarantees it), so carrying it here adds no name and loses none.
     return deckPayload(
       mainDeck,
       sideboardFromPool(session, botSeat, suggested.main_deck),
+      suggested.commander,
     );
   }
 
-  private matchConfig(): MatchConfig {
-    return { match_type: this.kind === "Traditional" ? "Bo3" : "Bo1" };
-  }
 
   /**
    * Report a match result. Called when a guest sends draft_match_result.
@@ -1064,11 +3025,11 @@ export class P2PDraftHost {
   async reportMatchResult(matchId: string, winnerSeat: number | null): Promise<void> {
     try {
       const view = await this.adapter.reportMatchResult(matchId, winnerSeat);
+      await this.persistSessionStrict();
       this.emit({ type: "matchResultReceived", matchId, winnerSeat });
 
       // Broadcast updated views with new standings
       await this.broadcastViews();
-      this.persistSession();
       this.emit({ type: "viewUpdated", view });
 
       // Check if the reducer auto-advanced (Competitive mode)
@@ -1078,7 +3039,13 @@ export class P2PDraftHost {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[P2PDraftHost] reportMatchResult failed:`, message);
+      throw err;
     }
+  }
+
+  /** Seat 0 uses the same authenticated settlement gate as remote match hosts. */
+  async submitHostMatchSettlement(settlement: DraftMatchSettlement): Promise<void> {
+    await this.enqueueAuthoritativeMutation(() => this.acceptMatchSettlement(0, settlement));
   }
 
   /**
@@ -1086,11 +3053,15 @@ export class P2PDraftHost {
    * T-57-07: only callable from host UI; guests sending draft_request_advance are ignored.
    */
   async advanceRound(): Promise<void> {
+    return this.enqueueAuthoritativeMutation(() => this.advanceRoundInner());
+  }
+
+  private async advanceRoundInner(): Promise<void> {
     try {
-      const view = await this.adapter.advanceRound();
-      const newRound = view.current_round;
-      this.emit({ type: "roundAdvanced", newRound });
-      await this.generatePairings(newRound);
+      await this.adapter.advanceRound();
+      await this.persistSessionStrict();
+      this.emit({ type: "roundAdvanced" });
+      await this.generatePairingsInner();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.emit({ type: "error", message: `Failed to advance round: ${message}` });
@@ -1101,11 +3072,66 @@ export class P2PDraftHost {
    * Replace a disconnected player with a bot (Casual mode, host-only).
    */
   async replaceSeatWithBot(seat: number): Promise<void> {
+    return this.enqueueAuthoritativeMutation(() => this.replaceSeatWithBotInner(seat));
+  }
+
+  private async replaceSeatWithBotInner(seat: number): Promise<void> {
     try {
       const seed = this.draftSeed ?? hashStringToSeed(this.draftCode || this.roomCode || "draft");
-      await this.adapter.replaceSeatWithBot(seat, this.botNameForSeat(seat, seed));
+      const replaced = await this.adapter.replaceSeatWithBot(seat, this.botNameForSeat(seat, seed));
+      const stillDrafting = replaced.status === "Drafting";
+      const grace = this.disconnectedSeats.get(seat);
+      if (grace) this.clearReconnectGrace(seat);
+      this.reconnectDeadlines.delete(seat);
+      this.expiredDisconnectedSeats.delete(seat);
+      this.seatTokens.delete(seat);
+      this.seatNames.delete(seat);
+      await this.persistSessionStrict();
+
+      // A seat that just BECAME a bot may be the one the shared stack is
+      // waiting on, and nothing else would ever drive it: the reducer refuses
+      // a decision from a non-active seat, so no human can move for it, and
+      // the pick clock only exists under `Competitive`. Driving it here is the
+      // same obligation `startDraftInner` and `handleSharedStackDecision`
+      // already carry — every path that can leave a bot as the active seat
+      // must also drive it — and this is the third.
+      //
+      // The database load is not optional here either: an all-human pod that
+      // started before this replacement never took `startDraftInner`'s
+      // bot-seat branch, so the seat this creates would be the FIRST bot in the
+      // pod and would decide with no card faces at all.
+      //
+      // Gated on the ENGINE'S published status, read off the reducer's own
+      // return rather than re-queried: the only reachable caller today is the
+      // host control, which `HostControls.tsx` gates on `matchInProgress ||
+      // roundComplete`, so a pod outside `Drafting` owes no turn to anybody and
+      // must not pay for a card-data fetch. Both steps sit before the
+      // broadcast, so every seat's next view already shows where the bot chain
+      // stopped. The error boundary is the enclosing `catch`, which reports
+      // this as the host action it is rather than as a refused player decision.
+      // The bot chain has its OWN error boundary, for the same reason
+      // `handleSharedStackDecision`'s does: the replacement is already applied
+      // and persisted by this point, so a loud failure driving the bot must not
+      // swallow the broadcast that tells every guest the seat changed. Without
+      // this, guests keep a stale view of a replacement that really happened.
+      if (stillDrafting) {
+        try {
+          await this.loadCardDatabaseForSharedStackBots(
+            (await this.ensureProcedure()).distribution,
+            replaced.seats.filter((s) => s.is_bot).length,
+          );
+          await this.resolveBotPicks({ emit: false, persist: true });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          this.emit({
+            type: "error",
+            message: `Seat ${seat} became a bot, but driving its turn failed: ${message}`,
+          });
+        }
+      }
+
       await this.broadcastViews();
-      this.persistSession();
+      this.reconcileEffectivePause();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.emit({ type: "error", message: `Failed to replace seat ${seat}: ${message}` });
@@ -1116,7 +3142,7 @@ export class P2PDraftHost {
    * Override a match result (Casual mode, host-only).
    */
   async overrideMatchResult(matchId: string, winnerSeat: number | null): Promise<void> {
-    await this.reportMatchResult(matchId, winnerSeat);
+    await this.enqueueAuthoritativeMutation(() => this.reportMatchResult(matchId, winnerSeat));
   }
 
   // ── Bo3 Between-Games Orchestration ────────────────────────────────────
@@ -1133,13 +3159,33 @@ export class P2PDraftHost {
     seatA: number,
     seatB: number,
   ): void {
+    this.runDetachedMutation("between-games transition", () => this.handleMatchBetweenGamesDurably(
+      matchId, gameNumber, score, loserSeat, seatA, seatB,
+    ));
+  }
+
+  private async handleMatchBetweenGamesDurably(
+    matchId: string,
+    gameNumber: number,
+    score: MatchScore,
+    loserSeat: number | null,
+    seatA: number,
+    seatB: number,
+  ): Promise<void> {
+    const decks = this.matchDecks.get(matchId);
     this.bo3State.set(matchId, {
       seatA, seatB,
       submittedA: false, submittedB: false,
       loserSeat, gameNumber, score,
+      decks: [seatA, seatB].flatMap((seat) => {
+        const deck = decks?.get(seat);
+        return deck ? [{ seat, ...deckSubmission(deck) }] : [];
+      }),
     });
 
     const timerMs = this.podPolicy === "Competitive" ? 60_000 : 0;
+
+    await this.persistSessionStrict();
 
     // Send sideboard prompt to both pairing players via draft pod channel
     const prompt: DraftP2PMessage = {
@@ -1164,53 +3210,227 @@ export class P2PDraftHost {
     this.emit({ type: "bo3SideboardPromptSent", matchId });
   }
 
-  /**
-   * Handle a sideboard submission from a player in a Bo3 match.
-   * T-58-01: validates seat matches seatA or seatB.
-   */
-  handleSideboardSubmit(
+  private async handleGuestBetweenGames(
     seat: number,
-    matchId: string,
-    _mainDeck: string[],
-    _sideboard: Array<{ name: string; count: number }>,
-  ): void {
-    const state = this.bo3State.get(matchId);
-    if (!state) return;
+    message: Extract<DraftP2PMessage, { type: "draft_bo3_between_games" }>,
+  ): Promise<void> {
+    const binding = this.matchBindings.get(message.matchId);
+    const view = await this.adapter.getViewForSeat(0);
+    const pairing = view.pairings.find(
+      (candidate) => candidate.match_id === message.matchId && candidate.round === binding?.round,
+    );
+    if (
+      !binding
+      || binding.matchAuthoritySeat !== seat
+      || view.current_round !== binding.round
+      || !pairing
+      || (pairing.status !== "Pending" && pairing.status !== "InProgress")
+    ) {
+      this.guestSessions.get(seat)?.send({ type: "draft_error", reason: "Unauthorized between-games report" });
+      return;
+    }
+    if (this.bo3State.get(message.matchId)?.gameNumber === message.gameNumber) return;
 
-    // T-58-01: validate sending seat belongs to this pairing
-    if (seat === state.seatA) state.submittedA = true;
-    else if (seat === state.seatB) state.submittedB = true;
-    else return;
+    await this.handleMatchBetweenGamesDurably(
+      message.matchId,
+      message.gameNumber,
+      message.score,
+      message.loserSeat,
+      pairing.seat_a,
+      pairing.seat_b,
+    );
+  }
 
-    // Check both-submitted gate
-    if (state.submittedA && state.submittedB) {
-      this.clearActiveTimer();
-      this.emit({ type: "bo3BothSideboardsSubmitted", matchId });
-      this.transitionToPlayDraw(matchId, state);
+  /** The sole command ingress for host UI and authenticated guest sessions. */
+  submitAuthorized(seat: number, command: DraftIntergameCommand): void {
+    this.runDetachedMutation("authorized intergame command", () => this.submitAuthorizedDurably(seat, command));
+  }
+
+  private async submitAuthorizedDurably(seat: number, command: DraftIntergameCommand): Promise<void> {
+    if (command.status === "Receipted" && command.receiptId) {
+      await this.receiptIntergameCommand(seat, commandAcknowledgement(command), command.receiptId);
+      return;
+    }
+    await this.holdIntergameCommand(seat, command);
+  }
+
+  private async holdIntergameCommand(seat: number, command: DraftIntergameCommand): Promise<void> {
+    const state = this.bo3State.get(command.matchId);
+    const launchDigest = this.launchDigests.get(command.matchId)?.get(seat);
+    if (!state
+      || command.status !== "Pending"
+      || command.seat !== seat
+      || command.gameNumber !== state.gameNumber
+      || !launchDigest
+      || command.launchDigest !== launchDigest
+      || draftIntergameDigest(command.launchPayload) !== command.launchDigest
+      || command.payloadDigest !== draftIntergameDigest(command.payload)
+      || this.intergameCommands.snapshot().some((candidate) => candidate.commandId === command.commandId)) {
+      return;
+    }
+    if (command.payload.type === "SubmitSideboard") {
+      const deck = this.matchDecks.get(command.matchId)?.get(seat);
+      if (
+        (seat !== state.seatA && seat !== state.seatB)
+        || !deck
+        || !preservesDeckPool(deck, command.payload.main, command.payload.sideboard)
+      ) {
+        this.sendToSeat(seat, { type: "draft_error", reason: "Invalid sideboard submission" });
+        return;
+      }
+    } else if (state.loserSeat !== seat) {
+      return;
+    }
+
+    const held = this.intergameCommands.hold({
+      commandId: command.commandId,
+      matchId: command.matchId,
+      gameNumber: command.gameNumber,
+      seat,
+      payload: command.payload,
+      launchPayload: command.launchPayload,
+      launchDigest: command.launchDigest,
+    });
+    switch (held.payload.type) {
+      case "SubmitSideboard":
+        if (seat === state.seatA) state.submittedA = true;
+        else state.submittedB = true;
+        await this.persistSessionStrict();
+        if (state.submittedA && state.submittedB) {
+          this.clearActiveTimer();
+          for (const pending of this.intergameCommands.snapshot()) {
+            if (pending.matchId === held.matchId
+              && pending.gameNumber === held.gameNumber
+              && pending.status === "Pending"
+              && pending.payload.type === "SubmitSideboard") {
+              await this.authorizeIntergameCommand(pending);
+            }
+          }
+          this.emit({ type: "bo3BothSideboardsSubmitted", matchId: held.matchId });
+        }
+        break;
+      case "ChoosePlayDraw":
+        await this.authorizeIntergameCommand(held);
+        break;
     }
   }
 
-  /**
-   * Handle play/draw choice from the losing player.
-   * T-58-04: validates seat matches loserSeat.
-   */
-  handlePlayDrawChosen(seat: number, matchId: string, playFirst: boolean): void {
-    const state = this.bo3State.get(matchId);
-    if (!state || state.loserSeat !== seat) return;
-    this.resolvePlayDrawChoice(matchId, playFirst);
+  private async authorizeIntergameCommand(command: DraftIntergameCommand): Promise<void> {
+    const acknowledgement = commandAcknowledgement(command);
+    const authorized = this.intergameCommands.authorize(command.commandId, acknowledgement);
+    if (!authorized) return;
+    const permit = this.intergameCommands.begin(command.commandId, acknowledgement);
+    if (!permit) return;
+    // The controller, not a caller supplied flag, owns the Executing state.
+    // This deliberate no-op consumption proves the issuer created the permit;
+    // the participant performs the same pre-execution check with its own issuer.
+    void permit;
+    await this.persistSessionStrict();
+    this.sendToSeat(command.seat, {
+      type: "draft_bo3_intergame_authorized",
+      command: authorized,
+      acknowledgement,
+    });
   }
 
-  private autoSubmitSideboards(matchId: string): void {
+  private async receiptIntergameCommand(
+    seat: number,
+    acknowledgement: DraftIntergameCommandAck,
+    receiptId: string,
+  ): Promise<void> {
+    const command = this.intergameCommands.snapshot().find(
+      (candidate) => candidate.commandId === acknowledgement.commandId,
+    );
+    if (!command || command.seat !== seat || !matchesCommandAcknowledgement(command, acknowledgement)) return;
+    const receipted = this.intergameCommands.receipt(command.commandId, acknowledgement, receiptId);
+    if (!receipted) return;
+    switch (receipted.payload.type) {
+      case "SubmitSideboard": {
+        const state = this.bo3State.get(receipted.matchId);
+        const deck = state?.decks.find((candidate) => candidate.seat === seat);
+        if (deck) {
+          deck.main = receipted.payload.main;
+          deck.sideboard = receipted.payload.sideboard;
+        }
+        const complete = state && [state.seatA, state.seatB].every((participant) =>
+          this.intergameCommands.snapshot().some((candidate) =>
+            candidate.matchId === receipted.matchId
+              && candidate.gameNumber === receipted.gameNumber
+              && candidate.seat === participant
+              && candidate.payload.type === "SubmitSideboard"
+              && candidate.status === "Receipted"),
+        );
+        await this.persistSessionStrict();
+        if (complete && state) await this.transitionToPlayDraw(receipted.matchId, state);
+        break;
+      }
+      case "ChoosePlayDraw":
+        await this.persistSessionStrict();
+        await this.resolvePlayDrawChoice(receipted.matchId, receipted.payload.playFirst);
+        break;
+    }
+  }
+
+  private async autoSubmitSideboards(matchId: string): Promise<void> {
     const state = this.bo3State.get(matchId);
     if (!state) return;
-    // Mark both as submitted (they keep their current decks)
-    state.submittedA = true;
-    state.submittedB = true;
-    this.emit({ type: "bo3BothSideboardsSubmitted", matchId });
-    this.transitionToPlayDraw(matchId, state);
+    const participants = [state.seatA, state.seatB];
+    const submitted = new Set([
+      ...(state.submittedA ? [state.seatA] : []),
+      ...(state.submittedB ? [state.seatB] : []),
+    ]);
+    for (const seat of participants) {
+      if (submitted.has(seat)) continue;
+      const deck = state.decks.find((candidate) => candidate.seat === seat);
+      if (!deck) {
+        this.emit({ type: "error", message: "Sideboard timer expired without a registered deck" });
+        continue;
+      }
+      await this.submitDefaultIntergameCommand(matchId, state, seat, {
+        type: "SubmitSideboard",
+        main: deck.main,
+        sideboard: deck.sideboard,
+      });
+    }
   }
 
-  private transitionToPlayDraw(matchId: string, state: Bo3MatchState): void {
+  private async autoChoosePlayDraw(matchId: string): Promise<void> {
+    const state = this.bo3State.get(matchId);
+    if (!state || state.loserSeat === null) return;
+    await this.submitDefaultIntergameCommand(matchId, state, state.loserSeat, {
+      type: "ChoosePlayDraw",
+      playFirst: true,
+    });
+  }
+
+  /** Timeout defaults enter the same signed launch/ledger path as a player
+   * submission, so they cannot bypass authorization or the execution receipt. */
+  private async submitDefaultIntergameCommand(
+    matchId: string,
+    state: Bo3MatchState,
+    seat: number,
+    payload: DraftIntergameCommand["payload"],
+  ): Promise<void> {
+    const launch = this.matchLaunches.get(matchId)?.get(seat);
+    const launchDigest = this.launchDigests.get(matchId)?.get(seat);
+    if (!launch || !launchDigest) {
+      this.emit({ type: "error", message: "Intergame timeout lacks launch authority" });
+      return;
+    }
+    await this.holdIntergameCommand(seat, {
+      commandId: crypto.randomUUID(),
+      matchId,
+      gameNumber: state.gameNumber,
+      seat,
+      payload,
+      launchPayload: launch,
+      launchDigest,
+      payloadDigest: draftIntergameDigest(payload),
+      status: "Pending",
+    });
+  }
+
+  private async transitionToPlayDraw(matchId: string, state: Bo3MatchState): Promise<void> {
     if (state.loserSeat !== null) {
       const timerMs = this.podPolicy === "Competitive" ? 10_000 : 0;
       const prompt: DraftP2PMessage = {
@@ -1224,11 +3444,11 @@ export class P2PDraftHost {
       if (timerMs > 0) this.startPlayDrawTimer(matchId);
     } else {
       // Draw — keep previous first player. Signal game start immediately.
-      this.resolvePlayDrawChoice(matchId, true);
+      await this.resolvePlayDrawChoice(matchId, true);
     }
   }
 
-  private resolvePlayDrawChoice(matchId: string, playFirst: boolean): void {
+  private async resolvePlayDrawChoice(matchId: string, playFirst: boolean): Promise<void> {
     this.clearActiveTimer();
     const state = this.bo3State.get(matchId);
     if (!state) return;
@@ -1237,6 +3457,8 @@ export class P2PDraftHost {
       ? (state.loserSeat ?? state.seatA)
       : (state.loserSeat === state.seatA ? state.seatB : state.seatA);
 
+    this.bo3State.delete(matchId);
+    await this.persistSessionStrict();
     const msg: DraftP2PMessage = {
       type: "draft_bo3_game_start",
       matchId,
@@ -1246,7 +3468,6 @@ export class P2PDraftHost {
     this.sendToSeat(state.seatA, msg);
     this.sendToSeat(state.seatB, msg);
 
-    this.bo3State.delete(matchId);
     this.emit({ type: "bo3GameStarted", matchId, gameNumber: state.gameNumber });
   }
 
@@ -1256,6 +3477,9 @@ export class P2PDraftHost {
       switch (msg.type) {
         case "draft_match_start":
           this.emit({ type: "matchStart", launch: msg.launch });
+          break;
+        case "draft_commander_launch":
+          this.emit({ type: "commanderLaunch", launch: msg.launch });
           break;
         case "draft_bo3_sideboard_prompt":
           this.emit({
@@ -1284,6 +3508,13 @@ export class P2PDraftHost {
             firstPlayerSeat: msg.firstPlayerSeat,
           });
           break;
+        case "draft_bo3_intergame_authorized":
+          this.emit({
+            type: "bo3AuthorizedCommand",
+            command: msg.command,
+            acknowledgement: msg.acknowledgement,
+          });
+          break;
         default:
           break;
       }
@@ -1298,100 +3529,179 @@ export class P2PDraftHost {
   // ── Host controls ──────────────────────────────────────────────────
 
   kickPlayer(seat: number, reason: string = "Kicked by host"): void {
+    this.runDetachedMutation("kick player", () => this.kickPlayerDurably(seat, reason));
+  }
+
+  private async kickPlayerDurably(seat: number, reason: string): Promise<void> {
     const token = this.seatTokens.get(seat);
     if (token) this.kickedTokens.add(token);
 
     const session = this.guestSessions.get(seat);
-    if (session) {
-      session.send({ type: "draft_kicked", reason });
-      session.close("Kicked");
-      this.guestSessions.delete(seat);
-    }
+    if (session) this.guestSessions.delete(seat);
 
     // Cancel grace timer if active
     const grace = this.disconnectedSeats.get(seat);
-    if (grace) {
-      if (grace.timer !== null) clearTimeout(grace.timer);
-      this.disconnectedSeats.delete(seat);
-    }
+    if (grace) this.clearReconnectGrace(seat);
+    this.reconnectDeadlines.delete(seat);
+    this.expiredDisconnectedSeats.delete(seat);
 
-    this.persistSession();
+    await this.persistSessionStrict();
+    if (session) {
+      session.send({ type: "draft_kicked", reason });
+      session.close("Kicked");
+    }
     this.emit({ type: "seatKicked", seatIndex: seat, reason });
     this.syncLobbyToGuests();
+    this.reconcileEffectivePause();
   }
 
   requestPause(): void {
-    if (!this.paused) {
-      this.clearActiveTimer();
-      this.paused = true;
-      this.broadcastToGuests({
-        type: "draft_paused",
-        reason: DraftPauseReason.PausedByHost,
-      });
-      this.emit({ type: "draftPaused", reason: DraftPauseReason.PausedByHost });
-    }
+    void this.enqueueAuthoritativeMutation(async () => {
+      if (this.manualPause) return;
+      this.manualPause = true;
+      await this.persistSessionStrict();
+      this.reconcileEffectivePause();
+    }).catch((error: unknown) => console.error("[P2PDraftHost] pause persistence failed:", error));
   }
 
   requestResume(): void {
-    if (this.paused && this.disconnectedSeats.size === 0) {
-      this.paused = false;
-      this.broadcastToGuests({ type: "draft_resumed" });
-      this.emit({ type: "draftResumed" });
-      // Restart timer if still in drafting phase
-      if (this.draftStarted && this.podPolicy === "Competitive") {
-        void (async () => {
-          try {
-            const view = await this.adapter.getViewForSeat(0);
-            if (view.status === "Drafting") {
-              this.startPickTimer(view.pick_number);
-            }
-          } catch { /* best-effort */ }
-        })();
+    void this.enqueueAuthoritativeMutation(async () => {
+      if (!this.manualPause) return;
+      this.manualPause = false;
+      await this.persistSessionStrict();
+      // RESUME RE-DRIVES A STUCK BOT, and this is the pod-policy-independent
+      // half of the recovery. If a bot turn failed loudly, the shared-stack
+      // cursor is left on a seat only the host can move: no human may decide
+      // for it (`refusal_for` refuses a decision from any other seat), and
+      // `ReplaceSeatWithBot` on a seat that is already a bot changes nothing.
+      // The pick clock recovers it — but `startPickTimer` returns immediately
+      // unless the pod is Competitive, so a CASUAL pod had no recovery at all
+      // and was simply stranded. Pause/Resume is a control the host always has.
+      //
+      // Contained, because a resume must not fail on the retry it is offering.
+      const view = await this.adapter.getViewForSeat(0);
+      if (view.shared_stack && view.seats.some((seat) => seat.is_bot)) {
+        try {
+          await this.resolveBotPicks({ emit: false, persist: true });
+          await this.broadcastViews();
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          this.emit({ type: "error", message: `Driving the bot seat failed again: ${message}` });
+        }
       }
-    }
+      this.reconcileEffectivePause();
+    }).catch((error: unknown) => console.error("[P2PDraftHost] resume persistence failed:", error));
   }
 
   // ── Persistence (P2P-05) ──────────────────────────────────────────
 
   private persistSession(): void {
     if (!this.persistenceId || this.persistenceClosed) return;
-    this.persistQueue = this.persistQueue.then(async () => {
+    // Lobby snapshots contain no asynchronous engine export, so capture them
+    // at mutation time. A later admission must not leak into an earlier queued
+    // snapshot if its own strict write fails.
+    const snapshot = this.draftStarted ? undefined : this.buildPersistedSnapshot(null);
+    void this.enqueuePersistSession(snapshot).catch(() => {});
+  }
+
+  /**
+   * Callers await this fence before making a recovery capability externally
+   * visible. A caller that fully compensates its mutation can opt out of
+   * retaining its failed engine snapshot for replay.
+   */
+  private persistSessionStrict(
+    options: { retainFailedDraftSnapshot?: boolean } = {},
+  ): Promise<void> {
+    if (!this.persistenceId || this.persistenceClosed) return Promise.resolve();
+    return this.enqueuePersistSession(
+      this.draftStarted ? undefined : this.buildPersistedSnapshot(null),
+      options.retainFailedDraftSnapshot,
+    );
+  }
+
+  /**
+   * Serializes snapshots while retaining a live queue after a failed write.
+   * Fire-and-forget mutations report errors through `persistSession`; callers
+   * that await the returned task may roll their mutation back on failure.
+   */
+  private enqueuePersistSession(
+    snapshotAtMutation?: PersistedDraftHostSession,
+    retainFailedDraftSnapshot = true,
+  ): Promise<void> {
+    if (!this.persistenceId || this.persistenceClosed) return Promise.resolve();
+    const persist = this.persistQueue.then(async () => {
+      if (this.persistenceClosed) return;
+      // A failed deck/pick snapshot is immutable evidence of an already-run
+      // reducer. Retry it before capturing newer state; never retry by
+      // applying the command again.
+      if (this.pendingDraftSnapshot) {
+        await saveDraftHostSession(this.persistenceId!, this.pendingDraftSnapshot);
+        this.pendingDraftSnapshot = null;
+      }
+      const snapshot = snapshotAtMutation ?? this.buildPersistedSnapshot(
+        this.draftStarted ? await this.adapter.exportSession() : null,
+      );
+      if (this.persistenceClosed) return;
+
       try {
-        if (this.persistenceClosed) return;
-        const sessionJson = this.draftStarted
-          ? await this.adapter.exportSession()
-          : null;
-        if (this.persistenceClosed) return;
-
-        const snapshot: PersistedDraftHostSession = {
-          persistenceId: this.persistenceId!,
-          roomCode: this.roomCode ?? "",
-          kind: this.kind,
-          podSize: this.podSize,
-          hostDisplayName: this.hostDisplayName,
-          tournamentFormat: this.tournamentFormat,
-          podPolicy: this.podPolicy,
-          seatTokens: Object.fromEntries(this.seatTokens),
-          seatNames: Object.fromEntries(this.seatNames),
-          kickedTokens: [...this.kickedTokens],
-          draftStarted: this.draftStarted,
-          draftCode: this.draftCode,
-          draftSessionJson: sessionJson,
-          poolInput: this.poolInput,
-        };
-
         await saveDraftHostSession(this.persistenceId!, snapshot);
+      } catch (error) {
+        // Admission has its own transactional rollback.  Only an engine-backed
+        // snapshot represents a reducer result that must be replayed exactly.
+        if (this.draftStarted && retainFailedDraftSnapshot) this.pendingDraftSnapshot = snapshot;
+        throw error;
+      }
 
-        // Server backup upload (D-08, T-60-11: rate-limited to every N picks)
-        this.picksSinceLastBackup++;
-        if (this.backupEndpoint && this.picksSinceLastBackup >= P2PDraftHost.BACKUP_INTERVAL_PICKS) {
-          this.picksSinceLastBackup = 0;
-          void this.uploadBackupSnapshot(snapshot);
-        }
-      } catch (err) {
-        console.warn("[P2PDraftHost] persist failed:", err);
+      // Server backup upload (D-08, T-60-11: rate-limited to every N picks)
+      this.picksSinceLastBackup++;
+      if (this.backupEndpoint && this.picksSinceLastBackup >= P2PDraftHost.BACKUP_INTERVAL_PICKS) {
+        this.picksSinceLastBackup = 0;
+        void this.uploadBackupSnapshot(snapshot);
       }
     });
+    this.persistQueue = persist.catch((err) => {
+      console.warn("[P2PDraftHost] persist failed:", err);
+    });
+    return persist;
+  }
+
+  private buildPersistedSnapshot(draftSessionJson: string | null): PersistedDraftHostSession {
+    return {
+      persistenceId: this.persistenceId!,
+      roomCode: this.roomCode!,
+      kind: this.kind,
+      podSize: this.podSize,
+      hostDisplayName: this.hostDisplayName,
+      tournamentFormat: this.tournamentFormat,
+      podPolicy: this.podPolicy,
+      seatTokens: Object.fromEntries(this.seatTokens),
+      seatNames: Object.fromEntries(this.seatNames),
+      kickedTokens: [...this.kickedTokens],
+      reconnectDeadlines: Object.fromEntries(this.reconnectDeadlines),
+      expiredDisconnectedSeats: [...this.expiredDisconnectedSeats],
+      draftStarted: this.draftStarted,
+      manualPause: this.manualPause,
+      draftCode: this.draftCode,
+      draftSessionJson,
+      poolInput: this.poolInput,
+      matchBindings: [...this.matchBindings.values()],
+      settlementOutbox: [...this.settlementOutbox.values()],
+      settlementReceipts: [...this.settlementReceipts.entries()].map(
+        ([matchId, receipt]) => ({ matchId, ...receipt }),
+      ),
+      intergameCommands: this.intergameCommands.snapshot(),
+      bo3State: [...this.bo3State.entries()].map(([matchId, state]) => ({ matchId, ...state })),
+      launchDigests: [...this.launchDigests.entries()].flatMap(([matchId, digests]) =>
+        [...digests.entries()].map(([seat, digest]) => ({ matchId, seat, digest })),
+      ),
+      matchLaunches: [...this.matchLaunches.entries()].flatMap(([matchId, launches]) =>
+        [...launches.entries()].map(([seat, launch]) => ({ matchId, seat, launch })),
+      ),
+      deckSubmissionReceipts: [...this.deckSubmissionReceipts.entries()].map(
+        ([submissionId, receipt]) => ({ submissionId, ...receipt }),
+      ),
+      perSeatWorkspaceSnapshots: Object.fromEntries(this.perSeatWorkspaceSnapshots),
+    };
   }
 
   /**
@@ -1401,13 +3711,14 @@ export class P2PDraftHost {
   private async uploadBackupSnapshot(snapshot: PersistedDraftHostSession): Promise<void> {
     if (!this.backupEndpoint || !this.draftCode) return;
     try {
+      const publicSnapshot = sanitizePublicBackup(snapshot);
       await fetch(`${this.backupEndpoint}/p2p-draft-backup`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           draft_code: this.draftCode,
           host_peer_id: this.hostPeer.id,
-          snapshot_json: JSON.stringify(snapshot),
+          snapshot_json: JSON.stringify(publicSnapshot),
         }),
       });
     } catch (err) {
@@ -1436,6 +3747,12 @@ export class P2PDraftHost {
    * Called before `initialize()` to rehydrate a crashed host.
    */
   async restoreFromPersisted(session: PersistedDraftHostSession): Promise<DraftPlayerView | null> {
+    this.perSeatWorkspaceSnapshots = new Map(
+      Object.entries(session.perSeatWorkspaceSnapshots ?? {}).map(([seat, state]) => [
+        Number(seat),
+        state,
+      ]),
+    );
     for (const [seatStr, token] of Object.entries(session.seatTokens)) {
       this.seatTokens.set(Number(seatStr), token);
     }
@@ -1445,37 +3762,102 @@ export class P2PDraftHost {
     for (const token of session.kickedTokens) {
       this.kickedTokens.add(token);
     }
+    for (const seat of session.expiredDisconnectedSeats ?? []) {
+      this.expiredDisconnectedSeats.add(seat);
+    }
     this.draftStarted = session.draftStarted;
+    this.manualPause = session.manualPause ?? false;
     this.draftCode = session.draftCode;
     this.draftSeed = hashStringToSeed(session.draftCode || this.roomCode || "draft");
+    for (const binding of session.matchBindings ?? []) {
+      this.matchBindings.set(binding.matchId, binding);
+    }
+    for (const settlement of session.settlementOutbox ?? []) {
+      this.settlementOutbox.set(settlement.receiptId, settlement);
+    }
+    for (const receipt of session.settlementReceipts ?? []) {
+      this.settlementReceipts.set(receipt.matchId, {
+        receiptId: receipt.receiptId,
+        revision: receipt.revision,
+      });
+    }
+    for (const receipt of session.deckSubmissionReceipts ?? []) {
+      this.deckSubmissionReceipts.set(receipt.submissionId, {
+        seat: receipt.seat,
+        payloadFingerprint: receipt.payloadFingerprint,
+      });
+    }
+    this.intergameCommands = new IntergameCommandController(session.intergameCommands ?? []);
+    this.intergameCommands.recover();
+    for (const state of session.bo3State ?? []) {
+      const { matchId, ...rest } = state;
+      this.bo3State.set(matchId, { ...rest, decks: rest.decks ?? [] });
+    }
+    for (const { matchId, seat, digest } of session.launchDigests ?? []) {
+      let digests = this.launchDigests.get(matchId);
+      if (!digests) {
+        digests = new Map();
+        this.launchDigests.set(matchId, digests);
+      }
+      digests.set(seat, digest);
+    }
+    for (const { matchId, seat, launch } of session.matchLaunches ?? []) {
+      const binding = launch.binding ?? this.matchBindings.get(matchId);
+      if (!binding || binding.matchId !== matchId) continue;
+      const recoveredLaunch = launch.binding ? launch : { ...launch, binding } as DraftMatchLaunch;
+      let launches = this.matchLaunches.get(matchId);
+      if (!launches) {
+        launches = new Map();
+        this.matchLaunches.set(matchId, launches);
+      }
+      launches.set(seat, recoveredLaunch);
+      this.rememberMatchDecks(recoveredLaunch);
+    }
+
+    const recoveryStateChanged = this.armRecoveredGuestGrace(session.reconnectDeadlines);
+    if (recoveryStateChanged) {
+      // Persist the recovery transition from the original engine snapshot
+      // before importing it. A second host crash during import therefore sees
+      // this same absolute deadline rather than granting a fresh window.
+      await this.enqueuePersistSession(this.buildPersistedSnapshot(session.draftSessionJson));
+    }
 
     if (session.draftSessionJson) {
       const view = await this.adapter.importSession(session.draftSessionJson, 2);
-
-      // Arm grace windows for all guest seats
-      for (const seatStr of Object.keys(session.seatTokens)) {
-        const seat = Number(seatStr);
-        if (seat === 0) continue;
-        const timer = setTimeout(() => {
-          this.disconnectedSeats.delete(seat);
-          this.emit({ type: "seatKicked", seatIndex: seat, reason: "Resume grace expired" });
-        }, 5 * 60_000);
-        this.disconnectedSeats.set(seat, { disconnectedAt: Date.now(), timer });
+      for (const seat of this.expiredDisconnectedSeats) {
+        await this.adapter.setSeatConnected(seat, false);
+      }
+      if (this.reconcileRetainedWorkspace(0, view.pool).changed) this.persistSession();
+      await this.recoverSettlementOutbox(view);
+      if (this.rotateLegacyBotMatchAuthorities(view)) {
+        await this.persistSessionStrict();
       }
 
-      if (this.disconnectedSeats.size > 0) {
-        this.paused = true;
-        this.emit({
-          type: "draftPaused",
-          reason: DraftPauseReason.PlayerDisconnected,
-        });
-      }
+      this.reconcileEffectivePause();
 
       if (view.status === "MatchInProgress") {
         await this.dispatchMatchLaunchesForSeat(view, 0);
-      } else if (view.status === "Pairing" && view.pairings.length === 0) {
-        await this.generatePairings(view.current_round + 1);
+      } else if (view.status === "Pairing") {
+        // Two engine sites write `Pairing`: `apply_submit_deck` opens the
+        // round-0 window once all decks are in, and `apply_advance_round` opens
+        // each later one. Neither has generated the pairings the window exists
+        // to produce — `apply_generate_pairings` is what generates them, and it
+        // immediately leaves for `MatchInProgress`. So `Pairing` always means
+        // "not generated yet".
+        // `view.pairings` still holds the *previous* round's pairings here
+        // (`compute_pairing_views` filters on `current_round`, which
+        // `AdvanceRound` deliberately does not bump), so testing it for
+        // emptiness made this branch dead for every round after the first.
+        //
+        // Widening it cannot generate a round twice: generating sets status to
+        // `MatchInProgress`, so this branch cannot fire again for the same
+        // round; and `AdvanceRound` requires `RoundComplete`, which the final
+        // round never enters (it transitions straight to `Complete`), so there
+        // is no round past the last one for this branch to invent.
+        await this.generatePairingsInner();
         return this.adapter.getViewForSeat(0);
+      } else if (view.status === "Drafting") {
+        return await this.resumeDraftingAfterRestore(view);
       }
 
       return view;
@@ -1484,34 +3866,211 @@ export class P2PDraftHost {
     return null;
   }
 
+  /**
+   * Hand a restored, still-DRAFTING pod back to whoever owes the next move.
+   *
+   * A restored snapshot can legitimately hold a state whose active seat is a
+   * BOT, and this diff is what made that reachable: `handleSharedStackDecision`
+   * persists the human's applied decision BEFORE it runs the bot turns, so the
+   * durable snapshot between those two awaits describes a pod waiting on a bot.
+   * Nothing else recovers it. The reducer refuses a decision from a non-active
+   * seat, so no human can move for the bot; `frozenTimer` is in-memory only and
+   * is not persisted, so no clock is re-armed; and `startPickTimer` returns
+   * immediately for any pod that is not `Competitive`. The pod would sit there
+   * with no error, no timer and no legal move available to anybody.
+   *
+   * Gated on the ENGINE'S OWN discriminators, not on `kind`: `shared_stack` is
+   * `None` for every non-Winston frame and outside `Drafting`, and `is_bot` is
+   * the published seat flag the bot loop itself reads. A human-vs-human pod and
+   * a pick-and-pass pod both fall straight through, and neither pays for the
+   * procedure fetch or the card-data fetch below.
+   *
+   * The card database is loaded before the bot moves for the same reason
+   * `startDraftInner` loads it: restore never calls that method, and
+   * `draftPodHostAdapter`'s own fetch is gated on `Cube || CommanderDraft`, so
+   * a restored Set-pool Winston pod would otherwise decide every remaining turn
+   * with no card faces at all.
+   *
+   * `emit: false` because there is no per-pick event a decision can carry, and
+   * no broadcast because `restoreFromPersisted` runs BEFORE `initialize()` —
+   * there are no guest sessions yet. The returned view is the re-read one, so
+   * the caller publishes where the bot chain actually stopped rather than the
+   * bot-active state it was handed.
+   */
+  private async resumeDraftingAfterRestore(view: DraftPlayerView): Promise<DraftPlayerView> {
+    if (!view.shared_stack || !view.seats.some((seat) => seat.is_bot)) return view;
+    // `resolveBotPicks` dispatches on the PROCEDURE, which `initialize()` has
+    // not fetched yet at this point — see `ensureProcedure`. Without this the
+    // dispatch falls through to the `current_pack` loop, which is null for
+    // every seat under this distribution, and the bot silently does not move.
+    // CONTAINED, exactly as `replaceSeatWithBotInner` contains the same two
+    // calls and for a sharper version of the same reason. `loadCardDatabaseForSharedStackBots`
+    // fetches multiple megabytes over the network, so an offline reload or a
+    // CDN blip throws here — and this throw would propagate out of
+    // `restoreFromPersisted`, through `hostDraft`'s catch, which disposes the
+    // pending host and rethrows. The snapshot is left untouched, still
+    // describing a bot-active pod, so EVERY later attempt to re-host runs the
+    // same failing path: one transient fetch failure would make an in-progress
+    // draft permanently unhostable.
+    //
+    // Failing open costs only the bot's head start: the pod comes up with the
+    // bot still to move, and the pick clock (Competitive) or a host control
+    // recovers it. The engine also scores without a card database, degraded but
+    // functional -- see `winston_decision_degrades_without_a_card_database` --
+    // so there is nothing to fail closed FOR.
+    try {
+      const procedure = await this.ensureProcedure();
+      await this.loadCardDatabaseForSharedStackBots(
+        procedure.distribution,
+        view.seats.filter((seat) => seat.is_bot).length,
+      );
+      await this.resolveBotPicks({ emit: false, persist: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.emit({
+        type: "error",
+        message: `The pod was restored, but driving its bot seat failed: ${message}`,
+      });
+      return view;
+    }
+    return this.adapter.getViewForSeat(0);
+  }
+
+  /**
+   * A recovered host is the first observer that knows its peers are gone. It
+   * persists that absolute deadline before serving recovery, so another host
+   * recovery cannot reset the grace clock. Snapshots from before this field
+   * existed fail closed rather than guessing how much grace remained.
+   */
+  private armRecoveredGuestGrace(reconnectDeadlines: Record<number, number> | undefined): boolean {
+    let changed = false;
+    const now = Date.now();
+    for (const seat of [...this.seatTokens.keys()]) {
+      if (seat === 0 || this.expiredDisconnectedSeats.has(seat)) continue;
+      if (reconnectDeadlines === undefined) {
+        if (this.draftStarted) {
+          this.expiredDisconnectedSeats.add(seat);
+        } else {
+          this.seatTokens.delete(seat);
+          this.seatNames.delete(seat);
+          this.perSeatWorkspaceSnapshots.delete(seat);
+        }
+        changed = true;
+        continue;
+      }
+
+      const deadlineAt = reconnectDeadlines[seat] ?? now + this.gracePeriodMs;
+      if (deadlineAt <= now) {
+        this.reconnectDeadlines.delete(seat);
+        if (this.draftStarted) {
+          this.expiredDisconnectedSeats.add(seat);
+        } else {
+          this.seatTokens.delete(seat);
+          this.seatNames.delete(seat);
+          this.perSeatWorkspaceSnapshots.delete(seat);
+        }
+        changed = true;
+        continue;
+      }
+
+      this.scheduleReconnectGrace(seat, deadlineAt);
+      if (reconnectDeadlines[seat] === undefined) changed = true;
+    }
+    return changed;
+  }
+
+  /**
+   * Old snapshots selected the lowest numbered seat as the settlement
+   * authority, including bot seats. A bot cannot return a participant
+   * settlement, so repair only the active human-versus-bot binding after the
+   * restored engine view identifies its human participant. Completed and
+   * future-round bindings intentionally retain their historical capability.
+   */
+  private rotateLegacyBotMatchAuthorities(view: DraftPlayerView): boolean {
+    let changed = false;
+    for (const pairing of view.pairings ?? []) {
+      if (pairing.round !== view.current_round || pairing.status !== "InProgress") continue;
+
+      const seatAIsBot = this.isBotSeatFromView(view, pairing.seat_a);
+      const seatBIsBot = this.isBotSeatFromView(view, pairing.seat_b);
+      if (seatAIsBot === seatBIsBot) continue;
+
+      const binding = this.matchBindings.get(pairing.match_id);
+      if (!binding || binding.round !== pairing.round) continue;
+
+      const humanSeat = seatAIsBot ? pairing.seat_b : pairing.seat_a;
+      const botSeat = seatAIsBot ? pairing.seat_a : pairing.seat_b;
+      if (binding.matchAuthoritySeat !== botSeat) continue;
+
+      this.matchBindings.set(pairing.match_id, { ...binding, matchAuthoritySeat: humanSeat });
+      changed = true;
+    }
+    return changed;
+  }
+
+  /** Replays only write-ahead settlements that the restored draft still lacks. */
+  private async recoverSettlementOutbox(view: DraftPlayerView): Promise<void> {
+    for (const settlement of [...this.settlementOutbox.values()]) {
+      const binding = this.matchBindings.get(settlement.binding.matchId);
+      const pairing = view.pairings.find(
+        (candidate) => candidate.match_id === settlement.binding.matchId,
+      );
+      if (!binding || !this.sameBinding(binding, settlement.binding) || !pairing) continue;
+      if (pairing.status === "Pending" || pairing.status === "InProgress") {
+        await this.reportMatchResult(settlement.binding.matchId, settlement.winnerSeat);
+      }
+      this.settlementReceipts.set(settlement.binding.matchId, {
+        receiptId: settlement.receiptId,
+        revision: settlement.binding.revision,
+      });
+      this.settlementOutbox.delete(settlement.receiptId);
+    }
+    this.persistSession();
+  }
+
   // ── Cleanup ────────────────────────────────────────────────────────
 
-  dispose(): void {
+  async dispose(): Promise<void> {
+    // Closing this synchronously is a write fence: `persistSession` continuations
+    // may already be queued, but none may snapshot or save after their host loses
+    // ownership to a newer recovery using the same persistence ID.
+    this.persistenceClosed = true;
     this.clearActiveTimer();
     if (this.hostConnectionUnsub) this.hostConnectionUnsub();
     for (const { timer } of this.disconnectedSeats.values()) {
       if (timer !== null) clearTimeout(timer);
     }
     this.disconnectedSeats.clear();
+    this.reconnectDeadlines.clear();
     this.bo3State.clear();
+    this.matchDecks.clear();
+    this.matchLaunches.clear();
     for (const session of this.guestSessions.values()) {
       session.close();
     }
     this.guestSessions.clear();
     this.listeners = [];
+    await this.persistQueue;
   }
 
   async terminateDraft(): Promise<void> {
-    for (const session of this.guestSessions.values()) {
-      await session.send({ type: "draft_host_left", reason: "Host left the draft" });
-    }
+    // Fence queued non-terminal saves before awaiting guest notifications.
     this.persistenceClosed = true;
+    for (const session of this.guestSessions.values()) {
+      try {
+        await session.send({ type: "draft_host_left", reason: "Host left the draft" });
+      } catch (error) {
+        // A disconnected guest cannot prevent notification of the remaining
+        // guests or the terminal cleanup of the host's durable session.
+        console.warn("[P2PDraftHost] termination notification failed:", error);
+      }
+    }
     await this.persistQueue;
     if (this.persistenceId) {
       await clearDraftHostSession(this.persistenceId);
     }
     void this.cleanupServerBackup();
-    this.dispose();
+    await this.dispose();
     try {
       this.hostPeer.destroy();
     } catch { /* best-effort */ }
@@ -1541,31 +4100,108 @@ export class P2PDraftHost {
         connected: i === 0 || this.guestSessions.has(i),
         has_submitted_deck: false,
         pick_status: "NotDrafting",
+        active_pack_count: 0,
+        // A LOBBY seat, before `StartDraft` exists to deal anything: nobody has
+        // drafted a card yet, so this is 0 for the same reason the two fields
+        // above it are their own "nothing is happening" values. Every drafting
+        // view is engine-built and carries the real count.
+        drafted_card_count: 0,
+        face_up_draft_cards: [],
       });
     }
     return seats;
   }
 
   private buildLobbyView(): DraftPlayerView {
+    // A null procedure means `buildLobbyView` ran before `initialize()`, which
+    // is a programming error. Throw rather than default: a silent 40-card
+    // fallback would advertise the CR 100.2b limited floor for a CR 903.13f(1)
+    // 60-card format — exactly the class of defect the procedure read exists to
+    // prevent.
+    if (!this.procedure) {
+      throw new Error("P2PDraftHost.buildLobbyView called before initialize()");
+    }
     return {
       status: "Lobby",
       kind: this.kind,
+      launch_capability: this.procedure.launch_capability,
+      // From the SAME engine-published procedure as the capability above, so a
+      // lobby view answers "is this a shared-stack pod" exactly as every
+      // drafting view does.
+      distribution: this.procedure.distribution,
+      commanders_required: this.procedure.commanders_required,
       current_pack_number: 0,
       pick_number: 0,
       pass_direction: "Left",
       current_pack: null,
+      // 0, not `procedure.cards_per_pick`: this mirrors exactly what
+      // `filter_for_player` publishes for a seat with no pending pack. A
+      // placeholder that disagrees with the real view is the [G6] defect class
+      // this run has already paid for once.
+      required_pick_count: 0,
+      pick_selection_mode: this.procedure?.pick_selection_mode ?? "Direct",
       pool: [],
+      draft_effects: [],
+      pool_groups: EMPTY_DRAFT_POOL_GROUPS,
       seats: this.buildSeatPublicViews(),
-      cards_per_pack: 14,
-      pack_count: 3,
-      min_deck_size: 40,
+      // NOT a `DraftProcedure` axis — the struct carries no pack-size field, so
+      // this is a POOL property (`set_cards_per_pack` for a set pool,
+      // `settings.cards_per_pack` for a cube), wrong for all five kinds equally
+      // rather than wrong for CommanderDraft. This is a pre-draft placeholder
+      // view that the real session view replaces once the draft starts; not a
+      // missed kind-derived hardcode.
+      cards_per_pack: LOBBY_PLACEHOLDER_CARDS_PER_PACK,
+      // Mirrors what `filter_for_player` publishes for a session that has
+      // opened nothing: `pack_size_sequence()` falls back to the uniform
+      // `cards_per_pack` for every pack, and the lobby's own `cards_per_pack`
+      // above is that uniform value. The length is read from the procedure
+      // rather than hardcoded, so a kind whose pack count differs does not get
+      // a 3-element array. A multi-set draft's real per-pack sizes replace
+      // these the moment the draft starts.
+      pack_sizes: Array<number>(this.procedure.packs_per_player).fill(
+        LOBBY_PLACEHOLDER_CARDS_PER_PACK,
+      ),
+      // Empty strings, not fabricated codes: the lobby host has no
+      // `DraftSource`, so there is no engine answer for which set fills each
+      // booster. `""` is the one value no reachable producer publishes — every
+      // path that fills `pack_set_code_sequence` names a real set or cube id —
+      // so it cannot be read as an engine answer.
+      pack_set_codes: Array<string>(this.procedure.packs_per_player).fill(""),
+      // Zeroes, for the same reason the scalar below is 0: there is no
+      // engine-derived step count to publish before a session exists, and 0 is
+      // a value no reachable producer emits. Sized from the procedure so the
+      // array agrees with `pack_count`.
+      pack_pick_steps: Array<number>(this.procedure.packs_per_player).fill(0),
+      // 0, not a step count: the lobby host has no session, and its own
+      // `cards_per_pack` above is a POOL placeholder rather than a config
+      // value — so there is no engine-derived answer to publish here. Deriving
+      // one from `procedure.cards_per_pick` is refused: that is a second
+      // authority for CR 903.13b's step rule in the display layer, the same
+      // defect class as the seat-count literal this commit deletes above. `0`
+      // is the one value no reachable producer publishes -- every path that
+      // fills `DraftConfig.cards_per_pack` supplies at least 1 (an MTGJSON
+      // slot-count sum, or the cube panel's clamped `min={1}`), so steps >= 1
+      // -- and it therefore cannot be read as an engine answer. It is wrong
+      // for all five kinds equally rather than right for four and wrong for
+      // CommanderDraft.
+      //
+      // Note which precedent applies: `required_pick_count: 0` above justifies
+      // its `0` as a value production DOES emit (a seat with no pending pack).
+      // That ground does not transfer — there is no production state that
+      // yields 0 steps. The ground here is `cards_per_pack`'s: an acknowledged
+      // placeholder, wrong uniformly rather than kind-selectively.
+      pick_steps_per_pack: 0,
+      pack_count: this.procedure.packs_per_player,
+      min_deck_size: this.procedure.min_deck_size,
       addable_cards: ["Plains", "Island", "Swamp", "Mountain", "Forest"],
       timer_remaining_ms: null,
       standings: [],
       current_round: 0,
+      next_pairing_round: 1,
       tournament_format: "Swiss",
       pod_policy: "Competitive",
       pairings: [],
+      match_config: this.procedure.match_config,
     };
   }
 

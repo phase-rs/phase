@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use engine::database::CardDatabase;
 use phase_ai::config::AiDifficulty;
 use phase_ai::duel_suite::attribution::PolicyAttribution;
-use phase_ai::duel_suite::run::{run_suite, AttributionMode, SuiteOptions};
+use phase_ai::duel_suite::run::{run_suite, AttributionMode, ReportSink, SuiteOptions};
 use phase_ai::duel_suite::FeatureKind;
 
 /// Map a `FeatureKind` to the set of `PolicyId` debug-names whose appearance
@@ -105,11 +105,12 @@ fn declared_exercises_appear_in_attribution() {
         difficulty: AiDifficulty::Easy,
         games_per_matchup: 1,
         base_seed: 7777,
-        output_path: PathBuf::from("target/duel-suite-attribution-test.json"),
+        output: ReportSink::Create(PathBuf::from("target/duel-suite-attribution-test.json")),
         filter: None,
         attribution: AttributionMode::Enabled,
         git_sha: None,
         card_data_hash: None,
+        harvest_output: None,
     };
     let report = run_suite(&db, &opts).expect("suite run");
 

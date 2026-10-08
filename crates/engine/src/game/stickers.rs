@@ -17,6 +17,7 @@ use crate::types::keywords::Keyword;
 use crate::types::layers::{ActiveContinuousEffect, Layer};
 use crate::types::mana::ManaCost;
 use crate::types::player::{PlayerCounterKind, PlayerId};
+use crate::types::resolved_commands::ResolvedPlayerEdit;
 use crate::types::stickers::{AppliedSticker, StickerKind, StickerLocator};
 use crate::types::zones::Zone;
 
@@ -101,6 +102,13 @@ pub fn object_has_sticker_kind(obj: &GameObject, kind: StickerKind) -> bool {
     obj.stickers.iter().any(|sticker| sticker.kind() == kind)
 }
 
+/// CR 123.3b: A player can't put a sticker on an object they don't own; an
+/// effect that would cause them to does nothing for that part. The single
+/// predicate the PutSticker resolver and `apply_selected_sticker` share.
+pub(crate) fn may_put_sticker_on(object: &GameObject, player: PlayerId) -> bool {
+    object.owner == player
+}
+
 pub fn rebuild_public_zone_stickers(obj: &mut GameObject) {
     obj.revert_layered_characteristics_to_base();
     apply_name_stickers_from_base(obj);
@@ -155,6 +163,8 @@ pub fn append_battlefield_pt_sticker_effects(
                 controller: obj.controller,
                 def_index: None,
                 transient_id: None,
+                trigger_producer_origin: None,
+                expanded_trigger_provider: None,
                 mod_index: 0,
                 layer: Layer::SetPT,
                 timestamp: *timestamp,
@@ -163,12 +173,15 @@ pub fn append_battlefield_pt_sticker_effects(
                 condition: None,
                 mode: crate::types::statics::StaticMode::Continuous,
                 characteristic_defining: false,
+                granter: None,
             });
             bucket.push(ActiveContinuousEffect {
                 source_id: id,
                 controller: obj.controller,
                 def_index: None,
                 transient_id: None,
+                trigger_producer_origin: None,
+                expanded_trigger_provider: None,
                 mod_index: 1,
                 layer: Layer::SetPT,
                 timestamp: *timestamp,
@@ -177,6 +190,7 @@ pub fn append_battlefield_pt_sticker_effects(
                 condition: None,
                 mode: crate::types::statics::StaticMode::Continuous,
                 characteristic_defining: false,
+                granter: None,
             });
         }
     }
@@ -358,9 +372,13 @@ pub fn apply_selected_sticker(
     pay_ticket: bool,
     events: &mut Vec<GameEvent>,
 ) {
-    let Some(_) = state.objects.get(&target_id) else {
+    let Some(target) = state.objects.get(&target_id) else {
         return;
     };
+    // CR 123.3b: refused before any ticket is paid (CR 123.3c: the owner pays).
+    if !may_put_sticker_on(target, player) {
+        return;
+    }
 
     let ticket_cost = match &sticker {
         AppliedSticker::Ability { ticket_cost, .. }
@@ -369,13 +387,24 @@ pub fn apply_selected_sticker(
     };
 
     if pay_ticket {
-        let Some(player_entry) = state.players.iter_mut().find(|p| p.id == player) else {
+        // CR 122.1: Ticket payment removes counters through the scalar authority.
+        let Some(player_entry) = state.players.iter().find(|p| p.id == player) else {
             return;
         };
         if player_entry.player_counter(&PlayerCounterKind::Ticket) < ticket_cost {
             return;
         }
-        player_entry.remove_player_counters(&PlayerCounterKind::Ticket, ticket_cost);
+        if ticket_cost > 0 {
+            state
+                .resolve_and_apply_player_edit(
+                    player,
+                    ResolvedPlayerEdit::Counter {
+                        kind: PlayerCounterKind::Ticket,
+                        delta: -(ticket_cost as i32),
+                    },
+                )
+                .expect("the checked ticket cost must satisfy its resolved precondition");
+        }
     }
 
     let timestamp = state.next_timestamp();
@@ -404,6 +433,8 @@ pub fn apply_selected_sticker(
     } else if zone_retains_stickers(obj.zone) {
         rebuild_public_zone_stickers(obj);
     }
+    // CR 608.2c: latch "that sticker" for the rest of this resolution.
+    state.placed_sticker_this_resolution = Some(sticker.clone());
 
     events.push(GameEvent::StickerPlaced {
         player_id: player,
@@ -473,7 +504,18 @@ fn apply_ability_stickers(obj: &mut GameObject) {
         }
         Arc::make_mut(&mut obj.abilities).extend(parsed.abilities);
         for trigger in parsed.triggers {
-            obj.trigger_definitions.push(trigger);
+            // FIXME(stickers): needs a real occurrence ref. Unlike the other
+            // sites in this change, a sticker-granted trigger is NOT a printed
+            // slot — `rebuild_public_zone_stickers` reverts to base and
+            // re-applies, so pushing to `base_trigger_definitions` would make
+            // the sticker permanent. It wants a Layer-6 grant producer key, but
+            // neither `TriggerProducerOrigin::Static` (no owning static
+            // definition) nor `Transient` (no continuous-effect id) describes a
+            // sticker without a design decision. Left explicit rather than
+            // guessed; a stickered object still fails to serialize.
+            obj.trigger_definitions.push(
+                crate::types::ability::TriggerEntry::unmaterialized_legacy(trigger),
+            );
         }
         for replacement in parsed.replacements {
             obj.replacement_definitions.push(replacement);

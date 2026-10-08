@@ -1,18 +1,58 @@
 {
+  "playerLatency": {"host":"Host","waiting":"In attesa","value":"{{ms}} ms","description":"Latenza di andata e ritorno verso l’host. Una risposta mancante non disconnette la partita."},
+  "abilityBlock": {
+    "badge": "Bloccata",
+    "cantBeActivated": "Questa abilità non può essere attivata",
+    "cantActivateDuring": "Non può essere attivata ora",
+    "prohibited": "L'attivazione di questa abilità è proibita",
+    "costNotPayableNow": "Non puoi pagare questo costo in questo momento"
+  },
+  "manaSourceSelection": {
+    "title": "Scegli una fonte di mana",
+    "description": "Questa abilità di mana richiede di sacrificare un permanente.",
+    "baseOutput_one": "Produzione base: {{count}} mana",
+    "baseOutput_other": "Produzione base: {{count}} mana",
+    "baseOutputVariable": "Quantità base determinata all’attivazione",
+    "sacrifice": "Sacrifica",
+    "back": "Torna al pagamento del mana",
+    "unknownSource": "Fonte di mana"
+  },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
     "respondTitle": "Loop Shortcut Proposed",
-    "respondSubtitle": "An opponent proposes taking a loop shortcut. Accept it, or break out to keep playing manually.",
+    "respondSubtitle": "An opponent proposes taking a loop shortcut. Accept it, or name the place where the sequence stops.",
     "confirm": "Take the shortcut",
     "accept": "Accept",
-    "shorten": "Break out",
+    "shorten": "Shorten it",
     "decline": "Decline the shortcut",
     "untilLethal": "Repeat until the game ends.",
-    "fixedCount_one": "Repeat once.",
-    "fixedCount_other": "Repeat {{count}} times.",
+    "fixedCount_one": "Repeat at most once.",
+    "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
     "convokeInfo_other": "Auto-taps up to {{count}} creatures for convoke each iteration.",
+    "countAria": "Number of iterations",
+    "countDecreaseAria": "Diminuisci il numero di ripetizioni",
+    "countIncreaseAria": "Aumenta il numero di ripetizioni",
+    "previewTitle_one": "Repeating once produces:",
+    "previewTitle_other": "Repeating {{count}} times produces:",
+    "previewEntry": "{{amount}} {{resource}}",
+    "previewEntryPlayer": "{{amount}} {{resource}} — {{player}}",
+    "allocationTitle": "Distribuisci le ripetizioni tra i bersagli:",
+    "allocationAria": "Ripetizioni per {{subject}}",
+    "allocationDecreaseAria": "Diminuisci le ripetizioni per {{subject}}",
+    "allocationIncreaseAria": "Aumenta le ripetizioni per {{subject}}",
+    "allocationSum": "{{allocated}} di {{total}} ripetizioni assegnate.",
+    "evenSplit": "Ripristina la divisione equa",
+    "customDistribution": "Distribuzione personalizzata — il motore non ha previsualizzato questa divisione.",
+    "announceTitle": "Scegli il bersaglio che ogni ripetizione annuncia:",
+    "announce": "Annuncia",
+    "announceAria": "Annuncia {{subject}}",
+    "mayTitle": "Abilità opzionale {{group}} — ripetere questa scelta a ogni iterazione?",
+    "mayTake": "Usala",
+    "mayDecline": "Rifiutala",
+    "mayTakeAria": "Usa l'abilità opzionale {{group}}",
+    "mayDeclineAria": "Rifiuta l'abilità opzionale {{group}}",
     "winKind": {
       "LethalDamage": "This loop deals lethal damage.",
       "PoisonLoss": "This loop gives lethal poison counters.",
@@ -20,6 +60,13 @@
       "ImmediateWin": "This loop wins the game.",
       "ExtraTurns": "This loop takes infinite extra turns.",
       "Advantage": "This loop generates unbounded advantage."
+    },
+    "respondDeclaredTitle": "Dichiarazione proposta:",
+    "respondAllocationEntry": "{{subject}} — ×{{repetitions}}",
+    "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondDecision": {
+      "take": "{{subject}} — si usa a ogni iterazione",
+      "decline": "{{subject}} — si rifiuta a ogni iterazione"
     }
   },
   "precastShortcut": {
@@ -32,17 +79,48 @@
     "respondSubtitle": "Accept the verified route or stop at one of your issued boundaries.",
     "shortenAtBreakpoint": "Stop at boundary {{breakpointId}}"
   },
-  "resolutionProgress": {
-    "label": "Risoluzione {{resolved}} / {{total}}",
-    "collapse": "Comprimi avanzamento risoluzione",
-    "expand": "Espandi avanzamento risoluzione"
+  "restoredAutomation": {
+    "dismiss": "Chiudi",
+    "noop": {
+      "title": "Partita salvata caricata",
+      "summary_one": "Non è stato necessario riprendere l’automazione della pila.",
+      "summary_other": "Non è stato necessario riprendere l’automazione della pila."
+    },
+    "progressed": {
+      "title": "Automazione della pila ripresa",
+      "summary_one": "Il motore ha completato {{count}} risoluzione automatizzata.",
+      "summary_other": "Il motore ha completato {{count}} risoluzioni automatizzate.",
+      "omitted_one": "È stato omesso {{count}} evento intermedio.",
+      "omitted_other": "Sono stati omessi {{count}} eventi intermedi."
+    },
+    "zeroResolutionRepair": {
+      "title": "Automazione della pila riparata",
+      "summary_one": "L’automazione salvata è stata riparata in modo sicuro prima di riprendere.",
+      "summary_other": "L’automazione salvata è stata riparata in modo sicuro prima di riprendere."
+    }
+  },
+  "resolveAllConsent": {
+    "eyebrow": "Risolvi tutto",
+    "title": "Approvare la risoluzione rapida?",
+    "subtitle": "Tutti i giocatori devono approvare prima che il motore risolva un prefisso sicuro della pila.",
+    "grant": "Approva",
+    "decline": "Mantieni priorità"
   },
   "debugCreate": {
+    "copies": "Copie",
+    "asToken": "Crea come pedina",
     "tokenPower": "Power",
     "tokenToughness": "Toughness",
     "tokenPowerPlaceholder": "Power",
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
+  },
+  "debugMove": {
+    "runEtbEffects": "Esegui effetti ETB",
+    "simulate": "Simula (effetti ETB, innescate + SBA)"
+  },
+  "debugLibrary": {
+    "openActions": "Apri le azioni di debug per {{name}}"
   },
   "nextUp": {
     "label": "Prossimo",
@@ -116,6 +194,7 @@
     "blockWithNoneConfirm": "Tocca di nuovo: Blocca con nessuno",
     "selectAttackerForBlocker": "Seleziona l'attaccante contro cui questo bloccante deve difendere",
     "companionToHand": "Compagno in mano",
+    "endContinuousEffect": "Termina l'effetto di {{source}} —",
     "resolve": "Risolvi",
     "resolveTooltip": "Passa la priorità così l'oggetto in cima alla pila può risolversi se anche tutti i giocatori passano. Scorciatoia: Spazio.",
     "resolveAll": "Risolvi tutto",
@@ -235,20 +314,35 @@
     "eligibleCount": "{{count}} legali",
     "attackingCount": "att {{count}}",
     "selectedCount": "sel {{count}}",
+    "directBlockTargetCount": "bersagli di blocco {{count}}",
+    "blockingWith": "Blocca con {{name}}",
+    "blockedBy": "Bloccato da {{names}}",
+    "unblocked": "Non bloccato",
     "pickAll": "Tutti",
     "pickNone": "Nessuno",
     "underAttack_one": "Attaccato da {{count}} creatura",
     "underAttack_other": "Attaccato da {{count}} creature",
     "target": "Bersaglio",
+    "token": "Pedina",
+    "tokenTooltip": "Pedina che è una copia di una carta reale",
     "copy": "Copia",
-    "copyTooltip": "Copia pedina di una carta reale",
+    "copyTooltip": "Permanente non pedina che copia un'altra carta",
+    "cantBeBlocked": "Non può essere bloccata",
     "ringBearer": "Anello",
     "ringBearerTooltip": "Portatore dell'Anello",
     "hiddenAttachments": "+{{count}} more attached",
+    "hiddenAttachmentsAria_few": "Mostra {{count}} carte assegnate nascoste",
+    "hiddenAttachmentsAria_many": "Mostra {{count}} carte assegnate nascoste",
+    "hiddenAttachmentsAria_one": "Mostra {{count}} carta assegnata nascosta",
+    "hiddenAttachmentsAria_other": "Mostra {{count}} carte assegnate nascoste",
     "fanPick": "Scegli",
     "fanConfirm": "Conferma ({{count}})",
     "viewAttachments_one": "Mostra carta assegnata",
     "viewAttachments_other": "Mostra {{count}} carte assegnate",
+    "viewAttachmentsFor_few": "Mostra {{count}} carte assegnate a {{name}}",
+    "viewAttachmentsFor_many": "Mostra {{count}} carte assegnate a {{name}}",
+    "viewAttachmentsFor_one": "Mostra carta assegnata a {{name}}",
+    "viewAttachmentsFor_other": "Mostra {{count}} carte assegnate a {{name}}",
     "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {
@@ -256,6 +350,7 @@
       "return": "Return",
       "exile": "Exile",
       "tap": "Tap",
+      "untap": "Stappa",
       "crew": "Crew",
       "saddle": "Saddle",
       "station": "Station",
@@ -289,6 +384,11 @@
     "creatureFallback": "Creatura #{{id}}",
     "planeswalkerFallback": "Planeswalker #{{id}}",
     "objectFallback": "Object #{{id}}",
+    "playerTarget": "{{name}} (Giocatore — {{life}} punti vita)",
+    "playerTargetProjected": "{{name}} (Giocatore — {{life}} → {{projectedLife}})",
+    "playerTargetLethal": "{{name}} (Giocatore — {{life}} → {{projectedLife}} · Letale)",
+    "planeswalkerTarget": "{{name}} (Planeswalker)",
+    "battleTarget": "{{name}} (Battaglia)",
     "you": "Tu",
     "ally": "Alleato",
     "restoreDialog": "Ripristina finestra",
@@ -312,7 +412,7 @@
     "assignRemaining_other": "Assegna ancora {{count}}",
     "confirmDistribute_one": "Dichiara {{count}} attaccante",
     "confirmDistribute_other": "Dichiara {{count}} attaccanti",
-    "mustAttackPlayer": "{{creature}} deve attaccare {{player}}"
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
   },
   "fullControl": {
     "label": "Controllo",
@@ -358,7 +458,14 @@
     "scopeOwnTurn": "Si ferma solo nei tuoi turni.",
     "scopeOpponentsTurns": "Si ferma solo nei turni degli avversari.",
     "tooltipCurrentPhase": "Fase corrente.",
-    "tooltip": "Stop di fase: {{label}}. {{description}} {{stopText}}{{activeText}}"
+    "tooltip": "Stop di fase: {{label}}. {{description}} {{stopText}}{{activeText}}",
+    "chipAria": "Fase attuale: {{phase}}. Apri le impostazioni degli stop di fase.",
+    "sheetTitle": "Fasi del turno",
+    "sheetSubtitle": "Tocca un passo per cambiare quando il passaggio automatico si ferma lì.",
+    "scopeShortOff": "Disattivato",
+    "scopeShortAllTurns": "Tutti i turni",
+    "scopeShortOwnTurn": "I tuoi turni",
+    "scopeShortOpponentsTurns": "Turni avversari"
   },
   "phaseTracker": {
     "turn": "Turno {{number}}"
@@ -398,6 +505,7 @@
   "counterTooltip": {
     "summary_one": "1 segnalino {{label}}\n{{description}}",
     "summary_other": "{{count}} segnalini {{label}}\n{{description}}",
+    "summaryUnbounded": "∞ segnalini {{label}}\n{{description}}",
     "descriptions": {
       "p1p1": "Ogni segnalino +1/+1 dà +1/+1 al permanente.",
       "m1m1": "Ogni segnalino -1/-1 dà -1/-1 al permanente.",
@@ -414,8 +522,13 @@
     "initiativeTooltip": "Ha l'Iniziativa — si avventura nella Città Bassa all'inizio del mantenimento",
     "cityBlessing": "Benedizione della Città",
     "cityBlessingTooltip": "Benedizione della Città — controlla dieci o più permanenti (Ascendere)",
-    "dungeonAriaLabel": "Avventura in {{name}}, stanza {{room}}",
-    "dungeonTooltip": "Avventura in {{name}} — stanza {{room}}",
+    "enduringStory": "Storia duratura",
+    "enduringStoryTooltip": "Storia duratura — ottenuta controllando un permanente con Storied e tre o più artefatti, permanenti leggendari e/o saghe; dura per il resto della partita",
+    "dungeonAriaLabel": "Avventura in {{name}}, {{roomName}}, stanza {{room}} di {{total}}",
+    "dungeonRoomTooltip": "{{roomName}} — stanza {{room}} di {{total}}",
+    "dungeonMapLoading": "Caricamento della carta sotterraneo…",
+    "dungeonMapUnavailable": "Immagine della carta sotterraneo non disponibile",
+    "dungeonTooltip": "Avventura in {{name}}",
     "poisonAriaLabel_one": "{{count}} segnalino veleno",
     "poisonAriaLabel_other": "{{count}} segnalini veleno",
     "poisonTooltip": "Segnalini veleno: {{count}}\nUn giocatore con dieci o più segnalini veleno perde la partita.",
@@ -455,6 +568,15 @@
     "pendingCheaper": "La prossima magia costa {{amount}} in meno",
     "companion": "Compagno",
     "unboundedTooltip": "{{resource}} illimitato (∞)",
+    "unboundedScheduledTooltip": "{{resource}} illimitato (∞) — collasso in sospeso; verrà scelta una quantità finita",
+    "unboundedScheduledYouTooltip": "{{resource}} illimitato (∞) — collasso in sospeso; indicherai tu la quantità",
+    "unboundedScheduledGlyph": "∞→N",
+    "unboundedConditionalTooltip": "{{resource}} illimitato (∞) — collasso in sospeso; questo può restare illimitato",
+    "unboundedConditionalYouTooltip": "{{resource}} illimitato (∞) — collasso in sospeso; questo può restare illimitato e, in caso contrario, indicherai tu la quantità",
+    "unboundedMixedTooltip": "{{resource}} illimitato (∞) — parte di questo gruppo ha un collasso in sospeso; parte resta illimitata",
+    "unboundedConditionalGlyph": "∞→?",
+    "boundedLoopGlyph": "≤{{bound}}×",
+    "boundedLoopTooltip": "{{resource}} da un ciclo rilevato, con un massimo di {{bound}} ripetizioni",
     "unboundedManaPoolMarker": "Mana illimitato (∞)",
     "unboundedMana": "mana",
     "unboundedLife": "punti vita",
@@ -476,13 +598,25 @@
     "clickToFocus": "clicca per mettere a fuoco"
   },
   "manaPool": {
+    "onlyForSpell": "Spendi solo per lanciare magie",
     "onlyForSpellType": "Spendi solo per lanciare magie di un tipo specifico",
     "onlyForCreatureType": "Spendi solo per lanciare una magia creatura del tipo scelto",
     "onlyForTypeSpellsOrAbilities": "Spendi solo su magie o abilità di un tipo specifico",
+    "onlyForTaggedActivation": "Spendi solo per attivare abilità di un tipo specifico",
     "onlyForSpellWithKeywordKind": "Spendi solo per lanciare magie con una parola chiave specifica",
     "onlyForSpellWithKeywordKindFromZone": "Spendi solo per lanciare magie con parola chiave da un cimitero",
+    "onlyForSpellWithManaValue": "Spendi solo per lanciare magie che soddisfano un requisito di valore di mana",
+    "onlyForSpellMatchingCostCriteria": "Spendi solo per lanciare magie che soddisfano un requisito di costo",
+    "onlyForSpellWithColorCount": "Spendi solo per lanciare magie che soddisfano un requisito sul numero di colori",
+    "onlyForSpellColor": "Spendi solo per lanciare magie del colore scelto",
+    "onlyForSpellFromZone": "Spendi solo per lanciare magie da una zona consentita",
+    "cannotCastSpellFromZone": "Non può essere speso per lanciare magie dalla zona indicata",
+    "onlyForFaceDownSpell": "Spendi solo per lanciare magie a faccia in giù",
     "onlyForActivation": "Spendi solo per attivare abilità",
     "onlyForXCosts": "Spendi solo su costi che includono {X}",
+    "onlyForAny": "Spendi solo per uno degli usi elencati",
+    "onlyForSpecialAction": "Spendi solo per un'azione speciale specifica",
+    "impossible": "Questo mana non può essere speso",
     "convokePayment": "Pagamento di Convocare",
     "grantsProperty": "Concede una proprietà alla magia",
     "grantCantBeCountered": "Spendi per questa magia per renderla impossibile da neutralizzare"
@@ -497,6 +631,11 @@
     "castCommander": "Lancia {{name}} — doppio clic o trascina per giocare",
     "castCommanderTax": "Lancia {{name}} (Tassa: +{{tax}}) — doppio clic o trascina per giocare",
     "ninjutsuCommander": "Ninjutsu del comandante: {{name}} — clicca per far tornare in mano un attaccante non bloccato e mettere questo comandante sul campo di battaglia TAPpato e attaccante",
+    "signatureSpell": "Magia firma",
+    "signatureSpellTitle": "Magia firma: {{name}}",
+    "signatureSpellTitleTax": "Magia firma: {{name}} (Tassa: +{{tax}})",
+    "castSignatureSpell": "Lancia {{name}} — doppio clic o trascina per giocare",
+    "castSignatureSpellTax": "Lancia {{name}} (Tassa: +{{tax}}) — doppio clic o trascina per giocare",
     "tax": "Tassa: +{{tax}}",
     "companion": "Compagno",
     "companionTitle": "Compagno: {{name}}",
@@ -527,13 +666,17 @@
   "mana": {
     "free": "Gratis",
     "chooseXTitle": "Scegli un valore per X",
-    "chooseXAria": "Scegli il valore di X",
     "chooseXInputAria": "Inserisci il valore di X",
     "decreaseX": "Diminuisci il valore di X",
     "increaseX": "Aumenta il valore di X",
-    "xEquals": "X = {{value}}",
+    "maximum": "Max",
+    "setXToMaximum": "Imposta X al massimo",
     "minMax": "min {{min}} / max {{max}}",
     "maxOnly": "max {{max}}",
+    "amountOutOfRange": "Inserisci un numero intero tra {{min}} e {{max}}",
+    "decreaseAmount": "Diminuisci la quantità",
+    "increaseAmount": "Aumenta la quantità",
+    "confirmAmount": "Conferma",
     "confirmX": "Conferma X = {{value}}",
     "payMana": "Paga il costo di mana",
     "convokeHint": "TAPpa le creature per aiutare a pagare.",
@@ -556,6 +699,15 @@
     "resourceMana": "mana",
     "resourceCounters": "segnalini",
     "resourceSpeed": "velocità",
+    "loopCollapseTitleTokens": "Scegli quante pedine creare",
+    "loopCollapseTitleCounters": "Scegli quante volte aggiungere segnalini",
+    "loopCollapseTitleLife": "Scegli quante volte guadagnare punti vita",
+    "loopCollapseTitleMixed": "Scegli quante volte ripetere il ciclo",
+    "loopCollapseAmountTokens_one": "Crea {{count}} pedina",
+    "loopCollapseAmountTokens_other": "Crea {{count}} pedine",
+    "loopCollapseAmountCounters": "Aggiungi segnalini {{value}}×",
+    "loopCollapseAmountLife": "Guadagna punti vita {{value}}×",
+    "loopCollapseAmountMixed": "Ripeti il ciclo {{value}}×",
     "manualMana": "Manuale",
     "manualManaTooltip": "Mana manuale — solo questa partita. TAPpa le tue terre e il tuo mana per pagare.",
     "spendHint": "Clicca sul tuo mana per spenderlo per questo costo",
@@ -571,6 +723,12 @@
     "cardBack": "Retro della carta",
     "organizeLabel": "Organizza la mano",
     "reorderPausedHint": "Il trascinamento per riordinare è in pausa mentre la mano è ordinata o filtrata."
+  },
+  "storm": {
+    "copies_one": "Tempesta: {{count}} copia",
+    "copies_other": "Tempesta: {{count}} copie",
+    "count_one": "Contatore tempesta: {{count}} copia",
+    "count_other": "Contatore tempesta: {{count}} copie"
   },
   "opponentHud": {
     "ally": "Alleato",
@@ -616,11 +774,12 @@
     "mustAttackBadge": "Must attack",
     "mustAttackSatisfiedBadge": "Attacking ✓",
     "mustBlockBadge": "Must block",
+    "mustBlockExactBadge": "Deve bloccare {{attacker}}",
+    "mustBeBlockedBadge": "Deve essere bloccato",
+    "bandBadge": "Banda {{n}}",
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
-    "unsatisfiedMustAttack_one": "{{count}} creature must attack",
-    "unsatisfiedMustAttack_other": "{{count}} creatures must attack",
     "unsatisfiedMustBlock_one": "{{count}} creature must block",
     "unsatisfiedMustBlock_other": "{{count}} creatures must block",
     "assignDamageTitle": "Assegna {{amount}} danno da combattimento",
@@ -639,6 +798,7 @@
     "dockLeft": "Ancora la pila a sinistra",
     "dockRight": "Ancora la pila a destra",
     "casting": "Lancio…",
+    "selectedModes": "Modalità selezionate",
     "next": "Successivo",
     "activated": "Attivata",
     "triggered": "Innescata",
@@ -651,6 +811,7 @@
     "titleTargets": "Bersagli: {{targets}}",
     "titlePaid": "Pagato: {{paid}}",
     "titleContext": "Contesto: {{context}}",
+    "revealedCards": "Rivelata: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} mana",
     "paidColorsSpent": "{{count}} colori",
@@ -687,22 +848,38 @@
     "tapUntappedCreatures_one": "TAPpa {{count}} creatura STAPpata",
     "tapUntappedCreatures_other": "TAPpa {{count}} creature STAPpate",
     "chooseTargetOf": "Scegli il bersaglio {{current}} di {{total}}",
+    "slotProgress": "Bersaglio {{current}} di {{total}}",
+    "choosePlayerTarget": "Scegli: {{name}}",
+    "expandDescription": "Mostra la descrizione completa",
+    "collapseDescription": "Mostra meno",
+    "descriptionDisclosure": "{{action}}: {{description}}",
     "chooseTarget": "Scegli un bersaglio",
     "triggerDamageAmount": "This trigger: {{amount}} damage",
     "noLegalTargets": "Nessun bersaglio legale disponibile",
-    "modeContext": "{{mode}} — {{prompt}}",
-    "upToOne": "fino a un {{target}}",
-    "one": "un {{target}}",
-    "nounPlayer": "giocatore",
-    "nounNonlandPermanent": "permanente non Terra",
-    "nounSpell": "magia",
-    "nounCreature": "creatura",
-    "nounPlaneswalker": "planeswalker",
-    "nounTargetPermanent": "permanente bersaglio",
-    "nounTarget": "bersaglio",
+    "one": {
+      "player": "un giocatore",
+      "spell": "una magia",
+      "creature": "una creatura",
+      "planeswalker": "un planeswalker",
+      "nonlandPermanent": "un permanente non terra",
+      "targetPermanent": "un permanente bersaglio",
+      "target": "un bersaglio",
+      "orPlayer": "{{noun}} o un giocatore"
+    },
+    "upToOne": {
+      "player": "fino a un giocatore",
+      "spell": "fino a una magia",
+      "creature": "fino a una creatura",
+      "planeswalker": "fino a un planeswalker",
+      "nonlandPermanent": "fino a un permanente non terra",
+      "targetPermanent": "fino a un permanente bersaglio",
+      "target": "fino a un bersaglio",
+      "orPlayer": "{{noun}} o un giocatore"
+    },
     "confirmTap": "Conferma TAP ({{selected}}/{{count}})",
     "keepCurrentTargets": "Mantieni i bersagli attuali",
     "skip": "Salta",
+    "opponentChoice": "(a scelta dell'avversario)",
     "chooseNewTarget": "Scegli il nuovo bersaglio della magia",
     "chooseNewTargetForSpell": "Scegli un nuovo bersaglio per {{spell}}",
     "sacrificeExact_one": "Sacrifice {{count}} permanent",
@@ -716,11 +893,50 @@
   },
   "log": {
     "title": "Registro di gioco",
+    "dockLeft": "Ancora il registro a sinistra",
+    "dockRight": "Ancora il registro a destra",
     "noEvents": "Nessun evento ancora",
     "closeLog": "Chiudi il registro di gioco",
     "verbosityFull": "completo",
     "verbosityCompact": "compatto",
     "verbosityMinimal": "minimo",
+    "panelLabel": "Pannello registro di gioco",
+    "viewLabel": "Vista registro",
+    "viewTimeline": "Cronologia",
+    "viewDetails": "Dettagli",
+    "viewDiagnostics": "Diagnostica",
+    "showHiddenInformation": "Mostra informazioni nascoste",
+    "filters": "Filtri ({{count}})",
+    "filters_one": "Filtri ({{count}})",
+    "filters_few": "Filtri ({{count}})",
+    "filters_many": "Filtri ({{count}})",
+    "filters_other": "Filtri ({{count}})",
+    "filterSummary": "{{count}} voci",
+    "filterSummary_one": "{{count}} voce",
+    "filterSummary_few": "{{count}} voci",
+    "filterSummary_many": "{{count}} voci",
+    "filterSummary_other": "{{count}} voci",
+    "clearFilters": "Cancella filtri",
+    "searchLabel": "Cerca nel registro",
+    "noMatchingEvents": "Nessun evento corrispondente",
+    "jumpToLatest": "Vai al più recente ({{count}})",
+    "jumpToLatest_one": "Vai al più recente ({{count}})",
+    "jumpToLatest_few": "Vai al più recente ({{count}})",
+    "jumpToLatest_many": "Vai al più recente ({{count}})",
+    "jumpToLatest_other": "Vai al più recente ({{count}})",
+    "copyFiltered": "Copia {{count}} voci filtrate",
+    "copyFiltered_one": "Copia {{count}} voce filtrata",
+    "copyFiltered_few": "Copia {{count}} voci filtrate",
+    "copyFiltered_many": "Copia {{count}} voci filtrate",
+    "copyFiltered_other": "Copia {{count}} voci filtrate",
+    "exportFiltered": "Esporta {{count}} voci filtrate",
+    "exportFiltered_one": "Esporta {{count}} voce filtrata",
+    "exportFiltered_few": "Esporta {{count}} voci filtrate",
+    "exportFiltered_many": "Esporta {{count}} voci filtrate",
+    "exportFiltered_other": "Esporta {{count}} voci filtrate",
+    "copyContext": "Turno {{turn}} · {{phase}} · {{category}}",
+    "copySuccess": "Registro copiato negli appunti",
+    "copyFailure": "Impossibile copiare il registro",
     "gameStarted": "Partita iniziata",
     "turnStarted": "Turno {{turn}} -- {{player}}",
     "phaseChanged": "Fase: {{phase}}",
@@ -767,6 +983,7 @@
     "genericEvent": "Evento: {{type}}",
     "searchPlaceholder": "Search log…",
     "allTurns": "All turns",
+    "turnFilterLabel": "Filtra per turno",
     "turnChip": "T{{turn}}",
     "entryCount": "{{count}} entries",
     "copy": "Copy",
@@ -917,6 +1134,8 @@
       "usePowder": "Usa {{name}}",
       "powderDescription": "Esilia ogni carta in mano, pesca lo stesso numero — non è un mulligan",
       "powderTooltip": "Esilia ogni carta nella tua mano e pesca lo stesso numero. Non è un mulligan — il conteggio e le carte in fondo non sono influenzati.",
+      "freeReveal": "Rivela e pesca di nuovo (gratis)",
+      "freeRevealDescription": "Rivela la mano, rimescolala e pesca 7 — gratis, nessuna carta in fondo, non è un mulligan",
       "eyebrowMulligan": "Mulligan {{count}} · Londra",
       "eyebrowOpening": "Mano iniziale · Mulligan di Londra",
       "reviewTitle": "Rivedi la tua mano iniziale",
@@ -961,7 +1180,38 @@
       "subtitlePreparedCopy": "Lanciare la magia preparata?",
       "subtitleActivate": "Attivare questa abilità?",
       "subtitlePlay": "Scegli come giocare questa carta",
-      "subtitleChoose": "Scegli un'abilità da attivare"
+      "subtitleChoose": "Scegli un'abilità da attivare",
+      "unlockThisDoor": "Sblocca questa porta",
+      "unlockHalf": "Sblocca {{name}}",
+      "unlockHalfWithCost": "Sblocca {{name}} ({{cost}})"
+    },
+    "manaRestrictions": {
+      "tapForMana": "Tappa per mana",
+      "tapFor": "Tappa per {{mana}}",
+      "onlyForSpell": "Solo per magie.",
+      "onlyForSpellType": "Solo per magie {{spellType}}.",
+      "onlyForCreatureType": "Solo per magie {{creatureType}}.",
+      "onlyForTypeSpellsOrAbilitiesOfSpellType": "Solo per magie {{spellType}} o abilità di {{spellType}}.",
+      "onlyForTypeSpellsOrAbilitiesAny": "Solo per magie o abilità {{spellType}}.",
+      "onlyForActivation": "Solo per attivare abilità.",
+      "onlyForTaggedActivation": "Solo per attivare abilità {{tag}}.",
+      "onlyForXCosts": "Solo per costi che contengono X.",
+      "onlyForSpellWithKeywordKind": "Solo per magie con {{keyword}}.",
+      "onlyForSpellWithKeywordKindFromZone": "Solo per magie con {{keyword}} lanciate da {{zone}}.",
+      "onlyForSpellWithManaValue": "Solo per magie con valore di mana {{comparator}} {{value}}.",
+      "onlyForSpellMatchingCostCriteria": "Solo per magie {{spellType}} che soddisfano {{criteria}}.",
+      "manaValueCriterion": "valore di mana {{comparator}} {{value}}",
+      "hasXInCostCriterion": "una X nel loro costo",
+      "onlyForSpellWithColorCount": "Solo per magie con {{comparator}} {{count}} colori.",
+      "onlyForSpellColor": "Solo per magie del colore {{color}}.",
+      "onlyForSpellFromZone": "Solo per magie {{polarity}} {{zone}}.",
+      "cannotCastSpellFromZone": "Non può essere speso per lanciare magie da {{zone}}.",
+      "onlyForFaceDownSpell": "Solo per magie a faccia in giù.",
+      "onlyForAny": "Solo per uno di questi usi: {{restrictions}}",
+      "onlyForSpecialAction": "Solo per l'azione speciale {{action}}.",
+      "impossible": "Questo mana non può essere speso.",
+      "convokePayment": "Solo per questo pagamento di convocazione.",
+      "anySpell": "qualsiasi"
     },
     "defiler": {
       "title": "Riduzione del costo di Defiler",
@@ -1004,6 +1254,14 @@
       "returnToHand_one": "restituisci un permanente alla mano",
       "returnToHand_other": "restituisci {{count}} permanenti alla mano",
       "energy": "{{amount}} energia",
+      "playerCounters_one": "ottieni {{count}} segnalino {{kind}}",
+      "playerCounters_other": "ottieni {{count}} segnalini {{kind}}",
+      "playerCounterKind": {
+        "Poison": "veleno",
+        "Experience": "esperienza",
+        "Rad": "radiazione",
+        "Ticket": "ticket"
+      },
       "generic": "un costo",
       "pay": "Paga {{cost}}"
     },
@@ -1025,6 +1283,13 @@
     },
     "activationCost": {
       "title": "Scegli il costo di attivazione"
+    },
+    "meld": {
+      "choosePair": "Scegli le carte da combinare",
+      "into": "Combina in {{result}}",
+      "chooseAttackTarget": "Scegli cosa attacca",
+      "player": "Giocatore {{id}}",
+      "permanent": "Permanente {{id}}"
     },
     "debug": {
       "modeBanner": "MODALITÀ DEBUG - Clicca qualsiasi carta",
@@ -1123,6 +1388,7 @@
       "target": "Bersaglio",
       "return": "Restituisci",
       "discard": "Scarta",
+      "reveal": "Rivela",
       "evidence": "Prove",
       "manifest": "Manifesta",
       "untap": "Stappa",
@@ -1173,7 +1439,16 @@
       "subtitleUpTo_other": "Seleziona fino a {{count}} carte da mettere {{destination}}",
       "destinationTop": "in cima al tuo grimorio",
       "destinationBattlefield": "sul campo di battaglia",
-      "destinationHand": "nella tua mano"
+      "destinationHand": "nella tua mano",
+      "titleSplit": "Dividi le carte rimanenti",
+      "subtitleSplit_one": "Disponi le carte: {{count}} va in cima al tuo grimorio, le altre {{remaining}} vanno in fondo",
+      "subtitleSplit_other": "Disponi le carte: {{count}} vanno in cima al tuo grimorio, le altre {{remaining}} vanno in fondo",
+      "badgeTop": "Cima {{order}}",
+      "badgeBottom": "Fondo",
+      "hintSplit": "Trascina per riordinare · le verdi vanno in cima (la prima è la più alta), le grigie in fondo",
+      "moveEarlier": "Sposta {{card}} prima",
+      "moveLater": "Sposta {{card}} dopo",
+      "hintSplitOrderOnly": "Trascina o usa le frecce per riordinare all’interno di ogni pila · un altro giocatore ha scelto quali carte vanno in cima"
     },
     "surveil": {
       "title": "Sorvegliare",
@@ -1242,6 +1517,7 @@
       "titleTopdeck": "Metti nel grimorio",
       "titleBattlefield": "Metti sul campo di battaglia",
       "titleHand": "Restituisci",
+      "titleExile": "Esilia",
       "titleUntap": "Stappa",
       "titleTap": "Tappa",
       "titleAttach": "Attach",
@@ -1263,6 +1539,12 @@
       "subtitleBattlefieldUpTo_other": "Scegli fino a {{count}} carte da mettere sul campo di battaglia",
       "subtitleBattlefieldRange_one": "Scegli {{min}}-{{count}} carta da mettere sul campo di battaglia",
       "subtitleBattlefieldRange_other": "Scegli {{min}}-{{count}} carte da mettere sul campo di battaglia",
+      "subtitleExileExact_one": "Scegli {{count}} carta da esiliare",
+      "subtitleExileExact_other": "Scegli {{count}} carte da esiliare",
+      "subtitleExileUpTo_one": "Scegli fino a {{count}} carta da esiliare",
+      "subtitleExileUpTo_other": "Scegli fino a {{count}} carte da esiliare",
+      "subtitleExileRange_one": "Scegli {{min}}-{{count}} carta da esiliare",
+      "subtitleExileRange_other": "Scegli {{min}}-{{count}} carte da esiliare",
       "subtitleHandExact_one": "Scegli {{count}} permanente da restituire nella mano del suo proprietario",
       "subtitleHandExact_other": "Scegli {{count}} permanenti da restituire nella mano del loro proprietario",
       "subtitleHandUpTo_one": "Scegli fino a {{count}} permanente da restituire nella mano del suo proprietario",
@@ -1294,8 +1576,14 @@
       "labelTop": "Cima ({{selected}}/{{count}})",
       "labelPut": "Metti ({{selected}}/{{count}})",
       "labelReturn": "Restituisci ({{selected}}/{{count}})",
+      "labelExile": "Esilia ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
-      "orderTop": "Cima"
+      "orderTop": "Cima",
+      "orderSecond": "2º",
+      "orderThird": "3º",
+      "orderFourth": "4º",
+      "orderFifth": "5º",
+      "orderPosition": "Posizione {{position}}"
     },
     "drawnThisTurn": {
       "title": "Pescate questo turno",
@@ -1409,6 +1697,14 @@
       "labelExile": "Esilia",
       "labelBehold": "Contempla"
     },
+    "empowerJace": {
+      "title": "Potenziare Jace",
+      "subtitle": "Scegli una pedina Jace che controlli perché ottenga +{{count}} fedeltà"
+    },
+    "spellCopyOrder": {
+      "title": "Ordina le copie",
+      "subtitle": "Scegli la magia la cui copia va successivamente in pila"
+    },
     "collectEvidence": {
       "title": "Raccogli prove",
       "subtitle": "Esilia carte dal tuo cimitero con valore di mana totale {{minimum}} o superiore"
@@ -1417,6 +1713,9 @@
       "selectAll": "Tutti",
       "invert": "Inverti",
       "clear": "Cancella",
+      "searchLabel": "Filtra",
+      "searchPlaceholder": "Nome della carta",
+      "searchCardsAria": "Filtra le carte per nome",
       "sortLabel": "Ordina",
       "groupLabel": "Raggruppa",
       "optNone": "Nessuno",
@@ -1461,7 +1760,11 @@
     "legend": {
       "title": "Regola delle leggende",
       "subtitle": "Scegli quale \"{{name}}\" tenere",
-      "keepAria": "Tieni {{name}} ({{status}})",
+      "keepAria": "Tieni {{name}} ({{identity}}, {{status}})",
+      "keepAriaUnknown": "Tieni {{name}} ({{status}})",
+      "identityOriginal": "Originale",
+      "identityCopy": "Copia",
+      "identityTokenCopy": "Copia pedina",
       "statusJustEntered": "Appena entrata",
       "statusAlready": "Già sul campo di battaglia"
     },
@@ -1505,11 +1808,29 @@
     "manaCombination": {
       "title": "Scegli la combinazione di mana",
       "subtitleAny": "Seleziona ogni colore di mana da produrre",
-      "subtitle": "Seleziona quale combinazione di mana produrre"
+      "subtitle": "Seleziona quale combinazione di mana produrre",
+      "amount": "{{selected}} / {{count}} mana selezionati",
+      "decrease": "Rimuovi mana {{color}}",
+      "increase": "Aggiungi mana {{color}}",
+      "quantity": "Mana {{color}}: {{count}}"
     },
     "untapSubset": {
       "title": "Choose permanents to untap",
       "subtitle": "Untap up to {{count}} of these permanents."
+    },
+    "rippleBottom": {
+      "title": "Order the rest on the bottom",
+      "subtitle_one": "Put {{count}} revealed card on the bottom of your library",
+      "subtitle_other": "Put {{count}} revealed cards on the bottom of your library, in any order",
+      "hint": "Drag to reorder · position 1 ends up on top of this pile"
+    },
+    "revealUntilBottom": {
+      "title": "Metti il resto in fondo",
+      "subtitle_one": "Metti {{count}} carta rivelata in fondo al tuo grimorio",
+      "subtitle_other": "Metti {{count}} carte rivelate in fondo al tuo grimorio in qualsiasi ordine",
+      "hint": "Trascina per riordinare · la posizione 1 va in cima a questa pila",
+      "moveLeft": "Sposta a sinistra",
+      "moveRight": "Sposta a destra"
     }
   },
   "specializeColor": {
@@ -1589,7 +1910,22 @@
     "emergeEyebrow": "Emergere",
     "emergeNormalLabel": "Lancia normalmente",
     "emergeAltLabel": "Lancia con Emergere",
-    "emergeSubtitle": "Lancia {{name}} normalmente, o paga il suo costo di Emergere sacrificando una creatura, riducendo il costo del valore di mana di quella creatura.",
+    "emergeSubtitle": "Lancia {{name}} normalmente, o paga il suo costo di Emergere sacrificando {{sacrifice}}, riducendo il costo del valore di mana di quel permanente.",
+    "emergeFallbackSacrifice": "un permanente corrispondente",
+    "emergeSacrificeQuality": {
+      "artifact": "un artefatto",
+      "battle": "una battaglia",
+      "card": "una carta",
+      "creature": "una creatura",
+      "enchantment": "un incantesimo",
+      "instant": "un istantaneo",
+      "kindred": "un tribale",
+      "land": "una terra",
+      "permanent": "un permanente",
+      "planeswalker": "un planeswalker",
+      "sorcery": "una stregoneria",
+      "subtype": "un permanente di tipo {{subtype}}"
+    },
     "impendingEyebrow": "Incombere",
     "impendingNormalLabel": "Lancia normalmente",
     "impendingAltLabel": "Lancia con Incombere",
@@ -1606,6 +1942,10 @@
     "prowlNormalLabel": "Lancia normalmente",
     "prowlAltLabel": "Lancia con Prowl",
     "prowlSubtitle": "Lancia {{name}} normalmente, o paga il suo costo di Prowl (disponibile perché una creatura corrispondente ha inflitto danno da combattimento a un giocatore in questo turno).",
+    "surgeEyebrow": "Surge",
+    "surgeNormalLabel": "Lancia normalmente",
+    "surgeAltLabel": "Lancia con Surge",
+    "surgeSubtitle": "Lancia {{name}} normalmente, o paga il suo costo di Surge (disponibile perché tu o un compagno di squadra avete lanciato un'altra magia in questo turno).",
     "overloadEyebrow": "Sovraccarico",
     "overloadNormalLabel": "Lancia normalmente",
     "overloadAltLabel": "Lancia con Sovraccarico",
@@ -1629,6 +1969,8 @@
     "additionalExile": "+ Esilia una carta",
     "additionalSacrifice": "+ Sacrifica un permanente",
     "additionalPayLife": "+ Paga punti vita",
+    "additionalPayLifeAmount": "+ Paga {{amount}} punti vita",
+    "additionalCollectEvidence": "+ Raccogli prove {{amount}}",
     "additionalDiscard": "+ Scarta una carta",
     "additionalTapCreatures": "+ TAPpa creature",
     "additionalGeneric": "+ {{type}}"
@@ -1638,9 +1980,46 @@
     "battleFallback": "Battaglia",
     "subtitle": "{{name}} necessita di un nuovo protettore. Scegli quale avversario la difenderà."
   },
+  "announcingOpponent": {
+    "title": "Scegli l'avversario che annuncia ({{current}} di {{total}})",
+    "subtitle": "Scegli quale avversario annuncia {{target}} ({{current}} di {{total}}).",
+    "targetLand": "il bersaglio terra",
+    "targetCreature": "il bersaglio creatura",
+    "targetChoice": "questa scelta del bersaglio"
+  },
+  "giftRecipient": {
+    "title": "Scegli il destinatario del dono",
+    "subtitle": "Scegli quale avversario riceve il dono promesso."
+  },
+  "entryController": {
+    "title": "Scegli il controllore all'entrata",
+    "subtitle": "Scegli quale avversario controlla questo permanente mentre entra."
+  },
+  "optionalCost": {
+    "gift": {
+      "title": "Promettere un dono?",
+      "pay": "Prometti {{gift}}",
+      "decline": "Lancia senza promettere",
+      "kind": {
+        "card": "una carta",
+        "treasure": "un Tesoro",
+        "food": "un Cibo",
+        "tappedFish": "un Pesce TAPpato",
+        "extraTurn": "un turno extra"
+      }
+    }
+  },
   "clashOpponent": {
     "title": "Scegli l'avversario per lo scontro",
     "subtitle": "Scegli quale avversario si scontrerà con te."
+  },
+  "zoneOpponentChooser": {
+    "title": "Scegli avversario",
+    "subtitle": "Scegli quale avversario effettua la scelta.",
+    "orderTitle": "Scegli il giocatore successivo",
+    "orderSubtitle": "Scegli per chi effettuare la prossima selezione.",
+    "substituteTitle": "Scegli giocatore",
+    "substituteSubtitle": "Scegli chi effettua questa scelta."
   },
   "pileOpponent": {
     "title": "Choose Opponent",
@@ -1674,10 +2053,15 @@
     "subtitleCascade": "Cascata ha esiliato {{name}} (valore di mana sotto {{sourceMv}}). Lanciala senza pagare il suo costo di mana, o rifiuta e rimescola tutte le {{total}} carte esiliate in fondo al tuo grimorio.",
     "subtitleDiscover": "Scoperta ha esiliato {{name}}. Lanciala senza pagare il suo costo di mana, o mettila nella tua mano e rimescola le altre {{missCount}} carte esiliate in fondo al tuo grimorio.",
     "subtitleRipple": "Ripple ha rivelato {{name}}. Lanciala senza pagare il suo costo di mana, oppure rifiuta e metti tutte le {{total}} carte rivelate in fondo al tuo grimorio in ordine casuale.",
-    "subtitleGraveyardPaid": "Lancia {{name}} da un cimitero pagando il suo costo di mana — può essere speso mana di qualsiasi tipo. Oppure rifiuta e lasciala nel cimitero.",
+    "subtitleGraveyardPaid": "Lancia {{name}} da un cimitero pagando il suo costo di mana{{extra}}{{concession}}. Oppure rifiuta e lasciala nel cimitero.",
     "castNamed": "Lancia {{name}}",
     "castSuffix": "(senza pagare il suo costo di mana)",
-    "castPaidSuffix": "(paga il suo costo di mana — può essere speso mana di qualsiasi tipo)",
+    "castPaidSuffix": "(paga il suo costo di mana{{extra}}{{concession}})",
+    "paidExtraFragment": " più {{extra}}",
+    "paidAnyTypeSubtitleFragment": " — può essere speso mana di qualsiasi tipo",
+    "paidAnyColorSubtitleFragment": " — può essere speso mana di qualsiasi colore",
+    "paidAnyTypeSuffixFragment": " — può essere speso mana di qualsiasi tipo",
+    "paidAnyColorSuffixFragment": " — può essere speso mana di qualsiasi colore",
     "putIntoHand": "Metti in mano",
     "decline": "Rifiuta",
     "discoverDeclineSuffix": "(metti il resto in fondo)",
@@ -1689,6 +2073,7 @@
     "title": "Lancia una magia gratuitamente",
     "subtitle": "Scegli una magia da lanciare senza pagare il suo costo di mana ({{remaining}} rimanente/i). Valore di mana totale rimanente: {{budget}}.",
     "subtitleNoBudget": "Scegli una magia da lanciare senza pagare il suo costo di mana ({{remaining}} rimanente/i).",
+    "remainingAny": "un numero qualsiasi",
     "castNamed": "Lancia {{name}}",
     "castSuffix": "(senza pagare il suo costo di mana)",
     "done": "Fatto",
@@ -1717,9 +2102,24 @@
     "variantForetell": "Lancia da Predire",
     "variantOverload": "Lancia con Sovraccarico",
     "variantBestow": "Lancia con Conferire",
+    "variantBlitz": "Lancia con Blitz",
     "variantFreerunning": "Lancia con Freerunning",
     "variantFuse": "Lancia con Fusione",
-    "variantFallback": "Lancia con {{type}}"
+    "variantMutate": "Lancia con Mutate",
+    "variantAwaken": "Lancia con Risveglio",
+    "variantCleave": "Lancia con Fendere",
+    "variantImpending": "Lancia con Incombere",
+    "variantMoreThanMeetsTheEye": "Cast Converted",
+    "variantPrototype": "Lancia con Prototipo",
+    "variantFaceDown": "Lancia a faccia in giù",
+    "variantFallback": "Lancia con {{type}}",
+    "viaSource": "tramite {{name}}",
+    "extraCostAdditional": "+ {{cost}}",
+    "extraCostAlternative": "invece del suo costo di mana: {{cost}}",
+    "entersWithCounter": "entra con un segnalino {{counter}}",
+    "slotPerType": "usa il suo spazio {{type}}",
+    "slotChooseType": "scegli un tipo di permanente",
+    "slotOncePerTurn": "una volta in questo turno"
   },
   "categoryChoice": {
     "title": "Scegli i permanenti da tenere",
@@ -1778,8 +2178,10 @@
     "diagnostic": "diagnostica: {{reason}}",
     "showDetails": "Mostra dettagli",
     "exportGameState": "Esporta stato partita",
+    "exportClientSnapshot": "Esporta istantanea del client",
     "exported": "Esportato",
     "exportFailed": "Esportazione non riuscita",
+    "exportRequested": "Esportazione non confermata",
     "copyDiagnostic": "Copia diagnostica",
     "copied": "Copiato!",
     "reportOnGithub": "Segnala su GitHub",
@@ -1847,6 +2249,7 @@
     "searchPlaceholder": "Cerca per nome...",
     "noCardsFound": "Nessuna carta trovata",
     "buttonSubtitle": "Seleziona un'opzione",
+    "numberSubtitle": "Inserisci un numero intero maggiore o uguale a {{min}}",
     "filterPlaceholder": "Filtra opzioni...",
     "noOptionsMatch": "Nessuna opzione corrisponde"
   },
@@ -1874,14 +2277,44 @@
     "accept": "Sì",
     "decline": "No",
     "sourceFallback": "Effetto",
-    "entryLabel": "{{source}} — {{decision}}"
+    "entryLabel": "{{source}} — {{decision}}",
+    "optionalTriggers": "Abilità innescate facoltative ({{count, number}})",
+    "replacementChoices": "Scelte di sostituzione ({{count, number}})"
   },
   "optionalEffect": {
     "sourceFallback": "Effetto",
     "title": "{{name}} - Effetto facoltativo",
     "yes": "Sì",
     "no": "No",
-    "dontAskAgain": "Non chiedere di nuovo in questa partita"
+    "dontAskAgain": "Non chiedere di nuovo in questa partita",
+    "dontAskAgainForSameCard": "Usa questa scelta per ogni copia di questa carta in questa partita"
+  },
+  "keywordDetail": {
+    "selfManaCost": "il suo costo di mana",
+    "selfManaValue": "il suo valore di mana",
+    "manaCostReduced": "il suo costo di mana ridotto di {{reduction}}",
+    "spliceOnto": "su {{subtype}} {{cost}}"
+  },
+  "resolutionOptionalPayment": {
+    "title": "Scegli un pagamento opzionale",
+    "pay": "Paga {{cost}}",
+    "decline": "Rifiuta",
+    "cost": {
+      "card": "carta",
+      "cards": "carte",
+      "filteredCard": "carta {{types}}",
+      "filteredCards": "carte {{types}}",
+      "nonType": "non {{type}}",
+      "orSeparator": " o ",
+      "zoneBattlefield": "il campo di battaglia",
+      "zoneGraveyard": "il tuo cimitero",
+      "zoneLibrary": "la tua biblioteca",
+      "zoneExile": "l’esilio",
+      "zoneHand": "la tua mano",
+      "discard": "Scarta {{count}} {{cards}}",
+      "exile": "Esilia {{count}} {{cards}} da {{zone}}",
+      "reveal": "Rivela {{count}} {{cards}} da {{zone}}"
+    }
   },
   "topOrBottom": {
     "cardFallback": "Card",
@@ -1926,10 +2359,25 @@
     "confirm": "Conferma"
   },
   "replacement": {
+    "remember": "Ricorda questa scelta per questa partita",
+    "savedChoice": "Sostituzione: {{choice}}",
     "eyebrow": "Ordine di risoluzione",
     "title": "Effetti di sostituzione",
-    "subtitle": "Scegli quale effetto di sostituzione si applica per primo.",
-    "candidateFallback": "Effetto di sostituzione {{number}}"
+    "orderSubtitle": "Questi effetti cambiano tutti il modo in cui avviene questo evento. Trascina per stabilire l'ordine di applicazione: l'ultimo applicato è quello che ha effetto (CR 616.1).",
+    "appliedFirst": "Applicato per primo (verrà sovrascritto)",
+    "appliedLast": "Applicato per ultimo — questo prevale",
+    "resultLabel": "Risultato: {{outcome}}",
+    "confirmOrder": "Conferma ordine",
+    "dragHint": "Trascina per riordinare, o usa le frecce.",
+    "chooseSubtitle": "Scegli quale effetto di sostituzione applicare.",
+    "candidateFallback": "Effetto di sostituzione {{number}}",
+    "orderSubtitleComposing": "Questi effetti cambiano tutti il modo in cui accade questo evento. Trascina per impostare l'ordine di applicazione: si applicano tutti, quindi l'ordine cambia il risultato (CR 616.1).",
+    "appliedEarlier": "Applicato prima",
+    "appliedLater": "Applicato dopo",
+    "composesNote": "Ogni effetto si applica — l'ordine cambia come si combinano.",
+    "moveUpNamed": "Sposta {{name}} prima",
+    "moveDownNamed": "Sposta {{name}} dopo",
+    "positionAnnounce": "Posizione {{position}} di {{total}}"
   },
   "retargetChoice": {
     "title": "Cambia bersaglio",
@@ -1982,6 +2430,25 @@
     "moveDown": "Sposta giù",
     "triggerFallback": "Innesco {{number}}"
   },
+  "costReductionOrder": {
+    "eyebrow": "Ordine delle riduzioni di costo",
+    "title": "Ordina le tue riduzioni di costo",
+    "subtitle": "Queste riduzioni fissano un costo totale diverso a seconda dell'ordine in cui le applichi (CR 601.2f). La cima di questo elenco viene applicata per prima.",
+    "appliedFirst": "Applicata per prima",
+    "appliedLast": "Applicata per ultima",
+    "lockedCost": "Costo totale fissato",
+    "lockedCostUnknown": "Uguale a uno dei totali qui sotto",
+    "outcomesHeading": "Totali che puoi fissare",
+    "reachColoredOnly": "Riduce solo il mana colorato",
+    "reachSpills": "Può ridurre il mana generico",
+    "multiplier": "×{{count}}",
+    "confirmOrder": "Conferma ordine",
+    "cancel": "Annulla",
+    "moveUp": "Sposta su",
+    "moveDown": "Sposta giù",
+    "reductionFallback": "Riduzione {{number}}",
+    "floor": "Non può ridurre il costo sotto {{count}} mana"
+  },
   "unhandledWaitingFor": {
     "title": "Azione richiesta, ma manca l'interfaccia",
     "body": "La partita è in attesa di un'azione da parte tua, ma questa versione di phase.rs non ha ancora un'interfaccia per essa. Questo è un bug — per favore segnalalo così possiamo correggerlo. Usa il pulsante qui sotto per uscire dalla partita.",
@@ -2008,9 +2475,20 @@
   },
   "outsideGame": {
     "fromExile": "Dall'esilio",
-    "fromSideboard": "Dalla sideboard"
+    "fromSideboard": "Dalla sideboard",
+    "fromBoosterPack": "Da una busta {{setCode}}",
+    "fromCubeBoosterPack": "Da una busta del cube"
+  },
+  "boosterPack": {
+    "title": "Busta {{setCode}}",
+    "cubeTitle": "Busta del cube",
+    "subtitleExact_one": "Scegli {{count}} carta da tenere; il resto è rimosso dalla partita",
+    "subtitleExact_other": "Scegli {{count}} carte da tenere; il resto è rimosso dalla partita",
+    "subtitleUpTo_one": "Scegli fino a {{count}} carta da tenere; il resto è rimosso dalla partita",
+    "subtitleUpTo_other": "Scegli fino a {{count}} carte da tenere; il resto è rimosso dalla partita"
   },
   "phaseName": {
+    "Untap": "STAP",
     "Upkeep": "Mantenimento",
     "Draw": "Pesca",
     "PreCombatMain": "Fase principale 1",
@@ -2043,6 +2521,18 @@
       "keep": "Keep this"
     }
   },
+  "dieRoll": {
+    "ignore": {
+      "title": "Ignore a Roll",
+      "subtitle_one": "Choose which of the tied lowest rolls to ignore.",
+      "subtitle_other": "Choose {{count}} of the tied lowest rolls to ignore."
+    },
+    "buttons": {
+      "ignore": "Ignore this",
+      "ignoring": "Ignoring",
+      "keep": "Kept"
+    }
+  },
   "spectator": {
     "banner": "Spectating — read only",
     "leave": "Leave",
@@ -2054,6 +2544,7 @@
       "return": "Return",
       "exile": "Exile",
       "tap": "Tap",
+      "untap": "Stappa",
       "crew": "Crew",
       "saddle": "Saddle",
       "station": "Station",
@@ -2095,6 +2586,23 @@
     "deckCount": "{{count}} in deck",
     "heroCount": "{{count}} heroes"
   },
+  "debugPanel": {
+    "aiDecisionVisibility": "Mostra decisioni IA",
+    "aiDecisionUnavailable": "La diagnostica delle decisioni IA non è disponibile per questa partita."
+  },
+  "aiDecisionOverlay": {
+    "title": "Decisione IA",
+    "rankedSubtitle": "Campione softmax alla temperatura {{temperature}}.",
+    "directSubtitle": "Selezionata da una politica IA diretta.",
+    "metrics": "P {{score}} · W {{weight}}",
+    "top": "MIGLIORE",
+    "chosen": "SCELTA",
+    "legendTop": "Più alta in classifica",
+    "legendChosen": "Scelta",
+    "collapse": "Comprimi i dettagli della decisione IA",
+    "expand": "Espandi i dettagli della decisione IA",
+    "close": "Chiudi la finestra della decisione IA"
+  },
   "status": {
     "yourPriority": "Your priority",
     "yourPriorityReason": "Your priority — {{reason}}",
@@ -2109,6 +2617,7 @@
       "mulligan": "mulligan decision",
       "discarding": "discarding",
       "orderingTriggers": "ordering triggers",
+      "orderingCostReductions": "ordering cost reductions",
       "respondingToStack": "responding to the stack",
       "priorityCombat": "combat",
       "priorityMain": "main phase",
@@ -2124,11 +2633,21 @@
       "mulligan": "Mulligan",
       "discarding": "Discarding",
       "orderingTriggers": "Ordering triggers",
+      "orderingCostReductions": "Ordering cost reductions",
       "respondingToStack": "Responding",
       "priorityCombat": "Combat",
       "priorityMain": "Main phase",
       "priority": "Priority",
       "thinking": "Thinking"
     }
+  },
+  "rippleReveal": {
+    "eyebrow": "Ripple",
+    "title": "Reveal the top of your library?",
+    "subtitle_one": "You may reveal the top {{count}} card. Same-named cards can be cast free; the rest go to the bottom.",
+    "subtitle_other": "You may reveal the top {{count}} cards. Same-named cards can be cast free; the rest go to the bottom.",
+    "reveal_one": "Reveal {{count}} card",
+    "reveal_other": "Reveal {{count}} cards",
+    "decline": "Don't reveal"
   }
 }

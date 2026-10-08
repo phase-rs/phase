@@ -38,15 +38,18 @@ fn fractured_sanity_parses_cycle_trigger_with_mill() {
     let cycle_trigger = obj
         .trigger_definitions
         .iter_unchecked()
-        .find(|t| t.mode == TriggerMode::Cycled)
+        .find(|t| t.definition.mode == TriggerMode::Cycled)
         .expect("must parse a Cycled self-trigger");
     assert_eq!(
-        cycle_trigger.valid_card,
+        cycle_trigger.definition.valid_card,
         Some(engine::types::ability::TargetFilter::SelfRef)
     );
-    assert!(cycle_trigger.trigger_zones.contains(&Zone::Graveyard));
+    assert!(cycle_trigger
+        .definition
+        .trigger_zones
+        .contains(&Zone::Graveyard));
     assert!(
-        cycle_trigger.execute.is_some(),
+        cycle_trigger.definition.execute.is_some(),
         "cycle trigger must carry the mill effect"
     );
     assert!(

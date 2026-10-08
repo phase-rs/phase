@@ -50,7 +50,9 @@
     },
     "preview": {
       "cta": "Probar versión de desarrollo",
-      "tooltip": "Ejecuta la última versión de desarrollo — las cartas y correcciones más recientes llegan aquí antes de cada lanzamiento."
+      "tooltip": "Ejecuta la última versión de desarrollo — las cartas y correcciones más recientes llegan aquí antes de cada lanzamiento.",
+      "backCta": "Volver a la versión estable",
+      "backTooltip": "Volver a la versión de lanzamiento actual."
     },
     "coverage": {
       "title": "Abrir el panel de cobertura",
@@ -115,6 +117,8 @@
     "coverageThresholdHint": "Excluir mazos por debajo de este umbral de compatibilidad del motor",
     "bracket": "Nivel",
     "bracketHint": "La IA aleatoria elige de estos niveles. Los mazos sin etiqueta se excluyen al filtrar.",
+    "bracketPoolEmpty": "Ningún mazo coincide con los niveles seleccionados. La IA aleatoria elegirá entre todos los mazos legales.",
+    "cedhPoolEmpty": "No hay mazos de nivel 5 disponibles. No se pueden asignar mazos a la IA aleatoria.",
     "opponentLabel": "Oponente {{number}}",
     "deck": "Mazo",
     "difficulty": "Dificultad",
@@ -129,7 +133,9 @@
       "feed": "Feed",
       "user": "Usuario",
       "precon": "Precon"
-    }
+    },
+    "brain": "Controlado por",
+    "brainEngine": "IA del motor"
   },
   "feedManager": {
     "title": "Gestionar feeds",
@@ -141,6 +147,7 @@
     "lastRefreshed": "Última actualización: {{date}}",
     "addCustomFeed": "Añadir feed personalizado",
     "add": "Añadir",
+    "offlineUnavailable": "Las actualizaciones de feeds no están disponibles sin conexión.",
     "done": "Listo"
   },
   "importDeck": {
@@ -153,9 +160,21 @@
     "urlHint": "Importa un mazo público desde Moxfield o Archidekt.",
     "import": "Importar",
     "importing": "Importando…",
+    "importAsOathbreaker": "Configurar como mazo Oathbreaker",
+    "oathbreakerSetupTitle": "Configurar Oathbreaker",
+    "oathbreakerSetupDescription": "Elige el Oathbreaker y el hechizo distintivo de esta lista.",
+    "oathbreakerLabel": "Oathbreaker",
+    "signatureSpellLabel": "Hechizo distintivo",
+    "chooseOathbreaker": "Elige un Oathbreaker",
+    "chooseSignatureSpell": "Elige un hechizo distintivo",
+    "confirmOathbreakerImport": "Importar mazo Oathbreaker",
+    "backToImport": "Volver a importar",
     "errorInvalidUrl": "Introduce una URL válida de Moxfield o Archidekt.",
+    "errorOffline": "Las importaciones por URL no están disponibles sin conexión. Usa Pegar texto o Desde archivo.",
     "errorNetworkFailure": "No se pudo contactar con el servicio de importación. Comprueba tu conexión e inténtalo de nuevo.",
     "errorGeneric": "No se pudo importar el mazo.",
+    "errorNoOathbreaker": "Esta lista no tiene un Oathbreaker válido.",
+    "errorNoSignatureSpell": "Este Oathbreaker no tiene un hechizo distintivo válido en esta lista.",
     "errorNoCards": "No se encontraron cartas. Pega un mazo en formato MTGA o .dck.",
     "fileSupports": "Admite formatos .dck, .dec, .txt y MTGA",
     "chooseFile": "Elegir archivo",
@@ -303,6 +322,7 @@
     "online": "En línea",
     "draft": "Draft",
     "decks": "Mazos",
+    "tournament": "Torneos",
     "alpha": "Alfa",
     "profile": "Perfil",
     "settings": "Ajustes",

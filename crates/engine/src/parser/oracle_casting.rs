@@ -1,18 +1,22 @@
 use crate::parser::oracle_nom::bridge::nom_on_lower;
-use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::combinator::{all_consuming, map, opt, value};
+use nom::multi::separated_list1;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
-use super::oracle_cost::parse_oracle_cost;
+use super::oracle_cost::{parse_gerund_cost, parse_oracle_cost};
+use super::oracle_nom::condition::parse_you_cast_another_spell_filter_this_turn;
+use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_util::{parse_mana_symbols, parse_ordinal, TextPair};
 use crate::parser::oracle_condition::parse_restriction_condition;
 use crate::types::ability::{
-    AbilityCost, AdditionalCost, CastingRestriction, Comparator, ParsedCondition, QuantityExpr,
-    QuantityRef, SpellCastingOption,
+    AbilityCost, AdditionalCost, CastingRestriction, Comparator, CountScope, ParsedCondition,
+    QuantityExpr, QuantityRef, SpellCastingOption, TargetFilter,
 };
+use crate::types::mana::ManaColor;
 
 /// Split a combined additional-cost line from its trailing self-spell cost
 /// reduction (Rottenmouth Viper class: "...sacrifice N. This spell costs {1}
@@ -36,11 +40,21 @@ pub(crate) fn split_additional_cost_trailing_spell_reduction<'a>(
 /// - "you may blight N" → `Optional(Blight { count: N })`
 /// - "blight N or pay {M}" → `Choice(Blight { count: N }, Mana { cost: M })`
 /// - General "X or Y" → `Choice(X, Y)` using `parse_single_cost` for each fragment
+/// - Anything no arm can read → an honest `Unimplemented` cost (`Optional` for a
+///   "you may" body, otherwise `Required`), NOT `None`. CR 601.2f + CR 601.2h:
+///   the cost is part of the total cost and cannot be silently dropped. Only a
+///   line whose "…to cast this spell, " prefix matched gets this treatment; a
+///   line imposing a cost on OTHER spells still answers `None`.
 pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCost> {
-    // Strip the standard additional-cost prefix.
-    let after_prefix = tag::<_, _, OracleError<'_>>("as an additional cost to cast this spell, ")
-        .parse(lower)
-        .map_or(lower, |(rest, _)| rest);
+    // Strip the standard additional-cost prefix. `names_this_spell` records
+    // whether that prefix actually matched, which the honest-decline tail below
+    // depends on: a line that instead imposes a cost on OTHER spells ("As an
+    // additional cost to cast creature spells, ..." — Chorus of the Conclave) is
+    // not a cost on this object at all, so no cost may be stapled to its face.
+    let (after_prefix, names_this_spell) =
+        tag::<_, _, OracleError<'_>>("as an additional cost to cast this spell, ")
+            .parse(lower)
+            .map_or((lower, false), |(rest, _)| (rest, true));
     // Use TextPair for case-preserving parallel slicing, then strip trailing period.
     let tp = TextPair::new(&raw[raw.len() - after_prefix.len()..], after_prefix);
     let tp = tp.trim_end_matches('.');
@@ -121,6 +135,42 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
     let cost = super::oracle_cost::parse_single_cost(body_raw);
     if !matches!(cost, AbilityCost::Unimplemented { .. }) {
         return Some(AdditionalCost::Required(cost));
+    }
+
+    // CR 601.2f + CR 601.2h: every arm above has declined, so this IS an
+    // additional-cost line the parser cannot read — not the absence of one. The
+    // sole production caller (`oracle.rs`, gated on the "as an additional cost"
+    // opener) consumes the line either way, so answering `None` here does not
+    // hand it to another arm; it erases the cost from the total cost the spell
+    // may never be cast without. Surface the unreadable cost honestly instead,
+    // exactly as the choose-behold guard above does: coverage names it, and the
+    // cast-time payment authority refuses a cost it has no procedure for
+    // ("Unpayable costs can't be paid").
+    //
+    // Gated on `names_this_spell` so only a cost this object itself must pay is
+    // surfaced; an unmatched prefix leaves the `None` untouched.
+    if names_this_spell {
+        // CR 601.2b: "you may <cost>" is an OPTIONAL additional cost the player
+        // announces an intention to pay. Surfacing it as `Required` would make
+        // the spell uncastable, which is wrong in the restrictive direction —
+        // declining an optional cost is always legal. This runs only after the
+        // "you may" arm above has already declined, so it steals no dispatch.
+        let (unreadable_raw, optional) = tag::<_, _, OracleError<'_>>("you may ")
+            .parse(body_lower)
+            .map_or((body_raw, false), |(rest, _)| {
+                (&body_raw[body_raw.len() - rest.len()..], true)
+            });
+        let unreadable = AbilityCost::Unimplemented {
+            description: unreadable_raw.to_string(),
+        };
+        return Some(if optional {
+            AdditionalCost::Optional {
+                cost: unreadable,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+            }
+        } else {
+            AdditionalCost::Required(unreadable)
+        });
     }
 
     None
@@ -220,11 +270,40 @@ fn parse_self_flash_option(
         }
     }
 
-    if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("by ").parse(rest) {
-        if let Some(cost_text) = after.strip_suffix(" in addition to paying its other costs") {
-            option = option.cost(parse_oracle_cost(cost_text));
-            return Some(option);
+    if let Some(((), after)) = nom_on_lower(rest, &rest.to_lowercase(), |input| {
+        value((), tag::<_, _, OracleError<'_>>("by ")).parse(input)
+    }) {
+        let after = after.trim();
+        let after_lower = after.to_lowercase();
+        // CR 601.2f: the trailing closer has the same independent axes as the
+        // graveyard permission parser: optional "paying " and either possessive
+        // pronoun. A malformed closer must decline the whole option rather than
+        // fall through to an uncosted flash grant.
+        let (cost_len, _) = nom_on_lower(after, &after_lower, |input| {
+            all_consuming(map(
+                (
+                    terminated(
+                        take_until::<_, _, OracleError<'_>>(" in addition to "),
+                        tag(" in addition to "),
+                    ),
+                    opt(tag("paying ")),
+                    alt((tag("their other costs"), tag("its other costs"))),
+                    opt(tag(".")),
+                ),
+                |(cost, _, _, _)| cost.len(),
+            ))
+            .parse(input)
+        })?;
+        // CR 601.2f: the rider names the additional cost as a GERUND ("by
+        // discarding a card") — de-gerund via the shared cost authority. A
+        // present-but-unmodeled cost declines the whole option, avoiding a
+        // strictly-more-permissive cost-less flash permission.
+        let cost = parse_gerund_cost(&after[..cost_len]);
+        if matches!(cost, AbilityCost::Unimplemented { .. }) {
+            return None;
         }
+        option = option.cost(cost);
+        return Some(option);
     }
 
     if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("if you ").parse(rest) {
@@ -262,25 +341,42 @@ fn parse_self_flash_option(
 }
 
 /// CR 702.8a + CR 601.3d: Parse a self-referential conditional flash grant of the
-/// form "~ has flash as long as <condition>" (Take for a Ride: "Take for a Ride
-/// has flash as long as you've committed a crime this turn"). The spell grants
-/// ITSELF flash — a conditional casting permission — rather than the
-/// "you may cast ~ as though it had flash" framing handled by
-/// `parse_self_flash_option`. Self-references are normalized to `~` upstream
-/// (CR 201.4b), so the subject is matched as the `~` token.
+/// form "[~|this spell] has flash as long as <condition>" (Take for a Ride:
+/// "Take for a Ride has flash as long as you've committed a crime this turn";
+/// Graveyard Shift: "This spell has flash as long as there are five or more
+/// mana values among cards in your graveyard"). The spell grants ITSELF
+/// flash — a conditional casting permission — rather than the "you may cast ~
+/// as though it had flash" framing handled by `parse_self_flash_option`. A
+/// card's own printed name normalizes to `~` upstream (an engine
+/// self-reference tokenization convention, not itself a numbered CR rule),
+/// but the generic self-reference "this spell" is deliberately excluded from that
+/// normalization (`SELF_REF_PARSE_ONLY_PHRASES` in `oracle_util.rs`), so both
+/// subject spellings are matched here directly — the same
+/// `alt((tag("~"), tag("this spell")))` idiom used by the sibling
+/// casting-restriction parsers in this file (`parse_cant_spend_mana_restriction`,
+/// `parse_negative_self_casting_restriction`). The classifier
+/// (`oracle_classifier::is_self_conditional_flash_grant`) defers both
+/// spellings past the generic static-line classifier before this function is
+/// ever reached — see that call site for why a naive "has " static reading
+/// would silently produce an inert grant.
 ///
 /// As with the sibling conditional-flash arm, an unrecognized predicate refuses
 /// to emit the option entirely (the `?` on `parse_restriction_condition`): CR
 /// 601.3d only grants flash "if those conditions are met", so degrading to an
 /// unconditional permission would be strictly more permissive than the printed
-/// text. The bare "~ has flash" form (no condition) emits an unconditional
-/// permission.
+/// text. The bare "~ has flash" / "this spell has flash" form (no condition)
+/// emits an unconditional permission.
 fn parse_self_has_flash_option(body_lower: &str) -> Option<SpellCastingOption> {
     // `body_lower` is already lowercase, so parse it directly with combinators
     // (no `nom_on_lower` case-bridge needed — the condition text is delegated to
     // `parse_restriction_condition`, which lowercases internally).
+    //
+    // Word-boundary guard on "flash" (mirrors `parse_object_recipient_pronoun`'s
+    // idiom): without it, "flash" also matches as a prefix of "flashback",
+    // wrongly claiming "~ has flashback {2}{U}" as a bare unconditional grant
+    // with garbage leftover text.
     let (rest, _) = preceded(
-        tag::<_, _, OracleError<'_>>("~ has flash"),
+        nom_primitives::parse_self_spell_has_flash_prefix,
         opt(tag(" as long as ")),
     )
     .parse(body_lower)
@@ -297,11 +393,11 @@ fn parse_self_has_flash_option(body_lower: &str) -> Option<SpellCastingOption> {
     Some(option)
 }
 
-/// CR 118.9 (verified `docs/MagicCompRules.txt:1014`): "Some spells have alternative costs.
-/// An alternative cost is a cost listed in a spell's text, or applied to it from another
-/// effect, that its controller may pay rather than paying the spell's mana cost. Alternative
-/// costs are usually phrased, 'You may [action] rather than pay [this object's] mana cost,'
-/// or 'You may cast [this object] without paying its mana cost.'"
+/// CR 118.9: "Some spells have alternative costs. An alternative cost is a cost listed in a
+/// spell's text, or applied to it from another effect, that its controller may pay rather
+/// than paying the spell's mana cost. Alternative costs are usually phrased, 'You may
+/// [action] rather than pay [this object's] mana cost,' or 'You may cast [this object]
+/// without paying its mana cost.'"
 ///
 /// Parses both forms. The `"you may [verb-cost] rather than pay this spell's mana cost"`
 /// form is verb-agnostic: the cost text (with verb intact) is delegated to `parse_oracle_cost`,
@@ -409,12 +505,74 @@ fn self_spell_phrase(lower: &str, card_name: &str) -> Option<String> {
     None
 }
 
+fn parse_mana_color_connector(input: &str) -> OracleResult<'_, &str> {
+    alt((
+        tag(" and/or "),
+        tag(", and/or "),
+        tag(" or "),
+        tag(", or "),
+        tag(" and "),
+        tag(", and "),
+        tag(", "),
+    ))
+    .parse(input)
+}
+
+fn parse_colored_keyword(input: &str) -> OracleResult<'_, Vec<ManaColor>> {
+    value(
+        vec![
+            ManaColor::White,
+            ManaColor::Blue,
+            ManaColor::Black,
+            ManaColor::Red,
+            ManaColor::Green,
+        ],
+        tag("colored"),
+    )
+    .parse(input)
+}
+
+pub(crate) fn parse_mana_colors(input: &str) -> OracleResult<'_, Vec<ManaColor>> {
+    alt((
+        parse_colored_keyword,
+        separated_list1(parse_mana_color_connector, nom_primitives::parse_color),
+    ))
+    .parse(input)
+}
+
+/// CR 601.2b / CR 601.2h: Parse a "Spend only [colors] mana on X" clause using nom combinators.
+pub(crate) fn parse_spend_only_on_x_clause(input: &str) -> OracleResult<'_, CastingRestriction> {
+    let (rest, _) = tag("spend only ").parse(input)?;
+    let (rest, colors) = parse_mana_colors(rest)?;
+    let (rest, _) = opt(tag(" mana")).parse(rest)?;
+    let (rest, _) = tag(" on x").parse(rest)?;
+    let (rest, _) = opt(tag(".")).parse(rest)?;
+    Ok((rest, CastingRestriction::SpendOnlyOnX { colors }))
+}
+
+/// CR 601.2b / CR 601.2h: Extract a "Spend only ... on X." prefix from a line, returning
+/// the remainder of the line and the parsed `CastingRestriction`. Uses `nom_on_lower`
+/// to safely map the remainder back across case and Unicode transformations.
+pub(crate) fn extract_spend_only_on_x_prefix(line: &str) -> Option<(&str, CastingRestriction)> {
+    let lower = line.to_lowercase();
+    let (restriction, rest) = nom_on_lower(line, &lower, parse_spend_only_on_x_clause)?;
+    Some((rest.trim(), restriction))
+}
+
 /// CR 601.3: Parse "Cast this spell only [condition]" into typed restrictions.
 /// Handles ability word prefixes (e.g., "Tragic Backstory — Cast this spell only if...").
 pub(crate) fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRestriction>> {
     let trimmed = text.trim().trim_end_matches('.');
     // Try direct match first, then fall back to stripping ability word prefix
     let trimmed_lower = trimmed.to_lowercase();
+    if parse_cant_spend_mana_restriction(&trimmed_lower) {
+        return Some(vec![CastingRestriction::CantSpendMana]);
+    }
+    if let Ok((rest, restriction)) = parse_spend_only_on_x_clause(trimmed_lower.as_str()) {
+        if rest.trim().is_empty() || rest.trim() == "." {
+            return Some(vec![restriction]);
+        }
+    }
     if let Some(restriction) = parse_negative_self_casting_restriction(&trimmed_lower) {
         return Some(vec![restriction]);
     }
@@ -457,17 +615,68 @@ pub(crate) fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRe
     {
         let condition_text = strip_casting_condition_suffixes(condition);
         restrictions.push(CastingRestriction::RequiresCondition {
-            condition: Some(parse_restriction_condition(condition_text)?),
+            condition: Some(parse_casting_condition(condition_text)?),
         });
     }
     if let Some(condition) = rest.split(" and only if ").nth(1) {
         let condition_text = strip_casting_condition_suffixes(condition);
         restrictions.push(CastingRestriction::RequiresCondition {
-            condition: Some(parse_restriction_condition(condition_text)?),
+            condition: Some(parse_casting_condition(condition_text)?),
         });
     }
 
     (!restrictions.is_empty()).then_some(restrictions)
+}
+
+/// CR 601.3 + CR 109.1: The condition of a "Cast this spell only if …" line.
+///
+/// "you've cast another [<filter>] spell this turn" (Illusory Angel, Talara's
+/// Battalion) is checked BEFORE the spell is cast (CR 601.3), when the spell
+/// being cast is not yet in this turn's spell history. The shared condition
+/// grammar reads the phrase as `SpellsCastThisTurn >= 2`, which is right where
+/// the condition is evaluated on resolution (the resolving spell is already
+/// recorded) but asks for TWO earlier spells here — so the card was never
+/// castable. Same shape as the ETB "unless you've cast another spell" route in
+/// `oracle_replacement`: the own-cast exclusion marker plus GE 1, which counts
+/// one OTHER matching spell whether or not this spell's own cast is recorded.
+fn parse_casting_condition(condition_text: &str) -> Option<ParsedCondition> {
+    if let Ok((rest, filter)) = parse_you_cast_another_spell_filter_this_turn(condition_text) {
+        if rest.trim().is_empty() {
+            return Some(ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter: Some(TargetFilter::with_own_cast_exclusion(filter)),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            });
+        }
+    }
+    parse_restriction_condition(condition_text)
+}
+
+/// CR 601.2g / CR 118.3: "You can't spend mana to cast this spell." A payment
+/// restriction (Hogaak, Arisen Necropolis) — no mana may leave the pool, so the
+/// whole mana cost must be met by alternative payments (convoke/delve).
+/// Recognized here so the line is not left to the effect-parser fallback as an
+/// `Effect::Unimplemented`. `~` covers the self-name rewrite of the card form.
+fn parse_cant_spend_mana_restriction(lower: &str) -> bool {
+    fn parser(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+        all_consuming(value(
+            (),
+            (
+                alt((
+                    tag("you can't spend mana to cast "),
+                    tag("you can\u{2019}t spend mana to cast "),
+                )),
+                alt((tag("this spell"), tag("~"))),
+            ),
+        ))
+        .parse(input)
+    }
+    parser(lower).is_ok()
 }
 
 fn parse_negative_self_casting_restriction(text: &str) -> Option<CastingRestriction> {
@@ -776,6 +985,68 @@ mod tests {
     use crate::types::zones::Zone;
 
     #[test]
+    fn cant_spend_mana_to_cast_this_spell_parses() {
+        // Hogaak, Arisen Necropolis (issue #1095).
+        let restrictions =
+            parse_casting_restriction_line("You can't spend mana to cast this spell.")
+                .expect("restriction should parse");
+        assert_eq!(restrictions, vec![CastingRestriction::CantSpendMana]);
+    }
+
+    #[test]
+    fn cant_spend_mana_accepts_curly_apostrophe_and_self_name_form() {
+        assert_eq!(
+            parse_casting_restriction_line("You can\u{2019}t spend mana to cast this spell."),
+            Some(vec![CastingRestriction::CantSpendMana]),
+        );
+        // `~` is the self-name rewrite of the card form.
+        assert_eq!(
+            parse_casting_restriction_line("You can't spend mana to cast ~."),
+            Some(vec![CastingRestriction::CantSpendMana]),
+        );
+    }
+
+    #[test]
+    fn cant_spend_mana_does_not_overmatch_other_mana_lines() {
+        // A superficially similar but distinct line must not be swallowed.
+        assert_eq!(
+            parse_casting_restriction_line("You can't spend mana to activate abilities."),
+            None,
+        );
+    }
+
+    #[test]
+    fn hogaak_full_card_records_restriction_and_drops_no_unimplemented_line() {
+        // Issue #1095: the "can't spend mana" line previously fell through to the
+        // effect parser as an `Effect::Unimplemented` ("effect_structure"). It must
+        // now be captured as a structured casting restriction instead.
+        let hogaak = "You can't spend mana to cast this spell.\n\
+Convoke, delve (Each creature you tap while casting this spell pays for {1} or one mana of that creature's color. Each card you exile from your graveyard pays for {1}.)\n\
+You may cast this card from your graveyard.\n\
+Trample";
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            hogaak,
+            "Hogaak, Arisen Necropolis",
+            &[],
+            &[],
+            &[],
+        );
+        assert!(
+            parsed
+                .casting_restrictions
+                .contains(&CastingRestriction::CantSpendMana),
+            "Hogaak must record CastingRestriction::CantSpendMana, got {:?}",
+            parsed.casting_restrictions
+        );
+        let dump = format!("{:#?}", parsed);
+        assert!(
+            // allow-noncombinator: test assertion scanning a Debug dump, not parse dispatch
+            !dump.to_lowercase().contains("spend mana to cast"),
+            "the 'can't spend mana to cast' line must not remain as an Unimplemented effect"
+        );
+    }
+
+    #[test]
     fn spell_cast_restriction_condition_is_preserved() {
         let restrictions = parse_casting_restriction_line(
             "Cast this spell only during the declare attackers step and only if you've been attacked this step.",
@@ -923,13 +1194,73 @@ mod tests {
         );
     }
 
+    /// The "another [<filter>] spell" condition this restriction must produce:
+    /// own-cast exclusion marker + GE 1 (`parse_casting_condition`).
+    fn assert_another_spell_restriction(text: &str) -> Option<TargetFilter> {
+        let restrictions = parse_casting_restriction_line(text).expect("restrictions should parse");
+        let [CastingRestriction::RequiresCondition {
+            condition:
+                Some(ParsedCondition::QuantityComparison {
+                    lhs:
+                        QuantityExpr::Ref {
+                            qty:
+                                QuantityRef::SpellsCastThisTurn {
+                                    scope: CountScope::Controller,
+                                    filter: Some(filter),
+                                },
+                        },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                }),
+        }] = restrictions.as_slice()
+        else {
+            panic!("got {restrictions:?}");
+        };
+        filter
+            .peel_own_cast_exclusion()
+            .expect("\"another\" must carry the own-cast exclusion marker")
+    }
+
     #[test]
     fn spell_cast_restriction_cast_another_spell_this_turn() {
-        let restrictions = parse_casting_restriction_line(
+        // CR 601.3: checked before the spell is cast, so "another spell" is one
+        // OTHER spell (GE 1), with this spell's own cast excluded (CR 109.1) —
+        // never "two spells including this one", which needed two earlier spells
+        // (Illusory Angel was never castable).
+        let peeled = assert_another_spell_restriction(
             "Cast this spell only if you've cast another spell this turn.",
+        );
+        assert_eq!(peeled, None, "any spell — no filter beyond the marker");
+    }
+
+    #[test]
+    fn spell_cast_restriction_cast_another_green_spell_this_turn() {
+        // Talara's Battalion: the colour filter survives inside the marker.
+        let peeled = assert_another_spell_restriction(
+            "Cast this spell only if you've cast another green spell this turn.",
+        )
+        .expect("green filter");
+        let TargetFilter::Typed(typed) = peeled else {
+            panic!("expected a typed filter, got {peeled:?}");
+        };
+        assert!(
+            typed.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::HasColor {
+                    color: ManaColor::Green
+                }
+            )),
+            "got {typed:?}"
+        );
+    }
+
+    #[test]
+    fn spell_cast_restriction_two_or_more_spells_keeps_threshold_two() {
+        // No "another": two EARLIER spells, the plain count — unchanged.
+        let restrictions = parse_casting_restriction_line(
+            "Cast this spell only if you've cast two or more spells this turn.",
         )
         .expect("restrictions should parse");
-        // "another spell" — the spell being cast is itself counted, so the threshold is 2.
         assert!(
             matches!(
                 restrictions.as_slice(),
@@ -1056,32 +1387,24 @@ mod tests {
         assert!(restrictions.contains(&CastingRestriction::AfterCombat));
     }
 
+    /// The blight count is parameterized, not enumerated — every count parses to the
+    /// same `Optional` shape with `AbilityCost::Blight { count }`.
     #[test]
-    fn parse_additional_cost_optional_blight() {
-        let lower = "as an additional cost to cast this spell, you may blight 1.";
-        let raw = "As an additional cost to cast this spell, you may blight 1.";
-        let result = parse_additional_cost_line(lower, raw);
-        assert_eq!(
-            result,
-            Some(AdditionalCost::Optional {
-                cost: AbilityCost::Blight { count: 1 },
-                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
-            })
-        );
-    }
-
-    #[test]
-    fn parse_additional_cost_optional_blight_2() {
-        let lower = "as an additional cost to cast this spell, you may blight 2.";
-        let raw = "As an additional cost to cast this spell, you may blight 2.";
-        let result = parse_additional_cost_line(lower, raw);
-        assert_eq!(
-            result,
-            Some(AdditionalCost::Optional {
-                cost: AbilityCost::Blight { count: 2 },
-                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
-            })
-        );
+    fn parse_additional_cost_optional_blight_counts() {
+        for count in [1, 2] {
+            let lower =
+                format!("as an additional cost to cast this spell, you may blight {count}.");
+            let raw = format!("As an additional cost to cast this spell, you may blight {count}.");
+            let result = parse_additional_cost_line(&lower, &raw);
+            assert_eq!(
+                result,
+                Some(AdditionalCost::Optional {
+                    cost: AbilityCost::Blight { count },
+                    repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+                }),
+                "blight {count}"
+            );
+        }
     }
 
     #[test]
@@ -1237,42 +1560,32 @@ mod tests {
         }
     }
 
+    /// Both the blight count and the generic-mana alternative are parameterized —
+    /// the `(blight N, pay {M})` pair varies independently of the `Choice` shape.
     #[test]
-    fn parse_additional_cost_choice_blight_or_pay() {
-        let lower = "as an additional cost to cast this spell, blight 2 or pay {1}.";
-        let raw = "As an additional cost to cast this spell, blight 2 or pay {1}.";
-        let result = parse_additional_cost_line(lower, raw);
-        assert_eq!(
-            result,
-            Some(AdditionalCost::Choice(
-                AbilityCost::Blight { count: 2 },
-                AbilityCost::Mana {
-                    cost: ManaCost::Cost {
-                        generic: 1,
-                        shards: vec![]
+    fn parse_additional_cost_choice_blight_or_pay_counts() {
+        for (blight, generic) in [(2, 1), (1, 3)] {
+            let lower = format!(
+                "as an additional cost to cast this spell, blight {blight} or pay {{{generic}}}."
+            );
+            let raw = format!(
+                "As an additional cost to cast this spell, blight {blight} or pay {{{generic}}}."
+            );
+            let result = parse_additional_cost_line(&lower, &raw);
+            assert_eq!(
+                result,
+                Some(AdditionalCost::Choice(
+                    AbilityCost::Blight { count: blight },
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            generic,
+                            shards: vec![]
+                        }
                     }
-                }
-            ))
-        );
-    }
-
-    #[test]
-    fn parse_additional_cost_choice_blight_or_pay_3() {
-        let lower = "as an additional cost to cast this spell, blight 1 or pay {3}.";
-        let raw = "As an additional cost to cast this spell, blight 1 or pay {3}.";
-        let result = parse_additional_cost_line(lower, raw);
-        assert_eq!(
-            result,
-            Some(AdditionalCost::Choice(
-                AbilityCost::Blight { count: 1 },
-                AbilityCost::Mana {
-                    cost: ManaCost::Cost {
-                        generic: 3,
-                        shards: vec![]
-                    }
-                }
-            ))
-        );
+                )),
+                "blight {blight} or pay {{{generic}}}"
+            );
+        }
     }
 
     #[test]
@@ -1361,6 +1674,39 @@ mod tests {
                 ..
             })) => {}
             other => panic!("Expected Required(Discard), got {:?}", other),
+        }
+    }
+
+    /// CR 107.3a + CR 601.2b: the X of an additional discard cost is announced
+    /// while casting, so the count stays symbolic (Firestorm, Devastating Dreams).
+    #[test]
+    fn parse_additional_cost_discard_x_cards_keeps_x() {
+        let x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        for (lower, raw, selection) in [
+            (
+                "as an additional cost to cast this spell, discard x cards.",
+                "As an additional cost to cast this spell, discard X cards.",
+                CardSelectionMode::Chosen,
+            ),
+            (
+                "as an additional cost to cast this spell, discard x cards at random.",
+                "As an additional cost to cast this spell, discard X cards at random.",
+                CardSelectionMode::Random,
+            ),
+        ] {
+            match parse_additional_cost_line(lower, raw) {
+                Some(AdditionalCost::Required(AbilityCost::Discard {
+                    count,
+                    filter: None,
+                    selection: parsed,
+                    ..
+                })) if count == x && parsed == selection => {}
+                other => panic!("Expected Required(Discard X) for {raw:?}, got {other:?}"),
+            }
         }
     }
 
@@ -1570,6 +1916,105 @@ mod tests {
         }
     }
 
+    /// CR 601.2f: a self-flash rider that names its additional cost as a GERUND
+    /// ("as though it had flash by discarding a card in addition to paying its
+    /// other costs") must de-gerund the cost via the shared authority and carry a
+    /// concrete Discard cost — not the `Unimplemented` the old imperative-only
+    /// `parse_oracle_cost(cost_text)` produced. Class completeness for the
+    /// "cast … by <gerund> in addition to …" family alongside the graveyard rider.
+    #[test]
+    fn self_flash_by_gerund_additional_cost_carries_discard() {
+        for closer in [
+            "its other costs",
+            "their other costs",
+            "paying its other costs",
+            "paying their other costs",
+        ] {
+            let option = parse_spell_casting_option_line(
+                &format!(
+                    "You may cast this spell as though it had flash by discarding a card in addition to {closer}."
+                ),
+                "Test Card",
+            )
+            .expect("self-flash rider should parse");
+            match option {
+                SpellCastingOption {
+                    kind: crate::types::ability::SpellCastingOptionKind::AsThoughHadFlash,
+                    cost: Some(AbilityCost::Discard { .. }),
+                    condition: None,
+                } => {}
+                other => panic!("expected AsThoughHadFlash with a Discard cost, got {other:?}"),
+            }
+        }
+    }
+
+    /// The paired negative: an unmodeled gerund cost on the self-flash rider must
+    /// DECLINE the whole option (return `None`), mirroring the graveyard
+    /// `AdditionalCostRider::Unmodeled` decline — NOT emit a cost-less flash grant
+    /// (which coverage would falsely mark supported). Asserting `is_none()` is the
+    /// load-bearing, discriminating check: it flips to failure the instant the
+    /// guard falls through to the cost-less `Some(option)` tail. A `!matches!(cost,
+    /// Some(Unimplemented))` assertion would pass vacuously for that exact
+    /// (dishonest) `cost == None` outcome, so it cannot catch the regression.
+    #[test]
+    fn self_flash_by_unmodeled_gerund_declines_option() {
+        let option = parse_spell_casting_option_line(
+            "You may cast this spell as though it had flash by frobnicating a card in addition to paying its other costs.",
+            "Test Card",
+        );
+        assert!(
+            option.is_none(),
+            "an unmodeled gerund additional cost must decline the whole self-flash \
+             option (honest coverage gap), not emit a cost-less flash grant: {option:?}"
+        );
+    }
+
+    /// CR 601.2f + CR 702.8a: Tegwyll's Scouring — the self-flash rider's
+    /// additional cost is a single-component "tapping three untapped creatures
+    /// you control with flying" phrase, so the per-component split must leave it
+    /// byte-identical to the pre-split lowering and the option must still carry
+    /// `TapCreatures { count: 3, …flying… }`. Sibling regression guard for
+    /// `parse_gerund_cost`'s component split.
+    #[test]
+    fn tegwyll_self_flash_gerund_survives_component_split() {
+        let option = parse_spell_casting_option_line(
+            "You may cast this spell as though it had flash by tapping three untapped creatures you control with flying in addition to paying its other costs.",
+            "Tegwyll's Scouring",
+        )
+        .expect("Tegwyll's single-component flash rider must survive the component split");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AsThoughHadFlash,
+                cost:
+                    Some(AbilityCost::TapCreatures {
+                        ref requirement,
+                        ref filter,
+                    }),
+                condition: None,
+            } => {
+                assert_eq!(
+                    requirement.fixed_count(),
+                    Some(3),
+                    "Tegwyll taps three creatures, got {requirement:?}"
+                );
+                let TargetFilter::Typed(typed) = filter else {
+                    panic!("expected a Typed creature filter, got {filter:?}");
+                };
+                assert!(
+                    typed.type_filters.contains(&TypeFilter::Creature),
+                    "expected a Creature filter, got {typed:?}"
+                );
+                assert!(
+                    typed.properties.contains(&FilterProp::WithKeyword {
+                        value: Keyword::Flying
+                    }),
+                    "the flying restriction must survive the split, got {typed:?}"
+                );
+            }
+            other => panic!("expected AsThoughHadFlash with a TapCreatures cost, got {other:?}"),
+        }
+    }
+
     #[test]
     fn alt_cost_sacrifice_typed_creature_arm() {
         // Delraich — "sacrifice three black creatures"
@@ -1590,7 +2035,7 @@ mod tests {
 
     /// Issue #3677: Flare of Denial — "sacrifice a nontoken blue creature" must
     /// keep BOTH the `NonToken` negation and the `blue creature` type/color
-    /// filter. Before the fix to `parse_type_phrase`'s color-prefix scan (which
+    /// filter. Before the fix to `parse_type_phrase_folding`'s color-prefix scan (which
     /// only ran before the `non-` negation loop), the color and creature type
     /// were silently dropped, leaving a filter that matched any nontoken
     /// permanent — including a land — as a valid alternative-cost payment.
@@ -1933,6 +2378,47 @@ mod tests {
         }
     }
 
+    /// CR 508.1k + CR 118.9: Pitfall Trap — leading "If exactly one creature is
+    /// attacking, " (singular copula, EQ comparator) gates the {W} alternative
+    /// casting cost on an attacking-creature count of exactly one.
+    #[test]
+    fn alt_cost_leading_if_exactly_one_creature_attacking_binds() {
+        let option = parse_spell_casting_option_line(
+            "If exactly one creature is attacking, you may pay {W} rather than pay this spell's mana cost.",
+            "Pitfall Trap",
+        )
+        .expect("alt-cost should parse with leading-if exactly-one attacking gate");
+        assert_eq!(
+            option.kind,
+            crate::types::ability::SpellCastingOptionKind::AlternativeCost
+        );
+        assert_eq!(
+            option.condition,
+            Some(ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            crate::types::ability::TypedFilter::creature()
+                                .properties(vec![FilterProp::Attacking { defender: None }]),
+                        ),
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            })
+        );
+        assert_eq!(
+            option.cost,
+            Some(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    generic: 0,
+                    shards: vec![crate::types::mana::ManaCostShard::White],
+                },
+            }),
+            "the alternative cost must be exactly {{W}}"
+        );
+    }
+
     /// CR 508.1 + CR 105.1 + CR 118.9: Nemesis Trap — leading "If a white
     /// creature is attacking, " gates the {B}{B} alternative casting cost on a
     /// color-filtered attacker presence check (not a bare/count one).
@@ -2106,6 +2592,64 @@ mod tests {
         );
     }
 
+    /// Word-boundary regression: "flash" is a literal prefix of "flashback",
+    /// so a naive `tag(" has flash")` would wrongly match "~ has flashback"
+    /// and try to parse the leftover "back {2}{u}" as a restriction condition
+    /// instead of declining so the real flashback-keyword-grant static parser
+    /// handles the line.
+    #[test]
+    fn spell_self_has_flash_word_boundary_excludes_flashback() {
+        assert!(
+            parse_spell_casting_option_line("~ has flashback {2}{u}.", "Some Spell").is_none(),
+            "'~ has flashback' must NOT be claimed as a bare self-flash grant"
+        );
+    }
+
+    /// Graveyard Shift: "This spell has flash as long as there are five or more
+    /// mana values among cards in your graveyard." The generic "this spell"
+    /// subject (not the card's own name, so it is NOT normalized to `~` — see
+    /// `SELF_REF_PARSE_ONLY_PHRASES`) must be matched directly, and the
+    /// graveyard-mana-value-diversity condition must attach as a
+    /// `QuantityComparison` over `ObjectCountDistinct[ManaValue]`.
+    /// CR 702.8a (Flash); CR 601.3d (conditional flash); CR 202.3 (mana value).
+    #[test]
+    fn spell_this_spell_has_flash_conditional_on_graveyard_mana_values() {
+        let option = parse_spell_casting_option_line(
+            "This spell has flash as long as there are five or more mana values among cards in your graveyard.",
+            "Graveyard Shift",
+        )
+        .expect("'this spell has flash as long as ...' should parse");
+        assert!(matches!(
+            option.kind,
+            crate::types::ability::SpellCastingOptionKind::AsThoughHadFlash
+        ));
+        match option.condition {
+            Some(ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCountDistinct { filter, qualities },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            }) => {
+                assert_eq!(
+                    qualities,
+                    vec![crate::types::ability::SharedQuality::ManaValue]
+                );
+                let crate::types::ability::TargetFilter::Typed(filter) = filter else {
+                    panic!("expected Typed graveyard filter");
+                };
+                assert_eq!(
+                    filter.controller,
+                    Some(crate::types::ability::ControllerRef::You)
+                );
+            }
+            other => {
+                panic!("expected ObjectCountDistinct[ManaValue] GE 5 condition, got {other:?}")
+            }
+        }
+    }
+
     #[test]
     fn spell_flash_option_targets_commander_condition_attaches() {
         // CR 601.3d + CR 702.8a: "as though it had flash if it targets a commander"
@@ -2179,73 +2723,42 @@ mod tests {
     // because the global turn counter counts both players' turns (my turn 3 = global turn 5).
     #[test]
     fn spell_cast_restriction_parses_first_n_turns_of_game_per_player() {
-        // Spider-Man 2099 exact oracle text (with ability-word prefix and curly apostrophe,
-        // after card-name normalization to "~").
-        let restrictions = parse_casting_restriction_line(
-            "From the Future \u{2014} You can\u{2019}t cast ~ during your first, second, or third turns of the game.",
-        )
-        .expect("Spider-Man 2099 restriction should parse");
-        assert_eq!(
-            restrictions,
-            vec![CastingRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::Not {
-                    condition: Box::new(ParsedCondition::QuantityComparison {
-                        lhs: QuantityExpr::Ref {
-                            qty: QuantityRef::TurnsTaken,
-                        },
-                        comparator: Comparator::LE,
-                        rhs: QuantityExpr::Fixed { value: 3 },
+        // Each row is a distinct English form, not just a different ordinal: the
+        // Spider-Man 2099 row carries an ability-word prefix, a curly apostrophe, and
+        // "~" after card-name normalization; the singular row uses "this spell".
+        for (max_ordinal, text) in [
+            (
+                3,
+                "From the Future \u{2014} You can\u{2019}t cast ~ during your first, second, or third turns of the game.",
+            ),
+            (
+                2,
+                "You can't cast ~ during your first or second turns of the game.",
+            ),
+            (
+                1,
+                "You can't cast this spell during your first turn of the game.",
+            ),
+        ] {
+            let restrictions = parse_casting_restriction_line(text)
+                .unwrap_or_else(|| panic!("{text:?} should parse"));
+            assert_eq!(
+                restrictions,
+                vec![CastingRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::Not {
+                        condition: Box::new(ParsedCondition::QuantityComparison {
+                            lhs: QuantityExpr::Ref {
+                                qty: QuantityRef::TurnsTaken,
+                            },
+                            comparator: Comparator::LE,
+                            rhs: QuantityExpr::Fixed { value: max_ordinal },
+                        }),
                     }),
-                }),
-            }],
-            "must block casting on turns 1–3 using per-player TurnsTaken, not global turn_number"
-        );
-    }
-
-    #[test]
-    fn spell_cast_restriction_parses_first_two_turns_of_game() {
-        // "first or second" variant — max_ordinal = 2.
-        let restrictions = parse_casting_restriction_line(
-            "You can't cast ~ during your first or second turns of the game.",
-        )
-        .expect("two-turn restriction should parse");
-        assert_eq!(
-            restrictions,
-            vec![CastingRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::Not {
-                    condition: Box::new(ParsedCondition::QuantityComparison {
-                        lhs: QuantityExpr::Ref {
-                            qty: QuantityRef::TurnsTaken,
-                        },
-                        comparator: Comparator::LE,
-                        rhs: QuantityExpr::Fixed { value: 2 },
-                    }),
-                }),
-            }]
-        );
-    }
-
-    #[test]
-    fn spell_cast_restriction_parses_first_turn_of_game() {
-        // Singular "turn" variant — max_ordinal = 1.
-        let restrictions = parse_casting_restriction_line(
-            "You can't cast this spell during your first turn of the game.",
-        )
-        .expect("single-turn restriction should parse");
-        assert_eq!(
-            restrictions,
-            vec![CastingRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::Not {
-                    condition: Box::new(ParsedCondition::QuantityComparison {
-                        lhs: QuantityExpr::Ref {
-                            qty: QuantityRef::TurnsTaken,
-                        },
-                        comparator: Comparator::LE,
-                        rhs: QuantityExpr::Fixed { value: 1 },
-                    }),
-                }),
-            }]
-        );
+                }],
+                "must block casting on turns 1–{max_ordinal} using per-player TurnsTaken, \
+                 not global turn_number: {text:?}"
+            );
+        }
     }
 
     #[test]
@@ -2256,6 +2769,139 @@ mod tests {
         assert_eq!(
             restrictions, None,
             "trailing conjunct must not be swallowed into an unconditional turn restriction"
+        );
+    }
+
+    /// CR 601.2f + CR 601.2h (#8701): an additional-cost line whose body no arm
+    /// can read must surface an honest `Unimplemented` cost, not vanish. The
+    /// old tail answered `None` — "this spell has NO additional cost" — which
+    /// erased a printed cost from the total cost and left the spell castable
+    /// without it. One line per unreadable shape.
+    #[test]
+    fn unreadable_required_additional_cost_is_surfaced_not_dropped() {
+        for (lower, raw, expected_description) in [
+            (
+                "as an additional cost to cast this spell, gobble x.",
+                "As an additional cost to cast this spell, gobble X.",
+                "gobble X",
+            ),
+            (
+                "as an additional cost to cast this spell, choose a through m or n through z.",
+                "As an additional cost to cast this spell, choose A through M or N through Z.",
+                "choose A through M or N through Z",
+            ),
+        ] {
+            match parse_additional_cost_line(lower, raw) {
+                Some(AdditionalCost::Required(AbilityCost::Unimplemented { description })) => {
+                    assert_eq!(
+                        description, expected_description,
+                        "the description must be the prefix-stripped body, not the whole line"
+                    );
+                }
+                other => panic!("Expected Required(Unimplemented) for {raw:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// CR 601.2b: an unreadable "you may <cost>" additional cost is OPTIONAL.
+    /// Surfacing it as `Required` would make the spell uncastable, which is
+    /// wrong in the restrictive direction — declining an optional additional
+    /// cost is always legal (Myntasha, Honored One).
+    #[test]
+    fn unreadable_optional_additional_cost_stays_optional() {
+        let lower = "as an additional cost to cast this spell, you may open a sealed magic booster pack and put the cards on the bottom of your booster pile in a random order.";
+        let raw = "As an additional cost to cast this spell, you may open a sealed Magic booster pack and put the cards on the bottom of your booster pile in a random order.";
+        match parse_additional_cost_line(lower, raw) {
+            Some(AdditionalCost::Optional {
+                cost: AbilityCost::Unimplemented { description },
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+            }) => {
+                assert_eq!(
+                    description,
+                    "open a sealed Magic booster pack and put the cards on the bottom of your booster pile in a random order",
+                    "the \"you may \" opener is the optionality marker, not part of the cost"
+                );
+            }
+            other => panic!("Expected Optional(Unimplemented, Once), got {other:?}"),
+        }
+    }
+
+    /// CR 601.2b: "As an additional cost to cast creature SPELLS, ..." (Chorus
+    /// of the Conclave) is a static ability imposing a cost on OTHER spells —
+    /// it is not a cost on this object. The honest-decline tail is gated on the
+    /// "...to cast this spell, " prefix having actually matched precisely so
+    /// this line keeps answering `None` instead of stapling a required cost
+    /// onto Chorus's own face.
+    #[test]
+    fn additional_cost_imposed_on_other_spells_is_not_a_cost_on_this_face() {
+        let lower = "as an additional cost to cast creature spells, you may pay any amount of mana. if you do, that creature enters with that many additional +1/+1 counters on it";
+        let raw = "As an additional cost to cast creature spells, you may pay any amount of mana. If you do, that creature enters with that many additional +1/+1 counters on it";
+        assert_eq!(
+            parse_additional_cost_line(lower, raw),
+            None,
+            "a cost imposed on other spells must not become this object's own additional cost"
+        );
+    }
+
+    /// Anti-vacuity guard for the two tests above: a READABLE body must still
+    /// reach the typed single-cost fallback and never the new honest-decline
+    /// tail. If the tail ever started swallowing readable lines, the
+    /// `Unimplemented` assertions above would pass for the wrong reason.
+    #[test]
+    fn readable_additional_cost_still_parses_to_a_typed_cost() {
+        let lower = "as an additional cost to cast this spell, sacrifice a creature.";
+        let raw = "As an additional cost to cast this spell, sacrifice a creature.";
+        match parse_additional_cost_line(lower, raw) {
+            Some(AdditionalCost::Required(AbilityCost::Sacrifice(_))) => {}
+            other => panic!("a readable body must stay a typed cost, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_spend_only_on_x_prefix_handles_expanding_unicode_and_colored_mana() {
+        // CR 601.2b / CR 601.2h: "Spend only colored mana on X." (Emblazoned Golem)
+        let line = "Spend only colored mana on X. No more than one mana of each color may be spent this way.";
+        let (rest, restriction) =
+            extract_spend_only_on_x_prefix(line).expect("colored mana on X should extract");
+        assert_eq!(
+            rest,
+            "No more than one mana of each color may be spent this way."
+        );
+        assert_eq!(
+            restriction,
+            CastingRestriction::SpendOnlyOnX {
+                colors: vec![
+                    ManaColor::White,
+                    ManaColor::Blue,
+                    ManaColor::Black,
+                    ManaColor::Red,
+                    ManaColor::Green,
+                ]
+            }
+        );
+
+        // Expanding Unicode in remainder (\u{0130} / İ expands from 2 to 3 bytes under to_lowercase())
+        let expanding = "Spend only black mana on X. \u{0130}deal test";
+        let (rest_expanding, restriction_expanding) =
+            extract_spend_only_on_x_prefix(expanding).expect("prefix extraction should succeed");
+        assert_eq!(rest_expanding, "\u{0130}deal test");
+        assert_eq!(
+            restriction_expanding,
+            CastingRestriction::SpendOnlyOnX {
+                colors: vec![ManaColor::Black]
+            }
+        );
+
+        // Soul Burn: "Spend only black and/or red mana on X."
+        let soul_burn = "Spend only black and/or red mana on X. Soul Burn deals X damage.";
+        let (rest_sb, restriction_sb) =
+            extract_spend_only_on_x_prefix(soul_burn).expect("Soul Burn prefix should extract");
+        assert_eq!(rest_sb, "Soul Burn deals X damage.");
+        assert_eq!(
+            restriction_sb,
+            CastingRestriction::SpendOnlyOnX {
+                colors: vec![ManaColor::Black, ManaColor::Red]
+            }
         );
     }
 }

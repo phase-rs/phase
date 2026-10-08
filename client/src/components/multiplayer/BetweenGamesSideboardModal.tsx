@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { MoveList } from "../deck-builder/MoveList";
@@ -22,6 +22,13 @@ export interface BetweenGamesSideboardModalProps {
   };
   gameNumber: number;
   score: MatchScore;
+  /** CR 100.2a / CR 100.5: fewest cards the main deck may hold on submit, as
+   *  computed by the engine and published on the `BetweenGamesSideboard`
+   *  prompt. `deck_size` is a minimum — a larger main deck is legal. */
+  minMainDeckSize: number;
+  /** CR 100.4a: most cards the sideboard may hold, or `null` when the format
+   *  imposes no cap. Also engine-supplied. */
+  maxSideboardSize: number | null;
   onSubmit: (main: DeckCardCount[], sideboard: DeckCardCount[]) => void;
 }
 
@@ -75,11 +82,22 @@ function moveOne(
  * matching the engine's pool-equality check. Reset restores the pre-match
  * registered partition. Submit dispatches the engine action; the engine is
  * the single authority on whether the submission is valid.
+ *
+ * The submit gate is the engine's own acceptance predicate, delivered on the
+ * prompt as `min_main_deck_size` / `max_sideboard_size` — the partition is
+ * free to be uneven (CR 100.5: no maximum deck size), so this must never
+ * require the main deck to match its registered size.
+ *
+ * Both lists pin `density="comfortable"`: the move button is this modal's only
+ * card-moving affordance, and the default `compact` density hides it behind
+ * `group-hover`, which does not exist on touch — do not drop the prop.
  */
 export function BetweenGamesSideboardModal({
   pool,
   gameNumber,
   score,
+  minMainDeckSize,
+  maxSideboardSize,
   onSubmit,
 }: BetweenGamesSideboardModalProps) {
   const { t } = useTranslation("multiplayer");
@@ -113,11 +131,9 @@ export function BetweenGamesSideboardModal({
 
   const mainTotal = totalCards(drafts.main);
   const sideTotal = totalCards(drafts.side);
-  const registeredMainTotal = useMemo(
-    () => pool.registered_main.reduce((sum, e) => sum + e.count, 0),
-    [pool.registered_main],
-  );
-  const canSubmit = mainTotal === registeredMainTotal;
+  const belowMinimum = mainTotal < minMainDeckSize;
+  const overSideboardCap = maxSideboardSize !== null && sideTotal > maxSideboardSize;
+  const canSubmit = !belowMinimum && !overSideboardCap;
 
   const handleSubmit = () => {
     if (!canSubmit) return;
@@ -159,21 +175,32 @@ export function BetweenGamesSideboardModal({
           <div className="grid flex-1 grid-cols-1 gap-4 px-3 py-3 md:grid-cols-2 lg:px-5 lg:py-5">
             <MoveList
               section="main"
-              title={t("sideboardModal.main", {
-                count: mainTotal,
-                total: registeredMainTotal,
-              })}
+              title={
+                // A zero floor refuses no count, so it is not shown as a minimum.
+                minMainDeckSize === 0
+                  ? t("sideboardModal.mainNoMinimum", { count: mainTotal })
+                  : t("sideboardModal.main", { count: mainTotal, min: minMainDeckSize })
+              }
               entries={drafts.main}
               onMove={moveCard}
               alwaysShow
+              density="comfortable"
               emptyHint={t("sideboardModal.moveFromSideboard")}
             />
             <MoveList
               section="sideboard"
-              title={t("sideboardModal.sideboard", { count: sideTotal })}
+              title={
+                maxSideboardSize === null
+                  ? t("sideboardModal.sideboard", { count: sideTotal })
+                  : t("sideboardModal.sideboardCapped", {
+                      count: sideTotal,
+                      max: maxSideboardSize,
+                    })
+              }
               entries={drafts.side}
               onMove={moveCard}
               alwaysShow
+              density="comfortable"
               emptyHint={t("sideboardModal.moveFromMain")}
             />
           </div>
@@ -184,14 +211,17 @@ export function BetweenGamesSideboardModal({
               role="status"
               aria-live="polite"
             >
-              {canSubmit
-                ? t("sideboardModal.matchesRegistered", {
-                    total: registeredMainTotal,
-                  })
-                : t("sideboardModal.submitDisabled", {
+              {belowMinimum
+                ? t("sideboardModal.belowMinimum", {
                     count: mainTotal,
-                    total: registeredMainTotal,
-                  })}
+                    min: minMainDeckSize,
+                  })
+                : overSideboardCap
+                  ? t("sideboardModal.overSideboardCap", {
+                      count: sideTotal,
+                      max: maxSideboardSize,
+                    })
+                  : t("sideboardModal.readyToSubmit")}
             </span>
             <div className="flex gap-2">
               <button

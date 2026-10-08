@@ -53,8 +53,7 @@ expression: "&lowered"
       "condition": null,
       "optional_targeting": false,
       "optional": false,
-      "forward_result": false,
-      "is_mana_ability": true
+      "forward_result": false
     }
   ],
   "triggers": [],

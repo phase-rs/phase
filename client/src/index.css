@@ -134,6 +134,11 @@
   --action-btn-bottom: 0.75rem;
   --action-btn-right: 3.5rem;
   --game-edge-right: 0.75rem;
+  --game-mobile-hand-lift: 0rem;
+  --game-player-row-height: min(calc(0.18 * (100dvh - var(--game-top-overlay-offset, 0px))), 150px);
+  --game-board-choice-bottom: calc(
+    env(safe-area-inset-bottom) + var(--game-player-row-height) + var(--game-mobile-hand-lift) + 0.75rem
+  );
   --card-base: clamp(4rem, calc((7vw + 11vh) / 2), 6.75rem);
   --card-w: calc(var(--card-base) * var(--card-size-scale) * var(--card-viewport-scale));
   --card-h: calc(var(--card-w) * 1.4);
@@ -171,6 +176,21 @@ html {
   color-scheme: dark;
 }
 
+@utility draft-card-area-drop-active {
+  isolation: isolate;
+  background-color: rgb(255 255 255 / 0.08);
+
+  &::after {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    border: 1px solid rgb(255 255 255 / 0.96);
+    border-radius: inherit;
+    box-shadow: 0 0 18px 2px rgb(255 255 255 / 0.68);
+    content: "";
+  }
+}
+
 body {
   background:
     radial-gradient(circle at top, rgba(251, 146, 60, 0.12), transparent 30%),
@@ -181,6 +201,37 @@ body {
 #root {
   min-height: 100vh;
   overscroll-behavior: none;
+}
+
+/* Game route only: pin the document itself so iOS cannot rubber-band the PWA
+   around the battlefield. Nested overflow containers remain scrollable. */
+html.game-viewport-lock,
+body.game-viewport-lock {
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+body.game-viewport-lock {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100dvh;
+}
+
+html.game-viewport-lock #root {
+  height: 100%;
+  overflow: hidden;
+}
+
+/* The locked game document cannot act as a fallback scroll container. Keep the
+   in-game menu within the visible viewport and let it own vertical touch scroll. */
+.game-menu-scroll {
+  max-height: calc(
+    100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) -
+      var(--game-top-overlay-offset, 0px) - 3.75rem
+  );
+  -webkit-overflow-scrolling: touch;
 }
 
 /* Game-only: prevent selection, callout, and tap-highlight during matches */
@@ -506,14 +557,11 @@ select.select-dark option {
 @media (width < 64rem) and (orientation: portrait) {
   :root {
     --game-mobile-hand-lift: 1rem;
+    --game-player-row-height: min(calc(0.24 * (100dvh - var(--game-top-overlay-offset, 0px))), 190px);
     --game-mobile-pile-lift: 16rem;
     --game-mobile-command-lift: 0.5rem;
     --game-mobile-player-hud-lift: 0.5rem;
     --game-mobile-player-hud-shift-x: 1.125rem;
-  }
-
-  [data-flex-zone="player-row"] {
-    height: min(calc(0.24 * (100dvh - var(--game-top-overlay-offset, 0px))), 190px) !important;
   }
 
   [data-flex-zone="playerHandRow"] {
@@ -574,6 +622,16 @@ select.select-dark option {
   [data-mobile-action-left],
   [data-mobile-action-right] {
     width: min(calc((100vw - 3rem) / 2), 9.5rem);
+  }
+}
+
+/* iOS reserves the landscape bottom edge for the Home/App Switcher gesture.
+   A website or installed PWA cannot suppress that system gesture, so keep the
+   fanned hand's touch surface above its safe-area inset. The 1.25rem floor also
+   protects browser-mode layouts where WebKit reports a transient zero inset. */
+@media (width < 64rem) and (orientation: landscape) {
+  [data-flex-zone="playerHandRow"] {
+    transform: translateY(calc(-1 * max(env(safe-area-inset-bottom), 1.25rem)));
   }
 }
 

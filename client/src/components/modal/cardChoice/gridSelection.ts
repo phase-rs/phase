@@ -104,6 +104,23 @@ export function filterCards(
   });
 }
 
+/**
+ * Narrows the visible card list by its engine-provided display name. This is a
+ * display-only text filter: it neither decides eligibility nor changes the
+ * caller-owned selection.
+ */
+export function filterCardsByName(
+  cards: ObjectId[],
+  objects: ObjLookup,
+  query: string,
+): ObjectId[] {
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  if (!normalizedQuery) return [...cards];
+  return cards.filter((id) =>
+    objects[id]?.name.toLocaleLowerCase().includes(normalizedQuery),
+  );
+}
+
 export function applyBulk(
   action: "all" | "invert" | "clear",
   ordered: ObjectId[],

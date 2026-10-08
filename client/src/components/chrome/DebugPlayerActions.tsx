@@ -225,12 +225,22 @@ function ModifyEnergyForm({ onDispatch }: Props) {
 }
 
 // Opens the debug library browser for the local (perspective) player. The
-// engine only exposes the viewer's OWN library names in sandbox debug
-// (`visibility.rs`), so this is intentionally scoped to the perspective seat
-// rather than offering a player picker that would render opponent backs.
+// engine supplies its separately authorized OWN-library debug projection, so
+// this remains scoped to the perspective seat rather than offering a picker
+// that could expose opponent library identities.
 function BrowseLibraryForm() {
   const openDebugLibraryViewer = useUiStore((s) => s.openDebugLibraryViewer);
   const perspectivePlayerId = usePerspectivePlayerId();
+
+  const openLibrary = () => {
+    // DebugPanel sits above ordinary modal layers. Close it before mounting the
+    // aria-modal library viewer, just like the panel's Report Card action, so
+    // no visually higher background surface remains pointer-accessible.
+    if (useUiStore.getState().debugPanelOpen) {
+      useUiStore.getState().toggleDebugPanel();
+    }
+    openDebugLibraryViewer(perspectivePlayerId);
+  };
 
   return (
     <>
@@ -238,7 +248,7 @@ function BrowseLibraryForm() {
         Opens a modal of your library in randomized order. Click a card to move
         it to any zone, or use the quick Battlefield / Hand buttons.
       </p>
-      <SubmitButton onClick={() => openDebugLibraryViewer(perspectivePlayerId)}>
+      <SubmitButton onClick={openLibrary}>
         Browse Library
       </SubmitButton>
     </>

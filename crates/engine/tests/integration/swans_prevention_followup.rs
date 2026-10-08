@@ -66,13 +66,17 @@ fn swans_followup_draws_for_damage_sources_controller() {
     // event context still readable, which is exactly what
     // `PostReplacementSourceController` reads below.
     state.last_effect_count = Some(1);
-    state.post_replacement_drains.install(
+    state.install_post_replacement_drain(
         PostReplacementDrain {
             status: DrainStatus::Dispatching,
             source: None,
             applied: HashSet::new(),
             event_source: Some(damage_source),
             event_target: None,
+            // CR 109.5: this fixture drives the event-context read directly and
+            // installs no replacing object, so "you" falls back to the affected
+            // object's controller exactly as before the slot existed.
+            controller: None,
         },
         ResidentDrainPolicy::Replace,
     );

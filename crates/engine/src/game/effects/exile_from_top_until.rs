@@ -1,7 +1,8 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
-use crate::game::quantity::resolve_quantity;
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ObjectProperty, ResolvedAbility, TargetRef, UntilCondition,
+    Effect, EffectError, EffectKind, ObjectProperty, QuantityExpr, ResolvedAbility, TargetFilter,
+    TargetRef, UntilCondition,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -15,9 +16,9 @@ use crate::types::zones::Zone;
 ///
 /// * `NextMatches(filter)` — Etali / Cascade / Discover-shape (CR 701.57a /
 ///   CR 702.85a). The just-exiled card is checked against the filter; the loop
-///   ends on the first match. The hit `ObjectId` is injected into the
-///   sub_ability chain as a target so downstream "cast that card" / "put it
-///   onto the battlefield" sub-effects can address it.
+///   ends on the `count`th match (the first, for "a/an"). The hit `ObjectId`s
+///   are injected into the sub_ability chain as targets so downstream "cast
+///   that card" / "put it onto the battlefield" sub-effects can address them.
 ///
 /// * `CumulativeThreshold { property, comparator, threshold }` — Tasha's
 ///   Hideous Laughter / Dream Harvest / Improvisation Capstone (CR 202.3 +
@@ -48,6 +49,7 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    let events_before = events.len();
     let (player_filter, until) = match &ability.effect {
         Effect::ExileFromTopUntil { player, until } => (player, until),
         _ => return Err(EffectError::MissingParam("until".to_string())),
@@ -60,14 +62,21 @@ pub fn resolve(
     // Per-iteration "their library" uses `TargetFilter::ScopedPlayer` or a typed
     // `ControllerRef::ScopedPlayer` filter instead.
     let acting_player = super::resolve_player_for_context_ref(state, ability, player_filter);
+    let resume = state.pending_exile_from_top_until.take();
     let player = state
         .players
         .iter()
         .find(|p| p.id == acting_player)
         .ok_or(EffectError::PlayerNotFound)?;
 
-    // Snapshot library (top = index 0) to iterate without borrow conflicts.
-    let library: Vec<ObjectId> = player.library.iter().copied().collect();
+    let resume = resume.as_deref();
+    let mut library: Vec<ObjectId> = resume
+        .map(|resume| resume.remaining.clone())
+        .unwrap_or_else(|| state.library_of(player.id).iter().copied().collect());
+    let resumed_card = resume.map(|resume| resume.pending_card);
+    if let Some(card) = resumed_card {
+        library.insert(0, card);
+    }
 
     // CR 107.3a + CR 601.2b: ability-context evaluation so dynamic thresholds
     // resolve against the resolving ability's `chosen_x`.
@@ -77,42 +86,89 @@ pub fn resolve(
     // dynamic refs read from the same context the ability is resolving in.
     let threshold_value: Option<i32> = match until {
         UntilCondition::NextMatches { .. } => None,
-        UntilCondition::CumulativeThreshold { threshold, .. } => Some(resolve_quantity(
-            state,
-            threshold,
-            ability.controller,
-            ability.source_id,
-        )),
+        UntilCondition::CumulativeThreshold { threshold, .. } => {
+            Some(resolve_quantity_with_targets(state, threshold, ability))
+        }
     };
 
-    let mut hit_id: Option<ObjectId> = None;
-    let mut cumulative: i32 = 0;
+    // CR 608.2c + CR 107.3a: how many matching cards end a `NextMatches` loop
+    // ("until you exile two nonland cards …"), resolved once in the resolving
+    // ability's context so an X count reads the X its controller announced.
+    let match_count: usize = match until {
+        UntilCondition::NextMatches { count, .. } => {
+            usize::try_from(resolve_quantity_with_targets(state, count, ability)).unwrap_or(0)
+        }
+        UntilCondition::CumulativeThreshold { .. } => 0,
+    };
+
+    let mut hits: Vec<ObjectId> = resume.map(|resume| resume.hits.clone()).unwrap_or_default();
+    // "until you exile X … cards" with X = 0 is satisfied before the first
+    // card moves, so nothing is exiled.
+    if matches!(until, UntilCondition::NextMatches { .. }) && hits.len() >= match_count {
+        library.clear();
+    }
+    let mut cumulative = resume.map_or(0, |resume| resume.cumulative);
+    let mut linked_batch = resume
+        .map(|resume| resume.linked_batch.clone())
+        .unwrap_or_default();
     let track_exiled_by_source =
         crate::game::exile_links::should_track_exiled_by_source(state, ability.source_id, ability);
 
-    for &obj_id in &library {
+    for (index, &obj_id) in library.iter().enumerate() {
         // CR 701.13a: Exile the card through the shared zone-change pipeline so
         // replacement effects, exile links, and zone bookkeeping stay identical
         // to `Effect::ChangeZone`.
-        match super::change_zone::execute_zone_move(
-            state,
-            obj_id,
-            Zone::Library,
-            Zone::Exile,
-            ability.source_id,
-            ability.duration.as_ref(),
-            false,
-            crate::types::zones::EtbTapState::Unspecified,
-            None,
-            &[],
-            None,
-            track_exiled_by_source,
-            None,
-            None,
-            events,
-        ) {
+        let move_result = if resumed_card == Some(obj_id) && index == 0 {
+            super::change_zone::ZoneMoveResult::Done
+        } else {
+            super::change_zone::execute_zone_move(
+                state,
+                obj_id,
+                Zone::Library,
+                Zone::Exile,
+                ability.source_id,
+                ability.duration.as_ref(),
+                false,
+                crate::types::zones::EtbTapState::Unspecified,
+                false,
+                None,
+                &[],
+                None,
+                track_exiled_by_source,
+                None,
+                None,
+                events,
+            )
+        };
+        match move_result {
             super::change_zone::ZoneMoveResult::Done => {}
             super::change_zone::ZoneMoveResult::NeedsChoice(player) => {
+                for pin in super::linked_exile_batch_from_events(
+                    state,
+                    ability.source_id,
+                    &events[events_before..],
+                ) {
+                    if !linked_batch.contains(&pin) {
+                        linked_batch.push(pin);
+                    }
+                }
+                state.pending_exile_from_top_until = Some(Box::new(
+                    crate::types::game_state::PendingExileFromTopUntil {
+                        pending_card: obj_id,
+                        remaining: library[index + 1..].to_vec(),
+                        linked_batch,
+                        cumulative,
+                        hits,
+                    },
+                ));
+                super::append_to_pending_continuation(
+                    state,
+                    Some(Box::new(ability_with_resolved_until(
+                        ability,
+                        match_count,
+                        threshold_value,
+                    ))),
+                );
                 state.waiting_for =
                     crate::game::replacement::replacement_choice_waiting_for(player, state);
                 return Ok(());
@@ -120,30 +176,51 @@ pub fn resolve(
             super::change_zone::ZoneMoveResult::NeedsAuraAttachmentChoice => return Ok(()),
         }
 
-        match until {
-            UntilCondition::NextMatches { filter } => {
-                // CR 701.57a / 702.85a: Stop on the first card matching the
-                // filter; expose it to the sub_ability chain.
+        // CR 616.1: a resumed replacement result is inspected exactly once;
+        // if it moved elsewhere, it contributes nothing and iteration resumes.
+        let Some(object) = state
+            .objects
+            .get(&obj_id)
+            .filter(|object| object.zone == Zone::Exile)
+        else {
+            continue;
+        };
+
+        // The replacement pipeline emitted this card's ZoneChanged event before
+        // this continuation resumed, so the current event slice cannot recover
+        // it. Preserve the exact current incarnation only when the completed
+        // move also created this resolver's source link.
+        if resumed_card == Some(obj_id)
+            && index == 0
+            && state.exile_links.iter().any(|link| {
+                link.exiled_id == obj_id
+                    && link.source_id == ability.source_id
+                    && link.kind == crate::types::game_state::ExileLinkKind::TrackedBySource
+            })
+        {
+            let pin = crate::types::identifiers::ObjectIncarnationRef::from_object(object);
+            if !linked_batch.contains(&pin) {
+                linked_batch.push(pin);
+            }
+        }
+        let stopped = match until {
+            UntilCondition::NextMatches { filter, .. } => {
                 if matches_target_filter(state, obj_id, filter, &ctx) {
-                    hit_id = Some(obj_id);
-                    break;
+                    hits.push(obj_id);
                 }
+                hits.len() >= match_count
             }
             UntilCondition::CumulativeThreshold {
                 property,
                 comparator,
                 ..
             } => {
-                // CR 202.3 + CR 107.3e: Add this card's contribution and stop
-                // once the running sum satisfies the comparator vs threshold.
                 cumulative = cumulative.saturating_add(extract_property(state, obj_id, *property));
-                if comparator.evaluate(
-                    cumulative,
-                    threshold_value.expect("threshold resolved for cumulative branch"),
-                ) {
-                    break;
-                }
+                comparator.evaluate(cumulative, threshold_value.expect("resolved threshold"))
             }
+        };
+        if stopped {
+            break;
         }
     }
 
@@ -152,11 +229,18 @@ pub fn resolve(
         source_id: ability.source_id,
         subject: None,
     });
+    for pin in
+        super::linked_exile_batch_from_events(state, ability.source_id, &events[events_before..])
+    {
+        if !linked_batch.contains(&pin) {
+            linked_batch.push(pin);
+        }
+    }
 
     // CR 400.7: An object that moves from one zone to another becomes a new
     // object. Sub-ability chaining differs per stop-condition kind:
     //
-    // * NextMatches: inject the hit card as the sub-ability's target so
+    // * NextMatches: inject the hit cards as the sub-ability's targets so
     //   "cast that card" / "you may put it onto the battlefield" address the
     //   right object. If no hit was found, the "cast that card" link is
     //   skipped, but any downstream exile-cleanup link that references
@@ -170,7 +254,7 @@ pub fn resolve(
     if let Some(ref sub) = ability.sub_ability {
         match until {
             UntilCondition::NextMatches { .. } => {
-                if let Some(hit) = hit_id {
+                if !hits.is_empty() {
                     let mut sub_clone = sub.as_ref().clone();
                     // CR 608.2c + CR 610.3: Sub-ability target injection is conditional
                     // on the sub-ability's effect filter:
@@ -191,9 +275,14 @@ pub fn resolve(
                     //   as the parent target so anaphoric `ParentTarget` / `SelfRef`
                     //   references resolve to the just-exiled card.
                     if !sub_effect_references_exiled_by_source(&sub_clone) {
-                        sub_clone.targets = vec![TargetRef::Object(hit)];
+                        sub_clone.targets = hits.iter().copied().map(TargetRef::Object).collect();
                     }
                     sub_clone.context = ability.context.clone();
+                    // CR 400.7j: the rest of this ability finds the cards this
+                    // loop exiled through the exact batch, not through a
+                    // source-wide ledger or a trigger's earlier snapshot.
+                    sub_clone.context.exile_until_batch = linked_batch.clone();
+                    super::bind_resolution_exile_batch_paths(&mut sub_clone, &linked_batch);
                     super::resolve_ability_chain(state, &sub_clone, events, 1)?;
                 } else if let Some(cleanup) = first_exiled_by_source_link(sub.as_ref()) {
                     // CR 608.2c + CR 701.13a: Library exhausted with no hit
@@ -210,21 +299,85 @@ pub fn resolve(
                     // cleanup's `DistinctFrom { ParentTarget }` leg fails open
                     // when there are no object targets, so clearing `targets`
                     // here lets every exiled card be swept to the bottom.
-                    let mut cleanup_clone = cleanup.clone();
-                    cleanup_clone.targets = vec![];
-                    cleanup_clone.context = ability.context.clone();
-                    super::resolve_ability_chain(state, &cleanup_clone, events, 1)?;
+                    let mut pool = linked_batch.clone();
+                    // CR 607.2a: a bare exiled-cards cleanup also takes the cards
+                    // the ability exiled before its loop (Possibility Storm's
+                    // "exiles it"), as `put_on_top` does after a match.
+                    if matches!(
+                        &cleanup.effect,
+                        Effect::PutAtLibraryPosition { target, .. }
+                            if target.without_exile_anaphor().is_none()
+                    ) {
+                        for id in super::put_on_top::cards_exiled_with_source_now(
+                            state,
+                            ability.source_id,
+                        ) {
+                            let pin = crate::types::identifiers::ObjectIncarnationRef::from_object(
+                                &state.objects[&id],
+                            );
+                            if !pool.contains(&pin) {
+                                pool.push(pin);
+                            }
+                        }
+                    }
+                    // CR 607.2a: no current pool means there is no "rest" to move.
+                    if !pool.is_empty() {
+                        let mut cleanup_clone = cleanup.clone();
+                        cleanup_clone.targets = pool
+                            .iter()
+                            .map(|pin| TargetRef::Object(pin.object_id))
+                            .collect();
+                        cleanup_clone.target_incarnations = pool;
+                        // CR 607.2a + CR 608.2c: explicit targets are this exact pool.
+                        if let Effect::PutAtLibraryPosition { target, .. } =
+                            &mut cleanup_clone.effect
+                        {
+                            *target = TargetFilter::Any;
+                        }
+                        cleanup_clone.context = ability.context.clone();
+                        super::resolve_ability_chain(state, &cleanup_clone, events, 1)?;
+                    }
                 }
             }
             UntilCondition::CumulativeThreshold { .. } => {
                 let mut sub_clone = sub.as_ref().clone();
                 sub_clone.context = ability.context.clone();
+                super::bind_resolution_exile_batch_paths(&mut sub_clone, &linked_batch);
                 super::resolve_ability_chain(state, &sub_clone, events, 1)?;
             }
         }
     }
 
     Ok(())
+}
+
+/// CR 608.2h: the loop's match count and cumulative threshold are determined
+/// once, when the effect is applied. A loop paused for a replacement choice
+/// resumes from this clone, which carries both as the fixed values this
+/// resolution resolved, so a population that changed during the pause ("until
+/// you exile X cards, where X is the number of cards in your graveyard") cannot
+/// move the stopping point.
+fn ability_with_resolved_until(
+    ability: &ResolvedAbility,
+    match_count: usize,
+    threshold_value: Option<i32>,
+) -> ResolvedAbility {
+    let mut parked = ability.clone();
+    if let Effect::ExileFromTopUntil { until, .. } = &mut parked.effect {
+        match until {
+            UntilCondition::NextMatches { count, .. } => {
+                *count = QuantityExpr::Fixed {
+                    value: i32::try_from(match_count).unwrap_or(i32::MAX),
+                };
+            }
+            UntilCondition::CumulativeThreshold { threshold, .. } => {
+                if let Some(value) = threshold_value {
+                    *threshold = QuantityExpr::Fixed { value };
+                }
+            }
+        }
+    }
+    parked
 }
 
 /// CR 608.2c: Decide whether the sub-ability's effect filter forwards the
@@ -302,14 +455,15 @@ mod tests {
     use crate::game::engine::apply;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, CardPlayMode, CastFromZoneDriver, CastingPermission,
-        Comparator, ControllerRef, FilterProp, LibraryPosition, PlayerFilter, QuantityExpr,
-        ReplacementDefinition, ResolvedAbility, SubAbilityLink, TargetFilter, TargetRef,
-        TypeFilter, TypedFilter,
+        AbilityDefinition, AbilityKind, CardPlayMode, CastFromZoneDriver, Comparator,
+        ControllerRef, FilterProp, LibraryPosition, PlayerFilter, QuantityExpr,
+        ReplacementDefinition, ReplacementMode, ResolvedAbility, SubAbilityLink, TargetFilter,
+        TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::format::FormatConfig;
+    use crate::types::game_state::{CastOfferKind, WaitingFor};
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
     use crate::types::player::PlayerId;
@@ -372,6 +526,7 @@ mod tests {
             Effect::ExileFromTopUntil {
                 player: TargetFilter::Controller,
                 until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 1 },
                     filter: nonland_filter(),
                 },
             },
@@ -431,6 +586,7 @@ mod tests {
                 // "their library" to the scoped event player, not Controller.
                 player: TargetFilter::ScopedPlayer,
                 until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 1 },
                     filter: nonland_filter(),
                 },
             },
@@ -511,6 +667,8 @@ mod tests {
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![],
             source,
@@ -526,6 +684,7 @@ mod tests {
                     TypedFilter::default().controller(ControllerRef::Opponent),
                 ),
                 until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 1 },
                     filter: instant_or_sorcery_filter(),
                 },
             },
@@ -616,6 +775,8 @@ mod tests {
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![],
             source,
@@ -631,6 +792,7 @@ mod tests {
                     TypedFilter::default().controller(ControllerRef::Opponent),
                 ),
                 until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 1 },
                     filter: instant_or_sorcery_filter(),
                 },
             },
@@ -693,17 +855,23 @@ mod tests {
                             enters_modified_if: None,
                         },
                     ))
-                    .destination_zone(Zone::Exile),
+                    .destination_zone(Zone::Exile)
+                    .valid_card(nonland_filter()),
             );
+            obj.replacement_definitions
+                .push(obj.replacement_definitions[0].clone());
         }
 
+        let land = add_library_card(&mut state, PlayerId(0), "Forest", true);
         let hit = add_library_card(&mut state, PlayerId(0), "Bear", false);
-        state.players[0].library = crate::im::vector![hit];
+        let tail = add_library_card(&mut state, PlayerId(0), "Wolf", false);
+        state.players[0].library = crate::im::vector![land, hit, tail];
 
-        let ability = ResolvedAbility::new(
+        let mut ability = ResolvedAbility::new(
             Effect::ExileFromTopUntil {
                 player: TargetFilter::Controller,
                 until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 1 },
                     filter: nonland_filter(),
                 },
             },
@@ -711,8 +879,24 @@ mod tests {
             source,
             PlayerId(0),
         );
+        ability.sub_ability = jodah_chain(source).sub_ability.unwrap().sub_ability;
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
+        for remaining in [1, 0] {
+            assert!(matches!(
+                state.waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ));
+            let pending = state.pending_exile_from_top_until.as_ref().unwrap();
+            assert_eq!(pending.linked_batch[0].object_id, land);
+            assert_eq!(pending.remaining.len(), remaining);
+            assert_eq!(pending.cumulative, 0);
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::ChooseReplacement { index: 0 },
+            )
+            .unwrap();
+        }
 
         assert_eq!(
             state.objects[&hit].zone,
@@ -727,6 +911,410 @@ mod tests {
             !state.exile.contains(&hit),
             "redirected card must not remain in exile"
         );
+        assert_eq!(state.objects[&tail].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&land].zone, Zone::Library);
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            vec![land]
+        );
+    }
+
+    /// Saved shapes from before the counted loop still load: a `NextMatches`
+    /// without `count` is a one-match loop, a paused loop without `hits` has
+    /// found nothing, and a context without `exile_until_batch` has no batch.
+    #[test]
+    fn shapes_saved_before_the_counted_loop_still_load() {
+        let until: UntilCondition =
+            serde_json::from_str(r#"{"type":"NextMatches","filter":{"type":"Any"}}"#).unwrap();
+        assert_eq!(
+            until,
+            UntilCondition::NextMatches {
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+            }
+        );
+
+        let pending: crate::types::game_state::PendingExileFromTopUntil = serde_json::from_str(
+            r#"{"pending_card":7,"remaining":[8],"linked_batch":[],"cumulative":0}"#,
+        )
+        .unwrap();
+        assert!(pending.hits.is_empty());
+
+        let context = serde_json::to_value(crate::types::ability::SpellContext::default()).unwrap();
+        assert!(context.get("exile_until_batch").is_none());
+        let loaded: crate::types::ability::SpellContext = serde_json::from_value(context).unwrap();
+        assert!(loaded.exile_until_batch.is_empty());
+    }
+
+    /// CR 616.1: a counted loop paused for a replacement choice stores the
+    /// matches it already found, so the resumed loop still stops on the second.
+    #[test]
+    fn a_counted_loop_paused_for_a_replacement_choice_stores_its_matches() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Replacement Source".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.replacement_definitions.push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            origin: None,
+                            destination: Zone::Graveyard,
+                            target: TargetFilter::Any,
+                            owner_library: false,
+                            enter_transformed: false,
+                            enters_under: None,
+                            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
+                            face_down_profile: None,
+                            enters_modified_if: None,
+                        },
+                    ))
+                    .destination_zone(Zone::Exile)
+                    .valid_card(TargetFilter::Typed(TypedFilter::new(TypeFilter::Land))),
+            );
+            obj.replacement_definitions
+                .push(obj.replacement_definitions[0].clone());
+        }
+
+        let first = add_library_card(&mut state, PlayerId(0), "Bear", false);
+        let land = add_library_card(&mut state, PlayerId(0), "Forest", true);
+        let second = add_library_card(&mut state, PlayerId(0), "Wolf", false);
+        let tail = add_library_card(&mut state, PlayerId(0), "Elk", false);
+        state.players[0].library = crate::im::vector![first, land, second, tail];
+
+        let ability = ResolvedAbility::new(
+            Effect::ExileFromTopUntil {
+                player: TargetFilter::Controller,
+                until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    filter: nonland_filter(),
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert_eq!(
+            state.pending_exile_from_top_until.as_ref().unwrap().hits,
+            vec![first]
+        );
+        while matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::ChooseReplacement { index: 0 },
+            )
+            .unwrap();
+        }
+
+        assert_eq!(state.objects[&first].zone, Zone::Exile);
+        assert_eq!(state.objects[&second].zone, Zone::Exile);
+        assert_eq!(
+            state.objects[&tail].zone,
+            Zone::Library,
+            "the loop stops on its second match"
+        );
+    }
+
+    /// A source whose two identical replacements send `card` to its owner's
+    /// graveyard instead of exile, so that card's move pauses for a
+    /// replacement choice (CR 616.1).
+    fn redirect_to_graveyard_source(state: &mut GameState, card: ObjectId) -> ObjectId {
+        let source = create_object(
+            state,
+            CardId(100),
+            PlayerId(0),
+            "Replacement Source".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.replacement_definitions.push(
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChangeZone {
+                        origin: None,
+                        destination: Zone::Graveyard,
+                        target: TargetFilter::Any,
+                        owner_library: false,
+                        enter_transformed: false,
+                        enters_under: None,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                        enters_attacking: false,
+                        up_to: false,
+                        enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
+                        face_down_profile: None,
+                        enters_modified_if: None,
+                    },
+                ))
+                .destination_zone(Zone::Exile)
+                .valid_card(TargetFilter::SpecificObject { id: card }),
+        );
+        obj.replacement_definitions
+            .push(obj.replacement_definitions[0].clone());
+        source
+    }
+
+    /// Four mana-value-1 cards on top of P0's library, the second of which a
+    /// replacement sends to the graveyard; two cards already in that
+    /// graveyard. Returns the source and the cards, top first.
+    fn graveyard_count_board(state: &mut GameState) -> (ObjectId, [ObjectId; 4]) {
+        let cards = ["First", "Redirected", "Second", "Third"]
+            .map(|name| add_library_card_with_mv(state, PlayerId(0), name, 1));
+        state.players[0].library = cards.iter().copied().collect();
+        for name in ["Old One", "Old Two"] {
+            let id = add_library_card(state, PlayerId(0), name, true);
+            let mut events = Vec::new();
+            crate::game::zones::move_to_zone(state, id, Zone::Graveyard, &mut events);
+        }
+        let source = redirect_to_graveyard_source(state, cards[1]);
+        (source, cards)
+    }
+
+    fn graveyard_count() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: crate::parser::oracle_quantity::parse_quantity_ref(
+                "the number of cards in your graveyard",
+            )
+            .expect("graveyard count quantity"),
+        }
+    }
+
+    /// Resolve `until` over [`graveyard_count_board`], declining nothing: the
+    /// replacement choice pauses the second move and sends that card to the
+    /// graveyard, which grows the counted population from two to three.
+    fn resolve_through_the_pause(
+        until: UntilCondition,
+        chosen_x: Option<u32>,
+    ) -> (GameState, [ObjectId; 4]) {
+        let mut state = GameState::new_two_player(42);
+        let (source, cards) = graveyard_count_board(&mut state);
+        let mut ability = ResolvedAbility::new(
+            Effect::ExileFromTopUntil {
+                player: TargetFilter::Controller,
+                until,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.chosen_x = chosen_x;
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "reach guard: the second move paused for the replacement choice"
+        );
+        while matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::ChooseReplacement { index: 0 },
+            )
+            .unwrap();
+        }
+        assert_eq!(state.objects[&cards[1]].zone, Zone::Graveyard);
+        assert_eq!(state.players[0].graveyard.len(), 3, "the population grew");
+        (state, cards)
+    }
+
+    /// CR 608.2h: the match count is determined once, when the effect is
+    /// applied — two, the graveyard's size then. A count read again on resume
+    /// would be three, and the loop would run on to the third card.
+    #[test]
+    fn a_paused_counted_loop_keeps_the_count_it_resolved_before_the_pause() {
+        let (state, [first, _, second, third]) = resolve_through_the_pause(
+            UntilCondition::NextMatches {
+                count: graveyard_count(),
+                filter: nonland_filter(),
+            },
+            None,
+        );
+        assert_eq!(state.objects[&first].zone, Zone::Exile);
+        assert_eq!(state.objects[&second].zone, Zone::Exile);
+        assert_eq!(
+            state.objects[&third].zone,
+            Zone::Library,
+            "the loop stops on the two matches its count resolved to"
+        );
+    }
+
+    /// CR 608.2h: the same for a cumulative threshold — total mana value two,
+    /// reached by the first and second card.
+    #[test]
+    fn a_paused_threshold_loop_keeps_the_threshold_it_resolved_before_the_pause() {
+        let (state, [first, _, second, third]) = resolve_through_the_pause(
+            UntilCondition::CumulativeThreshold {
+                property: ObjectProperty::ManaValue,
+                comparator: Comparator::GE,
+                threshold: graveyard_count(),
+            },
+            None,
+        );
+        assert_eq!(state.objects[&first].zone, Zone::Exile);
+        assert_eq!(state.objects[&second].zone, Zone::Exile);
+        assert_eq!(
+            state.objects[&third].zone,
+            Zone::Library,
+            "the loop stops on the total its threshold resolved to"
+        );
+    }
+
+    /// Control: an announced X count crosses the same pause unchanged (CR
+    /// 107.3a). X = 3 reaches the third card although the counted graveyard
+    /// plays no part. Green with or without the snapshot, since the parked
+    /// clone keeps the same `chosen_x`.
+    #[test]
+    fn a_paused_announced_x_loop_keeps_its_x() {
+        let (state, [first, _, second, third]) = resolve_through_the_pause(
+            UntilCondition::NextMatches {
+                count: QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                filter: nonland_filter(),
+            },
+            Some(3),
+        );
+        for card in [first, second, third] {
+            assert_eq!(state.objects[&card].zone, Zone::Exile);
+        }
+    }
+
+    #[test]
+    fn declined_replacement_keeps_resumed_exile_in_exact_cast_batch() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Replacement Source".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            origin: None,
+                            destination: Zone::Graveyard,
+                            target: TargetFilter::Any,
+                            owner_library: false,
+                            enter_transformed: false,
+                            enters_under: None,
+                            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
+                            face_down_profile: None,
+                            enters_modified_if: None,
+                        },
+                    ))
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .destination_zone(Zone::Exile)
+                    .valid_card(nonland_filter()),
+            );
+
+        let stale = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Old Exiled Spell".to_string(),
+            Zone::Exile,
+        );
+        state
+            .objects
+            .get_mut(&stale)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        crate::game::exile_links::push_tracked_by_source(&mut state, stale, source);
+
+        let hit = add_library_card(&mut state, PlayerId(0), "Fresh Hit", false);
+        state.players[0].library = crate::im::vector![hit];
+
+        let cast_sub = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::And {
+                    filters: vec![TargetFilter::ExiledBySource, nonland_filter()],
+                },
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::ResolutionWindow {
+                    bounds: crate::types::ability::ResolutionCastWindow::UNBOUNDED,
+                },
+                mana_spend_permission: None,
+                additional_cost: None,
+                cast_cost_modifier: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::ExileFromTopUntil {
+                player: TargetFilter::Controller,
+                until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    filter: nonland_filter(),
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.sub_ability = Some(Box::new(cast_sub));
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement { index: 1 },
+        )
+        .unwrap();
+
+        assert_eq!(state.objects[&hit].zone, Zone::Exile);
+        assert!(state.pending_exile_from_top_until.is_none());
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::CastOffer {
+                player: PlayerId(0),
+                kind: CastOfferKind::FreeCastWindow { ref candidates, .. },
+            } if candidates == &vec![hit]
+        ));
     }
 
     /// CR 608.2 + CR 701.57a + CR 702.85a: Etali-shape — `player_scope: All`
@@ -769,6 +1357,7 @@ mod tests {
             Effect::ExileFromTopUntil {
                 player: TargetFilter::Controller,
                 until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 1 },
                     filter: nonland_filter(),
                 },
             },
@@ -817,7 +1406,7 @@ mod tests {
     /// must remain green, proving the guard preserves the pre-bind for
     /// `ParentTarget`-shape consumers.
     #[test]
-    fn etali_each_player_exile_until_grants_cast_permission_to_every_linked_hit() {
+    fn etali_each_player_exile_until_opens_window_for_every_nonland_hit() {
         let mut state = GameState::new(FormatConfig::standard(), 3, 42);
         let source = create_object(
             &mut state,
@@ -855,8 +1444,12 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
-                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                driver: CastFromZoneDriver::ResolutionWindow {
+                    bounds: crate::types::ability::ResolutionCastWindow::UNBOUNDED,
+                },
                 mana_spend_permission: None,
+                additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![],
             source,
@@ -867,6 +1460,7 @@ mod tests {
             Effect::ExileFromTopUntil {
                 player: TargetFilter::Controller,
                 until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 1 },
                     filter: nonland_filter(),
                 },
             },
@@ -905,35 +1499,549 @@ mod tests {
             "expected 6 source-linked exiles (3 lands + 3 hits), got {linked_count}",
         );
 
-        // Every nonland hit must carry ExileWithAltCost { zero } granted to
-        // Etali's controller (PlayerId(0)). Lands must NOT — the AND with the
-        // nonland filter excludes them from the cast permission.
-        for &hit in &[p0_hit, p1_hit, p2_hit] {
-            let perms = &state.objects[&hit].casting_permissions;
-            let zero_cost_etali_permissions = perms
-                .iter()
-                .filter(|p| {
-                    matches!(
-                        p,
-                        CastingPermission::ExileWithAltCost { cost, granted_to: Some(g), .. }
-                            if *cost == ManaCost::zero() && *g == PlayerId(0)
-                    )
-                })
-                .count();
-            assert_eq!(
-                zero_cost_etali_permissions,
-                1,
-                "nonland hit {:?} must have ExileWithAltCost {{ zero, granted_to: PlayerId(0) }} in casting_permissions={:?}",
-                hit,
-                perms
-            );
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::CastOffer {
+                player: PlayerId(0),
+                kind: CastOfferKind::FreeCastWindow { ref candidates, .. },
+            } if candidates.iter().copied().collect::<std::collections::HashSet<_>>()
+                == [p0_hit, p1_hit, p2_hit].into_iter().collect()
+        ));
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::FreeCastWindowChoice {
+                selection: Some(p0_hit),
+            },
+        )
+        .unwrap();
+        assert_eq!(state.objects[&p0_hit].zone, Zone::Stack);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::FreeCastWindow { ref candidates, .. },
+                ..
+            } if candidates.iter().copied().collect::<std::collections::HashSet<_>>()
+                == [p1_hit, p2_hit].into_iter().collect()
+        ));
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::FreeCastWindowChoice { selection: None },
+        )
+        .unwrap();
+    }
+
+    /// CR 607.2a + CR 608.2d + CR 101.4: Plargg and Nassari — `player_scope: All`
+    /// exile-until with a DETACHED opponent-chooser continuation. In a
+    /// four-player game the tail runs once and pauses THREE times in order:
+    /// (1) `ChooseFromZoneOpponentChooser` — the CONTROLLER picks which of the
+    /// three live opponents makes the choice (Plargg's release notes: "you
+    /// choose which opponent gets to choose one of the exiled nonland cards");
+    /// (2) `ChooseFromZoneChoice` — the picked opponent chooses over exactly
+    /// the linked nonland hits (never the lands); (3) `CastOffer` with a
+    /// `FreeCastWindow` capped at TWO casts ("up to two spells") whose
+    /// candidate pool is the UNCHOSEN hits only — the opponent's pick is
+    /// excluded by `Not(InTrackedSet 0)` over the freshly-published chosen
+    /// set, and lands are excluded by the cast-mode land guard (CR 305.1).
+    #[test]
+    fn plargg_opponent_chooses_nonland_hit_then_cast_pool_is_the_other_hits() {
+        use crate::types::ability::{CardSelectionMode, Chooser, ZoneOwner};
+        use crate::types::game_state::{CastOfferKind, WaitingFor};
+        let mut state = GameState::new(FormatConfig::standard(), 4, 42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Plargg and Nassari".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Each player's library: one Land then one Creature (the nonland hit).
+        let p0_land = add_library_card(&mut state, PlayerId(0), "P0 Forest", true);
+        let p0_hit = add_library_card(&mut state, PlayerId(0), "P0 Beast", false);
+        state.players[0].library = crate::im::vector![p0_land, p0_hit];
+
+        let p1_land = add_library_card(&mut state, PlayerId(1), "P1 Mountain", true);
+        let p1_hit = add_library_card(&mut state, PlayerId(1), "P1 Goblin", false);
+        state.players[1].library = crate::im::vector![p1_land, p1_hit];
+
+        let p2_land = add_library_card(&mut state, PlayerId(2), "P2 Plains", true);
+        let p2_hit = add_library_card(&mut state, PlayerId(2), "P2 Soldier", false);
+        state.players[2].library = crate::im::vector![p2_land, p2_hit];
+
+        let p3_land = add_library_card(&mut state, PlayerId(3), "P3 Island", true);
+        let p3_hit = add_library_card(&mut state, PlayerId(3), "P3 Merfolk", false);
+        state.players[3].library = crate::im::vector![p3_land, p3_hit];
+
+        // Sentence 3: "You may cast up to two spells from among the OTHER cards
+        // exiled this way without paying their mana costs" — the parser lowers
+        // this to a during-resolution free-cast window (ruling 2021-04-16: the
+        // spells are cast during the ability's resolution) capped at two casts,
+        // with "other" rewritten to `Not(InTrackedSet 0)` over the chosen set.
+        let cast_sub = ResolvedAbility::new(
+            Effect::FreeCastFromZones {
+                count: Some(2),
+                max_total_mv: None,
+                filter: TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::ExiledBySource,
+                        TargetFilter::Typed(
+                            TypedFilter::default()
+                                .with_type(TypeFilter::Card)
+                                .properties(vec![
+                                    FilterProp::Not {
+                                        prop: Box::new(FilterProp::InTrackedSet {
+                                            id: crate::types::identifiers::TrackedSetId(0),
+                                        }),
+                                    },
+                                    FilterProp::InZone { zone: Zone::Exile },
+                                ]),
+                        ),
+                    ],
+                },
+                zones: vec![Zone::Exile],
+                graveyard_replacement: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        // Sentence 2: "An opponent chooses a nonland card exiled this way" — the
+        // new typed exiled-this-way anaphor shape.
+        let mut choose_sub = ResolvedAbility::new(
+            Effect::ChooseFromZone {
+                count: 1,
+                zone: Zone::Exile,
+                additional_zones: vec![],
+                zone_owner: ZoneOwner::AllOwners,
+                filter: Some(TargetFilter::And {
+                    filters: vec![nonland_filter(), TargetFilter::ExiledBySource],
+                }),
+                chooser: Chooser::Opponent.into(),
+                candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+                reciprocal_role: None,
+                up_to: false,
+                selection: CardSelectionMode::Chosen,
+                constraint: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        choose_sub.sub_ability = Some(Box::new(cast_sub));
+
+        let mut wrapped = ResolvedAbility::new(
+            Effect::ExileFromTopUntil {
+                player: TargetFilter::Controller,
+                until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    filter: nonland_filter(),
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        wrapped.player_scope = Some(PlayerFilter::All);
+        wrapped.sub_ability = Some(Box::new(choose_sub));
+
+        let mut events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &wrapped, &mut events, 0).unwrap();
+
+        // All eight cards are exiled and linked before the detached choose parks.
+        for id in &[
+            p0_land, p0_hit, p1_land, p1_hit, p2_land, p2_hit, p3_land, p3_hit,
+        ] {
+            assert_eq!(state.objects[id].zone, Zone::Exile, "{id:?} must be exiled");
         }
-        for &land in &[p0_land, p1_land, p2_land] {
-            assert!(
-                state.objects[&land].casting_permissions.is_empty(),
-                "land {:?} must not have casting permissions (typed leg excludes it)",
-                land
+
+        // Pause 1 — CR 608.2d: with three live opponents, the CONTROLLER must
+        // first be asked which opponent makes the choice.
+        let picker_candidates = match &state.waiting_for {
+            WaitingFor::ChooseFromZoneOpponentChooser {
+                player, candidates, ..
+            } => {
+                assert_eq!(
+                    *player,
+                    PlayerId(0),
+                    "the CONTROLLER picks which opponent chooses"
+                );
+                candidates.clone()
+            }
+            other => panic!("expected ChooseFromZoneOpponentChooser pause, got {other:?}"),
+        };
+        let mut sorted_candidates = picker_candidates.clone();
+        sorted_candidates.sort();
+        assert_eq!(
+            sorted_candidates,
+            vec![PlayerId(1), PlayerId(2), PlayerId(3)],
+            "every live opponent must be offered as the chooser"
+        );
+
+        // The controller picks PlayerId(2) as the chooser.
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::ChooseZoneOpponentChooser {
+                opponent: PlayerId(2),
+            },
+        )
+        .unwrap();
+
+        // Pause 2 — CR 608.2d: the zone choice must belong to the PICKED
+        // opponent, offering exactly the four nonland hits (lands filtered).
+        let offered = match &state.waiting_for {
+            WaitingFor::ChooseFromZoneChoice {
+                player,
+                cards,
+                count,
+                ..
+            } => {
+                assert_eq!(*count, 1, "exactly one card is chosen");
+                assert_eq!(
+                    *player,
+                    PlayerId(2),
+                    "the zone choice must go to the opponent the controller picked"
+                );
+                cards.clone()
+            }
+            other => panic!("expected ChooseFromZoneChoice pause, got {other:?}"),
+        };
+        let mut offered_sorted = offered.clone();
+        offered_sorted.sort();
+        let mut expected_hits = vec![p0_hit, p1_hit, p2_hit, p3_hit];
+        expected_hits.sort();
+        assert_eq!(
+            offered_sorted, expected_hits,
+            "choice pool must be the nonland hits exiled this way (no lands)"
+        );
+
+        // The picked opponent chooses P1's Goblin.
+        apply(
+            &mut state,
+            PlayerId(2),
+            GameAction::SelectCards {
+                cards: vec![p1_hit],
+            },
+        )
+        .unwrap();
+
+        // Pause 3 — CR 607.2a + ruling 2021-04-16: the free-cast window opens
+        // for the CONTROLLER, capped at TWO casts, over "the OTHER cards exiled
+        // this way" — the three unchosen hits. The chosen Goblin is excluded by
+        // `Not(InTrackedSet 0)` over the freshly-published chosen set, and the
+        // lands are excluded by the cast-mode land guard (CR 305.1).
+        match &state.waiting_for {
+            WaitingFor::CastOffer {
+                player,
+                kind:
+                    CastOfferKind::FreeCastWindow {
+                        candidates,
+                        remaining_casts,
+                        ..
+                    },
+            } => {
+                assert_eq!(
+                    *player,
+                    PlayerId(0),
+                    "the free-cast window belongs to Plargg's controller"
+                );
+                assert_eq!(
+                    *remaining_casts,
+                    Some(2),
+                    "'up to two spells' — the window is capped at two casts"
+                );
+                let mut pool = candidates.clone();
+                pool.sort();
+                let mut expected_pool = vec![p0_hit, p2_hit, p3_hit];
+                expected_pool.sort();
+                assert_eq!(
+                    pool, expected_pool,
+                    "cast pool must be the UNCHOSEN hits only (no chosen card, no lands)"
+                );
+            }
+            other => panic!("expected FreeCastWindow cast offer, got {other:?}"),
+        }
+    }
+
+    /// CR 607.2a two-upkeep regression: "exiled this way" is scoped to THIS
+    /// trigger resolution, not the source's lifetime linked-exile ledger. A
+    /// linked nonland card left in exile by a PREVIOUS resolution (declined
+    /// free cast) must appear in NEITHER the next resolution's opponent choice
+    /// pool NOR its free-cast window — `ExiledBySource` alone is the source's
+    /// complete live ledger, so without the resolution-scoped member pool the
+    /// second window would wrongly offer the first upkeep's leftover.
+    #[test]
+    fn plargg_second_resolution_excludes_previous_resolutions_leftovers() {
+        use crate::types::ability::{CardSelectionMode, Chooser, ZoneOwner};
+        use crate::types::game_state::{CastOfferKind, WaitingFor};
+        let mut state = GameState::new_two_player(11);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Plargg and Nassari".to_string(),
+            Zone::Battlefield,
+        );
+
+        // The full sentence-2 + sentence-3 chain, rebuilt per resolution the
+        // way the trigger system re-instantiates the ability each upkeep.
+        let build_chain = |source: ObjectId| -> ResolvedAbility {
+            let cast_sub = ResolvedAbility::new(
+                Effect::FreeCastFromZones {
+                    count: Some(2),
+                    max_total_mv: None,
+                    filter: TargetFilter::And {
+                        filters: vec![
+                            TargetFilter::ExiledBySource,
+                            TargetFilter::Typed(
+                                TypedFilter::default()
+                                    .with_type(TypeFilter::Card)
+                                    .properties(vec![
+                                        FilterProp::Not {
+                                            prop: Box::new(FilterProp::InTrackedSet {
+                                                id: crate::types::identifiers::TrackedSetId(0),
+                                            }),
+                                        },
+                                        FilterProp::InZone { zone: Zone::Exile },
+                                    ]),
+                            ),
+                        ],
+                    },
+                    zones: vec![Zone::Exile],
+                    graveyard_replacement: None,
+                },
+                vec![],
+                source,
+                PlayerId(0),
             );
+            let mut choose_sub = ResolvedAbility::new(
+                Effect::ChooseFromZone {
+                    count: 1,
+                    zone: Zone::Exile,
+                    additional_zones: vec![],
+                    zone_owner: ZoneOwner::AllOwners,
+                    filter: Some(TargetFilter::And {
+                        filters: vec![nonland_filter(), TargetFilter::ExiledBySource],
+                    }),
+                    chooser: Chooser::Opponent.into(),
+                    candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+                    reciprocal_role: None,
+                    up_to: false,
+                    selection: CardSelectionMode::Chosen,
+                    constraint: None,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            choose_sub.sub_ability = Some(Box::new(cast_sub));
+            let mut wrapped = ResolvedAbility::new(
+                Effect::ExileFromTopUntil {
+                    player: TargetFilter::Controller,
+                    until: UntilCondition::NextMatches {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        filter: nonland_filter(),
+                    },
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            wrapped.player_scope = Some(PlayerFilter::All);
+            wrapped.sub_ability = Some(Box::new(choose_sub));
+            wrapped
+        };
+
+        // UPKEEP 1 — each library holds one nonland hit.
+        let p0_old = add_library_card(&mut state, PlayerId(0), "P0 Old Beast", false);
+        state.players[0].library = crate::im::vector![p0_old];
+        let p1_old = add_library_card(&mut state, PlayerId(1), "P1 Old Goblin", false);
+        state.players[1].library = crate::im::vector![p1_old];
+
+        let mut events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &build_chain(source), &mut events, 0)
+            .unwrap();
+
+        // The lone opponent chooses P1's old Goblin; the window then offers
+        // ONLY P0's old Beast (the other card exiled this way).
+        apply(
+            &mut state,
+            PlayerId(1),
+            GameAction::SelectCards {
+                cards: vec![p1_old],
+            },
+        )
+        .unwrap();
+        match &state.waiting_for {
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::FreeCastWindow { candidates, .. },
+                ..
+            } => assert_eq!(
+                candidates,
+                &vec![p0_old],
+                "upkeep 1 window offers the other card exiled this way"
+            ),
+            other => panic!("expected upkeep-1 FreeCastWindow, got {other:?}"),
+        }
+        // The controller DECLINES — the linked, uncast Beast stays in exile
+        // ("If you don't, it remains exiled" has no cleanup for this shape),
+        // so the source's live exile-link ledger still carries it.
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::FreeCastWindowChoice { selection: None },
+        )
+        .unwrap();
+        assert_eq!(
+            state.objects[&p0_old].zone,
+            Zone::Exile,
+            "the declined card must remain exiled (and linked) after upkeep 1"
+        );
+        assert!(
+            state
+                .exile_links
+                .iter()
+                .any(|link| link.source_id == source && link.exiled_id == p0_old),
+            "the declined card must remain linked to the source after upkeep 1 \u{2014} \
+             upkeep 2's exclusion is only meaningful if the stale link still exists"
+        );
+
+        // UPKEEP 2 — fresh libraries, fresh hits, the same source re-resolves.
+        let p0_new = add_library_card(&mut state, PlayerId(0), "P0 New Wurm", false);
+        state.players[0].library = crate::im::vector![p0_new];
+        let p1_new = add_library_card(&mut state, PlayerId(1), "P1 New Orc", false);
+        state.players[1].library = crate::im::vector![p1_new];
+
+        let mut events2 = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &build_chain(source), &mut events2, 0)
+            .unwrap();
+
+        // The opponent's choice pool is THIS resolution's batch only — the
+        // first upkeep's leftovers are linked to the source but were not
+        // "exiled this way" now.
+        let offered = match &state.waiting_for {
+            WaitingFor::ChooseFromZoneChoice { player, cards, .. } => {
+                assert_eq!(*player, PlayerId(1));
+                cards.clone()
+            }
+            other => panic!("expected upkeep-2 ChooseFromZoneChoice, got {other:?}"),
+        };
+        let mut offered_sorted = offered;
+        offered_sorted.sort();
+        let mut expected = vec![p0_new, p1_new];
+        expected.sort();
+        assert_eq!(
+            offered_sorted, expected,
+            "upkeep-2 choice pool must exclude upkeep-1 leftovers"
+        );
+
+        // The opponent chooses P1's new Orc; the window must offer ONLY P0's
+        // new Wurm. Without the resolution-scoped member pool, the stale
+        // still-linked Beast from upkeep 1 would pass `ExiledBySource` +
+        // `Not(InTrackedSet)` and be wrongly offered here.
+        apply(
+            &mut state,
+            PlayerId(1),
+            GameAction::SelectCards {
+                cards: vec![p1_new],
+            },
+        )
+        .unwrap();
+        match &state.waiting_for {
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::FreeCastWindow { candidates, .. },
+                ..
+            } => {
+                assert!(
+                    !candidates.contains(&p0_old),
+                    "upkeep-2 window must NOT offer upkeep 1's leftover (stale ledger)"
+                );
+                assert_eq!(
+                    candidates,
+                    &vec![p0_new],
+                    "upkeep-2 window offers exactly this resolution's other hit"
+                );
+            }
+            other => panic!("expected upkeep-2 FreeCastWindow, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2d two-player regression: with exactly ONE live opponent there is
+    /// nothing for the controller to decide, so the opponent-picker pause must
+    /// be skipped and the zone choice presented directly to that opponent.
+    #[test]
+    fn plargg_two_player_skips_the_opponent_picker_pause() {
+        use crate::types::ability::{CardSelectionMode, Chooser, ZoneOwner};
+        use crate::types::game_state::WaitingFor;
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Plargg and Nassari".to_string(),
+            Zone::Battlefield,
+        );
+
+        let p0_hit = add_library_card(&mut state, PlayerId(0), "P0 Beast", false);
+        state.players[0].library = crate::im::vector![p0_hit];
+        let p1_hit = add_library_card(&mut state, PlayerId(1), "P1 Goblin", false);
+        state.players[1].library = crate::im::vector![p1_hit];
+
+        let mut choose_sub = ResolvedAbility::new(
+            Effect::ChooseFromZone {
+                count: 1,
+                zone: Zone::Exile,
+                additional_zones: vec![],
+                zone_owner: ZoneOwner::AllOwners,
+                filter: Some(TargetFilter::And {
+                    filters: vec![nonland_filter(), TargetFilter::ExiledBySource],
+                }),
+                chooser: Chooser::Opponent.into(),
+                candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+                reciprocal_role: None,
+                up_to: false,
+                selection: CardSelectionMode::Chosen,
+                constraint: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        choose_sub.sub_ability = None;
+
+        let mut wrapped = ResolvedAbility::new(
+            Effect::ExileFromTopUntil {
+                player: TargetFilter::Controller,
+                until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    filter: nonland_filter(),
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        wrapped.player_scope = Some(PlayerFilter::All);
+        wrapped.sub_ability = Some(Box::new(choose_sub));
+
+        let mut events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &wrapped, &mut events, 0).unwrap();
+
+        // No picker pause — the single opponent gets the zone choice directly.
+        match &state.waiting_for {
+            WaitingFor::ChooseFromZoneChoice { player, .. } => {
+                assert_eq!(
+                    *player,
+                    PlayerId(1),
+                    "the lone opponent must be the chooser without a picker pause"
+                );
+            }
+            other => {
+                panic!("expected a direct ChooseFromZoneChoice with one opponent, got {other:?}")
+            }
         }
     }
 
@@ -1085,6 +2193,51 @@ mod tests {
             Zone::Library,
             "card after the threshold was reached should remain in the library"
         );
+    }
+
+    /// CR 107.3a: an X threshold reads the X announced for the resolving
+    /// ability. No printed card parses an X threshold, so this drives the
+    /// resolver directly.
+    #[test]
+    fn cumulative_threshold_reads_the_announced_x() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "X Threshold".to_string(),
+            Zone::Battlefield,
+        );
+        let c1 = add_library_card_with_mv(&mut state, PlayerId(0), "Three", 3);
+        let c2 = add_library_card_with_mv(&mut state, PlayerId(0), "Four", 4);
+        let c3 = add_library_card_with_mv(&mut state, PlayerId(0), "Five", 5);
+        state.players[0].library = crate::im::vector![c1, c2, c3];
+
+        let mut ability = ResolvedAbility::new(
+            Effect::ExileFromTopUntil {
+                player: TargetFilter::Controller,
+                until: UntilCondition::CumulativeThreshold {
+                    property: ObjectProperty::ManaValue,
+                    comparator: Comparator::GE,
+                    threshold: QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.chosen_x = Some(7);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // 3 + 4 = 7 reaches X = 7; with X read as zero only the first card moves.
+        assert_eq!(state.objects[&c1].zone, Zone::Exile);
+        assert_eq!(state.objects[&c2].zone, Zone::Exile);
+        assert_eq!(state.objects[&c3].zone, Zone::Library);
     }
 
     /// CR 202.3 + CR 107.3e: When the library cannot reach the threshold even
@@ -1341,6 +2494,8 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::DuringResolution,
                 mana_spend_permission: None,
+                additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![],
             source,
@@ -1355,6 +2510,7 @@ mod tests {
             Effect::ExileFromTopUntil {
                 player: TargetFilter::Controller,
                 until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 1 },
                     filter: legendary_nonland_filter(),
                 },
             },
@@ -1548,6 +2704,18 @@ mod tests {
         // Unreached card untouched.
         assert_eq!(state.objects[&unreached].zone, Zone::Library);
         assert!(state.players[0].library.contains(&unreached));
+        let remains_linked = |state: &GameState| {
+            state.exile_links.iter().any(|link| {
+                link.exiled_id == hit
+                    && link.source_id == source
+                    && link.kind == crate::types::game_state::ExileLinkKind::TrackedBySource
+            })
+        };
+        assert!(remains_linked(&state));
+        state.players[0].library.clear();
+        super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert_eq!(state.objects[&hit].zone, Zone::Exile);
+        assert!(remains_linked(&state));
     }
 
     /// (d) Parser shape: Jodah's verbatim Oracle text lowers to the normalized
@@ -1638,5 +2806,151 @@ mod tests {
             !has_unimplemented(exec),
             "the Jodah trigger chain must contain no Unimplemented effects"
         );
+    }
+
+    fn counted_until(count: i32) -> Effect {
+        Effect::ExileFromTopUntil {
+            player: TargetFilter::Controller,
+            until: UntilCondition::NextMatches {
+                filter: nonland_filter(),
+                count: QuantityExpr::Fixed { value: count },
+            },
+        }
+    }
+
+    /// The hand-off a counted loop's sub-ability sees: "put them into your hand".
+    fn hits_to_hand() -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Exile),
+                destination: Zone::Hand,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+    }
+
+    fn counted_source(state: &mut GameState) -> ObjectId {
+        create_object(
+            state,
+            CardId(100),
+            PlayerId(0),
+            "Counted Source".to_string(),
+            Zone::Battlefield,
+        )
+    }
+
+    /// CR 608.2c: "until you exile two nonland cards" passes the first match,
+    /// stops on the second, and hands BOTH matches to the next instruction.
+    #[test]
+    fn counted_loop_stops_on_the_nth_match_and_hands_on_every_match() {
+        let mut state = GameState::new_two_player(42);
+        let source = counted_source(&mut state);
+        let land = add_library_card(&mut state, PlayerId(0), "Forest", true);
+        let first = add_library_card(&mut state, PlayerId(0), "First Bear", false);
+        let second = add_library_card(&mut state, PlayerId(0), "Second Bear", false);
+        let unreached = add_library_card(&mut state, PlayerId(0), "Unreached Bear", false);
+        state.players[0].library = crate::im::vector![land, first, second, unreached];
+
+        let mut ability = ResolvedAbility::new(counted_until(2), vec![], source, PlayerId(0));
+        ability.sub_ability = Some(Box::new(hits_to_hand()));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&land].zone, Zone::Exile);
+        assert_eq!(state.objects[&first].zone, Zone::Hand);
+        assert_eq!(state.objects[&second].zone, Zone::Hand);
+        assert_eq!(state.objects[&unreached].zone, Zone::Library);
+    }
+
+    /// CR 608.2c: with fewer matches than the count, the loop runs out of
+    /// library and hands on the matches it found.
+    #[test]
+    fn counted_loop_hands_on_the_matches_found_when_the_library_runs_out() {
+        let mut state = GameState::new_two_player(42);
+        let source = counted_source(&mut state);
+        let land = add_library_card(&mut state, PlayerId(0), "Forest", true);
+        let only = add_library_card(&mut state, PlayerId(0), "Only Bear", false);
+        let last_land = add_library_card(&mut state, PlayerId(0), "Mountain", true);
+        state.players[0].library = crate::im::vector![land, only, last_land];
+
+        let mut ability = ResolvedAbility::new(counted_until(2), vec![], source, PlayerId(0));
+        ability.sub_ability = Some(Box::new(hits_to_hand()));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&only].zone, Zone::Hand);
+        assert_eq!(state.objects[&land].zone, Zone::Exile);
+        assert_eq!(state.objects[&last_land].zone, Zone::Exile);
+        assert!(state.players[0].library.is_empty());
+    }
+
+    /// CR 608.2c: a count of zero is met before the first card moves.
+    #[test]
+    fn counted_loop_with_a_zero_count_exiles_nothing() {
+        let mut state = GameState::new_two_player(42);
+        let source = counted_source(&mut state);
+        let land = add_library_card(&mut state, PlayerId(0), "Forest", true);
+        let bear = add_library_card(&mut state, PlayerId(0), "Bear", false);
+        state.players[0].library = crate::im::vector![land, bear];
+
+        let ability = ResolvedAbility::new(counted_until(0), vec![], source, PlayerId(0));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&land].zone, Zone::Library);
+        assert_eq!(state.objects[&bear].zone, Zone::Library);
+        // Yes-partner: the same board with a count of one exiles down to the bear.
+        let ability = ResolvedAbility::new(counted_until(1), vec![], source, PlayerId(0));
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(state.objects[&bear].zone, Zone::Exile);
+    }
+
+    /// CR 616.1 + CR 608.2c: a loop paused for a replacement choice keeps the
+    /// matches it already found, so the resumed loop stops on the count.
+    #[test]
+    fn a_resumed_counted_loop_keeps_the_matches_found_before_the_pause() {
+        let mut state = GameState::new_two_player(42);
+        let source = counted_source(&mut state);
+        let first = add_library_card(&mut state, PlayerId(0), "First Bear", false);
+        let paused = add_library_card(&mut state, PlayerId(0), "Paused Bear", false);
+        let unreached = add_library_card(&mut state, PlayerId(0), "Unreached Bear", false);
+        state.players[0].library = crate::im::vector![unreached];
+        // The first match was exiled before the pause; the paused card's
+        // replacement-resolved move already put it into exile.
+        for id in [first, paused] {
+            let mut events = Vec::new();
+            crate::game::zones::move_to_zone(&mut state, id, Zone::Exile, &mut events);
+        }
+        state.pending_exile_from_top_until = Some(Box::new(
+            crate::types::game_state::PendingExileFromTopUntil {
+                pending_card: paused,
+                remaining: vec![unreached],
+                linked_batch: Vec::new(),
+                cumulative: 0,
+                hits: vec![first],
+            },
+        ));
+
+        let mut ability = ResolvedAbility::new(counted_until(2), vec![], source, PlayerId(0));
+        ability.sub_ability = Some(Box::new(hits_to_hand()));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&first].zone, Zone::Hand);
+        assert_eq!(state.objects[&paused].zone, Zone::Hand);
+        assert_eq!(state.objects[&unreached].zone, Zone::Library);
     }
 }

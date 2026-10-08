@@ -22,22 +22,13 @@ expression: "&ir"
         "fragment": "Flying, first strike, lifelink, protection from Demons and from Dragons"
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "Unimplemented",
-            "name": "unknown",
+        "Unsupported": {
+          "unsupported": {
+            "category": "Unknown",
+            "fragment": "Flying, first strike, lifelink, protection from Demons and from Dragons",
             "description": "Flying, first strike, lifelink, protection from Demons and from Dragons"
           },
-          "cost": null,
-          "sub_ability": null,
-          "duration": null,
-          "description": "Flying, first strike, lifelink, protection from Demons and from Dragons",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "min_x_value": 0
         }
       }
     }

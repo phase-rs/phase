@@ -12,6 +12,9 @@ pub struct DeckData {
     pub sideboard: Vec<String>,
     #[serde(default)]
     pub commander: Vec<String>,
+    /// Commander-family companion kept outside the 100-card deck.
+    #[serde(default)]
+    pub companion: Vec<String>,
     /// CR 717.2: Supplementary Attraction deck (Unfinity) as card names.
     #[serde(default)]
     pub attraction_deck: Vec<String>,

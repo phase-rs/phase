@@ -10,17 +10,17 @@ use crate::parser::oracle_util::{apply_bracket_mode, strip_reminder_text, Bracke
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationRestriction, AdditionalCost, AdditionalCostOrigin, AdditionalCostPaymentSource,
-    AggregateFunction, AttackScope, AttackSubject, CardPlayMode, CastFromZoneDriver,
-    CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, ChoiceType, Comparator,
-    ContinuousModification, ControllerRef, CopyRetargetPermission, CounterTriggerFilter,
-    DamageChannel, DamageKindFilter, DamageModification, DelayedTriggerCondition, Duration, Effect,
-    EffectScope, FilterProp, KickerVariant, ManaContribution, ManaProduction,
-    ModalSelectionCondition, ModalSelectionConstraint, NinjutsuVariant, ObjectScope,
-    ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr,
-    QuantityRef, RenownSubject, ReplacementCondition, ReplacementDefinition, RuntimeHandler,
-    SacrificeCost, SearchSelectionConstraint, StaticCondition, StaticDefinition, TapStateChange,
-    TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier,
+    AggregateFunction, AttachCardinality, AttachSelection, AttackSubject, CardPlayMode,
+    CastFromZoneDriver, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, ChoiceType,
+    CombatHistoryScope, Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission,
+    CounterTriggerFilter, DamageChannel, DamageKindFilter, DamageModification,
+    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, KickerVariant,
+    ManaContribution, ManaProduction, ModalSelectionCondition, ModalSelectionConstraint,
+    NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValue,
+    PtValueScope, QuantityExpr, QuantityRef, RenownSubject, ReplacementCondition,
+    ReplacementDefinition, RuntimeHandler, SacrificeCost, SearchSelectionConstraint,
+    StaticCondition, StaticDefinition, TapStateChange, TargetChoiceTiming, TargetFilter,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -40,6 +40,70 @@ use crate::types::zones::Zone;
 // ---------------------------------------------------------------------------
 // Shared helpers for building card faces from MTGJSON data
 // ---------------------------------------------------------------------------
+
+/// Exact primary Oracle-parser input prepared by the production face builder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OracleParserInput {
+    pub oracle_text: String,
+    pub card_name: String,
+    pub keyword_names: Vec<String>,
+    pub types: Vec<String>,
+    pub subtypes: Vec<String>,
+    pub has_cleave_variant: bool,
+    cleave_oracle_text: Option<String>,
+}
+
+/// Prepare the single primary parse performed by `build_oracle_face_inner`.
+pub fn prepare_oracle_parser_input(
+    mtgjson: &AtomicCard,
+    skip_mtgjson_keywords: bool,
+) -> OracleParserInput {
+    let mtgjson_keyword_names = mtgjson
+        .keywords
+        .as_ref()
+        .map(|keywords| {
+            keywords
+                .iter()
+                .map(|keyword| keyword.to_ascii_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
+    let keyword_names = if skip_mtgjson_keywords {
+        vec!["__force_keyword_extract__".to_string()]
+    } else {
+        mtgjson_keyword_names
+    };
+    let raw_oracle_text = mtgjson.text.as_deref().unwrap_or("");
+    let (oracle_text, cleave_text) = prepare_cleave_oracle_text(raw_oracle_text, &keyword_names);
+    OracleParserInput {
+        oracle_text,
+        card_name: mtgjson
+            .face_name
+            .as_deref()
+            .unwrap_or(&mtgjson.name)
+            .to_string(),
+        keyword_names,
+        types: mtgjson.types.clone(),
+        subtypes: mtgjson.subtypes.clone(),
+        has_cleave_variant: cleave_text.is_some(),
+        cleave_oracle_text: cleave_text,
+    }
+}
+
+/// CR 702.148a-b + CR 612: Cleave removes bracketed rules text as a text-changing effect.
+fn prepare_cleave_oracle_text(
+    raw_oracle_text: &str,
+    keyword_names: &[String],
+) -> (String, Option<String>) {
+    if keyword_names.iter().any(|name| name == "cleave") {
+        (
+            apply_bracket_mode(raw_oracle_text, BracketMode::KeepContent),
+            Some(apply_bracket_mode(raw_oracle_text, BracketMode::RemoveSpan)),
+        )
+    } else {
+        (raw_oracle_text.to_string(), None)
+    }
+}
 
 /// CR 702.148a-b + CR 612: Parse a face's Oracle text under Cleave's
 /// text-changing semantics, returning the printed-cost parse and (when the face
@@ -69,19 +133,34 @@ pub(crate) fn parse_oracle_with_cleave_brackets(
     crate::parser::oracle::ParsedAbilities,
     Option<CleaveVariant>,
 ) {
-    let has_cleave = keyword_names.iter().any(|n| n == "cleave");
+    let (base_oracle_text, cleave_text) =
+        prepare_cleave_oracle_text(raw_oracle_text, keyword_names);
+    parse_prepared_oracle_text(
+        &base_oracle_text,
+        cleave_text.as_deref(),
+        card_name,
+        keyword_names,
+        types,
+        subtypes,
+    )
+}
 
-    let base_oracle_text = if has_cleave {
-        apply_bracket_mode(raw_oracle_text, BracketMode::KeepContent)
-    } else {
-        raw_oracle_text.to_string()
-    };
-    let parsed = parse_oracle_text(&base_oracle_text, card_name, keyword_names, types, subtypes);
+fn parse_prepared_oracle_text(
+    base_oracle_text: &str,
+    cleave_text: Option<&str>,
+    card_name: &str,
+    keyword_names: &[String],
+    types: &[String],
+    subtypes: &[String],
+) -> (
+    crate::parser::oracle::ParsedAbilities,
+    Option<CleaveVariant>,
+) {
+    let parsed = parse_oracle_text(base_oracle_text, card_name, keyword_names, types, subtypes);
 
-    let cleave_variant = if has_cleave {
-        let cleave_text = apply_bracket_mode(raw_oracle_text, BracketMode::RemoveSpan);
+    let cleave_variant = if let Some(cleave_text) = cleave_text {
         let cleave_parsed =
-            parse_oracle_text(&cleave_text, card_name, keyword_names, types, subtypes);
+            parse_oracle_text(cleave_text, card_name, keyword_names, types, subtypes);
         Some(CleaveVariant {
             abilities: cleave_parsed.abilities,
             triggers: cleave_parsed.triggers,
@@ -496,6 +575,11 @@ pub(crate) fn equip_ability_for_keyword(keyword: &Keyword) -> Option<AbilityDefi
         Effect::Attach {
             attachment: TargetFilter::SelfRef,
             target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            // CR 702.6a: the keyword's "target" names the HOST (the equipped
+            // creature); the attachment ("this permanent") is determined.
+            selection: AttachSelection::AtResolution {
+                count: AttachCardinality::One,
+            },
         },
     )
     .cost(AbilityCost::Mana { cost: cost.clone() })
@@ -536,6 +620,11 @@ pub fn synthesize_fortify(face: &mut CardFace) {
                             target: TargetFilter::Typed(
                                 TypedFilter::land().controller(ControllerRef::You),
                             ),
+                            // CR 702.67a: fortify — the keyword's "target" names the host (the
+                            // fortified land); the attachment ("this Fortification") is determined.
+                            selection: AttachSelection::AtResolution {
+                                count: AttachCardinality::One,
+                            },
                         },
                     )
                     .cost(AbilityCost::Mana { cost: cost.clone() })
@@ -581,6 +670,11 @@ pub fn synthesize_reconfigure(face: &mut CardFace) {
                             .controller(ControllerRef::You)
                             .properties(vec![FilterProp::Another]),
                     ),
+                    // CR 702.151a: reconfigure — the keyword's "target" names
+                    // the HOST; the attachment ("this permanent") is determined.
+                    selection: AttachSelection::AtResolution {
+                        count: AttachCardinality::One,
+                    },
                 },
             )
             .cost(AbilityCost::Mana { cost: cost.clone() })
@@ -936,6 +1030,10 @@ fn synthesize_etb_token_attach_keyword(
         Effect::Attach {
             attachment: TargetFilter::SelfRef,
             target: TargetFilter::LastCreated,
+            // The created token is the host; the attachment is the source.
+            selection: AttachSelection::AtResolution {
+                count: AttachCardinality::One,
+            },
         },
     );
 
@@ -1394,7 +1492,11 @@ pub fn synthesize_bargain(face: &mut CardFace) {
         return;
     }
 
-    face.additional_cost = Some(AdditionalCost::Optional {
+    face.additional_cost = Some(bargain_additional_cost());
+}
+
+pub(crate) fn bargain_additional_cost() -> AdditionalCost {
+    AdditionalCost::Optional {
         cost: AbilityCost::Sacrifice(SacrificeCost::count(
             TargetFilter::Or {
                 filters: vec![
@@ -1408,7 +1510,18 @@ pub fn synthesize_bargain(face: &mut CardFace) {
             1,
         )),
         repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
-    });
+    }
+}
+
+/// CR 702.174a: Zero-cost optional Gift promise. Matches `synthesize_gift` so
+/// `obj_additional_matches_instance` dedups the legacy face cost against the queue.
+pub(crate) fn gift_additional_cost() -> AdditionalCost {
+    AdditionalCost::Optional {
+        cost: AbilityCost::Mana {
+            cost: ManaCost::zero(),
+        },
+        repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+    }
 }
 
 /// Synthesize Gift optional cost and delivery effect.
@@ -1436,12 +1549,7 @@ pub fn synthesize_gift(face: &mut CardFace) {
     };
 
     // Gift uses a zero-cost optional additional cost — the "cost" is just a decision.
-    face.additional_cost = Some(AdditionalCost::Optional {
-        cost: AbilityCost::Mana {
-            cost: ManaCost::zero(),
-        },
-        repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
-    });
+    face.additional_cost = Some(gift_additional_cost());
 
     // Inject GiftDelivery as a wrapper around the first spell ability.
     // The delivery effect is a no-op when the gift wasn't promised, so the
@@ -1613,11 +1721,63 @@ pub fn compute_deck_copy_limit(face: &CardFace) -> Option<DeckCopyLimit> {
         .and_then(compute_deck_copy_limit_from_text)
 }
 
-/// CR 903.3 type-line analysis (excludes MTGJSON skill data). Public for use by
-/// the deck-validation predicate, which reads the precomputed `face.is_commander`
-/// at runtime but exposes this helper for callers that only have a `CardFace`.
-pub fn type_line_commander_eligible(face: &CardFace) -> bool {
+/// CR 903.3 / CR 702.124k: how a card qualifies to be designated a commander.
+///
+/// This is the decomposition of [`type_line_commander_eligible`], not a sibling
+/// of it: the general predicate is *defined in terms of* this one, so every
+/// existing caller of the general predicate is unaffected. The distinction
+/// exists because CR 903.13f(3) grants the partner ability only to a card that
+/// "can be a player's commander **by itself**" — a condition no predicate in
+/// the tree previously drew.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommanderQualification {
+    /// CR 903.3 (a)–(c) + CR 903.3a: designatable as the sole commander.
+    ByItself,
+    /// CR 702.124k: a legendary Background enchantment card, which "can't be
+    /// your commander unless you have also designated a commander with 'choose
+    /// a Background'".
+    OnlyAlongsideChooseABackground,
+    /// Not commander-eligible by type line.
+    No,
+}
+
+/// CR 903.3 type-line analysis, resolved to the "by itself" distinction
+/// CR 903.13f(3) needs. Excludes MTGJSON skill data.
+///
+/// LABELLED LIMITATION, stated rather than hidden: this reads the TYPE LINE
+/// only. `is_commander_eligible` prefers the pre-computed `face.is_commander`,
+/// which is the *union* of MTGJSON `leadershipSkills.commander` and this
+/// analysis — so a card MTGJSON marks a commander but whose type line does not
+/// would not receive the CR 903.13f(3) grant. The alternative, treating the
+/// MTGJSON union as "by itself", would grant partner to Backgrounds, which
+/// CR 702.124k forbids. The type-line reading is the conservative and
+/// rules-correct one.
+pub fn commander_qualification(face: &CardFace) -> CommanderQualification {
+    // CR 903.3a: explicit "can be your commander" override.
+    //
+    // BRANCH ORDER IS LOAD-BEARING and must not be "tidied" into type-line
+    // order. A card could in principle match both this override and the
+    // CR 702.124k Background branch below. CR 101.1: "Whenever a card's text
+    // directly contradicts these rules, the card takes precedence. The card
+    // overrides only the rule that applies to that specific situation."
+    // CR 702.124k's restriction is a RULE, so a printed ability saying the card
+    // can be your commander overrides it for that card, and such a card is
+    // `ByItself`. (CR 101.2's "'can't' takes precedence" does NOT govern here:
+    // it resolves a rule or effect against another EFFECT, and CR 702.124k is
+    // neither.) No printed card matches both today, so this specifies a
+    // currently-empty case rather than changing a live verdict.
+    let explicitly_allowed = face
+        .oracle_text
+        .as_ref()
+        .is_some_and(|text| oracle_text_allows_commander(text, &face.name));
+    if explicitly_allowed {
+        return CommanderQualification::ByItself;
+    }
+
     let is_legendary = face.card_type.supertypes.contains(&Supertype::Legendary);
+    if !is_legendary {
+        return CommanderQualification::No;
+    }
     let subtypes = &face.card_type.subtypes;
 
     // CR 903.3(a): legendary creature.
@@ -1632,18 +1792,30 @@ pub fn type_line_commander_eligible(face: &CardFace) -> bool {
         .any(|s| s.eq_ignore_ascii_case("Spacecraft"))
         && face.power.is_some()
         && face.toughness.is_some();
-    // CR 702.124: legendary Background enchantment (paired with a partner).
-    let is_background = subtypes
-        .iter()
-        .any(|s| s.eq_ignore_ascii_case("Background"));
-    // CR 903.3a: explicit "can be your commander" override.
-    let explicitly_allowed = face
-        .oracle_text
-        .as_ref()
-        .is_some_and(|text| oracle_text_allows_commander(text, &face.name));
+    if is_creature || is_vehicle || is_spacecraft_with_pt {
+        return CommanderQualification::ByItself;
+    }
 
-    (is_legendary && (is_creature || is_vehicle || is_spacecraft_with_pt || is_background))
-        || explicitly_allowed
+    // CR 702.124k: a legendary Background enchantment is commander-eligible,
+    // but never on its own.
+    if subtypes
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case("Background"))
+    {
+        return CommanderQualification::OnlyAlongsideChooseABackground;
+    }
+
+    CommanderQualification::No
+}
+
+/// CR 903.3 type-line analysis (excludes MTGJSON skill data). Public for use by
+/// the deck-validation predicate, which reads the precomputed `face.is_commander`
+/// at runtime but exposes this helper for callers that only have a `CardFace`.
+///
+/// Defined in terms of [`commander_qualification`], so the two can never
+/// disagree about who is eligible.
+pub fn type_line_commander_eligible(face: &CardFace) -> bool {
+    !matches!(commander_qualification(face), CommanderQualification::No)
 }
 
 /// Brawl variant of CR 903.3: determine if a card can be a Brawl commander.
@@ -2320,6 +2492,14 @@ pub fn synthesize_casualty(face: &mut CardFace) {
             TriggerDefinition::new(TriggerMode::SpellCast)
                 .valid_card(TargetFilter::SelfRef)
                 .trigger_zones(vec![Zone::Stack])
+                .condition(TriggerCondition::AdditionalCostPaid {
+                    source: AdditionalCostPaymentSource::NonKicker,
+                    origin: Some(AdditionalCostOrigin::Casualty),
+                    origin_ordinal: Some(casualty_ordinal),
+                    variant: None,
+                    kicker_cost: None,
+                    min_count: 1,
+                })
                 .execute(execute)
                 .description("Casualty — copy this spell when cast with casualty paid".to_string()),
         );
@@ -2909,13 +3089,16 @@ pub fn synthesize_madness_intrinsics(face: &mut CardFace) {
 /// replacement whose execute mills N then returns this card from the graveyard
 /// to hand.
 ///
-/// The replacement functions while the card is in the graveyard. Two pieces make
-/// that work: (1) the draw-replacement default player-scope follows the dredge
-/// card's effective source player (CR 109.4 + CR 108.4a), so a graveyard card
-/// applies on its owner's draw — no `valid_player`/`valid_card` needed (and
+/// CR 113.6b: the replacement functions from the graveyard and ONLY from the
+/// graveyard, which the definition states via `active_zones = [Graveyard]` —
+/// without it the card would keep offering dredge from the battlefield, where
+/// CR 702.52a says the ability doesn't function. Two more pieces complete it:
+/// (1) the draw-replacement default player-scope follows the dredge card's
+/// effective source player (CR 109.4 + CR 108.4a), so a graveyard card applies
+/// on its owner's draw — no `valid_player`/`valid_card` needed (and
 /// `valid_card: SelfRef` would not match a `Draw`, which has no affected object);
-/// (2) `find_applicable_replacements` includes graveyard dredge cards on that
-/// player's draw, gated on library size >= N (CR 702.52b enforced at offer time).
+/// (2) `find_applicable_replacements` gates the offer on library size >= N
+/// (CR 702.52b), the one half that depends on live game state.
 pub fn synthesize_dredge(face: &mut CardFace) {
     let Some(n) = face.keywords.iter().find_map(|k| match k {
         Keyword::Dredge(n) => Some(*n),
@@ -2927,6 +3110,24 @@ pub fn synthesize_dredge(face: &mut CardFace) {
         return;
     }
 
+    face.replacements.push(dredge_replacement_definition(n));
+}
+
+/// CR 702.52a + CR 121.6b + CR 113.6b: the single per-value Dredge Draw
+/// replacement definition — "if you would draw a card, you may instead mill N
+/// cards and return this card from your graveyard to your hand."
+///
+/// The single authority for building a Dredge replacement, shared by:
+/// - build-time synthesis (`synthesize_dredge`) for PRINTED Dredge, and
+/// - the runtime granted-keyword replacement path (`granted_dredge_value` →
+///   `find_applicable_replacements` in `game/replacement.rs`), which surfaces
+///   one virtual candidate for a graveyard card whose Dredge is granted at
+///   runtime (e.g. The Necrobloom's "Land cards in your graveyard have dredge
+///   2") rather than printed.
+///
+/// Because both callers build identical definitions, printed + granted
+/// instances each apply through the same shape.
+pub(crate) fn dredge_replacement_definition(n: u32) -> ReplacementDefinition {
     // CR 702.52a: "return this card from your graveyard to your hand."
     let return_to_hand = AbilityDefinition::new(
         AbilityKind::Spell,
@@ -2960,17 +3161,25 @@ pub fn synthesize_dredge(face: &mut CardFace) {
     mill.sub_ability = Some(Box::new(return_to_hand));
 
     // CR 702.52a + CR 121.6b: Dredge replaces a single individual card draw
-    // ("if you would draw a card, you may instead mill N"), not the instruction count.
+    // ("if you would draw a card, you may instead mill N"), not the instruction
+    // count — and CR 702.52a + CR 113.6b, it "functions only while the card with
+    // dredge is in a player's graveyard." Declaring that zone on the definition
+    // is what keeps a dredge creature on the BATTLEFIELD, where the ability does
+    // not function, from offering its dredge on your draws.
     let mut replacement = ReplacementDefinition::new(ReplacementEvent::Draw)
-        .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw);
+        .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
+        .active_zones(vec![Zone::Graveyard]);
     replacement.mode = crate::types::ability::ReplacementMode::Optional { decline: None };
-    replacement.description = Some(
-        "CR 702.52a: Dredge — instead of drawing, you may mill N cards and return this \
-         card from your graveyard to your hand."
-            .to_string(),
-    );
+    // CR 616.1: a printed and a differently-valued GRANTED dredge candidate can
+    // co-occur on one card in a single ordering prompt, so this label must show
+    // its own N (the granted label interpolates its own value the same way).
+    let cards = if n == 1 { "card" } else { "cards" };
+    replacement.description = Some(format!(
+        "CR 702.52a: Dredge — instead of drawing, you may mill {n} {cards} and return \
+         this card from your graveyard to your hand."
+    ));
     replacement.execute = Some(Box::new(mill));
-    face.replacements.push(replacement);
+    replacement
 }
 
 /// Idempotency-shape predicate for the synthesized Dredge draw-replacement — a
@@ -3110,14 +3319,16 @@ pub(crate) fn ensure_evoke_etb_sac_trigger(obj: &mut crate::game::game_object::G
     // so the trigger is collectable this same resolution before the next layers
     // pass re-derives `trigger_definitions`.
     if obj.base_trigger_definitions.iter().any(is_evoke_sac) {
-        if !obj.trigger_definitions.iter_all().any(is_evoke_sac) {
-            obj.trigger_definitions.push(build_evoke_etb_sac_trigger());
+        if !obj
+            .trigger_definitions
+            .iter_all()
+            .any(|entry| is_evoke_sac(entry.definition()))
+        {
+            obj.relive_printed_trigger(is_evoke_sac);
         }
         return;
     }
-    let trigger = build_evoke_etb_sac_trigger();
-    std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger.clone());
-    obj.trigger_definitions.push(trigger);
+    obj.push_printed_trigger(build_evoke_etb_sac_trigger());
 }
 
 fn offspring_etb_copy_trigger_for_ordinal(origin_ordinal: u32) -> TriggerDefinition {
@@ -3205,20 +3416,17 @@ pub(crate) fn ensure_paid_offspring_etb_copy_triggers(
             .iter()
             .any(|trigger| is_offspring_etb_copy_trigger_for_ordinal(trigger, origin_ordinal));
         if has_base {
-            if !obj
-                .trigger_definitions
-                .iter_all()
-                .any(|trigger| is_offspring_etb_copy_trigger_for_ordinal(trigger, origin_ordinal))
-            {
-                obj.trigger_definitions
-                    .push(offspring_etb_copy_trigger_for_ordinal(origin_ordinal));
+            if !obj.trigger_definitions.iter_all().any(|entry| {
+                is_offspring_etb_copy_trigger_for_ordinal(entry.definition(), origin_ordinal)
+            }) {
+                obj.relive_printed_trigger(|trigger| {
+                    is_offspring_etb_copy_trigger_for_ordinal(trigger, origin_ordinal)
+                });
             }
             continue;
         }
 
-        let trigger = offspring_etb_copy_trigger_for_ordinal(origin_ordinal);
-        std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger.clone());
-        obj.trigger_definitions.push(trigger);
+        obj.push_printed_trigger(offspring_etb_copy_trigger_for_ordinal(origin_ordinal));
     }
 }
 
@@ -3692,16 +3900,21 @@ pub(crate) fn entry_replacement_for_grant_static(
 
 /// CR 702.64a: Absorb N — "If a source would deal damage to this creature,
 /// prevent N of that damage." A continuous, self-recipient damage replacement:
-/// `DamageModification::Minus { value: N }` saturating-subtracts N from each
-/// damage event whose recipient is this creature (`valid_card: SelfRef`). It is
-/// NOT a consumed shield, so it re-applies to every source and every event
-/// independently (CR 702.64b). No new variant — mirrors the continuous
-/// damage-prevention statics (Benevolent Unicorn class) and the self-scoped
-/// `valid_card(SelfRef)` damage replacements (persistent prevention shields).
+/// `DamageModification::PreventionMinus { value: N }` saturating-subtracts N
+/// from each damage event whose recipient is this creature (`valid_card:
+/// SelfRef`). `PreventionMinus` is the CR 615 prevention provenance of the
+/// shared `Minus` subtraction authority — Absorb genuinely PREVENTS damage, so
+/// it emits `DamagePrevented` bookkeeping, unlike the plain-arithmetic
+/// `Minus` statics (Benevolent Unicorn class). It is NOT a consumed shield, so
+/// it re-applies to every source and every event independently (CR 702.64b),
+/// like the self-scoped `valid_card(SelfRef)` damage replacements (persistent
+/// prevention shields).
 fn build_absorb_replacement(n: u32) -> ReplacementDefinition {
     ReplacementDefinition::new(ReplacementEvent::DamageDone)
         .valid_card(TargetFilter::SelfRef)
-        .damage_modification(DamageModification::Minus { value: n })
+        .damage_modification(DamageModification::PreventionMinus {
+            value: crate::types::ability::PreventionFormula::fixed(n),
+        })
         .description(format!(
             "CR 702.64a: Absorb {n} — if a source would deal damage to this creature, \
              prevent {n} of that damage."
@@ -3717,7 +3930,9 @@ fn is_absorb_replacement(r: &ReplacementDefinition, n: u32) -> bool {
         && matches!(r.valid_card, Some(TargetFilter::SelfRef))
         && matches!(
             r.damage_modification,
-            Some(DamageModification::Minus { value }) if value == n
+            Some(DamageModification::PreventionMinus {
+                value: crate::types::ability::PreventionFormula::Fixed(value),
+            }) if value == n
         )
 }
 
@@ -3763,6 +3978,53 @@ fn static_grants_riot(static_def: &StaticDefinition) -> bool {
         })
 }
 
+/// CR 702.37b: Megamorph — "As this permanent is turned face up, put a +1/+1
+/// counter on it if its megamorph cost was paid to turn it face up." A
+/// TurnFaceUp replacement gated on the payment fact
+/// (`ReplacementCondition::TurnUpCostSourcePaid`), which only the PAID
+/// special action publishes — an effect-driven (free) turn-up places nothing.
+/// Riding the replacement pipeline gives the rider ordinary CR 616.1
+/// ordering with any other as-turned-face-up replacement.
+pub fn synthesize_megamorph(face: &mut CardFace) {
+    let has_megamorph = face
+        .keywords
+        .iter()
+        .any(|kw| matches!(kw, Keyword::Megamorph(_)));
+    if !has_megamorph {
+        return;
+    }
+    let already = face.replacements.iter().any(|replacement| {
+        replacement.event == ReplacementEvent::TurnFaceUp
+            && matches!(
+                replacement.condition,
+                Some(ReplacementCondition::TurnUpCostSourcePaid {
+                    source: crate::types::ability::TurnUpCostSource::Megamorph
+                })
+            )
+    });
+    if already {
+        return;
+    }
+    face.replacements.push(
+        ReplacementDefinition::new(ReplacementEvent::TurnFaceUp)
+            .valid_card(TargetFilter::SelfRef)
+            .condition(ReplacementCondition::TurnUpCostSourcePaid {
+                source: crate::types::ability::TurnUpCostSource::Megamorph,
+            })
+            .execute(
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::PutCounter {
+                        counter_type: CounterType::Plus1Plus1,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::SelfRef,
+                    },
+                )
+                .description("Put a +1/+1 counter on it (its megamorph cost was paid)".to_string()),
+            ),
+    );
+}
+
 fn add_riot_replacements(face: &mut CardFace, valid_card: TargetFilter, needed: usize) {
     let existing = face
         .replacements
@@ -3796,6 +4058,7 @@ fn build_riot_replacement(valid_card: TargetFilter) -> ReplacementDefinition {
                 }])],
             duration: Some(Duration::Permanent),
             target: None,
+            end_cost: None,
         },
     )
     .duration(Duration::Permanent)
@@ -4036,7 +4299,9 @@ fn is_unleash_cant_block_static(
 ///     Graveyard`, `valid_card = SelfRef` (the canonical dies trigger shape;
 ///     CR 603.10a — leaves-the-battlefield triggers look back in time).
 ///   * `condition = Not(HadCounters { Some("P1P1") })` — CR 400.7 LKI lookup
-///     against `state.lki_cache` for the source's pre-death counter map.
+///     against the exact `ZoneChanged` record context for the pre-death counter
+///     map. The ObjectId-keyed cache is only a compatibility fallback when a
+///     legacy/defaulted record has no context.
 ///   * Execute body: `Effect::ChangeZone` from `Graveyard` → `Battlefield`
 ///     targeting `SelfRef`, with `enter_with_counters = [("P1P1", 1)]`. The
 ///     default `enters_under = None` matches the rule's "under its owner's
@@ -5020,6 +5285,7 @@ fn is_provoke_attack_trigger(t: &TriggerDefinition) -> bool {
         execute.sub_ability.as_deref().map(|a| &*a.effect),
         Some(Effect::ForceBlock {
             target: TargetFilter::ParentTarget,
+            ..
         })
     )
 }
@@ -5148,9 +5414,14 @@ fn build_provoke_trigger() -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::ForceBlock {
             target: TargetFilter::ParentTarget,
+            attacker: Some(crate::types::ability::ForceBlockAttackerRef::Source),
+            duration: Duration::UntilEndOfCombat,
         },
     )
-    .description("CR 509.1c: that creature blocks this creature this turn if able".to_string());
+    .description(
+        "CR 702.39a + CR 509.1c: that creature blocks this creature this combat if able"
+            .to_string(),
+    );
 
     // CR 702.39a + CR 701.26b: "you may have target creature ... untap" — the
     // optional parent body untaps the chosen defender, then force-blocks it.
@@ -5165,7 +5436,7 @@ fn build_provoke_trigger() -> TriggerDefinition {
     .optional()
     .sub_ability(force_block)
     .description(
-        "Provoke — untap target creature defending player controls; it blocks this turn if able"
+        "Provoke — untap target creature defending player controls; it blocks this combat if able"
             .to_string(),
     );
 
@@ -5470,7 +5741,7 @@ fn melee_attacked_opponents_expr() -> QuantityExpr {
         qty: QuantityRef::PlayerCount {
             filter: PlayerFilter::OpponentAttacked {
                 subject: AttackSubject::You,
-                scope: AttackScope::ThisCombat,
+                scope: CombatHistoryScope::ThisCombat,
             },
         },
     }
@@ -5785,7 +6056,9 @@ fn build_ingest_trigger() -> TriggerDefinition {
     let exile = Effect::ExileTop {
         player: TargetFilter::TriggeringPlayer,
         count: QuantityExpr::Fixed { value: 1 },
+        position: crate::types::ability::LibraryPosition::Top,
         face_down: false,
+        actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
     };
     let execute = AbilityDefinition::new(AbilityKind::Spell, exile).description(
         "CR 702.115a: Ingest — that player exiles the top card of their library".to_string(),
@@ -5816,7 +6089,9 @@ fn is_ingest_trigger(t: &TriggerDefinition) -> bool {
             Some(Effect::ExileTop {
                 player: TargetFilter::TriggeringPlayer,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
             })
         )
 }
@@ -5978,6 +6253,7 @@ fn build_extort_trigger() -> TriggerDefinition {
             amount: QuantityExpr::Ref {
                 qty: QuantityRef::PreviousEffectAmount {
                     channel: crate::types::ability::DamageChannel::Total,
+                    aggregate: AggregateFunction::Sum,
                 },
             },
             player: TargetFilter::Controller,
@@ -6364,6 +6640,10 @@ fn build_evolve_trigger() -> TriggerDefinition {
 /// (`"P1P1"` or `"M1M1"`). Any future "dies → return with single typed
 /// counter, gated on the same counter type's prior absence" keyword can reuse
 /// this directly.
+///
+/// At runtime, `HadCounters` reads the exact `ZoneChanged` record LKI. The
+/// ObjectId-keyed cache is retained only for legacy records whose defaulted
+/// source context is absent, never as an alternative to a present context.
 fn build_dies_return_with_counter_trigger(
     counter_type: &str,
     counter_label: &str,
@@ -6397,8 +6677,9 @@ fn build_dies_return_with_counter_trigger(
     ));
 
     // CR 400.7 + CR 603.10a: "if it had no <polarity> counters on it" —
-    // negate `HadCounters` to express the absence of the specific counter
-    // type in the LKI snapshot captured by `apply_zone_exit_cleanup`.
+    // negate `HadCounters` to express the absence of the specific counter type
+    // in the exact ZoneChanged record LKI. Only a legacy record with no source
+    // context may fall back to the ObjectId-keyed cache.
     let condition = TriggerCondition::Not {
         condition: Box::new(TriggerCondition::HadCounters {
             counter_type: Some(counter_type),
@@ -6474,6 +6755,8 @@ fn build_suspend_last_counter_cast_trigger() -> TriggerDefinition {
             // sorcery-speed timing bypass for an upkeep recast (issue #1520).
             driver: CastFromZoneDriver::DuringResolution,
             mana_spend_permission: None,
+            additional_cost: None,
+            cast_cost_modifier: None,
         },
     )
     .optional();
@@ -7199,44 +7482,65 @@ pub fn synthesize_sunburst(face: &mut CardFace) {
         .filter(|r| is_sunburst_etb_replacement(r, &counter_type))
         .count();
 
-    let counter_phrase = match &counter_type {
+    for _ in existing..instances {
+        face.replacements
+            .push(sunburst_replacement_definition(&counter_type));
+    }
+}
+
+/// CR 702.44a + CR 702.44d + CR 601.2h: the single per-instance Sunburst ETB
+/// replacement definition — one `Moved`→Battlefield replacement on `SelfRef`
+/// whose execute places one counter of `counter_type` per distinct color of
+/// mana spent to cast the object.
+///
+/// The single authority for building a Sunburst replacement, shared by:
+/// - build-time synthesis (`synthesize_sunburst`) for PRINTED Sunburst, and
+/// - the runtime granted-keyword replacement path
+///   (`granted_sunburst_instances` → `granted_etb_replacement_definitions` →
+///   `find_applicable_replacements`), which
+///   surfaces one virtual candidate per *granted* Sunburst instance so a grant
+///   ("that spell gains sunburst": Solar Array / Lux Artillery) also places
+///   counters at entry (#5337).
+///
+/// Because both callers build identical definitions, printed + granted
+/// instances each yield a distinct candidate and apply separately, exactly as
+/// CR 702.44d ("If an object has multiple instances of sunburst, each one works
+/// separately") requires.
+pub(crate) fn sunburst_replacement_definition(counter_type: &CounterType) -> ReplacementDefinition {
+    let counter_phrase = match counter_type {
         CounterType::Plus1Plus1 => "+1/+1",
         _ => "charge",
     };
-
-    for _ in existing..instances {
-        let etb_counters = AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::PutCounter {
-                counter_type: counter_type.clone(),
-                // CR 702.44a + CR 601.2h: one counter per *color* (max 5) of mana
-                // spent to cast this object — the distinct-colors metric, not the
-                // total amount.
-                count: QuantityExpr::Ref {
-                    qty: QuantityRef::ManaSpentToCast {
-                        scope: CastManaObjectScope::SelfObject,
-                        metric: CastManaSpentMetric::DistinctColors,
-                    },
+    let etb_counters = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: counter_type.clone(),
+            // CR 702.44a + CR 601.2h: one counter per *color* (max 5) of mana
+            // spent to cast this object — the distinct-colors metric, not the
+            // total amount.
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::SelfObject,
+                    metric: CastManaSpentMetric::DistinctColors,
                 },
-                target: TargetFilter::SelfRef,
             },
-        )
-        .description(format!(
-            "This permanent enters with a {counter_phrase} counter on it for each color of mana spent to cast it"
-        ));
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .description(format!(
+        "This permanent enters with a {counter_phrase} counter on it for each color of mana spent to cast it"
+    ));
 
-        let replacement = ReplacementDefinition {
-            event: ReplacementEvent::Moved,
-            execute: Some(Box::new(etb_counters)),
-            valid_card: Some(TargetFilter::SelfRef),
-            // CR 614.1c: battlefield-entry-scoped (departure gate).
-            destination_zone: Some(Zone::Battlefield),
-            description: Some(format!(
-                "CR 702.44a: Sunburst — this permanent enters with a {counter_phrase} counter on it for each color of mana spent to cast it."
-            )),
-            ..ReplacementDefinition::new(ReplacementEvent::Moved)
-        };
-        face.replacements.push(replacement);
+    ReplacementDefinition {
+        event: ReplacementEvent::Moved,
+        execute: Some(Box::new(etb_counters)),
+        valid_card: Some(TargetFilter::SelfRef),
+        // CR 614.1c: battlefield-entry-scoped (departure gate).
+        destination_zone: Some(Zone::Battlefield),
+        description: Some(format!(
+            "CR 702.44a: Sunburst — this permanent enters with a {counter_phrase} counter on it for each color of mana spent to cast it."
+        )),
+        ..ReplacementDefinition::new(ReplacementEvent::Moved)
     }
 }
 
@@ -7423,6 +7727,29 @@ fn oracle_corroborated_keywords(raw_oracle_text: &str) -> Vec<Keyword> {
     keywords
 }
 
+/// Lowercased alphanumeric words of one reminder-stripped Oracle line.
+fn counter_scan_words(line: &str) -> Vec<String> {
+    strip_reminder_text(line)
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Does `words` contain `phrase`'s words as one contiguous run?
+fn words_contain_phrase(words: &[String], phrase: &str) -> bool {
+    let phrase_words: Vec<&str> = phrase.split_whitespace().collect();
+    if phrase_words.is_empty() {
+        return false;
+    }
+    words.windows(phrase_words.len()).any(|run| {
+        run.iter()
+            .map(String::as_str)
+            .eq(phrase_words.iter().copied())
+    })
+}
+
 fn backup_keyword_modifications(granted_text: &str) -> Vec<ContinuousModification> {
     let mut modifications = Vec::new();
     for line in granted_text.lines() {
@@ -7511,6 +7838,7 @@ pub fn synthesize_backup(face: &mut CardFace) {
             }],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,
+            end_cost: None,
         })
     };
 
@@ -8097,27 +8425,51 @@ pub fn synthesize_bloodthirst(face: &mut CardFace) {
         if existing >= needed {
             continue;
         }
-        let etb_counters = AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::PutCounter {
-                counter_type: CounterType::Plus1Plus1,
-                count: bloodthirst_counter_quantity(value),
-                target: TargetFilter::SelfRef,
-            },
-        )
-        .description(bloodthirst_execute_description(value));
+        face.replacements
+            .push(bloodthirst_replacement_definition(value));
+    }
+}
 
-        let replacement = ReplacementDefinition {
-            event: ReplacementEvent::Moved,
-            execute: Some(Box::new(etb_counters)),
-            valid_card: Some(TargetFilter::SelfRef),
-            condition: bloodthirst_condition(value),
-            // CR 614.1c: battlefield-entry-scoped (departure gate).
-            destination_zone: Some(Zone::Battlefield),
-            description: Some(bloodthirst_replacement_description(value)),
-            ..ReplacementDefinition::new(ReplacementEvent::Moved)
-        };
-        face.replacements.push(replacement);
+/// CR 702.54a + CR 702.54b + CR 702.54c: the single per-instance Bloodthirst ETB
+/// replacement definition — one `Moved`→Battlefield replacement on `SelfRef`
+/// whose execute places `bloodthirst_counter_quantity(value)` +1/+1 counters,
+/// gated by `bloodthirst_condition(value)` (the fixed-N form is conditional on an
+/// opponent having been dealt damage this turn; the X form is unconditional and
+/// its count reads the damage total directly).
+///
+/// The single authority for building a Bloodthirst replacement, shared by:
+/// - build-time synthesis (`synthesize_bloodthirst`) for PRINTED Bloodthirst, and
+/// - the runtime granted-keyword replacement path
+///   (`granted_bloodthirst_instances` → `find_applicable_replacements`), which
+///   surfaces one virtual candidate per *granted* Bloodthirst instance so a grant
+///   ("it gains bloodthirst 3": Bloodlord of Vaasgoth) also places counters at
+///   entry (mirrors `sunburst_replacement_definition`, #5802).
+///
+/// Because both callers build identical definitions, printed + granted instances
+/// each yield a distinct candidate and apply separately per CR 702.54c ("each
+/// instance works separately").
+pub(crate) fn bloodthirst_replacement_definition(
+    value: &BloodthirstValue,
+) -> ReplacementDefinition {
+    let etb_counters = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: bloodthirst_counter_quantity(value),
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .description(bloodthirst_execute_description(value));
+
+    ReplacementDefinition {
+        event: ReplacementEvent::Moved,
+        execute: Some(Box::new(etb_counters)),
+        valid_card: Some(TargetFilter::SelfRef),
+        condition: bloodthirst_condition(value),
+        // CR 614.1c: battlefield-entry-scoped (departure gate).
+        destination_zone: Some(Zone::Battlefield),
+        description: Some(bloodthirst_replacement_description(value)),
+        ..ReplacementDefinition::new(ReplacementEvent::Moved)
     }
 }
 
@@ -8247,27 +8599,65 @@ fn is_bloodthirst_x_etb_replacement(replacement: &ReplacementDefinition) -> bool
 ///
 /// Counter-count linkage: the ranged `EffectZoneChoice` Sacrifice completion
 /// stamps `state.last_effect_count` (the number of creatures chosen).
-/// `QuantityRef::EventContextAmount`'s resolver falls back through
-/// `last_effect_count`, so the `PutCounter` count reads exactly the number
+/// `QuantityRef::PreviousEffectCount` reads that continuation-local tally
+/// directly, so an enclosing trigger's scalar amount cannot shadow the number
 /// sacrificed. For Devour N > 1 the count is wrapped in
 /// `QuantityExpr::Multiply { factor: n, .. }` (CR 702.82a "N counters per
 /// creature sacrificed"). `PreviousEffectAmount` is NOT used — it reads
 /// `last_effect_amount`, which the ranged Sacrifice never stamps.
 ///
-/// CR 702.82c "Devour [quality]" variant: `Keyword::Devour(u32)` carries only
-/// N, not a quality filter. This synthesizer hard-codes the CR 702.82a default
-/// (sacrifice creatures). A future card needing the quality axis requires
-/// parameterizing the keyword to `Devour { n, quality }`.
+fn type_filter_noun(filter: &TypeFilter, plural: bool) -> String {
+    let noun = match filter {
+        TypeFilter::Creature => "creature",
+        TypeFilter::Land => "land",
+        TypeFilter::Artifact => "artifact",
+        TypeFilter::Enchantment => "enchantment",
+        TypeFilter::Instant => "instant",
+        TypeFilter::Sorcery => "sorcery",
+        TypeFilter::Planeswalker => "planeswalker",
+        TypeFilter::Battle => "battle",
+        TypeFilter::Kindred => "kindred",
+        TypeFilter::Permanent => "permanent",
+        TypeFilter::Card => "card",
+        TypeFilter::Any => "permanent",
+        TypeFilter::Non(inner) => return format!("non-{}", type_filter_noun(inner, plural)),
+        TypeFilter::Subtype(subtype) => {
+            let noun = subtype.to_lowercase();
+            return if plural { format!("{noun}s") } else { noun };
+        }
+        TypeFilter::AnyOf(filters) => {
+            return filters
+                .iter()
+                .map(|filter| type_filter_noun(filter, plural))
+                .collect::<Vec<_>>()
+                .join(" or ");
+        }
+    };
+
+    if plural {
+        format!("{noun}s")
+    } else {
+        noun.into()
+    }
+}
+
+/// CR 702.82c "Devour [quality]" variant: `Keyword::Devour { n, quality }`
+/// carries both N and the sacrifice-pool quality. `quality: TypeFilter::Creature`
+/// is the CR 702.82a default (plain "Devour N"); a non-creature quality (Land for
+/// Famished Worldsire, Artifact for Caprichrome, Subtype("Food") for Feasting
+/// Hobbit) narrows the sacrifice pool per CR 702.82c. The counter math (CR 122.1a,
+/// N per permanent sacrificed) is identical across qualities — only the
+/// `Sacrifice` target and its `ObjectCount` bound switch to `quality`.
 ///
 /// CR 113.2c: each Devour instance functions independently. Per-N idempotency
 /// (`is_devour_etb_replacement`) emits only the delta so re-running synthesis
 /// is a no-op.
 pub fn synthesize_devour(face: &mut CardFace) {
-    let devour_values: Vec<u32> = face
+    let devour_values: Vec<(u32, TypeFilter)> = face
         .keywords
         .iter()
         .filter_map(|kw| match kw {
-            Keyword::Devour(n) => Some(*n),
+            Keyword::Devour { n, quality } => Some((*n, quality.clone())),
             _ => None,
         })
         .collect();
@@ -8275,30 +8665,42 @@ pub fn synthesize_devour(face: &mut CardFace) {
         return;
     }
 
-    for &n in &devour_values {
-        let needed = devour_values.iter().filter(|m| **m == n).count();
+    for (n, quality) in &devour_values {
+        let n = *n;
+        // CR 113.2c: dedup on the FULL (n, quality) key — a card carrying both a
+        // land-quality and a creature-quality Devour of the same N synthesizes
+        // BOTH replacements; the count alone would false-merge them.
+        let needed = devour_values
+            .iter()
+            .filter(|(m, q)| *m == n && q == quality)
+            .count();
         let existing = face
             .replacements
             .iter()
-            .filter(|r| is_devour_etb_replacement(r, n))
+            .filter(|r| is_devour_etb_replacement(r, n, quality))
             .count();
         if existing >= needed {
             continue;
         }
 
-        // CR 122.1: N +1/+1 counters per creature sacrificed this way. The
-        // per-creature count is `EventContextAmount` (resolves to the number
-        // the ranged Sacrifice choice stamped into `last_effect_count`); for
+        // CR 702.82a / CR 702.82c: display noun for the sacrifice pool. Cosmetic —
+        // the idempotency predicate keys on structure, not this text.
+        let quality_noun = type_filter_noun(quality, false);
+        let quality_noun_plural = type_filter_noun(quality, true);
+
+        // CR 702.82a / CR 702.82c: N +1/+1 counters per sacrificed permanent. The
+        // per-sacrifice count is `PreviousEffectCount` (the number the ranged
+        // Sacrifice choice stamped into `last_effect_count`); for
         // N > 1 it is scaled by `factor: n`.
         let counter_count = if n == 1 {
             QuantityExpr::Ref {
-                qty: QuantityRef::EventContextAmount,
+                qty: QuantityRef::PreviousEffectCount,
             }
         } else {
             QuantityExpr::Multiply {
                 factor: n as i32,
                 inner: Box::new(QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextAmount,
+                    qty: QuantityRef::PreviousEffectCount,
                 }),
             }
         };
@@ -8312,17 +8714,20 @@ pub fn synthesize_devour(face: &mut CardFace) {
             },
         );
 
-        // CR 702.82a: "you may sacrifice any number of creatures" — a ranged
-        // `UpTo` choice bounded by the controller's eligible creature pool,
-        // `min_count: 0` so an empty choice is legal.
+        // CR 702.82a / CR 702.82c: "you may sacrifice any number of [quality]
+        // permanents" — a ranged `UpTo` choice bounded by the controller's
+        // eligible pool of `quality` permanents, `min_count: 0` so an empty
+        // choice is legal. `quality` is `Creature` for the CR 702.82a default.
         let sacrifice = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Sacrifice {
-                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                target: TargetFilter::Typed(
+                    TypedFilter::new(quality.clone()).controller(ControllerRef::You),
+                ),
                 count: QuantityExpr::up_to(QuantityExpr::Ref {
                     qty: QuantityRef::ObjectCount {
                         filter: TargetFilter::Typed(
-                            TypedFilter::creature().controller(ControllerRef::You),
+                            TypedFilter::new(quality.clone()).controller(ControllerRef::You),
                         ),
                     },
                 }),
@@ -8330,8 +8735,8 @@ pub fn synthesize_devour(face: &mut CardFace) {
             },
         )
         .description(format!(
-            "CR 702.82a: Devour {n} — sacrifice any number of creatures; this \
-             permanent enters with {n} +1/+1 counter{} per creature sacrificed.",
+            "CR 702.82a: Devour {n} — sacrifice any number of {quality_noun_plural}; this \
+             permanent enters with {n} +1/+1 counter{} per {quality_noun} sacrificed.",
             if n == 1 { "" } else { "s" }
         ))
         .sub_ability(put_counters);
@@ -8344,8 +8749,8 @@ pub fn synthesize_devour(face: &mut CardFace) {
             destination_zone: Some(Zone::Battlefield),
             description: Some(format!(
                 "CR 702.82a + CR 614.1c: Devour {n} — as this creature enters, \
-                 you may sacrifice any number of creatures; it enters with {n} \
-                 +1/+1 counter{} for each creature sacrificed this way.",
+                you may sacrifice any number of {quality_noun_plural}; it enters with {n} \
+                 +1/+1 counter{} for each {quality_noun} sacrificed this way.",
                 if n == 1 { "" } else { "s" }
             )),
             ..ReplacementDefinition::new(ReplacementEvent::Moved)
@@ -8356,15 +8761,24 @@ pub fn synthesize_devour(face: &mut CardFace) {
 
 /// Idempotency-shape predicate for `synthesize_devour`'s ETB replacement.
 /// True iff `replacement` is a `Moved` replacement on `SelfRef` whose `execute`
-/// chain is `Effect::Sacrifice` of your creatures (ranged `UpTo`) with a
-/// `PutCounter` of `expected_n` P1P1 counters per creature on `SelfRef` as its
-/// sub-ability.
+/// chain is `Effect::Sacrifice` of your `expected_quality` permanents (ranged
+/// `UpTo`) with a `PutCounter` of `expected_n` P1P1 counters per permanent on
+/// `SelfRef` as its sub-ability.
 ///
 /// `expected_n` is load-bearing: a card carrying both a printed enters-with-K
-/// replacement and `Keyword::Devour(N≠K)` must not dedupe — the `Multiply`
-/// factor (N) for N > 1 and the bare `EventContextAmount` (N == 1) discriminate
-/// the count.
-fn is_devour_etb_replacement(replacement: &ReplacementDefinition, expected_n: u32) -> bool {
+/// replacement and `Keyword::Devour { n: N≠K, .. }` must not dedupe — the
+/// `Multiply` factor (N) for N > 1 and the bare `PreviousEffectCount` (N == 1)
+/// discriminate the count.
+///
+/// `expected_quality` is equally load-bearing (CR 702.82c): a land-quality Devour
+/// and a creature-quality Devour of the SAME N are distinct replacements. Without
+/// discriminating the `Sacrifice` target's `TypeFilter`, a `Devour land 3` and a
+/// `Devour 3` on the same face would false-dedupe, dropping one pool.
+fn is_devour_etb_replacement(
+    replacement: &ReplacementDefinition,
+    expected_n: u32,
+    expected_quality: &TypeFilter,
+) -> bool {
     if !matches!(replacement.event, ReplacementEvent::Moved)
         || !matches!(replacement.valid_card, Some(TargetFilter::SelfRef))
     {
@@ -8373,7 +8787,16 @@ fn is_devour_etb_replacement(replacement: &ReplacementDefinition, expected_n: u3
     let Some(execute) = replacement.execute.as_deref() else {
         return false;
     };
-    if !matches!(&*execute.effect, Effect::Sacrifice { .. }) {
+    // CR 702.82c: the sacrifice pool's quality must match. `TypedFilter::new`
+    // mirrors the synthesizer, so a full `TargetFilter` equality check on the
+    // expected shape discriminates the quality axis.
+    let expected_target = TargetFilter::Typed(
+        TypedFilter::new(expected_quality.clone()).controller(ControllerRef::You),
+    );
+    let Effect::Sacrifice { target, .. } = &*execute.effect else {
+        return false;
+    };
+    if *target != expected_target {
         return false;
     }
     let Some(sub) = execute.sub_ability.as_deref() else {
@@ -8392,13 +8815,13 @@ fn is_devour_etb_replacement(replacement: &ReplacementDefinition, expected_n: u3
     }
     let expected_count = if expected_n == 1 {
         QuantityExpr::Ref {
-            qty: QuantityRef::EventContextAmount,
+            qty: QuantityRef::PreviousEffectCount,
         }
     } else {
         QuantityExpr::Multiply {
             factor: expected_n as i32,
             inner: Box::new(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextAmount,
+                qty: QuantityRef::PreviousEffectCount,
             }),
         }
     };
@@ -8674,7 +9097,7 @@ pub fn synthesize_suspend(face: &mut CardFace) {
     // CR 702.62a: Last-counter free-cast trigger — "When the last time counter
     // is removed from this card, if it's exiled, you may play it without
     // paying its mana cost." Mirrors `synthesize_siege_intrinsics` victory
-    // trigger (CR 310.11b) — both use `CounterRemoved` with `threshold: Some(0)`.
+    // trigger (CR 310.12b) — both use `CounterRemoved` with `threshold: Some(0)`.
     // The cast itself goes through the normal casting pipeline; `prepare_spell_cast`
     // detects the variant via `obj.zone == Exile && Keyword::Suspend` and assigns
     // `CastingVariant::Suspend`, which tags `CastVariantPaid::Suspend` at
@@ -8841,16 +9264,12 @@ pub fn synthesize_read_ahead(face: &mut CardFace) {
     if !face.keywords.contains(&Keyword::ReadAhead) {
         return;
     }
-    // CR 714.2d: final chapter number = greatest lore-counter threshold among
-    // this Saga's chapter triggers. No chapter abilities → nothing to read ahead to.
-    let Some(final_chapter) = face
-        .triggers
-        .iter()
-        .filter_map(|t| t.counter_filter.as_ref())
-        .filter(|f| f.counter_type == CounterType::Lore)
-        .filter_map(|f| f.threshold)
-        .max()
-    else {
+    // CR 714.2d: final chapter number = the greatest value among this Saga's
+    // chapter abilities, read from the chapter-symbol provenance the Saga parser
+    // records. Not inferred from lore thresholds: CR 714.2b gives a chapter
+    // symbol that shape, but a lore threshold trigger acquired some other way is
+    // not a chapter ability. No chapter abilities → nothing to read ahead to.
+    let Some(final_chapter) = face.triggers.iter().filter_map(|t| t.saga_chapter).max() else {
         return;
     };
 
@@ -8862,7 +9281,9 @@ pub fn synthesize_read_ahead(face: &mut CardFace) {
         Effect::Choose {
             choice_type: ChoiceType::NumberRange {
                 min: 1,
-                max: final_chapter.min(u8::MAX as u32) as u8,
+                // CR 702.155b: the Saga states its own upper bound (the final
+                // chapter), so this range is genuinely bounded.
+                max: Some(final_chapter),
                 distinctness: crate::types::ability::NumberDistinctness::Repeatable,
             },
             persist: true,
@@ -9115,6 +9536,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // haste. Static grants of Riot synthesize matching ETB replacements from
     // their affected filters.
     synthesize_riot(face);
+    // CR 702.37b: Megamorph — the paid-turn-up counter rider as a TurnFaceUp
+    // replacement, gated on the special action's published payment fact.
+    synthesize_megamorph(face);
     // CR 702.64a: Absorb N — continuous self-recipient damage replacement that
     // prevents N from each source each time.
     synthesize_absorb(face);
@@ -9515,12 +9939,12 @@ pub fn synthesize_partner_with(face: &mut CardFace) {
     );
 }
 
-/// CR 310.11a + CR 310.11b: Synthesize the two intrinsic abilities every Siege has:
+/// CR 310.12a + CR 310.12b: Synthesize the two intrinsic abilities every Siege has:
 ///   1. As-enters replacement: "As this Siege enters, its controller chooses an
-///      opponent to be its protector." (CR 310.11a)
+///      opponent to be its protector." (CR 310.12a)
 ///   2. Victory trigger: "When the last defense counter is removed from this
 ///      permanent, exile it, then you may cast it transformed without paying
-///      its mana cost." (CR 310.11b)
+///      its mana cost." (CR 310.12b)
 ///
 /// The defense-counter ETB replacement (CR 310.4b) is handled directly by
 /// `apply_card_face_to_object` which seeds `CounterType::Defense` at load time,
@@ -9532,7 +9956,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
         return;
     }
 
-    // CR 310.11a: "As a Siege enters the battlefield, its controller must
+    // CR 310.12a: "As a Siege enters the battlefield, its controller must
     // choose its protector from among their opponents." Modeled as a
     // self-referential `Moved` replacement that persists the opponent choice
     // as a `ChosenAttribute::Player`, which `GameObject::protector()` reads.
@@ -9553,13 +9977,13 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
         protector_replacement.valid_card = Some(TargetFilter::SelfRef);
         protector_replacement.destination_zone = Some(Zone::Battlefield);
         protector_replacement.description = Some(
-            "CR 310.11a: As a Siege enters, its controller chooses an opponent as its protector."
+            "CR 310.12a: As a Siege enters, its controller chooses an opponent as its protector."
                 .to_string(),
         );
         protector_replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
-                choice_type: ChoiceType::Opponent { restriction: None },
+                choice_type: ChoiceType::opponent(),
                 persist: true,
                 selection: crate::types::ability::TargetSelectionMode::Chosen,
             },
@@ -9567,7 +9991,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
         face.replacements.push(protector_replacement);
     }
 
-    // CR 310.11b: Victory triggered ability — "When the last defense counter
+    // CR 310.12b: Victory triggered ability — "When the last defense counter
     // is removed from this permanent, exile it, then you may cast it
     // transformed without paying its mana cost."
     let already_has_victory_trigger = face.triggers.iter().any(|t| {
@@ -9588,7 +10012,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
-                // CR 310.11b + CR 608.2g: the Siege victory ability casts the
+                // CR 310.12b + CR 608.2g: the Siege victory ability casts the
                 // exiled back face AS this trigger resolves — a self-free-cast
                 // during resolution, structurally identical to Suspend's
                 // last-counter cast. (Pre-`driver`, the `duration.is_none()`
@@ -9596,6 +10020,8 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 // the explicit discriminator preserves that.)
                 driver: CastFromZoneDriver::DuringResolution,
                 mana_spend_permission: None,
+                additional_cost: None,
+                cast_cost_modifier: None,
             },
         )
         .optional();
@@ -9627,7 +10053,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
             })
             .execute(exile_then_cast)
             .description(
-                "CR 310.11b: When the last defense counter is removed from this Siege, exile it, then you may cast it transformed without paying its mana cost.".to_string(),
+                "CR 310.12b: When the last defense counter is removed from this Siege, exile it, then you may cast it transformed without paying its mana cost.".to_string(),
             );
         face.triggers.push(trigger);
     }
@@ -9688,7 +10114,7 @@ pub fn synthesize_tribute_intrinsics(face: &mut CardFace) {
     let choose_stage = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Choose {
-            choice_type: ChoiceType::Opponent { restriction: None },
+            choice_type: ChoiceType::opponent(),
             persist: true,
             selection: crate::types::ability::TargetSelectionMode::Chosen,
         },
@@ -9835,11 +10261,7 @@ fn build_oracle_face_inner(
         .as_ref()
         .map(|kws| kws.iter().map(|s| s.to_ascii_lowercase()).collect())
         .unwrap_or_default();
-    let parser_keyword_names: Vec<String> = if skip_mtgjson_keywords {
-        vec!["__force_keyword_extract__".to_string()]
-    } else {
-        mtgjson_keyword_names.clone()
-    };
+    let parser_input = prepare_oracle_parser_input(mtgjson, skip_mtgjson_keywords);
 
     // B8: For multi-face cards, skip MTGJSON-provided keywords entirely.
     // MTGJSON duplicates keywords across both faces of Transform/DFC cards,
@@ -9861,21 +10283,19 @@ fn build_oracle_face_inner(
     };
 
     let raw_oracle_text = mtgjson.text.as_deref().unwrap_or("");
-    let face_name = mtgjson.face_name.as_deref().unwrap_or(&mtgjson.name);
-
-    let types: Vec<String> = mtgjson.types.clone();
-    let subtypes: Vec<String> = mtgjson.subtypes.clone();
+    let face_name = parser_input.card_name.as_str();
 
     // CR 702.148a-b + CR 612: Cleave's text-changing effect removes every
     // square-bracketed span from the spell's rules text. `parse_oracle_with_cleave_brackets`
     // is the single authority for the dual (printed-cost / cleave-cost) parse,
     // shared with the test scenario harness so the two pipelines cannot diverge.
-    let (parsed, cleave_variant) = parse_oracle_with_cleave_brackets(
-        raw_oracle_text,
-        face_name,
-        &parser_keyword_names,
-        &types,
-        &subtypes,
+    let (parsed, cleave_variant) = parse_prepared_oracle_text(
+        &parser_input.oracle_text,
+        parser_input.cleave_oracle_text.as_deref(),
+        &parser_input.card_name,
+        &parser_input.keyword_names,
+        &parser_input.types,
+        &parser_input.subtypes,
     );
 
     let extracted_keywords = parsed.extracted_keywords;
@@ -9920,12 +10340,56 @@ fn build_oracle_face_inner(
         !name_words.contains(&token) || oracle_corroborated.iter().any(|e| e == kw)
     });
 
+    // CR 122.1b: a keyword counter grants its keyword only while the counter sits
+    // on the object — the card itself does not HAVE the ability. MTGJSON still
+    // stamps such cards' `keywords` with the counter's name (Reluctant Role Model
+    // gets "Lifelink" from "put a flying, lifelink, or +1/+1 counter on it";
+    // Grimdancer and Aragorn, Company Leader get their choose-a-counter options).
+    // Drop a counter-capable keyword (the closed CR 122.1b list mirrored in
+    // `KEYWORD_COUNTERS`) that no Oracle keyword line corroborates when its word
+    // appears in a line that also says "counter"/"counters"; a real keyword line
+    // beside counter text stays corroborated and is kept.
+    keywords.retain(|kw| {
+        let counter_token = crate::types::counter::KEYWORD_COUNTERS
+            .iter()
+            .find(|(_, kind)| Keyword::promote_keyword_kind(*kind).as_ref() == Some(kw))
+            .map(|(name, _)| *name);
+        let Some(token) = counter_token else {
+            return true;
+        };
+        if oracle_corroborated.iter().any(|entry| entry == kw) {
+            return true;
+        }
+        !raw_oracle_text.lines().any(|line| {
+            let words = counter_scan_words(line);
+            words_contain_phrase(&words, token)
+                && words.iter().any(|w| w == "counter" || w == "counters")
+        })
+    });
+
     // Merge keywords extracted from Oracle text with MTGJSON keywords via the
     // shared `merge_extracted_keywords` authority (also used by the scenario test
     // harness so the two pipelines cannot diverge). It reconciles parameterized
     // keywords (e.g., Morph) and CR 113.2c multi-instance keywords (Cascade/Storm/
     // Myriad/Exalted) — see the helper's doc comment for the per-class rules.
     merge_extracted_keywords(&mut keywords, extracted_keywords);
+
+    // CR 611.3a + CR 702: MTGJSON can list a keyword that is granted only by a
+    // conditional static (Goddric's flying). Keep it on the static and drop the
+    // unconditional copy unless a standalone keyword line corroborates it.
+    keywords.retain(|keyword| {
+        oracle_corroborated.iter().any(|entry| entry == keyword)
+            || !parsed.statics.iter().any(|definition| {
+                definition.condition.is_some()
+                    && definition.modifications.iter().any(|modification| {
+                        matches!(
+                            modification,
+                            ContinuousModification::AddKeyword { keyword: granted }
+                                if granted == keyword
+                        )
+                    })
+            })
+    });
 
     // CR 702.124j: "Partner with [Name]" — upgrade Generic → With(name).
     // MTGJSON sends both "Partner" and "Partner with" keywords; the former produces
@@ -10596,6 +11060,165 @@ mod cycling_synthesis_tests {
         );
     }
 
+    /// Thought Distortion (PR #6940), production boundary (`build_oracle_face`):
+    /// "Exile all noncreature, nonland cards from that player's hand and
+    /// graveyard" lowers to ONE owner-scoped, type-restricted, multi-zone exile —
+    /// not a hand-only wipe plus an orphaned `Unimplemented { "graveyard" }` (the
+    /// pre-PR parse), and never the mis-parse that injected `InZone(Battlefield)`
+    /// and dropped the noncreature/nonland restriction. The asserted shape:
+    ///   - `RevealHand` targeting the Opponent (the parse-chain antecedent that
+    ///     the exile's "that player" anaphor resolves to — template/anaphora
+    ///     resolution, not a numbered rule),
+    ///   - a single `ChangeZoneAll` to Exile with `origin: None` (the zone union
+    ///     rides on the filter) whose `Typed` filter carries the
+    ///     `Non(Creature)`/`Non(Land)` restriction (CR 205.2a), the
+    ///     `ControllerRef::TargetPlayer` owner scope (CR 400.3), and
+    ///     `InAnyZone([Hand, Graveyard])` (CR 402.1 + CR 404.1) — with NO
+    ///     `InZone(Battlefield)`,
+    ///   - and NO remaining coverage gap (`card_face_gaps` is empty).
+    #[test]
+    fn thought_distortion_owner_scoped_multizone_exile_at_production_boundary() {
+        use crate::database::mtgjson::AtomicIdentifiers;
+        use crate::types::ability::{AbilityDefinition, ControllerRef, TypeFilter};
+        use crate::types::zones::Zone;
+
+        let oracle = "This spell can't be countered.\n\
+                      Target opponent reveals their hand. Exile all noncreature, nonland cards from that player's hand and graveyard.";
+        let mtgjson = AtomicCard {
+            name: "Thought Distortion".to_string(),
+            mana_cost: Some("{4}{B}{B}".to_string()),
+            colors: vec!["B".to_string()],
+            color_identity: vec!["B".to_string()],
+            text: Some(oracle.to_string()),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            layout: "normal".to_string(),
+            type_line: Some("Sorcery".to_string()),
+            types: vec!["Sorcery".to_string()],
+            subtypes: vec![],
+            supertypes: vec![],
+            keywords: None,
+            side: None,
+            face_name: None,
+            mana_value: 6.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: AtomicIdentifiers {
+                scryfall_oracle_id: Some("5f089ac6-9e92-4ec2-bf46-a0b08d1e2979".to_string()),
+                scryfall_id: Some("thought-distortion-face".to_string()),
+            },
+            foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
+        };
+
+        let face = build_oracle_face(&mtgjson, None);
+
+        // The reveal names the target opponent; the exile's "that player" anaphor
+        // resolves to that same antecedent (parser-chain behavior, not a CR rule).
+        let reveal = face
+            .abilities
+            .iter()
+            .find(|a| matches!(&*a.effect, Effect::RevealHand { .. }))
+            .expect("Thought Distortion must parse a RevealHand ability");
+        match &*reveal.effect {
+            Effect::RevealHand { target, .. } => assert!(
+                matches!(
+                    target,
+                    TargetFilter::Typed(tf)
+                        if tf.controller == Some(crate::types::ability::ControllerRef::Opponent)
+                ),
+                "RevealHand must target the opponent, got {target:?}"
+            ),
+            _ => unreachable!(),
+        }
+
+        // Walk the whole chain and locate the hand-exile ChangeZoneAll.
+        fn walk<'a>(a: &'a AbilityDefinition, out: &mut Vec<&'a AbilityDefinition>) {
+            out.push(a);
+            if let Some(sub) = a.sub_ability.as_deref() {
+                walk(sub, out);
+            }
+            if let Some(els) = a.else_ability.as_deref() {
+                walk(els, out);
+            }
+        }
+        let mut chain = Vec::new();
+        for a in &face.abilities {
+            walk(a, &mut chain);
+        }
+
+        let exile = chain
+            .iter()
+            .find_map(|a| match &*a.effect {
+                Effect::ChangeZoneAll {
+                    destination: Zone::Exile,
+                    origin,
+                    target,
+                    ..
+                } => Some((origin, target)),
+                _ => None,
+            })
+            .expect("must lower to a ChangeZoneAll to Exile");
+        let (origin, target) = exile;
+
+        // Multi-zone origin rides on the filter, so the lowering passes None.
+        assert_eq!(
+            *origin, None,
+            "multi-zone exile carries its origin on the filter (InAnyZone), so origin is None"
+        );
+
+        // A single Typed leg (never an Or) carrying: the noncreature/nonland
+        // restriction, the target-player owner scope, and the hand+graveyard zone
+        // union — with NO battlefield injection.
+        let tf = match target {
+            TargetFilter::Typed(tf) => tf,
+            other => panic!("exile target must be a single Typed leg, got {other:?}"),
+        };
+        assert!(
+            tf.type_filters
+                .contains(&TypeFilter::Non(Box::new(TypeFilter::Creature)))
+                && tf
+                    .type_filters
+                    .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))),
+            "noncreature/nonland restriction must survive, got {:?}",
+            tf.type_filters
+        );
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::TargetPlayer),
+            "the exile must be owner-scoped to the targeted player, got {:?}",
+            tf.controller
+        );
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::InAnyZone { zones }
+                    if zones.contains(&Zone::Hand) && zones.contains(&Zone::Graveyard)
+            )),
+            "the zone union must span Hand and Graveyard, got {:?}",
+            tf.properties
+        );
+        assert!(
+            !tf.properties.contains(&FilterProp::InZone {
+                zone: Zone::Battlefield
+            }),
+            "no InZone(Battlefield) may be injected, got {:?}",
+            tf.properties
+        );
+
+        // The whole card is now supported: no coverage gap remains.
+        assert!(
+            crate::game::coverage::card_face_gaps(&face).is_empty(),
+            "Thought Distortion must be fully supported, gaps: {:?}",
+            crate::game::coverage::card_face_gaps(&face)
+        );
+    }
+
     /// MSH Wave 2 (Storm, Queen of Wakanda): MTGJSON phantom-tags the Storm keyword
     /// (CR 702.40) because the card's name embeds the word "Storm". The synthesis
     /// name-guard must drop the uncorroborated Storm keyword while keeping the real
@@ -10696,6 +11319,140 @@ mod cycling_synthesis_tests {
             // allow-raw-authority: test asserts build-time CardFace intrinsic keywords; no GameState/live object at synthesis time
             face.keywords.contains(&Keyword::Flying),
             "name-colliding Flying corroborated by a standalone Oracle line must be kept"
+        );
+    }
+
+    fn counter_phrase_card(name: &str, oracle: &str, mtgjson_keywords: &[&str]) -> AtomicCard {
+        use crate::database::mtgjson::AtomicIdentifiers;
+        AtomicCard {
+            name: name.to_string(),
+            mana_cost: Some("{1}{W}".to_string()),
+            colors: vec!["W".to_string()],
+            color_identity: vec!["W".to_string()],
+            text: Some(oracle.to_string()),
+            power: Some("2".to_string()),
+            toughness: Some("2".to_string()),
+            loyalty: None,
+            defense: None,
+            layout: "normal".to_string(),
+            type_line: Some("Creature — Human".to_string()),
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Human".to_string()],
+            supertypes: vec![],
+            keywords: Some(mtgjson_keywords.iter().map(|s| s.to_string()).collect()),
+            side: None,
+            face_name: None,
+            mana_value: 2.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: AtomicIdentifiers {
+                scryfall_oracle_id: Some(format!("{name}-test")),
+                scryfall_id: Some(format!("{name}-test-face")),
+            },
+            foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
+        }
+    }
+
+    #[test]
+    fn oracle_parser_input_uses_face_name_and_multiface_keyword_mode() {
+        let mut card = counter_phrase_card("Combined Name", "Flying", &["Flying"]);
+        card.face_name = Some("Front Face".to_string());
+        let single = prepare_oracle_parser_input(&card, false);
+        let multi = prepare_oracle_parser_input(&card, true);
+        assert_eq!(single.card_name, "Front Face");
+        assert_eq!(single.keyword_names, vec!["flying"]);
+        assert_eq!(multi.keyword_names, vec!["__force_keyword_extract__"]);
+    }
+
+    #[test]
+    fn oracle_parser_input_uses_production_cleave_base_text() {
+        let card = counter_phrase_card("Cleave Test", "Draw [two] cards.", &["Cleave"]);
+        let input = prepare_oracle_parser_input(&card, false);
+        assert_eq!(input.oracle_text, "Draw two cards.");
+        assert!(input.has_cleave_variant);
+        let (production, cleave) = parse_oracle_with_cleave_brackets(
+            card.text.as_deref().expect("fixture text"),
+            &input.card_name,
+            &input.keyword_names,
+            &input.types,
+            &input.subtypes,
+        );
+        assert_eq!(
+            serde_json::to_value(parse_oracle_text(
+                &input.oracle_text,
+                &input.card_name,
+                &input.keyword_names,
+                &input.types,
+                &input.subtypes,
+            ))
+            .expect("serialize prepared parse"),
+            serde_json::to_value(production).expect("serialize production parse")
+        );
+        assert!(cleave.is_some());
+    }
+
+    /// CR 122.1b: a keyword counter grants its keyword only while the counter is
+    /// on the object — the card itself does not have the ability. MTGJSON still
+    /// phantom-tags Reluctant Role Model with "Lifelink" because its Survival
+    /// trigger names a lifelink counter ("put a flying, lifelink, or +1/+1
+    /// counter on it"). The counter-phrase guard must drop it.
+    #[test]
+    fn synthesis_drops_counter_phrase_only_mtgjson_keyword() {
+        let card = counter_phrase_card(
+            "Reluctant Role Model",
+            "Survival — At the beginning of your second main phase, if this creature is tapped, put a flying, lifelink, or +1/+1 counter on it.\nWhenever this creature or another creature you control dies, if it had counters on it, put those counters on up to one target creature.",
+            &["Lifelink", "Survival"],
+        );
+        let face = build_oracle_face(&card, None);
+        assert!(
+            // allow-raw-authority: test asserts build-time CardFace intrinsic keywords; no GameState/live object at synthesis time
+            !face.keywords.iter().any(|k| matches!(k, Keyword::Lifelink)),
+            "counter-phrase-only Lifelink must be dropped, got {:?}",
+            face.keywords
+        );
+    }
+
+    /// CR 122.1b list form AFTER the word "counter" (Aragorn, Company Leader /
+    /// Grimdancer): "a counter from among first strike, vigilance, deathtouch,
+    /// and lifelink" — the stamped choices must all be dropped.
+    #[test]
+    fn synthesis_drops_choose_a_counter_from_among_keywords() {
+        let card = counter_phrase_card(
+            "Aragorn, Company Leader",
+            "This creature enters with your choice of a counter from among first strike, vigilance, deathtouch, and lifelink on it.",
+            &["Deathtouch", "Vigilance"],
+        );
+        let face = build_oracle_face(&card, None);
+        assert!(
+            // allow-raw-authority: test asserts build-time CardFace intrinsic keywords; no GameState/live object at synthesis time
+            !face
+                .keywords
+                .iter()
+                .any(|k| matches!(k, Keyword::Deathtouch | Keyword::Vigilance)),
+            "choose-a-counter keywords must be dropped, got {:?}",
+            face.keywords
+        );
+    }
+
+    /// Negative control — a PIN, green with and without the counter-phrase guard:
+    /// a real standalone "Lifelink" line beside lifelink-counter text is
+    /// corroborated and must survive.
+    #[test]
+    fn synthesis_keeps_corroborated_keyword_beside_counter_phrase() {
+        let card = counter_phrase_card(
+            "Gilraen Test",
+            "Lifelink\nWhen this creature enters, put a lifelink counter on another target creature you control.",
+            &["Lifelink"],
+        );
+        let face = build_oracle_face(&card, None);
+        assert!(
+            // allow-raw-authority: test asserts build-time CardFace intrinsic keywords; no GameState/live object at synthesis time
+            face.keywords.contains(&Keyword::Lifelink),
+            "corroborated Lifelink beside counter text must be kept"
         );
     }
 }
@@ -10988,7 +11745,8 @@ mod job_select_synthesis_tests {
                 sub.effect.as_ref(),
                 Effect::Attach {
                     attachment: TargetFilter::SelfRef,
-                    target: TargetFilter::LastCreated
+                    target: TargetFilter::LastCreated,
+                    ..
                 }
             ),
             "sub_ability should be Attach targeting LastCreated"
@@ -11145,6 +11903,14 @@ mod madness_synthesis_tests {
             }
         ));
         assert!(is_dredge_draw_replacement(repl));
+        // CR 702.52a + CR 113.6b: dredge "functions only while the card with
+        // dredge is in a player's graveyard" — the definition must SAY so, or
+        // the pipeline's default battlefield/command scan offers it in play.
+        assert_eq!(
+            repl.active_zones,
+            vec![Zone::Graveyard],
+            "dredge must declare graveyard-only zone of function"
+        );
     }
 
     #[test]
@@ -11168,6 +11934,26 @@ mod madness_synthesis_tests {
         face.keywords.push(Keyword::Flying);
         synthesize_dredge(&mut face);
         assert!(face.replacements.is_empty());
+    }
+
+    /// F1 — the printed label pluralizes its own count: Dredge 1 (Shenanigans,
+    /// Grave-Shell Scarab) reads "mill 1 card", never "mill 1 cards".
+    #[test]
+    fn dredge_description_pluralizes_its_own_count() {
+        assert_eq!(
+            dredge_replacement_definition(1).description.as_deref(),
+            Some(
+                "CR 702.52a: Dredge — instead of drawing, you may mill 1 card and return \
+                 this card from your graveyard to your hand."
+            )
+        );
+        assert_eq!(
+            dredge_replacement_definition(3).description.as_deref(),
+            Some(
+                "CR 702.52a: Dredge — instead of drawing, you may mill 3 cards and return \
+                 this card from your graveyard to your hand."
+            )
+        );
     }
 }
 
@@ -12616,11 +13402,12 @@ mod undying_persist_synthesis_tests {
 #[cfg(test)]
 mod undying_persist_runtime_tests {
     //! CR 702.93a + CR 702.79a runtime integration: a battlefield permanent
-    //! with the keyword dies, `apply_zone_exit_cleanup` captures its LKI
-    //! counter map into `state.lki_cache`, `process_triggers` fires the
-    //! synthesized dies-trigger, the intervening `Not(HadCounters)` condition
-    //! reads the LKI snapshot, and `resolve_top` resolves `Effect::ChangeZone`
-    //! to return the permanent with a single +1/+1 (or -1/-1) counter.
+    //! with the keyword dies, the `ZoneChanged` record captures its exact LKI
+    //! counter map, `process_triggers` fires the synthesized dies-trigger, the
+    //! intervening `Not(HadCounters)` condition reads that record snapshot, and
+    //! `resolve_top` resolves `Effect::ChangeZone` to return the permanent with
+    //! a single +1/+1 (or -1/-1) counter. The ObjectId-keyed cache is only an
+    //! absence-only compatibility path for legacy/defaulted records.
 
     use super::*;
     use crate::game::printed_cards::apply_card_face_to_object;
@@ -13068,8 +13855,8 @@ mod undying_persist_runtime_tests {
     /// the `ObjectId` across the zone change). When the second trigger
     /// resolves, its `Effect::ChangeZone` evaluates `from_zone =
     /// Zone::Battlefield`, which fails the `expected_origin ==
-    /// Some(Zone::Graveyard)` guard at `change_zone.rs:501-505` and the
-    /// move silently no-ops. `enter_with_counters` runs only on a successful
+    /// Some(Zone::Graveyard)` guard in `change_zone::process_one_zone_move_with_terminal`
+    /// and the move silently no-ops. `enter_with_counters` runs only on a successful
     /// move, so the second trigger places no counter either.
     ///
     /// Post-condition pinned by this test: exactly one battlefield object
@@ -13117,7 +13904,7 @@ mod undying_persist_runtime_tests {
             count_in_battlefield, 1,
             "dual-keyword permanent must not be double-returned"
         );
-        // The origin guard at change_zone.rs:501-505 prevents the
+        // The origin guard in `change_zone::process_one_zone_move_with_terminal` prevents the
         // second-to-resolve trigger from executing its move, so its
         // `enter_with_counters` never runs. Exactly one counter ends up on
         // the returned permanent (polarity = whichever trigger resolved
@@ -13488,6 +14275,8 @@ mod provoke_synthesis_tests {
                 &*sub.effect,
                 Effect::ForceBlock {
                     target: TargetFilter::ParentTarget,
+                    attacker: Some(crate::types::ability::ForceBlockAttackerRef::Source),
+                    duration: Duration::UntilEndOfCombat,
                 }
             ),
             "sub-ability must force-block the parent (untapped) target via ParentTarget, got {:?}",
@@ -13736,7 +14525,7 @@ mod provoke_runtime_tests {
     use crate::types::ability::{ContinuousModification, EffectKind, TargetRef};
     use crate::types::events::GameEvent;
     use crate::types::game_state::GameState;
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use crate::types::player::PlayerId;
     use crate::types::statics::StaticMode;
 
@@ -13787,6 +14576,11 @@ mod provoke_runtime_tests {
             vec![TargetRef::Object(defender)],
         );
         resolved.optional = false;
+        // Match the shared stack boundary: source-referential force-blocks
+        // bind the exact attacking incarnation before their continuation runs.
+        resolved.bind_force_block_source_recursive(Some(ObjectIncarnationRef::from_object(
+            &state.objects[&provoker],
+        )));
 
         let mut events = Vec::new();
         resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
@@ -13805,7 +14599,7 @@ mod provoke_runtime_tests {
                     m,
                     ContinuousModification::AddStaticMode {
                         mode: StaticMode::MustBlockAttacker { attacker },
-                    } if *attacker == provoker
+                    } if attacker.object_id == provoker
                 )
             })
         });
@@ -13813,6 +14607,13 @@ mod provoke_runtime_tests {
             forced,
             "Provoke must apply MustBlockAttacker bound to the provoking attacker, \
              reusing the existing source-referential ForceBlock resolver"
+        );
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .any(|effect| effect.duration == Duration::UntilEndOfCombat),
+            "CR 702.39a's forced block lasts only for this combat"
         );
 
         assert!(events.iter().any(|e| matches!(
@@ -14470,7 +15271,7 @@ mod melee_synthesis_tests {
                 qty: QuantityRef::PlayerCount {
                     filter: PlayerFilter::OpponentAttacked {
                         subject: AttackSubject::You,
-                        scope: AttackScope::ThisCombat,
+                        scope: CombatHistoryScope::ThisCombat,
                     },
                 },
             }
@@ -14716,6 +15517,7 @@ mod extort_synthesis_tests {
                 amount: QuantityExpr::Ref {
                     qty: QuantityRef::PreviousEffectAmount {
                         channel: DamageChannel::Total,
+                        aggregate: AggregateFunction::Sum,
                     },
                 },
                 player: TargetFilter::Controller,
@@ -15290,6 +16092,7 @@ mod annihilator_runtime_tests {
             attacker_ids: vec![attacker_id],
             defending_player,
             attacks: vec![(attacker_id, AttackTarget::Player(defending_player))],
+            declaration_records: Vec::new(),
         }
     }
 
@@ -15576,6 +16379,7 @@ mod myriad_runtime_tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
             valid_attack_targets: vec![],
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
 
@@ -15881,7 +16685,7 @@ mod myriad_runtime_tests {
         // Make Muddle become a copy of the target "except it has myriad".
         let copy_ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: Some(Duration::UntilEndOfTurn),
                 mana_value_limit: None,
@@ -15903,8 +16707,9 @@ mod myriad_runtime_tests {
             "Muddle should have Myriad keyword after becoming a copy"
         );
         let has_myriad_trigger = muddle_obj.trigger_definitions.iter_all().any(|trigger| {
-            matches!(trigger.mode, TriggerMode::Attacks)
+            matches!(trigger.definition.mode, TriggerMode::Attacks)
                 && trigger
+                    .definition
                     .execute
                     .as_deref()
                     .is_some_and(|a| a.optional && matches!(a.effect.as_ref(), Effect::Myriad))
@@ -15958,10 +16763,12 @@ mod myriad_runtime_tests {
         assert_eq!(token_attacker.defending_player, PlayerId(2));
 
         // Token should inherit the combat damage trigger from Face-Breaker.
-        let token_has_damage_trigger = token_obj
-            .trigger_definitions
-            .iter_all()
-            .any(|trigger| matches!(trigger.mode, TriggerMode::DamageDoneOnceByController));
+        let token_has_damage_trigger = token_obj.trigger_definitions.iter_all().any(|trigger| {
+            matches!(
+                trigger.definition.mode,
+                TriggerMode::DamageDoneOnceByController
+            )
+        });
         assert!(
             token_has_damage_trigger,
             "Token copy should inherit the source's triggered abilities"
@@ -16762,7 +17569,7 @@ mod siege_synthesis_tests {
         face
     }
 
-    /// CR 310.11a: Sieges get a synthesized Moved-replacement that asks the
+    /// CR 310.12a: Sieges get a synthesized Moved-replacement that asks the
     /// controller to choose an opponent as the protector.
     #[test]
     fn synthesize_adds_protector_choice_replacement() {
@@ -16785,7 +17592,7 @@ mod siege_synthesis_tests {
         ));
     }
 
-    /// CR 310.11b: Sieges get a synthesized `CounterRemoved` trigger with a
+    /// CR 310.12b: Sieges get a synthesized `CounterRemoved` trigger with a
     /// `CounterTriggerFilter` targeting defense at threshold 0 (last counter
     /// removed). The execute chain exiles the Siege then offers an optional
     /// `CastFromZone` with both `without_paying_mana_cost` and `cast_transformed`.
@@ -17831,6 +18638,109 @@ mod idempotency_tests {
         }
     }
 
+    /// CR 609.3 + CR 111.7 (#8147): one mobilized token trades in combat before
+    /// the end step, so it has ceased to exist by the time the delayed
+    /// "sacrifice them" fires.
+    #[test]
+    fn mobilize_end_step_sacrifice_still_takes_the_survivor_of_a_combat_trade() {
+        let mut face = CardFace::default();
+        face.keywords
+            .push(Keyword::Mobilize(QuantityExpr::Fixed { value: 2 }));
+        synthesize_mobilize(&mut face);
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mobilizer".to_string(),
+            Zone::Battlefield,
+        );
+        let execute = face
+            .triggers
+            .first()
+            .and_then(|trigger| trigger.execute.as_deref())
+            .expect("mobilize trigger must have an execute body");
+        let ability = build_resolved_from_def(execute, source_id, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        let tokens = state.last_created_token_ids.clone();
+        assert_eq!(tokens.len(), 2);
+        let (died, survivor) = (tokens[0], tokens[1]);
+
+        // CR 111.7: a token that dies in combat ceases to exist.
+        state.battlefield.retain(|id| *id != died);
+        state.objects.remove(&died);
+
+        let stacked =
+            check_delayed_triggers(&mut state, &[GameEvent::PhaseChanged { phase: Phase::End }]);
+        assert_eq!(stacked.len(), 1, "end-step cleanup must still stack");
+        resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&survivor].zone,
+            Zone::Graveyard,
+            "surviving mobilized token must still be sacrificed"
+        );
+    }
+
+    /// CR 603.7c + CR 111.7: both mobilized tokens are gone before the end step, and
+    /// a later token producer has overwritten `last_created_token_ids`. The delayed
+    /// "sacrifice them" has no referent left, so it must not sacrifice that later
+    /// token.
+    #[test]
+    fn mobilize_end_step_sacrifice_ignores_a_later_producers_token_when_all_referents_are_gone() {
+        let mut face = CardFace::default();
+        face.keywords
+            .push(Keyword::Mobilize(QuantityExpr::Fixed { value: 2 }));
+        synthesize_mobilize(&mut face);
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mobilizer".to_string(),
+            Zone::Battlefield,
+        );
+        let execute = face
+            .triggers
+            .first()
+            .and_then(|trigger| trigger.execute.as_deref())
+            .expect("mobilize trigger must have an execute body");
+        let ability = build_resolved_from_def(execute, source_id, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        let tokens = state.last_created_token_ids.clone();
+        assert_eq!(tokens.len(), 2);
+        for token in tokens {
+            state.battlefield.retain(|id| *id != token);
+            state.objects.remove(&token);
+        }
+
+        let later_token = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Later Token".to_string(),
+            Zone::Battlefield,
+        );
+        state.last_created_token_ids = vec![later_token];
+
+        let stacked =
+            check_delayed_triggers(&mut state, &[GameEvent::PhaseChanged { phase: Phase::End }]);
+        assert_eq!(stacked.len(), 1, "end-step cleanup must still stack");
+        resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&later_token].zone,
+            Zone::Battlefield,
+            "the later producer's token was never named by the delayed trigger"
+        );
+    }
+
     #[test]
     fn synthesize_mobilize_preserves_dynamic_quantity() {
         let quantity = QuantityExpr::Ref {
@@ -17914,6 +18824,19 @@ mod idempotency_tests {
             .expect("casualty trigger must have an execute ability");
 
         assert_eq!(
+            trig.condition,
+            Some(TriggerCondition::AdditionalCostPaid {
+                source: AdditionalCostPaymentSource::NonKicker,
+                origin: Some(AdditionalCostOrigin::Casualty),
+                origin_ordinal: Some(0),
+                variant: None,
+                kicker_cost: None,
+                min_count: 1,
+            }),
+            "intrinsic casualty must be gated when the spell is cast, not only when the copy trigger resolves"
+        );
+
+        assert_eq!(
             **execute, canonical,
             "intrinsic casualty trigger's execute must equal the canonical \
              casualty_copy_ability_definition() — single source of truth for \
@@ -17979,28 +18902,6 @@ mod sorcery_speed_invariant_tests {
     use crate::types::ability::ActivationRestriction;
     use crate::types::mana::{ManaCost, ManaCostShard};
 
-    /// Walk every sub_ability in the chain.
-    fn walk_chain<F: FnMut(&AbilityDefinition)>(def: &AbilityDefinition, mut visit: F) {
-        let mut cur: Option<&AbilityDefinition> = Some(def);
-        while let Some(d) = cur {
-            visit(d);
-            cur = d.sub_ability.as_deref();
-        }
-    }
-
-    fn assert_sorcery_invariant(def: &AbilityDefinition, context: &str) {
-        walk_chain(def, |d| {
-            if d.is_sorcery_speed() {
-                assert!(
-                    d.activation_restrictions
-                        .contains(&ActivationRestriction::AsSorcery),
-                    "{context}: ability is sorcery-speed but \
-                     activation_restrictions is missing AsSorcery"
-                );
-            }
-        });
-    }
-
     /// CR 702.6a: Swiftfoot Boots — "Equip {1}" synthesizes an activated ability
     /// that MUST be gated at sorcery speed. Regression test for the confirmed
     /// bug where equip abilities were activatable at instant speed because
@@ -18051,6 +18952,7 @@ mod sorcery_speed_invariant_tests {
             Effect::Attach {
                 attachment: TargetFilter::SelfRef,
                 target: TargetFilter::Typed(tf),
+                ..
             } => {
                 assert_eq!(
                     *tf,
@@ -18262,6 +19164,33 @@ mod sorcery_speed_invariant_tests {
             )),
             "materials-exile sub-cost present (CR 702.167a/b)"
         );
+
+        // CR 702.167a + CR 113.6m: Craft's cost EXILES THE PERMANENT FROM THE
+        // BATTLEFIELD, so CR 113.6m's `unless` clause ("a previous part of its
+        // cost … specifies that the object is put into that zone") exempts it,
+        // and CR 113.6j makes the battlefield the only zone the cost is payable
+        // from. Craft is synthesized here, never through
+        // `parse_activated_ability_ir`, so the CR 113.6m effect-side derivation
+        // cannot reach it — this pins that.
+        assert_eq!(
+            def.activation_zone, None,
+            "craft functions from the battlefield"
+        );
+        // Second, independent line of defense: even on a hypothetical parser
+        // path, `activation_zone_from_self_cost` matches this cost component
+        // FIRST and yields Battlefield, so the effect side is never consulted.
+        assert!(
+            costs.iter().any(|c| matches!(
+                c,
+                AbilityCost::Exile {
+                    zone: Some(Zone::Battlefield),
+                    filter: Some(TargetFilter::SelfRef),
+                    ..
+                }
+            )),
+            "the self-exile cost names the battlefield, so the cost-side \
+             derivation wins before the effect side is consulted"
+        );
     }
 
     /// CR 702.87a: Level Up synthesis must carry AsSorcery.
@@ -18398,51 +19327,6 @@ mod sorcery_speed_invariant_tests {
             .filter(|r| matches!(r, ActivationRestriction::AsSorcery))
             .count();
         assert_eq!(count, 1, "AsSorcery must not be duplicated");
-    }
-
-    /// CR 602.5d: Corpus-wide smoke test — run the synthesis pipeline against
-    /// every keyword variant that has synthesis coverage and walk each ability's
-    /// sub_ability chain, confirming every sorcery-speed ability carries
-    /// `AsSorcery`. Now that `is_sorcery_speed()` is defined as
-    /// `contains(AsSorcery)`, this is structurally guaranteed; the test remains
-    /// as broad synthesis coverage.
-    #[test]
-    fn sorcery_speed_flag_implies_as_sorcery_restriction_for_synthesized_abilities() {
-        fn mana() -> ManaCost {
-            ManaCost::Cost {
-                shards: vec![],
-                generic: 1,
-            }
-        }
-
-        type SynthCase = (&'static str, fn() -> CardFace);
-        let cases: &[SynthCase] = &[
-            ("Equip {1}", || {
-                let mut f = CardFace::default();
-                f.keywords.push(Keyword::Equip(mana()));
-                synthesize_equip(&mut f);
-                f
-            }),
-            ("Level Up {1}", || {
-                let mut f = CardFace::default();
-                f.keywords.push(Keyword::LevelUp(mana()));
-                synthesize_level_up(&mut f);
-                f
-            }),
-            ("Scavenge {1}", || {
-                let mut f = CardFace::default();
-                f.keywords.push(Keyword::Scavenge(mana()));
-                synthesize_scavenge(&mut f);
-                f
-            }),
-        ];
-
-        for (name, build) in cases {
-            let face = build();
-            for def in face.abilities.iter() {
-                assert_sorcery_invariant(def, name);
-            }
-        }
     }
 }
 
@@ -22254,13 +23138,16 @@ mod devour_synthesis_tests {
 
     fn face_with_devour(n: u32) -> CardFace {
         let mut face = CardFace::default();
-        face.keywords.push(Keyword::Devour(n));
+        face.keywords.push(Keyword::Devour {
+            n,
+            quality: TypeFilter::Creature,
+        });
         face
     }
 
     /// CR 702.82a: Devour 1 synthesizes one `Moved`/`SelfRef` replacement
     /// whose execute chain is `Sacrifice(UpTo) → PutCounter(P1P1, SelfRef)`,
-    /// and whose `PutCounter` count is the bare `EventContextAmount` (one
+    /// and whose `PutCounter` count is the bare `PreviousEffectCount` (one
     /// counter per creature sacrificed).
     #[test]
     fn synthesize_devour_1_builds_sacrifice_then_counter_chain() {
@@ -22270,7 +23157,7 @@ mod devour_synthesis_tests {
         let replacement = face
             .replacements
             .iter()
-            .find(|r| is_devour_etb_replacement(r, 1))
+            .find(|r| is_devour_etb_replacement(r, 1, &TypeFilter::Creature))
             .expect("Devour 1 must synthesize an as-enters replacement");
 
         assert!(matches!(replacement.event, ReplacementEvent::Moved));
@@ -22307,7 +23194,7 @@ mod devour_synthesis_tests {
             "Devour sacrifices creatures the controller controls"
         );
 
-        // Sub-ability: PutCounter of EventContextAmount P1P1 counters on self.
+        // Sub-ability: PutCounter of PreviousEffectCount P1P1 counters on self.
         let sub = execute
             .sub_ability
             .as_deref()
@@ -22325,11 +23212,10 @@ mod devour_synthesis_tests {
         assert_eq!(
             *count,
             QuantityExpr::Ref {
-                qty: QuantityRef::EventContextAmount
+                qty: QuantityRef::PreviousEffectCount
             },
             "Devour 1 places exactly one counter per creature sacrificed — \
-             the count must be the bare EventContextAmount (NOT \
-             PreviousEffectAmount, which the ranged Sacrifice never stamps)"
+             the count must be the direct continuation-local PreviousEffectCount"
         );
     }
 
@@ -22343,7 +23229,7 @@ mod devour_synthesis_tests {
         let replacement = face
             .replacements
             .iter()
-            .find(|r| is_devour_etb_replacement(r, 2))
+            .find(|r| is_devour_etb_replacement(r, 2, &TypeFilter::Creature))
             .expect("Devour 2 must synthesize an as-enters replacement");
         let sub = replacement
             .execute
@@ -22358,13 +23244,17 @@ mod devour_synthesis_tests {
             QuantityExpr::Multiply {
                 factor: 2,
                 inner: Box::new(QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextAmount
+                    qty: QuantityRef::PreviousEffectCount
                 }),
             },
             "Devour 2 places 2 counters per creature sacrificed (CR 702.82a)"
         );
         // A Devour-2 replacement must not be mistaken for a Devour-1 one.
-        assert!(!is_devour_etb_replacement(replacement, 1));
+        assert!(!is_devour_etb_replacement(
+            replacement,
+            1,
+            &TypeFilter::Creature
+        ));
     }
 
     /// CR 113.2c: re-running synthesis is idempotent — exactly one Devour
@@ -22377,7 +23267,7 @@ mod devour_synthesis_tests {
         let count = face
             .replacements
             .iter()
-            .filter(|r| is_devour_etb_replacement(r, 2))
+            .filter(|r| is_devour_etb_replacement(r, 2, &TypeFilter::Creature))
             .count();
         assert_eq!(count, 1, "running synthesis twice must not duplicate");
     }
@@ -22388,6 +23278,62 @@ mod devour_synthesis_tests {
         let mut face = CardFace::default();
         synthesize_devour(&mut face);
         assert!(face.replacements.is_empty());
+    }
+
+    /// CR 702.82c: the quality axis discriminates. A land-quality Devour and a
+    /// creature-quality Devour of the SAME N are DISTINCT replacements — the
+    /// idempotency predicate must not cross-match them, and a face carrying both
+    /// must synthesize BOTH pools (not false-dedupe one away).
+    ///
+    /// Revert-failing: without the `expected_quality` discrimination in
+    /// `is_devour_etb_replacement`, the creature and land replacements would
+    /// mutually match, `synthesize_devour` would emit only one, and the
+    /// cross-match assertions below would fail.
+    #[test]
+    fn synthesize_devour_discriminates_quality_axis() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Devour {
+            n: 3,
+            quality: TypeFilter::Creature,
+        });
+        face.keywords.push(Keyword::Devour {
+            n: 3,
+            quality: TypeFilter::Land,
+        });
+        synthesize_devour(&mut face);
+
+        let creature_matches = face
+            .replacements
+            .iter()
+            .filter(|r| is_devour_etb_replacement(r, 3, &TypeFilter::Creature))
+            .count();
+        let land_matches = face
+            .replacements
+            .iter()
+            .filter(|r| is_devour_etb_replacement(r, 3, &TypeFilter::Land))
+            .count();
+
+        assert_eq!(
+            creature_matches, 1,
+            "the creature-quality Devour 3 must synthesize exactly one replacement"
+        );
+        assert_eq!(
+            land_matches, 1,
+            "the land-quality Devour 3 must synthesize a SEPARATE replacement — \
+             same N, different quality, must not false-dedupe"
+        );
+
+        // Cross-match must be empty: a creature-quality replacement is NOT a
+        // land-quality one and vice versa (same N).
+        let creature_repl = face
+            .replacements
+            .iter()
+            .find(|r| is_devour_etb_replacement(r, 3, &TypeFilter::Creature))
+            .expect("creature-quality Devour replacement exists");
+        assert!(
+            !is_devour_etb_replacement(creature_repl, 3, &TypeFilter::Land),
+            "a creature-quality Devour 3 replacement must NOT match the land quality"
+        );
     }
 
     fn face_with_amplify(n: u32) -> CardFace {
@@ -22582,7 +23528,10 @@ mod devour_synthesis_tests {
                     .counter_filter(CounterTriggerFilter {
                         counter_type: CounterType::Lore,
                         threshold: Some(n),
-                    }),
+                    })
+                    // CR 714.2: mirror what the Saga parser records — these
+                    // fixtures stand in for real chapter symbols.
+                    .saga_chapter(n),
             );
         }
         face.replacements.push(
@@ -22627,7 +23576,7 @@ mod devour_synthesis_tests {
             panic!("read-ahead ETB should choose a number");
         };
         // CR 702.155b + CR 714.2d: between one and the final chapter number (3).
-        assert_eq!((*min, *max), (1, 3));
+        assert_eq!((*min, *max), (1, Some(3)));
         assert!(*persist, "chosen number must persist for ChosenNumber");
 
         let sub = execute
@@ -22843,6 +23792,7 @@ mod living_weapon_synthesis_tests {
                 Effect::Attach {
                     attachment: TargetFilter::SelfRef,
                     target: TargetFilter::LastCreated,
+                    ..
                 }
             ),
             "sub_ability should be Attach(SelfRef, LastCreated), got {:?}",
@@ -22957,6 +23907,7 @@ mod for_mirrodin_synthesis_tests {
                 Effect::Attach {
                     attachment: TargetFilter::SelfRef,
                     target: TargetFilter::LastCreated,
+                    ..
                 }
             ),
             "sub_ability should be Attach(SelfRef, LastCreated), got {:?}",
@@ -24411,7 +25362,9 @@ mod ingest_gravestorm_synthesis_tests {
         let Effect::ExileTop {
             player,
             count,
+            position: _,
             face_down,
+            actor: _,
         } = effect
         else {
             panic!("Ingest must exile the top card, got {effect:?}");
@@ -25147,9 +26100,11 @@ mod absorb_synthesis_tests {
     //! CR 702.64a shape tests: Absorb was parsed/typed but had no runtime.
     //! `synthesize_absorb` installs a continuous self-recipient `DamageDone`
     //! replacement that subtracts N from each incoming damage event
-    //! (`DamageModification::Minus { value: N }`, `valid_card: SelfRef`). The
-    //! continuous, non-consumed, per-source/per-event semantics (CR 702.64b) come
-    //! for free from `Minus`; CR 702.64c (each instance separate) is one
+    //! (`DamageModification::PreventionMinus { value: N }` — the CR 615
+    //! prevention provenance of the shared `Minus` subtraction —
+    //! `valid_card: SelfRef`). The continuous, non-consumed,
+    //! per-source/per-event semantics (CR 702.64b) come for free from the
+    //! shared subtraction arm; CR 702.64c (each instance separate) is one
     //! replacement per instance.
     use super::*;
     use crate::game::effects::deal_damage;
@@ -25234,9 +26189,11 @@ mod absorb_synthesis_tests {
         assert!(
             matches!(
                 r.damage_modification,
-                Some(DamageModification::Minus { value: 2 })
+                Some(DamageModification::PreventionMinus {
+                    value: crate::types::ability::PreventionFormula::Fixed(2),
+                })
             ),
-            "CR 702.64a: prevent N (=2) of the damage"
+            "CR 702.64a: prevent N (=2) of the damage (prevention provenance)"
         );
     }
 
@@ -25298,6 +26255,163 @@ mod absorb_synthesis_tests {
             marked_damage_after_absorb_damage(vec![Keyword::Absorb(1), Keyword::Absorb(1)], 3),
             1,
             "CR 702.64c: two Absorb 1 instances each prevent 1 damage"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tiered_synthesis_tests {
+    //! CR 702.183a: Tiered's runtime structure lives in the spell's
+    //! `ModalChoice` (choose exactly one) plus the per-mode additional costs
+    //! (CR 700.2h), not in an independent keyword handler. These tests drive the
+    //! production MTGJSON→face path (`build_oracle_face`) to prove the
+    //! `"tiered"` keyword maps to the typed variant and the modal carries the
+    //! per-mode costs.
+    use super::*;
+    use crate::database::mtgjson::AtomicIdentifiers;
+
+    /// Fire Magic's verbatim Oracle text (U+2022 bullets, U+2014 em-dashes).
+    const FIRE_MAGIC_ORACLE: &str = "Tiered (Choose one additional cost.)\n\
+        \u{2022} Fire \u{2014} {0} \u{2014} Fire Magic deals 1 damage to each creature.\n\
+        \u{2022} Fira \u{2014} {2} \u{2014} Fire Magic deals 2 damage to each creature.\n\
+        \u{2022} Firaga \u{2014} {5} \u{2014} Fire Magic deals 3 damage to each creature.";
+
+    fn tiered_atomic_card(name: &str, oracle: &str, keywords: Option<Vec<String>>) -> AtomicCard {
+        AtomicCard {
+            name: name.to_string(),
+            mana_cost: Some("{1}{R}".to_string()),
+            colors: vec!["R".to_string()],
+            color_identity: vec!["R".to_string()],
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            text: Some(oracle.to_string()),
+            layout: "normal".to_string(),
+            type_line: Some("Instant".to_string()),
+            types: vec!["Instant".to_string()],
+            subtypes: vec![],
+            supertypes: vec![],
+            keywords,
+            side: None,
+            face_name: None,
+            mana_value: 2.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: AtomicIdentifiers {
+                scryfall_oracle_id: Some(format!("{}-oracle", name.to_lowercase())),
+                scryfall_id: Some(format!("{}-face", name.to_lowercase())),
+            },
+            foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
+        }
+    }
+
+    /// Production `build_oracle_face`: MTGJSON's real Fire Magic keyword array
+    /// (`["Fira","Firaga","Fire","Tiered"]`) maps its one real keyword to
+    /// `Keyword::Tiered` — the three mode-name entries stay `Unknown` and are
+    /// filtered — and the Tiered header lowers to a `ModalChoice` whose per-mode
+    /// additional costs (CR 700.2h) are `{0}` / `{2}` / `{5}`.
+    ///
+    /// Revert-red: deleting the `"tiered"` `FromStr` arm leaves `face.keywords`
+    /// empty, failing the first assertion.
+    #[test]
+    fn tiered_fire_magic_face_carries_keyword_and_modal_mode_costs() {
+        let card = tiered_atomic_card(
+            "Fire Magic",
+            FIRE_MAGIC_ORACLE,
+            Some(vec![
+                "Fira".to_string(),
+                "Firaga".to_string(),
+                "Fire".to_string(),
+                "Tiered".to_string(),
+            ]),
+        );
+        let face = build_oracle_face(&card, None);
+
+        assert_eq!(
+            face.keywords,
+            vec![Keyword::Tiered],
+            "the MTGJSON \"Tiered\" keyword must map; the mode names stay Unknown"
+        );
+
+        let modal = face
+            .modal
+            .as_ref()
+            .expect("Tiered lowers to a modal choice");
+        assert_eq!(modal.min_choices, 1, "CR 702.183a: choose exactly one");
+        assert_eq!(modal.max_choices, 1, "CR 702.183a: choose exactly one");
+        assert_eq!(modal.mode_count, 3);
+        assert_eq!(
+            modal.mode_costs,
+            vec![ManaCost::zero(), ManaCost::generic(2), ManaCost::generic(5)],
+            "CR 700.2h: each mode's listed cost is an additional cost"
+        );
+
+        // Positive reach-guard: the three modes lowered to real abilities, not
+        // Unimplemented placeholders.
+        assert_eq!(face.abilities.len(), 3);
+        assert!(
+            !face
+                .abilities
+                .iter()
+                .any(|ability| matches!(&*ability.effect, Effect::Unimplemented { .. })),
+            "no Tiered mode may be an Unimplemented placeholder"
+        );
+
+        // Hostile rows — the mapping is not case-sensitive, and the Spree
+        // sibling arm is unaffected by the Tiered addition.
+        let lower = build_oracle_face(
+            &tiered_atomic_card(
+                "Fire Magic",
+                FIRE_MAGIC_ORACLE,
+                Some(vec!["tiered".to_string()]),
+            ),
+            None,
+        );
+        assert_eq!(
+            lower.keywords,
+            vec![Keyword::Tiered],
+            "\"tiered\" must map as well"
+        );
+        let upper = build_oracle_face(
+            &tiered_atomic_card(
+                "Fire Magic",
+                FIRE_MAGIC_ORACLE,
+                Some(vec!["Tiered".to_string()]),
+            ),
+            None,
+        );
+        assert_eq!(
+            upper.keywords,
+            vec![Keyword::Tiered],
+            "\"Tiered\" must map as well"
+        );
+
+        let spree = build_oracle_face(
+            &tiered_atomic_card(
+                "Modal Spree Test",
+                "Spree\n+ {1} \u{2014} Draw a card.",
+                Some(vec!["Spree".to_string()]),
+            ),
+            None,
+        );
+        assert_eq!(
+            spree.keywords,
+            vec![Keyword::Spree],
+            "the Spree arm must still map after the Tiered sibling lands"
+        );
+
+        let absent = build_oracle_face(
+            &tiered_atomic_card("Fire Magic", FIRE_MAGIC_ORACLE, None),
+            None,
+        );
+        assert!(
+            absent.keywords.is_empty(),
+            "no MTGJSON keyword array means no Tiered keyword on the face"
         );
     }
 }

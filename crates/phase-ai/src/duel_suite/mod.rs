@@ -8,6 +8,7 @@
 
 pub mod attribution;
 pub mod compare;
+pub mod harvest;
 pub mod inline_decks;
 pub mod perf;
 pub mod run;
@@ -18,6 +19,18 @@ pub mod spec;
 mod tests;
 
 use serde::{Deserialize, Serialize};
+
+/// Wrap a refused comparison in the markdown envelope both gates publish.
+///
+/// Both `ai-gate` and `ai-perf-gate` redirect stdout into a file that
+/// `.github/workflows/ai-gate.yml` posts as a drift issue, and both abort when that file
+/// is empty. A refusal that reaches only stderr is therefore invisible exactly where it
+/// matters most — the reader of a red job sees no statement of what failed. One envelope
+/// rather than two so the two gates cannot drift into describing the same situation
+/// differently; the remedy text stays per-error-type, because the knobs differ.
+pub(crate) fn refusal_markdown(err: &dyn std::fmt::Display, remedy: &str) -> String {
+    format!("## Gate: comparison refused\n\n**{err}**\n\n{remedy}\n")
+}
 
 pub use run::{run_suite, MatchupResult, SuiteReport, SuiteStatus};
 pub use snapshots::{load_snapshot, resolve_deck_ref, SnapshotError};

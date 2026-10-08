@@ -64,7 +64,8 @@ fn pipeline_chandra_plus_one_exile_cast_typed_single_use() {
                             },
                         card_filter: Some(TargetFilter::Typed(TypedFilter { type_filters, .. })),
                         single_use: true,
-                        cast_cost_raise: None,
+                        cast_cost_modifier: None,
+                        alt_ability_cost: None,
                         land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                         ..
                     },
@@ -106,7 +107,8 @@ fn pipeline_plural_exile_cast_stays_unrestricted() {
                 permission: CastingPermission::PlayFromExile {
                     card_filter: None,
                     single_use: false,
-                    cast_cost_raise: None,
+                    cast_cost_modifier: None,
+                    alt_ability_cost: None,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     ..
                 },
@@ -544,7 +546,8 @@ fn zack_fair_activated_parses_counter_move_and_attach_sub_chain() {
 
     let effect = "Target creature you control gains indestructible until end of turn. Put Zack Fair's counters on that creature and attach an Equipment that was attached to Zack Fair to that creature.";
     let mut ctx = ParseContext::default();
-    let def = parse_activated_with_self_ref_fallback(effect, "Zack Fair", &mut ctx);
+    let ir = parse_activated_ability_ir_with_self_ref_fallback(effect, "Zack Fair", &mut ctx);
+    let def = lower_ability_ir(&ir);
 
     fn has_effect(def: &AbilityDefinition, pred: &dyn Fn(&Effect) -> bool) -> bool {
         if pred(&def.effect) {
@@ -570,62 +573,26 @@ fn zack_fair_activated_parses_counter_move_and_attach_sub_chain() {
     assert!(!has_unimplemented(&def));
 }
 
-/// CR 120.1 + CR 208.3 + CR 115.4: Iron Fist, Living Weapon — the cast
-/// trigger grants "{T}: ~ deals damage equal to his power to any other
-/// target". The granted ability's inner effect must parse to a concrete
-/// `DealDamage { Power{Source}, Another }`, not `Effect::Unimplemented`.
+/// CR 201.5a: Iron Fist, Living Weapon — the granted body names Iron Fist where the masker
+/// refuses the name, so the cast trigger lowers to the granter residual.
 #[test]
-fn iron_fist_living_weapon_grants_damage_equal_to_power_any_other_target() {
-    use crate::types::ability::{
-        ContinuousModification, Effect, FilterProp, ObjectScope, QuantityExpr, QuantityRef,
-        TargetFilter, TypedFilter,
-    };
-
+fn iron_fist_living_weapon_grant_lowers_to_the_granter_residual() {
     let p = parse_oracle_text(
-            "Whenever you cast a spell that targets a creature you control, Iron Fist gains \
-             \"{T}: Iron Fist deals damage equal to his power to any other target\" until end of turn.",
-            "Iron Fist, Living Weapon",
-            &[],
-            &["Creature".into()],
-            &[],
-        );
+        "Whenever you cast a spell that targets a creature you control, Iron Fist gains \
+         \"{T}: Iron Fist deals damage equal to his power to any other target\" until end of turn.",
+        "Iron Fist, Living Weapon",
+        &[],
+        &["Creature".into()],
+        &[],
+    );
 
-    let execute = p.triggers[0]
-        .execute
-        .as_ref()
-        .expect("cast trigger has an execute ability");
-    assert!(!has_unimplemented(execute), "no Unimplemented in Iron Fist");
-
-    let Effect::GenericEffect {
-        static_abilities, ..
-    } = &*execute.effect
-    else {
-        panic!("expected GenericEffect, got {:?}", execute.effect);
-    };
-    let granted = static_abilities
-        .iter()
-        .flat_map(|s| s.modifications.iter())
-        .find_map(|m| match m {
-            ContinuousModification::GrantAbility { definition } => Some(definition),
-            _ => None,
-        })
-        .expect("a GrantAbility modification");
-
+    assert!(p.triggers.is_empty(), "{p:#?}");
     assert!(
-        matches!(
-            &*granted.effect,
-            Effect::DealDamage {
-                amount: QuantityExpr::Ref {
-                    qty: QuantityRef::Power {
-                        scope: ObjectScope::Source,
-                    },
-                },
-                target: TargetFilter::Typed(TypedFilter { properties, .. }),
-                ..
-            } if properties.iter().any(|prop| matches!(prop, FilterProp::Another))
-        ),
-        "granted ability must deal damage equal to source power to any other target, got {:?}",
-        granted.effect
+        p.abilities.iter().any(|def| matches!(
+            &*def.effect,
+            Effect::Unimplemented { name, .. } if name == "granter_reference_unreached"
+        )),
+        "{p:#?}"
     );
 }
 

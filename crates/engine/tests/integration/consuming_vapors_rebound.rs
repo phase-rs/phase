@@ -23,9 +23,11 @@
 //!   - CR 704.5d: tokens cease to exist in zones other than the battlefield
 //!     (Rebound copies of tokens cannot be cast again, so Rebound must not
 //!     arm on token spells).
-//!   - CR 514.2: "until end of turn" effects end at cleanup — the granted
-//!     `ExileWithAltCost { duration: Some(UntilEndOfTurn) }` is pruned at
-//!     cleanup if the controller declined or failed to cast.
+//!   - CR 608.2g: the "you may cast this card from exile" instruction names
+//!     no duration, so the recast happens AS the delayed trigger resolves —
+//!     accept puts the spell on the stack immediately (with the timing
+//!     bypass, so rebounding sorceries are castable at upkeep); decline
+//!     leaves the card in exile with no lingering permission (issue #6461).
 //!
 //! Most tests hand-build the minimum state needed and exercise
 //! `stack::resolve_top` plus the relevant prune helpers directly so each
@@ -40,7 +42,7 @@ use crate::support::shared_card_db;
 use engine::game::stack;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, CastingPermission, DelayedTriggerCondition, Duration, Effect,
+    AbilityDefinition, AbilityKind, CastingPermission, DelayedTriggerCondition, Effect,
     ResolvedAbility, TargetFilter,
 };
 use engine::types::card_type::CoreType;
@@ -117,7 +119,7 @@ fn push_to_stack_as_spell_from(
         controller,
         kind: StackEntryKind::Spell {
             card_id,
-            ability: Some(resolved),
+            ability: Some(Box::new(resolved)),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 0,
         },
@@ -246,17 +248,16 @@ fn rebound_offers_recast_at_upkeep_and_resolves() {
     );
 }
 
-/// Test 3 — CR 702.88a + CR 514.2: if the controller declines the upkeep
-/// recast (the trigger fires but the player chooses not to cast), the
-/// exiled card must not retain a standing `ExileWithAltCost` permission
-/// after end-of-turn cleanup. Pre-fix the granted permission had no
-/// `duration` and would persist indefinitely. The test pins the post-fix
-/// contract: declining never installs a permission AT ALL — the
-/// permission is granted only when the optional cast is accepted, and
-/// even if it were to leak, `prune_end_of_turn_casting_permissions`
-/// would now expire it.
+/// Test 3 — CR 702.88a: arming grants no preemptive permission. Immediately
+/// after the hand-cast resolution exiles the spell, the exiled card carries
+/// no casting permission — the recast happens only when the controller
+/// accepts the upkeep offer, as the trigger resolves (CR 608.2g), and
+/// declining leaves it in exile with nothing granted. The actual
+/// accept/decline branches are driven end-to-end in
+/// `issue_6461_ephemerate_rebound_timing`; this pins the arming-time state
+/// that both branches start from.
 #[test]
-fn rebound_declined_at_upkeep_leaves_card_in_exile_with_no_permission() {
+fn rebound_resolution_grants_no_preemptive_permission() {
     let mut state = GameState::new_two_player(42);
     let spell = add_rebound_sorcery_in_hand(&mut state, P0, "Consuming Vapors");
     push_to_stack_as_spell_from(&mut state, spell, P0, Zone::Hand);
@@ -269,53 +270,23 @@ fn rebound_declined_at_upkeep_leaves_card_in_exile_with_no_permission() {
     assert!(
         state.objects[&spell].casting_permissions.is_empty(),
         "CR 702.88a: Rebound resolution must NOT preemptively grant a casting \
-         permission — the permission is created only when the controller \
-         accepts the upkeep recast (`cast_from_zone::resolve`)",
+         permission — the recast happens only when the controller accepts \
+         the upkeep offer, as the trigger resolves (CR 608.2g)",
     );
     assert_eq!(
         state.objects[&spell].zone,
         Zone::Exile,
         "exiled Rebound card stays in exile until the upkeep trigger fires",
     );
-
-    // Simulate end-of-turn cleanup: even if a permission HAD leaked, the
-    // `UntilEndOfTurn` duration must now expire it. Push a fake durational
-    // permission and verify it would be pruned.
-    state
-        .objects
-        .get_mut(&spell)
-        .unwrap()
-        .casting_permissions
-        .push(CastingPermission::ExileWithAltCost {
-            cost: ManaCost::zero(),
-            cast_transformed: false,
-            constraint: None,
-            granted_to: Some(P0),
-            resolution_cleanup: None,
-            duration: Some(Duration::UntilEndOfTurn),
-
-            graveyard_replacement: None,
-            enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
-            mana_spend_permission: None,
-        });
-    engine::game::layers::prune_end_of_turn_casting_permissions(&mut state);
-    assert!(
-        state.objects[&spell].casting_permissions.is_empty(),
-        "CR 514.2: a Rebound-granted permission with Duration::UntilEndOfTurn \
-         must be pruned at cleanup if the controller did not accept (or did \
-         not finish casting). Pre-fix the `duration` field did not exist on \
-         `ExileWithAltCost`, so the permission would persist forever.",
-    );
 }
 
-/// Test 4 — CR 611.2a + CR 514.2: the recast effect carries
-/// `Effect::CastFromZone { duration: Some(UntilEndOfTurn), .. }` so the
-/// granted permission inherits the expiry. Pre-fix the `duration` field
-/// did not exist on the effect or the permission; the test pins the
-/// plumbing contract end-to-end (effect → permission propagation).
+/// Test 4 — CR 702.88a + CR 608.2g: resolving the armed delayed trigger
+/// body casts the exiled card DURING resolution — the spell lands on the
+/// stack immediately and no lingering (cleanup-less) permission is granted.
+/// Pre-fix (issue #6461) the body granted an `UntilEndOfTurn` lingering
+/// permission, making the recast exercisable at any later priority window.
 #[test]
-fn rebound_permission_expires_at_end_of_turn_if_player_passes_after_accepting() {
+fn rebound_accept_casts_during_trigger_resolution_with_no_lingering_permission() {
     let mut state = GameState::new_two_player(42);
     let spell = add_rebound_sorcery_in_hand(&mut state, P0, "Consuming Vapors");
     push_to_stack_as_spell_from(&mut state, spell, P0, Zone::Hand);
@@ -324,35 +295,33 @@ fn rebound_permission_expires_at_end_of_turn_if_player_passes_after_accepting() 
     stack::resolve_top(&mut state, &mut events);
 
     // Resolve the queued delayed trigger body directly — this is the same
-    // `Effect::CastFromZone` constructed by `arm_rebound`. It grants the
-    // `ExileWithAltCost { duration: Some(UntilEndOfTurn) }` permission.
+    // `Effect::CastFromZone` constructed by `arm_rebound`. It casts the
+    // targetless sorcery as the trigger resolves (CR 608.2g), with the
+    // timing bypass armed so the upkeep sorcery-speed gate does not apply.
     let trig = state.delayed_triggers[0].ability.clone();
     let mut events: Vec<GameEvent> = Vec::new();
     engine::game::effects::cast_from_zone::resolve(&mut state, &trig, &mut events)
-        .expect("Rebound recast effect must install the durational permission");
+        .expect("Rebound recast effect must cast during resolution");
 
-    let perm_duration = state.objects[&spell]
-        .casting_permissions
-        .iter()
-        .find_map(|p| match p {
-            CastingPermission::ExileWithAltCost { duration, .. } => duration.clone(),
-            _ => None,
-        });
     assert_eq!(
-        perm_duration,
-        Some(Duration::UntilEndOfTurn),
-        "CR 611.2a: the Rebound recast permission must inherit \
-         Duration::UntilEndOfTurn from the CastFromZone effect — pre-fix the \
-         field did not exist and the permission persisted forever",
+        state.objects[&spell].zone,
+        Zone::Stack,
+        "CR 608.2g: accepting the upkeep offer must cast the spell as the \
+         trigger resolves — pre-fix it stayed in Exile with only a \
+         lingering permission stamped",
     );
-
-    // CR 514.2: the prune helper must expire the permission at cleanup.
-    engine::game::layers::prune_end_of_turn_casting_permissions(&mut state);
+    assert_eq!(state.stack.len(), 1);
     assert!(
-        state.objects[&spell].casting_permissions.is_empty(),
-        "CR 514.2: prune_end_of_turn_casting_permissions must drop the \
-         durational ExileWithAltCost permission — pre-fix the helper only \
-         handled PlayFromExile and the Rebound permission persisted",
+        !state.objects[&spell].casting_permissions.iter().any(|p| {
+            matches!(
+                p,
+                CastingPermission::ExileWithAltCost {
+                    resolution_cleanup: None,
+                    ..
+                }
+            )
+        }),
+        "no lingering exile-cast permission may be granted by the recast",
     );
 }
 

@@ -21,22 +21,19 @@ You are a read-only analysis agent that identifies low-hanging fruit in the Orac
 
 Your prompt will specify one of these modes:
 
-### Quick Wins Mode (default)
-When invoked without specific instructions, or asked for "quick wins" / "low-hanging fruit":
-- Run `cargo parser-gaps -- --near-misses-only` to get categories A-D only
-- Focus on Category A (verb variation) and Category B (subject stripping) — these are parser-only fixes
-- For each top verb breakdown (sorted by `single_gap_unlocks`), trace the parser code
-- Produce a prioritized fix report
+### Parser Families Mode (default)
+When invoked without specific instructions, or asked for "low-hanging fruit":
+- Run `cargo parser-gaps` and read the `parser:*` categories — gaps whose clause the parser rejected with a typed verdict. These are parser-only fixes.
+- Families within a category are sorted by `fixes_alone`, the cards that family's fix would make supported on its own. Take the top families across the `parser:*` categories.
+- For each, trace the grammar that rejected the phrase and produce a prioritized fix report.
 
 ### Full Analysis Mode
 When asked for a "full analysis" or "complete report":
-- Run `cargo parser-gaps` (all categories)
-- Analyze all categories including F (new mechanic) and G (unclassified)
-- Produce a comprehensive report covering all gap types
+- Run `cargo parser-gaps` and cover every category: `parser:*`; `resolver:*` (the parser produced the ability, but the resolver lacks the feature — runtime work, not parser work); and `undiagnosed` (gaps with no typed verdict, grouped by coverage handler).
 
 ### Targeted Mode
-When given a specific verb, category, or card name:
-- Run `cargo parser-gaps -- --verb <verb>` or `cargo parser-gaps -- --category <cat>`
+When given a specific category, format, or card name:
+- Run `cargo parser-gaps -- --category <key>` (an unknown key prints every valid key) or `cargo parser-gaps -- --format <format>`
 - Deep-dive into that specific area with detailed code tracing
 
 ## Instructions
@@ -44,36 +41,34 @@ When given a specific verb, category, or card name:
 ### Step 1: Run the analysis binary
 
 ```bash
-cargo parser-gaps  # or with --near-misses-only, --category, --verb flags
+cargo parser-gaps  # or with --category <key>, --format <format>
 ```
 
-Capture both the JSON output (stdout) and summary (stderr).
+Capture both the JSON output (stdout) and summary (stderr). The JSON's `categories` map is keyed by category. Each category, and each entry in its `families`, carries `count`, `cards_affected`, `affected_cards`, `fixes_alone` and `fixes_alone_cards`.
 
-### Step 2: Analyze Category A (Verb Variation) gaps
+### Step 2: Analyze parser families
 
-For each verb in the `by_verb` breakdown with high `single_gap_unlocks`:
+For each high-`fixes_alone` family in a `parser:*` category (its `key` is the rejected phrase under the coverage report's pattern normalizer, which turns numbers into `N` and mana symbols into `{M}`; for `parser:unparsed_verb_arguments` it is `<verb>: <arguments>`):
 
-1. **Read the handler function** — find where this verb is dispatched in:
-   - `crates/engine/src/parser/oracle_effect/imperative.rs` (main verb dispatch at line ~1224)
+1. **Find the grammar that rejected it.** The category names the verdict: `parser:unparsed_condition`, `parser:unparsed_quantity`, `parser:unparsed_replacement`, `parser:unparsed_verb_arguments` (a known clause-head verb whose arguments failed), or `parser:unrecognized_clause_head` (no known verb or subject heads the clause). Verdicts are produced in `crates/engine/src/parser/oracle_effect/gap_diagnosis.rs`. Then read the grammar that handles the phrase:
+   - `crates/engine/src/parser/oracle_effect/imperative.rs` (verb dispatch)
    - `crates/engine/src/parser/oracle_effect/mod.rs` (pre-dispatch patterns)
-2. **Identify current patterns** — what text patterns does the handler currently support?
-3. **Compare with failing patterns** — look at the `top_patterns` from the gap report
-4. **Identify the gap** — what specific text structure is the handler missing?
-5. **Propose the fix** — describe the minimal code change needed, referencing specific functions and line numbers
+   - `crates/engine/src/parser/oracle_nom/` (condition, quantity and other shared combinators)
+2. **Identify current patterns** — what text patterns does that grammar currently support?
+3. **Compare with the family's phrase** and with the Oracle text of a few of its `fixes_alone_cards`.
+4. **Identify the gap** — what specific text structure is missing?
+5. **Propose the fix** — describe the minimal code change needed, referencing specific functions.
 
-### Step 3: Analyze Category B (Subject Stripping) gaps
+### Step 3: Analyze unrecognized clause heads
 
+For `parser:unrecognized_clause_head` families:
 1. Read `crates/engine/src/parser/oracle_effect/subject.rs`
-2. Check `starts_with_subject_prefix` — what subject phrases are currently handled?
-3. Compare with gap patterns — which subjects appear in gap texts but aren't in the prefix list?
-4. Check `find_predicate_start` — is the verb recognized but the subject prefix missing?
+2. Check `starts_with_subject_prefix` — does the clause open with a subject phrase the prefix list lacks?
+3. Check `find_predicate_start` — is the verb recognized but the subject prefix missing?
 
-### Step 4: Analyze Category C (Trigger Effect) gaps
+### Step 4: Separate resolver and undiagnosed gaps
 
-For triggers with registered modes but unimplemented execute effects:
-1. Identify which trigger modes are involved
-2. Check the execute effect's source text — is it a Category A/B pattern inside a trigger?
-3. Propose whether the fix is in the trigger handler or the effect parser
+`resolver:*` families name a resolver feature the engine does not handle yet. Report them as runtime work rather than proposing a parser fix. `undiagnosed` families are keyed by coverage handler (e.g. `Effect:unknown`, `Trigger:…`). Read a few of their cards' `gap_details[].source_text` in the coverage export to decide whether each is a parser miss.
 
 ### Step 5: Produce the report
 
@@ -86,18 +81,18 @@ Coverage: [current coverage %]
 
 ## Summary
 - Total unsupported: N cards
-- Near-miss gaps (parser-only fixes): N
-- Estimated unlock potential: N cards from top 10 fixes
+- Gaps with a parser verdict (`parser:*` categories): N
+- Estimated unlock potential: N cards from the top 10 families (sum of `fixes_alone`)
 
-## Quick Wins (sorted by cards unlocked)
+## Top Parser Families (sorted by fixes_alone)
 
-### 1. [Verb] variation: "[pattern]" (N cards)
-- **Category:** A (verb variation)
+### 1. [category key]: "[family key]" (N fixed alone, M affected)
+- **Verdict:** [category key]
 - **Current handler:** `function_name` in `file.rs:line`
 - **Supports:** [list current patterns]
 - **Missing:** [describe the gap]
 - **Proposed fix:** [describe the code change]
-- **Example cards:** [3-5 card names]
+- **Example cards:** [3-5 of the family's fixes_alone_cards]
 
 ### 2. ...
 
@@ -112,12 +107,12 @@ Coverage: [current coverage %]
 
 | File | Purpose |
 |------|---------|
-| `crates/engine/src/parser/oracle_effect/imperative.rs` | Verb dispatch table (~line 1224) |
+| `crates/engine/src/parser/oracle_effect/imperative.rs` | Verb dispatch table (`parse_imperative_family_ast`) |
 | `crates/engine/src/parser/oracle_effect/mod.rs` | Pre-dispatch patterns, `parse_effect_clause` |
 | `crates/engine/src/parser/oracle_effect/subject.rs` | Subject stripping, `PREDICATE_VERBS`, `starts_with_subject_prefix` |
 | `crates/engine/src/parser/oracle_nom/primitives.rs` | Shared nom combinators (numbers, mana, colors, P/T, counters) |
 | `crates/engine/src/parser/oracle_nom/error.rs` | `parse_or_unimplemented` error boundary, `OracleResult` type |
-| `crates/engine/src/game/gap_analysis.rs` | Classification logic and verb lists |
+| `crates/engine/src/game/gap_analysis.rs` | Regroups gaps by typed diagnosis (`GapClass`, `analyze_gaps`) |
 | `crates/engine/src/game/coverage.rs` | Coverage types and semantic audit pipeline (`audit_semantic`, `SemanticFinding`) |
 
 ## Complementary Tool: Semantic Audit

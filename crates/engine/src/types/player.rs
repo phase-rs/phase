@@ -51,7 +51,7 @@ impl PlayerStatus {
 /// CR 122.1b: Named player counter types tracked by the engine.
 /// Poison counters route to the dedicated `poison_counters` field due to SBA rules (CR 704.5c).
 /// Energy counters are excluded — they use the dedicated `energy` field and `GainEnergy` effect.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum PlayerCounterKind {
     Poison,
     Experience,
@@ -145,7 +145,8 @@ pub struct Player {
     /// CR 702.179d: The inherent speed trigger can increase speed only once each turn.
     #[serde(default)]
     pub speed_trigger_used_this_turn: bool,
-    /// CR 710.2: Number of crimes committed this turn.
+    /// CR 700.13: Whether this player has committed a crime this turn (stored
+    /// as 0 or 1 for `QuantityRef` condition evaluation).
     #[serde(default)]
     pub crimes_committed_this_turn: u32,
     /// CR 704.5b: Set when this player attempted to draw from an empty library.
@@ -163,12 +164,19 @@ pub struct Player {
     pub is_eliminated: bool,
 
     /// Avatar crossover: which bending types this player has performed this turn.
-    #[serde(default)]
+    #[serde(
+        default,
+        serialize_with = "crate::types::deterministic_serde::hash_set"
+    )]
     pub bending_types_this_turn: HashSet<BendingType>,
 
     /// CR 122.1: Player counters (experience, rad, ticket, etc.).
     /// Poison counters route to the dedicated `poison_counters` field via method accessors.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        serialize_with = "crate::types::deterministic_serde::hash_map"
+    )]
     pub player_counters: HashMap<PlayerCounterKind, u32>,
 
     /// Phasing status. Default `Active`. While `PhasedOut`, the player is
@@ -250,6 +258,46 @@ fn default_contraption_crank_sprocket() -> u8 {
 }
 
 impl Player {
+    /// CR 101.4 + CR 608.2d: The number this player most recently chose for a
+    /// per-player `Effect::Choose { ChoiceType::NumberRange }` ("each player
+    /// secretly chooses a number 0 or greater"). `None` when this player has
+    /// not chosen a number — the aggregate readers of
+    /// [`crate::types::ability::QuantityRef::PlayerChosenNumber`] use that to
+    /// exclude non-choosers from a highest/lowest fold instead of counting them
+    /// as 0.
+    ///
+    /// Reads the secret and the revealed variants interchangeably: revealing a
+    /// number changes who may SEE it, never what it is, so every rules read
+    /// ("the highest number", "each player who chose the lowest number") must
+    /// return the same value on both sides of the reveal.
+    pub fn chosen_number(&self) -> Option<u32> {
+        use crate::types::ability::ChosenAttribute;
+        self.chosen_attributes.iter().find_map(|attr| match attr {
+            ChosenAttribute::Number(n) | ChosenAttribute::RevealedNumber(n) => Some(*n),
+            _ => None,
+        })
+    }
+
+    /// CR 101.4 + CR 608.2c: Publish this player's secretly-chosen number, the
+    /// state transition behind "then all players reveal those numbers
+    /// simultaneously". Returns the revealed value, or `None` when this player
+    /// chose no number (CR 609.3 — revealing nothing is a legal no-op, which is
+    /// what lets a card name every player when only some of them chose).
+    /// Idempotent: an already-revealed number stays revealed.
+    pub fn reveal_chosen_number(&mut self) -> Option<u32> {
+        use crate::types::ability::ChosenAttribute;
+        let value = self.chosen_number()?;
+        self.chosen_attributes.retain(|attribute| {
+            !matches!(
+                attribute,
+                ChosenAttribute::Number(_) | ChosenAttribute::RevealedNumber(_)
+            )
+        });
+        self.chosen_attributes
+            .push(ChosenAttribute::RevealedNumber(value));
+        Some(value)
+    }
+
     /// CR 122.1: Get the current count of a player counter.
     /// Poison counters route to the dedicated field (SBA at CR 704.5c).
     pub fn player_counter(&self, kind: &PlayerCounterKind) -> u32 {

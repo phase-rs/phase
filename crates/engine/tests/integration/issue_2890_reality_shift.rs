@@ -131,6 +131,7 @@ fn reality_shift_manifest_resolves_via_effect_context_object_snapshot() {
         Effect::Manifest {
             target: engine::types::ability::TargetFilter::ParentTargetController,
             count: QuantityExpr::Fixed { value: 1 },
+            object_source: None,
             profile: None,
             enters_under: None,
         },
@@ -161,6 +162,7 @@ fn reality_shift_manifest_resolves_via_effect_context_object_snapshot() {
             is_suspected: false,
             attachments: Vec::new(),
         },
+        incarnation: 0,
     });
 
     let mut events = Vec::new();

@@ -220,6 +220,7 @@ fn etb_without_value_effect_is_not_payoff() {
             .execute(spell(Effect::Attach {
                 attachment: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
+                selection: engine::types::ability::AttachSelection::Targeted,
             })),
     );
     assert!(!is_etb_payoff(&c));

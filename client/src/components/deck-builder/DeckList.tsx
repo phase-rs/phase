@@ -8,20 +8,29 @@ import {
   resolveCommander,
 } from "../../services/deckParser";
 import type { ExportFormat } from "../../services/deckParser";
+import { canonicalizeDeckNames } from "../../services/canonicalCardNames";
 import type { DeckCompatibilityResult, UnsupportedCard } from "../../services/deckCompatibility";
 import type { ScryfallCard } from "../../services/scryfall";
 
 import { MoveList } from "./MoveList";
 import { mouseHoverPreview } from "./hoverPreview";
+import type { CardHoverHandler } from "./hoverPreview";
 import { groupAccent, groupKey, groupOrder, groupTitleKey, type GroupMode } from "./deckGrouping";
 import { isMaybeboardPolicy, useSideboardPolicy } from "./useSideboardPolicy";
+import { copyText } from "../../services/copyText";
 
 interface DeckListProps {
   deck: ParsedDeck;
   onRemoveCard: (name: string, section: "main" | "sideboard") => void;
+  /** Adds one more copy of an existing entry, in place. See
+   *  `CardEntryRowProps.onIncrement`. */
+  onIncrementCard: (name: string, section: "main" | "sideboard") => void;
+  /** CR 100.2a: engine-resolved copy-limit predicate paired with
+   *  `onIncrementCard`. See `CardEntryRowProps.canIncrement`. */
+  canIncrementCard: (name: string) => boolean;
   onMoveCard: (name: string, from: "main" | "sideboard") => void;
   onImport: (deck: ParsedDeck) => void;
-  onCardHover?: (cardName: string | null) => void;
+  onCardHover?: CardHoverHandler;
   format?: string;
   compatibility?: DeckCompatibilityResult | null;
   onChooseArt?: (cardName: string, x: number, y: number) => void;
@@ -31,7 +40,7 @@ interface DeckListProps {
   onSetAsCommander?: (name: string) => void;
   isCommanderEligible?: (name: string) => boolean;
   /** Touch path for art selection — forwarded to each row's ✦ badge. */
-  onOpenArtPicker?: (name: string) => void;
+  onOpenArtPicker?: (name: string, launcher: HTMLButtonElement) => void;
   /** Designated commander(s). Rendered as a pinned section above the section
    *  tabs (mirroring the visual stack's Commander lane) so the commander stays
    *  visible/removable in list view — on mobile the Info-panel CommanderPanel
@@ -55,6 +64,8 @@ function totalCards(entries: DeckEntry[]): number {
 export function DeckList({
   deck,
   onRemoveCard,
+  onIncrementCard,
+  canIncrementCard,
   onMoveCard,
   onImport,
   onCardHover,
@@ -134,7 +145,7 @@ export function DeckList({
   }, [compatibility?.coverage?.unsupported_cards]);
 
   const importParsedDeck = async (content: string): Promise<boolean> => {
-    const parsed = await resolveCommander(detectAndParseDeck(content));
+    const parsed = await resolveCommander(await canonicalizeDeckNames(detectAndParseDeck(content)));
     if (!parsedDeckHasCards(parsed)) {
       setPasteError(t("deckList.parseError"));
       return false;
@@ -184,7 +195,7 @@ export function DeckList({
   };
 
   const handleCopyToClipboard = async () => {
-    await navigator.clipboard.writeText(exportText);
+    if (!(await copyText(exportText))) return;
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -244,8 +255,13 @@ export function DeckList({
             >
               <span
                 className={`text-fuchsia-50 ${onCardHover ? "cursor-pointer" : ""}`}
-                onClick={() => onCardHover?.(name)}
-                {...mouseHoverPreview(onCardHover, name)}
+                onClick={() =>
+                  onCardHover?.({ name, scryfallId: cardDataCache.get(name)?.id })
+                }
+                {...mouseHoverPreview(onCardHover, {
+                  name,
+                  scryfallId: cardDataCache.get(name)?.id,
+                })}
               >
                 {name}
               </span>
@@ -314,6 +330,8 @@ export function DeckList({
                 entries={mainGroups.get(key) ?? []}
                 section="main"
                 onRemove={onRemoveCard}
+                onIncrement={onIncrementCard}
+                canIncrement={canIncrementCard}
                 onMove={onMoveCard}
                 onCardHover={onCardHover}
                 unsupportedMap={unsupportedMap}
@@ -331,6 +349,8 @@ export function DeckList({
                 entries={deck.sideboard}
                 section="sideboard"
                 onRemove={onRemoveCard}
+                onIncrement={onIncrementCard}
+                canIncrement={canIncrementCard}
                 onMove={onMoveCard}
                 onCardHover={onCardHover}
                 unsupportedMap={unsupportedMap}

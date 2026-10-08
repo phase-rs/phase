@@ -27,9 +27,7 @@ impl TournamentHarness {
     pub fn new_premier_draft() -> Self {
         let mut manager = DraftSessionManager::new();
         let config = DraftConfig {
-            source: DraftSource::Set {
-                code: "TST".to_string(),
-            },
+            source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
             pod_size: 8,
@@ -85,7 +83,7 @@ impl TournamentHarness {
                         &self.tokens[seat],
                         DraftAction::Pick {
                             seat: seat as u8,
-                            card_instance_id: card.instance_id.clone(),
+                            card_instance_ids: vec![card.instance_id.clone()],
                         },
                         Some(&self.source),
                     );
@@ -119,6 +117,7 @@ impl TournamentHarness {
                 DraftAction::SubmitDeck {
                     seat: seat as u8,
                     main_deck,
+                    commanders: Vec::new(),
                 },
                 Some(&self.source),
             );
@@ -192,6 +191,69 @@ mod tests {
             h.status(),
             DraftStatus::Pairing | DraftStatus::MatchInProgress | DraftStatus::RoundComplete
         ));
+    }
+
+    /// A completed Swiss round must be followed by round two.
+    ///
+    /// `AdvanceRound` deliberately leaves `current_round` at the round just
+    /// finished; only pairing generation commits the next one. Any caller that
+    /// derives the round itself gets this wrong (it did: `current_round.max(1)`
+    /// pinned every pod to round one forever).
+    #[test]
+    fn advance_round_then_generate_pairs_round_two() {
+        let mut h = TournamentHarness::new_premier_draft();
+        h.start();
+        h.run_all_picks();
+        h.submit_all_decks();
+
+        h.manager
+            .ensure_pairings_generated(&h.draft_code)
+            .expect("round one pairings");
+        assert_eq!(h.status(), DraftStatus::MatchInProgress);
+
+        let round_one: Vec<(String, u8)> = h.manager.sessions[&h.draft_code]
+            .session
+            .pairings
+            .iter()
+            .filter(|p| p.round == 1)
+            .map(|p| (p.match_id.clone(), p.players[0].0))
+            .collect();
+        assert_eq!(round_one.len(), 4, "an 8-player pod pairs four tables");
+
+        for (match_id, winner_seat) in round_one {
+            h.manager
+                .apply_system_action(
+                    &h.draft_code,
+                    DraftAction::ReportMatchResult {
+                        match_id,
+                        winner_seat: Some(winner_seat),
+                    },
+                    None,
+                )
+                .expect("report round one result");
+        }
+        assert_eq!(h.status(), DraftStatus::RoundComplete);
+
+        h.manager
+            .apply_system_action(&h.draft_code, DraftAction::AdvanceRound, None)
+            .expect("advance round");
+        assert_eq!(h.status(), DraftStatus::Pairing);
+
+        // REVERT-FAILING ASSERTION. Pre-fix `ensure_pairings_generated` derives
+        // `current_round.max(1) == 1`, the guard rejects `1 != 1 + 1`, and this
+        // `.expect` panics.
+        h.manager
+            .ensure_pairings_generated(&h.draft_code)
+            .expect("round two pairings");
+
+        let view = h.manager.sessions[&h.draft_code].view_for_seat(0);
+        assert_eq!(view.current_round, 2, "generation commits round two");
+        assert_eq!(
+            view.pairings.len(),
+            4,
+            "the view exposes the four round-two tables",
+        );
+        assert_eq!(h.status(), DraftStatus::MatchInProgress);
     }
 
     #[test]

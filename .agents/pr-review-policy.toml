@@ -10,6 +10,7 @@ rules_domain = "mtg-cr"
 [labels]
 frontend_deferred = "defer-fe"
 quality = "quality"
+approved_for_review = "pr:approved-for-review"
 
 # Artifact verification remains audit-only until the contributor contract is
 # published and an immutable post-publication cutoff is configured.
@@ -19,9 +20,11 @@ enforced_after = ""
 accepted_issue_label = "accepted"
 
 [architecture_scope]
-# Independently calibrated against 80 merged and 39 open PRs. This gate does
-# not depend on the artifact publication cutoff.
-mode = "enforce"
+# Broad cross-surface changes need a maintainer's full implementation review,
+# not automatic closure. In particular, a bounded parser/engine class moving
+# from Effect::Unimplemented to a real implementation may legitimately require
+# engine, interactive-choice, frontend, and transport plumbing.
+mode = "review"
 span_threshold = 3
 patterns = [
   "crates/engine/src/types/format.rs",
@@ -45,6 +48,11 @@ patterns = [
   ".claude/skills/**",
   ".claude/agents/**",
   ".github/workflows/**",
+  # The pin gate and its tests decide whether a privileged workflow's actions
+  # are pinned. A change to them carries the same authority as a change to the
+  # workflows themselves.
+  "scripts/check_action_pins.py",
+  "scripts/check_action_pins_tests.py",
   "AGENTS.md",
   "CLAUDE.md",
   "GEMINI.md",
@@ -74,6 +82,7 @@ patterns = [
 [path_classes.engine]
 patterns = [
   "crates/engine/**",
+  "crates/engine-wasm/**",
   "crates/phase-ai/**",
   "crates/phase-server/**",
 ]

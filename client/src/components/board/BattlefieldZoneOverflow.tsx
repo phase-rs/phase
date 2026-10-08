@@ -184,6 +184,23 @@ export function BattlefieldZoneOverflow({
   );
 }
 
+// Fluid minimum footprint for the collapsed lands/support summary pill, derived
+// from the board's viewport-fluid `--card-base` token (index.css) rather than
+// fixed rem widths behind a discrete mobile/desktop breakpoint. This lets the
+// tile track the same vw+vh curve every card uses, so it shrinks continuously on
+// smaller screens instead of holding its full desktop width. The multipliers
+// reproduce the prior desktop min sizes at a desktop `--card-base` (~112px); the
+// values are a floor — card content (mana/type chips) still expands the tile.
+// Support runs wider and taller than lands because it carries type-count chips.
+const LANDS_TILE_MIN: CSSProperties = {
+  minWidth: "calc(var(--card-base) * 1.07)",
+  minHeight: "calc(var(--card-base) * 0.46)",
+};
+const SUPPORT_TILE_MIN: CSSProperties = {
+  minWidth: "calc(var(--card-base) * 1.32)",
+  minHeight: "calc(var(--card-base) * 0.54)",
+};
+
 // Fixed, readable card size for the scrollable creature grid. Big enough to
 // read P/T, keywords, and counters; the parent scrolls the overflow.
 const CREATURE_GRID_VARS: CSSProperties = {
@@ -336,23 +353,23 @@ function ZoneSummaryTile({
   // corridor rather than off-screen: lands hug the left, support the right.
   const summaryScale = usePreferencesStore((s) => s.flexLayout.scales?.summaryTile) ?? 1;
   const flexEditMode = useUiStore((s) => s.flexEditMode);
-  const isMobile = useIsMobile();
-  // The collapsed overflow pill is more compact on mobile so it claims less of
-  // the cramped half-row; desktop keeps the roomier footprint.
-  const supportSizeClass = isMobile
-    ? "min-h-[2.85rem] min-w-[7.25rem] px-1.5 py-1"
-    : "min-h-[3.75rem] min-w-[9.25rem] px-2.5 py-1.5";
-  const defaultSizeClass = isMobile
-    ? "min-h-[2.25rem] min-w-[4.75rem] px-1.5 py-0.5"
-    : "min-h-[3.25rem] min-w-[7.5rem] px-2 py-1.5";
-  // Split panes cap the tile's width so the pip row wraps into a squarish
-  // block (~2 pips per line) instead of one long strip eating the pane width.
+  // The collapsed pill's min footprint scales with `--card-base` (see the
+  // *_TILE_MIN consts above) instead of a fixed desktop width, so it shrinks
+  // continuously on smaller screens rather than snapping at one breakpoint. Only
+  // padding stays in the class here. Split panes keep their capped Tailwind
+  // sizing so the pip row wraps into a squarish block (~2 pips per line) instead
+  // of one long strip eating the pane width.
   const splitSizeClass = "min-h-[3.25rem] min-w-[6.5rem] max-w-[9rem] px-2 py-1.5";
   const sizeClass = splitOverview
     ? splitSizeClass
     : zone === "support"
-      ? supportSizeClass
-      : defaultSizeClass;
+      ? "px-2.5 py-1.5"
+      : "px-2 py-1";
+  const tileMinStyle = splitOverview
+    ? undefined
+    : zone === "support"
+      ? SUPPORT_TILE_MIN
+      : LANDS_TILE_MIN;
   const selectedAttackers = useUiStore((s) => s.selectedAttackers);
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
   const selectedCardIds = useUiStore((s) => s.selectedCardIds);
@@ -496,6 +513,7 @@ function ZoneSummaryTile({
         type="button"
         onClick={onOpen}
         data-grouped-ids={objectIds.join(" ")}
+        style={tileMinStyle}
         className={`relative flex ${sizeClass} max-w-full flex-col justify-center rounded-lg border text-left shadow-[0_10px_24px_rgba(0,0,0,0.28)] backdrop-blur-md transition hover:border-white/30 hover:bg-slate-900/80 ${
           hasInteraction
             ? "border-cyan-300/60 bg-cyan-950/45 ring-1 ring-cyan-300/40"

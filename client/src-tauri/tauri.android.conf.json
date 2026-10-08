@@ -1,0 +1,21 @@
+{
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "phase.rs",
+        "create": true,
+        "resizable": true,
+        "maximized": true
+      }
+    ]
+  },
+  "bundle": {
+    "createUpdaterArtifacts": false,
+    "android": {
+      "minSdkVersion": 24,
+      "debugApplicationIdSuffix": ".debug",
+      "autoIncrementVersionCode": false
+    }
+  }
+}

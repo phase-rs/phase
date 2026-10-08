@@ -30,15 +30,48 @@ export function isCommanderPreconDeck(deck: DeckEntry): boolean {
 let cached: DeckMap | null = null;
 let fetchPromise: Promise<DeckMap | null> | null = null;
 
+function isDeckMap(value: unknown): value is DeckMap {
+  if (!value || typeof value !== "object" || Array.isArray(value) || !Object.keys(value).length) {
+    return false;
+  }
+
+  const isCardList = (cards: unknown) => Array.isArray(cards) && cards.every((card) => {
+    if (!card || typeof card !== "object" || Array.isArray(card)) return false;
+    const entry = card as Partial<DeckCardEntry>;
+    return typeof entry.name === "string" && typeof entry.count === "number";
+  });
+
+  return Object.values(value).every((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const deck = value as Partial<DeckEntry>;
+    return typeof deck.code === "string"
+      && typeof deck.name === "string"
+      && typeof deck.type === "string"
+      && typeof deck.coveragePct === "number"
+      && (deck.releaseDate === undefined || typeof deck.releaseDate === "string")
+      && isCardList(deck.mainBoard)
+      && (deck.sideBoard === undefined
+        || isCardList(deck.sideBoard))
+      && (deck.commander === undefined
+        || isCardList(deck.commander));
+  });
+}
+
 export function loadPreconDeckMap(): Promise<DeckMap | null> {
   if (!fetchPromise) {
-    fetchPromise = fetch(__DECKS_URL__)
-      .then((res) => (res.ok ? (res.json() as Promise<DeckMap>) : null))
-      .then((data) => {
-        if (data && typeof data === "object") cached = data;
-        return cached;
-      })
+    const pending = (async () => {
+      const response = await fetch(__DECKS_URL__);
+      if (!response.ok) return null;
+      const data: unknown = await response.json();
+      if (!isDeckMap(data)) return null;
+      cached = data;
+      return data;
+    })()
       .catch(() => null);
+    fetchPromise = pending;
+    void pending.then((data) => {
+      if (!data && fetchPromise === pending) fetchPromise = null;
+    });
   }
   return fetchPromise;
 }

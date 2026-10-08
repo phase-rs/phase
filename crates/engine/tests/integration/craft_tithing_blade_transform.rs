@@ -363,10 +363,13 @@ fn tithing_blade_crafts_into_transformed_sepulcher() {
 /// idiom in `game/transform.rs` tests and `integration_bending.rs`).
 fn consuming_sepulcher_back_face() -> BackFaceData {
     BackFaceData {
+        is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: "Consuming Sepulcher".to_string(),
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         // CR 712.14a: the back face is the permanent that exists after return.
         // Consuming Sepulcher is an Enchantment — distinct core type from the
@@ -390,6 +393,7 @@ fn consuming_sepulcher_back_face() -> BackFaceData {
         casting_restrictions: vec![],
         casting_options: vec![],
         layout_kind: None,
+        parse_warnings: vec![],
     }
 }
 

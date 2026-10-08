@@ -1,5 +1,5 @@
 ---
-source: crates/engine/src/parser/oracle.rs
+source: crates/engine/src/parser/oracle_pipeline_snapshot_tests.rs
 expression: result
 ---
 {
@@ -71,6 +71,7 @@ expression: result
         "counter_type": "lore",
         "threshold": 1
       },
+      "saga_chapter": 1,
       "batched": false
     },
     {
@@ -137,6 +138,7 @@ expression: result
         "counter_type": "lore",
         "threshold": 2
       },
+      "saga_chapter": 2,
       "batched": false
     },
     {
@@ -187,6 +189,7 @@ expression: result
         "counter_type": "lore",
         "threshold": 3
       },
+      "saga_chapter": 3,
       "batched": false
     }
   ],

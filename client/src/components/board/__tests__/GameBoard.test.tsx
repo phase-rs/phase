@@ -92,7 +92,7 @@ describe("GameBoard multiplayer layout", () => {
   });
 
   it("defaults to the focused opponent plus local player", () => {
-    render(<GameBoard oppHud={<div />} playerHud={<div />} />);
+    render(<GameBoard effectiveMultiplayerBoardLayout="focused" oppHud={<div />} playerHud={<div />} />);
 
     expect(screen.getByTestId("player-area-2")).toBeInTheDocument();
     expect(screen.getByTestId("player-area-0")).toBeInTheDocument();
@@ -103,7 +103,7 @@ describe("GameBoard multiplayer layout", () => {
   it("renders each live opponent once plus local player in split mode", () => {
     usePreferencesStore.setState({ multiplayerBoardLayout: "split" });
 
-    render(<GameBoard oppHud={<div data-testid="global-opponent-hud" />} playerHud={<div />} />);
+    render(<GameBoard effectiveMultiplayerBoardLayout="split" oppHud={<div data-testid="global-opponent-hud" />} playerHud={<div />} />);
 
     for (const playerId of [0, 1, 2, 3]) {
       expect(screen.getAllByTestId(`player-area-${playerId}`)).toHaveLength(1);

@@ -1,0 +1,2758 @@
+//! Schema-level tests for the custom-format engine core (Phase 1a), plus a
+//! handful of Phase 1d integration checks that exercise the real evaluator
+//! through the public `validate_name_deck_for_format_full` entry point. Most
+//! of this file covers construction, serde round-trip, the `GameFormat::Custom`
+//! wire format, the two registration gates against synthetic values, and the
+//! disclosed non-panicking fallbacks for methods that cannot resolve a Custom
+//! format's real values from a bare `GameFormat` alone. The bulk of
+//! deck-legality evaluation (`evaluate_custom_format` / `DeclaredPool` /
+//! `CardPoolAuthority`, all private to `deck_validation.rs`) is tested there,
+//! in that module's own `#[cfg(test)]` unit tests, which can reach those
+//! private items directly.
+
+use engine::types::custom_format::{
+    assert_no_lobby_save_sentinel_collision, bundled_presets, old_school_93_94, old_school_95,
+    passes_legacy_axis_gate, passes_reprint_fidelity_gate, swedish_old_school,
+    validate_custom_rules_consistency, AntePolicy, CombatDamageTiming, CommandZoneMode,
+    CommanderEligibilityRule, CustomFormatDef, CustomFormatId, CustomFormatRules, LegacyRuleSet,
+    LegalityRules, LegendRuleScope, ManaBurnPolicy, PrintingFidelity, ReprintPolicy, SetCode,
+    StructuralRules, WishOutsideGameScope, LOBBY_SAVE_CUSTOM_FORMAT_ID,
+};
+use engine::types::format::{
+    DeckCopyLimit, DeckSizeRule, FormatConfig, GameFormat, RangeOfInfluenceConfig, SelectedFormat,
+    SideboardPolicy,
+};
+use engine::types::player::PlayerId;
+use std::collections::{BTreeMap, BTreeSet};
+
+fn sample_structural() -> StructuralRules {
+    StructuralRules {
+        starting_life: 30,
+        min_players: 2,
+        max_players: 4,
+        deck_size: DeckSizeRule::Minimum(60),
+        singleton: false,
+        command_zone_mode: CommandZoneMode::Disabled,
+        range_of_influence: None,
+        team_based: false,
+        sideboard_policy: SideboardPolicy::Unlimited,
+        default_deck_copy_limit: DeckCopyLimit::UpTo(4),
+    }
+}
+
+fn sample_rules(id: u16) -> CustomFormatRules {
+    CustomFormatRules {
+        id: CustomFormatId(id),
+        structural: sample_structural(),
+        legality: LegalityRules {
+            legal_sets: None,
+            legal_cards: Vec::new(),
+            banned: Vec::new(),
+            restricted: Vec::new(),
+            legacy: LegacyRuleSet {
+                mana_burn: ManaBurnPolicy::default(),
+                damage_timing: CombatDamageTiming::default(),
+                wish_scope: WishOutsideGameScope::default(),
+                legend_rule_scope: engine::types::custom_format::LegendRuleScope::default(),
+                ante: AntePolicy::default(),
+            },
+        },
+    }
+}
+
+fn sample_def(id: u16) -> CustomFormatDef {
+    CustomFormatDef {
+        rules: sample_rules(id),
+        label: "Sample Custom Format".to_string(),
+        short_label: "SCF".to_string(),
+        description: "A test-only custom format".to_string(),
+        reprint_policy: None,
+        printing_fidelity: PrintingFidelity::NotApplicable,
+    }
+}
+
+#[test]
+fn custom_format_rules_serde_roundtrip() {
+    let rules = sample_rules(5);
+    let json = serde_json::to_string(&rules).unwrap();
+    let back: CustomFormatRules = serde_json::from_str(&json).unwrap();
+    assert_eq!(rules, back);
+}
+
+#[test]
+fn custom_format_def_serde_roundtrip() {
+    let def = sample_def(5);
+    let json = serde_json::to_string(&def).unwrap();
+    let back: CustomFormatDef = serde_json::from_str(&json).unwrap();
+    assert_eq!(def, back);
+}
+
+#[test]
+fn legal_sets_none_and_some_are_distinguishable() {
+    let unrestricted = LegalityRules {
+        legal_sets: None,
+        legal_cards: Vec::new(),
+        banned: Vec::new(),
+        restricted: Vec::new(),
+        legacy: sample_rules(0).legality.legacy,
+    };
+    let restricted = LegalityRules {
+        legal_sets: Some(vec![SetCode("LEA".to_string())]),
+        ..unrestricted.clone()
+    };
+    let unrestricted_json = serde_json::to_value(&unrestricted).unwrap();
+    let restricted_json = serde_json::to_value(&restricted).unwrap();
+    assert_ne!(unrestricted_json, restricted_json);
+    assert_eq!(unrestricted_json["legal_sets"], serde_json::Value::Null);
+    assert_eq!(restricted_json["legal_sets"][0], "LEA");
+}
+
+#[test]
+fn validate_custom_rules_consistency_accepts_matching_id() {
+    let rules = sample_rules(5);
+    let config = FormatConfig {
+        custom_rules: Some(Box::new(rules.clone())),
+        ..FormatConfig {
+            format: GameFormat::Custom(rules.id),
+            ..FormatConfig::standard()
+        }
+    };
+    assert!(validate_custom_rules_consistency(&config).is_ok());
+}
+
+#[test]
+fn validate_custom_rules_consistency_rejects_mismatched_id() {
+    let config = FormatConfig {
+        format: GameFormat::Custom(CustomFormatId(5)),
+        custom_rules: Some(Box::new(sample_rules(7))),
+        ..FormatConfig::standard()
+    };
+    assert!(validate_custom_rules_consistency(&config).is_err());
+}
+
+#[test]
+fn validate_custom_rules_consistency_rejects_custom_without_rules() {
+    let config = FormatConfig {
+        format: GameFormat::Custom(CustomFormatId(5)),
+        custom_rules: None,
+        ..FormatConfig::standard()
+    };
+    assert!(validate_custom_rules_consistency(&config).is_err());
+}
+
+#[test]
+fn validate_custom_rules_consistency_rejects_builtin_with_custom_rules() {
+    let config = FormatConfig {
+        format: GameFormat::Standard,
+        custom_rules: Some(Box::new(sample_rules(5))),
+        ..FormatConfig::standard()
+    };
+    assert!(validate_custom_rules_consistency(&config).is_err());
+}
+
+#[test]
+fn validate_custom_rules_consistency_accepts_every_builtin_default() {
+    for meta in GameFormat::registry() {
+        let config = FormatConfig::for_format(meta.format).unwrap();
+        assert!(
+            validate_custom_rules_consistency(&config).is_ok(),
+            "{:?}: built-in default config must be accepted",
+            meta.format
+        );
+    }
+}
+
+#[test]
+fn legacy_axis_gate_rejects_undeclared_axis() {
+    // Uses damage timing, not mana burn: Phase 2b implemented mana burn, so it
+    // is no longer an example of an UNimplemented axis. The gate's job is
+    // unchanged — the set it checks against simply grew.
+    let mut def = sample_def(1);
+    def.rules.legality.legacy.damage_timing = CombatDamageTiming::OnStack;
+    assert!(!passes_legacy_axis_gate(&def.rules.legality.legacy));
+}
+
+/// The other side of that change: every axis the engine DOES implement must
+/// pass, named individually. Without this, `IMPLEMENTED_LEGACY_AXES` could be
+/// emptied again and only the EC presets' registry test would notice — and
+/// that test covers mana burn alone, since no bundled preset declares either
+/// scope axis.
+#[test]
+fn legacy_axis_gate_accepts_every_implemented_axis() {
+    for (label, legacy) in [
+        (
+            "mana burn (Phase 2b)",
+            LegacyRuleSet {
+                mana_burn: ManaBurnPolicy::Obsolete,
+                ..LegacyRuleSet::default()
+            },
+        ),
+        (
+            "pre-M10 Wish reach (Phase 2cd)",
+            LegacyRuleSet {
+                wish_scope: WishOutsideGameScope::PreM10ReachesExile,
+                ..LegacyRuleSet::default()
+            },
+        ),
+        (
+            "pre-M14 legend scope (Phase 2cd)",
+            LegacyRuleSet {
+                legend_rule_scope: LegendRuleScope::PreM14AnyController,
+                ..LegacyRuleSet::default()
+            },
+        ),
+    ] {
+        assert!(
+            passes_legacy_axis_gate(&legacy),
+            "{label} is implemented, so the gate must accept it"
+        );
+    }
+
+    // All three at once: the gate checks every declared axis, not just the
+    // first one it finds.
+    assert!(passes_legacy_axis_gate(&LegacyRuleSet {
+        mana_burn: ManaBurnPolicy::Obsolete,
+        wish_scope: WishOutsideGameScope::PreM10ReachesExile,
+        legend_rule_scope: LegendRuleScope::PreM14AnyController,
+        ..LegacyRuleSet::default()
+    }));
+
+    // Paired control: adding the one unimplemented axis to that same set
+    // flips it back to rejected, so the assertions above are about the gate
+    // and not about it being permissive.
+    assert!(!passes_legacy_axis_gate(&LegacyRuleSet {
+        mana_burn: ManaBurnPolicy::Obsolete,
+        wish_scope: WishOutsideGameScope::PreM10ReachesExile,
+        legend_rule_scope: LegendRuleScope::PreM14AnyController,
+        damage_timing: CombatDamageTiming::OnStack,
+        ..LegacyRuleSet::default()
+    }));
+}
+
+#[test]
+fn legacy_axis_gate_accepts_all_default_axes() {
+    let def = sample_def(2);
+    assert!(passes_legacy_axis_gate(&def.rules.legality.legacy));
+}
+
+#[test]
+fn ante_enabled_is_gated_but_ante_excluded_is_not() {
+    // CR 407.2/407.4: `Enabled` promises an ante zone and the ante action,
+    // which no engine code provides — so it is a declared-but-unbuilt axis
+    // like any other, and the gate must reject it.
+    let mut def = sample_def(1);
+    def.rules.legality.legacy.ante = AntePolicy::Enabled;
+    assert!(!passes_legacy_axis_gate(&def.rules.legality.legacy));
+
+    // CR 407.3's exclusion, by contrast, IS enforced (in `DeclaredPool`), and
+    // is the default every custom format carries — including every Axis-A
+    // lobby save, whose whole LegacyRuleSet is `Default`. Gating it would
+    // reject every custom format in existence.
+    assert_eq!(AntePolicy::default(), AntePolicy::Excluded);
+    def.rules.legality.legacy.ante = AntePolicy::Excluded;
+    assert!(passes_legacy_axis_gate(&def.rules.legality.legacy));
+}
+
+#[test]
+fn a_legacy_rule_set_saved_before_the_ante_axis_still_deserializes() {
+    // Backward compatibility for a `CustomFormatDef` a client persisted
+    // before this axis existed (Phase 1c shipped the Axis-A save path): the
+    // payload has no `ante` key, and must resolve to the modern `Excluded` —
+    // which is exactly what such a save meant.
+    let legacy: LegacyRuleSet = serde_json::from_str(
+        r#"{
+            "mana_burn": "Modern",
+            "damage_timing": "Modern",
+            "wish_scope": "PostM10SideboardOnly",
+            "legend_rule_scope": "Modern"
+        }"#,
+    )
+    .expect("a pre-ante LegacyRuleSet payload must still deserialize");
+    assert_eq!(legacy.ante, AntePolicy::Excluded);
+    assert_eq!(legacy, LegacyRuleSet::default());
+}
+
+#[test]
+fn reprint_fidelity_gate_rejects_mismatch() {
+    let mut def = sample_def(3);
+    def.reprint_policy = Some(ReprintPolicy::OriginalPrintingsOnly);
+    def.printing_fidelity = PrintingFidelity::NotApplicable;
+    assert!(!passes_reprint_fidelity_gate(&def));
+
+    let mut def2 = sample_def(4);
+    def2.reprint_policy = None;
+    def2.printing_fidelity = PrintingFidelity::SetCodeApproximation;
+    assert!(!passes_reprint_fidelity_gate(&def2));
+}
+
+#[test]
+fn reprint_fidelity_gate_accepts_agreement() {
+    let mut def = sample_def(5);
+    def.reprint_policy = Some(ReprintPolicy::AllowAnyPrinting);
+    def.printing_fidelity = PrintingFidelity::SetCodeApproximation;
+    assert!(passes_reprint_fidelity_gate(&def));
+
+    let def2 = sample_def(6);
+    assert!(passes_reprint_fidelity_gate(&def2));
+}
+
+/// Names, not counts. A same-length substitution anywhere in these rosters
+/// changes legal deck construction, and a test that only counted would sail
+/// straight past it — the lesson from the Swedish preset's first review.
+fn names(entries: &[String]) -> BTreeSet<&str> {
+    entries.iter().map(String::as_str).collect()
+}
+
+fn codes(entries: &[SetCode]) -> BTreeSet<&str> {
+    entries.iter().map(|code| code.0.as_str()).collect()
+}
+
+#[test]
+fn old_school_93_94_declares_its_sourced_card_pool() {
+    // Verbatim from `lordsofthepit.com/src/pages/formats.md` (RESEARCH.md §1),
+    // re-fetched 2026-09-09. Every set code checked against Scryfall's live
+    // set list at implementation time.
+    let preset = old_school_93_94();
+    let legality = &preset.rules.legality;
+
+    let sets = legality
+        .legal_sets
+        .as_ref()
+        .expect("Old School 93/94 restricts its pool, so legal_sets is Some(_)");
+    assert_eq!(
+        codes(sets),
+        BTreeSet::from([
+            "LEA", "LEB", "2ED", "CED", "CEI", "ARN", "ATQ", "3ED", "LEG", "DRK", "FEM",
+        ]),
+        "Alpha, Beta, Unlimited, both Collectors' Editions, Arabian Nights, Antiquities, \
+         Revised, Legends, The Dark, Fallen Empires"
+    );
+    assert_eq!(sets.len(), 11, "no duplicate set codes");
+
+    assert_eq!(
+        names(&legality.restricted),
+        BTreeSet::from([
+            "Ancestral Recall",
+            "Balance",
+            "Black Lotus",
+            "Braingeyser",
+            "Chaos Orb",
+            "Channel",
+            "Demonic Tutor",
+            "Library of Alexandria",
+            "Mana Drain",
+            "Mind Twist",
+            "Mox Emerald",
+            "Mox Jet",
+            "Mox Pearl",
+            "Mox Ruby",
+            "Mox Sapphire",
+            "Recall",
+            "Regrowth",
+            "Sol Ring",
+            "Time Vault",
+            "Time Walk",
+            "Timetwister",
+            "Wheel of Fortune",
+        ])
+    );
+    assert_eq!(legality.restricted.len(), 22, "the source states 22");
+
+    assert_eq!(
+        names(&legality.banned),
+        BTreeSet::from([
+            "Bronze Tablet",
+            "Contract from Below",
+            "Darkpact",
+            "Demonic Attorney",
+            "Jeweled Bird",
+            "Rebirth",
+            "Tempest Efreet",
+        ])
+    );
+    assert_eq!(legality.banned.len(), 7, "the source states 7");
+
+    // Mana burn is the source's ONLY stated legacy exception — pinned axis by
+    // axis so a future edit cannot quietly add damage-on-the-stack or a Wish
+    // reversion this ruleset never asked for.
+    assert_eq!(legality.legacy.mana_burn, ManaBurnPolicy::Obsolete);
+    assert_eq!(
+        legality.legacy,
+        LegacyRuleSet {
+            mana_burn: ManaBurnPolicy::Obsolete,
+            ..LegacyRuleSet::default()
+        }
+    );
+}
+
+/// The promo carve-out, asserted as DATA on the shipped preset: both EC
+/// rulesets name specific cards legal, and `legal_sets` cannot express it.
+#[test]
+fn the_eternal_central_presets_name_their_legal_promos() {
+    assert_eq!(
+        names(&old_school_93_94().rules.legality.legal_cards),
+        BTreeSet::from(["Arena", "Sewers of Estark", "Nalathni Dragon"]),
+        "the three promos the 93/94 source declares legal"
+    );
+
+    // Swedish names none — the carve-out is an Eternal Central thing, and an
+    // empty list here is the honest value rather than an unfilled one. Without
+    // this, `legal_cards` could be populated for every preset by reflex.
+    assert!(swedish_old_school().rules.legality.legal_cards.is_empty());
+}
+
+/// PLAN.md §2's preset-inheritance requirement: 95 must carry every 93/94
+/// entry PLUS exactly its own declared additions. Asserting only that the
+/// additions are present would let a future edit silently drop or duplicate
+/// the inherited base.
+#[test]
+fn old_school_95_extends_93_94_by_exactly_its_declared_deltas() {
+    let base = old_school_93_94();
+    let extended = old_school_95();
+
+    let base_sets = codes(base.rules.legality.legal_sets.as_ref().unwrap());
+    let extended_sets = codes(extended.rules.legality.legal_sets.as_ref().unwrap());
+    assert!(
+        base_sets.is_subset(&extended_sets),
+        "95 must inherit every 93/94 set"
+    );
+    assert_eq!(
+        &extended_sets - &base_sets,
+        BTreeSet::from(["4ED", "ICE", "CHR", "REN", "HML"]),
+        "Fourth Edition, Ice Age, Chronicles, Renaissance, Homelands — and nothing else"
+    );
+
+    let base_restricted = names(&base.rules.legality.restricted);
+    let extended_restricted = names(&extended.rules.legality.restricted);
+    assert!(base_restricted.is_subset(&extended_restricted));
+    assert_eq!(
+        &extended_restricted - &base_restricted,
+        BTreeSet::from(["Demonic Consultation", "Mana Crypt"])
+    );
+
+    // The promo carve-out the set list cannot express: 95 names three more.
+    let base_named = names(&base.rules.legality.legal_cards);
+    let extended_named = names(&extended.rules.legality.legal_cards);
+    assert!(base_named.is_subset(&extended_named));
+    assert_eq!(
+        &extended_named - &base_named,
+        BTreeSet::from(["Giant Badger", "Windseeker Centaur", "Mana Crypt"])
+    );
+
+    let base_banned = names(&base.rules.legality.banned);
+    let extended_banned = names(&extended.rules.legality.banned);
+    assert!(base_banned.is_subset(&extended_banned));
+    assert_eq!(
+        &extended_banned - &base_banned,
+        BTreeSet::from(["Amulet of Quoz", "Timmerian Fiends"])
+    );
+
+    // Set semantics would hide a duplicated inherited entry, which is a real
+    // authoring defect even though it changes no verdict.
+    assert_eq!(
+        extended.rules.legality.legal_sets.as_ref().unwrap().len(),
+        16
+    );
+    assert_eq!(extended.rules.legality.legal_cards.len(), 6);
+    assert_eq!(extended.rules.legality.restricted.len(), 24);
+    assert_eq!(extended.rules.legality.banned.len(), 9);
+
+    // Inherited verbatim, not re-declared.
+    assert_eq!(extended.rules.legality.legacy, base.rules.legality.legacy);
+    assert_eq!(extended.printing_fidelity, base.printing_fidelity);
+    assert_eq!(extended.reprint_policy, base.reprint_policy);
+
+    // ...but NOT the identity, which must be its own.
+    assert_ne!(extended.rules.id, base.rules.id);
+    assert_ne!(extended.label, base.label);
+    assert_ne!(extended.short_label, base.short_label);
+}
+
+/// Phase 2b's payoff: the two EC presets are now SELECTABLE. They were listed
+/// in `bundled_presets()` and rejected by the legacy-axis gate from the moment
+/// they existed; implementing mana burn released them without either
+/// constructor changing.
+#[test]
+fn the_eternal_central_presets_are_registered_once_mana_burn_is_implemented() {
+    // Still asserted against the pre-gate list, for the same reason as before:
+    // "registered" is only meaningful if they were considered in the first
+    // place, and a registry assertion alone cannot tell a listed-and-passing
+    // preset from one that was never listed.
+    let listed: BTreeSet<u16> = bundled_presets().iter().map(|def| def.rules.id.0).collect();
+    assert!(
+        listed.contains(&old_school_93_94().rules.id.0)
+            && listed.contains(&old_school_95().rules.id.0),
+        "both EC presets must be CONSIDERED for registration; got ids {listed:?}"
+    );
+    // The other half of the mechanism: Swedish is absent from the list
+    // entirely, because it would pass the gates. See its own test.
+    assert!(!listed.contains(&swedish_old_school().rules.id.0));
+
+    for preset in bundled_presets() {
+        let label = preset.label.clone();
+        assert!(
+            passes_legacy_axis_gate(&preset.rules.legality.legacy),
+            "{label} declares only mana burn, which IMPLEMENTED_LEGACY_AXES now covers"
+        );
+        assert!(passes_reprint_fidelity_gate(&preset), "{label}");
+        assert_no_lobby_save_sentinel_collision(&[preset]);
+    }
+
+    let registry = engine::types::custom_format::custom_format_registry();
+    let registered: BTreeSet<u16> = registry.iter().map(|def| def.rules.id.0).collect();
+    assert_eq!(
+        registered,
+        BTreeSet::from([old_school_93_94().rules.id.0, old_school_95().rules.id.0]),
+        "exactly the two EC presets are selectable; got {:?}",
+        registry.iter().map(|def| &def.label).collect::<Vec<_>>()
+    );
+}
+
+/// PLAN.md §1's pairing rule, run offline: a preset that declares reprint
+/// intent must admit the approximation in text a player can read, or the
+/// label misleads about what the engine actually enforces.
+#[test]
+fn set_code_approximation_presets_disclose_the_limitation() {
+    for preset in [old_school_93_94(), old_school_95(), swedish_old_school()] {
+        let discloses = preset
+            .description
+            .contains("approximated at the set-code level");
+        match preset.printing_fidelity {
+            PrintingFidelity::SetCodeApproximation => assert!(
+                discloses,
+                "{} declares SetCodeApproximation but its description does not say so: {:?}",
+                preset.label, preset.description
+            ),
+            // Paired negative: a preset claiming no printing intent must not
+            // carry the disclosure either, or the text is boilerplate rather
+            // than a real signal.
+            PrintingFidelity::NotApplicable => assert!(
+                !discloses,
+                "{} is NotApplicable but discloses an approximation it does not make",
+                preset.label
+            ),
+        }
+    }
+}
+
+/// Registry ids are persisted in `GameFormat::Custom(id)`, so a collision
+/// between two presets would make saved games ambiguous. Checked across every
+/// bundled constructor, registered or not.
+#[test]
+fn every_bundled_preset_has_a_distinct_non_sentinel_id() {
+    let presets = [old_school_93_94(), old_school_95(), swedish_old_school()];
+    let ids: BTreeSet<u16> = presets.iter().map(|def| def.rules.id.0).collect();
+    assert_eq!(
+        ids.len(),
+        presets.len(),
+        "two bundled presets share a CustomFormatId: {:?}",
+        presets
+            .iter()
+            .map(|def| (&def.label, def.rules.id.0))
+            .collect::<Vec<_>>()
+    );
+    assert!(!ids.contains(&LOBBY_SAVE_CUSTOM_FORMAT_ID.0));
+}
+
+#[test]
+fn custom_format_registry_withholds_swedish_old_school_on_open_item_6() {
+    // Swedish is withheld by a DIFFERENT mechanism from its EC siblings, and
+    // the distinction is the whole point of this test. The EC presets are
+    // listed in the registry and rejected by the legacy-axis gate. Swedish
+    // PASSES both gates, so listing it would register it — its blocker is
+    // CONTEXT.md Open item 6 (unconfirmed reprint-policy metadata), a
+    // documentation-accuracy blocker with no gate to express it, leaving
+    // omission from the list as the only mechanism.
+    //
+    // Asserting both halves is what makes that meaningful: an empty-registry
+    // assertion alone would keep passing if the preset silently started
+    // FAILING a gate, which would hide the real reason it is absent.
+    let preset = swedish_old_school();
+    assert!(passes_legacy_axis_gate(&preset.rules.legality.legacy));
+    assert!(passes_reprint_fidelity_gate(&preset));
+
+    // Absent from the CONSIDERED list, not merely from the filtered result —
+    // that absence IS the withholding mechanism here, so it is what to assert.
+    assert!(
+        !bundled_presets()
+            .iter()
+            .any(|def| def.rules.id == preset.rules.id),
+        "Swedish passes both gates, so listing it in bundled_presets() would register it"
+    );
+
+    // The registry is no longer empty as of Phase 2b, so absence has to be
+    // asserted by identity rather than by emptiness — which is the stronger
+    // assertion anyway, and would have caught a Swedish entry appearing
+    // alongside the EC ones.
+    let registry = engine::types::custom_format::custom_format_registry();
+    assert!(
+        !registry.iter().any(|def| def.rules.id == preset.rules.id),
+        "swedish_old_school() must not be selectable while Open item 6 is unresolved; got {:?}",
+        registry.iter().map(|def| &def.label).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn swedish_old_school_declares_its_sourced_card_pool() {
+    // Preset integrity against `docs/proposals/custom-format-engine/CONTEXT.md`'s
+    // captured lists, themselves re-verified against the primary source
+    // (oldschool-mtg.blogspot.com/p/banrestriction.html). Every set code was
+    // checked against Scryfall's set list at implementation time.
+    let preset = swedish_old_school();
+    let legality = &preset.rules.legality;
+
+    let sets = legality
+        .legal_sets
+        .as_ref()
+        .expect("Swedish Old School restricts its pool, so legal_sets is Some(_), never None");
+    assert_eq!(
+        sets.iter().map(|code| code.0.as_str()).collect::<Vec<_>>(),
+        ["LEA", "LEB", "2ED", "ARN", "ATQ", "LEG", "DRK", "SUM"],
+        "Alpha, Beta, Unlimited, Arabian Nights, Antiquities, Legends, The Dark, Summer Magic"
+    );
+
+    // A genuinely empty list, not an unpopulated one: the format bans nothing
+    // and restricts instead. The schema must carry that faithfully.
+    assert!(legality.banned.is_empty());
+
+    // The COMPLETE authoritative roster, not a count plus spot-checks: a
+    // same-length substitution in any entry changes legal deck construction,
+    // and a test that only counted to 25 would pass straight through it.
+    // Order-independent so the constructor stays free to reorder, but exact in
+    // both directions — nothing missing, nothing extra.
+    let expected_restricted: BTreeSet<&str> = [
+        "Ancestral Recall",
+        "Balance",
+        "Black Lotus",
+        "Braingeyser",
+        "Channel",
+        "Chaos Orb",
+        "Contract from Below",
+        "Darkpact",
+        "Demonic Tutor",
+        "Library of Alexandria",
+        "Mana Drain",
+        "Mind Twist",
+        "Mishra's Workshop",
+        "Mox Emerald",
+        "Mox Jet",
+        "Mox Pearl",
+        "Mox Ruby",
+        "Mox Sapphire",
+        "Regrowth",
+        "Sol Ring",
+        "Strip Mine",
+        "Tempest Efreet",
+        "Time Walk",
+        "Timetwister",
+        "Wheel of Fortune",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        expected_restricted.len(),
+        25,
+        "the source's restricted list is 25 cards (CONTEXT.md corrected an earlier 23 miscount) — \
+         if this trips, the literal above gained a duplicate"
+    );
+    let actual_restricted: BTreeSet<&str> =
+        legality.restricted.iter().map(String::as_str).collect();
+    assert_eq!(
+        actual_restricted, expected_restricted,
+        "swedish_old_school()'s restricted list must match the primary source exactly"
+    );
+    // A set comparison would hide a duplicated entry in the constructor, which
+    // would be a real authoring defect even though it changes no verdict.
+    assert_eq!(legality.restricted.len(), 25);
+
+    // Three of the 25 (Contract from Below, Darkpact, Tempest Efreet) are also
+    // ante cards, exactly as the source spells it — the ante exclusion is what
+    // actually keeps those three out of a deck, ahead of this list.
+    assert!(actual_restricted.contains("Contract from Below"));
+
+    // An old card pool played under modern rules: the source mentions no mana
+    // burn, damage on the stack, pre-M10 Wish templating or modified legend
+    // rule. This is what makes it the one Axis-B preset needing zero
+    // LegacyRuleSet engine wiring.
+    assert_eq!(legality.legacy, LegacyRuleSet::default());
+}
+
+#[test]
+fn swedish_old_school_carries_honest_unresolved_reprint_metadata() {
+    let preset = swedish_old_school();
+    // Open item 6: the primary source states only "Only English versions are
+    // allowed in Oldschool". `None` says "no confirmed authored intent to
+    // declare" rather than inventing OriginalPrintingsOnly from a secondary
+    // source, and NotApplicable is the pairing PLAN.md §1 requires of it.
+    assert_eq!(preset.reprint_policy, None);
+    assert_eq!(preset.printing_fidelity, PrintingFidelity::NotApplicable);
+
+    // A registry-stable id of its own, never the Axis-A lobby-save sentinel.
+    assert_ne!(preset.rules.id, LOBBY_SAVE_CUSTOM_FORMAT_ID);
+    assert_no_lobby_save_sentinel_collision(&[preset]);
+}
+
+#[test]
+fn swedish_old_school_inherits_the_shared_constructed_structural_shape() {
+    // The primary source states pool and restriction rules only. Rather than
+    // invent structural values, the preset projects `FormatConfig::standard()`
+    // — the shape every built-in 60-card constructed format spreads. This
+    // pins that they stay identical.
+    let preset = swedish_old_school();
+    let structural = &preset.rules.structural;
+    let base = FormatConfig::standard();
+
+    assert_eq!(structural.starting_life, base.starting_life);
+    assert_eq!(structural.deck_size, base.deck_size);
+    assert_eq!(structural.min_players, base.min_players);
+    assert_eq!(structural.max_players, base.max_players);
+    assert_eq!(structural.sideboard_policy, base.sideboard_policy);
+    assert_eq!(
+        structural.default_deck_copy_limit,
+        base.default_deck_copy_limit
+    );
+    assert!(!structural.singleton);
+    assert_eq!(structural.command_zone_mode, CommandZoneMode::Disabled);
+}
+
+#[test]
+fn wish_outside_game_scope_default_is_the_deck_construction_policy_not_a_cr_mandate() {
+    // Pins the intended policy this axis encodes: PostM10SideboardOnly is
+    // the default (modern deck-construction/tournament restriction, CR
+    // 100.4), distinct from PreM10ReachesExile (the historical templating
+    // difference). Neither CR 400.11 nor CR 400.11a themselves restrict
+    // "outside the game" to only the sideboard — see the type's doc
+    // comment — so this test exists to catch a future change accidentally
+    // flipping which variant is the default, since nothing else enforces
+    // it yet (Phase 2cd wires the real behavior).
+    use engine::types::custom_format::WishOutsideGameScope;
+    assert_eq!(
+        WishOutsideGameScope::default(),
+        WishOutsideGameScope::PostM10SideboardOnly
+    );
+    assert_ne!(
+        WishOutsideGameScope::default(),
+        WishOutsideGameScope::PreM10ReachesExile
+    );
+}
+
+#[test]
+fn game_format_from_str_display_roundtrip_builtins() {
+    use strum::IntoEnumIterator;
+
+    // Was a hand-written 22-element array guarded by `assert_eq!(all.len(), 22)`
+    // — which cannot fail from the enum growing (22 == 22 holds however many
+    // variants exist), and which was blind to `GameFormat::CommanderDraft`
+    // being absent. Iterating the enum means a new format arrives here on its
+    // own and reds if `FromStr` has no arm for it. `FromStr` ends in
+    // `other => Err(..)` and is NOT compiler-forced; `Deserialize` for
+    // `GameFormat` delegates to it, so the registry-iterating deserialization
+    // tests below also exercise every arm, not just this test.
+    for format in GameFormat::iter() {
+        let s = format.to_string();
+        let back: GameFormat = s.parse().unwrap();
+        assert_eq!(format, back);
+    }
+}
+
+#[test]
+fn game_format_from_str_display_roundtrip_custom() {
+    for id in [0u16, 5, u16::MAX] {
+        let format = GameFormat::Custom(CustomFormatId(id));
+        let s = format.to_string();
+        assert_eq!(s, format!("Custom:{id}"));
+        let back: GameFormat = s.parse().unwrap();
+        assert_eq!(format, back);
+    }
+}
+
+#[test]
+fn game_format_serde_roundtrip_builtin_and_custom() {
+    let json = serde_json::to_string(&GameFormat::Commander).unwrap();
+    assert_eq!(json, "\"Commander\"");
+    let back: GameFormat = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, GameFormat::Commander);
+
+    let custom_json = serde_json::to_string(&GameFormat::Custom(CustomFormatId(5))).unwrap();
+    assert_eq!(custom_json, "\"Custom:5\"");
+    let back: GameFormat = serde_json::from_str(&custom_json).unwrap();
+    assert_eq!(back, GameFormat::Custom(CustomFormatId(5)));
+}
+
+#[test]
+fn game_format_deserialize_rejects_malformed_custom_strings() {
+    for bad in [
+        "\"Custom:\"",
+        "\"Custom:abc\"",
+        "\"Custom:-1\"",
+        "\"Custom:70000\"",
+        "\"custom:5\"",
+        "\"CustomFormat:5\"",
+        "\"NotARealFormat\"",
+        "{}",
+        "42",
+    ] {
+        assert!(
+            serde_json::from_str::<GameFormat>(bad).is_err(),
+            "expected {bad} to fail to deserialize as GameFormat"
+        );
+    }
+}
+
+#[test]
+fn game_format_deserialize_accepts_valid_custom_string() {
+    let back: GameFormat = serde_json::from_str("\"Custom:5\"").unwrap();
+    assert_eq!(back, GameFormat::Custom(CustomFormatId(5)));
+}
+
+#[test]
+fn commander_eligibility_rule_from_source_format_covers_every_builtin() {
+    use strum::IntoEnumIterator;
+
+    use CommanderEligibilityRule::*;
+    let cases = [
+        (GameFormat::Standard, None),
+        (GameFormat::Limited, None),
+        (GameFormat::Commander, Some(Standard)),
+        (GameFormat::Pioneer, None),
+        (GameFormat::Modern, None),
+        (GameFormat::Premodern, None),
+        (GameFormat::Legacy, None),
+        (GameFormat::Vintage, None),
+        (GameFormat::Historic, None),
+        (GameFormat::Timeless, None),
+        (GameFormat::Pauper, None),
+        (GameFormat::PauperCommander, Some(Standard)),
+        (GameFormat::DuelCommander, Some(Standard)),
+        (GameFormat::TinyLeaders, Some(TinyLeaders)),
+        (GameFormat::Oathbreaker, Some(OathbreakerSignatureSpell)),
+        (GameFormat::Brawl, Some(BrawlColorIdentity)),
+        (GameFormat::HistoricBrawl, Some(BrawlColorIdentity)),
+        (GameFormat::FreeForAll, None),
+        (GameFormat::TwoHeadedGiant, None),
+        (GameFormat::Archenemy, None),
+        (GameFormat::Planechase, None),
+        (GameFormat::Momir, None),
+        // CR 903.13g: Commander Draft games follow Commander's rules, and
+        // CR 903.13f routes deck construction through CR 903.5, so CR 903.3's
+        // eligibility test applies unchanged — the value `from_source_format`
+        // already returns, read off its arm rather than chosen here. This row
+        // was MISSING; see the commit message.
+        (GameFormat::CommanderDraft, Some(Standard)),
+        (GameFormat::Freeform, None),
+        (GameFormat::FreeformCommander, Some(FreeformAnyCastableCard)),
+        (GameFormat::Dandan, None),
+    ];
+    // This table had NO length assertion at all, despite its name. Ordered
+    // equality against the enum is what makes the name true and keeps it true:
+    // a new format reds here until its expected rule is stated. The table is
+    // compared in declaration order, so a format appended to the enum is
+    // appended here and no existing row moves.
+    let covered: Vec<GameFormat> = cases.iter().map(|(format, _)| *format).collect();
+    assert_eq!(
+        covered,
+        GameFormat::iter().collect::<Vec<_>>(),
+        "this table must cover every built-in GameFormat, in declaration order"
+    );
+    for (format, expected) in cases {
+        assert_eq!(
+            CommanderEligibilityRule::from_source_format(format),
+            Ok(expected),
+            "{format:?}"
+        );
+    }
+}
+
+#[test]
+fn commander_eligibility_rule_from_source_format_rejects_custom_without_panicking() {
+    // The maintainer's review found this public function still panicked on
+    // GameFormat::Custom, a value any external caller can hold. Confirms it
+    // now returns a typed error instead of terminating.
+    assert!(
+        CommanderEligibilityRule::from_source_format(GameFormat::Custom(CustomFormatId(1)))
+            .is_err()
+    );
+}
+
+#[test]
+fn game_format_serialization_is_byte_identical_to_old_derive_for_builtins() {
+    use strum::IntoEnumIterator;
+
+    let expectations: &[(GameFormat, &str)] = &[
+        (GameFormat::Standard, "Standard"),
+        (GameFormat::Limited, "Limited"),
+        (GameFormat::Commander, "Commander"),
+        (GameFormat::Pioneer, "Pioneer"),
+        (GameFormat::Modern, "Modern"),
+        (GameFormat::Premodern, "Premodern"),
+        (GameFormat::Legacy, "Legacy"),
+        (GameFormat::Vintage, "Vintage"),
+        (GameFormat::Historic, "Historic"),
+        (GameFormat::Timeless, "Timeless"),
+        (GameFormat::Pauper, "Pauper"),
+        (GameFormat::PauperCommander, "PauperCommander"),
+        (GameFormat::DuelCommander, "DuelCommander"),
+        (GameFormat::TinyLeaders, "TinyLeaders"),
+        (GameFormat::Oathbreaker, "Oathbreaker"),
+        (GameFormat::Brawl, "Brawl"),
+        (GameFormat::HistoricBrawl, "HistoricBrawl"),
+        (GameFormat::FreeForAll, "FreeForAll"),
+        (GameFormat::TwoHeadedGiant, "TwoHeadedGiant"),
+        (GameFormat::Archenemy, "Archenemy"),
+        (GameFormat::Planechase, "Planechase"),
+        (GameFormat::Momir, "Momir"),
+        (GameFormat::CommanderDraft, "CommanderDraft"),
+        (GameFormat::Freeform, "Freeform"),
+        (GameFormat::FreeformCommander, "FreeformCommander"),
+        (GameFormat::Dandan, "Dandan"),
+    ];
+    // Replaces `assert_eq!(expectations.len(), 22)`, which could not fail:
+    // 22 == 22 holds however the enum grows, and it did — `CommanderDraft`'s
+    // serde string was unasserted. See the commit message.
+    let covered: Vec<GameFormat> = expectations.iter().map(|(format, _)| *format).collect();
+    assert_eq!(
+        covered,
+        GameFormat::iter().collect::<Vec<_>>(),
+        "this table must cover every built-in GameFormat, in declaration order"
+    );
+    for (format, expected) in expectations {
+        let value = serde_json::to_value(format).unwrap();
+        assert_eq!(value, serde_json::Value::String(expected.to_string()));
+    }
+}
+
+#[test]
+fn format_config_for_format_still_works_for_every_builtin() {
+    for meta in GameFormat::registry() {
+        let config = FormatConfig::for_format(meta.format).unwrap();
+        assert!(matches!(
+            config.format.default_deck_copy_limit(),
+            DeckCopyLimit::Unlimited | DeckCopyLimit::UpTo(_)
+        ));
+    }
+}
+
+#[test]
+fn format_config_for_format_rejects_custom() {
+    // The public-factory panic CodeRabbit/the maintainer flagged: a bare
+    // GameFormat::Custom parsed from external input must not terminate the
+    // process here — for_format has no CustomFormatRules to build from.
+    assert!(FormatConfig::for_format(GameFormat::Custom(CustomFormatId(1))).is_err());
+}
+
+#[test]
+fn custom_format_sideboard_policy_returns_disclosed_fallback_not_panic() {
+    assert_eq!(
+        GameFormat::Custom(CustomFormatId(1)).sideboard_policy(),
+        SideboardPolicy::Forbidden
+    );
+}
+
+#[test]
+fn custom_format_uses_commander_rejects_without_panicking() {
+    // Unlike sideboard_policy/default_deck_copy_limit, uses_commander has no
+    // safe disclosed-fallback value: a Custom format can legitimately
+    // resolve to a commander-using configuration, so `false` would be a
+    // silently wrong answer rather than a safe default. This is a public
+    // query callable with any GameFormat, including one parsed straight
+    // from untrusted input (GameFormat::from_str accepts any
+    // "Custom:<u16>" string) — it must return a typed error, not panic.
+    assert!(GameFormat::Custom(CustomFormatId(1))
+        .uses_commander()
+        .is_err());
+}
+
+#[test]
+fn custom_format_default_deck_copy_limit_returns_disclosed_fallback_not_panic() {
+    assert_eq!(
+        GameFormat::Custom(CustomFormatId(1)).default_deck_copy_limit(),
+        DeckCopyLimit::UpTo(1)
+    );
+}
+
+#[test]
+fn custom_format_label_falls_back_when_id_is_not_registered() {
+    assert_eq!(
+        GameFormat::Custom(CustomFormatId(1)).label(),
+        "Custom Format"
+    );
+}
+
+// `evaluate_deck_compatibility` is the UI-HINT entry point (it feeds the
+// lobby's live deck-legality chip via `classifyCompatResult`, where `None`
+// already means "idle"/no opinion). Phase 1d wired a real evaluator
+// (`evaluate_custom_format`), but the Wire-Inertness Invariant on
+// `SelectedFormat` (its wire form is always the bare `GameFormat` tag, never
+// `Resolved`) means a `DeckCompatibilityRequest` built from a bare
+// `Tag(Custom(_))`, as both tests below do, can never resolve real rules —
+// `SelectedFormat::rules()` is unconditionally `Err` for it — so the engine
+// genuinely has no verdict to report. A hard "illegal" verdict would assert a
+// rules claim nothing computed. Both dispatches (summary and full) therefore
+// answer "no opinion" for exactly this unresolvable case. The real evaluator
+// is covered by `deck_validation.rs`'s own test module (which can construct a
+// trusted `SelectedFormat::Resolved`) and by
+// `validate_name_deck_for_format_full_evaluates_a_resolved_custom_format`
+// below, which exercises the real evaluator through a trusted `FormatConfig`.
+// The ENFORCING paths are covered separately and still fail closed:
+// `validate_deck_for_format` / `evaluate_deck_format_gate` in
+// `deck_validation.rs`'s own test module.
+
+#[test]
+fn custom_format_deck_compatibility_summary_reports_no_opinion() {
+    use engine::database::CardDatabase;
+    use engine::game::deck_validation::{evaluate_deck_compatibility, DeckCompatibilityRequest};
+
+    let db = CardDatabase::from_json_str("{}").expect("empty card database");
+    let request = DeckCompatibilityRequest {
+        selected_format: Some(SelectedFormat::Tag(GameFormat::Custom(CustomFormatId(1)))),
+        summary_only: true,
+        ..Default::default()
+    };
+    let result = evaluate_deck_compatibility(&db, &request);
+    assert_eq!(result.selected_format_compatible, None);
+    assert!(result.selected_format_reasons.is_empty());
+}
+
+#[test]
+fn custom_format_deck_compatibility_reports_no_opinion() {
+    use engine::database::CardDatabase;
+    use engine::game::deck_validation::{evaluate_deck_compatibility, DeckCompatibilityRequest};
+
+    let db = CardDatabase::from_json_str("{}").expect("empty card database");
+    let request = DeckCompatibilityRequest {
+        selected_format: Some(SelectedFormat::Tag(GameFormat::Custom(CustomFormatId(1)))),
+        summary_only: false,
+        ..Default::default()
+    };
+    let result = evaluate_deck_compatibility(&db, &request);
+    assert_eq!(result.selected_format_compatible, None);
+    assert!(result.selected_format_reasons.is_empty());
+}
+
+/// A `CardDatabase` populated with exactly one card — a basic Plains — so a
+/// legal 60-card deck can be built without any card-pool restriction getting
+/// in the way (`sample_rules`'s `LegalityRules` are all defaults: unrestricted
+/// `legal_sets`, empty banned/restricted). Basic lands are exempt from every
+/// deck-copy ceiling (CR 100.2a), so 60 copies of one name is legal under any
+/// `DeckCopyLimit`.
+fn plains_only_db_json() -> String {
+    serde_json::json!({
+        "plains": {
+            "name": "Plains",
+            "mana_cost": { "type": "NoCost" },
+            "card_type": { "supertypes": ["Basic"], "core_types": ["Land"], "subtypes": ["Plains"] },
+            "power": null, "toughness": null, "loyalty": null, "defense": null,
+            "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+            "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+            "color_override": null, "scryfall_oracle_id": null, "legalities": {}
+        }
+    })
+    .to_string()
+}
+
+/// Drives `legal_cards` through the AUTHORITATIVE deck-admission entry point,
+/// not the private pool.
+///
+/// A field can serialize, validate and pass a unit test on `DeclaredPool` while
+/// being dropped or bypassed where decks are actually admitted — so this drives
+/// `validate_name_deck_for_format_full` and asserts the admit and the reject on
+/// the same deck, changing only whether the card is named.
+#[test]
+fn validate_name_deck_for_format_full_admits_a_card_only_named_in_legal_cards() {
+    use engine::database::CardDatabase;
+    use engine::game::deck_validation::validate_name_deck_for_format_full;
+
+    let db = CardDatabase::from_json_str(&plains_only_db_json()).expect("card database");
+    let main_deck: Vec<String> = std::iter::repeat_n("Plains".to_string(), 60).collect();
+
+    // A finite pool the card is NOT in: the fixture records no printings, so
+    // `printed_in_any_set` fails closed against any restrictive `legal_sets`.
+    // That is the whole point — the card can reach the deck ONLY by being
+    // named, so an admit here cannot come from the set check.
+    let mut rules = sample_rules(1);
+    rules.legality.legal_sets = Some(vec![SetCode("LEA".to_string())]);
+
+    let reject_config = FormatConfig::for_custom_rules(&rules);
+    let rejected = validate_name_deck_for_format_full(
+        &db,
+        &main_deck,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &reject_config,
+        None,
+        2,
+    );
+    assert!(
+        rejected.is_err(),
+        "a card outside legal_sets and not named must be rejected"
+    );
+
+    // Same deck, same sets, same everything — one name added.
+    rules.legality.legal_cards = vec!["Plains".to_string()];
+    let admit_config = FormatConfig::for_custom_rules(&rules);
+    assert_eq!(
+        validate_name_deck_for_format_full(
+            &db,
+            &main_deck,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &admit_config,
+            None,
+            2,
+        ),
+        Ok(()),
+        "naming the card must admit it through the production validator"
+    );
+
+    // ...and naming it does NOT override the ban lists, which apply after the
+    // pool check. Without this, `legal_cards` could be read as "always legal".
+    rules.legality.banned = vec!["Plains".to_string()];
+    let banned_config = FormatConfig::for_custom_rules(&rules);
+    assert!(
+        validate_name_deck_for_format_full(
+            &db,
+            &main_deck,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &banned_config,
+            None,
+            2,
+        )
+        .is_err(),
+        "legal_cards widens the pool; it must not override `banned`"
+    );
+}
+
+/// Phase 1d: `validate_name_deck_for_format_full` now runs a `Resolved`
+/// Custom format through the REAL evaluator (`evaluate_custom_format`) rather
+/// than an honest "not yet supported" rejection. `custom_config` is built via
+/// `FormatConfig::for_custom_rules` — the same resolver a real caller uses —
+/// so every runtime field (`deck_size`, `sideboard_policy`,
+/// `default_deck_copy_limit`, ...) is self-consistent with `sample_rules`'
+/// declared structural rules, exactly as `validate_custom_rules_consistency`
+/// demands of a trusted, non-deserialized config.
+#[test]
+fn validate_name_deck_for_format_full_evaluates_a_resolved_custom_format() {
+    use engine::database::CardDatabase;
+    use engine::game::deck_validation::{
+        evaluate_deck_compatibility, validate_name_deck_for_format_full, DeckCompatibilityRequest,
+    };
+
+    let custom_config = FormatConfig::for_custom_rules(&sample_rules(1));
+
+    // Deck-size row: `sample_structural`'s `DeckSizeRule::Minimum(60)` rejects
+    // an empty main deck. This row needs no card data at all — an empty DB is
+    // fine here, unlike the pass row below.
+    let empty_db = CardDatabase::from_json_str("{}").expect("empty card database");
+    let result = validate_name_deck_for_format_full(
+        &empty_db,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &custom_config,
+        None,
+        2,
+    );
+    match result {
+        Err(reasons) => assert!(
+            reasons
+                .iter()
+                .any(|r| r.contains("at least 60") && r.contains("found 0")),
+            "expected a real deck-size rejection, got: {reasons:?}"
+        ),
+        Ok(()) => {
+            panic!("expected an empty deck to fail the format's own Minimum(60) deck-size rule")
+        }
+    }
+
+    // Pass row: a genuinely legal 60-card deck needs a database that actually
+    // knows the card (an empty DB fails every such deck on "Unknown cards",
+    // which would prove nothing about the evaluator under test).
+    let populated_db =
+        CardDatabase::from_json_str(&plains_only_db_json()).expect("populated card database");
+    let main_deck: Vec<String> = std::iter::repeat_n("Plains".to_string(), 60).collect();
+    let result = validate_name_deck_for_format_full(
+        &populated_db,
+        &main_deck,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &custom_config,
+        None,
+        2,
+    );
+    assert_eq!(
+        result,
+        Ok(()),
+        "expected a legal 60-card deck to pass a constructed-shaped custom format"
+    );
+
+    // A real card-pool rejection through the same public entry point proves
+    // the custom evaluator does more than reuse the structural deck-size
+    // check above. CR 100.6 permits tournament-format rules to limit a
+    // card's use; this custom format declares Plains banned.
+    let mut banned_rules = sample_rules(1);
+    banned_rules.legality.banned = vec!["Plains".to_string()];
+    let banned_config = FormatConfig::for_custom_rules(&banned_rules);
+    let result = validate_name_deck_for_format_full(
+        &populated_db,
+        &main_deck,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &banned_config,
+        None,
+        2,
+    );
+    assert!(
+        matches!(result, Err(ref reasons) if reasons.iter().any(|reason| reason.contains("Plains (banned)"))),
+        "a custom banned list must reject a deck that is otherwise legal: {result:?}"
+    );
+
+    // A restricted card remains legal at one copy, but the same public
+    // admission path must reject the second and later copies independently of
+    // the format's ordinary copy ceiling. Plains is Basic, so this row also
+    // proves the custom restricted-list policy is not accidentally masked by
+    // the Basic-land exemption in `copy_limit_violations`.
+    let mut restricted_rules = sample_rules(1);
+    restricted_rules.legality.restricted = vec!["Plains".to_string()];
+    let restricted_config = FormatConfig::for_custom_rules(&restricted_rules);
+    let result = validate_name_deck_for_format_full(
+        &populated_db,
+        &main_deck,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &restricted_config,
+        None,
+        2,
+    );
+    assert!(
+        matches!(result, Err(ref reasons) if reasons.iter().any(|reason| reason.contains("More than 1 copy of a restricted card") && reason.contains("Plains"))),
+        "a custom restricted list must reject repeated cards through the public validator: {result:?}"
+    );
+
+    // `Forbidden` is a resolved custom-format structural rule, not merely a
+    // fallback for an unresolved `GameFormat::Custom` tag. The public game
+    // creation validator must reject a submitted sideboard under that policy.
+    let mut forbidden_sideboard_rules = sample_rules(1);
+    forbidden_sideboard_rules.structural.sideboard_policy = SideboardPolicy::Forbidden;
+    let forbidden_sideboard_config = FormatConfig::for_custom_rules(&forbidden_sideboard_rules);
+    let result = validate_name_deck_for_format_full(
+        &populated_db,
+        &main_deck,
+        &["Plains".to_string()],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &forbidden_sideboard_config,
+        None,
+        2,
+    );
+    assert!(
+        matches!(result, Err(ref reasons) if reasons.iter().any(|reason| reason.contains("does not allow a sideboard"))),
+        "a forbidden custom sideboard must fail the public validator: {result:?}"
+    );
+
+    // The summary twin must preserve the same policy. A future resolved
+    // custom-format summary caller would otherwise report the deck compatible
+    // while the authoritative full path rejects it.
+    let summary = evaluate_deck_compatibility(
+        &populated_db,
+        &DeckCompatibilityRequest {
+            main_deck,
+            sideboard: vec!["Plains".to_string()],
+            selected_format: Some(SelectedFormat::Resolved(Box::new(
+                forbidden_sideboard_config,
+            ))),
+            player_count: 2,
+            summary_only: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(summary.selected_format_compatible, Some(false));
+    assert!(
+        summary
+            .selected_format_reasons
+            .iter()
+            .any(|reason| reason.contains("does not allow a sideboard")),
+        "the custom summary validator must reject a forbidden sideboard: {summary:?}"
+    );
+}
+
+#[test]
+fn companion_candidates_returns_empty_for_custom_format_without_panicking() {
+    use engine::database::CardDatabase;
+    use engine::game::deck_validation::{companion_candidates, DeckCompatibilityRequest};
+
+    let db = CardDatabase::from_json_str("{}").expect("empty card database");
+    let request = DeckCompatibilityRequest {
+        selected_format: Some(SelectedFormat::Tag(GameFormat::Custom(CustomFormatId(1)))),
+        ..Default::default()
+    };
+    // Exercises the exact guard added to companion_candidates: without it,
+    // `GameFormat::Custom(_).uses_commander()` inside the function's own
+    // `Option::filter` would panic. This is the direct production entry
+    // point `companion_candidates_js` (engine-wasm) calls with untrusted
+    // input — the other Custom tests above only cover it indirectly via
+    // `evaluate_deck_compatibility`.
+    assert_eq!(companion_candidates(&db, &request), Vec::<String>::new());
+}
+
+// The authoritative FormatConfig ingress. Phase 1a rejected EVERY
+// externally-deserialized Custom FormatConfig outright, because no resolver
+// existed to derive this struct's own runtime fields (command_zone,
+// commander_damage_threshold, uses_commander, singleton, ...) FROM
+// custom_rules.structural — they were two independently-writable
+// representations of the same state with nothing cross-checking them. Phase
+// 1c builds that resolver (FormatConfig::for_custom_rules), so the boundary
+// now accepts a Custom payload exactly when it equals what the resolver
+// derives from the payload's own custom_rules (allow_debug_actions
+// excepted, being a session capability rather than a format rule), and
+// rejects anything else. Each value below is constructed directly in Rust (bypassing
+// Deserialize, which has no reason to reject it going the other way) and
+// round-tripped through `serde_json` — the only way to exercise
+// FormatConfig's real Deserialize impl without hand-guessing its full field
+// set.
+
+/// A fully self-consistent active Custom config: exactly what the resolver
+/// derives from `sample_rules(id)`, i.e. the shape a legitimate Axis-A save
+/// resolves to when a player selects it.
+fn sample_custom_config(id: u16) -> FormatConfig {
+    FormatConfig::for_custom_rules(&sample_rules(id))
+}
+
+/// Asserts the rejection came from the resolver re-derivation check, not
+/// from some unrelated deserialization failure (a malformed field, a type
+/// mismatch) that would also make `.is_err()` pass vacuously.
+fn assert_rejected_as_structural_mismatch<T: std::fmt::Debug>(
+    result: Result<T, serde_json::Error>,
+) {
+    let error = result.expect_err("expected deserialization to be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("contradicts its own custom_rules.structural"),
+        "expected the resolver-mismatch rejection message, got: {error}"
+    );
+}
+
+#[test]
+fn format_config_deserialization_rejects_custom_without_matching_rules() {
+    let invalid = FormatConfig {
+        format: GameFormat::Custom(CustomFormatId(1)),
+        custom_rules: None,
+        ..FormatConfig::standard()
+    };
+    let json = serde_json::to_value(&invalid).unwrap();
+    let error = serde_json::from_value::<FormatConfig>(json)
+        .expect_err("a Custom format with no custom_rules must be rejected");
+    assert!(
+        error.to_string().contains("custom_rules is None"),
+        "expected the id-consistency rejection message, got: {error}"
+    );
+}
+
+#[test]
+fn format_config_deserialization_rejects_custom_with_mismatched_rules_id() {
+    let invalid = FormatConfig {
+        format: GameFormat::Custom(CustomFormatId(5)),
+        custom_rules: Some(Box::new(sample_rules(7))),
+        ..FormatConfig::standard()
+    };
+    let json = serde_json::to_value(&invalid).unwrap();
+    let error = serde_json::from_value::<FormatConfig>(json)
+        .expect_err("a Custom format whose custom_rules.id disagrees must be rejected");
+    assert!(
+        error.to_string().contains("custom_rules.id is"),
+        "expected the id-consistency rejection message, got: {error}"
+    );
+}
+
+#[test]
+fn format_config_deserialization_accepts_a_fully_consistent_custom_config() {
+    // The Phase 1c behavior change: custom_rules.id matches AND every
+    // runtime field is exactly what FormatConfig::for_custom_rules derives
+    // from custom_rules.structural, so there is nothing left for the
+    // boundary to distrust. Phase 1a rejected this same payload outright.
+    let config = sample_custom_config(5);
+    let json = serde_json::to_value(&config).unwrap();
+    let back = serde_json::from_value::<FormatConfig>(json)
+        .expect("a resolver-consistent Custom config must be accepted");
+    assert_eq!(back, config);
+}
+
+#[test]
+fn format_config_deserialization_rejects_matching_id_but_structurally_contradictory_payload() {
+    // The specific hostile case the maintainer's review named: a
+    // matching-id Custom payload whose CommandZoneMode declares Disabled in
+    // custom_rules.structural while FormatConfig's own independent
+    // command_zone/uses_commander/commander_damage_threshold fields claim
+    // the format DOES use a command zone. An id-only consistency check would
+    // accept this; the resolver re-derivation does not. Built by mutating an
+    // otherwise-valid resolved config, so the ONLY thing wrong with it is
+    // the contradiction under test.
+    let mut contradictory = sample_custom_config(5);
+    assert_eq!(
+        contradictory
+            .custom_rules
+            .as_ref()
+            .unwrap()
+            .structural
+            .command_zone_mode,
+        CommandZoneMode::Disabled,
+        "fixture precondition: the declared rules must have no command zone"
+    );
+    contradictory.command_zone = true;
+    contradictory.uses_commander = true;
+    contradictory.commander_damage_threshold = Some(21);
+    let json = serde_json::to_value(&contradictory).unwrap();
+    assert_rejected_as_structural_mismatch(serde_json::from_value::<FormatConfig>(json));
+}
+
+#[test]
+fn format_config_deserialization_rejects_a_custom_payload_forging_a_looser_copy_limit() {
+    // The Custom-format sibling of the built-in forged-copy-limit attack
+    // below: custom_rules.structural declares UpTo(4), but the runtime field
+    // the whole engine actually reads (max_deck_copies and every evaluate_*/
+    // quick_* dispatch) claims Unlimited. The built-in branch's
+    // permits_no_more_than check never runs for Custom — the resolver
+    // equality check is what closes this, and this test is what proves it
+    // does, since a resolver that simply copied the payload's own runtime
+    // field through would pass everything else.
+    let mut forged = sample_custom_config(5);
+    forged.default_deck_copy_limit = DeckCopyLimit::Unlimited;
+    let json = serde_json::to_value(&forged).unwrap();
+    assert_rejected_as_structural_mismatch(serde_json::from_value::<FormatConfig>(json));
+}
+
+#[test]
+fn format_config_deserialization_rejects_a_custom_payload_declaring_an_unimplemented_legacy_axis() {
+    // Hostile fixture: structurally self-consistent (the resolver check
+    // would pass), but custom_rules.legality.legacy declares
+    // CombatDamageTiming::OnStack — a LegacyAxis not in
+    // IMPLEMENTED_LEGACY_AXES. Accepting it would promise damage-on-the-stack
+    // behavior no engine code enforces. The registry gate alone does not cover
+    // this: a deserialized Custom config never passes through
+    // custom_format_registry().
+    //
+    // Was mana burn until Phase 2b implemented it; the axis had to change for
+    // the fixture to stay hostile, which is the gate auto-narrowing as designed.
+    let mut rules = sample_rules(5);
+    rules.legality.legacy.damage_timing = CombatDamageTiming::OnStack;
+    let config = FormatConfig::for_custom_rules(&rules);
+    let json = serde_json::to_value(&config).unwrap();
+    let error = serde_json::from_value::<FormatConfig>(json)
+        .expect_err("a Custom payload declaring an unimplemented legacy axis must be rejected");
+    let message = error.to_string();
+    assert!(
+        message.contains("LegacyRuleSet axis the engine does not implement"),
+        "expected the legacy-axis rejection message, got: {error}"
+    );
+    // Distinct from the structural-mismatch rejection: this payload IS
+    // structurally consistent, and conflating the two messages would hide
+    // which gate fired.
+    assert!(
+        !message.contains("contradicts its own custom_rules.structural"),
+        "the legacy-axis rejection must be distinguishable from the structural one, got: {error}"
+    );
+}
+
+#[test]
+fn format_config_deserialization_accepts_a_custom_config_with_default_legacy_rules() {
+    // Positive control paired with the hostile legacy-axis fixture above: an
+    // all-default LegacyRuleSet (every axis at its modern value, which is
+    // what every Axis-A lobby save declares) must pass the same gate, so the
+    // rejection above cannot be passing because Custom is refused wholesale.
+    let rules = sample_rules(5);
+    assert_eq!(
+        rules.legality.legacy,
+        LegacyRuleSet::default(),
+        "fixture precondition: the sample must declare no non-default axis"
+    );
+    let json = serde_json::to_value(FormatConfig::for_custom_rules(&rules)).unwrap();
+    assert!(serde_json::from_value::<FormatConfig>(json).is_ok());
+}
+
+#[test]
+fn format_config_deserialization_ignores_allow_debug_actions_in_the_custom_equality_check() {
+    // allow_debug_actions is a per-session capability (sandbox debug
+    // actions), orthogonal to format and not derivable from
+    // custom_rules — the resolver always emits false, so a strict
+    // whole-struct equality check would reject every sandboxed Custom game.
+    // Both values must round-trip; the paired assertions are what prove the
+    // field is genuinely excluded rather than coincidentally matching.
+    for allow_debug_actions in [true, false] {
+        let mut config = sample_custom_config(5);
+        config.allow_debug_actions = allow_debug_actions;
+        let json = serde_json::to_value(&config).unwrap();
+        let back = serde_json::from_value::<FormatConfig>(json)
+            .unwrap_or_else(|error| panic!("allow_debug_actions={allow_debug_actions}: {error}"));
+        assert_eq!(back, config);
+        assert_eq!(back.allow_debug_actions, allow_debug_actions);
+    }
+}
+
+#[test]
+fn format_config_deserialization_ignores_the_removed_experimental_dungeons_key() {
+    // Back-compat: saves, replays, and persisted setups written before the
+    // per-session experimental-dungeons flag was removed still carry the
+    // `allow_experimental_dungeons` key. The derived `Deserialize` impl sets
+    // no `deny_unknown_fields`, so the stale key must be ignored — not
+    // rejected — and the pool must come from the format alone. Both stale
+    // values must load; a `true` on a non-freeform config must NOT smuggle
+    // the Wilderness into its pool.
+    for stale_value in [true, false] {
+        let mut json = serde_json::to_value(FormatConfig::standard()).unwrap();
+        json.as_object_mut().unwrap().insert(
+            "allow_experimental_dungeons".to_string(),
+            serde_json::Value::Bool(stale_value),
+        );
+        let back = serde_json::from_value::<FormatConfig>(json)
+            .unwrap_or_else(|error| panic!("stale flag={stale_value}: {error}"));
+        assert_eq!(back, FormatConfig::standard());
+        assert!(!back.format.offers_baldurs_gate_wilderness());
+    }
+}
+
+#[test]
+fn format_config_deserialization_rejects_a_built_in_with_a_looser_forged_copy_limit() {
+    // The exact hostile payload named in the maintainer's Finding 1 review:
+    // {"format":"Standard","default_deck_copy_limit":{"type":"Unlimited"},...}.
+    // Built as a real FormatConfig value and round-tripped through
+    // serde_json — a hand-typed bare-string literal like
+    // "default_deck_copy_limit":"Unlimited" would fail with a type
+    // mismatch before ever reaching the new check (DeckCopyLimit's
+    // `#[serde(tag = "type", content = "data")]` shape only accepts
+    // {"type":"Unlimited"}), which would make this test pass for the wrong
+    // reason. Standard's true CR 100.2a ceiling is UpTo(4); accepting
+    // Unlimited would let max_deck_copies (and, pre-fix, admission)
+    // disclose/enforce a 60-copy Lightning Bolt deck as legal.
+    let mut forged = FormatConfig::standard();
+    forged.default_deck_copy_limit = DeckCopyLimit::Unlimited;
+    let json = serde_json::to_value(&forged).unwrap();
+    let error = serde_json::from_value::<FormatConfig>(json)
+        .expect_err("a Standard payload forging Unlimited copies must be rejected");
+    assert!(
+        error.to_string().contains("more permissive"),
+        "expected the copy-limit rejection message (proving this specific check fired, \
+         not some other deserialize failure), got: {error}"
+    );
+}
+
+#[test]
+fn format_config_deserialization_rejects_commander_with_a_looser_forged_copy_limit() {
+    // Same attack against a command-zone singleton format: forging UpTo(4)
+    // in place of Commander's true CR 903.5b ceiling (UpTo(1)) would let a
+    // 4-of Sol Ring through.
+    let mut forged = FormatConfig::commander();
+    forged.default_deck_copy_limit = DeckCopyLimit::UpTo(4);
+    let json = serde_json::to_value(&forged).unwrap();
+    let error = serde_json::from_value::<FormatConfig>(json)
+        .expect_err("a Commander payload forging UpTo(4) copies must be rejected");
+    assert!(
+        error.to_string().contains("more permissive"),
+        "expected the copy-limit rejection message, got: {error}"
+    );
+}
+
+#[test]
+fn format_config_deserialization_accepts_every_builtin_registry_default_copy_limit() {
+    // Paired positive control: every registry built-in's own correct,
+    // untouched default_deck_copy_limit must still round-trip successfully
+    // — the new check must not reject legitimate payloads. Iterates
+    // GameFormat::registry() dynamically rather than a hardcoded count, so
+    // this stays correct as formats are added.
+    for meta in GameFormat::registry() {
+        let config = FormatConfig::for_format(meta.format).unwrap();
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(
+            serde_json::from_value::<FormatConfig>(json).is_ok(),
+            "{:?}: a config using the format's own real default_deck_copy_limit must be accepted",
+            meta.format
+        );
+    }
+}
+
+#[test]
+fn format_config_deserialization_accepts_a_stricter_than_truth_copy_limit() {
+    // A declared value STRICTER than truth (including the pre-existing
+    // default_deck_copy_limit_fallback() == UpTo(1) that a legacy payload
+    // predating this field resolves to) can only under-permit, never admit
+    // an illegal deck, and must not be rejected — this is the backward-
+    // compatibility case the strict-equality alternative would have broken.
+    let mut stricter = FormatConfig::standard();
+    stricter.default_deck_copy_limit = DeckCopyLimit::UpTo(1);
+    let json = serde_json::to_value(&stricter).unwrap();
+    assert!(serde_json::from_value::<FormatConfig>(json).is_ok());
+}
+
+/// V5 (Verification Matrix): `built_in_axes_no_looser_than_rules` rejects a
+/// forged looser `sideboard_policy` on a built-in Commander-family format —
+/// the newly-found live hole from Step 3.5 finding 1 (CR 903.5e: Commander
+/// games do not use sideboards).
+#[test]
+fn format_config_deserialization_rejects_a_forged_looser_sideboard_policy() {
+    let mut forged = FormatConfig::commander();
+    forged.sideboard_policy = SideboardPolicy::Limited(15);
+    let json = serde_json::to_value(&forged).unwrap();
+    let error = serde_json::from_value::<FormatConfig>(json)
+        .expect_err("a Commander payload forging a 15-card sideboard must be rejected");
+    assert!(
+        error.to_string().contains("sideboard_policy"),
+        "expected the sideboard_policy rejection message, got: {error}"
+    );
+}
+
+/// V6: `built_in_axes_no_looser_than_rules` rejects a forged
+/// `supplies_fixed_deck: true` on formats that don't supply one — the
+/// pre-existing live hole this phase's gate closes.
+#[test]
+fn format_config_deserialization_rejects_forged_supplies_fixed_deck() {
+    for builder in [
+        FormatConfig::standard,
+        FormatConfig::commander,
+        FormatConfig::archenemy,
+    ] {
+        let mut forged = builder();
+        forged.supplies_fixed_deck = true;
+        let json = serde_json::to_value(&forged).unwrap();
+        let error = serde_json::from_value::<FormatConfig>(json)
+            .expect_err("a payload forging supplies_fixed_deck: true must be rejected");
+        assert!(
+            error.to_string().contains("supplies_fixed_deck"),
+            "expected the supplies_fixed_deck rejection message, got: {error}"
+        );
+    }
+}
+
+/// V7: `archenemy_player` is `HostChoice`, not `Locked`/`NoLooserThan` — CR
+/// 904.2a / CR 904.6 only fix that an archenemy exists and takes the first
+/// turn, not which numbered seat holds it. Any seat (including a non-zero
+/// one, bounds-checked separately by `FormatConfig::validate_for_player_
+/// count`) is admitted on an Archenemy-family format; only a built-in that
+/// is never Archenemy (e.g. Standard) rejects a declared `Some` at all.
+#[test]
+fn format_config_deserialization_archenemy_player_is_a_free_host_choice_on_archenemy() {
+    let mut none_declared = FormatConfig::archenemy();
+    none_declared.archenemy_player = None;
+    let json = serde_json::to_value(&none_declared).unwrap();
+    assert!(
+        serde_json::from_value::<FormatConfig>(json).is_ok(),
+        "None must always be admitted"
+    );
+
+    let mut different_seat = FormatConfig::archenemy();
+    different_seat.archenemy_player = Some(PlayerId(2));
+    let json = serde_json::to_value(&different_seat).unwrap();
+    assert!(
+        serde_json::from_value::<FormatConfig>(json).is_ok(),
+        "a different, valid non-zero archenemy seat must be admitted — the seat is per-seating- \
+         table state, not a value the built-in-axes gate locks to the registry default"
+    );
+
+    let mut forged_on_standard = FormatConfig::standard();
+    forged_on_standard.archenemy_player = Some(PlayerId(0));
+    let json = serde_json::to_value(&forged_on_standard).unwrap();
+    assert!(
+        serde_json::from_value::<FormatConfig>(json).is_err(),
+        "Standard never designates an archenemy; any declared Some must be rejected"
+    );
+}
+
+/// V8: positive control — every registry built-in's untouched, real config
+/// must still round-trip through the gate. Iterates `GameFormat::registry()`
+/// dynamically so this stays correct as formats are added.
+#[test]
+fn format_config_deserialization_accepts_every_builtin_untouched() {
+    for meta in GameFormat::registry() {
+        let config = FormatConfig::for_format(meta.format).unwrap();
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(
+            serde_json::from_value::<FormatConfig>(json).is_ok(),
+            "{:?}: an untouched, real config must always be accepted",
+            meta.format
+        );
+    }
+}
+
+/// V9: legacy compatibility (D4) — a hand-built payload omitting every
+/// `#[serde(default...)]` field must still deserialize, with each field
+/// resolving to its documented fallback. The same payload with one of those
+/// fallbacks overridden to a looser value must be rejected.
+#[test]
+fn format_config_deserialization_legacy_payload_omitting_defaulted_fields_still_accepted() {
+    let mut legacy = serde_json::to_value(FormatConfig::standard()).unwrap();
+    for field in [
+        "sideboard_policy",
+        "supplies_fixed_deck",
+        "archenemy_player",
+        "range_of_influence",
+        "allow_debug_actions",
+        "custom_rules",
+        "default_deck_copy_limit",
+    ] {
+        legacy.as_object_mut().unwrap().remove(field);
+    }
+    let restored: FormatConfig = serde_json::from_value(legacy.clone())
+        .expect("a legacy payload omitting every defaulted field must still deserialize");
+    assert_eq!(restored.sideboard_policy, SideboardPolicy::Forbidden);
+    assert!(!restored.supplies_fixed_deck);
+    assert_eq!(restored.archenemy_player, None);
+    assert_eq!(restored.default_deck_copy_limit, DeckCopyLimit::UpTo(1));
+
+    // The same payload, but now ALSO declaring a looser sideboard_policy
+    // than the omitted fallback would have given, must still be rejected.
+    legacy.as_object_mut().unwrap().insert(
+        "sideboard_policy".to_string(),
+        serde_json::to_value(SideboardPolicy::Unlimited).unwrap(),
+    );
+    assert!(
+        serde_json::from_value::<FormatConfig>(legacy).is_err(),
+        "a looser explicit value must still be rejected even alongside other omitted fields"
+    );
+}
+
+/// V9b: legacy compatibility, the OTHER historical shape — real legacy data
+/// doesn't only OMIT `range_of_influence` (V9's `None`/omitted-field arm
+/// above), it can also carry the field PRESENT in the old legacy scalar wire
+/// shape (a bare integer, migrated by `RangeOfInfluenceConfigWire::Legacy` —
+/// see `format.rs`'s own `legacy_scalar_range_of_influence_deserializes_and_
+/// remains_rejected` unit test, which this fixture mirrors). That shape must
+/// still deserialize successfully on a built-in format even though the
+/// built-in's registry value is `None` — admission for this field is
+/// deferred entirely to `reject_unimplemented_range_of_influence`, not to
+/// `built_in_axes_no_looser_than_rules`.
+#[test]
+fn format_config_deserialization_legacy_scalar_range_of_influence_still_accepted() {
+    let mut legacy = serde_json::to_value(FormatConfig::standard()).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .insert("range_of_influence".to_string(), serde_json::json!(1));
+
+    let restored: FormatConfig = serde_json::from_value(legacy)
+        .expect("a legacy scalar range_of_influence payload must still deserialize");
+    assert_eq!(
+        restored.range_of_influence,
+        Some(Box::new(RangeOfInfluenceConfig {
+            default_range: 1,
+            player_overrides: BTreeMap::new(),
+        }))
+    );
+}
+
+/// V10: every `NoLooserThan` axis admits a stricter-than-truth value —
+/// paired positive control for V5/V6's negatives.
+#[test]
+fn format_config_deserialization_accepts_stricter_than_truth_on_every_no_looser_than_axis() {
+    let mut stricter_sideboard = FormatConfig::standard();
+    stricter_sideboard.sideboard_policy = SideboardPolicy::Limited(1);
+    assert!(serde_json::from_value::<FormatConfig>(
+        serde_json::to_value(&stricter_sideboard).unwrap()
+    )
+    .is_ok());
+
+    let mut forbidden_sideboard = FormatConfig::standard();
+    forbidden_sideboard.sideboard_policy = SideboardPolicy::Forbidden;
+    assert!(serde_json::from_value::<FormatConfig>(
+        serde_json::to_value(&forbidden_sideboard).unwrap()
+    )
+    .is_ok());
+
+    let mut stricter_copies = FormatConfig::standard();
+    stricter_copies.default_deck_copy_limit = DeckCopyLimit::UpTo(1);
+    assert!(serde_json::from_value::<FormatConfig>(
+        serde_json::to_value(&stricter_copies).unwrap()
+    )
+    .is_ok());
+}
+
+/// V11: `Locked` axes reject any inequality against the registry value,
+/// even when the declared value is not obviously "looser" — equality is
+/// the only honest verdict for these axes (see `built_in_axes_no_looser_than_rules`).
+#[test]
+fn format_config_deserialization_rejects_any_inequality_on_locked_axes() {
+    // starting_life is no longer Locked (Phase 1d makes it HostChoiceWithin —
+    // see the starting_life tests below); min_players and team_based take its
+    // place here as still-Locked axes.
+    let mut wrong_min_players = FormatConfig::commander();
+    wrong_min_players.min_players = 3;
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&wrong_min_players).unwrap())
+            .is_err(),
+        "min_players is Locked; any declared inequality must be rejected"
+    );
+
+    let mut wrong_team_based = FormatConfig::standard();
+    wrong_team_based.team_based = true;
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&wrong_team_based).unwrap())
+            .is_err(),
+        "team_based is Locked; any declared inequality must be rejected"
+    );
+
+    let mut wrong_deck_size = FormatConfig::standard();
+    wrong_deck_size.deck_size = DeckSizeRule::Exactly(100);
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&wrong_deck_size).unwrap())
+            .is_err(),
+        "deck_size is Locked; Minimum(60) vs Exactly(100) must be rejected, not compared"
+    );
+
+    let mut wrong_singleton = FormatConfig::standard();
+    wrong_singleton.singleton = true;
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&wrong_singleton).unwrap())
+            .is_err(),
+        "singleton is Locked; any declared inequality must be rejected"
+    );
+}
+
+// Phase 1d: `max_players`, `starting_life`, `deck_size`'s magnitude, and
+// `commander_damage_threshold`'s magnitude move from Locked to
+// HostChoiceWithin a bounded set. These tests close the round-3 review
+// finding that the old Locked rows broke real shipped host-configuration
+// behavior (a Commander host at any seat count other than exactly 6, a
+// non-20 starting life, etc.) — every case below drives the real
+// `FormatConfig::deserialize` path via a `serde_json` round trip.
+
+/// (a) every registry format admits every seat count in its own
+/// `min_players..=max_players` range through the real deserialize gate.
+#[test]
+fn format_config_deserialization_accepts_every_registry_max_players_range() {
+    let mut accepted = 0;
+    for meta in GameFormat::registry() {
+        for n in meta.default_config.min_players..=meta.default_config.max_players {
+            let mut config = meta.default_config.clone();
+            config.max_players = n;
+            let json = serde_json::to_value(&config).unwrap();
+            assert!(
+                serde_json::from_value::<FormatConfig>(json).is_ok(),
+                "{:?}: max_players {n} is within {}..={} and must be accepted",
+                meta.format,
+                meta.default_config.min_players,
+                meta.default_config.max_players,
+            );
+            accepted += 1;
+        }
+    }
+    assert!(accepted > 0, "the loop must not vacuously pass");
+}
+
+/// (b) Commander's max_players ceiling: 7 is rejected (naming the field and
+/// the registry range), 1 and 0 are rejected, and the boundary values (2, 6)
+/// are accepted in the same test.
+#[test]
+fn format_config_deserialization_commander_max_players_boundaries() {
+    for boundary in [2u8, 6] {
+        let mut config = FormatConfig::commander();
+        config.max_players = boundary;
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(
+            serde_json::from_value::<FormatConfig>(json).is_ok(),
+            "Commander max_players {boundary} is a boundary of its own registry range and must \
+             be accepted"
+        );
+    }
+    for (bad, expect_range) in [(7u8, true), (1u8, false), (0u8, false)] {
+        let mut config = FormatConfig::commander();
+        config.max_players = bad;
+        let json = serde_json::to_value(&config).unwrap();
+        let error = serde_json::from_value::<FormatConfig>(json)
+            .expect_err(&format!("Commander max_players {bad} must be rejected"));
+        assert!(
+            error.to_string().contains("max_players"),
+            "expected the max_players rejection message, got: {error}"
+        );
+        if expect_range {
+            assert!(
+                error.to_string().contains("2-6"),
+                "expected the registry range in the message, got: {error}"
+            );
+        }
+    }
+}
+
+/// (a) every registry format admits `starting_life: 25` through the real
+/// deserialize gate.
+#[test]
+fn format_config_deserialization_accepts_starting_life_25_for_every_registry_format() {
+    for meta in GameFormat::registry() {
+        let mut config = meta.default_config;
+        config.starting_life = 25;
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(
+            serde_json::from_value::<FormatConfig>(json).is_ok(),
+            "{:?}: starting_life 25 must be accepted",
+            meta.format
+        );
+    }
+}
+
+/// (b) Standard rejects a starting_life resolving to 0 or less; Two-Headed
+/// Giant's per-seat halving means `starting_life: 1` resolves to 0 per seat
+/// and must be rejected, while `starting_life: 2` (resolving to 1 per seat)
+/// must be accepted — this pair is what proves the check reads the resolved
+/// per-seat value, not the raw field.
+#[test]
+fn format_config_deserialization_rejects_non_positive_resolved_starting_life() {
+    let mut zero_life = FormatConfig::standard();
+    zero_life.starting_life = 0;
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&zero_life).unwrap()).is_err(),
+        "Standard starting_life: 0 must be rejected"
+    );
+
+    let mut negative_life = FormatConfig::standard();
+    negative_life.starting_life = -5;
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&negative_life).unwrap())
+            .is_err(),
+        "Standard starting_life: -5 must be rejected"
+    );
+
+    let mut thg_one = FormatConfig::two_headed_giant();
+    thg_one.starting_life = 1;
+    let error = serde_json::from_value::<FormatConfig>(serde_json::to_value(&thg_one).unwrap())
+        .expect_err(
+            "Two-Headed Giant starting_life: 1 resolves to 0 per seat and must be rejected",
+        );
+    assert!(error.to_string().contains("per seat"), "got: {error}");
+
+    let mut thg_two = FormatConfig::two_headed_giant();
+    thg_two.starting_life = 2;
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&thg_two).unwrap()).is_ok(),
+        "Two-Headed Giant starting_life: 2 resolves to 1 per seat and must be accepted"
+    );
+}
+
+/// (a) Commander accepts a house-ruled commander_damage_threshold magnitude.
+#[test]
+fn format_config_deserialization_accepts_commander_damage_threshold_house_rules() {
+    for magnitude in [30u8, 1] {
+        let mut config = FormatConfig::commander();
+        config.commander_damage_threshold = Some(magnitude);
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(
+            serde_json::from_value::<FormatConfig>(json).is_ok(),
+            "Commander commander_damage_threshold Some({magnitude}) must be accepted"
+        );
+    }
+}
+
+/// (b) `None` is rejected on a format that uses the SBA (paired with a
+/// self-consistent forgery that also flips `uses_commander: false`, which the
+/// `Derived` `uses_commander` row alone does NOT catch); `Some` is rejected
+/// on a format that does not use the SBA at all.
+#[test]
+fn format_config_deserialization_rejects_commander_damage_threshold_shape_mismatches() {
+    let mut none_but_still_commander = FormatConfig::commander();
+    none_but_still_commander.commander_damage_threshold = None;
+    none_but_still_commander.uses_commander = false;
+    let json = serde_json::to_value(&none_but_still_commander).unwrap();
+    let error = serde_json::from_value::<FormatConfig>(json).expect_err(
+        "a self-consistent forgery (None threshold AND uses_commander: false) must still be \
+         rejected on Commander",
+    );
+    assert!(
+        error.to_string().contains("commander_damage_threshold"),
+        "got: {error}"
+    );
+
+    let mut standard_with_threshold = FormatConfig::standard();
+    standard_with_threshold.commander_damage_threshold = Some(21);
+    let json = serde_json::to_value(&standard_with_threshold).unwrap();
+    let error = serde_json::from_value::<FormatConfig>(json)
+        .expect_err("Standard does not use the commander-damage SBA at all");
+    assert!(
+        error.to_string().contains("commander_damage_threshold"),
+        "got: {error}"
+    );
+}
+
+/// (c) `Some(0)` is rejected (naming the floor) and `Some(1)` is accepted in
+/// the same test, pinning the floor exactly at 1.
+#[test]
+fn format_config_deserialization_commander_damage_threshold_floor_is_exactly_one() {
+    let mut zero = FormatConfig::commander();
+    zero.commander_damage_threshold = Some(0);
+    let json = serde_json::to_value(&zero).unwrap();
+    let error = serde_json::from_value::<FormatConfig>(json)
+        .expect_err("commander_damage_threshold Some(0) must be rejected");
+    assert!(error.to_string().contains("at least 1"), "got: {error}");
+
+    let mut one = FormatConfig::commander();
+    one.commander_damage_threshold = Some(1);
+    let json = serde_json::to_value(&one).unwrap();
+    assert!(
+        serde_json::from_value::<FormatConfig>(json).is_ok(),
+        "commander_damage_threshold Some(1) must be accepted"
+    );
+}
+
+/// (a) Free-for-All's own registry magnitudes, both admitted.
+#[test]
+fn format_config_deserialization_free_for_all_deck_size_own_magnitudes() {
+    for minimum in [40u16, 60] {
+        let mut config = FormatConfig::free_for_all();
+        config.deck_size = DeckSizeRule::Minimum(minimum);
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(
+            serde_json::from_value::<FormatConfig>(json).is_ok(),
+            "FreeForAll Minimum({minimum}) is a listed option and must be accepted"
+        );
+    }
+}
+
+/// (b) Free-for-All rejects a magnitude outside its closed option list.
+#[test]
+fn format_config_deserialization_free_for_all_deck_size_rejects_unlisted_magnitude() {
+    for minimum in [1u16, 59, 100] {
+        let mut config = FormatConfig::free_for_all();
+        config.deck_size = DeckSizeRule::Minimum(minimum);
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(
+            serde_json::from_value::<FormatConfig>(json).is_err(),
+            "FreeForAll Minimum({minimum}) is not in the closed option list and must be rejected"
+        );
+    }
+}
+
+/// (c) B-2's direct fix: Free-for-All rejects `Exactly(40)` (the discriminant
+/// is never a host choice) while accepting `Minimum(40)` (the identical
+/// magnitude, correct discriminant) in the SAME test — proving the rejection
+/// is about the discriminant, not the magnitude.
+#[test]
+fn format_config_deserialization_free_for_all_deck_size_discriminant_is_never_a_host_choice() {
+    let mut wrong_discriminant = FormatConfig::free_for_all();
+    wrong_discriminant.deck_size = DeckSizeRule::Exactly(40);
+    let json = serde_json::to_value(&wrong_discriminant).unwrap();
+    assert!(
+        serde_json::from_value::<FormatConfig>(json).is_err(),
+        "FreeForAll Exactly(40) must be rejected — the Minimum/Exactly discriminant is never a \
+         host choice, even though 40 is a listed magnitude"
+    );
+
+    let mut right_discriminant = FormatConfig::free_for_all();
+    right_discriminant.deck_size = DeckSizeRule::Minimum(40);
+    let json = serde_json::to_value(&right_discriminant).unwrap();
+    assert!(
+        serde_json::from_value::<FormatConfig>(json).is_ok(),
+        "FreeForAll Minimum(40) must be accepted"
+    );
+}
+
+/// (d) Other formats never delegate — the closed option list is per-format,
+/// not a global bypass.
+#[test]
+fn format_config_deserialization_deck_size_delegation_does_not_leak_to_other_formats() {
+    let mut standard = FormatConfig::standard();
+    standard.deck_size = DeckSizeRule::Minimum(40);
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&standard).unwrap()).is_err(),
+        "Standard must not accept FreeForAll's Minimum(40) option"
+    );
+
+    let mut limited = FormatConfig::limited();
+    limited.deck_size = DeckSizeRule::Minimum(60);
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&limited).unwrap()).is_err(),
+        "Limited must not accept FreeForAll's Minimum(60) option"
+    );
+
+    let mut commander = FormatConfig::commander();
+    commander.deck_size = DeckSizeRule::Exactly(99);
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&commander).unwrap()).is_err(),
+        "Commander must not accept a house-ruled deck size at all — it is not a table-agreement \
+         format"
+    );
+
+    let mut momir = FormatConfig::momir();
+    momir.deck_size = DeckSizeRule::Exactly(59);
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&momir).unwrap()).is_err(),
+        "Momir must not accept a house-ruled deck size at all — it is not a table-agreement \
+         format"
+    );
+}
+
+/// (e) Per-format lookup, not a global allowlist: Limited's own registry
+/// magnitude (40) is accepted for Limited, but the identical number is
+/// rejected for Standard, whose registry magnitude is 60.
+#[test]
+fn format_config_deserialization_deck_size_option_lookup_is_per_format() {
+    let mut limited_forty = FormatConfig::limited();
+    limited_forty.deck_size = DeckSizeRule::Minimum(40);
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&limited_forty).unwrap())
+            .is_ok(),
+        "Limited's own registry magnitude (40) must be accepted for Limited"
+    );
+
+    let mut standard_forty = FormatConfig::standard();
+    standard_forty.deck_size = DeckSizeRule::Minimum(40);
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&standard_forty).unwrap())
+            .is_err(),
+        "the identical magnitude (40) must be rejected for Standard, whose own registry \
+         magnitude is 60 and which is not a table-agreement format"
+    );
+}
+
+// V19: the gate is exhaustive over every `FormatConfig` field — enforced by
+// `format_config_field_destructure_is_exhaustive` in
+// `engine::types::format`'s own `#[cfg(test)] mod tests`, which exhaustively
+// destructures the (private-module-adjacent) struct so a future field added
+// without updating that pattern is a compile error. That replaces this
+// test's prior JSON-object-length arithmetic (`serialized_json_object.len()
+// + 2 == 17`), which a future field sharing `archenemy_player`/
+// `custom_rules`'s `skip_serializing_if`-when-`None` shape could silently
+// defeat without moving the count.
+
+#[test]
+fn persisted_game_state_restore_accepts_a_normal_built_in_game() {
+    // Paired positive control for the rejection test below: a normal
+    // built-in game's persisted state must still round-trip successfully,
+    // so the rejection test can't be passing because *nothing* deserializes.
+    use engine::types::game_state::{GameState, PersistedGameState};
+
+    let state = GameState::new(FormatConfig::standard(), 2, 42);
+    let persisted = PersistedGameState::capture(state);
+    let json = serde_json::to_value(&persisted).unwrap();
+    assert!(
+        serde_json::from_value::<PersistedGameState>(json).is_ok(),
+        "restoring a persisted built-in-format GameState must succeed"
+    );
+}
+
+/// Phase 1d: a persisted `GameState` carrying a HOST-CHOSEN (not registry-
+/// default) built-in `FormatConfig` — a smaller Commander seat ceiling, a
+/// custom starting life, a house-ruled commander-damage threshold, and
+/// separately a Free-for-All table-agreement deck size — must still restore
+/// through the real `PersistedGameState` round trip.
+#[test]
+fn persisted_game_state_restore_accepts_a_host_chosen_built_in_config() {
+    use engine::types::game_state::{GameState, PersistedGameState};
+
+    let mut commander_config = FormatConfig::commander();
+    commander_config.max_players = 2;
+    commander_config.starting_life = 25;
+    commander_config.commander_damage_threshold = Some(30);
+    let commander_state = GameState::new(commander_config, 2, 42);
+    let persisted = PersistedGameState::capture(commander_state);
+    let json = serde_json::to_value(&persisted).unwrap();
+    assert!(
+        serde_json::from_value::<PersistedGameState>(json).is_ok(),
+        "restoring a persisted host-chosen Commander config (max_players: 2, starting_life: 25, \
+         commander_damage_threshold: Some(30)) must succeed"
+    );
+
+    let mut ffa_config = FormatConfig::free_for_all();
+    ffa_config.deck_size = DeckSizeRule::Minimum(40);
+    let ffa_state = GameState::new(ffa_config, 2, 42);
+    let persisted = PersistedGameState::capture(ffa_state);
+    let json = serde_json::to_value(&persisted).unwrap();
+    assert!(
+        serde_json::from_value::<PersistedGameState>(json).is_ok(),
+        "restoring a persisted Free-for-All config with deck_size: Minimum(40) must succeed"
+    );
+}
+
+#[test]
+fn persisted_game_state_restore_rejects_a_structurally_contradictory_custom_format_config() {
+    // Empirically proves the rejection reaches the real restore/resume
+    // chokepoint engine-wasm's decode_restored_game_state calls
+    // (serde_json::from_value::<PersistedGameState>), not just a
+    // FormatConfig-in-isolation unit test. Builds a normal, valid two-player
+    // GameState, swaps in a Custom format_config the same way an
+    // attacker-controlled restore payload would, then round-trips the whole
+    // persisted envelope.
+    //
+    // Phase 1c fixture redesign: this test used to swap in a Custom config
+    // built from `..FormatConfig::standard()`, which was rejected by Phase
+    // 1a's categorical "no Custom at this boundary" rule. That rule is gone,
+    // so the fixture now carries a DELIBERATE, explicit contradiction — a
+    // singleton runtime field the declared StructuralRules does not entail —
+    // rather than passing for a reason that no longer exists.
+    use engine::types::game_state::{GameState, PersistedGameState};
+
+    let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+    let mut config = sample_custom_config(5);
+    assert!(
+        !config.singleton,
+        "fixture precondition: the declared rules must be non-singleton"
+    );
+    config.singleton = true;
+    state.format_config = config;
+    let persisted = PersistedGameState::capture(state);
+    let json = serde_json::to_value(&persisted).unwrap();
+    let error = serde_json::from_value::<PersistedGameState>(json).expect_err(
+        "restoring a persisted GameState whose Custom format_config contradicts its own \
+         custom_rules must be rejected, mirroring engine-wasm's decode_restored_game_state \
+         chokepoint",
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("contradicts its own custom_rules.structural"),
+        "expected the resolver-mismatch rejection to propagate through the persisted envelope, \
+         got: {error}"
+    );
+}
+
+#[test]
+fn persisted_game_state_restore_accepts_a_consistent_custom_format_config() {
+    // Paired positive control for the rejection above, and the Phase 1c
+    // behavior change at the real restore chokepoint: a Custom format_config
+    // that IS exactly what the resolver derives from its own custom_rules
+    // must now restore successfully. Without this, the rejection test could
+    // pass for the old categorical reason.
+    use engine::types::game_state::{GameState, PersistedGameState};
+
+    let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+    state.format_config = sample_custom_config(5);
+    let persisted = PersistedGameState::capture(state);
+    let json = serde_json::to_value(&persisted).unwrap();
+    assert!(
+        serde_json::from_value::<PersistedGameState>(json).is_ok(),
+        "restoring a persisted GameState with a resolver-consistent Custom format_config must \
+         succeed"
+    );
+}
+
+#[test]
+fn companion_reveal_check_does_not_panic_for_an_in_memory_custom_format_config() {
+    // The maintainer's review found that rejecting Custom at the external
+    // deserialization boundary doesn't make GameFormat::Custom safe
+    // in-memory: game/companion.rs's check_companion_reveal reads
+    // state.format_config on ANY live GameState (built-in or Custom,
+    // constructed directly in Rust, never through Deserialize), and used to
+    // call the bare GameFormat's uses_commander() internally — which
+    // panics for Custom. This proves the fix (reading the resolved
+    // FormatConfig.uses_commander field instead) reaches the real
+    // production entry point rather than just the unit-level helpers.
+    use engine::types::game_state::{GameState, PlayerDeckPool};
+    use engine::types::PlayerId;
+
+    let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+    let rules = sample_rules(5);
+    state.format_config = FormatConfig {
+        format: GameFormat::Custom(rules.id),
+        custom_rules: Some(Box::new(rules)),
+        uses_commander: true,
+        ..FormatConfig::standard()
+    };
+    state.deck_pools = vec![
+        PlayerDeckPool {
+            player: PlayerId(0),
+            ..Default::default()
+        },
+        PlayerDeckPool {
+            player: PlayerId(1),
+            ..Default::default()
+        },
+    ];
+
+    // No companion is registered in either empty pool, so the honest answer
+    // is "no reveal offer" — the discriminating claim is that this returns
+    // a defined result at all, rather than panicking on GameFormat::Custom's
+    // uses_commander() inside companion_offers/companion_starting_deck.
+    let result = engine::game::companion::check_all_companion_reveals(&state);
+    assert!(result.is_none());
+}
+
+#[test]
+fn custom_format_unlimited_sideboard_survives_deck_loading() {
+    // The maintainer's review found GameFormat::sideboard_policy()'s
+    // disclosed Forbidden fallback for Custom silently discarded a real,
+    // already-known declared policy sitting in
+    // custom_rules.structural.sideboard_policy — deck_loading.rs trusted the
+    // bare-GameFormat fallback and emptied the sideboard even for a Custom
+    // format whose real policy is Unlimited. FormatConfig now stores its own
+    // sideboard_policy field (mirroring uses_commander/supplies_fixed_deck),
+    // and deck_loading.rs reads that instead. This proves the fix through
+    // the real production entry point, load_deck_into_state: builds an
+    // in-memory Custom FormatConfig with sideboard_policy: Unlimited, loads
+    // a deck payload with a nonempty sideboard, and confirms the sideboard
+    // actually survives into the resulting deck pool rather than being
+    // silently dropped to empty.
+    use engine::game::deck_loading::{
+        load_deck_into_state, DeckEntry, DeckPayload, PlayerDeckPayload,
+    };
+    use engine::types::card::CardFace;
+    use engine::types::game_state::GameState;
+
+    let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+    let rules = sample_rules(5);
+    state.format_config = FormatConfig {
+        format: GameFormat::Custom(rules.id),
+        custom_rules: Some(Box::new(rules)),
+        sideboard_policy: SideboardPolicy::Unlimited,
+        ..FormatConfig::standard()
+    };
+
+    let sideboard_card = DeckEntry {
+        card: CardFace {
+            name: "Test Sideboard Card".to_string(),
+            ..Default::default()
+        },
+        count: 1,
+    };
+    let payload = DeckPayload {
+        player: PlayerDeckPayload {
+            sideboard: vec![sideboard_card.clone()],
+            ..Default::default()
+        },
+        opponent: PlayerDeckPayload {
+            sideboard: vec![sideboard_card],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    load_deck_into_state(&mut state, &payload);
+
+    let p0 = state
+        .deck_pools
+        .iter()
+        .find(|pool| pool.player == engine::types::PlayerId(0))
+        .expect("player 0 deck pool must exist after loading");
+    assert_eq!(
+        p0.current_sideboard.len(),
+        1,
+        "a Custom format with sideboard_policy: Unlimited must not have its sideboard dropped"
+    );
+    assert_eq!(p0.current_sideboard[0].card.name, "Test Sideboard Card");
+}
+
+// Axis A (Phase 1c): CustomFormatDef::from_lobby_config captures a lobby's
+// live built-in FormatConfig as a saved DEFINITION, and
+// FormatConfig::for_custom_rules is the inverse — the shared resolver that
+// turns a definition back into the active config a game runs on.
+
+#[test]
+fn from_lobby_config_rejects_archenemy_source() {
+    // CR 408.1 + CR 408.3 + CR 904.3: Archenemy's command zone holds a
+    // supplementary scheme deck, not a commander — one member of the general
+    // "deck_loading.rs grants an auxiliary deck/component keyed on this
+    // literal GameFormat" class (see
+    // GameFormat::has_unrepresentable_auxiliary_deck_component), which also
+    // covers Planechase and Momir below.
+    let error = CustomFormatDef::from_lobby_config("Archy".to_string(), &FormatConfig::archenemy())
+        .expect_err("Archenemy must not be saveable as a custom format");
+    assert!(
+        error.to_string().contains("auxiliary deck or component"),
+        "expected the auxiliary-deck-component rejection, got: {error}"
+    );
+}
+
+#[test]
+fn from_lobby_config_rejects_momir_source() {
+    // CR 109.4c + CR 114.1: Momir's command zone holds a game-start emblem,
+    // granted by deck_loading.rs keyed off GameFormat::Momir itself rather
+    // than off any StructuralRules field. Same defect class as Archenemy and
+    // Planechase, for a different underlying reason.
+    let error = CustomFormatDef::from_lobby_config("Momo".to_string(), &FormatConfig::momir())
+        .expect_err("Momir must not be saveable as a custom format");
+    assert!(
+        error.to_string().contains("auxiliary deck or component"),
+        "expected the auxiliary-deck-component rejection, got: {error}"
+    );
+}
+
+#[test]
+fn from_lobby_config_rejects_dandan_source() {
+    // CR 400.1: Dandân's shared library and graveyard are keyed on
+    // GameFormat::Dandan itself and have no StructuralRules field. Its config
+    // sets `command_zone: false`, so without
+    // has_unrepresentable_auxiliary_deck_component it would save as a plain
+    // format with the zones per-player.
+    let error = CustomFormatDef::from_lobby_config("Dan".to_string(), &FormatConfig::dandan())
+        .expect_err("Dandan must not be saveable as a custom format");
+    assert!(
+        error.to_string().contains("auxiliary deck or component"),
+        "expected the auxiliary-deck-component rejection, got: {error}"
+    );
+    // Reach-guard: an ordinary format saves, so the refusal above is the
+    // predicate and not a blanket refusal.
+    CustomFormatDef::from_lobby_config("Std".to_string(), &FormatConfig::standard())
+        .expect("Standard must be saveable as a custom format");
+}
+
+#[test]
+fn from_lobby_config_rejects_planechase_source() {
+    // CR 901.15a: Planechase's shared communal planar deck is granted by
+    // deck_loading.rs's `load_shared_planar_deck`, keyed on
+    // GameFormat::Planechase itself. Unlike Archenemy/Momir, Planechase's
+    // `command_zone` is false — FormatConfig::planechase() sets
+    // command_zone: false — so this format would otherwise fall straight
+    // through the command-zone/eligibility check below to
+    // CommandZoneMode::Disabled and save "successfully," silently dropping
+    // the planar deck. has_unrepresentable_auxiliary_deck_component is the
+    // only guard that reaches it.
+    let error =
+        CustomFormatDef::from_lobby_config("Planar".to_string(), &FormatConfig::planechase())
+            .expect_err("Planechase must not be saveable as a custom format");
+    assert!(
+        error.to_string().contains("auxiliary deck or component"),
+        "expected the auxiliary-deck-component rejection, got: {error}"
+    );
+}
+
+#[test]
+fn from_lobby_config_accepts_a_commander_style_command_zone_source() {
+    // Positive sibling for the two rejections above: a command-zone format
+    // whose zone really does hold a commander (CR 903.13g routes Commander
+    // Draft through CR 903.3's eligibility test) saves fine. Without this,
+    // the rejections could be passing because command_zone: true is refused
+    // outright.
+    let def = CustomFormatDef::from_lobby_config(
+        "Drafty Commander".to_string(),
+        &FormatConfig::commander_draft(),
+    )
+    .expect("a commander-style source must be saveable");
+    assert_eq!(
+        def.rules.structural.command_zone_mode,
+        CommandZoneMode::Enabled {
+            commander_damage_threshold: Some(21),
+            eligibility_rule: CommanderEligibilityRule::Standard,
+        }
+    );
+}
+
+#[test]
+fn from_lobby_config_rejects_an_empty_or_whitespace_only_name() {
+    // Rejected explicitly rather than saved with an empty label/short_label:
+    // there would be nothing to label the saved format with, and the badge
+    // code derived from it would be empty too.
+    for name in ["", "   ", "\t\n "] {
+        let result =
+            CustomFormatDef::from_lobby_config(name.to_string(), &FormatConfig::standard());
+        let error = match result {
+            Ok(def) => panic!("name {name:?} must be rejected, got {def:?}"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("non-empty format name"),
+            "{name:?}: expected the empty-name rejection, got: {error}"
+        );
+    }
+}
+
+#[test]
+fn from_lobby_config_rejects_a_custom_source_whatever_its_command_zone_flag() {
+    // Re-saving a save is out of scope: the source's own legality rules
+    // (legal_sets/legal_cards/banned/restricted/legacy) have no home in this conversion
+    // and would be silently dropped. Both flag values are exercised because
+    // the Custom check must not depend on reaching the command-zone branch.
+    let mut with_zone = sample_custom_config(5);
+    with_zone.command_zone = true;
+    for config in [sample_custom_config(5), with_zone] {
+        let error = CustomFormatDef::from_lobby_config("Re-save".to_string(), &config)
+            .expect_err("a Custom source must not be re-saveable");
+        assert!(
+            error.to_string().contains("cannot save Custom"),
+            "expected the Custom-source rejection, got: {error}"
+        );
+    }
+}
+
+#[test]
+fn from_lobby_config_uses_the_reserved_lobby_save_sentinel_id() {
+    let def = CustomFormatDef::from_lobby_config("Sentinel".to_string(), &FormatConfig::standard())
+        .expect("a built-in source must be saveable");
+    assert_eq!(def.rules.id, LOBBY_SAVE_CUSTOM_FORMAT_ID);
+}
+
+#[test]
+fn from_lobby_config_leaves_legality_and_reprint_metadata_at_lobby_save_defaults() {
+    // A lobby save models no published paper ruleset, so it declares no
+    // card pool, no banned/restricted list, no historical rules era, and no
+    // reprint intent.
+    let def = CustomFormatDef::from_lobby_config("Plain".to_string(), &FormatConfig::standard())
+        .expect("a built-in source must be saveable");
+    assert_eq!(def.rules.legality.legal_sets, None);
+    assert!(def.rules.legality.banned.is_empty());
+    assert!(def.rules.legality.restricted.is_empty());
+    assert_eq!(def.rules.legality.legacy, LegacyRuleSet::default());
+    assert_eq!(def.reprint_policy, None);
+    assert_eq!(def.printing_fidelity, PrintingFidelity::NotApplicable);
+}
+
+#[test]
+fn lobby_save_round_trips_every_structural_field_back_through_the_resolver() {
+    // Full-fidelity round trip on a source whose fields are deliberately
+    // NOT the common defaults: Tiny Leaders is the command-zone-without-
+    // commander-damage shape (CommandZoneMode::Enabled with a None
+    // threshold), with an Exactly deck-size rule, singleton on, a
+    // Limited(10) sideboard and an UpTo(1) copy limit — every one of which a
+    // partial capture would silently replace with a default.
+    use engine::types::format::RangeOfInfluenceConfig;
+
+    let mut source = FormatConfig::tiny_leaders();
+    source.starting_life = 33;
+    source.max_players = 5;
+    source.team_based = true;
+    source.range_of_influence = Some(Box::new(RangeOfInfluenceConfig {
+        default_range: 1,
+        player_overrides: Default::default(),
+    }));
+
+    let def = CustomFormatDef::from_lobby_config("Tiny Round Trip".to_string(), &source)
+        .expect("a commander-style built-in source must be saveable");
+    let resolved = FormatConfig::for_custom_rules(&def.rules);
+
+    assert_eq!(resolved.starting_life, 33);
+    assert_eq!(resolved.min_players, source.min_players);
+    assert_eq!(resolved.max_players, 5);
+    assert_eq!(resolved.deck_size, DeckSizeRule::Exactly(50));
+    assert!(resolved.singleton);
+    assert!(resolved.team_based);
+    assert_eq!(resolved.range_of_influence, source.range_of_influence);
+    assert_eq!(resolved.sideboard_policy, SideboardPolicy::Limited(10));
+    assert_eq!(resolved.default_deck_copy_limit, DeckCopyLimit::UpTo(1));
+    // CR 903.10a / CR 704.6c: a command zone with no commander-damage
+    // threshold is a real format class — uses_commander must stay false
+    // rather than being forced true by `Enabled` alone.
+    assert!(resolved.command_zone);
+    assert_eq!(resolved.commander_damage_threshold, None);
+    assert!(!resolved.uses_commander);
+    // Fixed by the resolver, never captured from the source.
+    assert_eq!(
+        resolved.format,
+        GameFormat::Custom(LOBBY_SAVE_CUSTOM_FORMAT_ID)
+    );
+    assert_eq!(resolved.custom_rules.as_deref(), Some(&def.rules));
+    assert!(!resolved.supplies_fixed_deck);
+    assert_eq!(resolved.archenemy_player, None);
+    assert!(!resolved.allow_debug_actions);
+}
+
+#[test]
+fn resolver_derives_uses_commander_from_the_declared_damage_threshold() {
+    // The paired half of the Tiny-Leaders case above: the same Enabled
+    // variant WITH a threshold must resolve to uses_commander: true, so the
+    // assertion above cannot be satisfied by hardcoding false.
+    let mut rules = sample_rules(5);
+    rules.structural.command_zone_mode = CommandZoneMode::Enabled {
+        commander_damage_threshold: Some(21),
+        eligibility_rule: CommanderEligibilityRule::Standard,
+    };
+    let resolved = FormatConfig::for_custom_rules(&rules);
+    assert!(resolved.command_zone);
+    assert_eq!(resolved.commander_damage_threshold, Some(21));
+    assert!(resolved.uses_commander);
+
+    rules.structural.command_zone_mode = CommandZoneMode::Disabled;
+    let resolved = FormatConfig::for_custom_rules(&rules);
+    assert!(!resolved.command_zone);
+    assert_eq!(resolved.commander_damage_threshold, None);
+    assert!(!resolved.uses_commander);
+}
+
+#[test]
+fn a_lobby_save_resolves_to_a_config_the_deserialize_boundary_accepts() {
+    // End-to-end production chain: save a live lobby config -> resolve the
+    // saved definition -> ship it across the wire. Every Axis-A format a host
+    // saves must survive the FormatConfig ingress, or the feature is
+    // unusable no matter how well each half works alone.
+    for source in [
+        FormatConfig::standard(),
+        FormatConfig::commander(),
+        // CR 903.13f(1)/(2): the only saveable source combining a command
+        // zone with DeckSizeRule::Minimum and an Unlimited copy limit — a
+        // structural shape none of the other sources below exercise.
+        FormatConfig::commander_draft(),
+        FormatConfig::tiny_leaders(),
+        FormatConfig::two_headed_giant(),
+        FormatConfig::limited(),
+    ] {
+        let def = CustomFormatDef::from_lobby_config("Saved Format".to_string(), &source)
+            .unwrap_or_else(|error| panic!("{:?}: {error}", source.format));
+        let resolved = FormatConfig::for_custom_rules(&def.rules);
+
+        // `back == resolved` below only proves the resolver and serde agree
+        // with THEMSELVES — a `from_lobby_config`/`for_custom_rules` mapping
+        // bug that swaps or drops a field the same way on both sides would
+        // still pass it. Compare `resolved` against `source` directly for
+        // every field the charter's documented mapping
+        // (IMPLEMENTATION_PLAN.md's Phase 1c section) calls a direct copy or
+        // a lossless CommandZoneMode round trip, so a real capture/resolve
+        // regression is caught here instead.
+        assert_eq!(
+            resolved.starting_life, source.starting_life,
+            "{:?}",
+            source.format
+        );
+        assert_eq!(
+            resolved.min_players, source.min_players,
+            "{:?}",
+            source.format
+        );
+        assert_eq!(
+            resolved.max_players, source.max_players,
+            "{:?}",
+            source.format
+        );
+        assert_eq!(resolved.deck_size, source.deck_size, "{:?}", source.format);
+        assert_eq!(resolved.singleton, source.singleton, "{:?}", source.format);
+        assert_eq!(
+            resolved.team_based, source.team_based,
+            "{:?}",
+            source.format
+        );
+        assert_eq!(
+            resolved.range_of_influence, source.range_of_influence,
+            "{:?}",
+            source.format
+        );
+        assert_eq!(
+            resolved.sideboard_policy, source.sideboard_policy,
+            "{:?}",
+            source.format
+        );
+        assert_eq!(
+            resolved.default_deck_copy_limit, source.default_deck_copy_limit,
+            "{:?}",
+            source.format
+        );
+        // CommandZoneMode-derived, not direct-copy — but every built-in
+        // source's command-zone shape round-trips losslessly through it.
+        assert_eq!(
+            resolved.command_zone, source.command_zone,
+            "{:?}",
+            source.format
+        );
+        assert_eq!(
+            resolved.commander_damage_threshold, source.commander_damage_threshold,
+            "{:?}",
+            source.format
+        );
+        assert_eq!(
+            resolved.uses_commander, source.uses_commander,
+            "{:?}",
+            source.format
+        );
+        // Deliberately NOT compared against `source` (per for_custom_rules's
+        // own doc comment): `format`/`custom_rules` are fixed to the Custom
+        // sentinel, and `archenemy_player`/`supplies_fixed_deck`/
+        // `allow_debug_actions` are always reset, never captured.
+
+        let json = serde_json::to_value(&resolved).unwrap();
+        let back = serde_json::from_value::<FormatConfig>(json)
+            .unwrap_or_else(|error| panic!("{:?}: {error}", source.format));
+        assert_eq!(back, resolved);
+    }
+}
+
+#[test]
+fn short_label_is_derived_from_the_name_and_tolerates_short_names() {
+    let cases = [
+        ("Swedish Old School", "SWE"),
+        ("  di-verse!  ", "DIV"),
+        // Fewer alphanumerics than the 3-character convention: a shorter
+        // code is the documented outcome, not a padded or invented one.
+        ("Hi", "HI"),
+        ("9", "9"),
+    ];
+    for (name, expected) in cases {
+        let def = CustomFormatDef::from_lobby_config(name.to_string(), &FormatConfig::standard())
+            .unwrap_or_else(|error| panic!("{name:?}: {error}"));
+        assert_eq!(def.short_label, expected, "{name:?}");
+        assert_eq!(def.label, name.trim(), "label is the name, trimmed");
+    }
+}
+
+#[test]
+fn description_is_derived_from_the_structural_rules_not_a_static_string() {
+    let commander = CustomFormatDef::from_lobby_config(
+        "Commander Save".to_string(),
+        &FormatConfig::commander(),
+    )
+    .expect("commander source saves");
+    let limited =
+        CustomFormatDef::from_lobby_config("Limited Save".to_string(), &FormatConfig::limited())
+            .expect("limited source saves");
+
+    assert!(!commander.description.is_empty());
+    assert!(!limited.description.is_empty());
+    assert_ne!(
+        commander.description, limited.description,
+        "two different StructuralRules must describe themselves differently"
+    );
+    // Content-derived, per field: CR 903.5a's exact-100 singleton rule and
+    // CR 100.5's 40-card floor must not read the same way.
+    assert!(
+        commander.description.contains("100-card singleton"),
+        "got: {}",
+        commander.description
+    );
+    assert!(
+        limited.description.contains("40-card minimum"),
+        "got: {}",
+        limited.description
+    );
+    assert!(commander.description.contains("40 life"));
+    assert!(limited.description.contains("20 life"));
+}
+
+#[test]
+#[should_panic(expected = "reserved as LOBBY_SAVE_CUSTOM_FORMAT_ID")]
+fn a_preset_claiming_the_lobby_save_sentinel_id_trips_the_registration_assert() {
+    // custom_format_registry() runs this same assert over its own preset
+    // list before filtering. Calling the extracted helper directly is what
+    // makes the guard testable while the list is still empty — and the
+    // assert is a real assert!, not debug_assert!, so it is active in every
+    // build profile (neither `release` nor `server-release` in the workspace
+    // Cargo.toml overrides debug-assertions).
+    let colliding = sample_def(LOBBY_SAVE_CUSTOM_FORMAT_ID.0);
+    assert_no_lobby_save_sentinel_collision(&[colliding]);
+}
+
+#[test]
+fn presets_with_ordinary_ids_pass_the_sentinel_guard() {
+    // Paired positive control: the guard must not reject every preset.
+    assert_no_lobby_save_sentinel_collision(&[sample_def(1), sample_def(2)]);
+    // And the real registry construction path still runs it without firing —
+    // now over real entries rather than an empty vector, which is what makes
+    // this a live check on the shipped presets.
+    assert!(!engine::types::custom_format::custom_format_registry().is_empty());
+}

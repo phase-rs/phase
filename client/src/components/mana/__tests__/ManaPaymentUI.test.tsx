@@ -2,16 +2,19 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
-import { ManaPaymentUI } from "../ManaPaymentUI";
+import { ManaPaymentUI, ManaSourceSelectionUI } from "../ManaPaymentUI";
 import { useGameStore } from "../../../stores/gameStore";
-import type { GameState } from "../../../adapter/types";
-import { buildGameObjectWithCoreTypes, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
+import type { GameObject, GameState, ManaSourceSelection } from "../../../adapter/types";
+import { buildGameObjectWithCoreTypes, buildObjectMap, gameObjectFactory } from "../../../test/factories/gameObjectFactory.ts";
 import {
   buildGameState,
   buildManaPaymentWaitingFor,
   buildPendingCast,
   buildStackEntry,
+  gameStateFactory,
+  manaSourceOptionFactory,
 } from "../../../test/factories/gameStateFactory.ts";
+import { setGameStoreForTest } from "../../../test/helpers/gameStoreHelpers.ts";
 
 function createGameState(overrides: Partial<GameState> = {}): GameState {
   return buildGameState({
@@ -419,5 +422,263 @@ describe("ManaPaymentUI", () => {
         ],
       },
     });
+  });
+});
+
+describe("ManaSourceSelectionUI", () => {
+  beforeEach(() => {
+    useGameStore.getState().reset();
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  function seedManaSourceSelection(
+    options: ManaSourceSelection[],
+    {
+      player = 0,
+      objects = [],
+    }: { player?: number; objects?: GameObject[] } = {},
+  ) {
+    const gameState = gameStateFactory
+      .withPlayers(0, 1)
+      .withObjects(...objects)
+      .params({ active_player: 0, turn_decision_controller: 0 })
+      .manaSourceSelection({ player, options })
+      .build();
+    return setGameStoreForTest({ gameState });
+  }
+
+  function lastActivateSelection(
+    dispatch: ReturnType<typeof setGameStoreForTest>["dispatch"],
+  ): ManaSourceSelection {
+    const calls = vi.mocked(dispatch).mock.calls;
+    const action = calls[calls.length - 1]?.[0];
+    expect(action?.type).toBe("ActivateManaSource");
+    if (action?.type !== "ActivateManaSource") {
+      throw new Error("expected ActivateManaSource");
+    }
+    return action.data.selection;
+  }
+
+  it("renders Concrete Black pip, dispatches the engine-issued option, and Back returns to payment", () => {
+    const source = gameObjectFactory
+      .artifact()
+      .onBattlefield()
+      .named("Basal Sliver")
+      .withId(91)
+      .build();
+    const option = manaSourceOptionFactory.forSource(91).concrete("Black").build();
+    const { dispatch } = seedManaSourceSelection([option], { objects: [source] });
+
+    render(<ManaSourceSelectionUI />);
+
+    expect(screen.getByAltText("B")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /basal sliver/i }));
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "ActivateManaSource",
+      data: { selection: option },
+    });
+    expect(lastActivateSelection(dispatch)).toBe(option);
+
+    fireEvent.click(screen.getByRole("button", { name: /back to mana payment/i }));
+    expect(dispatch).toHaveBeenCalledWith({ type: "BackToManaPayment" });
+  });
+
+  it("renders Colorless Concrete as C, not B", () => {
+    const source = gameObjectFactory
+      .artifact()
+      .onBattlefield()
+      .named("Sol Ring")
+      .withId(92)
+      .build();
+    const option = manaSourceOptionFactory.forSource(92).concrete("Colorless").build();
+    seedManaSourceSelection([option], { objects: [source] });
+
+    render(<ManaSourceSelectionUI />);
+
+    expect(screen.getByAltText("C")).toBeInTheDocument();
+    expect(screen.queryByAltText("B")).not.toBeInTheDocument();
+  });
+
+  it("Black Lotus shows three nominal mana with no selected-color pip", () => {
+    const source = gameObjectFactory
+      .artifact()
+      .onBattlefield()
+      .named("Black Lotus")
+      .withId(93)
+      .build();
+    const option = manaSourceOptionFactory.forSource(93).deferred(3).build();
+    seedManaSourceSelection([option], { objects: [source] });
+
+    render(<ManaSourceSelectionUI />);
+
+    expect(screen.getByText("Black Lotus")).toBeInTheDocument();
+    expect(screen.getByText("Base output: 3 mana")).toBeInTheDocument();
+    expect(screen.getByText("Sacrifice")).toBeInTheDocument();
+    expect(screen.queryByAltText("C")).not.toBeInTheDocument();
+    expect(screen.queryByAltText("W")).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Any color$/i)).not.toBeInTheDocument();
+  });
+
+  it("a variable deferred source paints no WUBRG/C pips, even with leftover combination", () => {
+    const source = gameObjectFactory
+      .artifact()
+      .onBattlefield()
+      .named("Variable Mana Witness")
+      .withId(94)
+      .build();
+    const option = manaSourceOptionFactory.forSource(94).deferred("Variable").build();
+    seedManaSourceSelection([option], { objects: [source] });
+
+    render(<ManaSourceSelectionUI />);
+
+    expect(screen.getByText("Variable Mana Witness")).toBeInTheDocument();
+    expect(screen.getByText("Base amount determined on activation")).toBeInTheDocument();
+    expect(screen.getByText("Sacrifice")).toBeInTheDocument();
+    for (const pip of ["W", "U", "B", "R", "G", "C"]) {
+      expect(screen.queryByAltText(pip)).not.toBeInTheDocument();
+    }
+
+    cleanup();
+    useGameStore.getState().reset();
+
+    const leftover = manaSourceOptionFactory
+      .forSource(94)
+      .deferred("Variable")
+      .withCombination(["Red", "Green"])
+      .build();
+    seedManaSourceSelection([leftover], { objects: [source] });
+    render(<ManaSourceSelectionUI />);
+
+    expect(screen.getByText("Variable Mana Witness")).toBeInTheDocument();
+    expect(screen.getByText("Sacrifice")).toBeInTheDocument();
+    expect(screen.queryByAltText("R")).not.toBeInTheDocument();
+    expect(screen.queryByAltText("G")).not.toBeInTheDocument();
+  });
+
+  it("a synthetic fixed combination paints two Black pips; sibling Concrete Black paints one", () => {
+    const source = gameObjectFactory
+      .artifact()
+      .onBattlefield()
+      .named("Fixed Combination Witness")
+      .withId(95)
+      .build();
+    const combination = manaSourceOptionFactory
+      .forSource(95)
+      .concrete("Black")
+      .withCombination(["Black", "Black"])
+      .build();
+    seedManaSourceSelection([combination], { objects: [source] });
+
+    render(<ManaSourceSelectionUI />);
+
+    expect(screen.getAllByAltText("B")).toHaveLength(2);
+
+    cleanup();
+    useGameStore.getState().reset();
+
+    const single = manaSourceOptionFactory.forSource(95).concrete("Black").build();
+    seedManaSourceSelection([single], { objects: [source] });
+    render(<ManaSourceSelectionUI />);
+
+    expect(screen.getAllByAltText("B")).toHaveLength(1);
+  });
+
+  it("Lotus Petal shows one nominal mana and dispatches the exact option", () => {
+    const source = gameObjectFactory.artifact().onBattlefield().named("Lotus Petal").withId(96).build();
+    const option = manaSourceOptionFactory.forSource(96).deferred(1).build();
+    const { dispatch } = seedManaSourceSelection([option], { objects: [source] });
+
+    render(<ManaSourceSelectionUI />);
+
+    expect(screen.getByText("Base output: 1 mana")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /lotus petal/i }));
+    expect(lastActivateSelection(dispatch)).toBe(option);
+  });
+
+  it("two identically named Petals dispatch the selected incarnation", () => {
+    const firstSource = gameObjectFactory.artifact().onBattlefield().named("Lotus Petal").withId(101).build();
+    const secondSource = gameObjectFactory.artifact().onBattlefield().named("Lotus Petal").withId(102).build();
+    const first = manaSourceOptionFactory.forSource(101, 1).deferred(1).build();
+    const second = manaSourceOptionFactory.forSource(102, 2).deferred(1).build();
+    const { dispatch } = seedManaSourceSelection([first, second], {
+      objects: [firstSource, secondSource],
+    });
+
+    render(<ManaSourceSelectionUI />);
+
+    const buttons = screen.getAllByRole("button", { name: /lotus petal/i });
+    expect(buttons).toHaveLength(2);
+    expect(screen.getAllByText("Base output: 1 mana")).toHaveLength(2);
+    fireEvent.click(buttons[1]);
+    expect(lastActivateSelection(dispatch)).toBe(second);
+  });
+
+  it("two abilities on one source dispatch the matching engine-issued option", () => {
+    const source = gameObjectFactory
+      .artifact()
+      .onBattlefield()
+      .named("Fellwar Stone")
+      .withId(97)
+      .build();
+    const white = manaSourceOptionFactory
+      .forSource(97)
+      .abilityIndex(0)
+      .concrete("White")
+      .build();
+    const blue = manaSourceOptionFactory
+      .forSource(97)
+      .abilityIndex(1)
+      .concrete("Blue")
+      .build();
+    const { dispatch } = seedManaSourceSelection([white, blue], {
+      objects: [source],
+    });
+
+    render(<ManaSourceSelectionUI />);
+
+    const buttons = screen.getAllByRole("button", { name: /fellwar stone/i });
+    expect(buttons).toHaveLength(2);
+
+    fireEvent.click(buttons[0]);
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "ActivateManaSource",
+      data: { selection: white },
+    });
+    expect(lastActivateSelection(dispatch)).toBe(white);
+
+    fireEvent.click(buttons[1]);
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "ActivateManaSource",
+      data: { selection: blue },
+    });
+    expect(lastActivateSelection(dispatch)).toBe(blue);
+  });
+
+  it("T8/seat-gate: the prompt renders only for the seat the engine addressed", () => {
+    // Rendering the component directly bypasses GamePage's outer gate, so the component's
+    // own `waitingFor?.type !== "ManaSourceSelection" || !canAct` guard is genuinely the
+    // expression under test. Emptiness here must not be a vacuous `return null`.
+    const source = gameObjectFactory
+      .artifact()
+      .onBattlefield()
+      .named("Basal Sliver")
+      .withId(98)
+      .build();
+    const option = manaSourceOptionFactory.forSource(98).concrete("Black").build();
+    seedManaSourceSelection([option], { player: 1, objects: [source] });
+    const { container } = render(<ManaSourceSelectionUI />);
+    expect(container).toBeEmptyDOMElement();
+
+    // PINNED POSITIVE, same test: the emptiness above is satisfiable by a constant
+    // `return null`, so the identical prompt on the LOCAL seat must render the dialog.
+    cleanup();
+    useGameStore.getState().reset();
+    seedManaSourceSelection([option], { player: 0, objects: [source] });
+    render(<ManaSourceSelectionUI />);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 });

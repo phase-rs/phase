@@ -3,12 +3,13 @@
 //! exiled" must split into a player-scoped exile plus an owner-binding
 //! `PlayFromExile` grant, and the two rider sentences ("Each spell cast this way
 //! costs {1} more to cast." / "Each land played this way enters tapped.") must
-//! fold into that grant's `cast_cost_raise` / `land_enter_tapped` rather than
+//! fold into that grant's `cast_cost_modifier` / `land_enter_tapped` rather than
 //! emitting a board-wide cost static or ETB-tapped replacement.
 
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, CastingPermission, Duration, Effect, PermissionGrantee,
+    AbilityDefinition, CastCostModifier, CastingPermission, Duration, Effect, PermissionGrantee,
+    TargetFilter, TypeFilter,
 };
 use engine::types::mana::ManaCost;
 use engine::types::zones::EtbTapState;
@@ -16,6 +17,10 @@ use engine::types::zones::EtbTapState;
 const LIGHTSTALL_ORACLE: &str = "Vigilance\nWhen this creature enters, each opponent exiles a \
 card from their hand and may play that card for as long as it remains exiled. Each spell cast \
 this way costs {1} more to cast. Each land played this way enters tapped.";
+
+const GOBAKHAN_ORACLE: &str = "When this Siege enters, look at target opponent's hand. You may \
+exile a nonland card from it. For as long as that card remains exiled, its owner may play it. A \
+spell cast this way costs {2} more to cast.";
 
 /// Walk an ability definition and its `sub_ability` / `else_ability` chain,
 /// returning the first `PlayFromExile` grant together with its grantee.
@@ -77,7 +82,7 @@ fn lightstall_etb_grants_owner_play_with_cost_raise_and_land_tapped() {
 
     let CastingPermission::PlayFromExile {
         duration,
-        cast_cost_raise,
+        cast_cost_modifier,
         land_enter_tapped,
         ..
     } = permission
@@ -95,12 +100,12 @@ fn lightstall_etb_grants_owner_play_with_cost_raise_and_land_tapped() {
 
     // CR 601.2f: "Each spell cast this way costs {1} more to cast." folds into the grant.
     assert_eq!(
-        *cast_cost_raise,
-        Some(ManaCost::Cost {
+        *cast_cost_modifier,
+        Some(CastCostModifier::raise(ManaCost::Cost {
             shards: vec![],
             generic: 1,
-        }),
-        "the cost-raise rider must fold into the grant's cast_cost_raise as {{1}}"
+        })),
+        "the cost-raise rider must fold into the grant's cast_cost_modifier as a Raise of {{1}}"
     );
 
     // CR 614.1c: "Each land played this way enters tapped." folds into the grant.
@@ -108,5 +113,63 @@ fn lightstall_etb_grants_owner_play_with_cost_raise_and_land_tapped() {
         *land_enter_tapped,
         EtbTapState::Tapped,
         "the land-tapped rider must fold into the grant's land_enter_tapped"
+    );
+}
+
+#[test]
+fn gobakhan_exiles_only_nonlands_and_raises_the_exiled_spell_cost() {
+    let parsed = parse_oracle_text(
+        GOBAKHAN_ORACLE,
+        "Invasion of Gobakhan",
+        &[],
+        &["Battle".to_string()],
+        &["Siege".to_string()],
+    );
+    let execute = parsed
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .find(|execute| matches!(execute.effect.as_ref(), Effect::RevealHand { .. }))
+        .expect("Gobakhan must have an ETB hand-reveal trigger");
+
+    let Effect::RevealHand {
+        card_filter,
+        choice_optional,
+        ..
+    } = execute.effect.as_ref()
+    else {
+        unreachable!("matched RevealHand above")
+    };
+    assert!(*choice_optional);
+    assert!(
+        matches!(
+            card_filter,
+            TargetFilter::Typed(filter)
+                if filter.type_filters.iter().any(|kind| matches!(
+                    kind,
+                    TypeFilter::Non(inner) if **inner == TypeFilter::Land
+                ))
+        ),
+        "Gobakhan's exile choice must exclude lands, got {card_filter:?}"
+    );
+
+    let (permission, grantee) = find_play_from_exile_grant(execute)
+        .expect("Gobakhan must grant the exiled card's owner permission to play it");
+    assert_eq!(*grantee, PermissionGrantee::ObjectOwner);
+    let CastingPermission::PlayFromExile {
+        duration,
+        cast_cost_modifier,
+        ..
+    } = permission
+    else {
+        unreachable!("matched PlayFromExile above")
+    };
+    assert_eq!(*duration, Duration::Permanent);
+    assert_eq!(
+        *cast_cost_modifier,
+        Some(CastCostModifier::raise(ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        }))
     );
 }

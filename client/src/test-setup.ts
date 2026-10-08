@@ -10,6 +10,7 @@ import deckBuilder from "./i18n/locales/en/deck-builder.json";
 import draft from "./i18n/locales/en/draft.json";
 import settings from "./i18n/locales/en/settings.json";
 import multiplayer from "./i18n/locales/en/multiplayer.json";
+import tournament from "./i18n/locales/en/tournament.json";
 
 // Tests only ever assert against English copy, so we register a lean,
 // English-only i18next instance here instead of importing the app's `./i18n`
@@ -25,7 +26,7 @@ import multiplayer from "./i18n/locales/en/multiplayer.json";
 void i18n.use(initReactI18next).init({
   lng: "en",
   fallbackLng: "en",
-  ns: ["common", "menu", "game", "deck-builder", "draft", "settings", "multiplayer"],
+  ns: ["common", "menu", "game", "deck-builder", "draft", "settings", "multiplayer", "tournament"],
   defaultNS: "common",
   resources: {
     en: {
@@ -36,9 +37,43 @@ void i18n.use(initReactI18next).init({
       draft,
       settings,
       multiplayer,
+      tournament,
     },
   },
   interpolation: { escapeValue: false }, // React already escapes
   returnNull: false,
   react: { useSuspense: false },
 });
+
+if (typeof globalThis.localStorage?.setItem !== "function") {
+  const store = new Map<string, string>();
+  const mockStorage: Storage = {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      store.set(key, String(value));
+    },
+    removeItem: (key: string) => {
+      store.delete(key);
+    },
+    clear: () => {
+      store.clear();
+    },
+    key: (index: number) => Array.from(store.keys())[index] ?? null,
+    get length() {
+      return store.size;
+    },
+  };
+  Object.defineProperty(globalThis, "localStorage", {
+    value: mockStorage,
+    configurable: true,
+    writable: true,
+  });
+  if (typeof window !== "undefined") {
+    Object.defineProperty(window, "localStorage", {
+      value: mockStorage,
+      configurable: true,
+      writable: true,
+    });
+  }
+}
+

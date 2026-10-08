@@ -179,14 +179,41 @@ export function extractSummary(content: string): string {
   return content.slice(0, 150).trim();
 }
 
-function splitIntoItems(content: string): string[] {
-  const numberedLines = content.split("\n").filter((l) => /^\d+[.)]\s/.test(l));
-  if (numberedLines.length >= 2) return numberedLines;
+/**
+ * Section headings of the bug-report template. A message whose markers are these
+ * is ONE report split into sections, not several reports — splitting on them
+ * would file an issue per heading and strip each heading's body.
+ */
+const REPORT_SECTION_HEADING =
+  /^(steps?\s+to\s+reproduce|repro(duction)?(\s+steps?)?|expected(\s+(result|behaviou?r))?|actual(\s+(result|behaviou?r))?|current(\s+behaviou?r)?|observed(\s+(result|behaviou?r))?|result|summary|description|notes?|context|screenshots?|attachments?|version|platform|game\s+state)\b\s*:?\s*$/i;
 
-  const bulletLines = content.split("\n").filter((l) => /^[-*•]\s/.test(l));
-  if (bulletLines.length >= 2) return bulletLines;
+const ITEM_MARKER = /^(?:\d+[.)]|[-*•])\s/;
 
-  return [content];
+const stripMarker = (line: string): string => line.replace(ITEM_MARKER, "").trim();
+
+/**
+ * Split a message into distinct report items.
+ *
+ * Each item keeps the lines beneath its marker: the marker line alone is a
+ * heading, and the substance of a report lives under it. Text before the first
+ * marker (typically the `[[card]]` reference) is kept with the first item.
+ */
+export function splitIntoItems(content: string): string[] {
+  const lines = content.split("\n");
+  const markerIdx = lines.flatMap((l, i) => (ITEM_MARKER.test(l) ? [i] : []));
+  if (markerIdx.length < 2) return [content];
+
+  // Template section headings mean one sectioned report, so keep it whole.
+  if (markerIdx.some((i) => REPORT_SECTION_HEADING.test(stripMarker(lines[i])))) {
+    return [content];
+  }
+
+  return markerIdx.map((start, n) =>
+    lines
+      .slice(n === 0 ? 0 : start, markerIdx[n + 1] ?? lines.length)
+      .join("\n")
+      .trim()
+  );
 }
 
 function contentHash(content: string): string {
@@ -244,7 +271,12 @@ export async function extractReports(
       const text = item.replace(/^\d+[.)]\s/, "").replace(/^[-*•]\s/, "").trim();
       if (text === "") return;
 
-      const { cards, explicitCards } = detectCards(text, cardIndex);
+      // Fall back to the whole message when an item names no card: `[[Card]]`
+      // references are usually stated once, above the items they apply to.
+      const detected = detectCards(text, cardIndex);
+      const { cards, explicitCards } = detected.cards.length > 0
+        ? detected
+        : detectCards(content, cardIndex);
       const mechanics = detectMechanics(text);
       const hasBugDescription = text.length > 30;
       const confidence = scoreConfidence(text, cards, hasBugDescription, false);

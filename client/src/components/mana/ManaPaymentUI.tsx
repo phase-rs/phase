@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type {
+  ManaSourceSelection,
   ManaType,
   PhyrexianShard,
   ShardChoice,
@@ -630,6 +631,105 @@ const COLOR_SHARD: Record<ManaType, string> = {
   Green: "G",
   Colorless: "C",
 };
+
+function manaSourceOutputDisplay(selection: ManaSourceSelection): string[] {
+  // CR 605.3b: this overlay only echoes engine-enumerated options.
+  // CR 106.1a/b: pips only when the engine serialized Concrete types or atomic_combination.
+  // DeferredColorChoice carries neither a color nor a type set (restricted AnyOneColor is still Deferred).
+  if (selection.output.type === "DeferredColorChoice") return [];
+  if (selection.atomic_combination && selection.atomic_combination.length > 0) {
+    return selection.atomic_combination.map((manaType) => COLOR_SHARD[manaType]);
+  }
+  if (selection.output.type === "Concrete") {
+    return [COLOR_SHARD[selection.output.data]];
+  }
+  return [];
+}
+
+/** CR 605.3b: The engine has reached a mana ability that sacrifices a
+ * permanent. It supplies every legal capability; this display layer only
+ * renders those rows and returns the selected opaque action. */
+export function ManaSourceSelectionUI() {
+  const { t } = useTranslation("game");
+  const waitingFor = useGameStore((s) => s.waitingFor);
+  const gameState = useGameStore((s) => s.gameState);
+  const dispatch = useGameStore((s) => s.dispatch);
+  const canAct = useCanActForWaitingState();
+
+  if (waitingFor?.type !== "ManaSourceSelection" || !canAct) return null;
+
+  return (
+    <AnimatePresence>
+      <motion.div
+        className="fixed inset-0 z-50 flex items-end justify-center bg-black/55 p-4 sm:items-center"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+      >
+        <motion.section
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("manaSourceSelection.title")}
+          className="w-full max-w-md rounded-xl bg-slate-900 p-5 shadow-2xl ring-1 ring-amber-400/40"
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: 16 }}
+        >
+          <h2 className="text-lg font-semibold text-amber-200">{t("manaSourceSelection.title")}</h2>
+          <p className="mt-1 text-sm text-slate-300">{t("manaSourceSelection.description")}</p>
+          <div className="mt-4 space-y-2">
+            {waitingFor.data.options.map((selection, index) => {
+              const source = gameState?.objects[selection.source.object_id];
+              const shards = manaSourceOutputDisplay(selection);
+              return (
+                <button
+                  key={`${selection.source.object_id}-${selection.ability_index ?? "basic"}-${index}`}
+                  type="button"
+                  className="flex min-h-11 w-full items-center justify-between rounded-lg bg-amber-500/10 px-3 text-left text-sm text-white ring-1 ring-amber-300/30 transition hover:bg-amber-500/20"
+                  onClick={() => dispatch({ type: "ActivateManaSource", data: { selection } })}
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span>{source?.name ?? t("manaSourceSelection.unknownSource")}</span>
+                    {selection.output.type === "DeferredColorChoice" ? (
+                      <span className="text-xs text-slate-300">
+                        {selection.output.data.quantity.type === "Fixed"
+                          ? t("manaSourceSelection.baseOutput", {
+                              count: selection.output.data.quantity.data,
+                            })
+                          : t("manaSourceSelection.baseOutputVariable")}
+                      </span>
+                    ) : null}
+                    {shards.length > 0
+                      ? shards.map((shard, shardIndex) => (
+                          <ManaSymbol key={shardIndex} shard={shard} size="sm" />
+                        ))
+                      : null}
+                  </span>
+                  {selection.penalty === "Sacrifices" ? (
+                    <span className="text-xs text-amber-200">
+                      {t("manaSourceSelection.sacrifice")}
+                    </span>
+                  ) : null}
+                </button>
+              );
+            })}
+          </div>
+          <button
+            type="button"
+            className={gameButtonClass({
+              tone: "slate",
+              size: "md",
+              className: "mt-4 w-full",
+            })}
+            onClick={() => dispatch({ type: "BackToManaPayment" })}
+          >
+            {t("manaSourceSelection.back")}
+          </button>
+        </motion.section>
+      </motion.div>
+    </AnimatePresence>
+  );
+}
 
 /**
  * A run of fungible pool units the payment panel renders as one chip — same

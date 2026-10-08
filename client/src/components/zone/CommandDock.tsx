@@ -4,14 +4,18 @@ import { useTranslation } from "react-i18next";
 
 import type { GameObject, PlayerId } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useLocalizedCardName } from "../../hooks/useEngineCardData.ts";
 import { useResolvedCommandZoneDisplay } from "../../hooks/useResolvedCommandZoneDisplay.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { objectImageProps } from "../../services/cardImageLookup.ts";
 import {
   type CommanderDamageEntry,
+  commandZoneLeaders,
   commanderDamageEntriesFor,
-  commandersInZone,
 } from "../../viewmodel/commanderColumn.ts";
 import { CommanderDamage } from "../board/CommanderDamage.tsx";
+import { CardArtFallback } from "../card/CardArtFallback.tsx";
+import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { CommanderCardZone } from "./CommanderCardZone.tsx";
 import { CommandZone } from "./CommandZone.tsx";
 
@@ -52,8 +56,8 @@ export function CommandDock({ playerId, isMirrored, splitOverview = false }: Com
   const mode = useResolvedCommandZoneDisplay();
   const gameState = useGameStore((s) => s.gameState);
 
-  const commanders = useMemo(
-    () => (gameState ? commandersInZone(gameState, playerId) : []),
+  const commandZoneLeadersForPlayer = useMemo(
+    () => (gameState ? commandZoneLeaders(gameState, playerId) : []),
     [gameState, playerId],
   );
   const damageEntries = useMemo(
@@ -73,7 +77,7 @@ export function CommandDock({ playerId, isMirrored, splitOverview = false }: Com
 
   // Same content gate PlayerArea used for `hasSupportExtras` — render nothing
   // when the command zone is empty so it reserves no corner space.
-  const hasContent = commanders.length > 0 || emblemCount > 0 || damageEntries.length > 0;
+  const hasContent = commandZoneLeadersForPlayer.length > 0 || emblemCount > 0 || damageEntries.length > 0;
   if (!hasContent) return null;
 
   // The full cluster — rendered in exactly one place (inline body OR popover),
@@ -104,7 +108,7 @@ export function CommandDock({ playerId, isMirrored, splitOverview = false }: Com
   return (
     <CompactCommandDock
       isMirrored={isMirrored}
-      commanders={commanders}
+      commanders={commandZoneLeadersForPlayer}
       emblemCount={emblemCount}
       damageEntries={damageEntries}
       label={t("zone.commandZone")}
@@ -140,7 +144,20 @@ function CompactCommandDock({
   const closeTimerRef = useRef<number | null>(null);
   const [popoverPos, setPopoverPos] = useState<{ left: number; top: number } | null>(null);
   const firstCommander = commanders[0];
-  const { src } = useCardImage(firstCommander?.name ?? "", { size: "normal" });
+  const displayName = useLocalizedCardName(firstCommander?.name ?? null) ?? firstCommander?.name ?? "";
+  const imageProps = firstCommander ? objectImageProps(firstCommander) : null;
+  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(
+    imageProps?.cardName ?? "",
+    {
+      size: "normal",
+      faceIndex: imageProps?.faceIndex,
+      isToken: imageProps?.isToken,
+      tokenFilters: imageProps?.tokenFilters,
+      tokenImageRef: imageProps?.tokenImageRef,
+      oracleId: imageProps?.oracleId,
+      faceName: imageProps?.faceName,
+    },
+  );
   const totalDamage = damageEntries.reduce(
     (sum, entry) => sum + entry.views.reduce((s, v) => s + v.damage, 0),
     0,
@@ -227,10 +244,25 @@ function CompactCommandDock({
         title={label}
         aria-expanded={open}
       >
-        {firstCommander && src ? (
+        {firstCommander && isLoading ? (
+          <span className="h-full w-full animate-pulse rounded-lg bg-gray-700" />
+        ) : firstCommander && src ? (
           <span className="flex h-full w-full items-center justify-center overflow-hidden rounded-lg bg-black/70">
-            <img src={src} alt={firstCommander.name} className="h-full w-full object-contain" draggable={false} />
+            <img
+              src={src}
+              {...getCardImageSrcSetProps(src, rungs)}
+              alt={displayName}
+              className="h-full w-full object-contain"
+              draggable={false}
+              onError={() => advanceFailedSource?.(src)}
+            />
           </span>
+        ) : firstCommander ? (
+          <CardArtFallback
+            name={displayName}
+            variant="artCrop"
+            className="h-full w-full rounded-lg"
+          />
         ) : (
           <span aria-hidden className="text-2xl leading-none text-amber-500/80">✦</span>
         )}

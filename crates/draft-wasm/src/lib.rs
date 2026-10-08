@@ -12,17 +12,17 @@ use draft_core::pack_generator::PackGenerator;
 use draft_core::session;
 use draft_core::set_pool::LimitedSetPool;
 use draft_core::types::*;
-use draft_core::view::filter_for_player;
+use draft_core::view::{filter_for_player, DraftPlayerView};
 use engine::database::CardDatabase;
 use phase_ai::config::AiDifficulty;
 
 mod bot_ai;
+mod session_cell;
 mod suggest;
 
+use crate::session_cell::{with_draft, with_draft_inner, with_draft_mut, with_draft_mut_inner};
+
 thread_local! {
-    /// Draft session state uses Cell<Option<T>> with take/set to avoid RefCell
-    /// borrow poisoning — same panic-resilient pattern as engine-wasm.
-    static DRAFT_SESSION: Cell<Option<DraftSession>> = const { Cell::new(None) };
     static PACK_GEN: Cell<Option<PackGenerator>> = const { Cell::new(None) };
     static DIFFICULTY: Cell<AiDifficulty> = const { Cell::new(AiDifficulty::Medium) };
     static RNG: Cell<Option<ChaCha20Rng>> = const { Cell::new(None) };
@@ -40,30 +40,17 @@ fn to_js<T: Serialize + ?Sized>(value: &T) -> JsValue {
     js_sys::JSON::parse(&json).unwrap_or_else(|e| panic!("JSON.parse failed: {e:?}"))
 }
 
-/// Take the draft session out of the Cell, pass it to a closure, then put it back.
-fn with_draft<R>(f: impl FnOnce(&DraftSession) -> R) -> Result<R, JsValue> {
-    DRAFT_SESSION.with(|cell| {
-        let session = cell
-            .take()
-            .ok_or_else(|| JsValue::from_str("Draft not initialized"))?;
-        let result = f(&session);
-        cell.set(Some(session));
-        Ok(result)
-    })
-}
-
-/// Take the draft session out of the Cell, pass it mutably, then put it back.
-fn with_draft_mut<R>(
-    f: impl FnOnce(&mut DraftSession) -> Result<R, JsValue>,
-) -> Result<R, JsValue> {
-    DRAFT_SESSION.with(|cell| {
-        let mut session = cell
-            .take()
-            .ok_or_else(|| JsValue::from_str("Draft not initialized"))?;
-        let result = f(&mut session);
-        cell.set(Some(session));
-        result
-    })
+/// Preserve Limited-deck validation details across the WASM boundary so the
+/// deck builder can tell the player what needs correction.
+fn deck_submission_message(error: DraftError) -> String {
+    match error {
+        DraftError::ValidationFailed { errors } => errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; "),
+        error => error.to_string(),
+    }
 }
 
 /// Map a u8 difficulty value to AiDifficulty.
@@ -109,6 +96,237 @@ fn default_cube_min_deck_size() -> usize {
     40
 }
 
+fn enforce_procedure_minimum_deck_size(mut config: DraftConfig) -> DraftConfig {
+    config.min_deck_size = config
+        .kind
+        .procedure()
+        .effective_cube_min_deck_size(config.min_deck_size);
+    config
+}
+
+fn build_quick_cube_config(
+    cube_name: &str,
+    settings: &CubeDraftSettings,
+    addable_cards: DeckAddableCards,
+    seed: u64,
+) -> DraftConfig {
+    enforce_procedure_minimum_deck_size(DraftConfig {
+        source: DraftSource::Cube {
+            id: "custom-cube".to_string(),
+            name: cube_name.to_string(),
+        },
+        set_code: "custom-cube".to_string(),
+        kind: DraftKind::Quick,
+        pod_size: settings.pod_size,
+        cards_per_pack: settings.cards_per_pack,
+        pack_count: settings.pack_count,
+        min_deck_size: settings.min_deck_size,
+        addable_cards,
+        rng_seed: seed,
+        tournament_format: TournamentFormat::Swiss,
+        pod_policy: PodPolicy::Competitive,
+        spectator_visibility: SpectatorVisibility::default(),
+    })
+}
+
+/// Derive the session pack size from the selected MTGJSON booster product.
+/// Every supported set currently has uniformly sized variants; rejecting mixed
+/// data keeps UI progress and sealed-pool validation aligned with actual pulls.
+fn set_cards_per_pack(set_pool: &LimitedSetPool) -> Result<u8, String> {
+    set_pool.cards_per_pack().ok_or_else(|| {
+        format!(
+            "Set {} has no single MTGJSON pack size across its booster variants",
+            set_pool.code
+        )
+    })
+}
+
+/// The sets backing a draft and the order their boosters are opened in.
+///
+/// `pools` carries each distinct set once; `sequence` names which of them fills
+/// each booster, in pack order, so a set may be drafted more than once without
+/// its pool data crossing the WASM boundary more than once. A one-element
+/// sequence is a single-set draft.
+///
+/// JSON shape:
+///   `{ "pools": [<LimitedSetPool>, ...], "sequence": ["isd", "dka", "avr"] }`
+#[derive(Deserialize)]
+struct SetPackSequence {
+    pools: Vec<LimitedSetPool>,
+    sequence: Vec<String>,
+}
+
+/// A set-backed draft's source, pack shape, and generator, resolved from the
+/// selection the client sent. Single authority for turning a `SetPackSequence`
+/// into the three things every set-backed entry point needs.
+struct ResolvedSetSelection {
+    source: DraftSource,
+    /// Nominal booster size (the first pack's). Per-pack sizes are recorded on
+    /// the session at `StartDraft` from the packs this generator produces.
+    cards_per_pack: u8,
+    pack_count: u8,
+    generator: PackGenerator,
+}
+
+impl ResolvedSetSelection {
+    /// Parse and validate a client selection. `expected_packs` constrains the
+    /// sequence length for event kinds the engine fixes (Sealed opens exactly
+    /// six boosters); `None` lets the selection decide how many packs to open.
+    fn parse(selection_json: &str, expected_packs: Option<u8>) -> Result<Self, String> {
+        let selection: SetPackSequence = serde_json::from_str(selection_json)
+            .map_err(|e| format!("Failed to parse set selection: {e}"))?;
+        Self::resolve(selection, expected_packs)
+    }
+
+    /// Validate an already-deserialized selection. The pod boundary reaches
+    /// this directly, since its sequence arrives inside a `PoolInput` frame
+    /// rather than as a JSON string of its own.
+    fn resolve(selection: SetPackSequence, expected_packs: Option<u8>) -> Result<Self, String> {
+        let named = u8::try_from(selection.sequence.len())
+            .ok()
+            .filter(|count| (1..=MAX_PACK_COUNT).contains(count))
+            .ok_or_else(|| format!("A draft must name between 1 and {MAX_PACK_COUNT} sets"))?;
+
+        // A sequence SHORTER than the event's pack count repeats its last entry
+        // (`entry_for_pack`) — that is the rule `DraftSource::Set` is defined
+        // by, and it is how a single-set draft stays a one-element sequence
+        // instead of the same code copied once per booster. A LONGER sequence
+        // names boosters the event never opens, so it is the caller's error
+        // rather than a silent truncation.
+        let pack_count = expected_packs.unwrap_or(named);
+        if named > pack_count {
+            return Err(format!(
+                "This event opens {pack_count} packs, but {named} sets were named"
+            ));
+        }
+
+        // Resolve every named set against the supplied pools up front, so a set
+        // with no pool data names itself here instead of surfacing as a short
+        // pack mid-draft.
+        let indices = selection
+            .sequence
+            .iter()
+            .map(|code| {
+                selection
+                    .pools
+                    .iter()
+                    .position(|pool| pool.code.eq_ignore_ascii_case(code))
+                    .ok_or_else(|| format!("No pool data was supplied for set '{code}'"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Every booster must have a size MTGJSON agrees on; pack 1's is the
+        // session's nominal one.
+        for &index in &indices {
+            set_cards_per_pack(&selection.pools[index])?;
+        }
+        let cards_per_pack = set_cards_per_pack(&selection.pools[indices[0]])?;
+
+        // Carry the pools' own casing into the source, so the per-pack set
+        // codes the view publishes match the codes on the cards it deals.
+        let codes: Vec<String> = indices
+            .iter()
+            .map(|&index| selection.pools[index].code.clone())
+            .collect();
+        let generator =
+            PackGenerator::for_sequence(selection.pools, &codes).map_err(|e| e.to_string())?;
+
+        Ok(Self {
+            source: DraftSource::Set {
+                layout: SetLayout::UniformByRound { codes },
+            },
+            cards_per_pack,
+            pack_count,
+            generator,
+        })
+    }
+}
+
+/// Preflight every set a Chaos draft can select. Pack passing requires every
+/// seat's booster in a round to exhaust on the same pick count, so a variable
+/// MTGJSON variant or a different declared total is rejected before assignment.
+fn preflight_chaos_pools(
+    pools: &[LimitedSetPool],
+    candidate_codes: &[String],
+) -> Result<(Vec<String>, u8), String> {
+    let mut canonical_codes = Vec::with_capacity(candidate_codes.len());
+    let mut cards_per_pack = None;
+    for candidate in candidate_codes {
+        let pool = pools
+            .iter()
+            .find(|pool| pool.code.eq_ignore_ascii_case(candidate))
+            .ok_or_else(|| format!("No pool data was supplied for set '{candidate}'"))?;
+        let size = set_cards_per_pack(pool)?;
+        if let Some(expected) = cards_per_pack {
+            if expected != size {
+                return Err(format!(
+                    "Chaos candidate sets must share one MTGJSON pack size; {} has {size}, expected {expected}",
+                    pool.code
+                ));
+            }
+        } else {
+            cards_per_pack = Some(size);
+        }
+        canonical_codes.push(pool.code.clone());
+    }
+    let cards_per_pack = cards_per_pack
+        .ok_or_else(|| "A Chaos draft must name at least one candidate set".to_string())?;
+    Ok((canonical_codes, cards_per_pack))
+}
+
+/// Host-local Chaos input. The host names only the candidate pools; the WASM
+/// boundary derives the exact seat-by-round assignment from its private seed
+/// and persists it in the session. Guests never receive this input.
+#[derive(Deserialize)]
+struct ChaosPackSelection {
+    pools: Vec<LimitedSetPool>,
+    candidate_codes: Vec<String>,
+}
+
+/// A resolved Chaos source and generator. Unlike `ResolvedSetSelection`, this
+/// records one set assignment for each seat and round.
+struct ResolvedChaosSelection {
+    source: DraftSource,
+    cards_per_pack: u8,
+    pack_count: u8,
+    generator: PackGenerator,
+}
+
+impl ResolvedChaosSelection {
+    fn resolve(
+        selection: ChaosPackSelection,
+        seat_count: u8,
+        pack_count: u8,
+        seed: u64,
+    ) -> Result<Self, String> {
+        let (candidate_codes, cards_per_pack) =
+            preflight_chaos_pools(&selection.pools, &selection.candidate_codes)?;
+        let assignments =
+            PackGenerator::chaos_assignments(&candidate_codes, seat_count, pack_count, seed)
+                .map_err(|error| error.to_string())?;
+        let generator = PackGenerator::for_chaos(
+            selection.pools,
+            &candidate_codes,
+            &assignments,
+            seat_count,
+            pack_count,
+        )
+        .map_err(|error| error.to_string())?;
+
+        Ok(Self {
+            source: DraftSource::Set {
+                layout: SetLayout::Chaos {
+                    candidate_codes,
+                    assignments,
+                },
+            },
+            cards_per_pack,
+            pack_count,
+            generator,
+        })
+    }
+}
+
 /// Initialize panic hook for better error messages in WASM.
 #[wasm_bindgen(start)]
 pub fn init_panic_hook() {
@@ -131,39 +349,42 @@ pub fn load_card_database(json_str: &str) -> Result<u32, JsValue> {
 
 /// Start a Quick Draft session: 1 human + 7 bots.
 ///
-/// - `set_pool_json`: serialized LimitedSetPool from draft-pools.json
+/// - `selection_json`: serialized [`SetPackSequence`] — the distinct set pools
+///   from draft-pools.json plus the set filling each booster, in pack order.
+///   The sequence length is the draft's pack count, and a set may repeat.
 /// - `difficulty`: 0=VeryEasy, 1=Easy, 2=Medium, 3=Hard, 4=VeryHard
 /// - `seed`: RNG seed for deterministic pack generation
 ///
 /// Returns the initial DraftPlayerView as a JS object.
 #[wasm_bindgen]
 pub fn start_quick_draft(
-    set_pool_json: &str,
+    selection_json: &str,
     difficulty: u8,
     seed: u32,
 ) -> Result<JsValue, JsValue> {
-    let set_pool: LimitedSetPool = serde_json::from_str(set_pool_json)
-        .map_err(|e| JsValue::from_str(&format!("Failed to parse set pool: {}", e)))?;
+    // The procedure table is the single authority for how many boosters this
+    // kind opens; the selection only decides which set fills each of them.
+    let quick_procedure = DraftKind::Quick.procedure();
+    let selection =
+        ResolvedSetSelection::parse(selection_json, Some(quick_procedure.packs_per_player))
+            .map_err(|e| JsValue::from_str(&e))?;
 
     let ai_difficulty = map_difficulty(difficulty);
-    let set_code = set_pool.code.clone();
 
-    let config = DraftConfig {
-        source: DraftSource::Set {
-            code: set_code.clone(),
-        },
-        set_code,
+    let config = enforce_procedure_minimum_deck_size(DraftConfig {
+        set_code: selection.source.set_code(),
+        source: selection.source,
         kind: DraftKind::Quick,
-        pod_size: 8,
-        cards_per_pack: 14,
-        pack_count: 3,
-        min_deck_size: 40,
+        pod_size: quick_procedure.pod_size,
+        cards_per_pack: selection.cards_per_pack,
+        pack_count: selection.pack_count,
+        min_deck_size: quick_procedure.min_deck_size,
         addable_cards: DeckAddableCards::standard_basics(),
         rng_seed: seed as u64,
         tournament_format: TournamentFormat::Swiss,
         pod_policy: PodPolicy::Competitive,
         spectator_visibility: SpectatorVisibility::default(),
-    };
+    });
 
     let mut seats = vec![DraftSeat::Human {
         player_id: engine::types::player::PlayerId(0),
@@ -176,7 +397,7 @@ pub fn start_quick_draft(
     }
 
     let mut draft_session = DraftSession::new(config, seats, "quick-draft".to_string());
-    let pack_gen = PackGenerator::new(set_pool);
+    let pack_gen = selection.generator;
 
     // Apply StartDraft to generate packs and transition to Drafting
     session::apply(&mut draft_session, DraftAction::StartDraft, Some(&pack_gen))
@@ -185,9 +406,63 @@ pub fn start_quick_draft(
     let view = filter_for_player(&draft_session, 0);
 
     // Store state in thread-locals
-    DRAFT_SESSION.with(|cell| cell.set(Some(draft_session)));
+    session_cell::install(draft_session);
     PACK_GEN.with(|cell| cell.set(Some(pack_gen)));
     DIFFICULTY.with(|cell| cell.set(ai_difficulty));
+    RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(seed as u64))));
+
+    Ok(to_js(&view))
+}
+
+/// Start a local Sealed event: one human and seven bots each open six packs,
+/// then the human proceeds directly to deckbuilding.
+#[wasm_bindgen]
+pub fn start_sealed_draft(
+    selection_json: &str,
+    difficulty: u8,
+    seed: u32,
+) -> Result<JsValue, JsValue> {
+    // CR-independent event rule: the engine fixes sealed at the procedure's
+    // booster count (`apply_start_draft` rejects any other), so the selection
+    // must name exactly that many — mixed sets are fine, a different pack count
+    // is not.
+    let sealed_procedure = DraftKind::Sealed.procedure();
+    let selection =
+        ResolvedSetSelection::parse(selection_json, Some(sealed_procedure.packs_per_player))
+            .map_err(|e| JsValue::from_str(&e))?;
+    let config = DraftConfig {
+        set_code: selection.source.set_code(),
+        source: selection.source,
+        kind: DraftKind::Sealed,
+        pod_size: sealed_procedure.pod_size,
+        cards_per_pack: selection.cards_per_pack,
+        pack_count: selection.pack_count,
+        min_deck_size: sealed_procedure.min_deck_size,
+        addable_cards: DeckAddableCards::standard_basics(),
+        rng_seed: seed as u64,
+        tournament_format: TournamentFormat::Swiss,
+        pod_policy: PodPolicy::Competitive,
+        spectator_visibility: SpectatorVisibility::default(),
+    };
+    let mut seats = vec![DraftSeat::Human {
+        player_id: engine::types::player::PlayerId(0),
+        display_name: "Player".to_string(),
+    }];
+    for i in 1..8u8 {
+        seats.push(DraftSeat::Bot {
+            name: format!("Bot {i}"),
+        });
+    }
+
+    let mut draft_session = DraftSession::new(config, seats, "sealed-draft".to_string());
+    let pack_gen = selection.generator;
+    session::apply(&mut draft_session, DraftAction::StartDraft, Some(&pack_gen))
+        .map_err(|e| JsValue::from_str(&format!("Failed to start sealed event: {e}")))?;
+    let view = filter_for_player(&draft_session, 0);
+
+    session_cell::install(draft_session);
+    PACK_GEN.with(|cell| cell.set(Some(pack_gen)));
+    DIFFICULTY.with(|cell| cell.set(map_difficulty(difficulty)));
     RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(seed as u64))));
 
     Ok(to_js(&view))
@@ -247,23 +522,7 @@ pub fn start_quick_cube_draft(
 
     let ai_difficulty = map_difficulty(difficulty);
     let pod_size = settings.pod_size;
-    let config = DraftConfig {
-        source: DraftSource::Cube {
-            id: "custom-cube".to_string(),
-            name: cube_name.to_string(),
-        },
-        set_code: "custom-cube".to_string(),
-        kind: DraftKind::Quick,
-        pod_size,
-        cards_per_pack: settings.cards_per_pack,
-        pack_count: settings.pack_count,
-        min_deck_size: settings.min_deck_size,
-        addable_cards,
-        rng_seed: seed as u64,
-        tournament_format: TournamentFormat::Swiss,
-        pod_policy: PodPolicy::Competitive,
-        spectator_visibility: SpectatorVisibility::default(),
-    };
+    let config = build_quick_cube_config(cube_name, &settings, addable_cards, seed as u64);
 
     let mut seats = vec![DraftSeat::Human {
         player_id: engine::types::player::PlayerId(0),
@@ -286,7 +545,7 @@ pub fn start_quick_cube_draft(
 
     let view = filter_for_player(&draft_session, 0);
 
-    DRAFT_SESSION.with(|cell| cell.set(Some(draft_session)));
+    session_cell::install(draft_session);
     PACK_GEN.with(|cell| cell.set(None));
     DIFFICULTY.with(|cell| cell.set(ai_difficulty));
     RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(seed as u64))));
@@ -304,27 +563,51 @@ pub fn start_quick_cube_draft(
 fn apply_human_pick_and_resolve_bots(
     draft_session: &mut DraftSession,
     human_card_id: String,
-) -> Result<(), JsValue> {
-    if !matches!(draft_session.config.kind, DraftKind::Quick) {
-        return Err(JsValue::from_str(
-            "apply_human_pick_and_resolve_bots is only valid for Quick Draft",
-        ));
-    }
-
-    session::apply(
+) -> Result<(), String> {
+    apply_human_pick_and_resolve_bots_with_action(
         draft_session,
         DraftAction::Pick {
             seat: 0,
-            card_instance_id: human_card_id,
+            card_instance_ids: vec![human_card_id],
         },
-        None,
     )
-    .map_err(|e| JsValue::from_str(&format!("Human pick failed: {}", e)))?;
+}
+
+fn apply_human_pick_and_resolve_bots_with_action(
+    draft_session: &mut DraftSession,
+    human_action: DraftAction,
+) -> Result<(), String> {
+    apply_human_pick_and_resolve_bots_with_overrides(
+        draft_session,
+        human_action,
+        &std::collections::BTreeMap::new(),
+    )
+}
+
+/// Resolve the bot seats, letting `overrides` supply the pick for any seat an
+/// LLM drafter already chose for.
+///
+/// An override is a list of `instance_id`s, never indices: the ids were resolved
+/// against the same pack this loop reads, and `session::apply` re-validates them
+/// against the live pack regardless. A seat with no override — or whose override
+/// the reducer refuses — falls through to the heuristic bot in the same pass, so
+/// a failed LLM call costs a seat its flavour, never its pick.
+fn apply_human_pick_and_resolve_bots_with_overrides(
+    draft_session: &mut DraftSession,
+    human_action: DraftAction,
+    overrides: &std::collections::BTreeMap<u8, Vec<String>>,
+) -> Result<(), String> {
+    if !matches!(draft_session.config.kind, DraftKind::Quick) {
+        return Err("apply_human_pick_and_resolve_bots is only valid for Quick Draft".to_string());
+    }
+
+    session::apply(draft_session, human_action, None)
+        .map_err(|e| format!("Human pick failed: {e}"))?;
 
     let difficulty = DIFFICULTY.with(|cell| cell.get());
     let mut rng = RNG
         .with(|cell| cell.take())
-        .ok_or_else(|| JsValue::from_str("RNG not initialized"))?;
+        .ok_or_else(|| "RNG not initialized".to_string())?;
 
     let result = CARD_DB.with(|cell| {
         let db_borrow = cell.borrow();
@@ -338,27 +621,52 @@ fn apply_human_pick_and_resolve_bots(
                 continue;
             }
 
-            let pick_idx = bot_ai::bot_pick(
-                &pack.0,
-                difficulty,
-                &draft_session.pools[seat as usize],
-                card_db,
-                &mut rng,
-            );
-            let pick_id = pack.0[pick_idx].instance_id.clone();
+            // CR 905.1a: a bot owes its kind's one-card Quick Draft pick step. This loop is
+            // `Quick`-gated above, so `cards_per_pick` is 1 here today; reading
+            // it from the procedure is what keeps that true by construction
+            // rather than by coincidence.
+            let cards_per_pick =
+                usize::from(draft_session.config.kind.procedure().cards_per_pick).min(pack.0.len());
+            let chosen = overrides
+                .get(&seat)
+                .filter(|ids| {
+                    // Only honour an override that names the exact step and
+                    // cards this pack still holds; anything else is stale.
+                    ids.len() == cards_per_pick
+                        && ids
+                            .iter()
+                            .all(|id| pack.0.iter().any(|card| &card.instance_id == id))
+                })
+                .cloned();
+            let card_instance_ids = chosen.unwrap_or_else(|| {
+                let pick_indices = bot_ai::bot_picks(
+                    &pack.0,
+                    cards_per_pick,
+                    difficulty,
+                    &draft_session.pools[seat as usize],
+                    card_db,
+                    &mut rng,
+                );
+                // Map indices to ids BEFORE applying — the apply mutates the pack
+                // the indices refer to.
+                pick_indices
+                    .into_iter()
+                    .map(|index| pack.0[index].instance_id.clone())
+                    .collect()
+            });
 
             session::apply(
                 draft_session,
                 DraftAction::Pick {
                     seat,
-                    card_instance_id: pick_id,
+                    card_instance_ids,
                 },
                 None,
             )
-            .map_err(|e| JsValue::from_str(&format!("Bot {seat} pick failed: {}", e)))?;
+            .map_err(|e| format!("Bot {seat} pick failed: {e}"))?;
         }
 
-        Ok::<(), JsValue>(())
+        Ok::<(), String>(())
     });
 
     RNG.with(|cell| cell.set(Some(rng)));
@@ -372,7 +680,32 @@ fn apply_human_pick_and_resolve_bots(
 pub fn submit_pick(card_instance_id: &str) -> Result<JsValue, JsValue> {
     let card_id = card_instance_id.to_string();
     with_draft_mut(|draft_session| {
-        apply_human_pick_and_resolve_bots(draft_session, card_id)?;
+        apply_human_pick_and_resolve_bots(draft_session, card_id)
+            .map_err(|e| JsValue::from_str(&e))?;
+        Ok(to_js(&filter_for_player(draft_session, 0)))
+    })
+}
+
+/// Submit an additional pick using a drafted card's draft-time effect, then
+/// resolve all bot picks.
+#[wasm_bindgen]
+pub fn submit_pick_with_draft_effect(
+    effect_card_instance_id: &str,
+    card_instance_ids_json: &str,
+) -> Result<JsValue, JsValue> {
+    let effect_card_instance_id = effect_card_instance_id.to_string();
+    let card_instance_ids: Vec<String> = serde_json::from_str(card_instance_ids_json)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse draft-effect cards: {e}")))?;
+    with_draft_mut(|draft_session| {
+        apply_human_pick_and_resolve_bots_with_action(
+            draft_session,
+            DraftAction::PickWithDraftEffect {
+                seat: 0,
+                effect_card_instance_id,
+                card_instance_ids,
+            },
+        )
+        .map_err(|e| JsValue::from_str(&e))?;
         Ok(to_js(&filter_for_player(draft_session, 0)))
     })
 }
@@ -410,9 +743,250 @@ pub fn auto_pick() -> Result<JsValue, JsValue> {
         });
         RNG.with(|cell| cell.set(Some(rng)));
 
-        apply_human_pick_and_resolve_bots(draft_session, card_id)?;
+        apply_human_pick_and_resolve_bots(draft_session, card_id)
+            .map_err(|e| JsValue::from_str(&e))?;
         Ok(to_js(&filter_for_player(draft_session, 0)))
     })
+}
+
+// ── LLM-driven draft seats ───────────────────────────────────────────────────
+//
+// Strictly opt-in, exactly as in `engine-wasm`: with no configured endpoint the
+// heuristic bot in `bot_ai` drives every seat, unchanged.
+//
+// The two calls bracket the network round trip. `buildLlmDraftPickRequests`
+// renders each LLM seat's own `DraftPlayerView` — the same per-seat projection
+// the heuristic bot is handed, which is what keeps an LLM drafter blind to other
+// seats' pools — and stamps the pack with a fingerprint.
+// `submitPickWithLlmBotPicks` applies the human's pick and then hands each
+// resolved pick to the bot loop as an override, falling back per seat.
+
+/// The per-seat inputs a caller supplies to resolve LLM picks: which seat, the
+/// pack fingerprint the prompt was built over, which provider answered, and the
+/// raw response body.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmDraftResponse {
+    seat: u8,
+    fingerprint: String,
+    provider: String,
+    /// HTTP status of the provider response. Carried so the engine can refuse a
+    /// non-2xx reply whatever its body looks like.
+    status: u16,
+    body: String,
+}
+
+/// What happened to one seat's LLM pick, so the UI can report a misconfigured
+/// endpoint instead of silently drafting like a bot forever.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmDraftOutcome {
+    seat: u8,
+    used: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmDraftPickRequest {
+    seat: u8,
+    fingerprint: String,
+    option_count: usize,
+    required_pick_count: usize,
+    request: phase_llm::HttpRequestSpec,
+}
+
+/// The seats an LLM drafter may act for: the BOT seats of this pod, and nothing
+/// else.
+///
+/// Derived from the session's own roster rather than filtering a caller's list,
+/// so there is exactly one answer to "which seats may an LLM draft for" and no
+/// way to ask for a different one. `DraftSeat::Human` is legal at ANY index — an
+/// 8-player Premier or Traditional pod seats humans at 1..7 — so a seat number
+/// carries no permission on its own. Rendering a seat's `filter_for_player`
+/// view builds a prompt out of that seat's private pool and unpassed pack and
+/// ships it to a third-party provider; for a human seat that would disclose
+/// another player's hidden information to an outside service.
+fn llm_eligible_bot_seats(draft_session: &DraftSession) -> Vec<u8> {
+    draft_session
+        .seats
+        .iter()
+        .enumerate()
+        .filter(|(_, seat)| matches!(seat, DraftSeat::Bot { .. }))
+        .filter_map(|(index, _)| u8::try_from(index).ok())
+        .collect()
+}
+
+/// Build one LLM pick request per eligible bot seat.
+///
+/// Takes NO seat list. Which seats an LLM may draft for is an authority
+/// question this crate already owns ([`llm_eligible_bot_seats`]), and accepting
+/// a caller's list made the display layer a second classifier of the same
+/// thing -- one free to drift toward naming a human seat, whose private pool
+/// and unpassed pack would then be rendered into a third-party prompt.
+///
+/// `set_names_json` is an optional set-code -> name map so the format brief
+/// reads "Triple Mirrodin" rather than "Triple MRD"; codes are used verbatim
+/// when it is absent.
+#[wasm_bindgen(js_name = buildLlmDraftPickRequests)]
+pub fn build_llm_draft_pick_requests(
+    endpoint_json: &str,
+    set_names_json: &str,
+) -> Result<JsValue, JsValue> {
+    let requests = build_llm_draft_pick_requests_inner(endpoint_json, set_names_json)
+        .map_err(|e| JsValue::from_str(&e))?;
+    Ok(to_js(&requests))
+}
+
+fn build_llm_draft_pick_requests_inner(
+    endpoint_json: &str,
+    set_names_json: &str,
+) -> Result<Vec<LlmDraftPickRequest>, String> {
+    let endpoint: phase_llm::LlmEndpointConfig = serde_json::from_str(endpoint_json)
+        .map_err(|e| format!("Invalid LLM endpoint config: {e}"))?;
+    // A missing or unparsable name map degrades the brief to set codes; it is
+    // never a reason to refuse a pick.
+    let set_names: std::collections::BTreeMap<String, String> =
+        serde_json::from_str(set_names_json).unwrap_or_default();
+    let set_names = phase_llm::draft_decision::set_names_from_pairs(set_names);
+    let difficulty = DIFFICULTY.with(|cell| cell.get());
+
+    with_draft_inner(|draft_session| {
+        let requests = CARD_DB.with(|cell| {
+            let db_borrow = cell.borrow();
+            let card_db = db_borrow.as_ref();
+            llm_eligible_bot_seats(draft_session)
+                .into_iter()
+                .filter_map(|seat| {
+                    let view = filter_for_player(draft_session, seat);
+                    let request = phase_llm::build_draft_pick_prompt(
+                        seat, &view, difficulty, card_db, &set_names,
+                    )
+                    .ok()?;
+                    let http = phase_llm::build_chat_request(&endpoint, &request.prompt).ok()?;
+                    Some(LlmDraftPickRequest {
+                        seat,
+                        fingerprint: request.fingerprint,
+                        option_count: request.option_count,
+                        required_pick_count: request.required_pick_count,
+                        request: http,
+                    })
+                })
+                .collect()
+        });
+        Ok(requests)
+    })
+}
+
+/// Submit the human's pick, resolving any LLM seat's pick from its response.
+///
+/// Returns `{ view, llmOutcomes }`: the same `DraftPlayerView` `submit_pick`
+/// returns, plus a per-seat record of whether the LLM pick was used.
+#[wasm_bindgen(js_name = submitPickWithLlmBotPicks)]
+pub fn submit_pick_with_llm_bot_picks(
+    card_instance_id: &str,
+    responses_json: &str,
+) -> Result<JsValue, JsValue> {
+    let (view, outcomes) = submit_pick_with_llm_bot_picks_inner(card_instance_id, responses_json)
+        .map_err(|e| JsValue::from_str(&e))?;
+    Ok(to_js(
+        &serde_json::json!({ "view": view, "llmOutcomes": outcomes }),
+    ))
+}
+
+fn submit_pick_with_llm_bot_picks_inner(
+    card_instance_id: &str,
+    responses_json: &str,
+) -> Result<(DraftPlayerView, Vec<LlmDraftOutcome>), String> {
+    let responses: Vec<LlmDraftResponse> = serde_json::from_str(responses_json)
+        .map_err(|e| format!("Invalid LLM draft responses: {e}"))?;
+    let card_id = card_instance_id.to_string();
+
+    with_draft_mut_inner(|draft_session| {
+        let mut overrides: std::collections::BTreeMap<u8, Vec<String>> =
+            std::collections::BTreeMap::new();
+        let mut outcomes: Vec<LlmDraftOutcome> = Vec::with_capacity(responses.len());
+
+        for response in &responses {
+            match resolve_llm_draft_pick(draft_session, response) {
+                Ok(selection) => {
+                    overrides.insert(response.seat, selection.card_instance_ids);
+                    outcomes.push(LlmDraftOutcome {
+                        seat: response.seat,
+                        used: true,
+                        reasoning: selection.reasoning,
+                        error: None,
+                    });
+                }
+                Err(error) => outcomes.push(LlmDraftOutcome {
+                    seat: response.seat,
+                    used: false,
+                    reasoning: None,
+                    error: Some(error.to_string()),
+                }),
+            }
+        }
+
+        apply_human_pick_and_resolve_bots_with_overrides(
+            draft_session,
+            DraftAction::Pick {
+                seat: 0,
+                card_instance_ids: vec![card_id],
+            },
+            &overrides,
+        )?;
+
+        Ok((filter_for_player(draft_session, 0), outcomes))
+    })
+}
+
+/// Decode one seat's LLM response against the pack it is actually holding.
+fn resolve_llm_draft_pick(
+    draft_session: &DraftSession,
+    response: &LlmDraftResponse,
+) -> Result<phase_llm::LlmPickSelection, phase_llm::LlmError> {
+    // Same authority as the request side. A response naming a human seat cannot
+    // have come from a request this bridge issued, so it is refused rather than
+    // used to pick for that player.
+    if !matches!(
+        draft_session.seats.get(usize::from(response.seat)),
+        Some(DraftSeat::Bot { .. })
+    ) {
+        return Err(phase_llm::LlmError::StaleDecision);
+    }
+    // The pack is read through the same per-seat projection the request was
+    // built from, never from `session.current_pack`. The projection can reorder
+    // a pack for presentation (a set draft lists it by rarity), and the prompt's
+    // numbered options, the fingerprint and the model's reply all speak in THAT
+    // order. Fingerprinting or indexing the raw pack instead would refuse every
+    // reply as stale, and where it did match would resolve the model's option
+    // number to a different card.
+    let view = filter_for_player(draft_session, response.seat);
+    let Some(pack) = view.current_pack.as_deref().filter(|pack| !pack.is_empty()) else {
+        return Err(phase_llm::LlmError::StaleDecision);
+    };
+    let provider = phase_llm::LlmProvider::from_label(&response.provider);
+    let completion =
+        phase_llm::completion_from_response(provider, response.status, &response.body)?;
+    // CR 905.1a / CR 903.13b: the configured procedure supplies the ordinary or Commander Draft pick-step count.
+    let required = usize::from(draft_session.config.kind.procedure().cards_per_pick);
+    phase_llm::select_picks(
+        response.seat,
+        pack,
+        required,
+        &response.fingerprint,
+        &completion,
+    )
+}
+
+/// The engine-owned LLM provider catalog, mirrored here so a draft-only client
+/// surface does not have to load the game engine to render the settings UI.
+#[wasm_bindgen(js_name = llmProviderCatalog)]
+pub fn llm_provider_catalog() -> JsValue {
+    to_js(phase_llm::catalog::provider_catalog())
 }
 
 /// Get the current DraftPlayerView without mutation.
@@ -421,24 +995,77 @@ pub fn get_view() -> Result<JsValue, JsValue> {
     with_draft(|session| to_js(&filter_for_player(session, 0)))
 }
 
+/// Narrow a limited-pool listing through the ENGINE's filtering authority
+/// (#7546 review): the display sends the listing and a typed `PoolFilter`;
+/// it renders exactly the returned instance ids. Each instance is classified
+/// inside draft-core, so wire-delivered groups (of any protocol vintage) are
+/// not an input. Stateless — usable by P2P guests.
+#[wasm_bindgen]
+pub fn filter_pool_listing(listing_json: &str, filter_json: &str) -> Result<JsValue, JsValue> {
+    let listing: Vec<draft_core::types::DraftCardInstance> = serde_json::from_str(listing_json)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse pool listing: {}", e)))?;
+    let filter: draft_core::view::PoolFilter = serde_json::from_str(filter_json)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse pool filter: {}", e)))?;
+    Ok(to_js(&draft_core::view::filter_pool_listing(
+        &listing, &filter,
+    )))
+}
+
+/// The complete engine-owned filter option lists for a pool, computed from
+/// the instances alone (review round 5): the stateless path a display uses
+/// when its delivered view predates the option fields, so legacy controls
+/// never come from the lossy exclusive presentation buckets.
+#[wasm_bindgen]
+pub fn pool_filter_options(pool_json: &str) -> Result<JsValue, JsValue> {
+    let pool: Vec<draft_core::types::DraftCardInstance> = serde_json::from_str(pool_json)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse pool: {}", e)))?;
+    Ok(to_js(&draft_core::view::pool_filter_options(&pool)))
+}
+
 /// Submit the human player's deck for limited play.
 ///
-/// `main_deck_json`: JSON array of card instance ID strings.
+/// `main_deck_json`: JSON array of card name strings.
+/// `commanders_json`: JSON array of the card names this seat designates as its
+/// commander(s) (CR 903.3 / CR 702.124h). CR 903.1 puts the designation inside
+/// the Commander variant, so `[]` is the correct and meaningful value for every
+/// non-Commander kind.
 /// The deck is validated against the pool via LimitedDeckValidator.
 #[wasm_bindgen]
-pub fn submit_deck(main_deck_json: &str) -> Result<JsValue, JsValue> {
-    let main_deck: Vec<String> = serde_json::from_str(main_deck_json)
-        .map_err(|e| JsValue::from_str(&format!("Failed to parse deck: {}", e)))?;
+pub fn submit_deck(main_deck_json: &str, commanders_json: &str) -> Result<JsValue, JsValue> {
+    let view =
+        submit_deck_inner(main_deck_json, commanders_json).map_err(|e| JsValue::from_str(&e))?;
+    Ok(to_js(&view))
+}
 
-    with_draft_mut(|session| {
+/// Pure-Rust core for `submit_deck`, so both halves of the payload boundary are
+/// reachable from `cargo test` without `js_sys::JSON::parse` -- the same reason
+/// `submit_pick_for_seat_inner` exists.
+///
+/// Both `serde_json::from_str` calls deliberately precede `with_draft_mut_inner`:
+/// a malformed payload fails before any session is mutated. The two parse
+/// failures carry DISTINCT texts so a caller can tell which payload was bad.
+fn submit_deck_inner(
+    main_deck_json: &str,
+    commanders_json: &str,
+) -> Result<draft_core::view::DraftPlayerView, String> {
+    let main_deck: Vec<String> =
+        serde_json::from_str(main_deck_json).map_err(|e| format!("Failed to parse deck: {e}"))?;
+    let commanders: Vec<String> = serde_json::from_str(commanders_json)
+        .map_err(|e| format!("Failed to parse commanders: {e}"))?;
+
+    with_draft_mut_inner(|session| {
         session::apply(
             session,
-            DraftAction::SubmitDeck { seat: 0, main_deck },
+            DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck,
+                commanders,
+            },
             None,
         )
-        .map_err(|e| JsValue::from_str(&format!("Deck submission failed: {}", e)))?;
+        .map_err(deck_submission_message)?;
 
-        Ok(to_js(&filter_for_player(session, 0)))
+        Ok(filter_for_player(session, 0))
     })
 }
 
@@ -455,11 +1082,15 @@ pub fn suggest_deck() -> Result<JsValue, JsValue> {
         CARD_DB.with(|cell| {
             let db_borrow = cell.borrow();
             let card_db = db_borrow.as_ref();
+            // `0`: the HUMAN designates their commander in the deck builder, so
+            // the suggester must not pre-empt that choice. A decision, not a
+            // default.
             let result = suggest::suggest_deck(
                 pool,
                 difficulty,
                 card_db,
                 session.config.min_deck_size,
+                0,
                 &session.config.addable_cards,
             );
             to_js(&result)
@@ -484,101 +1115,121 @@ pub fn suggest_lands(spells_json: &str) -> Result<JsValue, JsValue> {
     })
 }
 
+/// Suggest land counts for spells in a specific multiplayer seat's pool.
+///
+/// The spells payload is parsed before the active session is accessed, so a
+/// malformed request cannot observe or depend on the current draft state.
+#[wasm_bindgen]
+pub fn suggest_lands_for_seat(seat: u8, spells_json: &str) -> Result<JsValue, JsValue> {
+    let lands = suggest_lands_for_seat_inner(seat, spells_json)
+        .map_err(|error| JsValue::from_str(&error))?;
+    Ok(to_js(&lands))
+}
+
+/// Native-testable core for the multiplayer Auto Lands boundary.
+fn suggest_lands_for_seat_inner(
+    seat: u8,
+    spells_json: &str,
+) -> Result<std::collections::HashMap<String, u8>, String> {
+    let spell_names: Vec<String> = serde_json::from_str(spells_json)
+        .map_err(|error| format!("Failed to parse spells: {error}"))?;
+
+    with_draft_inner(|session| {
+        let pool = session
+            .pools
+            .get(seat as usize)
+            .ok_or_else(|| format!("Seat {seat} has no pool"))?;
+        Ok(suggest::suggest_lands(
+            &spell_names,
+            pool,
+            session.config.min_deck_size,
+        ))
+    })
+}
+
 // ── Multi-seat draft API (P2P Tournament Host) ─────────────────────────
 //
 // These exports support the P2P draft host running an authoritative
 // DraftSession for 8 human players. Unlike Quick Draft (single human +
-// bots), the host calls `start_multiplayer_draft` with human seat names,
+// bots), the host calls `create_multiplayer_draft` with seat descriptors,
 // then proxies picks/decks per-seat as guests submit them over the
 // DataChannel.
 
-/// Start a multiplayer draft session (Premier or Traditional).
+/// Submit one whole CR 903.13b pick step for any seat (host proxies guest
+/// picks): every card the seat drafts this step, as a JSON array of instance
+/// ids. `apply_pick_inner` owns the count contract — one id for the four CR
+/// 905.1a kinds, two for CommanderDraft, dropping to the remainder on an odd
+/// final pick. `Winston` has NO PICK STEP AT ALL and never reaches this
+/// function: a shared-stack turn is a whole-pile
+/// `DraftAction::SharedStackDecision`.
 ///
-/// - `set_pool_json`: serialized LimitedSetPool
-/// - `kind`: "Premier" or "Traditional"
-/// - `seat_names_json`: JSON array of display names, one per seat (length = pod size)
-/// - `seed`: RNG seed for deterministic pack generation
-///
-/// Returns the DraftPlayerView for seat 0 (the host).
-#[wasm_bindgen]
-pub fn start_multiplayer_draft(
-    set_pool_json: &str,
-    kind: &str,
-    seat_names_json: &str,
-    seed: u32,
-) -> Result<JsValue, JsValue> {
-    let set_pool: LimitedSetPool = serde_json::from_str(set_pool_json)
-        .map_err(|e| JsValue::from_str(&format!("Failed to parse set pool: {e}")))?;
-
-    let seat_names: Vec<String> = serde_json::from_str(seat_names_json)
-        .map_err(|e| JsValue::from_str(&format!("Failed to parse seat names: {e}")))?;
-
-    let draft_kind = match kind {
-        "Premier" => DraftKind::Premier,
-        "Traditional" => DraftKind::Traditional,
-        other => return Err(JsValue::from_str(&format!("Unknown draft kind: {other}"))),
-    };
-
-    let set_code = set_pool.code.clone();
-    let config = DraftConfig {
-        source: DraftSource::Set {
-            code: set_code.clone(),
-        },
-        set_code,
-        kind: draft_kind,
-        pod_size: seat_names.len() as u8,
-        cards_per_pack: 14,
-        pack_count: 3,
-        min_deck_size: 40,
-        addable_cards: DeckAddableCards::standard_basics(),
-        rng_seed: seed as u64,
-        tournament_format: TournamentFormat::default(),
-        pod_policy: PodPolicy::default(),
-        spectator_visibility: SpectatorVisibility::default(),
-    };
-
-    let seats: Vec<DraftSeat> = seat_names
-        .iter()
-        .enumerate()
-        .map(|(i, name)| DraftSeat::Human {
-            player_id: engine::types::player::PlayerId(i as u8),
-            display_name: name.clone(),
-        })
-        .collect();
-
-    let draft_code = format!("draft-{seed:08x}");
-    let mut draft_session = DraftSession::new(config, seats, draft_code);
-    let pack_gen = PackGenerator::new(set_pool);
-
-    session::apply(&mut draft_session, DraftAction::StartDraft, Some(&pack_gen))
-        .map_err(|e| JsValue::from_str(&format!("Failed to start draft: {e}")))?;
-
-    let view = filter_for_player(&draft_session, 0);
-
-    DRAFT_SESSION.with(|cell| cell.set(Some(draft_session)));
-    PACK_GEN.with(|cell| cell.set(Some(pack_gen)));
-    RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(seed as u64))));
-
-    Ok(to_js(&view))
-}
-
-/// Submit a pick for any seat (host proxies guest picks).
+/// The JSON encoding mirrors `submit_pick_with_draft_effect_for_seat` below
+/// byte for byte. It is deliberately NOT tolerant of a bare id: a bare string
+/// is a parse `Err` here, which is what keeps a half-applied caller loud
+/// instead of silently picking one card.
 ///
 /// Returns the DraftPlayerView for the specified seat after the pick.
 #[wasm_bindgen]
-pub fn submit_pick_for_seat(seat: u8, card_instance_id: &str) -> Result<JsValue, JsValue> {
-    let card_id = card_instance_id.to_string();
+pub fn submit_pick_for_seat(seat: u8, card_instance_ids_json: &str) -> Result<JsValue, JsValue> {
+    let view = submit_pick_for_seat_inner(seat, card_instance_ids_json)
+        .map_err(|e| JsValue::from_str(&e))?;
+    Ok(to_js(&view))
+}
 
-    with_draft_mut(|draft_session| {
+/// Pure-Rust core for `submit_pick_for_seat`, so both halves of the payload
+/// boundary are reachable from `cargo test` without `js_sys::JSON::parse` —
+/// the same reason `create_multiplayer_draft_inner` exists.
+///
+/// The `serde_json::from_str` deliberately precedes `with_draft_mut`: a
+/// malformed payload fails before any session is mutated.
+fn submit_pick_for_seat_inner(
+    seat: u8,
+    card_instance_ids_json: &str,
+) -> Result<draft_core::view::DraftPlayerView, String> {
+    let card_instance_ids: Vec<String> = serde_json::from_str(card_instance_ids_json)
+        .map_err(|e| format!("Failed to parse pick cards: {e}"))?;
+
+    with_draft_mut_inner(|draft_session| {
         session::apply(
             draft_session,
             DraftAction::Pick {
                 seat,
-                card_instance_id: card_id,
+                card_instance_ids,
             },
             None,
         )
-        .map_err(|e| JsValue::from_str(&format!("Pick failed for seat {seat}: {e}")))?;
+        .map_err(|e| format!("Pick failed for seat {seat}: {e}"))?;
+
+        Ok(filter_for_player(draft_session, seat))
+    })
+}
+
+/// Submit a draft-effect pick for any seat (host proxies guest picks).
+///
+/// Returns the filtered DraftPlayerView for the specified seat after the pick.
+#[wasm_bindgen]
+pub fn submit_pick_with_draft_effect_for_seat(
+    seat: u8,
+    effect_card_instance_id: &str,
+    card_instance_ids_json: &str,
+) -> Result<JsValue, JsValue> {
+    let effect_card_instance_id = effect_card_instance_id.to_string();
+    let card_instance_ids: Vec<String> = serde_json::from_str(card_instance_ids_json)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse draft-effect cards: {e}")))?;
+
+    with_draft_mut(|draft_session| {
+        session::apply(
+            draft_session,
+            DraftAction::PickWithDraftEffect {
+                seat,
+                effect_card_instance_id,
+                card_instance_ids,
+            },
+            None,
+        )
+        .map_err(|e| {
+            JsValue::from_str(&format!("Draft-effect pick failed for seat {seat}: {e}"))
+        })?;
 
         Ok(to_js(&filter_for_player(draft_session, seat)))
     })
@@ -606,18 +1257,48 @@ pub fn set_seat_connected(seat: u8, connected: bool) -> Result<JsValue, JsValue>
 /// Submit a deck for any seat.
 ///
 /// `main_deck_json`: JSON array of card name strings.
+/// `commanders_json`: JSON array of the card names this seat designates as its
+/// commander(s) (CR 903.3 / CR 702.124h). CR 903.1 puts the designation inside
+/// the Commander variant, so `[]` is the correct and meaningful value for every
+/// non-Commander kind.
 /// Returns the DraftPlayerView for the specified seat.
 #[wasm_bindgen]
-pub fn submit_deck_for_seat(seat: u8, main_deck_json: &str) -> Result<JsValue, JsValue> {
-    let main_deck: Vec<String> = serde_json::from_str(main_deck_json)
-        .map_err(|e| JsValue::from_str(&format!("Failed to parse deck: {e}")))?;
+pub fn submit_deck_for_seat(
+    seat: u8,
+    main_deck_json: &str,
+    commanders_json: &str,
+) -> Result<JsValue, JsValue> {
+    let view = submit_deck_for_seat_inner(seat, main_deck_json, commanders_json)
+        .map_err(|e| JsValue::from_str(&e))?;
+    Ok(to_js(&view))
+}
 
-    with_draft_mut(|session| {
-        session::apply(session, DraftAction::SubmitDeck { seat, main_deck }, None).map_err(
-            |e| JsValue::from_str(&format!("Deck submission failed for seat {seat}: {e}")),
-        )?;
+/// Pure-Rust core for `submit_deck_for_seat`, mirroring `submit_deck_inner`:
+/// both parses precede `with_draft_mut_inner`, so a malformed payload fails
+/// before any session is mutated.
+fn submit_deck_for_seat_inner(
+    seat: u8,
+    main_deck_json: &str,
+    commanders_json: &str,
+) -> Result<draft_core::view::DraftPlayerView, String> {
+    let main_deck: Vec<String> =
+        serde_json::from_str(main_deck_json).map_err(|e| format!("Failed to parse deck: {e}"))?;
+    let commanders: Vec<String> = serde_json::from_str(commanders_json)
+        .map_err(|e| format!("Failed to parse commanders: {e}"))?;
 
-        Ok(to_js(&filter_for_player(session, seat)))
+    with_draft_mut_inner(|session| {
+        session::apply(
+            session,
+            DraftAction::SubmitDeck {
+                seat,
+                main_deck,
+                commanders,
+            },
+            None,
+        )
+        .map_err(deck_submission_message)?;
+
+        Ok(filter_for_player(session, seat))
     })
 }
 
@@ -630,13 +1311,30 @@ pub fn get_view_for_seat(seat: u8) -> Result<JsValue, JsValue> {
 /// Serialize the full DraftSession to JSON for host persistence.
 ///
 /// The host persists this after every authoritative mutation so a
-/// crashed/reloaded host can restore the draft state.
+/// crashed/reloaded host can restore the draft state. This is the trusted
+/// authority export: unlike `DraftSourceView`, it intentionally retains a
+/// Chaos layout's complete assignment matrix and must not be sent to guests.
 #[wasm_bindgen]
 pub fn export_draft_session() -> Result<String, JsValue> {
     with_draft(|session| {
         serde_json::to_string(session)
             .map_err(|e| JsValue::from_str(&format!("Failed to serialize draft session: {e}")))
     })?
+}
+
+/// Decode only snapshot shapes this client can safely present after a restore.
+///
+/// Player and spectator projections own the privacy boundary for a Chaos
+/// layout: the persisted snapshot remains host-local, while all ordinary views
+/// expose only `DraftSourceView`'s redacted metadata.
+fn restorable_draft_session_from_json(json: &str) -> Result<DraftSession, String> {
+    let mut session: DraftSession = serde_json::from_str(json)
+        .map_err(|error| format!("Failed to deserialize draft session: {error}"))?;
+    session.config = enforce_procedure_minimum_deck_size(session.config);
+    session
+        .validate_persisted_snapshot()
+        .map_err(|error| format!("Invalid draft snapshot: {error}"))?;
+    Ok(session)
 }
 
 /// Restore a DraftSession from a persisted JSON snapshot.
@@ -648,18 +1346,26 @@ pub fn export_draft_session() -> Result<String, JsValue> {
 /// original session's RNG stream, which is fine.
 #[wasm_bindgen]
 pub fn import_draft_session(json: &str, difficulty: u8) -> Result<JsValue, JsValue> {
-    let session: DraftSession = serde_json::from_str(json)
-        .map_err(|e| JsValue::from_str(&format!("Failed to deserialize draft session: {e}")))?;
+    let session =
+        restorable_draft_session_from_json(json).map_err(|error| JsValue::from_str(&error))?;
 
-    let offset = session.current_pack_number as u64 * session.config.cards_per_pack as u64
-        + session.pick_number as u64;
+    // The resume-seed offset is derived from `cards_in_pack` /
+    // `current_pack_number` / `pick_number`, all of which stay `0` for a
+    // shared-stack session (it moves none of them). That is harmless: this RNG
+    // seeds the PICK-AND-PASS bot, and a shared-stack bot seat never reaches
+    // it. `winston_decision` is deliberately RNG-free -- "same projection =>
+    // same decision" is meant literally -- so a resumed Winston pod's bot
+    // behaviour does not depend on this stream at all.
+    let offset = u64::from(session.cards_in_pack(session.current_pack_number))
+        * u64::from(session.current_pack_number)
+        + u64::from(session.pick_number);
     let resume_seed = session.config.rng_seed.wrapping_add(offset);
 
     DIFFICULTY.with(|cell| cell.set(map_difficulty(difficulty)));
     RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(resume_seed))));
 
     let view = filter_for_player(&session, 0);
-    DRAFT_SESSION.with(|cell| cell.set(Some(session)));
+    session_cell::install(session);
 
     Ok(to_js(&view))
 }
@@ -686,9 +1392,19 @@ pub fn all_picks_submitted() -> Result<bool, JsValue> {
 /// Returns a SuggestedDeck built from the bot's drafted pool.
 #[wasm_bindgen]
 pub fn get_bot_deck(bot_seat: u8) -> Result<JsValue, JsValue> {
-    with_draft(|session| {
+    get_bot_deck_inner(bot_seat)
+        .map(|deck| to_js(&deck))
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Pure-Rust core for `get_bot_deck`, so the CR 903.3 designation argument is
+/// reachable from `cargo test` without `js_sys` — the same reason
+/// `create_multiplayer_draft_inner`, `submit_pick_for_seat_inner` and
+/// `draft_procedure_dto` exist.
+fn get_bot_deck_inner(bot_seat: u8) -> Result<suggest::SuggestedDeck, String> {
+    with_draft_inner(|session| {
         if bot_seat == 0 || bot_seat as usize >= session.seats.len() {
-            return Err(JsValue::from_str("bot_seat is out of range"));
+            return Err("bot_seat is out of range".to_string());
         }
         let pool = &session.pools[bot_seat as usize];
         let difficulty = DIFFICULTY.with(|cell| cell.get());
@@ -696,16 +1412,45 @@ pub fn get_bot_deck(bot_seat: u8) -> Result<JsValue, JsValue> {
         CARD_DB.with(|cell| {
             let db_borrow = cell.borrow();
             let card_db = db_borrow.as_ref();
-            let result = suggest::suggest_deck(
+
+            // CR 407.3 + CR 903.3: Cube addables and Commander designations
+            // require typed faces. Ordinary set-backed pods can propose a
+            // deck without this optional database; game admission still
+            // checks every submitted name and excludes ante cards.
+            let requires_card_db = match &session.config.source {
+                DraftSource::Set { .. } => session.config.kind.commanders_required() > 0,
+                DraftSource::Cube { .. } => true,
+            };
+            if requires_card_db && card_db.is_none() {
+                return Err("Card database must be loaded before a draft bot deck".to_string());
+            }
+
+            let deck = suggest::suggest_deck(
                 pool,
                 difficulty,
                 card_db,
                 session.config.min_deck_size,
+                session.config.kind.commanders_required(),
                 &session.config.addable_cards,
             );
-            Ok(to_js(&result))
+
+            // Enforce the session-configured floor for the bot, as
+            // `validate_limited_deck` does for human decks. CR 100.2b sets
+            // ordinary Limited at 40 cards; CR 903.13f(1) sets Commander Draft
+            // at 60. Custom Cube floors are configuration, not CR 100.2b.
+            // Never publish an undersized proposal if the bot runs out of cards.
+            let deck_total: usize =
+                deck.main_deck.len() + deck.lands.values().map(|&n| n as usize).sum::<usize>();
+            if deck_total < session.config.min_deck_size {
+                return Err(format!(
+                    "Draft bot deck reached {deck_total} cards, minimum is {}",
+                    session.config.min_deck_size
+                ));
+            }
+
+            Ok(deck)
         })
-    })?
+    })
 }
 
 // ── Host-role exports for multiplayer (P2P) draft coordination ─────────
@@ -726,15 +1471,17 @@ enum SeatDescriptor {
 /// TS↔Rust mirror convention in `draft-adapter.ts`.
 ///
 /// JSON examples:
-///   `{ "type": "Set",  "data": { "set_pool_json": "<serialized LimitedSetPool>" } }`
+///   `{ "type": "Set",  "data": { "pools": [<LimitedSetPool>, ...],
+///                                 "sequence": ["isd", "dka", "avr"] } }`
+///   `{ "type": "Chaos", "data": { "pools": [<LimitedSetPool>, ...],
+///                                  "candidate_codes": ["isd", "dka"] } }`
 ///   `{ "type": "Cube", "data": { "cube_list_text": "...", "cube_name": "My Cube",
 ///                                 "cube_draft_settings": { ... } } }`
 #[derive(Deserialize)]
 #[serde(tag = "type", content = "data")]
 enum PoolInput {
-    Set {
-        set_pool_json: String,
-    },
+    Set(SetPoolInput),
+    Chaos(ChaosPackSelection),
     Cube {
         cube_list_text: String,
         cube_name: String,
@@ -742,22 +1489,198 @@ enum PoolInput {
     },
 }
 
+/// A pod's set-backed pool, in either spelling a host may have written.
+///
+/// The live shape is the same [`SetPackSequence`] the single-player entry
+/// points take, so one pod boundary and one local boundary describe a pack
+/// sequence identically. Hosts that predate multi-set pods persisted a single
+/// serialized [`LimitedSetPool`] under `set_pool_json`; that snapshot restores
+/// here as the one-pack, one-pool sequence it always meant. Same contract as
+/// `DraftSource`'s `code`/`codes` alias, at the boundary rather than in the
+/// snapshot.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SetPoolInput {
+    Sequence(SetPackSequence),
+    Legacy { set_pool_json: String },
+}
+
+impl SetPoolInput {
+    /// Resolve to a pack sequence, promoting the legacy single-pool spelling.
+    fn into_sequence(self) -> Result<SetPackSequence, String> {
+        match self {
+            SetPoolInput::Sequence(sequence) => Ok(sequence),
+            SetPoolInput::Legacy { set_pool_json } => {
+                let pool: LimitedSetPool = serde_json::from_str(&set_pool_json)
+                    .map_err(|e| format!("Failed to parse set pool: {e}"))?;
+                Ok(SetPackSequence {
+                    sequence: vec![pool.code.clone()],
+                    pools: vec![pool],
+                })
+            }
+        }
+    }
+}
+
+/// Boundary mirror of `draft_core::types::DraftProcedure` for the JS bridge.
+///
+/// A DTO rather than `#[derive(Serialize)]` on `DraftProcedure` itself:
+/// `DraftProcedure` derives no `Serialize`, so this keeps the external procedure
+/// surface intentionally explicit. `PostDraftPlay` and `PackDistribution` are
+/// serialized here because a host must know whether the procedure runs in-session
+/// tournament pairings; the reducer remains the authority for every constraint.
+#[derive(Serialize)]
+struct DraftProcedureDto {
+    pod_size: u8,
+    human_seats: u8,
+    min_pod_size: u8,
+    max_pod_size: u8,
+    allowed_pod_sizes: Vec<u8>,
+    packs_per_player: u8,
+    cards_per_pick: u8,
+    pick_selection_mode: draft_core::types::PickSelectionMode,
+    distribution: draft_core::types::PackDistribution,
+    /// Which set-layout shapes this kind admits. The setup page renders exactly
+    /// this list; it does not derive layout legality from `distribution`.
+    allowed_set_layouts: Vec<draft_core::types::SetLayoutKind>,
+    min_deck_size: usize,
+    cube_min_deck_size: usize,
+    commanders_required: u8,
+    post_draft_play: draft_core::types::PostDraftPlay,
+    launch_capability: draft_core::types::DraftLaunchCapability,
+    match_config: engine::types::match_config::MatchConfig,
+}
+
+/// The engine-owned per-kind axes for a numeric draft kind. The display layer
+/// reads these; it never re-derives them (CLAUDE.md: the frontend is a display
+/// layer, not a logic layer).
+#[wasm_bindgen]
+pub fn draft_procedure(kind: u8, tournament_format: &str) -> Result<JsValue, JsValue> {
+    let tournament_format =
+        parse_tournament_format(tournament_format).map_err(|e| JsValue::from_str(&e))?;
+    let dto = draft_procedure_dto(kind, tournament_format).map_err(|e| JsValue::from_str(&e))?;
+    Ok(to_js(&dto))
+}
+
+/// Pure-Rust core for `draft_procedure`, so the field mapping is reachable from
+/// `cargo test` without `js_sys::JSON::parse` — the same reason
+/// `create_multiplayer_draft_inner` and `submit_pick_for_seat_inner` exist.
+///
+/// The mapping is hand-written and its `u8` columns are interchangeable to the
+/// compiler, so transposing any two of them compiles clean and passes clippy.
+/// Nothing in the type system catches that;
+/// `draft_procedure_dto_copies_every_axis_unmoved` is the substitute for the
+/// missing type error.
+fn draft_procedure_dto(
+    kind: u8,
+    tournament_format: TournamentFormat,
+) -> Result<DraftProcedureDto, String> {
+    let procedure = draft_kind_from_wire(kind)?.procedure();
+    Ok(DraftProcedureDto {
+        pod_size: procedure.pod_size,
+        human_seats: procedure.human_seats,
+        min_pod_size: procedure.min_pod_size,
+        max_pod_size: procedure.max_pod_size,
+        allowed_pod_sizes: procedure.allowed_pod_sizes(tournament_format),
+        packs_per_player: procedure.packs_per_player,
+        cards_per_pick: procedure.cards_per_pick,
+        pick_selection_mode: procedure.pick_selection_mode,
+        distribution: procedure.distribution,
+        allowed_set_layouts: procedure.allowed_set_layouts().to_vec(),
+        min_deck_size: procedure.min_deck_size,
+        cube_min_deck_size: procedure.cube_min_deck_size,
+        commanders_required: procedure.commanders_required,
+        post_draft_play: procedure.post_draft_play,
+        launch_capability: procedure.launch_capability(),
+        match_config: procedure.match_config,
+    })
+}
+
+fn parse_tournament_format(tournament_format: &str) -> Result<TournamentFormat, String> {
+    match tournament_format {
+        "Swiss" => Ok(TournamentFormat::Swiss),
+        "SingleElimination" => Ok(TournamentFormat::SingleElimination),
+        _ => Err("tournament_format must be Swiss or SingleElimination".to_string()),
+    }
+}
+
+/// The numeric `kind` the JS bridge sends, and the single authority for it.
+///
+/// Wildcard-free on the ENUM side: a sixth `DraftKind` is an `E0004` HERE, so a
+/// new kind cannot reach the bridge without a wire number. The base's
+/// `match kind: u8` could not do that — `DraftKind::CommanderDraft` existed for
+/// two phases while this decode still stopped at 3.
+fn draft_kind_wire_number(kind: DraftKind) -> u8 {
+    match kind {
+        DraftKind::Quick => 0,
+        DraftKind::Premier => 1,
+        DraftKind::Traditional => 2,
+        DraftKind::Sealed => 3,
+        // CR 903.13a: the fifth kind.
+        DraftKind::CommanderDraft => 4,
+        // The sixth kind. No CR: Winston Draft has no Comprehensive Rules
+        // section -- see `PackDistribution::SharedStackPiles`.
+        DraftKind::Winston => 5,
+    }
+}
+
+/// Decode, derived from the encode over `DraftKind::ALL` — one numeric table,
+/// not two. There is deliberately no arm that yields a `DraftKind` from an
+/// unmapped input: an unknown number is an `Err`, never a default.
+fn draft_kind_from_wire(kind: u8) -> Result<DraftKind, String> {
+    DraftKind::ALL
+        .into_iter()
+        .find(|k| draft_kind_wire_number(*k) == kind)
+        .ok_or_else(|| {
+            let known = DraftKind::ALL
+                .into_iter()
+                .map(|k| format!("{} ({k:?})", draft_kind_wire_number(k)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("unknown draft kind {kind}; expected one of {known}")
+        })
+}
+
 /// Create a multiplayer draft session. Used by the P2P host to initialize a
-/// Premier or Traditional draft with human + bot seats from either a Set pool
-/// or a custom Cube list.
+/// multiplayer draft of any `DraftKind` with a wire number, with human + bot
+/// seats from a Set pool, host-local Chaos candidate pools, or a custom Cube
+/// list. A shared-stack kind admits bot seats like any other; their turns are
+/// driven by `resolve_shared_stack_bot_turns`, which the host calls after each
+/// human decision.
 ///
 /// - `pool_input_json`: serialized `PoolInput` discriminated union
-///   (`{ "type": "Set" | "Cube", "data": { ... } }`)
+///   (`{ "type": "Set" | "Chaos" | "Cube", "data": { ... } }`)
 /// - `seats_json`: JSON array of SeatDescriptors
-/// - `kind`: 0=Quick, 1=Premier, 2=Traditional. The user-selected DraftKind
-///   flows through to `DraftConfig.kind` unchanged. Tournament match format
-///   (Bo1 for Premier, Bo3 for Traditional) is identical to set drafts.
+/// - `kind`: the wire number for a `DraftKind`. The mapping's single authority
+///   is `draft_kind_wire_number` — read it there rather than restating it here,
+///   which is what keeps a widening from leaving this list stale. Flows through
+///   to `DraftConfig.kind` unchanged. Tournament match format is identical to
+///   set drafts.
 /// - `seed`: RNG seed for deterministic pack generation
 /// - `draft_code`: unique room identifier
+/// - `difficulty`: the bot strength this pod's bot seats play at, through
+///   `map_difficulty` (0..=4, anything else is `Medium`). APPENDED LAST, and it
+///   must stay last: the client's call sites and their test mocks read this
+///   boundary positionally.
+///
+///   It is not cosmetic. `DIFFICULTY` is a per-thread `Cell` with no reset that
+///   outlives the draft that set it, and until now this entry point never wrote
+///   it — so a player who finished a Quick draft at `VeryHard` and then hosted
+///   a pod in the same tab got a `VeryHard` pod bot, silently, with no UI
+///   saying so. Every other entry point that creates a session writes this cell
+///   (`start_quick_draft`, `start_sealed_draft`, `start_quick_cube_draft`,
+///   `import_draft_session`); this one now does too, so the strength a pod
+///   plays at is the strength its host asked for.
 ///
 /// Stores the session in the same thread-local as Quick Draft (one active
 /// draft at a time per WASM instance). Returns the initial DraftPlayerView
 /// for seat 0.
+// The wasm boundary is positional by construction: `#[wasm_bindgen]` maps each
+// parameter to one JS argument, and the host's `.d.ts` and its tests read this
+// call by position. Bundling these eight into a struct would mean serializing a
+// payload across the boundary just to satisfy an arity lint, and would move
+// every existing argument — exactly what appending `difficulty` LAST avoids.
+#[allow(clippy::too_many_arguments)]
 #[wasm_bindgen]
 pub fn create_multiplayer_draft(
     pool_input_json: &str,
@@ -767,6 +1690,7 @@ pub fn create_multiplayer_draft(
     draft_code: &str,
     tournament_format: &str,
     pod_policy: &str,
+    difficulty: u8,
 ) -> Result<JsValue, JsValue> {
     let view = create_multiplayer_draft_inner(
         pool_input_json,
@@ -776,15 +1700,41 @@ pub fn create_multiplayer_draft(
         draft_code,
         tournament_format,
         pod_policy,
+        difficulty,
     )
     .map_err(|e| JsValue::from_str(&e))?;
     Ok(to_js(&view))
+}
+
+/// Return the host-only original cube multiset for the game launched after a
+/// draft. This deliberately bypasses `DraftPlayerView`: players and spectators
+/// must never receive undealt cube entries or their duplicate counts.
+#[wasm_bindgen]
+pub fn booster_pack_pool_for_game() -> Result<JsValue, JsValue> {
+    let pool = booster_pack_pool_for_game_inner().map_err(|error| JsValue::from_str(&error))?;
+    Ok(to_js(&pool))
+}
+
+fn booster_pack_pool_for_game_inner() -> Result<Option<Vec<String>>, String> {
+    with_draft_inner(|session| Ok(session.booster_pack_pool_for_game().map(<[String]>::to_vec)))
 }
 
 /// Pure-Rust core for `create_multiplayer_draft`. Returns a typed
 /// `DraftPlayerView` so this branch is reachable from `cargo test` without
 /// going through `js_sys::JSON::parse`. The WASM export wraps this with
 /// `to_js` and `JsValue::from_str` error mapping.
+///
+/// `difficulty` is written to the `DIFFICULTY` thread-local beside
+/// `session_cell::install` in each pool arm, exactly where `start_sealed_draft`
+/// and the other session-creating entry points write it — ON THE SUCCESS PATH
+/// ONLY. A failed creation leaves any previously installed session in place, so
+/// writing the cell earlier would hand THAT session's bots a strength nobody
+/// chose for it, which is the same cross-draft contamination this parameter
+/// exists to end.
+///
+/// The parameter list mirrors the export's one-for-one; see the note there for
+/// why the arity lint is allowed rather than designed around.
+#[allow(clippy::too_many_arguments)]
 fn create_multiplayer_draft_inner(
     pool_input_json: &str,
     seats_json: &str,
@@ -793,6 +1743,7 @@ fn create_multiplayer_draft_inner(
     draft_code: &str,
     tournament_format: &str,
     pod_policy: &str,
+    difficulty: u8,
 ) -> Result<draft_core::view::DraftPlayerView, String> {
     let pool_input: PoolInput = serde_json::from_str(pool_input_json)
         .map_err(|e| format!("Failed to parse pool input: {}", e))?;
@@ -800,22 +1751,9 @@ fn create_multiplayer_draft_inner(
     let seat_descriptors: Vec<SeatDescriptor> =
         serde_json::from_str(seats_json).map_err(|e| format!("Failed to parse seats: {}", e))?;
 
-    let draft_kind = match kind {
-        0 => DraftKind::Quick,
-        1 => DraftKind::Premier,
-        2 => DraftKind::Traditional,
-        _ => {
-            return Err("kind must be 0 (Quick), 1 (Premier), or 2 (Traditional)".to_string());
-        }
-    };
+    let draft_kind = draft_kind_from_wire(kind)?;
 
-    let tournament_format = match tournament_format {
-        "Swiss" => TournamentFormat::Swiss,
-        "SingleElimination" => TournamentFormat::SingleElimination,
-        _ => {
-            return Err("tournament_format must be Swiss or SingleElimination".to_string());
-        }
-    };
+    let tournament_format = parse_tournament_format(tournament_format)?;
 
     let pod_policy = match pod_policy {
         "Competitive" => PodPolicy::Competitive,
@@ -824,6 +1762,26 @@ fn create_multiplayer_draft_inner(
             return Err("pod_policy must be Competitive or Casual".to_string());
         }
     };
+
+    // This entry point hosts a draft for remote peers. It deliberately uses
+    // the public procedure range, not Quick Draft's local-cube allowance, so
+    // an arbitrary seat payload cannot allocate an unbounded remote pod.
+    let procedure = draft_kind.procedure();
+    let allowed = procedure.allowed_pod_size_range(tournament_format);
+    let pod_size = u8::try_from(seat_descriptors.len()).map_err(|_| {
+        format!(
+            "pod_size must be between {} and {}",
+            allowed.start(),
+            allowed.end()
+        )
+    })?;
+    if !procedure.allows_pod_size(tournament_format, pod_size) {
+        return Err(format!(
+            "pod_size must be between {} and {}",
+            allowed.start(),
+            allowed.end()
+        ));
+    }
 
     let seats: Vec<DraftSeat> = seat_descriptors
         .into_iter()
@@ -840,21 +1798,23 @@ fn create_multiplayer_draft_inner(
         .collect();
 
     match pool_input {
-        PoolInput::Set { set_pool_json } => {
-            let set_pool: LimitedSetPool = serde_json::from_str(&set_pool_json)
-                .map_err(|e| format!("Failed to parse set pool: {}", e))?;
-            let set_code = set_pool.code.clone();
+        PoolInput::Set(set_pool_input) => {
+            // The procedure table is the single authority for how many boosters
+            // this kind opens; the host's selection only decides which set fills
+            // each of them. Same contract as the single-player entry points.
+            let selection = ResolvedSetSelection::resolve(
+                set_pool_input.into_sequence()?,
+                Some(procedure.packs_per_player),
+            )?;
 
             let config = DraftConfig {
-                source: DraftSource::Set {
-                    code: set_code.clone(),
-                },
-                set_code,
+                set_code: selection.source.set_code(),
+                source: selection.source,
                 kind: draft_kind,
-                pod_size: seats.len() as u8,
-                cards_per_pack: 14,
-                pack_count: 3,
-                min_deck_size: 40,
+                pod_size,
+                cards_per_pack: selection.cards_per_pack,
+                pack_count: selection.pack_count,
+                min_deck_size: procedure.min_deck_size,
                 addable_cards: DeckAddableCards::standard_basics(),
                 rng_seed: seed as u64,
                 tournament_format,
@@ -863,15 +1823,54 @@ fn create_multiplayer_draft_inner(
             };
 
             let mut draft_session = DraftSession::new(config, seats, draft_code.to_string());
-            let pack_gen = PackGenerator::new(set_pool);
+            let pack_gen = selection.generator;
 
             session::apply(&mut draft_session, DraftAction::StartDraft, Some(&pack_gen))
                 .map_err(|e| format!("Failed to start draft: {}", e))?;
 
             let view = filter_for_player(&draft_session, 0);
 
-            DRAFT_SESSION.with(|cell| cell.set(Some(draft_session)));
+            session_cell::install(draft_session);
             PACK_GEN.with(|cell| cell.set(Some(pack_gen)));
+            DIFFICULTY.with(|cell| cell.set(map_difficulty(difficulty)));
+            RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(seed as u64))));
+
+            Ok(view)
+        }
+        PoolInput::Chaos(chaos_selection) => {
+            let selection = ResolvedChaosSelection::resolve(
+                chaos_selection,
+                pod_size,
+                procedure.packs_per_player,
+                seed as u64,
+            )?;
+
+            let config = DraftConfig {
+                set_code: selection.source.set_code(),
+                source: selection.source,
+                kind: draft_kind,
+                pod_size,
+                cards_per_pack: selection.cards_per_pack,
+                pack_count: selection.pack_count,
+                min_deck_size: procedure.min_deck_size,
+                addable_cards: DeckAddableCards::standard_basics(),
+                rng_seed: seed as u64,
+                tournament_format,
+                pod_policy,
+                spectator_visibility: SpectatorVisibility::default(),
+            };
+
+            let mut draft_session = DraftSession::new(config, seats, draft_code.to_string());
+            let pack_gen = selection.generator;
+
+            session::apply(&mut draft_session, DraftAction::StartDraft, Some(&pack_gen))
+                .map_err(|e| format!("Failed to start draft: {}", e))?;
+
+            let view = filter_for_player(&draft_session, 0);
+
+            session_cell::install(draft_session);
+            PACK_GEN.with(|cell| cell.set(Some(pack_gen)));
+            DIFFICULTY.with(|cell| cell.set(map_difficulty(difficulty)));
             RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(seed as u64))));
 
             Ok(view)
@@ -881,6 +1880,18 @@ fn create_multiplayer_draft_inner(
             cube_name,
             cube_draft_settings: settings,
         } => {
+            // A cube pool has no unopened-pack distribution, so an all-at-once
+            // kind cannot be run from one.
+            match draft_kind.procedure().distribution {
+                PackDistribution::AllAtOnce => {
+                    return Err("Sealed events require a Set pool".to_string());
+                }
+                // A shared stack is built by shuffling every opened pack
+                // together, and a cube source generates packs just as a set
+                // source does — so Winston-from-cube is permitted and this arm
+                // falls through with the pick-and-pass one.
+                PackDistribution::PickAndPass | PackDistribution::SharedStackPiles { .. } => {}
+            }
             let entries = parse_cube_list(&cube_list_text).map_err(|errors| {
                 format!(
                     "Failed to parse cube list: {}",
@@ -911,14 +1922,14 @@ fn create_multiplayer_draft_inner(
             })?;
 
             // pod_size from settings is overridden by seats.len() — MP authoritative source
-            let config = DraftConfig {
+            let config = enforce_procedure_minimum_deck_size(DraftConfig {
                 source: DraftSource::Cube {
                     id: "custom-cube".to_string(),
                     name: cube_name.clone(),
                 },
                 set_code: "custom-cube".to_string(),
                 kind: draft_kind,
-                pod_size: seats.len() as u8,
+                pod_size,
                 cards_per_pack: settings.cards_per_pack,
                 pack_count: settings.pack_count,
                 min_deck_size: settings.min_deck_size,
@@ -927,7 +1938,7 @@ fn create_multiplayer_draft_inner(
                 tournament_format,
                 pod_policy,
                 spectator_visibility: SpectatorVisibility::default(),
-            };
+            });
 
             let mut draft_session = DraftSession::new(config, seats, draft_code.to_string());
             let pack_source = CubePackSource::new(cards);
@@ -941,8 +1952,9 @@ fn create_multiplayer_draft_inner(
 
             let view = filter_for_player(&draft_session, 0);
 
-            DRAFT_SESSION.with(|cell| cell.set(Some(draft_session)));
+            session_cell::install(draft_session);
             PACK_GEN.with(|cell| cell.set(None));
+            DIFFICULTY.with(|cell| cell.set(map_difficulty(difficulty)));
             RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(seed as u64))));
 
             Ok(view)
@@ -954,7 +1966,7 @@ fn create_multiplayer_draft_inner(
 /// picks from connected guests.
 ///
 /// `action_json`: serialized DraftAction, e.g.:
-///   `{ "type": "Pick", "data": { "seat": 2, "card_instance_id": "abc-123" } }`
+///   `{ "type": "Pick", "data": { "seat": 2, "card_instance_ids": ["abc-123"] } }`
 ///
 /// Returns the list of DraftDeltas produced (serialized as a JS array).
 #[wasm_bindgen]
@@ -966,6 +1978,184 @@ pub fn apply_draft_action(action_json: &str) -> Result<JsValue, JsValue> {
         let deltas = session::apply(draft_session, action, None)
             .map_err(|e| JsValue::from_str(&format!("Draft action failed: {}", e)))?;
         Ok(to_js(&deltas))
+    })
+}
+
+/// The termination bound for one shared-stack bot run, DERIVED from the state
+/// rather than chosen, so it tracks the real board instead of a magic constant.
+///
+/// With `U` undrafted cards (main stack plus every pile) and `n` piles, the
+/// bound is `U * (n + 1) + 1`. The proof it comes from, read off
+/// `shared_stack::apply_shared_stack_decision`:
+///
+/// * `Phi = U * (n + 1) + (n - c)` is a non-negative integer (`c <= n - 1`, so
+///   `n - c >= 1`) and STRICTLY DECREASES on every applied decision. A `Take` or
+///   a final-pile `Decline` drops `U` by at least 1, costing at least `n + 1`,
+///   while `(n - c)` can rise by at most `n - 1`; a non-final `Decline` leaves
+///   `U` alone and drops `(n - c)` by exactly 1. So the loop terminates.
+/// * The `Err` branch is unreachable, by a tighter per-turn count: a turn's
+///   cursor starts at 0 and advances by exactly 1 per non-final `Decline`, which
+///   requires `cursor + 1 < n`, so a turn holds at most `n - 1` non-final
+///   declines plus exactly one turn-ender -- **at most `n` decisions per turn**.
+///   Every turn-ender drops `U` by at least 1 and the session leaves `Drafting`
+///   the instant `U` reaches 0, so there are at most `U` turns. Therefore
+///   `applied <= U * n < U * (n + 1) + 1`, with slack `U + 1`.
+///
+/// MEASURED, for scale: a 2-seat 90-card pod gives `U = 90`, `n = 3`, a bound of
+/// 361, a theoretical ceiling of 270 and 74-77 actual decisions; a 4-seat pod's
+/// longest consecutive bot run was 9 decisions against a bound of 720.
+///
+/// Returns 0 for a session with no shared stack -- there is nothing to drive,
+/// and the loop's own `break` handles that case before the bound is consulted.
+fn shared_stack_bot_turn_bound(session: &DraftSession) -> usize {
+    let Some(state) = session.shared_stack.as_ref() else {
+        return 0;
+    };
+    let undrafted = state.main_stack.len() + state.piles.iter().map(Vec::len).sum::<usize>();
+    undrafted
+        .saturating_mul(state.piles.len() + 1)
+        .saturating_add(1)
+}
+
+/// Drive every consecutive shared-stack turn that belongs to a bot seat, from
+/// whatever state the session is in, and stop at the first turn that does not.
+///
+/// A bot's turn is up to `pile_count` decisions and a 3-4 seat pod can have
+/// several bot turns back to back (MEASURED: the longest consecutive run in a
+/// 4-seat/3-bot pod was 9 decisions across three turns), so this re-reads
+/// `active_seat` every iteration. A one-decision-per-call driver would strand
+/// the pod mid-run.
+///
+/// `bound` is a parameter rather than an inline expression ONLY so
+/// `the_loop_fails_loudly_rather_than_spinning` can drive the failure branch
+/// without mutating the production arithmetic; the production caller passes
+/// [`shared_stack_bot_turn_bound`], computed once at entry from the state.
+///
+/// **Loud on violation, never silent.** Three distinct failures get three
+/// distinct `Err`s and none of them is a `break`:
+///
+/// * the bound trips -- an engine invariant broke, and the termination proof
+///   above says this is unreachable from any legal state;
+/// * `winston_decision` returns `None` for the active seat while drafting,
+///   which `some_decision_is_always_legal_for_the_active_seat_while_drafting`
+///   proves cannot happen, so it is a defect rather than a state;
+/// * `session::apply` refuses the decision -- the bot disagreed with the single
+///   legality authority, which `winston_decision_never_returns_a_refused_decision`
+///   says it cannot.
+///
+/// The `break`s are for the three LEGITIMATE exits only: the session is not
+/// drafting, it has no shared stack, or the active seat is human. A `break` on
+/// the bound would strand the pod on a bot's turn with no error anywhere.
+fn drive_shared_stack_bot_turns(
+    session: &mut DraftSession,
+    difficulty: AiDifficulty,
+    card_db: Option<&CardDatabase>,
+    bound: usize,
+) -> Result<Vec<DraftDelta>, String> {
+    let mut deltas = Vec::new();
+    let mut applied = 0usize;
+
+    while session.status == DraftStatus::Drafting {
+        let Some(state) = session.shared_stack.as_ref() else {
+            break;
+        };
+        let seat = state.active_seat;
+        if !matches!(
+            session.seats.get(usize::from(seat)),
+            Some(DraftSeat::Bot { .. })
+        ) {
+            break;
+        }
+
+        applied += 1;
+        if applied > bound {
+            return Err(format!(
+                "shared-stack bot loop exceeded its termination bound of {bound} decisions \
+                 (seat {seat}); the session's undrafted count is not decreasing"
+            ));
+        }
+
+        // THE ONLY INPUT the bot gets. Not the session, not the cell: the same
+        // projection the human seat across the table receives.
+        let view = filter_for_player(session, seat);
+        let (pile, decision) = bot_ai::winston_decision(&view, difficulty, card_db)
+            .ok_or_else(|| format!("no legal shared-stack decision for bot seat {seat}"))?;
+
+        deltas.extend(
+            session::apply(
+                session,
+                DraftAction::SharedStackDecision {
+                    seat,
+                    pile,
+                    decision,
+                },
+                None,
+            )
+            .map_err(|e| format!("bot seat {seat} decision refused: {e}"))?,
+        );
+    }
+
+    Ok(deltas)
+}
+
+/// Pure-Rust core for `resolve_shared_stack_bot_turns`, so the loop, its bound
+/// and its three `Err`s are reachable from `cargo test` without wasm-bindgen --
+/// the same `_inner` split `create_multiplayer_draft_inner` and
+/// `booster_pack_pool_for_game_inner` use.
+fn resolve_shared_stack_bot_turns_inner() -> Result<Vec<DraftDelta>, String> {
+    let difficulty = DIFFICULTY.with(|cell| cell.get());
+    with_draft_mut_inner(|session| {
+        let bound = shared_stack_bot_turn_bound(session);
+        CARD_DB.with(|cell| {
+            let db_borrow = cell.borrow();
+            drive_shared_stack_bot_turns(session, difficulty, db_borrow.as_ref(), bound)
+        })
+    })
+}
+
+/// Resolve every consecutive shared-stack turn owned by a bot seat, and return
+/// the `DraftDelta`s produced (an empty array when the active seat is human, the
+/// draft is over, or the session has no shared stack).
+///
+/// The host calls this after applying a human seat's decision and after starting
+/// a pod whose first seat is a bot. It is a WASM export because the loop, its
+/// bound and its termination proof are engine concerns: the client calls it and
+/// renders what comes back, and computes nothing.
+#[wasm_bindgen]
+pub fn resolve_shared_stack_bot_turns() -> Result<JsValue, JsValue> {
+    let deltas = resolve_shared_stack_bot_turns_inner().map_err(|e| JsValue::from_str(&e))?;
+    Ok(to_js(&deltas))
+}
+
+/// The decision the ENGINE would apply for a seat whose turn must be resolved
+/// without that seat choosing — a pick-timer expiry, or a disconnect.
+///
+/// `None` when there is no shared stack, or when the seat has no legal move
+/// (which for the ACTIVE seat while drafting is unreachable, and proved so by
+/// `some_decision_is_always_legal_for_the_active_seat_while_drafting`).
+///
+/// WHY THIS EXISTS AS AN EXPORT. The host used to scan the published
+/// `legality` vector itself — `legality.find(entry => entry.refusal === null)`
+/// — and take the first entry with no refusal. That is the same algorithm
+/// `shared_stack::forced_decision` runs, but over a DIFFERENT ordering source:
+/// the engine folds `SharedStackPileDecision::ALL` in declaration order, while
+/// the client folded whatever order the view happened to serialize. The two
+/// agreed by coincidence rather than by construction, and a reordering of
+/// either would have silently changed which move a timed-out seat makes.
+///
+/// Choosing a rules outcome is the reducer's job. The host may ASK for the
+/// forced resolution — that is a timeout, which is a host concern — but the
+/// answer comes from here, and the host only dispatches it through the ordinary
+/// decision path so the timed-out turn is persisted, acknowledged, broadcast and
+/// re-armed by exactly the code a player-driven one is.
+#[wasm_bindgen]
+pub fn shared_stack_forced_decision(seat_index: u8) -> Result<JsValue, JsValue> {
+    with_draft(|session| {
+        let decision = session
+            .shared_stack
+            .as_ref()
+            .and_then(|state| draft_core::shared_stack::forced_decision(state, seat_index));
+        to_js(&decision)
     })
 }
 
@@ -987,16 +2177,518 @@ pub fn get_draft_status() -> Result<JsValue, JsValue> {
 }
 
 #[cfg(test)]
-mod pool_input_tests {
+mod shared_stack_bot_loop_tests {
     use super::*;
+    use draft_core::pack_source::FixturePackSource;
+    use engine::types::player::PlayerId;
+
+    const CARDS_PER_PACK: u8 = 15;
+
+    /// A pod of `pod_size` seats where `bot_seats` are bots, started and dealt.
+    ///
+    /// `FixturePackSource`'s cards carry no colours and no database face, which
+    /// is deliberate here: these tests are about the LOOP -- its span, its
+    /// bound and its failure mode -- and the valuation is exercised by
+    /// `bot_ai`'s own tests against a real card database.
+    fn started_pod(pod_size: u8, bot_seats: &[u8], rng_seed: u64) -> DraftSession {
+        let config = DraftConfig {
+            source: DraftSource::single_set("TST".to_string()),
+            set_code: "TST".to_string(),
+            kind: DraftKind::Winston,
+            pod_size,
+            cards_per_pack: CARDS_PER_PACK,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        let seats: Vec<DraftSeat> = (0..pod_size)
+            .map(|i| {
+                if bot_seats.contains(&i) {
+                    DraftSeat::Bot {
+                        name: format!("Bot {i}"),
+                    }
+                } else {
+                    DraftSeat::Human {
+                        player_id: PlayerId(i),
+                        display_name: format!("Player {i}"),
+                    }
+                }
+            })
+            .collect();
+        let mut session = DraftSession::new(config, seats, "WIN-LOOP".to_string());
+        session::apply(
+            &mut session,
+            DraftAction::StartDraft,
+            Some(&FixturePackSource {
+                set_code: "TST".to_string(),
+                cards_per_pack: CARDS_PER_PACK,
+            }),
+        )
+        .expect("a Winston pod with bot seats starts");
+        session
+    }
+
+    fn active_seat(session: &DraftSession) -> u8 {
+        session
+            .shared_stack
+            .as_ref()
+            .expect("a live pile turn")
+            .active_seat
+    }
+
+    /// Hand the human seat's turn back to the bots, so the fixture is the shape
+    /// production is in when the host calls the driver: a human decision has
+    /// just been applied and the next seat is a bot.
+    fn end_the_humans_turn(session: &mut DraftSession) {
+        let seat = active_seat(session);
+        let pile = session
+            .shared_stack
+            .as_ref()
+            .expect("a live pile turn")
+            .cursor;
+        session::apply(
+            session,
+            DraftAction::SharedStackDecision {
+                seat,
+                pile,
+                decision: SharedStackPileDecision::Take,
+            },
+            None,
+        )
+        .expect("taking a dealt pile is legal at turn start");
+    }
+
+    fn decisions_in(deltas: &[DraftDelta]) -> Vec<u8> {
+        deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                DraftDelta::SharedStackDecisionApplied { seat, .. } => Some(*seat),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// One call spans EVERY consecutive bot turn, not one decision and not one
+    /// turn: a 4-seat pod with three bots hands the driver several turns back to
+    /// back, and a one-decision-per-call driver would strand the pod.
+    ///
+    /// Driven through `resolve_shared_stack_bot_turns_inner`, the production
+    /// core, so the thread-local read and the bound derivation are covered too.
+    #[test]
+    fn the_loop_spans_consecutive_bot_turns_and_terminates() {
+        let mut session = started_pod(4, &[1, 2, 3], 20_260_913);
+        if active_seat(&session) == 0 {
+            end_the_humans_turn(&mut session);
+        }
+        assert_ne!(active_seat(&session), 0, "the fixture must start on a bot");
+
+        session_cell::install(session);
+        let deltas = resolve_shared_stack_bot_turns_inner().expect("the loop runs");
+        let seats = decisions_in(&deltas);
+
+        assert!(
+            seats.len() > 3,
+            "one call must cross a turn boundary; it applied {} decisions",
+            seats.len()
+        );
+        let mut distinct: Vec<u8> = seats.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert!(
+            distinct.len() >= 2,
+            "the run must span more than one seat, got {distinct:?}"
+        );
+        assert!(
+            !seats.contains(&0),
+            "the driver must never act for the human seat"
+        );
+
+        // It STOPPED, and stopped for the right reason: the human's turn.
+        let stopped_on_human = session_cell::with_installed(|session| {
+            session.status != DraftStatus::Drafting || active_seat(session) == 0
+        });
+        assert!(stopped_on_human);
+
+        // A second call from the same state produces nothing at all.
+        let again = resolve_shared_stack_bot_turns_inner().expect("a second call is a no-op");
+        assert!(decisions_in(&again).is_empty());
+
+        session_cell::clear();
+    }
+
+    /// The bound trip is an `Err`, never a `break` and never a hang. A silent
+    /// `break` would strand the pod mid-run with no error anywhere.
+    #[test]
+    fn the_loop_fails_loudly_rather_than_spinning() {
+        let mut session = started_pod(4, &[1, 2, 3], 20_260_913);
+        if active_seat(&session) == 0 {
+            end_the_humans_turn(&mut session);
+        }
+
+        // The bound is DERIVED: `U * (n + 1) + 1` over the undrafted cards.
+        let state = session.shared_stack.as_ref().expect("a live pile turn");
+        let undrafted = state.main_stack.len() + state.piles.iter().map(Vec::len).sum::<usize>();
+        let piles = state.piles.len();
+        assert_eq!(
+            shared_stack_bot_turn_bound(&session),
+            undrafted * (piles + 1) + 1
+        );
+
+        let mut starved = session.clone();
+        let error = drive_shared_stack_bot_turns(&mut starved, AiDifficulty::Medium, None, 1)
+            .expect_err("a bound of 1 must trip on a multi-decision run");
+        assert!(
+            error.contains("termination bound"),
+            "the error must name the bound: {error}"
+        );
+
+        // Paired positive: the SAME state runs clean under the derived bound,
+        // so the `Err` above is the bound tripping and not a broken fixture.
+        let mut healthy = session;
+        let bound = shared_stack_bot_turn_bound(&healthy);
+        let deltas = drive_shared_stack_bot_turns(&mut healthy, AiDifficulty::Medium, None, bound)
+            .expect("the derived bound is not reachable from a legal state");
+        assert!(decisions_in(&deltas).len() > 1);
+    }
+}
+
+#[cfg(test)]
+mod llm_draft_resolution_tests {
+    use super::*;
+    use draft_core::pack_source::FixturePackSource;
+    use engine::types::player::PlayerId;
+
+    /// A Quick pod (seat 0 human, seats 1..8 bots), started and dealt.
+    fn started_quick_pod() -> DraftSession {
+        let config = DraftConfig {
+            source: DraftSource::single_set("TST".to_string()),
+            set_code: "TST".to_string(),
+            kind: DraftKind::Quick,
+            pod_size: 8,
+            cards_per_pack: 15,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 20_261_004,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        let seats: Vec<DraftSeat> = (0..8)
+            .map(|i| {
+                if i == 0 {
+                    DraftSeat::Human {
+                        player_id: PlayerId(0),
+                        display_name: "Player".to_string(),
+                    }
+                } else {
+                    DraftSeat::Bot {
+                        name: format!("Bot {i}"),
+                    }
+                }
+            })
+            .collect();
+        let mut session = DraftSession::new(config, seats, "LLM-RES".to_string());
+        session::apply(
+            &mut session,
+            DraftAction::StartDraft,
+            Some(&FixturePackSource {
+                set_code: "TST".to_string(),
+                cards_per_pack: 15,
+            }),
+        )
+        .expect("a Quick pod starts");
+        session
+    }
+
+    /// A well-formed OpenAI-compatible reply choosing option `choice`.
+    fn reply_choosing(choice: usize) -> String {
+        let content = format!(r#"{{"choice": {choice}, "reason": "test"}}"#);
+        serde_json::json!({ "choices": [{ "message": { "role": "assistant", "content": content } }] })
+            .to_string()
+    }
+
+    /// The request side's own recipe: the seat's projected view, rendered into a
+    /// prompt whose fingerprint the reply will carry back.
+    fn issued_fingerprint(session: &DraftSession, seat: u8) -> String {
+        let view = filter_for_player(session, seat);
+        phase_llm::build_draft_pick_prompt(
+            seat,
+            &view,
+            AiDifficulty::Medium,
+            None,
+            &phase_llm::draft_decision::set_names_from_pairs(Vec::new()),
+        )
+        .expect("a dealt pack renders")
+        .fingerprint
+    }
+
+    fn response(session: &DraftSession, seat: u8, choice: usize) -> LlmDraftResponse {
+        LlmDraftResponse {
+            seat,
+            fingerprint: issued_fingerprint(session, seat),
+            provider: "OpenAiCompatible".to_string(),
+            status: 200,
+            body: reply_choosing(choice),
+        }
+    }
+
+    /// A set draft presents each pack by rarity, so the order the model reads
+    /// its options in is not the order the session stores the pack in. A reply
+    /// to a request this bridge issued must resolve against the order the
+    /// prompt used: refused as stale, or bound to a different card, would mean
+    /// the LLM never drafts for a set pod at all.
+    #[test]
+    fn a_reply_resolves_against_the_pack_in_the_order_the_prompt_presented() {
+        let mut session = started_quick_pod();
+        // Store seat 1's pack in the reverse of its presented (rarity) order.
+        session.current_pack[1]
+            .as_mut()
+            .expect("seat 1 holds a pack")
+            .0
+            .reverse();
+        let view_pack = filter_for_player(&session, 1)
+            .current_pack
+            .expect("seat 1 is shown its pack");
+        let raw_pack = session.current_pack[1].as_ref().unwrap().0.clone();
+        assert_ne!(
+            view_pack.iter().map(|c| &c.instance_id).collect::<Vec<_>>(),
+            raw_pack.iter().map(|c| &c.instance_id).collect::<Vec<_>>(),
+            "fixture must make the presented order differ from the stored order"
+        );
+
+        let selection = resolve_llm_draft_pick(&session, &response(&session, 1, 0))
+            .expect("a reply to an issued request is not stale");
+
+        assert_eq!(
+            selection.card_instance_ids,
+            vec![view_pack[0].instance_id.clone()],
+            "option 0 is the first card the model was shown"
+        );
+    }
 
     #[test]
+    fn a_reply_for_a_pack_that_has_moved_on_is_refused_as_stale() {
+        let mut session = started_quick_pod();
+        let stale = response(&session, 1, 0);
+        // The seat's pack changes under the in-flight request.
+        session.current_pack[1].as_mut().unwrap().0.pop();
+
+        assert!(matches!(
+            resolve_llm_draft_pick(&session, &stale),
+            Err(phase_llm::LlmError::StaleDecision)
+        ));
+    }
+
+    #[test]
+    fn an_emptied_pack_is_refused_rather_than_resolved() {
+        let mut session = started_quick_pod();
+        let reply = response(&session, 1, 0);
+        session.current_pack[1].as_mut().unwrap().0.clear();
+
+        assert!(matches!(
+            resolve_llm_draft_pick(&session, &reply),
+            Err(phase_llm::LlmError::StaleDecision)
+        ));
+    }
+
+    #[test]
+    fn a_reply_naming_the_human_seat_is_refused() {
+        let session = started_quick_pod();
+        assert!(matches!(
+            resolve_llm_draft_pick(&session, &response(&session, 0, 0)),
+            Err(phase_llm::LlmError::StaleDecision)
+        ));
+    }
+
+    #[test]
+    fn issued_rarity_ordered_request_selects_the_specific_bot_pool_card() {
+        let mut start = started_quick_pod();
+        start.current_pack[1].as_mut().unwrap().0.reverse();
+        let projected = filter_for_player(&start, 1).current_pack.unwrap();
+        let stored = &start.current_pack[1].as_ref().unwrap().0;
+        assert_ne!(projected[0].instance_id, stored[0].instance_id);
+        let human_id = start.current_pack[0].as_ref().unwrap().0[0]
+            .instance_id
+            .clone();
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(42))));
+        let mut ordinary = start.clone();
+        apply_human_pick_and_resolve_bots(&mut ordinary, human_id.clone()).unwrap();
+        let ordinary_id = ordinary.pools[1][0].instance_id.clone();
+        let (choice, chosen) = projected
+            .iter()
+            .enumerate()
+            .find(|(_, card)| card.instance_id != ordinary_id)
+            .expect("the displayed pack offers a non-heuristic option");
+
+        session_cell::install(start);
+        RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(42))));
+        let requests = build_llm_draft_pick_requests_inner(
+            r#"{"provider":"OpenAiCompatible","baseUrl":"https://provider.test/v1","model":"test"}"#,
+            "{}",
+        )
+        .unwrap();
+        assert_eq!(requests.len(), 7);
+        let issued = requests.iter().find(|request| request.seat == 1).unwrap();
+        assert_eq!(issued.option_count, projected.len());
+        assert_eq!(issued.required_pick_count, 1);
+        assert!(issued
+            .request
+            .body
+            .contains(&format!("[{choice}] {}", chosen.name)));
+        let wire = serde_json::to_value(issued).unwrap();
+        assert_eq!(wire["seat"].as_u64(), Some(1));
+        assert_eq!(
+            wire["fingerprint"].as_str(),
+            Some(issued.fingerprint.as_str())
+        );
+        assert_eq!(wire["optionCount"].as_u64(), Some(projected.len() as u64));
+        assert_eq!(wire["requiredPickCount"].as_u64(), Some(1));
+        assert_eq!(wire["request"]["method"].as_str(), Some("POST"));
+        let responses = serde_json::json!([{
+            "seat": 1,
+            "fingerprint": issued.fingerprint,
+            "provider": "OpenAiCompatible",
+            "status": 200,
+            "body": reply_choosing(choice),
+        }]);
+        let (view, outcomes) =
+            submit_pick_with_llm_bot_picks_inner(&human_id, &responses.to_string())
+                .expect("the issued response submits through the installed draft");
+        assert!(outcomes[0].used);
+        assert!(view.pool.iter().any(|card| card.instance_id == human_id));
+        session_cell::with_installed(|session| {
+            assert_eq!(session.pools[1][0].instance_id, chosen.instance_id);
+            assert_ne!(session.pools[1][0].instance_id, ordinary_id);
+            assert!(session.pools[0]
+                .iter()
+                .any(|card| card.instance_id == human_id));
+        });
+        session_cell::clear();
+    }
+
+    #[test]
+    fn submit_core_refuses_human_and_stale_responses_while_valid_bot_and_fallback_advance() {
+        let start = started_quick_pod();
+        let human_id = start.current_pack[0].as_ref().unwrap().0[0]
+            .instance_id
+            .clone();
+        session_cell::install(start);
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(43))));
+        let requests = build_llm_draft_pick_requests_inner(
+            r#"{"provider":"OpenAiCompatible","baseUrl":"https://provider.test/v1","model":"test"}"#,
+            "{}",
+        )
+        .unwrap();
+        assert!(requests.iter().all(|request| request.seat != 0));
+        let stale = requests.iter().find(|request| request.seat == 1).unwrap();
+        let valid = requests.iter().find(|request| request.seat == 2).unwrap();
+        session_cell::with_installed_mut(|session| {
+            session.current_pack[1].as_mut().unwrap().0.pop();
+        });
+        let responses = serde_json::json!([
+            { "seat": 0, "fingerprint": "forged", "provider": "OpenAiCompatible", "status": 200, "body": reply_choosing(0) },
+            { "seat": 1, "fingerprint": stale.fingerprint, "provider": "OpenAiCompatible", "status": 200, "body": reply_choosing(0) },
+            { "seat": 2, "fingerprint": valid.fingerprint, "provider": "OpenAiCompatible", "status": 200, "body": reply_choosing(0) },
+        ]);
+        let (view, outcomes) =
+            submit_pick_with_llm_bot_picks_inner(&human_id, &responses.to_string())
+                .expect("invalid LLM responses fall back without blocking the human pick");
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|outcome| outcome.used)
+                .collect::<Vec<_>>(),
+            vec![false, false, true]
+        );
+        assert_eq!(view.pool.len(), 1);
+        session_cell::with_installed(|session| {
+            assert_eq!(session.pools[0].len(), 1);
+            assert_eq!(session.pools[0][0].instance_id, human_id);
+            assert_eq!(session.pools[1].len(), 1);
+            assert_eq!(session.pools[2].len(), 1);
+        });
+        session_cell::clear();
+    }
+}
+
+#[cfg(test)]
+mod pool_input_tests {
+    use super::*;
+    use draft_core::validation::LimitedDeckError;
+
+    #[test]
+    fn deck_submission_message_includes_validation_details() {
+        let message = deck_submission_message(DraftError::ValidationFailed {
+            errors: vec![LimitedDeckError::NotInPool {
+                name: "Watery Grave".to_string(),
+            }],
+        });
+
+        assert_eq!(message, "card 'Watery Grave' is not in the drafted pool");
+    }
+
+    /// The live pod spelling: pools plus the pack-ordered sequence naming which
+    /// of them fills each booster — the same shape the single-player entry
+    /// points take.
+    #[test]
     fn pool_input_set_round_trip() {
-        let json = r#"{"type":"Set","data":{"set_pool_json":"{\"code\":\"foo\"}"}}"#;
+        let json = r#"{"type":"Set","data":{
+            "pools":[{"code":"foo","name":"Foo","release_date":null,
+                      "pack_variants":[],"pack_variants_total_weight":0,
+                      "sheets":{},"prints":[],"basic_lands":[]}],
+            "sequence":["foo","foo","foo"]}}"#;
         let parsed: PoolInput = serde_json::from_str(json).unwrap();
         match parsed {
-            PoolInput::Set { set_pool_json } => {
-                assert_eq!(set_pool_json, "{\"code\":\"foo\"}");
+            PoolInput::Set(input) => {
+                let sequence = input.into_sequence().expect("already a sequence");
+                assert_eq!(sequence.sequence, vec!["foo".to_string(); 3]);
+                assert_eq!(sequence.pools.len(), 1);
+            }
+            _ => panic!("expected Set"),
+        }
+    }
+
+    #[test]
+    fn pool_input_chaos_carries_candidates_without_assignments() {
+        let json = r#"{"type":"Chaos","data":{"pools":[],"candidate_codes":["foo"]}}"#;
+        let parsed: PoolInput = serde_json::from_str(json).unwrap();
+        match parsed {
+            PoolInput::Chaos(input) => {
+                assert_eq!(input.candidate_codes, vec!["foo".to_string()]);
+                assert!(input.pools.is_empty());
+            }
+            _ => panic!("expected Chaos"),
+        }
+    }
+
+    /// The pre-multi-set spelling one pod host may still have persisted:
+    /// a single serialized pool, promoted to the one-element sequence it meant.
+    #[test]
+    fn pool_input_set_accepts_the_legacy_single_pool() {
+        let pool = r#"{"code":"foo","name":"Foo","release_date":null,
+            "pack_variants":[],"pack_variants_total_weight":0,
+            "sheets":{},"prints":[],"basic_lands":[]}"#;
+        let json = serde_json::json!({
+            "type": "Set",
+            "data": { "set_pool_json": pool }
+        })
+        .to_string();
+
+        let parsed: PoolInput = serde_json::from_str(&json).unwrap();
+        match parsed {
+            PoolInput::Set(input) => {
+                let sequence = input.into_sequence().expect("the legacy pool parses");
+                assert_eq!(sequence.sequence, vec!["foo".to_string()]);
+                assert_eq!(sequence.pools.len(), 1);
             }
             _ => panic!("expected Set"),
         }
@@ -1032,6 +2724,219 @@ mod pool_input_tests {
             }
             _ => panic!("expected Cube"),
         }
+    }
+}
+
+#[cfg(test)]
+mod set_selection_tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    fn declared_pool(code: &str, variant_sizes: &[u8]) -> LimitedSetPool {
+        LimitedSetPool {
+            code: code.to_string(),
+            name: format!("{code} Set"),
+            release_date: None,
+            pack_variants: variant_sizes
+                .iter()
+                .map(|size| draft_core::set_pool::PackVariant {
+                    contents: vec![draft_core::set_pool::PackSlot {
+                        slot: "common".to_string(),
+                        count: *size,
+                        choices: Vec::new(),
+                    }],
+                    weight: 1,
+                })
+                .collect(),
+            pack_variants_total_weight: variant_sizes.len() as u32,
+            sheets: BTreeMap::new(),
+            prints: Vec::new(),
+            basic_lands: Vec::new(),
+        }
+    }
+
+    /// A minimal `LimitedSetPool` whose single variant holds `size` commons.
+    fn pool_json(code: &str, size: u8) -> String {
+        let cards: Vec<String> = (0..40)
+            .map(|i| {
+                format!(
+                    r#"{{"name":"{code} Card {i}","set_code":"{code}","collector_number":"{n}","rarity":"common","weight":1}}"#,
+                    n = i + 1
+                )
+            })
+            .collect();
+        format!(
+            r#"{{
+                "code": "{code}",
+                "name": "{code} Set",
+                "release_date": null,
+                "pack_variants": [{{
+                    "contents": [{{
+                        "slot": "common",
+                        "count": {size},
+                        "choices": [{{ "sheet": "common", "weight": 1 }}]
+                    }}],
+                    "weight": 1
+                }}],
+                "pack_variants_total_weight": 1,
+                "sheets": {{
+                    "common": {{
+                        "cards": [{cards}],
+                        "total_weight": 40,
+                        "foil": false,
+                        "balance_colors": false
+                    }}
+                }},
+                "prints": [],
+                "basic_lands": []
+            }}"#,
+            cards = cards.join(",")
+        )
+    }
+
+    fn selection_json(pools: &[(&str, u8)], sequence: &[&str]) -> String {
+        let pools: Vec<String> = pools
+            .iter()
+            .map(|(code, size)| pool_json(code, *size))
+            .collect();
+        let sequence: Vec<String> = sequence.iter().map(|c| format!("\"{c}\"")).collect();
+        format!(
+            r#"{{ "pools": [{}], "sequence": [{}] }}"#,
+            pools.join(","),
+            sequence.join(",")
+        )
+    }
+
+    #[test]
+    fn a_selection_sets_the_pack_count_from_its_sequence_and_repeats_sets() {
+        let selection = ResolvedSetSelection::parse(
+            &selection_json(&[("AAA", 15), ("BBB", 14)], &["AAA", "BBB", "AAA"]),
+            None,
+        )
+        .expect("both named sets have pool data");
+
+        assert_eq!(selection.pack_count, 3);
+        // The nominal size follows pack 1; per-pack sizes are recorded on the
+        // session from the packs the generator produces.
+        assert_eq!(selection.cards_per_pack, 15);
+        assert_eq!(
+            selection.source,
+            DraftSource::Set {
+                layout: SetLayout::UniformByRound {
+                    codes: vec!["AAA".to_string(), "BBB".to_string(), "AAA".to_string()],
+                },
+            }
+        );
+        assert_eq!(selection.source.set_code(), "AAA+BBB");
+    }
+
+    #[test]
+    fn chaos_preflight_checks_every_selectable_pool_and_each_variant_shape() {
+        let mismatch = preflight_chaos_pools(
+            &[declared_pool("AAA", &[15]), declared_pool("BBB", &[14])],
+            &["AAA".to_string(), "BBB".to_string()],
+        )
+        .expect_err("all selectable Chaos pools must share a total");
+        assert!(mismatch.contains("BBB"), "unexpected error: {mismatch}");
+
+        let variable =
+            preflight_chaos_pools(&[declared_pool("AAA", &[15, 14])], &["AAA".to_string()])
+                .expect_err("variable MTGJSON variants are invalid for Chaos");
+        assert!(
+            variable.contains("no single MTGJSON pack size"),
+            "unexpected error: {variable}"
+        );
+
+        assert_eq!(
+            preflight_chaos_pools(
+                &[declared_pool("AAA", &[15]), declared_pool("BBB", &[15])],
+                &["AAA".to_string(), "BBB".to_string()],
+            )
+            .unwrap(),
+            (vec!["AAA".to_string(), "BBB".to_string()], 15)
+        );
+    }
+
+    #[test]
+    fn private_chaos_construction_persists_deterministic_assignments() {
+        let first = ResolvedChaosSelection::resolve(
+            ChaosPackSelection {
+                pools: vec![declared_pool("AAA", &[15]), declared_pool("BBB", &[15])],
+                candidate_codes: vec!["AAA".to_string(), "BBB".to_string()],
+            },
+            2,
+            3,
+            42,
+        )
+        .unwrap();
+        let replay = ResolvedChaosSelection::resolve(
+            ChaosPackSelection {
+                pools: vec![declared_pool("AAA", &[15]), declared_pool("BBB", &[15])],
+                candidate_codes: vec!["AAA".to_string(), "BBB".to_string()],
+            },
+            2,
+            3,
+            42,
+        )
+        .unwrap();
+
+        assert_eq!(first.source, replay.source);
+        assert!(matches!(
+            first.source,
+            DraftSource::Set {
+                layout: SetLayout::Chaos { assignments, .. }
+            } if assignments.len() == 2 && assignments.iter().all(|rounds| rounds.len() == 3)
+        ));
+    }
+
+    #[test]
+    fn a_selection_naming_a_set_it_did_not_supply_is_rejected() {
+        let error =
+            ResolvedSetSelection::parse(&selection_json(&[("AAA", 15)], &["AAA", "MISSING"]), None)
+                .err()
+                .expect("the sequence names a set with no pool");
+
+        assert!(error.contains("MISSING"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn an_empty_selection_is_rejected() {
+        assert!(ResolvedSetSelection::parse(&selection_json(&[("AAA", 15)], &[]), None).is_err());
+    }
+
+    /// A fixed-length event opens its own booster count regardless of how many
+    /// sets the selection names. Naming fewer repeats the last entry, so the
+    /// one-element single-set shorthand still fills all six; naming MORE would
+    /// silently drop boosters, so it is refused.
+    #[test]
+    fn sealed_opens_six_boosters_from_a_shorter_or_exact_selection() {
+        let one = selection_json(&[("AAA", 15)], &["AAA"]);
+        let selection = ResolvedSetSelection::parse(&one, Some(SEALED_PACK_COUNT))
+            .expect("a one-element sequence fills every booster");
+        assert_eq!(selection.pack_count, SEALED_PACK_COUNT);
+        assert_eq!(
+            selection.source.set_code_for_pack(SEALED_PACK_COUNT - 1),
+            "AAA"
+        );
+
+        let six = selection_json(
+            &[("AAA", 15), ("BBB", 14)],
+            &["AAA", "AAA", "AAA", "BBB", "BBB", "BBB"],
+        );
+        let selection = ResolvedSetSelection::parse(&six, Some(SEALED_PACK_COUNT))
+            .expect("six boosters is a valid sealed selection");
+        assert_eq!(selection.pack_count, SEALED_PACK_COUNT);
+        assert_eq!(selection.source.set_code_for_pack(5), "BBB");
+
+        let seven = selection_json(
+            &[("AAA", 15)],
+            &["AAA", "AAA", "AAA", "AAA", "AAA", "AAA", "AAA"],
+        );
+        let error = ResolvedSetSelection::parse(&seven, Some(SEALED_PACK_COUNT))
+            .err()
+            .expect("seven sets name a booster sealed never opens");
+        assert!(error.contains('7'), "unexpected error: {error}");
     }
 }
 
@@ -1091,10 +2996,483 @@ mod create_multiplayer_draft_tests {
     }
 
     fn clear_state() {
-        DRAFT_SESSION.with(|cell| cell.set(None));
+        session_cell::clear();
         PACK_GEN.with(|cell| cell.set(None));
         RNG.with(|cell| cell.set(None));
         CARD_DB.with(|cell| *cell.borrow_mut() = None);
+    }
+
+    fn persisted_premier_session(layout: SetLayout) -> DraftSession {
+        let source = DraftSource::Set { layout };
+        let config = DraftConfig {
+            set_code: source.set_code(),
+            source,
+            kind: DraftKind::Premier,
+            pod_size: 8,
+            cards_per_pack: 14,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 42,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        let seats = (0..8)
+            .map(|seat| DraftSeat::Human {
+                player_id: engine::types::player::PlayerId(seat),
+                display_name: format!("Player {seat}"),
+            })
+            .collect();
+        DraftSession::new(config, seats, "persisted-draft".to_string())
+    }
+
+    fn colored_spell(name: &str, color: &str) -> DraftCardInstance {
+        DraftCardInstance {
+            instance_id: format!("{name}-id"),
+            name: name.to_string(),
+            set_code: "TST".to_string(),
+            collector_number: "1".to_string(),
+            rarity: "common".to_string(),
+            colors: vec![color.to_string()],
+            cmc: 1,
+            type_line: "Creature".to_string(),
+            draft_effect: None,
+        }
+    }
+
+    #[test]
+    fn suggest_lands_for_seat_uses_the_requested_seat_pool() {
+        clear_state();
+        let mut session = persisted_premier_session(SetLayout::UniformByRound {
+            codes: vec!["TST".to_string()],
+        });
+        session.pools[0] = vec![colored_spell("Host Blue", "U")];
+        session.pools[1] = vec![colored_spell("Guest Red", "R")];
+        session_cell::install(session);
+
+        let lands = suggest_lands_for_seat_inner(1, r#"["Guest Red"]"#)
+            .expect("seat-one suggestion should succeed");
+        assert_eq!(lands.get("Mountain"), Some(&18));
+        assert!(!lands.contains_key("Island"));
+
+        clear_state();
+    }
+
+    #[test]
+    fn suggest_lands_for_seat_parses_before_accessing_the_session() {
+        clear_state();
+        let error = suggest_lands_for_seat_inner(1, "not JSON")
+            .expect_err("malformed spells must be rejected");
+        assert!(
+            error.contains("Failed to parse spells"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !error.contains("Draft not initialized"),
+            "parse must precede session access"
+        );
+    }
+
+    #[test]
+    fn suggest_lands_for_seat_rejects_a_missing_pool() {
+        clear_state();
+        let session = persisted_premier_session(SetLayout::UniformByRound {
+            codes: vec!["TST".to_string()],
+        });
+        session_cell::install(session);
+
+        let error =
+            suggest_lands_for_seat_inner(8, "[]").expect_err("out-of-range seat must be rejected");
+        assert!(
+            error.contains("Seat 8 has no pool"),
+            "unexpected error: {error}"
+        );
+
+        clear_state();
+    }
+
+    #[test]
+    fn import_accepts_persisted_chaos_only_through_a_redacted_player_view() {
+        clear_state();
+
+        let uniform = persisted_premier_session(SetLayout::UniformByRound {
+            codes: vec!["TST".to_string()],
+        });
+        let uniform_json = serde_json::to_string(&uniform).expect("serialize uniform snapshot");
+        assert!(
+            restorable_draft_session_from_json(&uniform_json).is_ok(),
+            "existing Uniform snapshots must continue to restore"
+        );
+
+        let chaos = persisted_premier_session(SetLayout::Chaos {
+            candidate_codes: vec!["TST".to_string()],
+            assignments: vec![vec!["TST".to_string(); 3]; 8],
+        });
+        let chaos_json = serde_json::to_string(&chaos).expect("serialize Chaos snapshot");
+        let restored = restorable_draft_session_from_json(&chaos_json)
+            .expect("redacted player views make persisted Chaos snapshots restorable");
+        let view = filter_for_player(&restored, 0);
+
+        let serialized = serde_json::to_value(view).expect("serialize redacted view");
+        assert!(
+            serialized
+                .pointer("/source/data/layout/Chaos/assignments")
+                .is_none(),
+            "a player view must never serialize the host-only assignments"
+        );
+        assert_eq!(
+            serialized.pointer("/source/data/layout/Chaos/candidate_codes"),
+            Some(&serde_json::json!(["TST"])),
+        );
+        assert!(!session_cell::is_installed());
+    }
+
+    /// A started, drafting 2-seat Winston session, built through the REAL
+    /// reducer so its `shared_stack` is the shape the reducer produces rather
+    /// than one this test invented.
+    /// A booster shaped like a real one: five colours, a mana curve, and type
+    /// lines. `FixturePackSource` makes colourless, typeless, mana-value-zero
+    /// cards, which is right for the reducer's conservation and legality tests
+    /// and useless here — a deck suggested from that pool has no colours to
+    /// choose between and no curve to build, so a playability claim over it
+    /// would assert nothing.
+    struct WinstonDeckFixtureSource;
+
+    impl draft_core::pack_source::PackSource for WinstonDeckFixtureSource {
+        fn generate_pack(
+            &self,
+            _rng: &mut dyn rand::RngCore,
+            seat: u8,
+            pack_number: u8,
+        ) -> draft_core::types::DraftPack {
+            // Five colours plus COLOURLESS, because every real booster has
+            // artifacts and a pool with none of them is a worst case no set
+            // produces: with nothing colourless to play, a two-colour build can
+            // never reach the suggester's 23-playable target and its documented
+            // top-up splashes the whole pool. Roughly one in five here, which is
+            // the low end of a real booster's artifact count.
+            const COLORS: [Option<&str>; 6] =
+                [Some("W"), Some("U"), Some("B"), Some("R"), Some("G"), None];
+            let cards = (0..15u8)
+                .map(|i| {
+                    let color = COLORS[usize::from(i) % COLORS.len()];
+                    // A curve, not a flat cost: 1..=5, so the land count the
+                    // suggester derives is a real answer rather than a constant.
+                    let cmc: u8 = 1 + (i % 5);
+                    let creature = i % 3 != 0;
+                    DraftCardInstance {
+                        instance_id: format!("FIX-{seat}-{pack_number}-{i}"),
+                        // The colour is IN THE NAME on purpose: `SuggestedDeck`
+                        // carries names only, so this is how the assertions read
+                        // a finished deck's colours back.
+                        name: format!(
+                            "Fixture {} {cmc} {seat}-{pack_number}-{i}",
+                            color.unwrap_or("C")
+                        ),
+                        set_code: "FIX".to_string(),
+                        collector_number: format!("{}", i + 1),
+                        rarity: if i == 0 { "rare" } else { "common" }.to_string(),
+                        colors: color.map(|c| vec![c.to_string()]).unwrap_or_default(),
+                        cmc,
+                        type_line: match (color, creature) {
+                            (None, _) => "Artifact".to_string(),
+                            (Some(_), true) => "Creature — Fixture".to_string(),
+                            (Some(_), false) => "Instant".to_string(),
+                        },
+                        draft_effect: None,
+                    }
+                })
+                .collect();
+            draft_core::types::DraftPack(cards)
+        }
+    }
+
+    /// A complete two-BOT Winston draft, driven by the same loop production
+    /// uses, returning the finished session.
+    fn winston_drafted_by_bots(card_db: Option<&CardDatabase>) -> DraftSession {
+        let source = DraftSource::single_set("FIX".to_string());
+        let config = DraftConfig {
+            set_code: source.set_code(),
+            source,
+            kind: DraftKind::Winston,
+            pod_size: 2,
+            cards_per_pack: 15,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 20_260_913,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        // BOTH seats are bots, so the driver runs the whole draft rather than
+        // stopping at the first human turn.
+        let seats = (0..2)
+            .map(|seat| DraftSeat::Bot {
+                name: format!("Bot {seat}"),
+            })
+            .collect();
+        let mut session = DraftSession::new(config, seats, "winston-bots".to_string());
+        draft_core::session::apply(
+            &mut session,
+            draft_core::types::DraftAction::StartDraft,
+            Some(&WinstonDeckFixtureSource),
+        )
+        .expect("a Winston pod starts");
+        drive_shared_stack_bot_turns(&mut session, AiDifficulty::Medium, card_db, 10_000)
+            .expect("the bot loop drives a whole draft");
+        assert_eq!(
+            session.status,
+            DraftStatus::Deckbuilding,
+            "the draft must actually finish before a deck can be judged"
+        );
+        session
+    }
+
+    /// The colour a fixture card's name encodes.
+    fn fixture_color(name: &str) -> Option<&'static str> {
+        ["W", "U", "B", "R", "G"]
+            .into_iter()
+            .find(|color| name.starts_with(&format!("Fixture {color} ")))
+    }
+
+    /// THE BAR: A BOT MUST END UP WITH A DECK IT COULD ACTUALLY PLAY.
+    ///
+    /// Not "a bot that drafts like a human" — it is not expected to. This is the
+    /// weaker, and the only load-bearing, claim: a bot seat drafts a pool, and
+    /// the suggester turns that pool into a legal, castable, sensibly shaped
+    /// deck. Everything the draft heuristics do above that is quality of play.
+    ///
+    /// Run WITHOUT a card database, which is the worst case and now a reachable
+    /// one: `resumeDraftingAfterRestore` fails open on a card-data fetch, so a
+    /// pod whose fetch failed drafts in exactly this degraded mode. If the deck
+    /// is playable here it is playable with the database too.
+    ///
+    /// DELIBERATELY NOT ASSERTED HERE: that the deck is focused on two colours,
+    /// and that the same pool builds the same deck twice. Both hold only once
+    /// `find_best_colors` sorts on a total order -- it sorts on score alone, and
+    /// `rarity_prior` scores a common at 0.0, so without a card database every
+    /// colour holding no rare or uncommon ties at exactly 0.0 and the second
+    /// colour falls out of `HashMap` iteration order. That is a defect in the
+    /// deckbuilding suggester, which is shared by every draft kind and is not
+    /// Winston's to fix; it is carried in its own change. The three claims
+    /// below are the ones that hold either way, measured green over 13 runs.
+    #[test]
+    fn a_bot_that_drafted_a_whole_winston_pod_can_build_a_playable_deck() {
+        let session = winston_drafted_by_bots(None);
+
+        for seat in 0..2usize {
+            let pool = &session.pools[seat];
+            // Reach guard: the draft really dealt this seat a pool to build from.
+            assert!(
+                pool.len() >= 40,
+                "seat {seat} drafted {} cards, which is not a limited pool",
+                pool.len()
+            );
+
+            let deck = suggest::suggest_deck(
+                pool,
+                AiDifficulty::Medium,
+                None,
+                session.config.min_deck_size,
+                0,
+                &session.config.addable_cards,
+            );
+
+            let basics: u32 = deck.lands.values().map(|count| u32::from(*count)).sum();
+            let spells = deck.main_deck.len() as u32;
+
+            // (1) LEGAL. CR 100.2b: a limited deck is at least 40 cards, and the
+            // engine's own `validate_limited_deck` counts spells plus basics.
+            assert!(
+                spells + basics >= session.config.min_deck_size as u32,
+                "seat {seat}: {spells} spells + {basics} basics is short of 40"
+            );
+
+            // (2) CASTABLE. Every colour the chosen spells need is produced by a
+            // basic the suggester actually added. A deck with red spells and no
+            // Mountains is legal and unplayable, which is the distinction this
+            // whole test exists to draw.
+            let needed: std::collections::HashSet<&str> = deck
+                .main_deck
+                .iter()
+                .filter_map(|name| fixture_color(name))
+                .collect();
+            let produced: std::collections::HashSet<&str> = deck
+                .lands
+                .iter()
+                .filter(|(_, count)| **count > 0)
+                .filter_map(|(name, _)| match name.as_str() {
+                    "Plains" => Some("W"),
+                    "Island" => Some("U"),
+                    "Swamp" => Some("B"),
+                    "Mountain" => Some("R"),
+                    "Forest" => Some("G"),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                needed.is_subset(&produced),
+                "seat {seat}: spells need {needed:?} but the manabase produces {produced:?}"
+            );
+
+            // (3) A DECK, not a pile of lands. A 40-card limited deck is about
+            // seventeen lands and twenty-three spells; this floor is deliberately
+            // well below that, because the claim is playability and not quality.
+            assert!(
+                spells >= 15,
+                "seat {seat}: {spells} spells is a land pile, not a deck"
+            );
+        }
+    }
+
+    fn started_winston_session() -> DraftSession {
+        let source = DraftSource::single_set("TST".to_string());
+        let config = DraftConfig {
+            set_code: source.set_code(),
+            source,
+            kind: DraftKind::Winston,
+            pod_size: 2,
+            cards_per_pack: 15,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 42,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        let seats = (0..2)
+            .map(|seat| DraftSeat::Human {
+                player_id: engine::types::player::PlayerId(seat),
+                display_name: format!("Player {seat}"),
+            })
+            .collect();
+        let mut session = DraftSession::new(config, seats, "winston-draft".to_string());
+        let pack_source = draft_core::pack_source::FixturePackSource {
+            set_code: "TST".to_string(),
+            cards_per_pack: 15,
+        };
+        draft_core::session::apply(
+            &mut session,
+            draft_core::types::DraftAction::StartDraft,
+            Some(&pack_source),
+        )
+        .expect("a human-only Winston pod starts");
+        session
+    }
+
+    /// V26. A public backup strips `shared_stack` at the trust boundary, and
+    /// the result is DELIBERATELY not a restorable Winston snapshot -- the same
+    /// discipline `import_rejects_redacted_chaos_snapshot_that_claims_a_uniform_layout`
+    /// applies to a redacted Chaos layout. The authoritative, resumable copy is
+    /// the host's IndexedDB snapshot.
+    #[test]
+    fn import_rejects_redacted_winston_snapshot_missing_its_stack() {
+        clear_state();
+
+        let session = started_winston_session();
+        assert_eq!(session.status, draft_core::types::DraftStatus::Drafting);
+        let mut snapshot = serde_json::to_value(&session).expect("serialize Winston snapshot");
+        assert!(
+            snapshot.get("shared_stack").is_some(),
+            "the unredacted snapshot carries its stack"
+        );
+
+        // Paired positive FIRST, so the refusal below is demonstrably about the
+        // redaction and not about Winston.
+        restorable_draft_session_from_json(&snapshot.to_string())
+            .expect("an unredacted Winston snapshot restores");
+
+        snapshot
+            .as_object_mut()
+            .expect("a session serializes to an object")
+            .remove("shared_stack");
+        let error = restorable_draft_session_from_json(&snapshot.to_string())
+            .expect_err("a public redaction is not a restorable Winston snapshot");
+        assert!(
+            error.contains("must carry its stack"),
+            "unexpected error: {error}"
+        );
+        assert!(!session_cell::is_installed());
+    }
+
+    /// V20's own leg. `draft_kind_wire_numbers_round_trip` and
+    /// `draft_procedure_dto_copies_every_axis_unmoved` carry the rest.
+    #[test]
+    fn winston_round_trips_through_the_wire_number() {
+        assert_eq!(draft_kind_wire_number(DraftKind::Winston), 5);
+        assert_eq!(draft_kind_from_wire(5), Ok(DraftKind::Winston));
+        // Negative sibling: an unmapped number is an `Err` naming every known
+        // kind, never a default.
+        let error = draft_kind_from_wire(6).expect_err("6 is unmapped");
+        assert!(error.contains("unknown draft kind 6"), "{error}");
+        for kind in DraftKind::ALL {
+            assert!(
+                error.contains(&format!("{kind:?}")),
+                "{error} omits {kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn import_rejects_redacted_chaos_snapshot_that_claims_a_uniform_layout() {
+        clear_state();
+
+        let chaos = persisted_premier_session(SetLayout::Chaos {
+            candidate_codes: vec!["TST".to_string()],
+            assignments: vec![vec!["TST".to_string(); 3]; 8],
+        });
+        let mut snapshot = serde_json::to_value(chaos).expect("serialize Chaos snapshot");
+        let layout = snapshot
+            .pointer_mut("/config/source/data")
+            .expect("canonical DraftSource layout");
+        *layout = serde_json::json!({
+            "candidate_codes": ["TST"],
+            "codes": ["TST"],
+        });
+
+        let error = restorable_draft_session_from_json(&snapshot.to_string())
+            .expect_err("a public redaction is not a restorable Chaos snapshot");
+        assert!(error.contains("Failed to deserialize draft session"));
+        assert!(!session_cell::is_installed());
+    }
+
+    #[test]
+    fn import_normalizes_legacy_commander_deck_floors_for_human_and_bot_decks() {
+        clear_state();
+        install_commander_fixture_db();
+        start_commander_pod(4);
+        seat_into_deckbuilding(0, 60);
+
+        let mut snapshot = session_cell::with_installed(|session| {
+            serde_json::to_value(session).expect("serialize Commander snapshot")
+        });
+        snapshot["config"]["min_deck_size"] = serde_json::json!(59);
+        let restored = restorable_draft_session_from_json(&snapshot.to_string())
+            .expect("a legacy Commander snapshot restores");
+        assert_eq!(restored.config.min_deck_size, 60);
+        session_cell::install(restored);
+
+        let human_deck = seat_deck(0, 59);
+        let error = submit_deck_inner(&json(&human_deck), &json(&["Seat 0 Card 0".to_string()]))
+            .expect_err("a restored 59-card Commander deck is illegal");
+        assert!(
+            error.contains("59") && error.contains("60"),
+            "error = {error}"
+        );
+
+        let bot_deck = get_bot_deck_inner(1).expect("a restored Commander bot deck builds");
+        let bot_total = bot_deck.main_deck.len()
+            + bot_deck
+                .lands
+                .values()
+                .map(|&count| count as usize)
+                .sum::<usize>();
+        assert!(bot_total >= 60, "bot deck has {bot_total} cards");
+
+        clear_state();
     }
 
     #[test]
@@ -1102,11 +3480,11 @@ mod create_multiplayer_draft_tests {
         clear_state();
         install_fixture_db();
 
-        // 2 seats × 2 cards/pack × 1 pack = 4 cards exactly.
+        // Four dealt cards, plus duplicate and undealt source occurrences.
         let pool_input_json = r#"{
             "type": "Cube",
             "data": {
-                "cube_list_text": "1 Alpha\n1 Beta\n1 Gamma\n1 Delta\n",
+                "cube_list_text": "2 Alpha\n1 Beta\n1 Gamma\n2 Delta\n",
                 "cube_name": "Test Cube",
                 "cube_draft_settings": {
                     "pod_size": 2,
@@ -1130,8 +3508,22 @@ mod create_multiplayer_draft_tests {
             "test-room",
             "Swiss",
             "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
         )
         .expect("cube draft should start");
+
+        let expected = vec!["Alpha", "Alpha", "Beta", "Gamma", "Delta", "Delta"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        assert!(serde_json::to_value(&view)
+            .unwrap()
+            .get("booster_pack_pool")
+            .is_none());
+        assert_eq!(
+            booster_pack_pool_for_game_inner(),
+            Ok(Some(expected.clone()))
+        );
 
         assert!(
             matches!(view.status, DraftStatus::Drafting),
@@ -1148,23 +3540,26 @@ mod create_multiplayer_draft_tests {
         let picked = pack[0].instance_id.clone();
         let action = DraftAction::Pick {
             seat: 0,
-            card_instance_id: picked.clone(),
+            card_instance_ids: vec![picked.clone()],
         };
-        DRAFT_SESSION.with(|cell| {
-            let mut session = cell.take().expect("session populated");
-            let deltas = session::apply(&mut session, action, None).expect("pick applies");
+        session_cell::with_installed_mut(|session| {
+            let deltas = session::apply(session, action, None).expect("pick applies");
             assert!(!deltas.is_empty(), "pick should produce deltas");
-            cell.set(Some(session));
         });
 
         // After the human pick, seat 0's pack should no longer contain the picked card
         // (it has been passed; pack will not be visible again until the rotation lands).
-        let post_view = DRAFT_SESSION.with(|cell| {
-            let session = cell.take().expect("session populated");
-            let v = filter_for_player(&session, 0);
-            cell.set(Some(session));
-            v
+        let post_view = session_cell::with_installed(|session| {
+            let json = serde_json::to_string(session).unwrap();
+            let restored = restorable_draft_session_from_json(&json).unwrap();
+            filter_for_player(&restored, 0)
         });
+        assert_eq!(post_view.pool.len(), 1);
+        assert!(serde_json::to_value(&post_view)
+            .unwrap()
+            .get("booster_pack_pool")
+            .is_none());
+        assert_eq!(booster_pack_pool_for_game_inner(), Ok(Some(expected)));
         if let Some(pack_after) = &post_view.current_pack {
             assert!(
                 !pack_after.iter().any(|c| c.instance_id == picked),
@@ -1207,6 +3602,7 @@ mod create_multiplayer_draft_tests {
             "test-room",
             "Swiss",
             "Casual",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
         )
         .expect("cube draft should start");
 
@@ -1219,5 +3615,1728 @@ mod create_multiplayer_draft_tests {
         assert!(matches!(view.kind, DraftKind::Traditional));
 
         clear_state();
+    }
+
+    #[test]
+    fn set_branch_uses_the_mtgjson_pack_size_for_draft_and_sealed() {
+        let set_pool_json = r#"{
+            "code": "TST",
+            "name": "Test Set",
+            "release_date": null,
+            "pack_variants": [{
+                "contents": [{ "slot": "common", "count": 3, "choices": [{ "sheet": "common", "weight": 1 }] }],
+                "weight": 1
+            }],
+            "pack_variants_total_weight": 1,
+            "sheets": {
+                "common": {
+                    "cards": [
+                        { "name": "Alpha", "set_code": "TST", "collector_number": "1", "rarity": "common", "weight": 1 },
+                        { "name": "Beta", "set_code": "TST", "collector_number": "2", "rarity": "common", "weight": 1 },
+                        { "name": "Gamma", "set_code": "TST", "collector_number": "3", "rarity": "common", "weight": 1 }
+                    ],
+                    "total_weight": 3,
+                    "foil": false,
+                    "balance_colors": false
+                }
+            },
+            "prints": [],
+            "basic_lands": []
+        }"#;
+        let pool_input_json = serde_json::json!({
+            "type": "Set",
+            "data": { "set_pool_json": set_pool_json }
+        })
+        .to_string();
+        let seats_json = r#"[
+            { "type": "Human", "player_id": 0, "display_name": "Host" },
+            { "type": "Human", "player_id": 1, "display_name": "Guest" }
+        ]"#;
+
+        clear_state();
+        let draft_view = create_multiplayer_draft_inner(
+            &pool_input_json,
+            seats_json,
+            1,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
+        )
+        .expect("set draft should start");
+        assert_eq!(draft_view.cards_per_pack, 3);
+        assert_eq!(draft_view.current_pack.expect("current pack").len(), 3);
+
+        clear_state();
+        let sealed_view = create_multiplayer_draft_inner(
+            &pool_input_json,
+            seats_json,
+            3,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
+        )
+        .expect("set sealed should start");
+        assert_eq!(sealed_view.cards_per_pack, 3);
+        assert_eq!(sealed_view.pool.len(), 18);
+        assert!(sealed_view
+            .sealed_packs
+            .expect("sealed pack boundaries")
+            .iter()
+            .all(|pack| pack.len() == 3));
+
+        clear_state();
+    }
+
+    /// One set pool with `code`, three commons, a fixed 3-card booster.
+    fn pod_pool_json(code: &str) -> String {
+        format!(
+            r#"{{
+            "code": "{code}",
+            "name": "Set {code}",
+            "release_date": null,
+            "pack_variants": [{{
+                "contents": [{{ "slot": "common", "count": 3, "choices": [{{ "sheet": "common", "weight": 1 }}] }}],
+                "weight": 1
+            }}],
+            "pack_variants_total_weight": 1,
+            "sheets": {{
+                "common": {{
+                    "cards": [
+                        {{ "name": "Alpha", "set_code": "{code}", "collector_number": "1", "rarity": "common", "weight": 1 }},
+                        {{ "name": "Beta", "set_code": "{code}", "collector_number": "2", "rarity": "common", "weight": 1 }},
+                        {{ "name": "Gamma", "set_code": "{code}", "collector_number": "3", "rarity": "common", "weight": 1 }}
+                    ],
+                    "total_weight": 3,
+                    "foil": false,
+                    "balance_colors": false
+                }}
+            }},
+            "prints": [],
+            "basic_lands": []
+        }}"#
+        )
+    }
+
+    /// A pod's `PoolInput::Set` in the live sequence spelling.
+    fn pod_sequence_pool_input(pools: &[&str], sequence: &[&str]) -> String {
+        let pools: Vec<serde_json::Value> = pools
+            .iter()
+            .map(|code| serde_json::from_str(&pod_pool_json(code)).expect("pool fixture"))
+            .collect();
+        serde_json::json!({
+            "type": "Set",
+            "data": { "pools": pools, "sequence": sequence }
+        })
+        .to_string()
+    }
+
+    fn pod_chaos_pool_input(candidates: &[&str]) -> String {
+        let pools: Vec<serde_json::Value> = candidates
+            .iter()
+            .map(|code| serde_json::from_str(&pod_pool_json(code)).expect("pool fixture"))
+            .collect();
+        serde_json::json!({
+            "type": "Chaos",
+            "data": { "pools": pools, "candidate_codes": candidates }
+        })
+        .to_string()
+    }
+
+    fn two_human_seats_json() -> &'static str {
+        r#"[
+            { "type": "Human", "player_id": 0, "display_name": "Host" },
+            { "type": "Human", "player_id": 1, "display_name": "Guest" }
+        ]"#
+    }
+
+    #[test]
+    fn remote_quick_draft_rejects_pods_outside_the_public_procedure_range() {
+        for seat_count in [1, 9] {
+            let seats_json = format!(
+                "[{}]",
+                (0..seat_count)
+                    .map(|seat| {
+                        format!(
+                            r#"{{ "type": "Human", "player_id": {seat}, "display_name": "P{seat}" }}"#
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+
+            let err = create_multiplayer_draft_inner(
+                &pod_sequence_pool_input(&["AAA"], &["AAA"]),
+                &seats_json,
+                0, // Quick
+                42,
+                "test-room",
+                "Swiss",
+                "Competitive",
+                2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
+            )
+            .expect_err("remote Quick Draft must use its public 2..=8 pod range");
+
+            assert!(err.contains("pod_size must be between 2 and 8"), "{err}");
+        }
+    }
+
+    /// THE multiplayer multi-set claim: a pod host names one set per booster,
+    /// and the pod that starts opens those sets in that order.
+    ///
+    /// Asserts the ORDER, not just the set membership — a pod that resolved
+    /// only its first code, or that deduped the sequence, would deal every
+    /// later booster from the wrong set while still reporting the right sets.
+    #[test]
+    fn a_pod_opens_each_booster_from_its_own_set_in_pack_order() {
+        clear_state();
+        let view = create_multiplayer_draft_inner(
+            &pod_sequence_pool_input(&["AAA", "BBB"], &["AAA", "BBB", "AAA"]),
+            two_human_seats_json(),
+            1,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
+        )
+        .expect("a three-booster Premier pod is a valid multi-set selection");
+
+        assert_eq!(
+            view.pack_set_codes,
+            vec!["AAA".to_string(), "BBB".to_string(), "AAA".to_string()]
+        );
+        // Pack 1 is open, so every card in hand comes from the sequence's first
+        // entry — the pool the generator resolved for that booster.
+        let pack = view.current_pack.expect("current pack");
+        assert_eq!(pack.len(), 3);
+        assert!(
+            pack.iter().all(|card| card.set_code == "AAA"),
+            "pack 1 must be dealt from the sequence's first set: {:?}",
+            pack.iter().map(|c| &c.set_code).collect::<Vec<_>>()
+        );
+        clear_state();
+    }
+
+    #[test]
+    fn a_chaos_pod_derives_and_persists_assignments_from_host_candidates() {
+        clear_state();
+        let view = create_multiplayer_draft_inner(
+            &pod_chaos_pool_input(&["AAA", "BBB"]),
+            two_human_seats_json(),
+            1,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
+        )
+        .expect("a Chaos pod should resolve host-local assignments");
+
+        let source = serde_json::to_value(&view.source).expect("view source serializes");
+        assert_eq!(
+            source.pointer("/data/layout/Chaos/candidate_codes"),
+            Some(&serde_json::json!(["AAA", "BBB"])),
+        );
+        assert!(
+            source.pointer("/data/layout/Chaos/assignments").is_none(),
+            "player views must not expose host-local assignments"
+        );
+
+        let persisted = export_draft_session().expect("host session exports");
+        let persisted: serde_json::Value = serde_json::from_str(&persisted).expect("session JSON");
+        let assignments = persisted
+            .pointer("/config/source/data/assignments")
+            .expect("host session persists exact Chaos assignments");
+        assert_eq!(assignments.as_array().map(Vec::len), Some(2));
+        assert!(assignments
+            .as_array()
+            .expect("assignment rows")
+            .iter()
+            .all(|row| row.as_array().map(Vec::len) == Some(3)));
+        clear_state();
+    }
+
+    /// The kind's procedure fixes how many boosters a pod opens. A host who
+    /// names MORE sets than that is refused at creation rather than having the
+    /// extra boosters silently dropped. Premier opens three; Sealed opens six.
+    #[test]
+    fn a_pod_refuses_a_sequence_longer_than_its_kinds_pack_count() {
+        clear_state();
+        let err = create_multiplayer_draft_inner(
+            &pod_sequence_pool_input(&["AAA", "BBB"], &["AAA", "BBB", "AAA", "BBB"]),
+            two_human_seats_json(),
+            1,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
+        )
+        .expect_err("four sets name a booster Premier never opens");
+        assert!(err.contains('4'), "unexpected error: {err}");
+
+        let sealed = create_multiplayer_draft_inner(
+            &pod_sequence_pool_input(&["AAA", "BBB"], &["AAA", "BBB", "AAA", "BBB", "AAA", "BBB"]),
+            two_human_seats_json(),
+            3,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
+        )
+        .expect("six boosters is a valid Sealed pod selection");
+        assert_eq!(sealed.pack_set_codes.len(), 6);
+        clear_state();
+    }
+
+    /// A sequence naming a set the host shipped no pool for is refused by name,
+    /// rather than starting a pod whose later packs come up empty.
+    #[test]
+    fn a_pod_refuses_a_sequence_naming_an_unsupplied_set() {
+        clear_state();
+        let err = create_multiplayer_draft_inner(
+            &pod_sequence_pool_input(&["AAA"], &["AAA", "MISSING", "AAA"]),
+            two_human_seats_json(),
+            1,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
+        )
+        .expect_err("the sequence names a set with no pool data");
+        assert!(err.contains("MISSING"), "unexpected error: {err}");
+        clear_state();
+    }
+
+    /// A host that persisted its pod before multi-set pods existed wrote a
+    /// single serialized `LimitedSetPool`. Resuming must restore the pod it
+    /// always described — every booster from that one set — not fail the frame.
+    #[test]
+    fn a_pod_resumes_from_the_legacy_single_pool_spelling() {
+        clear_state();
+        let legacy = serde_json::json!({
+            "type": "Set",
+            "data": { "set_pool_json": pod_pool_json("AAA") }
+        })
+        .to_string();
+
+        let view = create_multiplayer_draft_inner(
+            &legacy,
+            two_human_seats_json(),
+            1,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
+        )
+        .expect("a legacy single-pool pod still starts");
+
+        assert_eq!(
+            view.pack_set_codes,
+            vec!["AAA".to_string(), "AAA".to_string(), "AAA".to_string()],
+            "a one-element sequence repeats its last entry for every booster"
+        );
+        clear_state();
+    }
+
+    /// A 4-seat Commander pod over a Set pool. Packs are deliberately large
+    /// enough that a CR 903.13b two-card step is not the whole pack.
+    fn commander_pool_input_json() -> String {
+        let set_pool_json = r#"{
+            "code": "TST",
+            "name": "Test Set",
+            "release_date": null,
+            "pack_variants": [{
+                "contents": [{ "slot": "common", "count": 4, "choices": [{ "sheet": "common", "weight": 1 }] }],
+                "weight": 1
+            }],
+            "pack_variants_total_weight": 1,
+            "sheets": {
+                "common": {
+                    "cards": [
+                        { "name": "Alpha", "set_code": "TST", "collector_number": "1", "rarity": "common", "weight": 1 },
+                        { "name": "Beta", "set_code": "TST", "collector_number": "2", "rarity": "common", "weight": 1 },
+                        { "name": "Gamma", "set_code": "TST", "collector_number": "3", "rarity": "common", "weight": 1 },
+                        { "name": "Delta", "set_code": "TST", "collector_number": "4", "rarity": "common", "weight": 1 }
+                    ],
+                    "total_weight": 4,
+                    "foil": false,
+                    "balance_colors": false
+                }
+            },
+            "prints": [],
+            "basic_lands": []
+        }"#;
+        serde_json::json!({
+            "type": "Set",
+            "data": { "set_pool_json": set_pool_json }
+        })
+        .to_string()
+    }
+
+    const COMMANDER_SEATS_JSON: &str = r#"[
+        { "type": "Human", "player_id": 0, "display_name": "Host" },
+        { "type": "Human", "player_id": 1, "display_name": "G1" },
+        { "type": "Human", "player_id": 2, "display_name": "G2" },
+        { "type": "Human", "player_id": 3, "display_name": "G3" }
+    ]"#;
+
+    /// U10's discriminating test.
+    ///
+    /// The NEGATIVE half is the point: assert the resulting session's KIND,
+    /// never merely that the call returned `Ok`. A decode that silently
+    /// resolved 4 to `Quick` would satisfy an `is_ok()` assertion perfectly.
+    #[test]
+    fn create_multiplayer_draft_inner_accepts_commander_kind() {
+        clear_state();
+        let view = create_multiplayer_draft_inner(
+            &commander_pool_input_json(),
+            COMMANDER_SEATS_JSON,
+            4, // CommanderDraft
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
+        )
+        .expect("commander draft should start");
+
+        assert!(matches!(view.kind, DraftKind::CommanderDraft));
+        // CR 903.13f(1) and CR 903.13b reach the view through the procedure, so
+        // this also proves the config was built from `DraftProcedure` and not
+        // from the 40-card/3-pack literals the four older kinds share.
+        assert_eq!(view.min_deck_size, 60);
+        assert_eq!(view.pack_count, 3);
+
+        clear_state();
+    }
+
+    /// Hostile fixture, paired with the positive above so it cannot pass
+    /// vacuously: an id BEYOND the table must be an `Err`, never a default.
+    #[test]
+    fn create_multiplayer_draft_inner_refuses_an_unmapped_kind() {
+        clear_state();
+        let err = create_multiplayer_draft_inner(
+            &commander_pool_input_json(),
+            COMMANDER_SEATS_JSON,
+            // THE RULE, stated durably so the next widening does not repeat
+            // this: the unmapped-kind hostile fixture must name a number BEYOND
+            // the widened table. `5` is `DraftKind::Winston` now.
+            6,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
+        )
+        .expect_err("kind 6 is unmapped");
+        assert!(
+            err.contains("unknown draft kind 6"),
+            "unexpected error: {err}"
+        );
+
+        clear_state();
+    }
+
+    /// Phase D's discriminating test: a pod bot plays at the strength THIS pod
+    /// asked for, not at whatever the last draft in this tab left behind.
+    ///
+    /// `DIFFICULTY` is a per-thread `Cell` with no reset, and
+    /// `create_multiplayer_draft_inner` never wrote it before this change. So a
+    /// player who ran a Quick draft at `VeryHard` and then hosted a pod in the
+    /// same worker got a `VeryHard` pod bot, silently. That is the contamination
+    /// this asserts against, seeded here exactly as `start_quick_draft` would
+    /// have seeded it.
+    ///
+    /// TWO legs, because one is satisfiable by a function that always writes
+    /// `Medium`: the second call asks for `Hard` from the same contaminated
+    /// starting point and must get it.
+    #[test]
+    fn a_pod_bot_ignores_a_previous_drafts_difficulty() {
+        clear_state();
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::VeryHard));
+        // Positive control that the seeding took. Without it, a test whose
+        // seeding silently failed would pass on a cell that was already
+        // `Medium` by default.
+        assert_eq!(DIFFICULTY.with(|cell| cell.get()), AiDifficulty::VeryHard);
+
+        create_multiplayer_draft_inner(
+            &commander_pool_input_json(),
+            COMMANDER_SEATS_JSON,
+            4, // CommanderDraft
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2, // Medium — what this pod's host asked for.
+        )
+        .expect("the pod should start");
+
+        // REVERT-FAILING: delete the `DIFFICULTY.with(..set..)` line from the
+        // pool arm and this reads `VeryHard`, the previous draft's answer.
+        assert_eq!(DIFFICULTY.with(|cell| cell.get()), AiDifficulty::Medium);
+
+        // The paired leg, from the same contaminated start, asking for a
+        // DIFFERENT rung: an implementation that hardcodes `Medium` reds here.
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::VeryHard));
+        create_multiplayer_draft_inner(
+            &commander_pool_input_json(),
+            COMMANDER_SEATS_JSON,
+            4, // CommanderDraft
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            3, // Hard
+        )
+        .expect("the pod should start");
+        assert_eq!(DIFFICULTY.with(|cell| cell.get()), AiDifficulty::Hard);
+
+        clear_state();
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
+    }
+
+    /// The numeric table is total and injective over every kind, and the decode
+    /// is the encode's inverse. Folds `DraftKind::ALL`, so it moves with the
+    /// enum.
+    #[test]
+    fn draft_kind_wire_numbers_round_trip() {
+        for kind in DraftKind::ALL {
+            assert_eq!(
+                draft_kind_from_wire(draft_kind_wire_number(kind)).unwrap(),
+                kind
+            );
+        }
+        let mut numbers: Vec<u8> = DraftKind::ALL
+            .into_iter()
+            .map(draft_kind_wire_number)
+            .collect();
+        numbers.sort_unstable();
+        numbers.dedup();
+        assert_eq!(
+            numbers.len(),
+            DraftKind::ALL.len(),
+            "wire numbers must be distinct"
+        );
+    }
+
+    /// Boundary D, positive half: the multi-seat pick export carries one WHOLE
+    /// CR 903.13b step, and a Commander pod's step is two cards.
+    ///
+    /// This is also the paired reach-guard for the two negatives below — it
+    /// proves the export works on a live session, so their `Err`s cannot be
+    /// satisfied by a wholesale failure of the call.
+    #[test]
+    fn submit_pick_for_seat_takes_a_whole_commander_pick_step() {
+        clear_state();
+        let view = create_multiplayer_draft_inner(
+            &commander_pool_input_json(),
+            COMMANDER_SEATS_JSON,
+            4,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
+        )
+        .expect("commander draft should start");
+        let pack = view.current_pack.as_ref().expect("seat 0 has a pack");
+        let two = serde_json::json!([pack[0].instance_id, pack[1].instance_id]).to_string();
+
+        let after = submit_pick_for_seat_inner(0, &two).expect("a two-card step applies");
+        assert_eq!(
+            after.pool.len(),
+            2,
+            "CR 903.13b: a Commander pick step drafts two cards"
+        );
+
+        clear_state();
+    }
+
+    /// The count negative: a ONE-id payload is not a whole Commander step, so
+    /// the reducer refuses it (CR 903.13b). This is the assertion that would
+    /// flip if `submit_pick_for_seat` went back to wrapping a single id, and
+    /// its paired positive reach-guard is the two-id test above.
+    #[test]
+    fn submit_pick_for_seat_refuses_a_one_card_commander_step() {
+        clear_state();
+        let view = create_multiplayer_draft_inner(
+            &commander_pool_input_json(),
+            COMMANDER_SEATS_JSON,
+            4,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
+        )
+        .expect("commander draft should start");
+        let pack = view.current_pack.as_ref().expect("seat 0 has a pack");
+        let one = serde_json::json!([pack[0].instance_id]).to_string();
+
+        let err =
+            submit_pick_for_seat_inner(0, &one).expect_err("one id is not a whole CR 903.13b step");
+        assert!(
+            err.contains("Pick failed for seat 0"),
+            "unexpected error: {err}"
+        );
+
+        clear_state();
+    }
+
+    /// Boundary D, negative half: a BARE id is not a payload.
+    ///
+    /// Nothing in the compiler catches a half-applied caller here — both sides
+    /// of the boundary are `string` and the call is positional — so this
+    /// assertion is the substitute for the missing type error. It also pins the
+    /// ordering: the parse fails BEFORE any session is entered.
+    #[test]
+    fn submit_pick_for_seat_refuses_a_bare_id() {
+        clear_state();
+        let err =
+            submit_pick_for_seat_inner(0, "card-abc").expect_err("a bare id is not a JSON array");
+        assert!(
+            err.contains("Failed to parse pick cards"),
+            "unexpected error: {err}"
+        );
+        // Reached the parse, not the session: no draft is initialized here, so
+        // a decoder that ran AFTER `with_draft_mut_inner` would have reported
+        // "Draft not initialized" instead.
+        assert!(
+            !err.contains("Draft not initialized"),
+            "parse must precede the session: {err}"
+        );
+
+        clear_state();
+    }
+
+    /// The `DraftProcedureDto` mapping is a hand-written copy whose `u8` columns
+    /// are interchangeable to the compiler, so transposing any two of them
+    /// compiles clean and passes clippy while publishing a wrong axis to the
+    /// display layer. Nothing in the type system catches that; this is the
+    /// substitute for the missing type error.
+    ///
+    /// Folded over `DraftKind::ALL` rather than asserted on `CommanderDraft`
+    /// alone, and that is load-bearing: in the Commander row `min_pod_size` and
+    /// `packs_per_player` are BOTH `3`, so a single-kind test — field by field
+    /// or not — stays green with exactly those two swapped. Over the whole
+    /// table the `u8` columns are pairwise distinct AS COLUMNS, so every
+    /// transposition reddens here. Recomputed with the `Winston` row:
+    /// `commanders_required` is `[0, 0, 0, 0, 1, 0]` over `DraftKind::ALL` and
+    /// equals no other column (`pod_size` `[8, 8, 8, 8, 4, 2]`, `human_seats`
+    /// `[1, 8, 8, 8, 1, 2]`, `min_pod_size` `[2, 2, 2, 2, 3, 2]`,
+    /// `packs_per_player` `[3, 3, 3, 6, 3, 3]`, `cards_per_pick`
+    /// `[1, 1, 1, 1, 2, 1]`), so the pairwise-distinctness conclusion holds and
+    /// the argument survives the sixth kind.
+    ///
+    /// The `Winston` row has `pod_size == human_seats == min_pod_size == 2`, so
+    /// a single-kind test on that row could not catch a transposition among
+    /// those three. The fold over `ALL` is what keeps that within-row
+    /// transposition red — the same reason the Commander row gave.
+    #[test]
+    fn draft_procedure_dto_copies_every_axis_unmoved() {
+        for kind in DraftKind::ALL {
+            let procedure = kind.procedure();
+            let dto = draft_procedure_dto(draft_kind_wire_number(kind), TournamentFormat::Swiss)
+                .unwrap_or_else(|e| panic!("{kind:?} has a wire number: {e}"));
+
+            assert_eq!(dto.pod_size, procedure.pod_size, "pod_size ({kind:?})");
+            assert_eq!(
+                dto.human_seats, procedure.human_seats,
+                "human_seats ({kind:?})"
+            );
+            assert_eq!(
+                dto.min_pod_size, procedure.min_pod_size,
+                "min_pod_size ({kind:?})"
+            );
+            assert_eq!(
+                dto.max_pod_size, procedure.max_pod_size,
+                "max_pod_size ({kind:?})"
+            );
+            assert_eq!(
+                dto.allowed_pod_sizes,
+                procedure.allowed_pod_sizes(TournamentFormat::Swiss),
+                "allowed_pod_sizes ({kind:?})"
+            );
+            assert_eq!(
+                dto.packs_per_player, procedure.packs_per_player,
+                "packs_per_player ({kind:?})"
+            );
+            assert_eq!(
+                dto.cards_per_pick, procedure.cards_per_pick,
+                "cards_per_pick ({kind:?})"
+            );
+            assert_eq!(
+                dto.pick_selection_mode, procedure.pick_selection_mode,
+                "pick_selection_mode ({kind:?})"
+            );
+            assert_eq!(
+                dto.distribution, procedure.distribution,
+                "distribution ({kind:?})"
+            );
+            assert_eq!(
+                dto.min_deck_size, procedure.min_deck_size,
+                "min_deck_size ({kind:?})"
+            );
+            assert_eq!(
+                dto.cube_min_deck_size, procedure.cube_min_deck_size,
+                "cube_min_deck_size ({kind:?})"
+            );
+            assert_eq!(
+                dto.commanders_required, procedure.commanders_required,
+                "commanders_required ({kind:?})"
+            );
+            assert_eq!(
+                dto.post_draft_play, procedure.post_draft_play,
+                "post_draft_play ({kind:?})"
+            );
+            assert_eq!(
+                dto.launch_capability,
+                procedure.launch_capability(),
+                "launch_capability ({kind:?})"
+            );
+            assert_eq!(
+                dto.match_config, procedure.match_config,
+                "match_config ({kind:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn draft_procedure_dto_publishes_the_engine_single_elimination_seat_set() {
+        let dto = draft_procedure_dto(
+            draft_kind_wire_number(DraftKind::Premier),
+            TournamentFormat::SingleElimination,
+        )
+        .expect("Premier has a wire number");
+
+        assert_eq!(dto.allowed_pod_sizes, vec![8]);
+    }
+
+    // ── V-RS: the CR 903.3 designation's channel, seat by seat ─────────────
+    //
+    // Seam: `submit_deck_inner` / `submit_deck_for_seat_inner` -> `session::apply`
+    // -> `apply_submit_deck` -> `validate_limited_deck`.
+    //
+    // Every row asserts on `session.submitted_decks[..].commanders`, NEVER on
+    // the returned view: the stored value is what
+    // `crates/server-core/src/draft_session.rs`'s phase-9 deferral promises
+    // that phase it will find, and a view assertion would not see it. (The
+    // marker itself is deliberately NOT reproduced here -- this phase's
+    // completion gate is a census of those literals, and a cross-reference
+    // that reproduced one would move a count it does not own.)
+
+    /// The CR 903.13e granting twin of `commander_pool_input_json()`.
+    ///
+    /// Identical but for the set code, which is the only thing that makes the
+    /// grant fire: `session_concessions` latches `SetLayout::UniformByRound`
+    /// and matches each of them case-insensitively against the engine's
+    /// `DRAFT_SET_CONCESSIONS` table, where "CMM" grants up to two copies of
+    /// The Prismatic Piper. The grant is therefore LATCHED from what the draft
+    /// contained rather than hand-set on the session, which is what makes the
+    /// rows below channel tests instead of validator tests.
+    ///
+    /// `commander_pool_input_json()` is deliberately left alone --
+    /// `create_multiplayer_draft_inner_accepts_commander_kind` and
+    /// `create_multiplayer_draft_inner_refuses_an_unmapped_kind` consume it.
+    fn granting_commander_pool_input_json() -> String {
+        let set_pool_json = r#"{
+            "code": "CMM",
+            "name": "Test Set",
+            "release_date": null,
+            "pack_variants": [{
+                "contents": [{ "slot": "common", "count": 4, "choices": [{ "sheet": "common", "weight": 1 }] }],
+                "weight": 1
+            }],
+            "pack_variants_total_weight": 1,
+            "sheets": {
+                "common": {
+                    "cards": [
+                        { "name": "Alpha", "set_code": "CMM", "collector_number": "1", "rarity": "common", "weight": 1 },
+                        { "name": "Beta", "set_code": "CMM", "collector_number": "2", "rarity": "common", "weight": 1 },
+                        { "name": "Gamma", "set_code": "CMM", "collector_number": "3", "rarity": "common", "weight": 1 },
+                        { "name": "Delta", "set_code": "CMM", "collector_number": "4", "rarity": "common", "weight": 1 }
+                    ],
+                    "total_weight": 4,
+                    "foil": false,
+                    "balance_colors": false
+                }
+            },
+            "prints": [],
+            "basic_lands": []
+        }"#;
+        serde_json::json!({
+            "type": "Set",
+            "data": { "set_pool_json": set_pool_json }
+        })
+        .to_string()
+    }
+
+    /// Put the installed session into Deckbuilding and seed ONE seat's pool.
+    ///
+    /// The wasm-seam mirror of draft-core's landed `deckbuilding_commander_draft`,
+    /// PARAMETERIZED ON THE SEAT -- and the parameter is required, not a
+    /// generalisation for its own sake. `apply_submit_deck` validates against
+    /// the SUBMITTING seat's own pool (`session.pools[seat as usize]`), and
+    /// `DraftSession::new` builds `pools: vec![vec![]; pod_size]`, so a
+    /// seat-0-only helper leaves `pools[2]` present and EMPTY: a seat-2
+    /// submission then dies at `validate_limited_deck` step 4 with a
+    /// `NotInPool` per deck name, `apply_submit_deck` returns `Err` before its
+    /// `insert`, and the routing the seat-routing row asserts is never reached.
+    ///
+    /// The names are per-seat distinct for the same reason: seat 2's deck must
+    /// not be validatable against seat 0's pool, so a wrong-pool read is a hard
+    /// `Err` rather than a silent pass.
+    fn seat_into_deckbuilding(seat: u8, pool_size: usize) {
+        session_cell::with_installed_mut(|session| {
+            session.status = DraftStatus::Deckbuilding;
+            session.pools[seat as usize] = (0..pool_size)
+                .map(|i| DraftCardInstance {
+                    instance_id: format!("seat-{seat}-card-{i}"),
+                    name: format!("Seat {seat} Card {i}"),
+                    set_code: "CMM".to_string(),
+                    collector_number: format!("{i}"),
+                    rarity: "common".to_string(),
+                    colors: Vec::new(),
+                    cmc: 0,
+                    type_line: String::new(),
+                    draft_effect: None,
+                })
+                .collect();
+        });
+    }
+
+    /// Start a granting 4-seat Commander pod and put `seat` into deckbuilding.
+    fn granting_commander_pod(seat: u8, pool_size: usize) {
+        create_multiplayer_draft_inner(
+            &granting_commander_pool_input_json(),
+            COMMANDER_SEATS_JSON,
+            4, // CommanderDraft
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
+        )
+        .expect("commander draft should start");
+        seat_into_deckbuilding(seat, pool_size);
+    }
+
+    /// Start a 4-seat PREMIER pod and put `seat` into deckbuilding.
+    ///
+    /// The non-Commander sibling of `granting_commander_pod`, for rows whose
+    /// subject is a deck OUTSIDE the Commander variant. CR 903.3's designation
+    /// floor is `0` for the four CR 905.1a kinds, so an empty designation is
+    /// legal here and illegal in a Commander pod -- which is the whole reason
+    /// this helper exists rather than the Commander one being edited (four
+    /// other rows depend on that helper's kind).
+    ///
+    /// Premier reaches `StartDraft`: `min_pod_size` is 2 and Swiss admits
+    /// `2..=8`, so a 4-seat pod passes both guards.
+    fn premier_pod(seat: u8, pool_size: usize) {
+        create_multiplayer_draft_inner(
+            &granting_commander_pool_input_json(),
+            COMMANDER_SEATS_JSON,
+            1, // Premier
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
+        )
+        .expect("premier draft should start");
+        seat_into_deckbuilding(seat, pool_size);
+    }
+
+    /// The `pool_size`-card deck a seat can legally submit from its own pool.
+    fn seat_deck(seat: u8, size: usize) -> Vec<String> {
+        (0..size).map(|i| format!("Seat {seat} Card {i}")).collect()
+    }
+
+    fn json(value: &[String]) -> String {
+        serde_json::to_string(value).expect("a Vec<String> serializes")
+    }
+
+    /// V-RS (i) -- DELIVERY. The designation reaches the session, IN ORDER.
+    ///
+    /// Discriminates against a channel that drops the designation or delivers
+    /// it reordered. Revert the threading of the parsed `commanders` into the
+    /// `DraftAction::SubmitDeck` literal (back to `Vec::new()`) and the stored
+    /// value is `[]` against an assertion naming an ordered, non-empty list.
+    ///
+    /// The designation is deliberately NOT in the deck's own order: a channel
+    /// that sorted, deduped or re-derived it from the deck would red here.
+    #[test]
+    fn submit_deck_inner_carries_the_designation_to_the_session() {
+        clear_state();
+        granting_commander_pod(0, 60);
+
+        let deck = seat_deck(0, 60);
+        let commanders = vec!["Seat 0 Card 7".to_string(), "Seat 0 Card 3".to_string()];
+        submit_deck_inner(&json(&deck), &json(&commanders)).expect("a legal deck submits");
+
+        session_cell::with_installed(|session| {
+            // Paired positive reach-guard: the submission INSERTED. A refusal
+            // cannot satisfy the assertion below vacuously.
+            assert_eq!(
+                session.submitted_decks.len(),
+                1,
+                "the submission must have reached `submitted_decks.insert`"
+            );
+            let submission = session
+                .submitted_decks
+                .get(&engine::types::player::PlayerId(0))
+                .expect("seat 0's submission is keyed by its player id");
+            assert_eq!(
+                submission.commanders, commanders,
+                "CR 903.3: the designation arrives verbatim and in order"
+            );
+        });
+
+        clear_state();
+    }
+
+    /// V-RS (ii) -- ANTI-FABRICATION. An empty designation is STORED empty.
+    ///
+    /// Discriminates against a world in which something on the empty path
+    /// synthesises a designation -- the core defaulting an empty parse,
+    /// `session::apply` substituting, or `apply_submit_deck` inventing an entry
+    /// rather than storing the empty one.
+    ///
+    /// This row is NOT revert-failing, and that is deliberate rather than an
+    /// oversight: the value-level reversion (`commanders: Vec::new()` in the
+    /// `SubmitDeck` literal) hands `apply_submit_deck` an empty `Vec` either
+    /// way, so the assertion holds identically. What it buys is a pin on the
+    /// empty path -- it is the only row that carries an empty designation
+    /// through to a SUCCESSFUL insert and then reads what was stored. Do NOT
+    /// "strengthen" it with a non-empty input: that converts it into (i) and
+    /// deletes this seam's only empty-path row.
+    #[test]
+    fn submit_deck_inner_stores_an_empty_designation_without_synthesising_one() {
+        clear_state();
+        // A PREMIER pod, not a Commander one: CR 903.3's floor is `0` outside
+        // the Commander variant, so an empty designation is legal here. The
+        // row's own assertion message already reads "a deck outside the
+        // Commander variant designates none" -- it was always about this case
+        // and was merely borrowing the Commander pod helper. The INPUT stays
+        // `"[]"`, exactly as the docstring above requires.
+        premier_pod(0, 60);
+
+        let deck = seat_deck(0, 60);
+        submit_deck_inner(&json(&deck), "[]").expect("an undesignated deck submits");
+
+        session_cell::with_installed(|session| {
+            assert_eq!(
+                session.submitted_decks.len(),
+                1,
+                "the submission must have reached `submitted_decks.insert`"
+            );
+            let submission = session
+                .submitted_decks
+                .get(&engine::types::player::PlayerId(0))
+                .expect("seat 0's submission is keyed by its player id");
+            assert!(
+                submission.commanders.is_empty(),
+                "CR 903.1: a deck outside the Commander variant designates none, and \
+                 the empty list must be stored rather than filled in: {:?}",
+                submission.commanders
+            );
+        });
+
+        clear_state();
+    }
+
+    /// V-RS (iii) -- LOUD REFUSAL. A designation the deck does not back is
+    /// refused, and the ENGINE'S OWN `CommanderNotInDeck` text reaches the
+    /// caller.
+    ///
+    /// Discriminates against a generic `format!` wrapper in place of
+    /// `deck_submission_message`: `DraftError::ValidationFailed`'s own
+    /// `#[error]` is the bare "deck validation failed", so a wrapper's string
+    /// would carry NONE of the text asserted here.
+    ///
+    /// Revert-failing against two distinct lines -- revert the threading and no
+    /// name is designated at all, so `*designated > in_deck` never fires and
+    /// the call SUCCEEDS where this row demands `expect_err`; revert
+    /// `.map_err(deck_submission_message)` to a generic wrapper and the text
+    /// half fails. Its paired positive is the same call with the name IN the
+    /// deck, immediately below.
+    #[test]
+    fn submit_deck_inner_carries_the_engines_refusal_text() {
+        clear_state();
+        granting_commander_pod(0, 60);
+
+        let deck = seat_deck(0, 60);
+        let absent = vec!["Seat 0 Card 99".to_string()];
+        let err = submit_deck_inner(&json(&deck), &json(&absent))
+            .expect_err("CR 702.124h: a designation must be backed by a copy in the deck");
+        assert!(
+            err.contains("is designated as commander"),
+            "the engine's own CommanderNotInDeck text must survive the boundary: {err}"
+        );
+        assert!(
+            !err.contains("deck validation failed"),
+            "a generic DraftError wrapper would have replaced the details: {err}"
+        );
+
+        // Paired positive: the same call with a name the deck DOES back
+        // succeeds, so this row cannot pass because everything is refused.
+        let present = vec!["Seat 0 Card 4".to_string()];
+        submit_deck_inner(&json(&deck), &json(&present)).expect("a backed designation submits");
+
+        clear_state();
+    }
+
+    /// V-RS (iv) -- PARSE ORDER. Both decodes precede the session.
+    ///
+    /// The landed `submit_pick_for_seat_refuses_a_bare_id` shape, verbatim: run
+    /// after `clear_state()` with NO session installed, so the two candidate
+    /// orderings produce DIFFERENT strings. `main_deck_json` is well-formed, so
+    /// only the `commanders` decode can fire.
+    ///
+    /// This row is insensitive to the threading reversion the other rows catch;
+    /// what it protects is the parse ORDERING and the distinct
+    /// "Failed to parse commanders" text. Seeding a session here would destroy
+    /// its discrimination -- against a seeded session BOTH orderings produce
+    /// the same string.
+    #[test]
+    fn submit_deck_inner_parses_the_designation_before_the_session() {
+        clear_state();
+        let err = submit_deck_inner("[]", "kenrith").expect_err("a bare word is not a JSON array");
+        assert!(
+            err.contains("Failed to parse commanders"),
+            "the commanders decode is the one that fired: {err}"
+        );
+        // Reached the parse, not the session: no draft is initialized here, so
+        // a decoder that ran AFTER `with_draft_mut_inner` would have reported
+        // "Draft not initialized" instead.
+        assert!(
+            !err.contains("Draft not initialized"),
+            "parse must precede the session: {err}"
+        );
+
+        // Paired positive reach-guard: the same core against a seeded session
+        // DOES reach `submitted_decks.insert`, so a core that refused
+        // everything cannot satisfy the negative above.
+        granting_commander_pod(0, 60);
+        let deck = seat_deck(0, 60);
+        // CR 903.3: a Commander pod requires a designation, and this guard's
+        // job is only to show the insert IS reached. `Seat 0 Card 0` is backed
+        // by the deck and the pool, so nothing but the floor changes.
+        submit_deck_inner(&json(&deck), &json(&["Seat 0 Card 0".to_string()]))
+            .expect("a well-formed payload applies");
+        session_cell::with_installed(|session| {
+            assert_eq!(session.submitted_decks.len(), 1);
+        });
+
+        clear_state();
+    }
+
+    /// V-RS (v-a) -- CR 903.13e, the commanders-DEPENDENT arm.
+    ///
+    /// "each player may add up to two cards named The Prismatic Piper to their
+    /// card pool, but only if those cards are used as the player's
+    /// commander(s)". The two halves differ in EXACTLY ONE input: the same deck
+    /// submits cleanly when the added copies are designated and is refused by
+    /// `FillerNotUsedAsCommander` when they are not.
+    ///
+    /// Revert-failing: under the threading reversion the accepted half receives
+    /// `designated = 0`, `added > designated` fires, and the submission this
+    /// row asserts is clean is refused.
+    #[test]
+    fn submit_deck_inner_feeds_the_filler_designation_arm() {
+        clear_state();
+        granting_commander_pod(0, 60);
+
+        let filler = "The Prismatic Piper".to_string();
+        let mut deck = seat_deck(0, 58);
+        deck.push(filler.clone());
+        deck.push(filler.clone());
+        let designated = vec![filler.clone(), filler.clone()];
+
+        // Accepted: two added copies, both designated.
+        submit_deck_inner(&json(&deck), &json(&designated))
+            .expect("CR 903.13e: added filler copies designated as commanders are legal");
+        session_cell::with_installed(|session| {
+            let submission = session
+                .submitted_decks
+                .get(&engine::types::player::PlayerId(0))
+                .expect("the accepted submission inserted");
+            assert_eq!(submission.commanders, designated);
+        });
+
+        // Refused: the SAME deck with no designation.
+        let err = submit_deck_inner(&json(&deck), "[]")
+            .expect_err("CR 903.13e: undesignated added filler is not legal");
+        assert!(
+            err.contains("designated as commander(s)"),
+            "expected the engine's FillerNotUsedAsCommander text: {err}"
+        );
+
+        clear_state();
+    }
+
+    /// V-RS (v-b) -- CR 903.13e, the commanders-INDEPENDENT arm.
+    ///
+    /// Three added copies exceed the grant of two, and `FillerExceedsGrant`
+    /// is the error that fires, with the engine's own text through
+    /// `deck_submission_message`.
+    ///
+    /// This row is NOT revert-failing and is not padding: `added >
+    /// filler.max_copies` reads `commanders` not at all, so no line this phase
+    /// writes sits under it. It is here because phase 8 routed the filler's cap
+    /// affordance forward in prose, and the refusal must be shown REACHABLE
+    /// through this channel and SPECIFIC to this error rather than merely
+    /// asserted. Its paired positive is (v-a)'s accepted two-copy half.
+    #[test]
+    fn submit_deck_inner_reaches_the_filler_cap() {
+        clear_state();
+        granting_commander_pod(0, 60);
+
+        let filler = "The Prismatic Piper".to_string();
+        let mut deck = seat_deck(0, 57);
+        deck.push(filler.clone());
+        deck.push(filler.clone());
+        deck.push(filler.clone());
+        // Two designations, not three: CR 702.124g caps the designation at two,
+        // and `apply_submit_deck` would return TooManyCommanders BEFORE the
+        // validator on a third -- which would test the wrong arm.
+        let designated = vec![filler.clone(), filler.clone()];
+
+        let err = submit_deck_inner(&json(&deck), &json(&designated))
+            .expect_err("CR 903.13e: at most two copies may be added");
+        assert!(
+            err.contains("but at most 2 may be added"),
+            "expected the engine's FillerExceedsGrant text: {err}"
+        );
+
+        clear_state();
+    }
+
+    /// V-RS (vi) -- SEAT ROUTING, with a prior producer.
+    ///
+    /// There is no separate routing path to test: both submissions enter the
+    /// SAME function, so nothing but the `seat` argument can carry the routing.
+    /// The fixture seeds TWO seats and submits from both, because attribution
+    /// needs a first producer -- a one-seat fixture would catch "the seat
+    /// parameter is ignored" only by refusal, and would catch neither a
+    /// submission attributed to the wrong player nor a `submitted_decks`
+    /// replaced rather than inserted into.
+    ///
+    /// Per-seat-distinct pool names make `pools[seat]`'s index load-bearing,
+    /// and per-seat-distinct DESIGNATIONS make a wrong-keyed submission visible
+    /// in the value and not only in the count.
+    ///
+    /// Revert-failing: under the threading reversion BOTH entries store `[]`
+    /// and both `.commanders` assertions fail, independently of anything this
+    /// row claims about seats.
+    #[test]
+    fn submit_deck_for_seat_inner_routes_each_seat_to_its_own_submission() {
+        clear_state();
+        granting_commander_pod(0, 60);
+        seat_into_deckbuilding(2, 60);
+
+        let seat0_deck = seat_deck(0, 60);
+        let seat0_commanders = vec!["Seat 0 Card 0".to_string()];
+        submit_deck_for_seat_inner(0, &json(&seat0_deck), &json(&seat0_commanders))
+            .expect("seat 0 submits from its own pool");
+
+        let seat2_deck = seat_deck(2, 60);
+        let seat2_commanders = vec!["Seat 2 Card 1".to_string()];
+        submit_deck_for_seat_inner(2, &json(&seat2_deck), &json(&seat2_commanders))
+            .expect("seat 2 submits from its own pool");
+
+        session_cell::with_installed(|session| {
+            // Paired positive reach-guard: BOTH submissions inserted. A refused
+            // seat-2 call cannot satisfy the assertions below.
+            assert_eq!(
+                session.submitted_decks.len(),
+                2,
+                "`submitted_decks` is inserted into, never replaced"
+            );
+
+            let seat2 = session
+                .submitted_decks
+                .get(&engine::types::player::PlayerId(2))
+                .expect("seat 2's submission is keyed by its own player id");
+            assert_eq!(seat2.seat, 2);
+            assert_eq!(seat2.commanders, seat2_commanders);
+
+            let seat0 = session
+                .submitted_decks
+                .get(&engine::types::player::PlayerId(0))
+                .expect("seat 0's submission survives seat 2's");
+            assert_eq!(seat0.seat, 0);
+            assert_eq!(
+                seat0.commanders, seat0_commanders,
+                "a later seat's designation must not be attributed to an earlier one"
+            );
+        });
+
+        clear_state();
+    }
+
+    // ── U21: the PRODUCTION seam for the CR 903.3 designation ──────────────
+    //
+    // These three rows sit together and read as one argument about
+    // `get_bot_deck_inner`: VM-4c is the argument (`Ok` with a designation),
+    // VM-4e is the PRECONDITION refusal (before `suggest_deck`), VM-4h is the
+    // POSTCONDITION refusal (after it). They must not be folded into each
+    // other: VM-4c needs a database and VM-4e needs none, and VM-4e's fixture
+    // would never reach the postcondition VM-4h asserts.
+
+    /// A card database whose `commander_pool_input_json` cards are commander-
+    /// judgeable: `Alpha` is a Legendary Creature, all four are mono-white, and
+    /// the basics are present so a containment check never measures a missing
+    /// row (PROBE C'').
+    ///
+    /// The module's `fixture_card_db_json` makes all four NON-legendary, so a
+    /// designation test needs its own variant rather than reusing it.
+    fn commander_fixture_db_json() -> String {
+        let card = |name: &str, supertypes: &str, core: &str, identity: &str| {
+            format!(
+                r#""{}": {{ "name": "{name}", "mana_cost": {{ "type": "NoCost" }},
+                "card_type": {{ "supertypes": [{supertypes}], "core_types": ["{core}"], "subtypes": [] }},
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "color_identity": [{identity}],
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+                "legalities": {{ "commander": "legal" }} }}"#,
+                name.to_lowercase()
+            )
+        };
+        format!(
+            "{{ {} }}",
+            [
+                card("Alpha", "\"Legendary\"", "Creature", "\"White\""),
+                card("Beta", "", "Creature", "\"White\""),
+                card("Gamma", "", "Creature", "\"White\""),
+                card("Delta", "", "Creature", "\"White\""),
+                card("Blue Addable", "", "Creature", "\"Blue\""),
+                card("White Addable", "", "Creature", "\"White\""),
+                card("Plains", "\"Basic\"", "Land", "\"White\""),
+                card("Island", "\"Basic\"", "Land", "\"Blue\""),
+            ]
+            .join(", ")
+        )
+    }
+
+    fn install_commander_fixture_db() {
+        let db = CardDatabase::from_json_str(&commander_fixture_db_json()).unwrap();
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(db));
+    }
+
+    fn install_ante_fixture_db() {
+        let mut cards: serde_json::Value =
+            serde_json::from_str(&commander_fixture_db_json()).unwrap();
+        let mut contract = cards["beta"].clone();
+        contract["name"] = serde_json::json!("Contract from Below");
+        contract["card_type"]["core_types"] = serde_json::json!(["Sorcery"]);
+        contract["oracle_text"] = serde_json::json!(
+            "Remove this card from your deck before playing if you're not playing for ante.\nDiscard your hand, ante the top card of your library, then draw seven cards."
+        );
+        cards["contract from below"] = contract;
+        let mut forest = cards["plains"].clone();
+        forest["name"] = serde_json::json!("Forest");
+        forest["color_identity"] = serde_json::json!(["Green"]);
+        cards["forest"] = forest;
+        let db = CardDatabase::from_json_str(&cards.to_string()).unwrap();
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(db));
+    }
+
+    #[test]
+    fn quick_cube_config_raises_zero_to_one_without_lowering_higher_requests() {
+        let settings = |min_deck_size| CubeDraftSettings {
+            pod_size: 8,
+            pack_count: 3,
+            cards_per_pack: 15,
+            min_deck_size,
+            addable_cards: DeckAddableCards::standard_basics(),
+        };
+        let config = |min_deck_size| {
+            build_quick_cube_config(
+                "Test Cube",
+                &settings(min_deck_size),
+                DeckAddableCards::standard_basics(),
+                42,
+            )
+        };
+
+        assert_eq!(config(0).min_deck_size, 1);
+        assert_eq!(config(4).min_deck_size, 4);
+        install_fixture_db();
+        let cards = CARD_DB.with(|cell| {
+            let db = cell.borrow();
+            cube_cards_from_entries(
+                &parse_cube_list("400 Alpha\n1 Delta").unwrap(),
+                db.as_ref().unwrap(),
+            )
+            .unwrap()
+        });
+        let source = CubePackSource::new(cards);
+        let seats = (0..8)
+            .map(|i| DraftSeat::Bot {
+                name: format!("Bot {i}"),
+            })
+            .collect();
+        let mut session = DraftSession::new(config(4), seats, "quick-cube".into());
+        session::apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+        assert_eq!(session.current_pack[0].as_ref().unwrap().0.len(), 15);
+        let restored =
+            restorable_draft_session_from_json(&serde_json::to_string(&session).unwrap()).unwrap();
+        session_cell::install(restored);
+        let pool = booster_pack_pool_for_game_inner().unwrap().unwrap();
+        assert_eq!(pool.len(), 401);
+        assert_eq!(pool.last().unwrap(), "Delta");
+        clear_state();
+    }
+
+    #[test]
+    fn multiplayer_commander_cube_stores_and_publishes_the_procedure_floor() {
+        clear_state();
+        install_commander_fixture_db();
+        let pool_input = serde_json::json!({
+            "type": "Cube",
+            "data": {
+                "cube_list_text": "200 Alpha",
+                "cube_name": "Commander Cube",
+                "cube_draft_settings": {
+                    "pod_size": 4,
+                    "pack_count": 3,
+                    "cards_per_pack": 15,
+                    "min_deck_size": 1,
+                    "addable_cards": {
+                        "policy": "StandardBasics",
+                        "custom": []
+                    }
+                }
+            }
+        })
+        .to_string();
+
+        let view = create_multiplayer_draft_inner(
+            &pool_input,
+            COMMANDER_SEATS_JSON,
+            4,
+            42,
+            "commander-cube",
+            "Swiss",
+            "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
+        )
+        .expect("Commander cube should start");
+
+        assert_eq!(view.min_deck_size, 60);
+        assert!(serde_json::to_value(&view)
+            .unwrap()
+            .get("booster_pack_pool")
+            .is_none());
+        assert_eq!(
+            booster_pack_pool_for_game_inner(),
+            Ok(Some(vec!["Alpha".to_string(); 200]))
+        );
+        session_cell::with_installed(|session| {
+            assert_eq!(session.config.min_deck_size, 60);
+        });
+        clear_state();
+    }
+
+    /// `DraftSession.pools` is `pub`, and seeding a bot seat's pool directly is
+    /// the same shape `draft-core`'s own session tests use.
+    fn seed_bot_pool(seat: usize, pool: Vec<DraftCardInstance>) {
+        session_cell::with_installed_mut(|session| {
+            session.pools[seat] = pool;
+        });
+    }
+
+    /// `DraftConfig.addable_cards` is `pub`. In PRODUCTION this field is written
+    /// only by `create_multiplayer_draft_inner`'s Cube arm, from the host's cube
+    /// settings; the Set arm hardcodes `DeckAddableCards::standard_basics()` and
+    /// cannot reach a `CustomOnly` policy at all. The fixture below sets it
+    /// directly on a Set session, so it must not be read as implying the Set
+    /// path can produce this configuration.
+    fn set_addable_cards(addable: DeckAddableCards) {
+        session_cell::with_installed_mut(|session| {
+            session.config.addable_cards = addable;
+        });
+    }
+
+    fn mono_white_bot_pool() -> Vec<DraftCardInstance> {
+        ["Alpha", "Beta", "Gamma", "Delta"]
+            .into_iter()
+            .map(|name| DraftCardInstance {
+                instance_id: format!("id-{name}"),
+                name: name.to_string(),
+                set_code: "TST".to_string(),
+                collector_number: "1".to_string(),
+                rarity: "common".to_string(),
+                colors: vec!["W".to_string()],
+                cmc: 2,
+                type_line: if name == "Alpha" {
+                    "Legendary Creature — Human".to_string()
+                } else {
+                    "Creature — Human".to_string()
+                },
+                draft_effect: None,
+            })
+            .collect()
+    }
+
+    fn start_commander_pod(kind_wire: u8) {
+        create_multiplayer_draft_inner(
+            &commander_pool_input_json(),
+            COMMANDER_SEATS_JSON,
+            kind_wire,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
+        )
+        .expect("the pod should start");
+        seed_bot_pool(1, mono_white_bot_pool());
+    }
+
+    /// VM-4c — the PRODUCTION argument at `get_bot_deck_inner`'s `suggest_deck`
+    /// call: `session.config.kind.commanders_required()`, not a literal.
+    ///
+    /// This row is BLIND to database ABSENCE, and that is disclosed rather than
+    /// worked around: it installs its own fixture database, so it constructs the
+    /// input whose absence is the production failure mode. VM-4e is its
+    /// complement.
+    #[test]
+    fn get_bot_deck_inner_designates_a_commander_for_a_commander_pod() {
+        clear_state();
+        install_commander_fixture_db();
+        start_commander_pod(4);
+
+        let deck = get_bot_deck_inner(1).expect("a Commander bot deck should build");
+        // Reach guard first: an empty deck cannot satisfy the claim below.
+        assert!(!deck.main_deck.is_empty(), "deck = {:?}", deck.main_deck);
+        assert_eq!(deck.commander.len(), 1, "commander = {:?}", deck.commander);
+
+        // Paired control: the same pool and pod under `Premier` designates
+        // nothing, so the argument is provably read from the kind.
+        clear_state();
+        install_commander_fixture_db();
+        start_commander_pod(1);
+
+        let deck = get_bot_deck_inner(1).expect("a Premier bot deck should build");
+        assert!(!deck.main_deck.is_empty(), "deck = {:?}", deck.main_deck);
+        assert!(
+            deck.commander.is_empty(),
+            "commander = {:?}",
+            deck.commander
+        );
+
+        clear_state();
+    }
+
+    /// VM-4e — the source/kind gate when the host has no `CARD_DB`.
+    ///
+    /// `install_commander_fixture_db()` is deliberately NOT called. Do not add
+    /// it back as an oversight — the whole subject of this row is the database's
+    /// absence, and installing one silences it. `commander_pool_input_json()` is
+    /// a SET pool, so session creation itself needs no database, which is what
+    /// makes the fixture constructible.
+    #[test]
+    fn get_bot_deck_inner_requires_faces_for_commander_and_cube_but_not_set_premier() {
+        clear_state();
+        start_commander_pod(4);
+
+        let err = get_bot_deck_inner(1).expect_err("CR 903.3 cannot be judged with no database");
+        assert!(
+            err.contains("Card database"),
+            "the message must name the card database: {err}"
+        );
+
+        // The normal Set-backed Premier host does not fetch CARD_DB. Its bot
+        // still proposes a complete deck from the drafted pool and basics.
+        clear_state();
+        start_commander_pod(1);
+        let deck = get_bot_deck_inner(1).expect("Set Premier builds without CARD_DB");
+        assert!(!deck.main_deck.is_empty(), "deck = {:?}", deck.main_deck);
+        assert_eq!(
+            deck.main_deck.len() + deck.lands.values().map(|&n| n as usize).sum::<usize>(),
+            40
+        );
+        assert!(deck.commander.is_empty());
+
+        assert!(get_bot_deck_inner(8).unwrap_err().contains("out of range"));
+
+        // Positive reach: the same Premier seat builds with its database.
+        install_commander_fixture_db();
+        let deck = get_bot_deck_inner(1).expect("Premier builds with typed faces");
+        assert!(!deck.main_deck.is_empty(), "deck = {:?}", deck.main_deck);
+
+        // Cube's host loads faces at creation. Clearing them after creation
+        // models a resumed Cube whose database is missing at bot proposal.
+        clear_state();
+        install_fixture_db();
+        let cube_input = serde_json::json!({
+            "type": "Cube",
+            "data": {
+                "cube_list_text": "20 Alpha\n20 Beta",
+                "cube_name": "Test Cube",
+                "cube_draft_settings": {
+                    "pod_size": 2,
+                    "pack_count": 1,
+                    "cards_per_pack": 2,
+                    "min_deck_size": 4,
+                    "addable_cards": { "policy": "StandardBasics", "custom": [] }
+                }
+            }
+        });
+        let seats = serde_json::json!([
+            { "type": "Human", "player_id": 0, "display_name": "Host" },
+            { "type": "Bot", "name": "Bot 1" }
+        ]);
+        create_multiplayer_draft_inner(
+            &cube_input.to_string(),
+            &seats.to_string(),
+            1,
+            42,
+            "cube-room",
+            "Swiss",
+            "Competitive",
+            2,
+        )
+        .expect("Cube session must be installed before testing missing faces");
+        seed_bot_pool(1, mono_white_bot_pool());
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        let err = get_bot_deck_inner(1).expect_err("Cube requires typed faces");
+        assert!(err.contains("Card database"), "{err}");
+
+        clear_state();
+    }
+
+    #[test]
+    fn limited_bot_entry_admits_only_a_typed_ante_free_full_deck() {
+        clear_state();
+        install_ante_fixture_db();
+        let cube_input = serde_json::json!({
+            "type": "Cube",
+            "data": {
+                "cube_list_text": "100 Alpha\n100 Beta\n1 Contract from Below",
+                "cube_name": "Ante Cube",
+                "cube_draft_settings": {
+                    "pod_size": 2,
+                    "pack_count": 1,
+                    "cards_per_pack": 2,
+                    "min_deck_size": 40,
+                    "addable_cards": {
+                        "policy": "CustomOnly",
+                        "custom": ["Contract from Below", "Forest"]
+                    }
+                }
+            }
+        });
+        let seats = serde_json::json!([
+            { "type": "Human", "player_id": 0, "display_name": "Host" },
+            { "type": "Bot", "name": "Bot 1" }
+        ]);
+        create_multiplayer_draft_inner(
+            &cube_input.to_string(),
+            &seats.to_string(),
+            1,
+            42,
+            "ante-cube",
+            "Swiss",
+            "Competitive",
+            2,
+        )
+        .expect("Cube with typed addable faces must start");
+        let mut pool = mono_white_bot_pool();
+        pool.insert(
+            0,
+            DraftCardInstance {
+                instance_id: "ante-first".to_string(),
+                name: "Contract from Below".to_string(),
+                set_code: "TST".to_string(),
+                collector_number: "0".to_string(),
+                rarity: "rare".to_string(),
+                colors: vec!["B".to_string()],
+                cmc: 1,
+                type_line: "Sorcery".to_string(),
+                draft_effect: None,
+            },
+        );
+        seed_bot_pool(1, pool.clone());
+        CARD_DB.with(|cell| {
+            let db = cell.borrow();
+            let db = db.as_ref().unwrap();
+            assert!(db
+                .get_face_by_name("Contract from Below")
+                .is_some_and(engine::game::face_uses_ante));
+            assert!(db
+                .get_face_by_name("Forest")
+                .is_some_and(|face| !engine::game::face_uses_ante(face)));
+        });
+
+        let deck = get_bot_deck_inner(1).expect("the legal land fills the proposal");
+        assert!(deck.main_deck.contains(&"Alpha".to_string()));
+        assert!(!deck.main_deck.contains(&"Contract from Below".to_string()));
+        assert_eq!(deck.lands.get("Forest"), Some(&36));
+        assert_eq!(
+            deck.main_deck.len() + deck.lands.values().map(|&n| n as usize).sum::<usize>(),
+            40
+        );
+
+        set_addable_cards(DeckAddableCards {
+            policy: DeckAddableCardPolicy::CustomOnly,
+            custom: vec!["Contract from Below".to_string()],
+        });
+        let err = get_bot_deck_inner(1).expect_err("ante-only fill is short");
+        assert!(err.contains("minimum is 40"), "{err}");
+
+        seed_bot_pool(1, vec![pool[0].clone()]);
+        set_addable_cards(DeckAddableCards::standard_basics());
+        let err = get_bot_deck_inner(1).expect_err("all-ante pool is exhausted");
+        assert!(err.contains("reached 0 cards"), "{err}");
+        clear_state();
+    }
+
+    /// VM-4h — [M2] the POSTCONDITION refusal: a Commander bot deck that did not
+    /// reach `min_deck_size` is not shipped.
+    ///
+    /// CR 903.13f(1). The cause lives in `suggest.rs`
+    /// (`custom_only_with_no_in_identity_entry_yields_a_short_deck`, which pins
+    /// that the CR 903.5c filter reached the shortfall deliberately); this row
+    /// pins the DISPOSITION at the seam, and each would still pass if the
+    /// other's subject regressed.
+    #[test]
+    fn get_bot_deck_inner_refuses_a_commander_bot_deck_under_the_floor() {
+        // An off-identity custom list: the CR 903.5c filter admits nothing, so
+        // `lands` is empty and the deck is short of the session's floor.
+        clear_state();
+        install_commander_fixture_db();
+        start_commander_pod(4);
+        set_addable_cards(DeckAddableCards {
+            policy: DeckAddableCardPolicy::CustomOnly,
+            custom: vec!["Blue Addable".to_string()],
+        });
+
+        let err = get_bot_deck_inner(1).expect_err("a deck under the floor must be refused");
+        assert!(
+            err.contains("minimum is 60") && err.contains("reached 4 cards"),
+            "the message must name the reached count and the minimum: {err}"
+        );
+
+        // Control (i) — the reach guard, one field varied. An IN-identity custom
+        // name builds a full deck, so the `Err` above is the postcondition
+        // refusing rather than a broken fixture. This is also the row that reds
+        // if the comparison is inverted or the `lands` term is dropped from the
+        // sum.
+        clear_state();
+        install_commander_fixture_db();
+        start_commander_pod(4);
+        set_addable_cards(DeckAddableCards {
+            policy: DeckAddableCardPolicy::CustomOnly,
+            custom: vec!["White Addable".to_string()],
+        });
+
+        let deck = get_bot_deck_inner(1).expect("an in-identity custom card fills the deck");
+        assert_eq!(deck.commander.len(), 1, "commander = {:?}", deck.commander);
+        let land_total: usize = deck.lands.values().map(|&n| n as usize).sum();
+        assert_eq!(
+            deck.main_deck.len() + land_total,
+            60,
+            "lands = {:?}",
+            deck.lands
+        );
+
+        // Control (ii) — isolates the `commanders_required() > 0` conjunct: the
+        // identical off-identity `CustomOnly` list under `Premier` returns `Ok`.
+        clear_state();
+        install_commander_fixture_db();
+        start_commander_pod(1);
+        set_addable_cards(DeckAddableCards {
+            policy: DeckAddableCardPolicy::CustomOnly,
+            custom: vec!["Blue Addable".to_string()],
+        });
+
+        let deck = get_bot_deck_inner(1).expect("the four CR 905.1a kinds are unaffected");
+        assert!(!deck.main_deck.is_empty(), "deck = {:?}", deck.main_deck);
+
+        clear_state();
+    }
+}
+
+#[cfg(test)]
+mod llm_seat_authority_tests {
+    use super::*;
+
+    /// A pod whose seat roster is explicit about which indices are bots, so the
+    /// test never leans on the "seat 0 is the human" convention that the
+    /// authority check exists to stop trusting.
+    fn pod(bot_seats: &[u8], pod_size: u8) -> DraftSession {
+        let config = DraftConfig {
+            source: DraftSource::single_set("TST".to_string()),
+            set_code: "TST".to_string(),
+            kind: DraftKind::Premier,
+            pod_size,
+            cards_per_pack: 15,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 7,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        let seats: Vec<DraftSeat> = (0..pod_size)
+            .map(|index| {
+                if bot_seats.contains(&index) {
+                    DraftSeat::Bot {
+                        name: format!("Bot {index}"),
+                    }
+                } else {
+                    DraftSeat::Human {
+                        player_id: engine::types::player::PlayerId(index),
+                        display_name: format!("Player {index}"),
+                    }
+                }
+            })
+            .collect();
+        DraftSession::new(config, seats, "LLM-AUTH".to_string())
+    }
+
+    /// The motivating case: an 8-human Premier pod. Every index is in range, so
+    /// a bounds check would admit all of them, but none may have its private
+    /// pool and pack rendered into a third-party prompt.
+    #[test]
+    fn a_pod_of_humans_yields_no_llm_seat() {
+        assert_eq!(llm_eligible_bot_seats(&pod(&[], 8)), Vec::<u8>::new());
+    }
+
+    /// A human at a NONZERO index is excluded while its bot neighbours are
+    /// admitted. This is the disclosure the seat-number convention allowed:
+    /// seat 3 is in range and is not seat 0.
+    #[test]
+    fn only_bot_seats_are_eligible_whatever_their_index() {
+        assert_eq!(llm_eligible_bot_seats(&pod(&[1, 2, 4], 5)), vec![1, 2, 4]);
+    }
+
+    /// Seat 0 carries no special status in either direction: eligible when it
+    /// is a bot, excluded when it is not.
+    #[test]
+    fn seat_zero_is_governed_by_its_role_not_its_number() {
+        assert_eq!(llm_eligible_bot_seats(&pod(&[0], 2)), vec![0]);
+        assert_eq!(llm_eligible_bot_seats(&pod(&[1], 2)), vec![1]);
+        assert!(!llm_eligible_bot_seats(&pod(&[1], 2)).contains(&0));
+    }
+
+    /// There is no caller-supplied list to disagree with, so the roster is the
+    /// only answer: a pod of all bots yields exactly its seats, in order.
+    #[test]
+    fn the_roster_is_the_only_source_of_eligibility() {
+        assert_eq!(llm_eligible_bot_seats(&pod(&[0, 1, 2], 3)), vec![0, 1, 2]);
     }
 }

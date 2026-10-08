@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { BuiltInGameFormat } from "../../adapter/types";
 import { fetchDeckFromUrl, isSupportedDeckUrl, IMPORT_ERROR_KEYS } from "../deckUrlImport";
 import { detectAndParseDeck, resolveCommander, type ParsedDeck } from "../deckParser";
+import { useConnectivityStore } from "../../stores/connectivityStore";
 
 // resolveCommander delegates commander eligibility to the WASM engine; every
 // fixture below carries an explicit commander/sideboard so resolveCommander
@@ -13,6 +15,7 @@ vi.mock("../engineRuntime", () => ({
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
 });
 
 function mockWorkerText(text: string): void {
@@ -91,6 +94,24 @@ describe("fetchDeckFromUrl", () => {
     await expect(fetchDeckFromUrl("https://example.com/decks/abc")).rejects.toThrow(
       IMPORT_ERROR_KEYS.invalidUrl,
     );
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects a valid URL offline without fetching", async () => {
+    global.fetch = vi.fn();
+    useConnectivityStore.getState().setForcedOffline(true);
+
+    await expect(fetchDeckFromUrl("https://moxfield.com/decks/abc")).rejects.toThrow(
+      IMPORT_ERROR_KEYS.offline,
+    );
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps malformed URLs invalid while offline", async () => {
+    global.fetch = vi.fn();
+    useConnectivityStore.getState().setForcedOffline(true);
+
+    await expect(fetchDeckFromUrl("nonsense")).rejects.toThrow(IMPORT_ERROR_KEYS.invalidUrl);
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
@@ -185,31 +206,60 @@ function assertShape(deck: ParsedDeck, shape: DeckShape): void {
   }
 }
 
-// Every GameFormat in crates/engine/src/types/format.rs, mapped to its deck shape.
-const FORMAT_SHAPES: Array<[format: string, shape: DeckShape]> = [
-  ["Standard", "constructed"],
-  ["Pioneer", "constructed"],
-  ["Modern", "constructed"],
-  ["Premodern", "constructed"],
-  ["Legacy", "constructed"],
-  ["Vintage", "constructed"],
-  ["Historic", "constructed"],
-  ["Timeless", "constructed"],
-  ["Pauper", "constructed"],
-  ["FreeForAll", "constructed"],
-  ["TwoHeadedGiant", "constructed"],
-  ["Archenemy", "constructed"],
-  ["Commander", "commander"],
-  ["DuelCommander", "commander"],
-  ["PauperCommander", "commander"],
-  ["Brawl", "commander"],
-  ["HistoricBrawl", "commander"],
-  ["TinyLeaders", "commanderWithSideboard"],
-  ["Limited", "mainOnly"],
-];
+// Every built-in GameFormat, mapped to the deck-import FIXTURE its row exercises.
+//
+// Typed as a Record keyed by `BuiltInGameFormat`, so the COMPILER — not a
+// comment — is what says the KEY SET covers every format: a new built-in is
+// TS2741 here until a shape is declared for it, and a name that is not a
+// built-in is TS2353. `BuiltInGameFormat` is in turn pinned to the engine's
+// `GameFormat` by
+// `format::tests::client_builtin_game_format_union_matches_the_engine`.
+//
+// The VALUES are not engine-derived and must not be described as if they were.
+// `DeckShape` picks one of four hard-coded decklist texts in
+// `canonicalForShape` and the matching zone assertion in `assertShape`; the
+// `it.each` callback binds the format as `_format` and never reads it. So
+// NOTHING checks that a format is paired with the right fixture, and no lane
+// can. Measured against the engine: `Limited` and `FreeForAll` agree on
+// uses_commander, command_zone_holds_decklist_commander, sideboard_policy and
+// supplies_fixed_deck, yet belong to different shapes — so no function of
+// those fields reproduces this table. The pairings are editorial, chosen by
+// analogy to the existing rows.
+//
+// Before this change the table was `Array<[string, DeckShape]>` carrying the
+// comment "Every GameFormat in crates/engine/src/types/format.rs" while listing
+// 19 of 23 — missing Oathbreaker, Planechase, Momir and CommanderDraft.
+const FORMAT_SHAPES: Record<BuiltInGameFormat, DeckShape> = {
+  Standard: "constructed",
+  Pioneer: "constructed",
+  Modern: "constructed",
+  Premodern: "constructed",
+  Legacy: "constructed",
+  Vintage: "constructed",
+  Historic: "constructed",
+  Timeless: "constructed",
+  Pauper: "constructed",
+  FreeForAll: "constructed",
+  TwoHeadedGiant: "constructed",
+  Archenemy: "constructed",
+  Planechase: "constructed",
+  Commander: "commander",
+  DuelCommander: "commander",
+  PauperCommander: "commander",
+  Brawl: "commander",
+  HistoricBrawl: "commander",
+  CommanderDraft: "commander",
+  Oathbreaker: "commander",
+  TinyLeaders: "commanderWithSideboard",
+  Limited: "mainOnly",
+  Momir: "mainOnly",
+  Freeform: "constructed",
+  FreeformCommander: "commander",
+  Dandan: "mainOnly",
+};
 
 describe("fetchDeckFromUrl — format coverage", () => {
-  it.each(FORMAT_SHAPES)("imports a %s-shaped deck into the right zones", async (_format, shape) => {
+  it.each(Object.entries(FORMAT_SHAPES))("imports a %s-shaped deck into the right zones", async (_format, shape) => {
     mockWorkerText(canonicalForShape(shape));
     const deck = await resolveCommander(
       detectAndParseDeck(await fetchDeckFromUrl("https://moxfield.com/decks/sample")),

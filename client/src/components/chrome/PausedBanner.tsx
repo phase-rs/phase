@@ -4,6 +4,8 @@ import { useTranslation } from "react-i18next";
 interface PausedBannerProps {
   isVisible: boolean;
   reason: string;
+  /** Host-only recovery action for an intentional multiplayer pause. */
+  onResume?: () => void;
 }
 
 /**
@@ -12,7 +14,7 @@ interface PausedBannerProps {
  * `DisconnectChoiceDialog` overlay simultaneously; guests see only this
  * banner.
  */
-export function PausedBanner({ isVisible, reason }: PausedBannerProps) {
+export function PausedBanner({ isVisible, reason, onResume }: PausedBannerProps) {
   const { t } = useTranslation();
   return (
     <AnimatePresence>
@@ -24,8 +26,17 @@ export function PausedBanner({ isVisible, reason }: PausedBannerProps) {
           exit={{ opacity: 0, y: -16 }}
           transition={{ duration: 0.18 }}
         >
-          <div className="rounded-full bg-amber-500/20 px-4 py-1.5 text-xs font-semibold text-amber-200 ring-1 ring-amber-300/40 backdrop-blur">
+          <div className="pointer-events-auto flex items-center gap-3 rounded-full bg-amber-500/20 px-4 py-1.5 text-xs font-semibold text-amber-200 ring-1 ring-amber-300/40 backdrop-blur">
             {t("pausedBanner.message", { reason })}
+            {onResume && (
+              <button
+                type="button"
+                className="pointer-events-auto min-h-11 min-w-11 rounded bg-amber-200/15 px-2 py-1 text-xs font-bold text-amber-100 hover:bg-amber-200/25 active:bg-amber-200/25 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-100"
+                onClick={onResume}
+              >
+                {t("pausedBanner.resume")}
+              </button>
+            )}
           </div>
         </motion.div>
       )}

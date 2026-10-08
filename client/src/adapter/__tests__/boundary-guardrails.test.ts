@@ -71,6 +71,31 @@ describe("adapter boundary guardrails", () => {
     }
   });
 
+  it("keeps gameplay card-data ownership in the shared engine worker", () => {
+    const root = repoRoot();
+    const gameProvider = readFileSync(
+      resolve(root, "client/src/providers/GameProvider.tsx"),
+      "utf8",
+    );
+
+    // The shared WasmAdapter loads the corpus before game creation/restoration.
+    // Importing the main-thread card-data service here would allocate a second
+    // WASM module and full corpus whenever gameplay mounts or resumes.
+    expect(gameProvider).not.toMatch(/from ["']\.\.\/services\/cardData["']/);
+
+    const cardDataHook = readFileSync(
+      resolve(root, "client/src/hooks/useEngineCardData.ts"),
+      "utf8",
+    );
+    const mainThreadRuntimeImport = cardDataHook.match(
+      /import\s*{([^}]*)}\s*from ["']\.\.\/services\/engineRuntime["']/,
+    );
+    expect(mainThreadRuntimeImport?.[1] ?? "").not.toMatch(
+      /getCardFaceData|getCardParseDetails|getCardRulings/,
+    );
+    expect(cardDataHook).toContain('import { getSharedAdapter } from "../adapter/wasm-adapter";');
+  });
+
   it("keeps the frontend WaitingFor union in lockstep with the engine enum", () => {
     const root = repoRoot();
     const rustSource = readFileSync(

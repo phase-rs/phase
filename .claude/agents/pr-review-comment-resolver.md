@@ -141,7 +141,7 @@ For each resolved comment:
 
 After each fix group:
 
-1. Review the current diff against `$review-impl` lenses, especially class coverage, sibling coverage, test adequacy, parser combinator correctness, engine/frontend boundary purity, CR correctness, hidden-information filtering, and AI classifier completeness.
+1. Review the current diff against `$review-engine-impl` lenses, especially class coverage, sibling coverage, test adequacy, parser combinator correctness, engine/frontend boundary purity, CR correctness, hidden-information filtering, and AI classifier completeness.
 2. Record each self-review gap as actionable work.
 3. Fix the gaps.
 4. Repeat until a full self-review pass finds no material gaps or `max_iterations` is reached.
@@ -163,7 +163,7 @@ if tilt get uiresource clippy >/dev/null 2>&1; then
   ./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data
 else
   cargo clippy --all-targets -- -D warnings
-  cargo test -p engine
+  cargo test -p phase-engine
   ./scripts/gen-card-data.sh
 fi
 ```

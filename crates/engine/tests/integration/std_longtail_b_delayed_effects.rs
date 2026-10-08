@@ -236,7 +236,7 @@ fn fear_of_burning_alive_amount_and_triggering_player_binding() {
 
 /// CR 500.8 + CR 513.1: the end-step trigger schedules an additional end step
 /// ONLY during the first end step of the turn. The `FirstEndStepOfTurn` gate
-/// reads `state.end_steps_started_this_turn`; on the second (extra) end step the
+/// reads the step tally's `End` count; on the second (extra) end step the
 /// gate is false, so no further end step is scheduled — the turn does not loop.
 ///
 /// Revert assertion: without the end-step counter + `FirstEndStepOfTurn`
@@ -273,7 +273,8 @@ fn yshtola_schedules_exactly_one_extra_end_step() {
     for _ in 0..600 {
         let state = runner.state();
         if state.active_player == P0 {
-            peak_p0_end_steps = peak_p0_end_steps.max(state.end_steps_started_this_turn);
+            peak_p0_end_steps =
+                peak_p0_end_steps.max(state.steps_started_this_turn.count(Phase::End));
         }
         // Stop once we have safely reached P1's turn — proves the loop terminated.
         if state.active_player == P1 {

@@ -1,64 +1,77 @@
-import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
+import type { GameObject } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
-import { getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
+import { getWaitingForObjectChoiceIds, resolvePileSeat } from "../../viewmodel/gameStateView.ts";
 import { collectObjectActions, isManaObjectAction } from "../../viewmodel/cardActionChoice.ts";
-import { cardImageLookup, type CardImageLookup } from "../../services/cardImageLookup.ts";
+import { objectImageProps } from "../../services/cardImageLookup.ts";
+import { CardArtFallback } from "../card/CardArtFallback.tsx";
+import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 
 const EMPTY: readonly number[] = [];
 
 interface GraveyardPileProps {
   playerId: number;
-  onClick: () => void;
+  onClick: (launcher: HTMLButtonElement) => void;
   size?: { width: string; height: string };
 }
 
-function TopCard({ lookup }: { lookup: CardImageLookup }) {
+function TopCard({ object }: { object: GameObject }) {
   // Resolve via the engine's printed_ref (oracle_id + face) like every other
   // object-rendering surface — name-only lookup fails for DFC / transformed /
   // back-face cards (e.g. a transformed planeswalker) and would show the empty
   // placeholder instead of the card art.
-  const { src } = useCardImage(lookup.name, {
+  const imageProps = objectImageProps(object);
+  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(imageProps.cardName, {
     size: "normal",
-    oracleId: lookup.oracleId,
-    faceName: lookup.faceName,
-    faceIndex: lookup.faceIndex,
+    faceIndex: imageProps.faceIndex,
+    isToken: imageProps.isToken,
+    tokenFilters: imageProps.tokenFilters,
+    tokenImageRef: imageProps.tokenImageRef,
+    oracleId: imageProps.oracleId,
+    faceName: imageProps.faceName,
   });
 
-  if (!src) {
+  if (isLoading) {
     return (
-      <div
-        className="h-full w-full rounded-lg bg-gray-700 border border-gray-600"
-      />
+      <div className="h-full w-full animate-pulse rounded-lg border border-gray-600 bg-gray-700" />
     );
+  }
+  if (!src) {
+    return <CardArtFallback name={object.name} className="h-full w-full rounded-lg" />;
   }
 
   return (
     <img
       src={src}
-      alt={lookup.name}
+      {...getCardImageSrcSetProps(src, rungs)}
+      alt={object.name}
       className="h-full w-full rounded-lg object-cover"
       draggable={false}
+      onError={() => advanceFailedSource?.(src)}
     />
   );
 }
 
 export function GraveyardPile({ playerId, onClick, size }: GraveyardPileProps) {
   const { t } = useTranslation("game");
+  const pileSeat = useGameStore((s) => resolvePileSeat(s.gameState, "graveyard", playerId));
   const graveyard = useGameStore(
-    (s) => s.gameState?.players[playerId]?.graveyard ?? EMPTY,
+    (s) => s.gameState?.players[pileSeat]?.graveyard ?? EMPTY,
   );
-  const topObject = useGameStore((s) => {
-    const gy = s.gameState?.players[playerId]?.graveyard;
-    const id = gy && gy.length > 0 ? gy[gy.length - 1] : null;
-    return id != null ? (s.gameState?.objects[id] ?? null) : null;
+  // A card still in flight toward this pile is not shown yet: the top slot
+  // shows what would be visible without it (the count still includes it).
+  const shownTopId = useAnimationStore((s) => {
+    for (let i = graveyard.length - 1; i >= 0; i--) {
+      if (!s.flightVeiledObjectIds.has(graveyard[i])) return graveyard[i];
+    }
+    return null;
   });
-  const topLookup = useMemo(
-    () => (topObject ? cardImageLookup(topObject) : null),
-    [topObject],
+  const topObject = useGameStore((s) =>
+    shownTopId != null ? (s.gameState?.objects[shownTopId] ?? null) : null,
   );
 
   // Check if any graveyard card is selectable for the current engine prompt.
@@ -66,7 +79,7 @@ export function GraveyardPile({ playerId, onClick, size }: GraveyardPileProps) {
   const hasTargetableCards = useGameStore((s) => {
     if (!canActForWaitingState) return false;
     const objectChoiceIds = new Set(getWaitingForObjectChoiceIds(s.waitingFor));
-    const gy = s.gameState?.players[playerId]?.graveyard ?? [];
+    const gy = s.gameState?.players[pileSeat]?.graveyard ?? [];
     return gy.some((id) => objectChoiceIds.has(id));
   });
 
@@ -81,7 +94,7 @@ export function GraveyardPile({ playerId, onClick, size }: GraveyardPileProps) {
       return false;
     }
     const objects = s.gameState?.objects;
-    const gy = s.gameState?.players[playerId]?.graveyard ?? [];
+    const gy = s.gameState?.players[pileSeat]?.graveyard ?? [];
     return gy.some((id) => {
       const obj = objects?.[id];
       return (
@@ -102,10 +115,11 @@ export function GraveyardPile({ playerId, onClick, size }: GraveyardPileProps) {
 
   return (
     <button
-      onClick={onClick}
+      onClick={(event) => onClick(event.currentTarget)}
       className={`group relative cursor-pointer ${hasTargetableCards || hasDelveableCards ? "ring-2 ring-amber-400/60 rounded-lg shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]" : ""}`}
       title={t("zone.graveyardTitle", { count })}
-      data-graveyard-pile={playerId}
+      data-graveyard-pile={pileSeat}
+      data-grouped-ids={graveyard.join(" ")}
       style={{ width: w, height: h }}
     >
       {/* Shadow stack layers */}
@@ -124,7 +138,7 @@ export function GraveyardPile({ playerId, onClick, size }: GraveyardPileProps) {
 
       {/* Top card — full card image */}
       <div className="relative h-full w-full overflow-hidden rounded-lg border border-gray-500 shadow-md group-hover:border-gray-300 transition-colors">
-        {topLookup && <TopCard lookup={topLookup} />}
+        {topObject && <TopCard object={topObject} />}
         <div className="absolute inset-0 bg-black/20 group-hover:bg-black/0 transition-colors" />
       </div>
 

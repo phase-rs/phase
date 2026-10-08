@@ -4,20 +4,25 @@ use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::char;
 use nom::combinator::opt;
 use nom::combinator::value;
-use nom::sequence::delimited;
+use nom::sequence::{delimited, preceded};
 use nom::Parser;
 
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, Comparator, DieResultBranch, Effect,
-    SolveCondition, StaticDefinition, TargetFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, Comparator, Effect, SolveCondition,
+    StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::keywords::{EscapeCost, Keyword};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
-use crate::types::statics::StaticMode;
+use crate::types::statics::{CostReductionReach, StaticMode};
 
-use super::oracle_cost::{parse_or_separated_mana_costs, parse_single_cost};
+use super::oracle_cost::{
+    parse_colored_mana_only_clause, parse_or_separated_mana_costs, parse_single_cost,
+    ColoredManaOnlyScope,
+};
 use super::oracle_effect::imperative::try_parse_die_result_line;
-use super::oracle_effect::{capitalize, parse_effect_chain};
+use super::oracle_effect::{capitalize, lower_ability_ir, parse_ability_ir_standalone};
+use super::oracle_ir::ast::parsed_clause;
+use super::oracle_ir::effect_chain::{AbilityIr, AbilityShellIr, DieResultBranchIr, EffectChainIr};
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::error::OracleResult;
@@ -104,18 +109,29 @@ pub(super) fn parse_defiler_cost_reduction(
     };
     let (rest, mana_reduction) =
         parse_defiler_reduction_sentence(reduction_text.trim(), color).ok()?;
-    let (rest, mana_limit) = opt((
-        tag::<_, _, OracleError<'_>>(". this effect reduces only the amount of "),
-        parse_defiler_color,
-        tag(" mana you pay"),
+    // CR 118.7b/c/d: the printed rider ("This effect reduces only the amount of
+    // [color] mana you pay") is parsed through the shared authority so this
+    // cycle and the general `ModifyCost` path agree on the phrasings that count.
+    // A named color other than the reduction's own color is not a Defiler.
+    let (rest, mana_limit) = opt(preceded(
+        tag::<_, _, OracleError<'_>>(". "),
+        parse_colored_mana_only_clause,
     ))
     .parse(rest)
     .ok()?;
-    if let Some((_, limit_color, _)) = mana_limit {
+    if let Some(ColoredManaOnlyScope::Single(limit_color)) = mana_limit {
         if limit_color != color {
             return None;
         }
     }
+    // CR 118.7b/c/d: carry what the card actually printed. Present = the
+    // reduction is confined to that color and never spills onto generic mana;
+    // absent (MTGJSON split the rider onto another line) = the rules default.
+    let reach = if mana_limit.is_some() {
+        CostReductionReach::ColoredManaOnly
+    } else {
+        CostReductionReach::SpillsToGeneric
+    };
     let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
     if !rest.is_empty() {
         return None;
@@ -126,6 +142,7 @@ pub(super) fn parse_defiler_cost_reduction(
             color,
             life_cost,
             mana_reduction,
+            reach,
         })
         .affected(TargetFilter::SelfRef)
         .description(format!(
@@ -207,20 +224,37 @@ pub(crate) fn normalize_self_refs_for_static(text: &str, card_name: &str) -> Str
     normalize_card_name_refs(text, card_name)
 }
 
-/// CR 706: Walk the sub_ability chain of a parsed trigger/ability to find the
-/// terminal `RollDie { results: [] }` node and attach die result branches
-/// from subsequent oracle text lines.
-pub(super) fn attach_die_result_branches_to_chain(
-    def: &mut AbilityDefinition,
+pub(crate) fn find_terminal_roll_die(def: &mut AbilityDefinition) -> Option<&mut Effect> {
+    if let Some(ref mut sub) = def.sub_ability {
+        return find_terminal_roll_die(sub);
+    }
+    if matches!(&*def.effect, Effect::RollDie { results, .. } if results.is_empty()) {
+        return Some(&mut *def.effect);
+    }
+    None
+}
+
+/// CR 706.3b: A results table belongs to the first die-roll instruction in its
+/// paragraph even when later instructions remain in that ability's chain.
+pub(crate) fn find_result_table_roll_die(def: &mut AbilityDefinition) -> Option<&mut Effect> {
+    if matches!(&*def.effect, Effect::RollDie { results, .. } if results.is_empty()) {
+        return Some(&mut *def.effect);
+    }
+    def.sub_ability
+        .as_deref_mut()
+        .and_then(find_result_table_roll_die)
+}
+
+/// CR 706.3b: Parse contiguous result-table rows into typed branch IR.
+///
+/// A non-table first line is not consumed, so the ordinary document dispatcher
+/// can still classify it. Empty separator rows become consumed only when they
+/// actually precede at least one result row.
+pub(crate) fn parse_die_result_branches_ir(
     lines: &[&str],
     start_line: usize,
-) -> usize {
-    let roll_die = find_terminal_roll_die(def);
-    let roll_die = match roll_die {
-        Some(roll_die) => roll_die,
-        None => return start_line,
-    };
-
+    kind: AbilityKind,
+) -> (Vec<DieResultBranchIr>, usize) {
     let mut branches = Vec::new();
     let mut j = start_line;
     while j < lines.len() {
@@ -231,41 +265,22 @@ pub(super) fn attach_die_result_branches_to_chain(
         }
         if let Some((min, max, effect_text)) = try_parse_die_result_line(&table_line) {
             let effect_text = strip_die_table_flavor_label(effect_text);
-            let branch_def = parse_effect_chain(effect_text, AbilityKind::Spell);
-            branches.push(DieResultBranch {
+            branches.push(DieResultBranchIr {
                 min,
                 max,
-                effect: Box::new(branch_def),
+                effect: Box::new(parse_ability_ir_standalone(effect_text, kind)),
             });
             j += 1;
         } else {
             break;
         }
     }
-
-    if !branches.is_empty() {
-        if let Effect::RollDie {
-            ref mut results, ..
-        } = roll_die
-        {
-            *results = branches;
-        }
-    }
-
-    j
+    let next_line = if branches.is_empty() { start_line } else { j };
+    (branches, next_line)
 }
 
-fn find_terminal_roll_die(def: &mut AbilityDefinition) -> Option<&mut Effect> {
-    if matches!(&*def.effect, Effect::RollDie { results, .. } if results.is_empty()) {
-        return Some(&mut *def.effect);
-    }
-    if let Some(ref mut sub) = def.sub_ability {
-        return find_terminal_roll_die(sub);
-    }
-    None
-}
-
-/// CR 706: Try to parse a die roll table starting at line `i`.
+/// CR 706.3b: The die-roll instruction and its associated results table are
+/// part of one ability, so this consumes the table lines into the header's IR.
 /// CR 706.2: Also extracts an optional "and add/subtract X" modifier
 /// from the header line so the resolver can shift the natural result before
 /// branch lookup (Deck of Many Things, Diviner's Portent, Gale's Redirection).
@@ -278,42 +293,33 @@ pub(super) fn try_parse_die_roll_table(
     let lower = line.to_lowercase();
     let (sides, modifier) = parse_roll_die_sides_with_modifier(&lower)?;
 
-    let mut branches = Vec::new();
-    let mut has_branches = false;
-    let mut j = i + 1;
-    while j < lines.len() {
-        let table_line = strip_reminder_text(lines[j].trim());
-        if table_line.is_empty() {
-            j += 1;
-            continue;
-        }
-        if let Some((min, max, effect_text)) = try_parse_die_result_line(&table_line) {
-            let effect_text = strip_die_table_flavor_label(effect_text);
-            let branch_def = parse_effect_chain(effect_text, kind);
-            branches.push(DieResultBranch {
-                min,
-                max,
-                effect: Box::new(branch_def),
-            });
-            has_branches = true;
-            j += 1;
-        } else {
-            break;
-        }
-    }
+    let (branches, next_line) = parse_die_result_branches_ir(lines, i + 1, kind);
 
-    let mut def = AbilityDefinition::new(
-        kind,
-        Effect::RollDie {
-            // CR 706.1: result-table rolls are single-die ("roll a d20 ...").
-            count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
-            sides,
-            results: branches,
-            modifier,
+    let ir = AbilityIr {
+        source_text: line.to_string(),
+        body: EffectChainIr::single_clause(
+            line,
+            kind,
+            parsed_clause(Effect::RollDie {
+                // CR 706.1: result-table rolls are single-die ("roll a d20 ...").
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                sides,
+                results: vec![],
+                modifier,
+            }),
+            None,
+            None,
+            false,
+        ),
+        shell: AbilityShellIr {
+            description: Some(line.to_string()),
+            ..AbilityShellIr::default()
         },
-    );
-    def.description = Some(line.to_string());
-    Some((def, if has_branches { j } else { i + 1 }))
+        die_results: branches,
+        modal: None,
+        root_transforms: vec![],
+    };
+    Some((lower_ability_ir(&ir), next_line))
 }
 
 /// CR 706.1a + CR 706.2: Parse the header line of a die-roll table, returning

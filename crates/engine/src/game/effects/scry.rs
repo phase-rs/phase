@@ -3,8 +3,9 @@ use std::collections::HashSet;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
-use crate::types::events::{GameEvent, PlayerActionKind};
+use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::identifiers::ObjectId;
 use crate::types::proposed_event::ProposedEvent;
 
 /// CR 701.22a: Scry N — look at top N, put any number on bottom in any order, rest on top in any order.
@@ -39,11 +40,14 @@ pub fn resolve(
 
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
-            apply_scry_after_replacement(state, event, events);
+            if matches!(&event, ProposedEvent::Draw { .. }) {
+                resolve_scry_substituted_draw(state, ability.source_id, event, events);
+                return Ok(());
+            }
+
+            let _ = apply_scry_after_replacement(state, event, events);
             // CR 614.6 + CR 614.11 + CR 704.3: A scry replacement may substitute
-            // scry→draw (handled inside `apply_scry_after_replacement` → calls
-            // `apply_draw_after_replacement`); if the substituted draw stashes a
-            // mandatory-post-effect continuation, drain it in the same step.
+            // a mandatory-post-effect continuation. Drain it in the same step.
             // Mirrors the pipeline ceremony in
             // `effects::draw::draw_through_replacement` — scry's own propose
             // event variant means we can't use that helper directly, but the
@@ -56,6 +60,20 @@ pub fn resolve(
         }
         ReplacementResult::Prevented => {}
         ReplacementResult::NeedsChoice(player) => {
+            // `replace_event` continues through a substituted Draw event before
+            // returning, so a per-draw replacement can park its full-count Draw
+            // here. Take that parked event back into the draw-sequence authority
+            // before the generic replacement resume delivers it as one batch.
+            let Some(pending) = state.pending_replacement.take() else {
+                state.waiting_for =
+                    crate::game::replacement::replacement_choice_waiting_for(player, state);
+                return Ok(());
+            };
+            if matches!(&pending.proposed, ProposedEvent::Draw { .. }) {
+                resolve_scry_substituted_draw(state, ability.source_id, pending.proposed, events);
+                return Ok(());
+            }
+            state.pending_replacement = Some(pending);
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(player, state);
             return Ok(());
@@ -71,38 +89,119 @@ pub fn resolve(
     Ok(())
 }
 
+fn resolve_scry_substituted_draw(
+    state: &mut GameState,
+    source_id: ObjectId,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) {
+    if let ReplacementResult::NeedsChoice(player) =
+        apply_scry_after_replacement_with_source(state, source_id, event, events)
+    {
+        state.waiting_for = crate::game::replacement::replacement_choice_waiting_for(player, state);
+    }
+}
+
 pub(crate) fn apply_scry_after_replacement(
     state: &mut GameState,
     event: ProposedEvent,
     events: &mut Vec<GameEvent>,
-) {
-    let (player_id, count) = match event {
+) -> ReplacementResult {
+    let ProposedEvent::Draw {
+        player_id,
+        count,
+        applied,
+        ..
+    } = event
+    else {
+        return apply_scry_after_replacement_without_draw(state, event, events);
+    };
+
+    // CR 614.5: keep the replacements already applied to the substituted draw
+    // instruction on its frame so they cannot re-apply to the individual draws.
+    crate::game::effects::draw::start_draw_sequence_with_origin(
+        state,
+        player_id,
+        count,
+        applied,
+        crate::types::game_state::DrawSequenceOrigin::Plain,
+        events,
+    )
+}
+
+/// Applies an already-replaced scry with the source needed to emit its completion
+/// event if the replacement substituted a draw instruction.
+pub(crate) fn apply_scry_after_replacement_with_source(
+    state: &mut GameState,
+    source_id: ObjectId,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) -> ReplacementResult {
+    let ProposedEvent::Draw {
+        player_id,
+        count,
+        applied,
+        ..
+    } = event
+    else {
+        return apply_scry_after_replacement_without_draw(state, event, events);
+    };
+
+    // CR 614.5: keep the replacements already applied to the substituted draw
+    // instruction on its frame so they cannot re-apply to the individual draws.
+    crate::game::effects::draw::start_draw_sequence_with_origin(
+        state,
+        player_id,
+        count,
+        applied,
+        crate::types::game_state::DrawSequenceOrigin::ScryCompletion { source_id },
+        events,
+    )
+}
+
+fn apply_scry_after_replacement_without_draw(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) -> ReplacementResult {
+    let (player_id, instructed) = match event {
         ProposedEvent::Scry {
             player_id, count, ..
         } => (player_id, count),
-        ProposedEvent::Draw { .. } => {
-            crate::game::effects::draw::apply_draw_after_replacement(state, event, events);
-            return;
-        }
-        _ => return,
+        event => return ReplacementResult::Execute(event),
     };
 
     let Some(player) = state.players.iter().find(|p| p.id == player_id) else {
-        return;
+        return ReplacementResult::Execute(ProposedEvent::Scry {
+            player_id,
+            count: instructed,
+            applied: HashSet::new(),
+        });
     };
 
-    let count = (count as usize).min(player.library.len());
+    let count = (instructed as usize).min(state.library_of(player.id).len());
     if count == 0 {
-        return;
+        // CR 701.22b: an instruction to scry 0 is no scry event. CR 701.22d: an
+        // instruction of 1 or more with an empty library still completes a
+        // scry, so it publishes one with nothing looked at.
+        if instructed > 0 {
+            events.push(GameEvent::PlayerPerformedAction {
+                player_id,
+                action: crate::types::events::PlayerActionKind::Scry,
+                look_count: Some(0),
+                scry_bottom_count: Some(0),
+                scry_top_count: Some(0),
+            });
+        }
+        return ReplacementResult::Execute(ProposedEvent::Scry {
+            player_id,
+            count: 0,
+            applied: HashSet::new(),
+        });
     }
 
-    events.push(GameEvent::PlayerPerformedAction {
-        player_id,
-        action: PlayerActionKind::Scry,
-    });
-
-    let cards: Vec<_> = player
-        .library
+    let cards: Vec<_> = state
+        .library_of(player.id)
         .iter()
         .take(count)
         .copied()
@@ -112,6 +211,12 @@ pub(crate) fn apply_scry_after_replacement(
         player: player_id,
         cards,
     };
+
+    ReplacementResult::Execute(ProposedEvent::Scry {
+        player_id,
+        count: count as u32,
+        applied: HashSet::new(),
+    })
 }
 
 #[cfg(test)]
@@ -138,6 +243,9 @@ mod tests {
 
     #[test]
     fn test_scry_2_sets_waiting_for_scry_choice() {
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::types::actions::GameAction;
+
         let mut state = GameState::new_two_player(42);
         for i in 0..5 {
             create_object(
@@ -159,13 +267,16 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert!(events.iter().any(|event| matches!(
-            event,
-            GameEvent::PlayerPerformedAction {
-                player_id,
-                action: PlayerActionKind::Scry,
-            } if *player_id == PlayerId(0)
-        )));
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: crate::types::events::PlayerActionKind::Scry,
+                    ..
+                }
+            )),
+            "scry observers fire only after the choice completes"
+        );
 
         match &state.waiting_for {
             WaitingFor::ScryChoice { player, cards } => {
@@ -175,6 +286,73 @@ mod tests {
             }
             other => panic!("Expected ScryChoice, got {:?}", other),
         }
+
+        let waiting = state.waiting_for.clone();
+        handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SelectCards {
+                cards: top_2.clone(),
+            },
+            &mut events,
+        )
+        .expect("keeping both looked-at cards must use the production choice handler");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                player_id: PlayerId(0),
+                action: crate::types::events::PlayerActionKind::Scry,
+                look_count: Some(2),
+                scry_bottom_count: Some(0),
+                scry_top_count: Some(2),
+                ..
+            }
+        )));
+    }
+
+    /// CR 701.22a: Completion records the actual number moved to the bottom,
+    /// independently from the number initially looked at.
+    #[test]
+    fn test_scry_choice_records_positive_bottom_count() {
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        for i in 0..2 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Card {i}"),
+                Zone::Library,
+            );
+        }
+        let top_card = state.players[0].library[0];
+        let ability = make_scry_ability(2);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        let waiting = state.waiting_for.clone();
+        handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SelectCards {
+                cards: vec![top_card],
+            },
+            &mut events,
+        )
+        .expect("keeping one card must complete the production scry choice");
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                player_id: PlayerId(0),
+                action: crate::types::events::PlayerActionKind::Scry,
+                look_count: Some(2),
+                scry_bottom_count: Some(1),
+                scry_top_count: Some(1),
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -201,8 +379,12 @@ mod tests {
         }
     }
 
+    /// CR 701.22d: an instructed scry against an empty library still completes
+    /// the scry (no `ScryChoice` is offered, since there is nothing to choose),
+    /// and publishes a `PlayerPerformedAction::Scry` event with nothing looked
+    /// at, so "whenever you scry" triggers.
     #[test]
-    fn test_scry_with_empty_library_does_nothing() {
+    fn test_scry_with_empty_library_still_scries_without_prompt() {
         let mut state = GameState::new_two_player(42);
         assert!(state.players[0].library.is_empty());
 
@@ -213,6 +395,45 @@ mod tests {
         assert!(result.is_ok());
         // Should NOT set ScryChoice when library is empty
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                player_id: PlayerId(0),
+                action: crate::types::events::PlayerActionKind::Scry,
+                look_count: Some(0),
+                scry_bottom_count: Some(0),
+                scry_top_count: Some(0),
+            }
+        )));
+    }
+
+    /// CR 701.22b: an instructed scry of 0 is not a scry event at all.
+    #[test]
+    fn test_scry_zero_emits_no_scry_event() {
+        let mut state = GameState::new_two_player(42);
+        for i in 0..5 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Card {i}"),
+                Zone::Library,
+            );
+        }
+
+        let ability = make_scry_ability(0);
+        let mut events = Vec::new();
+
+        let result = resolve(&mut state, &ability, &mut events);
+        assert!(result.is_ok());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                action: crate::types::events::PlayerActionKind::Scry,
+                ..
+            }
+        )));
     }
 
     #[test]

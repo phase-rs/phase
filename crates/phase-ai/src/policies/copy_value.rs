@@ -1,8 +1,7 @@
 use engine::ai_support::{
-    copy_effect_adds_flying, copy_target_filter, copy_target_mana_value_ceiling,
+    copy_effect_adds_flying, copy_target_filter, copy_target_mana_value_ceiling, find_copy_targets,
     project_copy_mana_spent_for_x,
 };
-use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
 use engine::types::ability::{AbilityDefinition, ContinuousModification, Effect, TargetRef};
 use engine::types::actions::GameAction;
@@ -361,29 +360,22 @@ fn legal_copy_targets(
         return Vec::new();
     };
 
-    state
-        .battlefield
-        .iter()
-        .copied()
-        .filter(|target_id| *target_id != source_id)
-        .filter(|target_id| {
-            state.objects.get(target_id).is_some_and(|object| {
-                max_mana_value.is_none_or(|max| object.mana_cost.mana_value() <= max)
-                    && matches_target_filter(
-                        state,
-                        *target_id,
-                        filter,
-                        &FilterContext::from_source_with_controller(source_id, controller),
-                    )
-            })
-        })
-        .collect()
+    // Delegates to the engine's copy-source authority, which owns which zone
+    // the copy filter names (graveyard for Body Double, exile for The
+    // Mimeoplasm, battlefield by default) and measures the mana-value ceiling
+    // with `effective_mana_value` (a split card counts both halves).
+    find_copy_targets(state, filter, source_id, controller, max_mana_value)
 }
 
 fn target_has_etb_value(object: &engine::game::game_object::GameObject) -> bool {
-    object.trigger_definitions.iter_unchecked().any(|trigger| {
-        trigger.mode == TriggerMode::ChangesZone && trigger.destination == Some(Zone::Battlefield)
-    })
+    object
+        .trigger_definitions
+        .iter_unchecked()
+        .map(|entry| &entry.definition)
+        .any(|trigger| {
+            trigger.mode == TriggerMode::ChangesZone
+                && trigger.destination == Some(Zone::Battlefield)
+        })
 }
 
 fn strengthens_supported_plan(
@@ -455,7 +447,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::BecomeCopy {
                     target: TargetFilter::Any,
-                    recipient: TargetFilter::SelfRef,
+                    recipient: engine::types::ability::CopyRecipient::Source,
                     duration: None,
                     mana_value_limit: Some(CopyManaValueLimit::AmountSpentToCastSource),
                     additional_modifications: vec![
@@ -537,10 +529,7 @@ mod tests {
             decision: &decision,
             candidate: &CandidateAction {
                 action: GameAction::ChooseX { value: 0 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Selection,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
             },
             ai_player: PlayerId(0),
             config: &crate::config::AiConfig::default(),
@@ -553,10 +542,7 @@ mod tests {
             decision: &decision,
             candidate: &CandidateAction {
                 action: GameAction::ChooseX { value: 2 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Selection,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
             },
             ai_player: PlayerId(0),
             config: &crate::config::AiConfig::default(),
@@ -608,10 +594,7 @@ mod tests {
             decision: &decision,
             candidate: &CandidateAction {
                 action: GameAction::ChooseX { value: 0 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Selection,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
             },
             ai_player: PlayerId(0),
             config: &crate::config::AiConfig::default(),
@@ -624,10 +607,7 @@ mod tests {
             decision: &decision,
             candidate: &CandidateAction {
                 action: GameAction::ChooseX { value: 3 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Selection,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
             },
             ai_player: PlayerId(0),
             config: &crate::config::AiConfig::default(),
@@ -651,6 +631,7 @@ mod tests {
                 source_id: mockingbird_id,
                 valid_targets: vec![small, large],
                 max_mana_value: Some(4),
+                purpose: engine::types::ability::CopyTargetPurpose::BecomeCopy,
             },
             candidates: Vec::new(),
         };
@@ -662,10 +643,7 @@ mod tests {
                 action: GameAction::ChooseTarget {
                     target: Some(TargetRef::Object(small)),
                 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Selection,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
             },
             ai_player: PlayerId(0),
             config: &crate::config::AiConfig::default(),
@@ -680,10 +658,7 @@ mod tests {
                 action: GameAction::ChooseTarget {
                     target: Some(TargetRef::Object(large)),
                 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Selection,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
             },
             ai_player: PlayerId(0),
             config: &crate::config::AiConfig::default(),

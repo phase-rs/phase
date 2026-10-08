@@ -17,7 +17,6 @@
 //! CR 117.1a: Holding the ability until a threat appears is strictly better than
 //! pre-emptive activation.
 
-use engine::types::ability::AbilityDefinition;
 use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
@@ -26,6 +25,7 @@ use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use super::self_protection_classify::{
     any_land_sacrifice_protection_payoff, is_land_sacrifice_self_protection_activation,
+    self_protection_activation_payoff,
 };
 use crate::features::DeckFeatures;
 
@@ -57,18 +57,23 @@ impl TacticalPolicy for SacrificeLandProtectionPolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        let ability = match activation_ability(ctx) {
-            Some(ability) => ability,
+        let (source_id, ability) = match activation_ability(ctx) {
+            Some(activation) => activation,
             None => {
                 return PolicyVerdict::neutral(PolicyReason::new("sacrifice_land_protection_na"));
             }
         };
 
-        if !is_land_sacrifice_self_protection_activation(ability) {
+        if !is_land_sacrifice_self_protection_activation(&ability) {
             return PolicyVerdict::neutral(PolicyReason::new("sacrifice_land_protection_na"));
         }
 
-        if any_land_sacrifice_protection_payoff(ctx.state, ctx.ai_player, ability) {
+        let exact_payoff =
+            self_protection_activation_payoff(ctx.state, ctx.ai_player, source_id, &ability);
+        if exact_payoff == Some(true)
+            || (exact_payoff.is_none()
+                && any_land_sacrifice_protection_payoff(ctx.state, ctx.ai_player, &ability))
+        {
             return PolicyVerdict::neutral(PolicyReason::new(
                 "sacrifice_land_protection_answerable_threat",
             ));
@@ -88,18 +93,21 @@ impl TacticalPolicy for SacrificeLandProtectionPolicy {
     }
 }
 
-fn activation_ability<'a>(ctx: &'a PolicyContext<'a>) -> Option<&'a AbilityDefinition> {
+fn activation_ability(
+    ctx: &PolicyContext<'_>,
+) -> Option<(
+    engine::types::identifiers::ObjectId,
+    engine::types::ability::AbilityDefinition,
+)> {
     let GameAction::ActivateAbility {
         source_id,
-        ability_index,
+        ability_index: _,
     } = &ctx.candidate.action
     else {
         return None;
     };
-    ctx.state
-        .objects
-        .get(source_id)
-        .and_then(|object| object.abilities.get(*ability_index))
+    ctx.effective_activated_ability()
+        .map(|ability| (*source_id, ability))
 }
 
 fn count_controlled_lands(ctx: &PolicyContext<'_>) -> usize {
@@ -148,6 +156,7 @@ mod tests {
                     TypedFilter::default().controller(ControllerRef::You),
                 )),
                 duration: None,
+                end_cost: None,
             },
         );
         ability.cost = Some(AbilityCost::Sacrifice(SacrificeCost {
@@ -196,10 +205,7 @@ mod tests {
                 source_id,
                 ability_index: 0,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Ability,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::Priority { player: AI },
@@ -276,6 +282,7 @@ mod tests {
                     TypedFilter::default().controller(ControllerRef::You),
                 )),
                 duration: None,
+                end_cost: None,
             },
         );
         ability.cost = Some(AbilityCost::Tap);
@@ -402,7 +409,7 @@ mod tests {
             controller: opp,
             kind: StackEntryKind::Spell {
                 card_id: CardId(99),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
             },
@@ -480,10 +487,7 @@ mod tests {
                 source_id: id,
                 ability_index: 0,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Ability,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::Priority { player: AI },

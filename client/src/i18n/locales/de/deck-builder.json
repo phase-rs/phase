@@ -66,10 +66,19 @@
     "discard": "Verwerfen",
     "saveAndContinue": "Speichern & fortfahren"
   },
+  "saveConflict": {
+    "title": "Deck wurde anderswo geändert",
+    "bodyChanged": "„{{name}}“ wurde anderswo geändert, seit dieser Editor es geöffnet oder zuletzt gespeichert hat, daher wurde nichts gespeichert. Lade die gespeicherte Version, um sie anzusehen (deine ungespeicherten Änderungen werden verworfen), oder speichere deine Version trotzdem.",
+    "bodyDeleted": "„{{name}}“ wurde anderswo gelöscht, seit dieser Editor es geöffnet oder zuletzt gespeichert hat, daher wurde nichts gespeichert. Speichere deine Version trotzdem.",
+    "loadSaved": "Gespeicherte Version laden",
+    "saveMine": "Meine Version speichern"
+  },
   "card": {
     "moveToSideboard": "Ein {{name}} ins Sideboard verschieben",
     "moveToMain": "Ein {{name}} ins Hauptdeck verschieben",
     "removeOne": "Ein {{name}} entfernen",
+    "addOne": "Ein {{name}} hinzufügen",
+    "copyLimit": "{{name}} hat das Kopienlimit erreicht",
     "makeCommander": "{{name}} zum Kommandeur machen",
     "makeCommanderTitle": "Zu meinem Kommandeur machen",
     "chooseArtFor": "Artwork für {{name}} wählen",
@@ -220,6 +229,10 @@
     "identity": "Identität:",
     "setAsCommander": "Als Kommandeur festlegen:",
     "cardCount": "{{count}}/{{expected}} Karten",
+    "cardCountNoMinimum_one": "{{count}} Karte",
+    "cardCountNoMinimum_few": "{{count}} Karten",
+    "cardCountNoMinimum_many": "{{count}} Karten",
+    "cardCountNoMinimum_other": "{{count}} Karten",
     "singletonViolations": "Singleton-Verstöße: {{cards}}",
     "colorViolations": "Verstöße gegen die Farbidentität: {{cards}}",
     "signatureSpell": {
@@ -229,6 +242,11 @@
       "remove": "Signaturzauber entfernen",
       "mustBeInstantOrSorcery": "Der Signaturzauber muss ein Spontanzauber oder eine Hexerei sein",
       "outsideColorIdentity": "{{name}}: außerhalb der Farbidentität des Eidbrechers"
+    },
+    "companion": {
+      "heading": "Gefährte",
+      "noCompanion": "Kein Gefährte ausgewählt",
+      "remove": "Gefährten entfernen"
     }
   },
   "manaCurve": {
@@ -260,7 +278,9 @@
     "dataVersion": "Daten: {{version}}",
     "aboutBrackets": "Über Brackets ↗",
     "estimatedChip": "Geschätzt: B{{tier}}",
-    "estimatedChipFull": "Geschätztes Bracket: B{{tier}} {{label}}"
+    "estimatedChipFull": "Geschätztes Bracket: B{{tier}} {{label}}",
+    "manualChip": "B{{tier}}",
+    "manualChipFull": "Deklariertes Bracket: B{{tier}} {{label}}"
   },
   "bracketPicker": {
     "ariaLabel": "Deck-Bracket",

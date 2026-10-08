@@ -1,0 +1,122 @@
+{{- if and .Values.autoscaling.enabled .Values.autoscaling.prometheusRule.enabled }}
+{{- /* Skipping the rule here while hpa.yaml still renders would install an HPA
+     whose only metric producer is missing: `phase:wanted_replicas` comes from
+     this rule and nowhere else, so the HPA would sit in FailedGetExternalMetric
+     forever. Annotation scraping does not cover it either — that discovers the
+     raw gauges, not the recording rule. Fail at render instead. */}}
+{{- if not (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/PrometheusRule") }}
+{{- fail "autoscaling.enabled with autoscaling.prometheusRule.enabled needs the PrometheusRule CRD (monitoring.coreos.com/v1/PrometheusRule), which this cluster does not have — checking the resource rather than the API group, because a partial operator install can register PodMonitor without it: the HPA reads phase:wanted_replicas, this rule is its only producer, and an HPA without it stays in FailedGetExternalMetric. Install the operator, or set autoscaling.prometheusRule.enabled=false and supply the recording rule yourself (see deploy/helm/phase-server/examples/prometheus-adapter-values.yaml)." }}
+{{- end }}
+{{- $fullname := include "phase-server.fullname" . }}
+{{- /* Two selectors, because the raw gauges and this group's own output carry
+     different labels. Raw gauges are per-pod, so they are narrowed to THIS
+     StatefulSet's ordinals — filtering on namespace alone would sum a second
+     release in the same namespace into every demand term, and each HPA would
+     then scale on combined load and refuse scale-in because the OTHER release
+     had an occupied top ordinal. The intermediate `phase:replica_demand`
+     series aggregate `by (namespace)` and so have no `pod`; they carry
+     `service` instead, which also stops two releases colliding on one
+     recording-rule name. */}}
+{{- $raw := printf "namespace=%q,pod=~\"^%s-[0-9]+$\"" .Release.Namespace $fullname }}
+{{- $sel := printf "namespace=%q,service=%q" .Release.Namespace $fullname }}
+{{- $target := .Values.autoscaling.targetUtilization }}
+{{- if or (le (float64 $target) 0.0) (gt (float64 $target) 1.0) }}
+{{- fail (printf "autoscaling.targetUtilization must be greater than 0 and at most 1; got %v. At 0 or below the divisor collapses to clamp_min(...,1), so demand becomes the raw game count and the rule asks for replicaMax immediately." $target) }}
+{{- end }}
+{{- /* Asks whether a monitor will RENDER, not whether one was requested: the
+     emitters also need their own CRD, so a cluster carrying the PrometheusRule
+     CRD but neither monitor CRD would otherwise render this rule and the HPA
+     with nothing scraping the gauges they read. */}}
+{{- if not (or (include "phase-server.podMonitorRenders" .) (include "phase-server.serviceMonitorRenders" .)) }}
+{{- fail "autoscaling.enabled needs a monitor that will actually render: metrics.podMonitor.enabled or metrics.serviceMonitor.enabled, AND the matching CRD (monitoring.coreos.com/v1/PodMonitor or .../ServiceMonitor) present on the cluster. Without one nothing scrapes phase_games_active and friends, so this rule produces no phase:wanted_replicas and the HPA stays in FailedGetExternalMetric. Annotation scraping does not substitute: the occupied-ordinal rule joins on (namespace, pod), and only operator discovery labels targets with `pod` — annotations name it `kubernetes_pod_name`, so the join silently matches nothing and the scale-in floor disappears." }}
+{{- end }}
+{{- /* The scaling POLICY lives here rather than in the HPA.
+
+     An HPA can only express "keep this ratio". The binding constraint for a
+     StatefulSet is different in kind: scale-in always removes the HIGHEST
+     ordinal, so shrinking is safe only when that particular ordinal has nobody
+     on it — a fact about one replica, not an aggregate. Encoding it as a
+     recording rule makes the HPA a follower of a number that already accounts
+     for it (see hpa.yaml, which targets an AverageValue of 1).
+
+     Three demand terms are recorded under one metric name with a `source`
+     label, then aggregated: PromQL has no element-wise max of two vectors, and
+     `max by (namespace)` over the shared name is how you get one. Rules inside
+     a group evaluate in order, so the last rule sees the three above it.
+
+     One release per namespace: the terms aggregate by namespace, so two
+     phase-server releases sharing one would be summed into a single answer. */}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "phase-server.labels" . | nindent 4 }}
+    {{- with .Values.autoscaling.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: {{ $fullname }}.autoscaling
+      interval: {{ .Values.autoscaling.interval }}
+      rules:
+        # How many replicas the current game load needs, at the target packing
+        # fraction. clamp_min guards a divide-by-zero while no pod is reporting.
+        - record: phase:replica_demand
+          expr: |
+            ceil(
+              sum by (namespace) (phase_games_active{ {{- $raw -}} })
+              / clamp_min({{ $target }} * max by (namespace) (phase_games_capacity{ {{- $raw -}} }), 1)
+            )
+          labels:
+            source: games
+            service: {{ $fullname }}
+
+        # The same question against the socket cap, which binds first for
+        # multiplayer tables: 100 two-player games is already 200 sockets.
+        - record: phase:replica_demand
+          expr: |
+            ceil(
+              sum by (namespace) (phase_connections{ {{- $raw -}} })
+              / clamp_min({{ $target }} * max by (namespace) (phase_connections_capacity{ {{- $raw -}} }), 1)
+            )
+          labels:
+            source: connections
+            service: {{ $fullname }}
+
+        # The floor that makes scale-in safe: the highest ordinal still holding
+        # a human, plus one. `> bool 0` turns occupancy into 1/0, so the product
+        # is either that pod's ordinal or zero; with nobody anywhere the max is
+        # 0 and the floor is 1. Spectators and drafts count — both pin a pod.
+        #
+        # The `+` is a strict-label vector match, so a pod appearing on only one
+        # side drops out and understates the floor. Safe here only because both
+        # gauges come from the same /metrics exposition and are always emitted
+        # together; that stops being true if either becomes conditional.
+        - record: phase:replica_demand
+          expr: |
+            max by (namespace) (
+              phase_replica_ordinal{ {{- $raw -}} }
+              * on (namespace, pod) group_left ()
+                (
+                  (
+                    phase_games_with_connected_humans{ {{- $raw -}} }
+                    + phase_drafts_with_connected_humans{ {{- $raw -}} }
+                  ) > bool 0
+                )
+            ) + 1
+          labels:
+            source: occupied_floor
+            service: {{ $fullname }}
+
+        # The answer the HPA reads. One series per namespace.
+        - record: {{ .Values.autoscaling.recordName }}
+          expr: |
+            clamp(
+              max by (namespace) (phase:replica_demand{ {{- $sel -}} }),
+              {{ .Values.autoscaling.minReplicas }},
+              {{ .Values.scaleOut.replicaMax }}
+            )
+          labels:
+            service: {{ $fullname }}
+{{- end }}

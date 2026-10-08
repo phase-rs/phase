@@ -31,6 +31,8 @@ use engine::game::effects::attach::attach_to_player;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::trigger_index::reindex_object_triggers;
+use engine::types::actions::GameAction;
+use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 
@@ -91,6 +93,10 @@ fn setup_attack_curse(oracle: &str, name: &str) -> (GameRunner, ObjectId, Object
         scenario.add_card_to_library_top(P0, "Plains");
         scenario.add_card_to_library_top(P1, "Plains");
     }
+    // P0's nonempty hand makes Curse of Chaos's discard path observable. P1
+    // intentionally has none, so its accidental selection cannot emit a prompt.
+    scenario.add_card_to_hand(P0, "Discard A");
+    scenario.add_card_to_hand(P0, "Discard B");
 
     let mut runner = scenario.build();
 
@@ -124,6 +130,28 @@ fn curse_of_chaos_fires_when_player_attacks_enchanted_player() {
     assert!(
         stack_triggers_from(&runner, curse_id) >= 1,
         "Curse of Chaos must trigger when a player attacks enchanted player"
+    );
+}
+
+#[test]
+fn curse_of_chaos_discard_and_draw_belong_to_the_attacking_player() {
+    let (mut runner, _curse_id, attacker) = setup_attack_curse(CURSE_OF_CHAOS, "Curse of Chaos");
+
+    declare_attack_on_p1(&mut runner, attacker);
+    runner.resolve_top();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::OptionalEffectChoice { player: P0, .. }
+    ));
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .unwrap();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::DiscardChoice { player: P0, .. }
+        ),
+        "the resolved discard recipient must be the attacking player, not the enchanted player"
     );
 }
 

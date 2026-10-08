@@ -428,7 +428,9 @@ fn ai_candidates_three_pairs_for_greymond_choice() {
     let mut runner = scenario.build();
 
     // Drive state into the keyword NamedChoice for Greymond's choice.
+    let source = crate::support::exact_named_choice_source(runner.state(), greymond);
     runner.state_mut().waiting_for = WaitingFor::NamedChoice {
+        free_entry: None,
         player: P0,
         choice_type: ChoiceType::Keyword {
             options: vec![Keyword::FirstStrike, Keyword::Vigilance, Keyword::Lifelink],
@@ -439,7 +441,7 @@ fn ai_candidates_three_pairs_for_greymond_choice() {
             "First Strike, Lifelink".to_string(),
             "Vigilance, Lifelink".to_string(),
         ],
-        source_id: Some(greymond),
+        source: Some(source),
         persist_player: None,
     };
 

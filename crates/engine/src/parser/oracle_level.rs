@@ -7,6 +7,7 @@ use crate::types::ability::{
 use crate::types::counter::{CounterMatch, CounterType};
 
 use super::oracle::find_activated_colon;
+use super::oracle_ir::static_ir::StaticIr;
 use super::oracle_keyword::parse_granted_keyword_fragment;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_special::normalize_self_refs_for_static;
@@ -28,8 +29,14 @@ use super::oracle_util::strip_reminder_text;
 /// Return shape of [`parse_level_blocks`]: level-gated statics with their
 /// `(first_line, last_line)` spans, consumed line indices, and body ability
 /// lines paired with the level condition that gates them.
+///
+/// The statics are [`StaticIr`], not bare definitions, so this preprocessor is
+/// the single authority for its own provenance: only it knows that a body
+/// static's recognizer input is the self-ref-normalized sub-line rather than
+/// the printed line, and that the block summary is synthesized from the joined
+/// modification lines with no single printed line behind it.
 type LevelBlocksParse = (
-    Vec<(StaticDefinition, usize, usize)>,
+    Vec<(StaticIr, usize, usize)>,
     Vec<usize>,
     Vec<(String, StaticCondition, usize)>,
 );
@@ -54,7 +61,7 @@ pub(crate) fn parse_level_blocks(lines: &[&str], card_name: &str) -> LevelBlocks
     // yet cannot byte-overlap a body static printed between the header and a later
     // P/T/keyword line (which would trip `OverlappingSiblingSpans`).
     // `ability_lines` likewise carry their line.
-    let mut statics: Vec<(StaticDefinition, usize, usize)> = Vec::new();
+    let mut statics: Vec<(StaticIr, usize, usize)> = Vec::new();
     let mut consumed_indices = Vec::new();
     let mut ability_lines = Vec::new();
 
@@ -143,7 +150,7 @@ pub(crate) fn parse_level_blocks(lines: &[&str], card_name: &str) -> LevelBlocks
                     for mut sd in multi {
                         sd.condition = Some(condition.clone());
                         // Body static: emitted at its OWN line (single-line span).
-                        statics.push((sd, i, i));
+                        statics.push((StaticIr::from_definition(&static_text, sd), i, i));
                     }
                     i += 1;
                     continue;
@@ -151,7 +158,7 @@ pub(crate) fn parse_level_blocks(lines: &[&str], card_name: &str) -> LevelBlocks
                 if let Some(mut sd) = parse_static_line(&static_text) {
                     consumed_indices.push(i);
                     sd.condition = Some(condition.clone());
-                    statics.push((sd, i, i));
+                    statics.push((StaticIr::from_definition(&static_text, sd), i, i));
                     i += 1;
                     continue;
                 }
@@ -191,12 +198,21 @@ pub(crate) fn parse_level_blocks(lines: &[&str], card_name: &str) -> LevelBlocks
                 // P/T/keyword line (which would trip `OverlappingSiblingSpans` and
                 // panic `emit`). Body statics carry their own single line; the
                 // summary sorts first within the block by its header line.
+                // The summary has no single printed line behind it: it is
+                // synthesized from the block's modification lines, so those
+                // joined lines ARE its recognizer input. Anything else — the
+                // `LEVEL N-M` header the span anchors to, say — would claim
+                // provenance the definition does not derive from.
+                let summary_text = description_parts.join(" / ");
                 statics.push((
-                    StaticDefinition::continuous()
-                        .affected(TargetFilter::SelfRef)
-                        .condition(condition)
-                        .modifications(modifications)
-                        .description(description_parts.join(" / ")),
+                    StaticIr::from_definition(
+                        &summary_text,
+                        StaticDefinition::continuous()
+                            .affected(TargetFilter::SelfRef)
+                            .condition(condition)
+                            .modifications(modifications)
+                            .description(summary_text.clone()),
+                    ),
                     header,
                     header,
                 ));
@@ -260,7 +276,10 @@ mod tests {
     ) {
         let (statics, consumed, ability_lines) = parse_level_blocks(lines, name);
         (
-            statics.into_iter().map(|(s, _, _)| s).collect(),
+            // `.definition` — not `lower_static_ir` — keeps these preprocessor
+            // unit tests asserting exactly what they asserted before the IR
+            // wrap; the document-level second lowering is argued separately.
+            statics.into_iter().map(|(s, _, _)| s.definition).collect(),
             consumed,
             ability_lines
                 .into_iter()

@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
-  "git_sha": "854947668198",
-  "card_data_hash": "c05036041f01ff8406bef7ff6da1dcaafaac5854",
-  "unix_timestamp_secs": 1781649698,
+  "git_sha": "2d686880b94b",
+  "card_data_hash": "56b033662b27ea926a2db73a8b83007b6352ff35",
+  "unix_timestamp_secs": 1785243991,
   "difficulty": "Medium",
   "games_per_matchup": 10,
   "base_seed": 10573729,
@@ -18,65 +18,65 @@
         "kind": "Mirror",
         "tolerance": 0.15
       },
-      "p0_wins": 7,
-      "p1_wins": 3,
+      "p0_wins": 4,
+      "p1_wins": 6,
       "draws": 0,
       "games": [
         {
           "seed": 10579729,
-          "winner": 0,
-          "turns": 18
+          "winner": 1,
+          "turns": 20
         },
         {
           "seed": 10579730,
-          "winner": 0,
-          "turns": 17
+          "winner": 1,
+          "turns": 10
         },
         {
           "seed": 10579731,
-          "winner": 0,
+          "winner": 1,
           "turns": 16
         },
         {
           "seed": 10579732,
-          "winner": 1,
+          "winner": 0,
           "turns": 14
         },
         {
           "seed": 10579733,
           "winner": 1,
-          "turns": 21
+          "turns": 11
         },
         {
           "seed": 10579734,
-          "winner": 1,
-          "turns": 12
+          "winner": 0,
+          "turns": 10
         },
         {
           "seed": 10579735,
-          "winner": 0,
-          "turns": 11
+          "winner": 1,
+          "turns": 15
         },
         {
           "seed": 10579736,
           "winner": 0,
-          "turns": 17
+          "turns": 10
         },
         {
           "seed": 10579737,
           "winner": 0,
-          "turns": 9
+          "turns": 17
         },
         {
           "seed": 10579738,
-          "winner": 0,
-          "turns": 19
+          "winner": 1,
+          "turns": 16
         }
       ],
-      "total_turns": 154,
-      "total_duration_ms": 84657,
-      "avg_turns": 15.4,
-      "avg_duration_ms": 8465.7,
+      "total_turns": 139,
+      "total_duration_ms": 68288,
+      "avg_turns": 13.9,
+      "avg_duration_ms": 6828.8,
       "status": "Pass",
       "fail_reason": null
     },
@@ -93,65 +93,65 @@
         "kind": "Mirror",
         "tolerance": 0.15
       },
-      "p0_wins": 2,
+      "p0_wins": 4,
       "p1_wins": 4,
-      "draws": 4,
+      "draws": 2,
       "games": [
         {
           "seed": 10592729,
-          "winner": 0,
-          "turns": 9
+          "winner": 1,
+          "turns": 15
         },
         {
           "seed": 10592730,
-          "winner": null,
-          "turns": 0
+          "winner": 1,
+          "turns": 12
         },
         {
           "seed": 10592731,
           "winner": 1,
-          "turns": 11
+          "turns": 9
         },
         {
           "seed": 10592732,
-          "winner": null,
-          "turns": 10
+          "winner": 0,
+          "turns": 12
         },
         {
           "seed": 10592733,
           "winner": 0,
-          "turns": 18
+          "turns": 14
         },
         {
           "seed": 10592734,
-          "winner": null,
-          "turns": 10
+          "winner": 0,
+          "turns": 13
         },
         {
           "seed": 10592735,
-          "winner": 1,
-          "turns": 12
+          "winner": null,
+          "turns": 8
         },
         {
           "seed": 10592736,
-          "winner": 1,
-          "turns": 12
+          "winner": null,
+          "turns": 8
         },
         {
           "seed": 10592737,
-          "winner": null,
-          "turns": 0
+          "winner": 1,
+          "turns": 11
         },
         {
           "seed": 10592738,
-          "winner": 1,
-          "turns": 9
+          "winner": 0,
+          "turns": 12
         }
       ],
-      "total_turns": 91,
-      "total_duration_ms": 173320,
-      "avg_turns": 9.1,
-      "avg_duration_ms": 17332.0,
+      "total_turns": 114,
+      "total_duration_ms": 127476,
+      "avg_turns": 11.4,
+      "avg_duration_ms": 12747.6,
       "status": "Pass",
       "fail_reason": null
     },
@@ -166,65 +166,65 @@
         "kind": "Mirror",
         "tolerance": 0.15
       },
-      "p0_wins": 5,
-      "p1_wins": 5,
+      "p0_wins": 4,
+      "p1_wins": 6,
       "draws": 0,
       "games": [
         {
           "seed": 10593729,
-          "winner": 0,
-          "turns": 13
+          "winner": 1,
+          "turns": 10
         },
         {
           "seed": 10593730,
           "winner": 0,
-          "turns": 15
+          "turns": 18
         },
         {
           "seed": 10593731,
           "winner": 1,
-          "turns": 14
+          "turns": 12
         },
         {
           "seed": 10593732,
-          "winner": 0,
-          "turns": 9
+          "winner": 1,
+          "turns": 14
         },
         {
           "seed": 10593733,
           "winner": 1,
-          "turns": 12
+          "turns": 11
         },
         {
           "seed": 10593734,
           "winner": 0,
-          "turns": 16
+          "turns": 15
         },
         {
           "seed": 10593735,
-          "winner": 1,
-          "turns": 12
+          "winner": 0,
+          "turns": 15
         },
         {
           "seed": 10593736,
-          "winner": 1,
-          "turns": 13
+          "winner": 0,
+          "turns": 14
         },
         {
           "seed": 10593737,
-          "winner": 0,
-          "turns": 12
+          "winner": 1,
+          "turns": 18
         },
         {
           "seed": 10593738,
           "winner": 1,
-          "turns": 14
+          "turns": 19
         }
       ],
-      "total_turns": 130,
-      "total_duration_ms": 302341,
-      "avg_turns": 13.0,
-      "avg_duration_ms": 30234.1,
+      "total_turns": 146,
+      "total_duration_ms": 252988,
+      "avg_turns": 14.6,
+      "avg_duration_ms": 25298.8,
       "status": "Pass",
       "fail_reason": null
     }

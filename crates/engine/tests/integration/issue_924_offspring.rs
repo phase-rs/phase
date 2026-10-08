@@ -162,13 +162,14 @@ fn offspring_cast_creates_token_without_labeling_original_as_copy() {
             .trigger_definitions
             .iter_unchecked()
             .any(|trig| matches!(
-                trig.condition,
+                trig.definition.condition,
                 Some(TriggerCondition::AdditionalCostPaid { .. })
             )),
         "offspring token must not retain offspring ETB trigger"
     );
     assert!(
         token.trigger_definitions.iter_unchecked().any(|trig| trig
+            .definition
             .description
             .as_deref()
             .is_some_and(|d| d.contains("land you control enters"))),

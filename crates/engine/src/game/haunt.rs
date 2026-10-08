@@ -29,7 +29,7 @@ use super::zone_pipeline::{self, ZoneMoveRequest};
 use crate::types::ability::{Effect, EffectError, ResolvedAbility};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{ExileLink, ExileLinkKind, GameState};
+use crate::types::game_state::{ExileLink, ExileLinkKind, GameState, TriggerSourceContext};
 use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
 
@@ -119,13 +119,13 @@ pub fn resolve(
 
 /// CR 702.55c: A `HauntedCreatureDies` payoff trigger on a card in exile fires
 /// when the creature that card haunts dies — i.e. the event is that creature
-/// being put into a graveyard from the battlefield. `source_id` is the haunting
-/// card (the trigger source, in exile); the haunted creature is read from its
-/// `Haunt` link.
+/// being put into a graveyard from the battlefield. The exact source context
+/// identifies the haunting card (in exile); the haunted creature is read from
+/// its `Haunt` link.
 pub fn match_haunted_creature_dies(
     event: &GameEvent,
     _trigger: &crate::types::ability::TriggerDefinition,
-    source_id: ObjectId,
+    source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
     // CR 603.6c + CR 700.4: "dies" means a creature put into a graveyard from
@@ -146,5 +146,7 @@ pub fn match_haunted_creature_dies(
     if !record.core_types.contains(&CoreType::Creature) {
         return false;
     }
-    haunted_creature(state, source_id) == Some(*object_id)
+    // This is event-link attribution, not a source-relative characteristic
+    // read. The source id only selects the Haunt relation.
+    haunted_creature(state, source_context.identity.reference.object_id) == Some(*object_id)
 }

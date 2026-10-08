@@ -4,7 +4,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::TrackedSetId;
+use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::player::PlayerId;
 
 #[cfg(test)]
@@ -14,11 +14,34 @@ use crate::types::ability::{AbilityDefinition, AbilityKind, ManaSpendPermission,
 #[cfg(test)]
 use crate::types::card_type::CoreType;
 #[cfg(test)]
-use crate::types::identifiers::ObjectId;
-#[cfg(test)]
 use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 #[cfg(test)]
 use std::sync::Arc;
+
+/// CR 608.2h + CR 108.3: the player `grantee` binds to for `obj_id`, fixed once at resolution;
+/// `ObjectOwner` binds each object's owner, the others one player for the whole resolution.
+pub(crate) fn resolve_grantee(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    grantee: PermissionGrantee,
+    obj_id: ObjectId,
+) -> PlayerId {
+    match grantee {
+        PermissionGrantee::AbilityController => ability.controller,
+        PermissionGrantee::ParentTargetController => ability
+            .targets
+            .iter()
+            .find_map(|t| match t {
+                TargetRef::Player(pid) => Some(*pid),
+                TargetRef::Object(_) => None,
+            })
+            .unwrap_or(ability.controller),
+        PermissionGrantee::ObjectOwner => state
+            .objects
+            .get(&obj_id)
+            .map_or(ability.controller, |o| o.owner),
+    }
+}
 
 /// Grant a CastingPermission to the target object (CR 604.6).
 ///
@@ -55,6 +78,11 @@ pub fn resolve(
         // (which skips empties for inline "from among the milled cards"
         // continuations) — see the regression test
         // `tracked_set_sentinel_does_not_reuse_prior_non_empty_set_when_current_move_is_empty`.
+        // CR 700.2 + CR 608.2c: "highest id" == "the set the currently-resolving
+        // instruction published" — the ordering argument is written once, on
+        // `effects::publish_tracked_set`. Deliberately not routed through
+        // `targeting::resolve_tracked_set_id`: that authority SKIPS empty sets, and
+        // under mode scoping not skipping is the correct semantics here.
         TargetFilter::TrackedSet {
             id: TrackedSetId(0),
         } => state
@@ -121,33 +149,10 @@ pub fn resolve(
         }
     };
 
-    // CR 611.2a/b + CR 108.3: Resolve `grantee` to the `PlayerId` that a
-    // `PlayFromExile` permission's `granted_to` should bind to. For
-    // `ObjectOwner`, this varies per iterated object and is computed inside
-    // the loop. For the other variants it is constant across iterations.
-    let constant_grantee: Option<PlayerId> = match grantee {
-        PermissionGrantee::AbilityController => Some(ability.controller),
-        PermissionGrantee::ParentTargetController => ability
-            .targets
-            .iter()
-            .find_map(|t| match t {
-                TargetRef::Player(pid) => Some(*pid),
-                TargetRef::Object(_) => None,
-            })
-            .or(Some(ability.controller)),
-        PermissionGrantee::ObjectOwner => None, // per-iteration
-    };
-
+    // CR 611.2b: set when a host-bound lifetime was attached below.
+    let mut needs_lifetime_check = false;
     for obj_id in target_ids {
-        // Compute `granted_to` for this object. For `ObjectOwner` we read the
-        // object's owner here so each iteration binds independently (CR 108.3).
-        let granted_to_pid = constant_grantee.unwrap_or_else(|| {
-            state
-                .objects
-                .get(&obj_id)
-                .map(|o| o.owner)
-                .unwrap_or(ability.controller)
-        });
+        let granted_to_pid = resolve_grantee(state, ability, grantee, obj_id);
         // CR 702.143d: compute any effective foretell cost (printed OR granted by
         // a static such as Singing Towers of Darillium, with its derived cost)
         // BEFORE the mutable object borrow below — `foretell_cost` takes `&state`
@@ -155,6 +160,31 @@ pub fn resolve(
         // branch; harmless to precompute for other permissions.
         let derived_foretell = crate::game::casting::foretell_cost(state, obj_id);
         let mut granted = permission.clone();
+        // CR 611.2a: refuse a stated lifetime no lifecycle seam can end, rather
+        // than attaching it as an unbounded permission. Placed BEFORE any of
+        // the stamping below, all of which has side effects on the object
+        // (`prune_replaced_play_from_exile_permissions`, and the `Foretold` arm
+        // setting `obj.foretold` / `obj.face_down`): refusing after those would
+        // leave the object mutated with no grant to show for it. The duration
+        // is carried by `permission` itself, so it is known this early.
+        //
+        // `exile_resident` decides one arm of that question (CR 611.2b
+        // conditional windows are ended by `zones::apply_zone_exit_cleanup`,
+        // which only fires on leaving exile), so it is read from the object
+        // this grant is being attached to rather than assumed.
+        let exile_resident = state
+            .objects
+            .get(&obj_id)
+            .is_some_and(|o| o.zone == crate::types::zones::Zone::Exile);
+        if let Some(d) = granted.lifetime().duration {
+            debug_assert!(
+                crate::game::layers::casting_permission_duration_is_enforceable(d, exile_resident),
+                "casting permission granted with an unenforceable duration: {d:?}"
+            );
+            if !crate::game::layers::casting_permission_duration_is_enforceable(d, exile_resident) {
+                continue;
+            }
+        }
         if let CastingPermission::PlayFromExile {
             granted_to,
             source_id,
@@ -170,6 +200,24 @@ pub fn resolve(
             if *single_use {
                 *single_use_group = tracked_set_group;
             }
+        }
+        // CR 611.2a + CR 400.7: stamp the granting permanent onto the CAST
+        // half of the grant, mirroring the `PlayFromExile` arm above.
+        // Deliberately its own `if let` rather than a field added to the
+        // `granted_to` match below: that match fires only on a parser-emitted
+        // `None` placeholder, so a grant whose grantee was already bound
+        // (Jeleva class) would silently keep an unbindable host identity and
+        // outlive its source. `prune_host_left_casting_permissions` reads this.
+        if let CastingPermission::ExileWithAltCost {
+            source_id: source_id @ None,
+            ..
+        }
+        | CastingPermission::ExileWithAltAbilityCost {
+            source_id: source_id @ None,
+            ..
+        } = &mut granted
+        {
+            *source_id = Some(ability.source_id);
         }
         prune_replaced_play_from_exile_permissions(state, obj_id, &granted);
         if let Some(obj) = state.objects.get_mut(&obj_id) {
@@ -239,7 +287,17 @@ pub fn resolve(
                 }
                 became_foretold = Some(obj_id);
             }
+            // CR 611.2b: see `cast_from_zone::record_lingering_permissions` —
+            // a host-bound lifetime has to be evaluated once right away, and
+            // attaching a permission does not dirty the layers by itself.
+            let host_bound = granted
+                .lifetime()
+                .duration
+                .is_some_and(crate::types::ability::Duration::ends_when_host_leaves_play);
             obj.casting_permissions.push(granted);
+            if host_bound {
+                needs_lifetime_check = true;
+            }
             if let Some(player_id) = plotted_for {
                 events.push(GameEvent::BecomesPlotted {
                     object_id: obj_id,
@@ -250,6 +308,10 @@ pub fn resolve(
                 events.push(GameEvent::BecameForetold { object_id });
             }
         }
+    }
+
+    if needs_lifetime_check {
+        state.layers_dirty.mark_full();
     }
 
     events.push(GameEvent::EffectResolved {
@@ -320,6 +382,8 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::GrantCastingPermission {
                 permission: CastingPermission::PlayFromExile {
+                    provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                    mode: crate::types::ability::CardPlayMode::Play,
                     duration: Duration::UntilNextTurnOf {
                         player: PlayerScope::Controller,
                     },
@@ -331,7 +395,8 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: false,
-                    cast_cost_raise: None,
+                    cast_cost_modifier: None,
+                    alt_ability_cost: None,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     invalidation: None,
                 },
@@ -385,6 +450,8 @@ mod tests {
             Zone::Exile,
         );
         let permission = CastingPermission::PlayFromExile {
+            provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            mode: crate::types::ability::CardPlayMode::Play,
             duration: Duration::Permanent,
             granted_to: PlayerId(0),
             frequency: crate::types::statics::CastFrequency::Unlimited,
@@ -394,7 +461,8 @@ mod tests {
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: Some(PlayPermissionInvalidation::UntilNextGrantFromSameSource),
         };
@@ -463,6 +531,8 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::GrantCastingPermission {
                 permission: CastingPermission::PlayFromExile {
+                    provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                    mode: crate::types::ability::CardPlayMode::Play,
                     duration: Duration::UntilEndOfNextTurnOf {
                         player: PlayerScope::Controller,
                     },
@@ -474,7 +544,8 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: true,
-                    cast_cost_raise: None,
+                    cast_cost_modifier: None,
+                    alt_ability_cost: None,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     invalidation: None,
                 },
@@ -686,6 +757,8 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::GrantCastingPermission {
                 permission: CastingPermission::PlayFromExile {
+                    provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                    mode: crate::types::ability::CardPlayMode::Play,
                     duration: Duration::UntilNextTurnOf {
                         player: PlayerScope::Controller,
                     },
@@ -697,7 +770,8 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: false,
-                    cast_cost_raise: None,
+                    cast_cost_modifier: None,
+                    alt_ability_cost: None,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     invalidation: None,
                 },
@@ -743,6 +817,8 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::GrantCastingPermission {
                 permission: CastingPermission::PlayFromExile {
+                    provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                    mode: crate::types::ability::CardPlayMode::Play,
                     duration: Duration::UntilNextTurnOf {
                         player: PlayerScope::Controller,
                     },
@@ -754,7 +830,8 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: false,
-                    cast_cost_raise: None,
+                    cast_cost_modifier: None,
+                    alt_ability_cost: None,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     invalidation: None,
                 },
@@ -812,6 +889,8 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::GrantCastingPermission {
                 permission: CastingPermission::PlayFromExile {
+                    provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                    mode: crate::types::ability::CardPlayMode::Play,
                     duration: Duration::UntilNextStepOf {
                         step: Phase::End,
                         player: PlayerScope::Controller,
@@ -824,7 +903,8 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: false,
-                    cast_cost_raise: None,
+                    cast_cost_modifier: None,
+                    alt_ability_cost: None,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     invalidation: None,
                 },
@@ -897,6 +977,8 @@ mod tests {
         );
 
         let mk_perm = |duration: Duration, granted_to: PlayerId| CastingPermission::PlayFromExile {
+            provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            mode: crate::types::ability::CardPlayMode::Play,
             duration,
             granted_to,
             frequency: CastFrequency::Unlimited,
@@ -906,7 +988,8 @@ mod tests {
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
         };
@@ -972,6 +1055,8 @@ mod tests {
             Zone::Exile,
         );
         let permission = CastingPermission::PlayFromExile {
+            provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            mode: crate::types::ability::CardPlayMode::Play,
             duration: Duration::UntilNextStepOf {
                 step: Phase::End,
                 player: PlayerScope::Controller,
@@ -984,7 +1069,8 @@ mod tests {
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
         };
@@ -1036,6 +1122,8 @@ mod tests {
             .get_mut(&exiled_pre_prune)
             .unwrap()
             .casting_permissions = vec![CastingPermission::PlayFromExile {
+            provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            mode: crate::types::ability::CardPlayMode::Play,
             duration: Duration::UntilNextStepOf {
                 step: Phase::End,
                 player: PlayerScope::Controller,
@@ -1048,7 +1136,8 @@ mod tests {
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
         }];
@@ -1073,6 +1162,8 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::GrantCastingPermission {
                 permission: CastingPermission::PlayFromExile {
+                    provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                    mode: crate::types::ability::CardPlayMode::Play,
                     duration: Duration::UntilNextStepOf {
                         step: Phase::End,
                         player: PlayerScope::Controller,
@@ -1085,7 +1176,8 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: false,
-                    cast_cost_raise: None,
+                    cast_cost_modifier: None,
+                    alt_ability_cost: None,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     invalidation: None,
                 },
@@ -1143,6 +1235,8 @@ mod tests {
         );
         state.objects.get_mut(&card).unwrap().casting_permissions =
             vec![CastingPermission::PlayFromExile {
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: crate::types::ability::CardPlayMode::Play,
                 duration: Duration::UntilNextStepOf {
                     step: Phase::End,
                     player: PlayerScope::Controller,
@@ -1155,7 +1249,8 @@ mod tests {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
-                cast_cost_raise: None,
+                cast_cost_modifier: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 invalidation: None,
             }];
@@ -1169,11 +1264,11 @@ mod tests {
         );
     }
 
-    /// CR 502.3: `prune_until_next_turn_casting_permissions` at the
+    /// CR 500.4: `prune_untap_step_casting_permissions` at the
     /// untap step must NOT touch `UntilNextStepOf { step: End }` permissions either.
     #[test]
     fn untap_prune_retains_until_next_end_step_permissions() {
-        use crate::game::layers::prune_until_next_turn_casting_permissions;
+        use crate::game::layers::prune_untap_step_casting_permissions;
         use crate::types::statics::CastFrequency;
 
         let mut state = GameState::new_two_player(1);
@@ -1186,6 +1281,8 @@ mod tests {
         );
         state.objects.get_mut(&card).unwrap().casting_permissions =
             vec![CastingPermission::PlayFromExile {
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: crate::types::ability::CardPlayMode::Play,
                 duration: Duration::UntilNextStepOf {
                     step: Phase::End,
                     player: PlayerScope::Controller,
@@ -1198,12 +1295,13 @@ mod tests {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
-                cast_cost_raise: None,
+                cast_cost_modifier: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 invalidation: None,
             }];
 
-        prune_until_next_turn_casting_permissions(&mut state, PlayerId(0));
+        prune_untap_step_casting_permissions(&mut state, PlayerId(0));
 
         assert_eq!(
             state.objects[&card].casting_permissions.len(),
@@ -1247,6 +1345,8 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::GrantCastingPermission {
                 permission: CastingPermission::PlayFromExile {
+                    provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                    mode: crate::types::ability::CardPlayMode::Play,
                     duration: Duration::Permanent,
                     granted_to: PlayerId(0),
                     frequency: crate::types::statics::CastFrequency::Unlimited,
@@ -1256,7 +1356,8 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: false,
-                    cast_cost_raise: None,
+                    cast_cost_modifier: None,
+                    alt_ability_cost: None,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     invalidation: None,
                 },

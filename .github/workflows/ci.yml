@@ -17,6 +17,7 @@ on:
       - '.github/workflows/ci.yml'
       - '.github/workflows/deploy.yml'
       - '.github/workflows/release.yml'
+      - '.github/workflows/shell-release.yml'
   pull_request:
     branches: [main]
   merge_group:
@@ -46,11 +47,28 @@ jobs:
           target: wasm32-unknown-unknown
           cache-shared-key: rust-debug
 
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Enable sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      # `--locked` costs nothing here (this step already resolves the whole
+      # workspace) and asserts the committed root Cargo.lock is in sync with the
+      # manifests. Without it, dropping a crate leaves dead entries in the lock,
+      # every later cargo invocation silently rewrites the file, and Nightly
+      # Release dies on `cargo release`'s dirty-tree check -- which is exactly
+      # what #7556 did. `--locked` is already used for the Tauri manifest below.
       - name: Clippy
-        run: cargo clippy --workspace --exclude phase-tauri --all-targets --features engine/proptest -- -D warnings
+        run: cargo clippy --locked --workspace --exclude phase-tauri --all-targets --features engine/proptest -- -D warnings
+
+      - name: Interaction bindings are current
+        run: ./scripts/check-interaction-bindings.sh --check
 
       - name: Parser combinator gate
         # Diff-based gate: new parser code must use nom combinators, not
@@ -62,25 +80,125 @@ jobs:
           fi
           ./scripts/check-parser-combinators.sh "$BASE"
 
+      - name: PreLowered ratchet (Plan 05b burn-down)
+        # Ceiling check on `OracleNodeIr::PreLowered*` occurrences per parser
+        # file. Counts may only decrease, and a parser file carrying PreLowered
+        # with no ledger entry fails, so a new producer cannot be added in a
+        # third file and escape the burn-down. Ledger:
+        # scripts/prelowered-ratchet.txt
+        run: ./scripts/check-prelowered-ratchet.sh
+
       - name: Skill doc gate (oracle-parser SKILL.md)
         # Asserts .claude/skills/oracle-parser/SKILL.md still matches the
         # parser source tree: documented paths/symbols exist and the §3
         # priority table mirrors the `// Priority` slots in oracle.rs.
         run: ./scripts/check-skill-doc.sh
 
+      - name: CR citation anchor gate
+        # A CR citation is anchored by its rule number. A line coordinate into
+        # docs/MagicCompRules.txt is not an anchor: that file is gitignored,
+        # every checkout fetches its own copy, and the offsets move with every
+        # fetch -- so a committed coordinate is stale on arrival and points at
+        # an unrelated rule, which is worse than no annotation (#8515).
+        #
+        # Whole-tree, not diff-based, so a coordinate cannot survive by living
+        # in a file the PR does not touch. The script self-checks its own
+        # detector against planted text on every run and reports what it
+        # declined, so a PASS states what it matched rather than claiming the
+        # tree is clean of every possible coordinate form.
+        run: ./scripts/check-cr-citation-anchors.sh
+
       - name: Engine authority gate
         # (A) Diff-based: new engine code must use single-authority helpers
         #     (keyword queries via game/keywords.rs) instead of raw state pokes.
         # (B) Full-tree: gameplay zone changes must go through zone_pipeline,
         #     not the raw movers / zone containers / `GameObject::zone =`.
-        #     Ratchets against scripts/zone-authority-baseline.txt, which may
-        #     only shrink as the Plan 03 tranches migrate each site.
+        #     Every classified site requires a nonempty `allow-raw-zone:`
+        #     annotation explaining why it is not a replaceable zone event.
         run: |
           BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
           if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
             BASE="origin/main"
           fi
           ./scripts/check-engine-authorities.sh "$BASE"
+
+      - name: Release dispatch guard tests
+        # release.yml's recovery guard is release authorization: it decides
+        # whether a workflow_dispatch run may publish the tag it asks for. The
+        # tests read the guard's shell out of the committed workflow, so an edit
+        # that weakens it fails here instead of shipping unnoticed.
+        run: python3 scripts/release_dispatch_guard_tests.py
+
+      - name: Preview data wait tests
+        # The manifest is signed only after this script sees its data URLs
+        # served, so the tests drive it against a local HTTP server. They also
+        # run the publish step's own shell over a stubbed checkout, holding
+        # packaging/desktop-platforms.txt to the binaries that step uploads: a
+        # listed triple it does not publish leaves that desktop with no preview.
+        run: python3 scripts/preview_data_wait_tests.py
+
+      - name: Localized card image fallback tests
+        run: python3 scripts/lib/localized_image_fallback_tests.py
+
+      - name: Action pin checker unit tests
+        # Exercises the checker against throwaway repositories only; it does
+        # not walk this repository's own workflows. The gate over the real tree
+        # is action-pin-audit.yml, which runs the default branch's copy of this
+        # checker against the evaluated commit.
+        run: python3 scripts/check_action_pins_tests.py
+
+      - name: Action pin regression coverage
+        # Walks reusable-workflow and composite-action calls out of the
+        # release/deploy workflows: those run with deploy and signing secrets,
+        # so an action one call away from the edited file is the same exposure
+        # with less visibility. Pinning only top-level files would miss it.
+        #
+        # This runs from the pull request's checkout, so it is fast feedback and
+        # NOT the control: a commit can change a privileged workflow and this
+        # checker together. The authority is action-pin-audit.yml, which runs
+        # the default branch's copy of the checker against this commit.
+        run: python3 scripts/check_action_pins.py
+
+      - name: Media plugin packaging checker unit tests
+        # Exercises the checker against throwaway trees only; it does not read
+        # this repository's own packaging files. What matters is that it refuses
+        # a degraded read -- a renamed constant or a renamed build step -- rather
+        # than reporting a clean pass over the empty package set that a failed
+        # read produces.
+        run: python3 scripts/check_media_plugin_packaging_tests.py
+
+      - name: Media plugin packaging coverage
+        # media_stack.rs's REQUIRED_PLUGINS is the single authority for the
+        # GStreamer plugins this app needs, and both packaging consumers must
+        # cover every package it declares: the .deb's bundle.linux.deb.depends,
+        # and shell-release.yml's Linux apt step, which is the whole set
+        # linuxdeploy-plugin-gstreamer has available to copy into the AppImage.
+        # They are checked separately because #8615 shipped a silent AppImage
+        # while only the .deb side was current.
+        run: python3 scripts/check_media_plugin_packaging.py
+
+      - name: Desktop platform matrix checker unit tests
+        # Exercises the checker against throwaway trees only; it does not read
+        # this repository's own files. The direction that matters is refusal: an
+        # unreadable list must raise, not read as an empty list.
+        run: python3 scripts/check_desktop_platform_matrix_tests.py
+
+      - name: Desktop platform matrix coverage
+        # packaging/desktop-platforms.txt is the published desktop platform set.
+        # A platform shell-release.yml's build-shell matrix builds with no row
+        # there ships a desktop whose ServerPlatform resolves no triple, so it can
+        # never fetch an engine; preview-server.yml's build and release.yml's
+        # build-server triples are held to the same file by equality, so a triple
+        # published for no listed desktop is an error, not a harmless extra. The
+        # enum half is native_engine.rs's own test, which runs at tag time in
+        # shell-release.yml's shell-preflight — tauri-check is disabled here, so
+        # no PR-time job compiles it.
+        run: python3 scripts/check_desktop_platform_matrix.py
+
+      - name: Resolution-frame boundary guard
+        # Full-tree guard: legacy resolution keys are reader/fixture-only, and
+        # ResolutionStack mutation remains top-only or adjacent-pair scoped.
+        run: ./scripts/check-resolution-frame-boundaries.sh
 
       - name: Test card-data load gate
         # Diff-based gate: new test code must not reparse the full ~90 MB
@@ -93,22 +211,17 @@ jobs:
           fi
           ./scripts/check-test-card-data-load.sh "$BASE"
 
-  rust-test:
-    name: Rust tests (shard ${{ matrix.shard }}/2)
+  rust-test-build:
+    name: Rust tests (build archive)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2]
     steps:
       - uses: actions/checkout@v4
 
       - name: Free runner disk for Rust test linking
-        # The nextest count partition splits execution, but each shard still
-        # runs `cargo test --no-run` for the whole workspace. Keep the Rust
-        # caches intact and reclaim only unused hosted-image payloads before
-        # setup-rust-toolchain restores/saves Cargo state.
+        # Build the workspace's test binaries once. Keep the Rust caches intact
+        # and reclaim only unused hosted-image payloads before setup-rust-toolchain
+        # restores/saves Cargo state.
         run: |
           echo "Disk before cleanup:"
           df -h /
@@ -132,17 +245,107 @@ jobs:
           target: wasm32-unknown-unknown
           cache-shared-key: rust-debug
 
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Enable sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
 
+      - name: Build test archive
+        # This is the only Rust test compilation. The archive includes all
+        # test binaries and their runtime dependencies for the shard jobs.
+        run: cargo nextest archive --profile ci --workspace --exclude phase-tauri --features engine/proptest --archive-file nextest-archive.tar.zst
+
+      - name: Build binaries launched by integration tests
+        # `CARGO_BIN_EXE_*` embeds target/debug paths. Nextest's archive does
+        # not preserve those launcher paths, so share the binaries the
+        # integration tests execute directly with every shard. This list and the
+        # two below must cover every such binary: a launcher added here must also
+        # be uploaded and made executable below, or the shard fails on the leg
+        # that was missed rather than on the one that was added.
+        # `crates/phase-ai/tests/gate_cli.rs` reds when they fall behind.
+        run: |
+          cargo build -p probe-pin
+          cargo build -p phase-ai --bin ai-commander --bin ai-duel --bin ai-gate
+
+      - name: Upload test archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-archive
+          path: nextest-archive.tar.zst
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload test runtime binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-runtime-binaries
+          path: |
+            target/debug/probe-pin
+            target/debug/ai-commander
+            target/debug/ai-duel
+            target/debug/ai-gate
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
+
+  rust-test:
+    name: Rust tests (shard ${{ matrix.shard }}/4)
+    needs: rust-test-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Some snapshot tests query Cargo metadata at runtime. This makes Cargo
+      # available but does not build test binaries; those come from the archive.
+      # Do not restore or save a Rust target cache: the archive is the cache.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-unknown-unknown
+          cache: false
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Download test archive
+        uses: actions/download-artifact@v4
+        with:
+          name: nextest-archive
+
+      - name: Prepare test archive destination
+        run: mkdir -p target
+
+      - name: Download test runtime binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: test-runtime-binaries
+          path: target/debug
+
+      - name: Restore test runtime binary permissions
+        # Actions artifacts preserve file contents but not executable bits.
+        run: chmod +x target/debug/probe-pin target/debug/ai-commander target/debug/ai-duel target/debug/ai-gate
+
       - name: Run tests
+        # The archive retains build options. Each shard only extracts it and
+        # executes its partition; it does not invoke Cargo or compile Rust.
         # PROPTEST_CASES split: PRs run a smaller case count for fast feedback;
         # pushes to main run the default (256) so any property regression is
         # caught before it lands on the branch that feeds staging/preview.
         env:
           PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '32' || '256' }}
-        run: cargo nextest run --profile ci --partition count:${{ matrix.shard }}/2 --workspace --exclude phase-tauri --exclude mtgish-import --features engine/proptest --status-level fail --final-status-level fail
+        run: cargo-nextest nextest run --profile ci --partition count:${{ matrix.shard }}/4 --archive-file nextest-archive.tar.zst --extract-to target --status-level fail --final-status-level fail
 
   card-data-gate:
     name: Card data (generate, validate, coverage)
@@ -158,6 +361,14 @@ jobs:
         with:
           target: wasm32-unknown-unknown
           cache-shared-key: rust-debug
+
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Enable sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
 
       - name: Set cache keys
         id: cache-keys
@@ -258,6 +469,13 @@ jobs:
         run: |
           cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
 
+      - name: Verify Gemstone Caverns production-export drift guard
+        run: |
+          test -s data/card-data.json
+          test_name='gemstone_caverns_begin_game::gemstone_caverns_full_export_retains_luck_counter_mana_contract'
+          cargo test -p phase-engine --test integration "$test_name" -- --exact 2>&1 | tee /tmp/gemstone-export-guard.log
+          grep -F 'test result: ok. 1 passed' /tmp/gemstone-export-guard.log
+
       - name: Card export must not mutate the tracked parser vocabulary
         # Regression guard: the export is a PURE READ of the tracked tree.
         #
@@ -311,6 +529,25 @@ jobs:
         # would hit the cache, skip the check, and report a false green. The
         # export is present either way (generated above or restored by cardgen).
         run: python3 scripts/draw_replacement_census.py --corpus --check
+
+      - name: Cost-walk carrier drift guard (CR 605.1a)
+        # `visit_ability_def_costs_scoped` does not descend the eight inline
+        # branch carriers that `visit_effect_scoped` does (documented KNOWN GAP).
+        # A cost on a carrier-nested `AbilityDefinition` therefore escapes
+        # CR 605.1a's cost criterion, and a `Mill` / `Exile { Library }` cost
+        # there would keep mana-ability status it should have lost. Zero such
+        # costs exist today; this fails the moment a parser production emits one.
+        #
+        # Lives here, not in the Rust test job, for the same reason as the draw
+        # census above: it reads the generated (gitignored) export. The
+        # equivalent `#[test]` would self-skip in `Rust tests` (see the header of
+        # scripts/check-test-card-data-load.sh), and the change that triggers
+        # this gap comes from a parser author whose PR is checked by CI — so a
+        # CI-invisible guard is green for exactly the person it exists to stop.
+        #
+        # Unconditional, like the draw census: gates-cache does not hash
+        # scripts/**, so a cache hit must not skip it.
+        run: python3 scripts/cost_walk_carrier_census.py --check
 
       - name: Card support coverage report
         # Skipped on a gates-cache hit — coverage-data.json and
@@ -573,7 +810,10 @@ jobs:
         run: cargo check --package engine-wasm --target wasm32-unknown-unknown
 
   tauri-check:
-    name: Tauri compile check
+    # Disabled pending a faster Linux dependency setup: apt-get update regularly
+    # consumes this job's entire 15-minute timeout.
+    if: ${{ false }}
+    name: Tauri compile check + tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -593,34 +833,138 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
 
-      - name: Stub frontend dist for tauri::generate_context!
+      - name: Stub bootstrap dist for tauri::generate_context!
         # phase-tauri's build.rs runs `tauri::generate_context!()` which
-        # requires `frontendDist` (../dist per tauri.conf.json) to exist.
-        # An empty stub is enough for type-checking — we don't bundle assets.
+        # requires `frontendDist` (../bootstrap/dist per tauri.conf.json) to
+        # exist. An empty stub is enough for type-checking — we don't bundle
+        # bootstrap assets here.
         run: |
-          mkdir -p client/dist
-          echo '<!doctype html><html></html>' > client/dist/index.html
-
-      - name: Stub phase-server sidecar + bundled resources for tauri-build
-        # tauri.conf.json declares `externalBin: ["binaries/phase-server"]`
-        # and bundled data resources, so tauri-build requires those paths to
-        # exist at check time. The real sidecar / data files are built in the
-        # release matrix; for PR-time compile checks we only need the paths to
-        # exist.
-        run: |
-          mkdir -p client/src-tauri/binaries client/public
-          touch client/src-tauri/binaries/phase-server-x86_64-unknown-linux-gnu
-          touch client/public/card-data.json
-          touch client/public/draft-pools.json
+          mkdir -p client/bootstrap/dist
+          echo '<!doctype html><html></html>' > client/bootstrap/dist/index.html
 
       - name: Tauri compile check
         # phase-tauri is excluded from the workspace clippy and nextest runs
-        # above (no proptest support, no tests). Without this step, compile
-        # errors in the desktop crate only surface at release time during the
-        # 30-45min build-tauri matrix. Catches them on every PR in ~3 min.
+        # above. Without this step, compile errors in the desktop crate only
+        # surface at shell release time. Catches them on every PR in ~3 min.
         # Driven via --manifest-path because client/src-tauri is excluded
         # from the root workspace, so `-p phase-tauri` cannot resolve it.
         run: cargo check --locked --manifest-path client/src-tauri/Cargo.toml
+
+      - name: Tauri tests
+        # phase-tauri's `#[cfg(test)]` unit tests (migration, native_bridge,
+        # native_engine, audio_probe, ...) are excluded from the workspace
+        # nextest run above for the same reason as the compile check, so they
+        # need their own step or they'd never run in CI at all.
+        run: cargo test --locked --manifest-path client/src-tauri/Cargo.toml
+
+  android-debug-apk:
+    name: Android debug APK (ARM64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 9.15.9
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        with:
+          # The action's default is `tools platform-tools`, and it installs each
+          # package with its own `sdkmanager <pkg>` call. Google has withdrawn the
+          # legacy `tools` package from the SDK repository, so that call now fails
+          # with "Failed to find package 'tools'" and takes the whole job with it.
+          # Nothing here uses it: the pinned-SDK step below installs the platform,
+          # build-tools and NDK this job actually needs. Overriding the default is
+          # the fix rather than a version bump — v4.0.1 ships the same default.
+          packages: platform-tools
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          target: aarch64-linux-android
+          cache-shared-key: rust-tauri-android-arm64
+          cache-workspaces: client/src-tauri -> target
+
+      - name: Install pinned Android SDK and NDK
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;28.2.13676358"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+
+      - name: Install frozen client dependencies
+        run: cd client && pnpm install --frozen-lockfile
+
+      - name: Build ARM64 debug APK through the project CLI
+        run: |
+          set -euo pipefail
+          NODE_BIN=$(realpath "$(command -v node)")
+          TAURI_JS="$GITHUB_WORKSPACE/client/node_modules/@tauri-apps/cli/tauri.js"
+          test -f "$NODE_BIN"
+          test -x "$NODE_BIN"
+          test -f "$TAURI_JS"
+          export ORG_GRADLE_PROJECT_phaseNodeExecutable="$NODE_BIN"
+          (
+            cd client
+            "$NODE_BIN" "$TAURI_JS" android build --debug --target aarch64 --apk
+          )
+
+      - name: Inspect ARM64 debug APK
+        run: |
+          set -euo pipefail
+          APK=$(find client/src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk' -print -quit)
+          test -n "$APK"
+          test -f "$APK"
+
+          AAPT2="$ANDROID_HOME/build-tools/36.0.0/aapt2"
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          TAURI_PROPERTIES="client/src-tauri/gen/android/app/tauri.properties"
+          test -f "$TAURI_PROPERTIES"
+          APP_VERSION=$(sed -n 's/^tauri.android.versionName=//p' "$TAURI_PROPERTIES")
+          VERSION_CODE=$(sed -n 's/^tauri.android.versionCode=//p' "$TAURI_PROPERTIES")
+          test -n "$APP_VERSION"
+          [[ "$VERSION_CODE" =~ ^[0-9]+$ ]]
+          BADGING=$($AAPT2 dump badging "$APK")
+          grep -F "package: name='rs.phase.app.debug' versionCode='$VERSION_CODE' versionName='$APP_VERSION'" <<<"$BADGING"
+          grep -F "minSdkVersion:'24'" <<<"$BADGING"
+          grep -F "targetSdkVersion:'36'" <<<"$BADGING"
+
+          SIGNING=$($APKSIGNER verify --verbose --print-certs "$APK")
+          grep -F 'Verified using v2 scheme (APK Signature Scheme v2): true' <<<"$SIGNING"
+          grep -F 'CN=Android Debug' <<<"$SIGNING"
+
+          mapfile -t ABIS < <(unzip -Z1 "$APK" | sed -nE 's#^lib/([^/]+)/.*\.so$#\1#p' | sort -u)
+          test "${#ABIS[@]}" -eq 1
+          test "${ABIS[0]}" = 'arm64-v8a'
+          if unzip -Z1 "$APK" | grep -Eq '(^|/)(update\.json|.*\.sig)$'; then
+            echo 'Android debug APK unexpectedly contains updater material'
+            exit 1
+          fi
+          cp "$APK" Phase-Android-ARM64-debug.apk
+
+      - name: Upload inspected Android debug APK
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: phase-android-arm64-debug
+          path: Phase-Android-ARM64-debug.apk
+          retention-days: 14
 
   rust-check:
     name: Rust (fmt, clippy, test, coverage-gate)
@@ -628,23 +972,31 @@ jobs:
     timeout-minutes: 5
     needs:
       - rust-lint
+      - rust-test-build
       - rust-test
       - card-data-gate
       - draft-pools
       - wasm-check
       - tauri-check
+      - android-debug-apk
     if: always()
     steps:
       - name: Check split Rust jobs
         env:
           RUST_LINT_RESULT: ${{ needs.rust-lint.result }}
+          RUST_TEST_BUILD_RESULT: ${{ needs.rust-test-build.result }}
           RUST_TEST_RESULT: ${{ needs.rust-test.result }}
           CARD_DATA_RESULT: ${{ needs.card-data-gate.result }}
           DRAFT_POOLS_RESULT: ${{ needs.draft-pools.result }}
           WASM_RESULT: ${{ needs.wasm-check.result }}
           TAURI_RESULT: ${{ needs.tauri-check.result }}
+          ANDROID_RESULT: ${{ needs.android-debug-apk.result }}
         run: |
-          results="$RUST_LINT_RESULT $RUST_TEST_RESULT $CARD_DATA_RESULT $DRAFT_POOLS_RESULT $WASM_RESULT $TAURI_RESULT"
+          if [ "$RUST_TEST_BUILD_RESULT" != "success" ]; then
+            echo "Rust test archive build failed: $RUST_TEST_BUILD_RESULT"
+            exit 1
+          fi
+          results="$RUST_LINT_RESULT $RUST_TEST_RESULT $CARD_DATA_RESULT $DRAFT_POOLS_RESULT $WASM_RESULT $TAURI_RESULT $ANDROID_RESULT"
           # `skipped` is a pass: draft-pools is main-only and is skipped on PRs.
           for result in $results; do
             if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
@@ -676,6 +1028,27 @@ jobs:
           npm ci
           pnpm test
 
+  card-bot-test:
+    name: Card bot (bun test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The tests never touch git; don't leave the token in .git/config.
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          # Tracks deploy/card-bot.Dockerfile's oven/bun:1.3 runtime.
+          bun-version: 1.3.x
+
+      # Dependency-free: the tests import client modules by relative path and
+      # read the pinned client/Tauri/workflow/crate files, none of which need
+      # client/node_modules.
+      - name: Test
+        run: bun test scripts/card-bot
+
   frontend:
     name: Frontend (lint, type-check, test)
     runs-on: ubuntu-latest
@@ -704,3 +1077,49 @@ jobs:
 
       - name: Run tests with coverage
         run: cd client && pnpm test -- --run --coverage
+
+  draft-match-wasm-proof:
+    name: Draft match proof (real WASM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          target: wasm32-unknown-unknown
+          cache-shared-key: rust-wasm
+          rustflags: ""
+
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: wasm-bindgen-cli@0.2.121
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 9
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: cd client && pnpm install --frozen-lockfile
+
+      - name: Build both WASM engines
+        run: ./scripts/build-wasm.sh wasm-dev
+
+      - name: Require generated bindings
+        run: |
+          test -s client/src/wasm/draft_wasm.js
+          test -s client/src/wasm/draft_wasm_bg.wasm
+          test -s client/src/wasm/engine_wasm.js
+          test -s client/src/wasm/engine_wasm_bg.wasm
+
+      - name: Run isolated draft match proofs
+        run: pnpm exec vitest run --config vitest.integration.config.ts --pool=forks --isolate --coverage.enabled=false --reporter=verbose src/adapter/__tests__/setDraftMatchProof.integration.test.ts src/adapter/__tests__/cubeDraftMatchProof.integration.test.ts
+        working-directory: client

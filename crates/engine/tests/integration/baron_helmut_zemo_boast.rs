@@ -19,7 +19,7 @@ use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, Comparator, Effect,
-    ObjectProperty, QuantityExpr, TargetFilter,
+    ObjectProperty, QuantityExpr, ReplacementDefinition, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -28,6 +28,8 @@ use engine::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::replacements::ReplacementEvent;
+use engine::types::zones::{EtbTapState, Zone};
 
 const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
@@ -112,6 +114,29 @@ fn setup(gy: &[usize]) -> (GameRunner, ObjectId, Vec<ObjectId>) {
     runner.state_mut().priority_player = P0;
     runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
     (runner, zemo, gy_ids)
+}
+
+fn exile_to_graveyard_redirect() -> ReplacementDefinition {
+    ReplacementDefinition::new(ReplacementEvent::Moved)
+        .destination_zone(Zone::Exile)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                destination: Zone::Graveyard,
+                origin: None,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        ))
 }
 
 /// Pass priority (both players) until the wait is no longer a priority window
@@ -444,6 +469,77 @@ fn zemo_boast_binds_cost_exiled_set_across_intervening_set() {
     }
 }
 
+#[test]
+fn zemo_boast_tracks_only_cards_delivered_to_exile_after_replacement_choices() {
+    let (mut runner, zemo, gy) = setup(&[3, 3, 3, 3, 3]);
+    let redirect = exile_to_graveyard_redirect();
+    let redirects = vec![redirect.clone(), redirect];
+    let zemo_obj = runner
+        .state_mut()
+        .objects
+        .get_mut(&zemo)
+        .expect("Zemo exists");
+    zemo_obj.replacement_definitions = redirects.clone().into();
+    zemo_obj.base_replacement_definitions = Arc::new(redirects);
+
+    let idx = boast_index(&runner, zemo);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: zemo,
+            ability_index: idx,
+        })
+        .expect("Boast is payable");
+    let result = runner
+        .act(GameAction::SelectCards { cards: gy.clone() })
+        .expect("select Boast cost cards");
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+
+    let mut prompts_answered = 0;
+    while matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ) {
+        runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("answer exile replacement ordering");
+        prompts_answered += 1;
+        assert!(prompts_answered <= gy.len(), "each cost card pauses once");
+    }
+
+    assert_eq!(prompts_answered, gy.len());
+    assert!(
+        gy.iter()
+            .all(|object_id| runner.state().objects[object_id].zone == Zone::Graveyard),
+        "every selected card is redirected away from exile"
+    );
+    let tracked_set = TrackedSetId(runner.state().next_tracked_set_id - 1);
+    assert_eq!(
+        runner.state().tracked_object_sets.get(&tracked_set),
+        Some(&vec![]),
+        "the cost's tracked set must contain only cards actually delivered to exile"
+    );
+}
+
+fn contains_unimplemented(def: &AbilityDefinition) -> bool {
+    let mut nested = false;
+    def.effect.for_each_nested_definition(&mut |_, inner| {
+        nested = nested || contains_unimplemented(inner)
+    });
+    matches!(*def.effect, Effect::Unimplemented { .. })
+        || nested
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(contains_unimplemented)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(contains_unimplemented)
+}
+
 /// Regression guard for the `fold_cast_copy_of_card_defs` broadening (PR-4b/Zemo).
 /// Extending the fold's copy-half match to `CopySpell { TrackedSet(0) }` (for
 /// Zemo's "Copy those exiled cards") must NOT fuse the legacy "copy the exiled
@@ -471,13 +567,46 @@ fn copy_then_conditional_cast_idiom_not_fused_away() {
         ),
         (
             "Spellweaver Helix",
-            "Imprint — When this artifact enters, you may exile two target sorcery cards from a single graveyard.\nWhenever a player casts a card, if it has the same name as one of the cards exiled with this artifact, you may copy the other. If you do, you may cast the copy without paying its mana cost.",
+            // The "if it has the same name as one of the cards exiled with this artifact" guard is
+            // not modelled (it fails closed); it is irrelevant to the copy/cast idiom under test.
+            "Imprint — When this artifact enters, you may exile two target sorcery cards from a single graveyard.\nWhenever a player casts a card, you may copy the other. If you do, you may cast the copy without paying its mana cost.",
             vec!["Artifact".to_string()],
             Vec::<String>::new(),
         ),
     ];
     for (name, oracle, types, subs) in &cards {
         let parsed = parse_oracle_text(oracle, name, &[], types, subs);
+        // Reach-guard: every ability and trigger parsed, so the swallow check below is not
+        // vacuously satisfied by a fail-closed unit.
+        let roots: Vec<&AbilityDefinition> = parsed
+            .abilities
+            .iter()
+            .chain(parsed.triggers.iter().filter_map(|t| t.execute.as_deref()))
+            .collect();
+        let mut chain: Vec<&AbilityDefinition> = Vec::new();
+        for root in &roots {
+            let mut node = Some(*root);
+            while let Some(def) = node {
+                chain.push(def);
+                node = def.sub_ability.as_deref();
+            }
+        }
+        assert!(
+            chain
+                .iter()
+                .any(|d| matches!(*d.effect, Effect::CopySpell { .. })),
+            "{name}: fixture must keep the CopySpell node, else the check is vacuous"
+        );
+        assert!(
+            chain
+                .iter()
+                .any(|d| matches!(*d.effect, Effect::CastFromZone { .. }) && d.condition.is_some()),
+            "{name}: fixture must keep the conditional CastFromZone sub-ability"
+        );
+        assert!(
+            !roots.iter().copied().any(contains_unimplemented),
+            "{name}: fixture must parse with zero Effect::Unimplemented"
+        );
         let swallowed: Vec<_> = parsed
             .parse_warnings
             .iter()

@@ -2,7 +2,7 @@
 
 use crate::game::effects::choose_one_of;
 use crate::game::effects::gain_control;
-use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::filter::matches_target_filter;
 use crate::game::game_object::GameObject;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::targeting::resolved_object_ids_for_filter;
@@ -166,10 +166,12 @@ pub fn perform_contraption_upkeep_turn_based_action(
         ObjectId(0),
         player,
     );
-    state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation)));
+    state.park_ability_continuation(PendingContinuation::new(Box::new(continuation), state));
     state.waiting_for = WaitingFor::ChooseObjectsSelection {
         player,
         eligible,
+        min: 0,
+        max: None,
         trigger_event: None,
     };
     let _ = events;
@@ -245,6 +247,7 @@ pub(crate) fn continue_assemble_batch(
             parent_targets: Vec::new(),
             context: crate::types::ability::SpellContext::default(),
             replacement_applied: Default::default(),
+            continuation: None,
             players: vec![player],
         },
     );
@@ -421,6 +424,7 @@ fn prompt_reassemble_sprocket_choice(
             parent_targets: ability.targets.clone(),
             context: ability.context.clone(),
             replacement_applied: ability.replacement_applied.clone(),
+            continuation: None,
             players: vec![ability.controller],
         },
     );
@@ -496,6 +500,33 @@ fn next_sprocket(current: u8) -> u8 {
     }
 }
 
+/// CR 706.4: the difference between this instruction's two die results.
+///
+/// CR 706.6 (survivors only): under a die-roll ignore replacement (Barbarian
+/// Class, Pixie Guide, Wyll), an ignored roll "is considered to have never
+/// happened... no effects apply to that roll", so it must not contribute to
+/// this difference. That is satisfied structurally rather than by a check here:
+/// `resume_after_ignore` (`game/effects/roll_die.rs`) emits `DieRolled` for
+/// SURVIVORS ONLY, so an ignored roll is invisible to this scan.
+///
+/// ORDERING INVARIANT — read before re-timing die-roll emission. This scan has
+/// NO resolution boundary: it walks the entire shared `events` vec backwards and
+/// takes the last two rolls it finds, whoever produced them. It is correct only
+/// because the reflexive `AssembleContraptionsFromRollDifference` cannot resolve
+/// until this instruction's rolls are already in that vec. Under a CR 706.6
+/// ignore replacement, emission is deferred past a `SelectDieRolls` action
+/// boundary, and what preserves the ordering is `WaitingFor::DieKeepChoice`'s
+/// membership in `waits_for_resolution_choice` (`game/effects/mod.rs`): the
+/// effect chain suspends, so the reflexive assemble is stashed and drained only
+/// AFTER `resume_after_ignore` has pushed the survivors' events. Remove that
+/// allowlist arm, or move emission later again, and this returns 0 (its "fewer
+/// than two rolls found" value) — a SILENT failure: Hard Hat Area assembles
+/// nothing, `EffectResolved` is still emitted, and no error surfaces.
+///
+/// This is ONE OF TWO events-slice die-result consumers; the other is
+/// `snapshot_resolution_context_quantity` (`game/effects/effect.rs`), which
+/// depends on the same ordering for the same reason. A change here almost
+/// certainly needs a matching look there.
 fn recent_roll_difference(events: &[GameEvent]) -> u32 {
     let mut rolls = events.iter().rev().filter_map(|event| match event {
         GameEvent::DieRolled {
@@ -562,9 +593,10 @@ fn apply_assemble_replacements(state: &GameState, source_id: ObjectId, count: u3
                 continue;
             }
             let matches_source = replacement.valid_card.as_ref().is_none_or(|filter| {
-                let ctx = FilterContext::from_source_with_controller(
+                let ctx = replacement.valid_card_context(
+                    state,
                     *replacement_source_id,
-                    replacement_source.controller,
+                    Some(replacement_source.controller),
                 );
                 matches_target_filter(state, source_id, filter, &ctx)
             });

@@ -11,7 +11,12 @@ export type { ObjectId, CardId, PlayerId, Phase, Zone, Player, StackEntry } from
 export type { P2PAdapterEvent } from "./p2p-adapter";
 export type { DraftPodHostEvent, DraftPodHostConfig, DraftPodHostStatus } from "./draftPodHostAdapter";
 export type { DraftPodGuestEvent, DraftPodGuestConfig, DraftPodGuestStatus } from "./draftPodGuestAdapter";
-export type { ServerDraftAdapterEvent, CreateDraftSettings, DraftPhase } from "./server-draft-adapter";
+export type {
+  ServerDraftAdapterEvent,
+  CreateDraftSettings,
+  DraftPhase,
+  DraftSourceIntent,
+} from "./server-draft-adapter";
 
 /**
  * Validates that the adapter type is allowed for the given player count.

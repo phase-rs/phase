@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { GameObject, PlayerId, Zone } from "../../adapter/types.ts";
@@ -14,6 +14,7 @@ import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { isObjectReportableToViewer } from "../../viewmodel/gameStateView.ts";
 import { ModalPanelShell } from "../ui/ModalPanelShell.tsx";
+import { getCardImageSrcSetProps } from "./cardImageSrcSet.ts";
 
 // Most-relevant-first zone ordering. `Library` is intentionally absent — the
 // visibility helper hides library cards, and top-of-library reveals are out of
@@ -84,7 +85,11 @@ function reportKey(identity: ReportIdentity): string {
  * list instead of chasing the hover preview. Reads engine-provided state only
  * (objects + reveal sets + parse details) and formats it — no game logic.
  */
-export function CardReportDialog() {
+export function CardReportDialog({
+  returnFocusRef,
+}: {
+  returnFocusRef?: RefObject<HTMLElement | SVGElement | null>;
+}) {
   const { t } = useTranslation("game");
   const open = useUiStore((s) => s.cardReportDialogOpen);
   const close = useUiStore((s) => s.closeCardReportDialog);
@@ -163,6 +168,7 @@ export function CardReportDialog() {
       title={t("cardReport.title")}
       subtitle={t("cardReport.subtitle")}
       onClose={close}
+      returnFocusRef={returnFocusRef}
       maxWidthClassName="max-w-lg"
       bodyClassName="flex flex-col"
     >
@@ -314,8 +320,12 @@ function CardReportRow({
   const { handlers: hoverHandlers, firedRef } = useCardHover(obj.id);
   const imageLookup = cardImageLookup(obj);
   const isToken = obj.display_source === "Token";
-  const { src: artSrc } = useCardImage(imageLookup.name, {
-    size: "art_crop",
+  const {
+    src: artSrc,
+    rungs: artRungs,
+    advanceFailedSource,
+  } = useCardImage(imageLookup.name, {
+    size: isToken ? "normal" : "art_crop",
     faceIndex: imageLookup.faceIndex,
     isToken,
     tokenFilters: isToken ? tokenFiltersForObject(obj) : undefined,
@@ -347,7 +357,14 @@ function CardReportRow({
       className="relative block h-9 w-9 shrink-0 overflow-hidden rounded-[6px] border border-white/10 bg-black/30"
     >
       {artSrc && (
-        <img src={artSrc} alt="" draggable={false} className="h-full w-full object-cover" />
+        <img
+          src={artSrc}
+          {...getCardImageSrcSetProps(artSrc, artRungs)}
+          alt=""
+          draggable={false}
+          onError={() => advanceFailedSource?.(artSrc)}
+          className="h-full w-full object-cover"
+        />
       )}
     </span>
   );

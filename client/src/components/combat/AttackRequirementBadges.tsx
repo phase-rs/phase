@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
 import type { ObjectId } from "../../adapter/types.ts";
+import { useGameStore } from "../../stores/gameStore.ts";
 import { useAttackRequirements, type AttackRequirement } from "./useAttackRequirements.ts";
 
 interface Anchor {
@@ -77,6 +78,7 @@ function badgeTone(status: AttackRequirement["status"]): string {
 export function AttackRequirementBadges() {
   const { t } = useTranslation("game");
   const { byObject } = useAttackRequirements();
+  const objects = useGameStore((s) => s.gameState?.objects);
   const objectIds = Array.from(byObject.keys());
   const anchors = useObjectAnchors(objectIds);
 
@@ -93,6 +95,16 @@ export function AttackRequirementBadges() {
             : req.status === "satisfied"
               ? t("combat.mustAttackSatisfiedBadge")
               : t("combat.mustAttackBadge");
+        // Display-only source attribution: suppress a self-source (an intrinsic
+        // requirement like Juggernaut shows a bare badge) and skip ids that no
+        // longer resolve (departed-source guard), mirroring PermanentCard.
+        const names = req.sources
+          .filter((id) => id !== req.objectId)
+          .map((id) => objects?.[String(id)]?.name)
+          .filter((n): n is string => !!n);
+        const title = names.length
+          ? `${label} ${t("preview.fromSource", { source: names.join(", ") })}`
+          : label;
         return (
           <div
             key={req.objectId}
@@ -100,7 +112,7 @@ export function AttackRequirementBadges() {
             style={{ left: anchor.x, top: anchor.top }}
           >
             <span
-              title={label}
+              title={title}
               className={`flex items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] font-bold shadow-[0_4px_12px_rgba(0,0,0,0.5)] backdrop-blur-sm ${badgeTone(req.status)}`}
             >
               {/* Sword glyph — a creature that must / can't attack. */}

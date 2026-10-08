@@ -101,6 +101,7 @@ pub fn resolve(
             parent_targets: ability.targets.clone(),
             context: ability.context.clone(),
             replacement_applied: ability.replacement_applied.clone(),
+            continuation: None,
             players: vec![enduring_controller],
         },
     );

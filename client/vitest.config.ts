@@ -1,6 +1,10 @@
 import path from "node:path";
 import type { Plugin } from "vite";
 import { defineConfig } from "vitest/config";
+import { resolveMultiplayerServerUrls } from "./src/config/multiplayerServerUrls";
+import { resolveTurnCredentialsUrl } from "./src/config/turnCredentials";
+
+const multiplayerServers = resolveMultiplayerServerUrls((name) => process.env[name]);
 
 /**
  * Resolves the @wasm/* aliases to the real WASM build artifacts when present,
@@ -9,6 +13,17 @@ import { defineConfig } from "vitest/config";
  * any test whose import graph reaches a `import("@wasm/...")` fails at
  * transform time. The stub also lets vi.mock("@wasm/engine", factory) work.
  */
+function isCoverageExplicitlyDisabledArgv(argv: readonly string[]): boolean {
+  for (let index = 0; index < argv.length; index += 1) {
+    if (argv[index] === "--") break;
+    if (argv[index] === "--coverage.enabled=false") return true;
+    if (argv[index] === "--coverage.enabled" && argv[index + 1] === "false") return true;
+  }
+  return false;
+}
+
+const coverageExplicitlyDisabled = isCoverageExplicitlyDisabledArgv(process.argv);
+
 function wasmStubPlugin(): Plugin {
   const artifacts: Record<string, string> = {
     "@wasm/engine": path.resolve(__dirname, "src/wasm/engine_wasm.js"),
@@ -35,39 +50,89 @@ function wasmStubPlugin(): Plugin {
   };
 }
 
+/** `virtual:pwa-register` is supplied by VitePWA in production but Vitest
+ * does not load that plugin. Keep the stub resolvable so updater tests can
+ * replace it with the same module contract. */
+function pwaRegisterStubPlugin(): Plugin {
+  const id = "\0virtual:pwa-register-stub";
+  return {
+    name: "pwa-register-stub",
+    resolveId(source) {
+      return source === "virtual:pwa-register" ? id : undefined;
+    },
+    load(source) {
+      return source === id ? "export const registerSW = () => async () => {};" : undefined;
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [wasmStubPlugin()],
+  plugins: [wasmStubPlugin(), pwaRegisterStubPlugin()],
   define: {
     __SCRYFALL_DATA_URL__: JSON.stringify("/scryfall-data.json"),
     __SCRYFALL_TOKEN_IMAGES_URL__: JSON.stringify("/scryfall-token-images.json"),
     __SCRYFALL_PRINTINGS_URL__: JSON.stringify("/scryfall-printings.json"),
     __SCRYFALL_SETS_URL__: JSON.stringify("/scryfall-sets.json"),
+    __DRAFT_POOLS_URL__: JSON.stringify("/draft-pools.json"),
     __DECKS_URL__: JSON.stringify("/decks.json"),
     __CARD_DATA_URL__: JSON.stringify("/card-data.json"),
+      __CARD_DATA_META_URL__: JSON.stringify("/card-data-meta.json"),
     __CARD_DATA_LOCALE_URL_TEMPLATE__: JSON.stringify("/card-data.{lng}.json"),
+    __SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE__: JSON.stringify("/scryfall-images.v2.{lng}.json"),
     __CHANGELOG_URL__: JSON.stringify("/changelog.json"),
     __CHANGELOG_META_URL__: JSON.stringify("/changelog-meta.json"),
+    __STATUS_URL__: JSON.stringify("/status.json"),
     __APP_VERSION__: JSON.stringify("0.0.0-test"),
     __BUILD_HASH__: JSON.stringify("testhash"),
-    __DEFAULT_MULTIPLAYER_SERVER_URL__: JSON.stringify(
-      process.env.DEFAULT_MULTIPLAYER_SERVER_URL || "wss://lobby.phase-rs.dev/ws",
+    __ENGINE_WASM_URL__: "undefined",
+    // Same resolver vite.config.ts uses — the order is single-authority.
+    __OFFICIAL_MULTIPLAYER_SERVER_URL__: JSON.stringify(multiplayerServers.official),
+    __DEFAULT_MULTIPLAYER_SERVER_URL__: JSON.stringify(multiplayerServers.buildDefault),
+    __TURN_CREDENTIALS_URL__: JSON.stringify(
+      resolveTurnCredentialsUrl(process.env.TURN_CREDENTIALS_URL),
     ),
     __GIT_REPO_URL__: JSON.stringify("https://github.com/phase-rs/phase"),
+    __PREVIEW_SITE_URL__: JSON.stringify("https://preview.phase-rs.dev"),
+    __RELEASE_SITE_URL__: JSON.stringify("https://phase-rs.dev"),
     __IS_RELEASE_BUILD__: JSON.stringify(false),
     // Empty ⇒ telemetry is build-disabled in tests (no network egress).
     __TELEMETRY_URL__: JSON.stringify(""),
   },
   test: {
     environment: "happy-dom",
+    server: {
+      deps: {
+        /**
+         * `react-i18next` must be processed by Vite rather than externalized to
+         * the Node ESM loader.
+         *
+         * Its `TransWithoutContext` entry does a bare `import
+         * "html-parse-stringify"`. Under pnpm that dependency is reached
+         * through a symlink, and Vitest 4's externalized path resolves the
+         * IMPORTER to its realpath under `.pnpm/react-i18next@.../`, then looks
+         * for `html-parse-stringify` beneath that directory instead of
+         * following the link — so every test file fails to load at import time
+         * with "Cannot find package ...". Node's own resolver handles it fine
+         * (`require.resolve` finds it); only the externalized loader does not.
+         *
+         * `test-setup.ts` imports `react-i18next` globally, so this took down
+         * the WHOLE suite, not just the tests that render translated UI.
+         */
+        inline: ["react-i18next"],
+      },
+    },
     include: ["src/**/*.test.{ts,tsx}"],
     exclude: ["src/**/*.integration.test.{ts,tsx}"],
     setupFiles: ["src/test-setup.ts"],
     pool: "threads",
     coverage: {
+      enabled: !coverageExplicitlyDisabled,
       provider: "v8",
       reporter: ["text", "lcov"],
       include: ["src/**/*.{ts,tsx}"],
-      exclude: ["src/**/__tests__/**", "src/**/*.test.*", "src/wasm/**"],
+      // Stories are documentation rendered by Storybook, not app code, so
+      // they neither add nor owe coverage.
+      exclude: ["src/**/__tests__/**", "src/**/*.test.*", "src/**/*.stories.*", "src/wasm/**"],
       thresholds: {
         lines: 10,
         functions: 10,

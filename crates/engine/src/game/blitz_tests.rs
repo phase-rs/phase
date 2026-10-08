@@ -36,7 +36,8 @@ fn blitz_creature_on_battlefield(state: &mut GameState) -> ObjectId {
         obj.card_types.core_types.push(CoreType::Creature);
         obj.base_card_types.core_types.push(CoreType::Creature);
     }
-    install_blitz_riders(state, id, PlayerId(0));
+    let mut events = Vec::new();
+    install_blitz_riders(state, id, PlayerId(0), &mut events);
     id
 }
 
@@ -75,12 +76,12 @@ fn install_grants_dies_draw_trigger() {
     let id = blitz_creature_on_battlefield(&mut state);
     let obj = &state.objects[&id];
     let has_dies_draw = obj.trigger_definitions.iter_all().any(|t| {
-        matches!(t.mode, TriggerMode::ChangesZone)
-            && t.origin == Some(Zone::Battlefield)
-            && t.destination == Some(Zone::Graveyard)
-            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        matches!(t.definition.mode, TriggerMode::ChangesZone)
+            && t.definition.origin == Some(Zone::Battlefield)
+            && t.definition.destination == Some(Zone::Graveyard)
+            && matches!(t.definition.valid_card, Some(TargetFilter::SelfRef))
             && matches!(
-                t.execute.as_deref().map(|a| &*a.effect),
+                t.definition.execute.as_deref().map(|a| &*a.effect),
                 Some(Effect::Draw { .. })
             )
     });

@@ -6,14 +6,18 @@ import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { usePlayerAvatarImage } from "../../hooks/usePlayerAvatarImage.ts";
 import { getCardNames } from "../../services/cardNames.ts";
 import {
   getPlayerDisplayName,
   useMultiplayerStore,
 } from "../../stores/multiplayerStore.ts";
-import type { PlayerId, WaitingFor } from "../../adapter/types.ts";
+import type { FreeEntry, PlayerId, WaitingFor } from "../../adapter/types.ts";
 
-type NamedChoice = Extract<WaitingFor, { type: "NamedChoice" }>;
+type OptionChoice = Extract<
+  WaitingFor,
+  { type: "NamedChoice" | "OpponentGuess" }
+>;
 
 /** Maps a ChoiceType key to its i18n leaf under `namedChoice.title.*`. */
 const CHOICE_TYPE_TITLE_KEYS: Record<string, string> = {
@@ -46,12 +50,78 @@ function getChoiceTypeKey(choiceType: string | Record<string, unknown>): string 
 
 const MAX_RESULTS = 10;
 
-export function NamedChoiceModal({ data }: { data: NamedChoice["data"] }) {
+export function NamedChoiceModal({ data }: { data: OptionChoice["data"] }) {
   const typeKey = getChoiceTypeKey(data.choice_type);
   if (typeKey === "CardName") {
     return <CardNameSearch />;
   }
+  // CR 107.1a/b: the engine publishes a free-entry contract when the answer is
+  // typed rather than picked from `options`. Its PRESENCE — not any reading of
+  // `choice_type`'s serialized shape — selects the numeric form; an enumerated
+  // choice carries no contract and keeps its grid.
+  const freeEntry = "free_entry" in data ? data.free_entry : undefined;
+  if (freeEntry?.kind === "Number") {
+    return <NumberEntry contract={freeEntry} />;
+  }
   return <ButtonGrid data={data} typeKey={typeKey} />;
+}
+
+/** CR 107.1a/b: free-entry numeric prompt, rendered and bounded entirely from
+ *  the engine's published contract.
+ *
+ *  The engine validates the submitted answer authoritatively
+ *  (`ChoiceType::accepts_free_entry_answer`) against the same bounds it
+ *  published here, so this check can only ever agree with it. Deriving the
+ *  bounds locally instead — from the choice type's shape, or from a hard-coded
+ *  numeric ceiling — would make the client a second authority, free to reject a
+ *  value the engine accepts and to drift when the engine's domain changes. */
+function NumberEntry({ contract }: { contract: FreeEntry }) {
+  const { min, max } = contract;
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const [value, setValue] = useState(String(min));
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  const parsed = /^\d+$/.test(value.trim()) ? Number(value.trim()) : null;
+  const valid =
+    parsed !== null &&
+    Number.isSafeInteger(parsed) &&
+    parsed >= min &&
+    parsed <= max;
+
+  const confirm = useCallback(() => {
+    if (valid) {
+      dispatch({ type: "ChooseOption", data: { choice: String(parsed) } });
+    }
+  }, [dispatch, parsed, valid]);
+
+  return (
+    <ChoiceOverlay
+      title={t("namedChoice.title.numberRange")}
+      subtitle={t("namedChoice.numberSubtitle", { min })}
+      footer={<ConfirmButton onClick={confirm} disabled={!valid} />}
+    >
+      <input
+        ref={inputRef}
+        type="text"
+        inputMode="numeric"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && valid) {
+            e.preventDefault();
+            confirm();
+          }
+        }}
+        className="w-40 rounded-lg border-2 border-gray-600 bg-gray-900/90 px-4 py-3 text-center text-xl text-white outline-none transition focus:border-cyan-400"
+      />
+    </ChoiceOverlay>
+  );
 }
 
 function CardNameSearch() {
@@ -216,7 +286,7 @@ function HighlightedName({ name, query }: { name: string; query: string }) {
  *  buttons. Short lists (colors, card types) render without the extra chrome. */
 const FILTERABLE_OPTION_THRESHOLD = 12;
 
-function ButtonGrid({ data, typeKey }: { data: NamedChoice["data"]; typeKey: string }) {
+function ButtonGrid({ data, typeKey }: { data: OptionChoice["data"]; typeKey: string }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const [selected, setSelected] = useState<string | null>(null);
@@ -292,9 +362,11 @@ function ButtonGrid({ data, typeKey }: { data: NamedChoice["data"]; typeKey: str
                   ? "border-emerald-400 bg-emerald-500/30 text-white"
                   : "border-gray-600 bg-gray-800/80 text-gray-300 hover:border-gray-400 hover:text-white"
               }`}
-              initial={{ opacity: 0, y: 20, scale: 0.95 }}
+              initial={showFilter ? false : { opacity: 0, y: 20, scale: 0.95 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
-              transition={{ delay: 0.05 + index * 0.03, duration: 0.25 }}
+              transition={
+                showFilter ? undefined : { delay: 0.05 + index * 0.03, duration: 0.25 }
+              }
               whileHover={{ scale: 1.05 }}
               onClick={onClick}
             >
@@ -327,8 +399,10 @@ function PlayerOptionButton({
   const playerId = Number(option) as PlayerId;
   const myId = usePlayerId();
   const seatColor = useSeatColor(playerId);
-  const avatarUrl = useMultiplayerStore((s) => s.playerAvatars.get(playerId) ?? null);
+  const avatarIdentity = useMultiplayerStore((s) => s.playerAvatars.get(playerId) ?? null);
+  const avatar = usePlayerAvatarImage(avatarIdentity);
   const displayName = getPlayerDisplayName(playerId, myId);
+  const activeAvatarSrc = avatar.src;
 
   return (
     <motion.button
@@ -353,14 +427,21 @@ function PlayerOptionButton({
         className="relative h-10 w-9 shrink-0 overflow-hidden rounded-md border bg-slate-950"
         style={{ borderColor: `${seatColor}cc` }}
       >
-        {avatarUrl ? (
-          <img src={avatarUrl} alt="" className="h-full w-full object-cover" />
+        {activeAvatarSrc ? (
+          <img
+            src={activeAvatarSrc}
+            alt=""
+            className="h-full w-full object-cover"
+            onError={() => avatar.advanceFailedSource(activeAvatarSrc)}
+          />
         ) : (
           <span
             className="flex h-full w-full items-center justify-center text-sm font-bold"
             style={{ color: seatColor }}
           >
-            {displayName.slice(0, 1).toUpperCase()}
+            {avatarIdentity && avatar.isLoading
+              ? null
+              : displayName.slice(0, 1).toUpperCase()}
           </span>
         )}
         <span className="absolute inset-0 bg-gradient-to-b from-white/12 via-transparent to-black/35" />

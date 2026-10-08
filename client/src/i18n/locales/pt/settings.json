@@ -5,11 +5,19 @@
   },
   "tabs": {
     "gameplay": "Jogabilidade",
+    "ai": "Oponentes de IA",
+    "experimental": "Experimental",
     "visual": "Visual",
     "combat": "Ritmo",
     "audio": "Áudio",
     "multiplayer": "Multijogador",
     "data": "Dados"
+  },
+  "experimental": {
+    "title": "Experimental",
+    "tournaments": "Torneios",
+    "showTournaments": "Mostrar torneios na navegação",
+    "showTournamentsDescription": "Os torneios ainda estão em desenvolvimento e podem mudar sem aviso prévio."
   },
   "gameplay": {
     "collapseLands": "Recolher Lands",
@@ -22,9 +30,20 @@
     "title": "Jogabilidade",
     "language": "Idioma",
     "cardSize": "Tamanho da Carta",
-    "logDefault": "Registro Padrão",
+    "commandZone": "Zona de comando",
+    "autoPass": "Auto-Pass",
+    "skipLowUsePriorityWindows": "Pular janelas de prioridade pouco usadas (experimental)",
+    "skipLowUsePriorityWindowsDescription": "Passe automaticamente suas próprias janelas de prioridade com a pilha vazia durante a manutenção, a etapa de compra e a etapa final. As paradas de fase e o Controle total continuam pausando.",
+    "logDockSide": "Posição do registro do jogo",
     "spellPayment": "Pagamento de Mágicas",
     "manualManaPayment": "Pagamento manual de mana para mágicas",
+    "spellPaymentOptions": {
+      "auto": "Automático",
+      "autoExceptSacrificialMana": "Perguntar antes de sacrificar",
+      "manual": "Manual"
+    },
+    "nativeEngine": "Usar o motor nativo para partidas locais e multijogador hospedado",
+    "nativeEngineDescription": "Use o motor baixado para partidas locais contra IA e partidas hospedadas por você em um lobby. Os convidados continuam a se conectar pela conexão ponto a ponto do lobby. Usa o motor integrado quando não está disponível.",
     "boardBackground": "Plano de Fundo do Tabuleiro",
     "boardBackgroundGroups": {
       "automatic": "Automático",
@@ -49,20 +68,22 @@
       "medium": "Médio",
       "large": "Grande"
     },
-    "logDefaultOptions": {
-      "open": "Aberto",
-      "closed": "Fechado"
+    "logDockSideOptions": {
+      "left": "Esquerda",
+      "right": "Direita"
     }
   },
   "visual": {
     "title": "Visual",
     "vfxQuality": "Qualidade dos VFX",
+    "cardAnimationStyle": "Animações das cartas",
     "keywordStrip": "Faixa de Palavras-chave",
     "showKeywords": "Mostrar palavras-chave nas cartas do campo de batalha",
     "opponentHoverPreview": "Pré-visualização ao Passar o Mouse sobre o Oponente",
     "showOpponentBoard": "Mostrar o tabuleiro do oponente ao passar o mouse sobre o HUD",
     "multiplayerBoardLayout": "Layout do campo multijogador",
     "multiplayerBoardLayoutOptions": {
+      "auto": "Automático",
       "focused": "Oponente em foco",
       "split": "Mesa dividida"
     },
@@ -81,6 +102,17 @@
       "side": "A pré-visualização fixa-se na borda da tela para nunca cobrir o tabuleiro.",
       "shift": "A pré-visualização só aparece enquanto você segura a tecla Shift, como no Tabletop Simulator."
     },
+    "draftCardPreview": "Pré-visualização de cartas durante o draft",
+    "draftCardPreviewOff": "Desativada",
+    "draftCardPreviewHint": "Aplica-se somente durante o draft e a construção do deck de draft.",
+    "draftDoubleClickConfirmPick": "Confirmar escolha com clique duplo no draft",
+    "draftDoubleClickConfirmPickOptions": {
+      "disabled": "Desativado",
+      "enabled": "Ativado"
+    },
+    "cardPreviewFooter": "Informações da pré-visualização",
+    "showCardPreviewFooter": "Mostrar informações sob as pré-visualizações das cartas",
+    "cardPreviewFooterHint": "Inclui o nome da carta, habilidades ativadas disponíveis e dicas de teclado. Alt ainda abre os detalhes de análise quando esta opção está oculta.",
     "cardArtPreferences": "Preferências de Arte das Cartas",
     "clearArtOverrides_one": "Limpar Todas as Substituições de Arte ({{count}})",
     "clearArtOverrides_other": "Limpar Todas as Substituições de Arte ({{count}})",
@@ -91,7 +123,13 @@
       "full": "Completa",
       "reduced": "Reduzida",
       "minimal": "Mínima"
-    }
+    },
+    "cardAnimationStyleOptions": {
+      "webgl": "Novas",
+      "classic": "Clássicas"
+    },
+    "cardAnimationPreviewHintHover": "Passe o cursor para pré-visualizar",
+    "cardAnimationPreviewHintTap": "Toque para pré-visualizar"
   },
   "flexLayout": {
     "title": "Layout flexível",
@@ -107,9 +145,18 @@
       "right": "Alinhar à direita"
     },
     "presets": {
-      "default": { "label": "Layout 1", "description": "O layout equilibrado padrão." },
-      "layout2": { "label": "Layout 2", "description": "Um campo de batalha maior com as mãos recolhidas." },
-      "layout3": { "label": "Layout 3", "description": "Um terço inferior mais alto." }
+      "default": {
+        "label": "Layout 1",
+        "description": "O layout equilibrado padrão."
+      },
+      "layout2": {
+        "label": "Layout 2",
+        "description": "Um campo de batalha maior com as mãos recolhidas."
+      },
+      "layout3": {
+        "label": "Layout 3",
+        "description": "Um terço inferior mais alto."
+      }
     },
     "zones": {
       "playerHud": "Seu HUD",
@@ -153,13 +200,15 @@
     "signedInAs": "Sessão iniciada como {{name}}",
     "syncNow": "Sincronizar agora",
     "statusSyncing": "A sincronizar…",
+    "statusPaused": "A sincronização na nuvem está em pausa enquanto está offline.",
     "statusError": "Falha na sincronização",
     "lastSynced": "Última sincronização {{time}}",
     "never": "nunca",
     "conflictTitle": "Ambas as cópias têm alterações",
-    "conflictBody": "Este dispositivo e a sua conta na nuvem têm dados e não conseguimos determinar qual está atualizada. Escolha qual cópia manter; a outra será substituída.",
+    "conflictBody": "Este dispositivo e a sua conta na nuvem têm dados e não conseguimos determinar qual está atualizada. Escolha uma cópia ou mantenha ambas as coleções de decks.",
     "keepCloud": "Usar a nuvem",
     "keepLocal": "Manter este dispositivo",
+    "keepBothDecks": "Manter ambas as coleções de decks",
     "savesNote": "Os jogos guardados e as caches permanecem neste dispositivo.",
     "diffDecks": "Decks: {{added}} adicionados, {{modified}} alterados, {{removed}} removidos",
     "diffPrefs": "As preferências diferem",
@@ -188,6 +237,172 @@
     "telemetry": "Enviar relatórios anônimos de falhas e uso",
     "telemetryDescription": "Ajuda a corrigir falhas e priorizar o suporte a cartas. Sem conta, sem dados pessoais — apenas contagens de erros e resumos de partida."
   },
+  "visualPacks": {
+    "title": "Catálogo visual off-line",
+    "description": "Escolha quais imagens de cartões confiáveis serão mantidas neste dispositivo ou instale o catálogo atual completo.",
+    "offlineUnavailable": "Os downloads de rede não estão disponíveis off-line. Reconecte-se para atualizar o catálogo ou instalar, sincronizar, reparar ou retomar imagens.",
+    "availability": {
+      "loading": "Verificando o suporte do catálogo visual off-line…",
+      "browser": "Os downloads de imagens offline não estão configurados nesta compilação.",
+      "browserFuture": "Esta compilação não inclui a política confiável de assinatura de catálogo necessária para verificar downloads de imagens.",
+      "unsupported": "Este aplicativo de desktop é muito antigo para gerenciar catálogos visuais offline. Atualize o aplicativo para continuar.",
+      "empty": "Nenhum catálogo visual confiável foi baixado ainda.",
+      "invalid": "O catálogo visual local não era confiável. Atualize-o antes de continuar."
+    },
+    "selector": {
+      "title": "Seleção de catálogo",
+      "core": "Visuais principais",
+      "printing": "Impressões da coleção",
+      "complete": "Catálogo atual completo",
+      "curated": "Uma imagem por carta",
+      "deck_library": "Biblioteca de decks",
+      "curatedNote": "Uma imagem por carta, escolhida pelas suas Preferências de Arte das Cartas na aba Visual. Altere-as lá e esta seleção acompanha.",
+      "curatedDefaultNote": "Uma imagem por carta. Você não tem regras de arte, então a arte padrão de cada carta é baixada — adicione regras em Preferências de Arte das Cartas, na aba Visual, para escolher outras edições.",
+      "deckLibraryNote": "Uma imagem por cada carta usada na biblioteca compartilhada de decks, incluindo pré-construídos de Commander para IA. Esta seleção segue as Preferências de Arte das Cartas. Depois da instalação, o app baixa adições e remove imagens que já não são necessárias enquanto está em execução; remover este pacote interrompe essa sincronização.",
+      "driftNone": "As suas imagens instaladas já correspondem a estas definições.",
+      "driftSummary": "As suas imagens instaladas estão desatualizadas: {{add}} a adicionar, {{remove}} a remover, {{refresh}} a atualizar.",
+      "setCode": "Definir código",
+      "setPlaceholder": "por exemplo barbatana",
+      "language": "Linguagem da imagem",
+      "currentRoot": "Raiz do catálogo atual: {{root}}",
+      "invalidSet": "Insira um código de conjunto de três a seis caracteres válido."
+    },
+    "actions": {
+      "estimate": "Estimativa de download",
+      "estimating": "Analisando o catálogo do Scryfall…",
+      "estimateCurated": "Recalcular tamanho",
+      "estimatingCurated": "Calculando o tamanho…",
+      "install": "Seleção de instalação",
+      "sync": "Sincronizar imagens",
+      "cancel": "Cancelar operação",
+      "resume": "Retomar operação",
+      "retry": "Tente novamente",
+      "refresh": "Verificar catálogo do Scryfall",
+      "refreshing": "Verificando o catálogo do Scryfall…",
+      "verifyMetadata": "Verifique metadados",
+      "verifyFull": "Verifique todos os arquivos",
+      "repair": "Reparo selecionado",
+      "removeSelected": "Remover selecionado",
+      "removeComplete": "Remover catálogo completo",
+      "removeAll": "Remova todos os recursos visuais off-line"
+    },
+    "estimate": {
+      "title": "Análise do instantâneo do Scryfall",
+      "progressTitle": "Progresso da análise do catálogo",
+      "curatedTitle": "Download estimado",
+      "headroomWarning": "Isso é maior que o espaço livre que este navegador informa. Você ainda pode instalar: se o espaço acabar, o download pode ser retomado e mantém tudo o que já foi salvo.",
+      "evictionWarning": "Este navegador não concedeu armazenamento persistente, portanto pode apagar estas imagens quando o dispositivo ficar sem espaço.",
+      "progress": "{{downloaded}} MB de {{total}} MB lidos · {{records}} cartas analisadas · {{images}} imagens encontradas"
+    },
+    "metrics": {
+      "assetRecords": "Registros de imagens",
+      "estimatedImageBytes": "Tamanho estimado do download",
+      "availableBytes": "Espaço livre disponível",
+      "uniqueObjects": "Imagens a transferir",
+      "logicalImageBytes": "Bytes de imagem lógica",
+      "uniqueImageBytes": "Bytes de imagem exclusivos",
+      "shardCount": "Fragmentos",
+      "shardBytes": "Bytes de fragmento"
+    },
+    "operation": {
+      "title": "Operação atual",
+      "states": {
+        "downloading": "Baixando",
+        "cancel_requested": "Cancelamento solicitado",
+        "finalizing": "Finalizando",
+        "failed": "Falha – pronto para retomar",
+        "terminated": "Parado – esta operação não pode ser retomada",
+        "completed": "Concluído",
+        "cancelled": "Cancelado"
+      },
+      "id": "Operação",
+      "root": "Raiz do catálogo",
+      "packs": "Pacotes: {{current}} de {{total}}",
+      "objects": "Imagens: {{current}} de {{total}}",
+      "objectsUnknown": "Imagens baixadas: {{current}}",
+      "scanNote": "O total cresce enquanto a captura do Scryfall é analisada. As imagens já baixadas ficam locais e são ignoradas ao retomar.",
+      "estimateNote": "O total foi fixado no início desta transferência. As imagens já baixadas ficam locais e são ignoradas ao retomar.",
+      "finalizing": "Finalizando a instalação do catálogo"
+    },
+    "status": {
+      "title": "Status do catálogo instalado",
+      "root": "Raiz do catálogo",
+      "epoch": "Época",
+      "revision": "Revisão instalada",
+      "selectorCount": "Seletores",
+      "shardCount": "Fragmentos",
+      "installed": "Pacotes instalados",
+      "noneInstalled": "Nenhum pacote visual está instalado.",
+      "upgradeAvailable": "Atualização disponível",
+      "receiptRoot": "Instalado a partir do instantâneo: {{root}}",
+      "membershipDigest": "Impressão digital da seleção: {{digest}}",
+      "storageUsage": "Armazenamento usado por este site",
+      "persistence": "Proteção contra remoção",
+      "persistenceState": {
+        "persisted": "Concedida — este navegador manterá estas imagens",
+        "best_effort": "Não concedida — este navegador pode apagar estas imagens quando faltar espaço",
+        "unsupported": "Este navegador não informa"
+      }
+    },
+    "verification": {
+      "revision": "Revisão instalada verificada {{revision}}.",
+      "healthy": "Nenhum problema de verificação encontrado.",
+      "issues": {
+        "missing_root_witness": "Testemunha de raiz de catálogo ausente",
+        "invalid_root_witness": "Testemunha de raiz de catálogo inválida",
+        "receipt_metadata": "Os metadados de recibo diferem do catálogo confiável",
+        "missing_shard": "Fragmento de catálogo ausente",
+        "invalid_shard": "Fragmento de catálogo inválido",
+        "missing_object": "Objeto de imagem ausente",
+        "invalid_object_metadata": "Metadados de objeto de imagem inválidos",
+        "corrupt_object": "Objeto de imagem corrompido",
+        "dependency_drift": "Os registros de dependência instalados diferem do catálogo confiável",
+        "projection_drift": "Os registros de pesquisa instalados diferem do catálogo confiável"
+      }
+    },
+    "removal": {
+      "committed": "Remoção confirmada na revisão {{revision}}.",
+      "inProgress": "A remover elementos visuais offline…"
+    },
+    "cleanup": {
+      "malformed_entry": "Uma entrada de cache malformada não pôde ser recuperada",
+      "unsafe_entry": "Uma entrada de cache insegura não foi alterada",
+      "remove_failed": "Não foi possível remover um arquivo de cache",
+      "catalog_state": "O estado do catálogo histórico não pôde ser recuperado"
+    },
+    "packs": {
+      "core": "Visuais principais",
+      "complete": "Catálogo atual completo",
+      "curated": "Uma imagem por carta",
+      "deckLibrary": "Biblioteca de decks",
+      "printing": "Impressões {{set}}",
+      "locale": "Impressões {{set}} ({{language}})"
+    },
+    "errors": {
+      "unsupported_shell": "Esta versão do aplicativo não oferece suporte a catálogos visuais offline.",
+      "unauthorized": "Esta janela não tem permissão para gerenciar catálogos visuais offline.",
+      "unavailable": "O gerenciamento offline do catálogo visual está temporariamente indisponível.",
+      "invalid_input": "A seleção de catálogo solicitada é inválida.",
+      "conflict": "Esta seleção está desatualizada: o catálogo ou as suas preferências de arte mudaram depois de ela ser feita. Calcule novamente e tente outra vez.",
+      "cancelled": "A operação foi cancelada.",
+      "network": "A solicitação de rede do catálogo falhou.",
+      "storage": "Não foi possível gravar o catálogo no armazenamento do dispositivo.",
+      "insufficient_storage": "Espaço livre insuficiente: este download precisa de pelo menos {{required}}, mas há apenas {{available}} livres.",
+      "trust": "A resposta do catálogo não era confiável.",
+      "emit": "O aplicativo não pôde relatar o progresso do catálogo.",
+      "internal": "A operação de catálogo não pôde ser concluída."
+    },
+    "confirm": {
+      "cascadeTitle": "Remover pacotes dependentes?",
+      "cascadeMessage": "Outros pacotes instalados dependem de {{selection}}. Remover a seleção congelada e seus dependentes?",
+      "cascadeAction": "Remover dependentes",
+      "completeTitle": "Remover este catálogo completo?",
+      "completeMessage": "Remover todos os pacotes instalados da raiz do catálogo {{selection}}?",
+      "allTitle": "Remover todos os recursos visuais off-line?",
+      "allMessage": "Remover todos os pacotes visuais instalados deste dispositivo?",
+      "removeAction": "Remover"
+    }
+  },
   "resetAll": {
     "confirm": "Redefinir todas as preferências para os padrões? Isso limpa todas as configurações deste diálogo.",
     "button": "Redefinir todas as preferências",
@@ -215,6 +430,45 @@
       "banners": "Exibição do banner de início de turno."
     }
   },
+  "offlinePreparation": {
+    "title": "Preparação offline",
+    "description": "Prepare este dispositivo para jogo local offline antes de ativar Trabalhar offline.",
+    "prepare": "Preparar para offline",
+    "preparing": "Preparando…",
+    "workOffline": "Trabalhar offline",
+    "checklistLabel": "Lista de preparação offline",
+    "visualWarning": "Os pacotes visuais instalados precisam de atenção. Abra Pacotes visuais para repará-los; o jogo local continua disponível.",
+    "cardArtMissing": "Nenhuma imagem de carta instalada. As cartas serão exibidas sem arte offline — instale um pacote em Pacotes visuais, abaixo.",
+    "cardArtInstalled": "Imagens de cartas em cache: {{packs}}",
+    "incompleteTitle": "A preparação offline está incompleta",
+    "incompleteMessage": "Falta: {{capabilities}}. Ativar Trabalhar offline mesmo assim?",
+    "confirmOffline": "Ativar Trabalhar offline",
+    "states": {
+      "needs-preparation": "Prepare este dispositivo antes de trabalhar offline.",
+      "preparing": "Preparando capacidades de jogo local…",
+      "ready": "Este dispositivo está pronto para jogo local offline.",
+      "failed": "Algumas capacidades necessárias não estão prontas.",
+      "reconnect-required": "Reconecte-se antes de preparar o jogo offline.",
+      "reload-or-relaunch-required": "Recarregue o aplicativo ou reinicie o desktop e tente novamente."
+    },
+    "capabilities": {
+      "appShell": "Aplicativo",
+      "browserEngine": "Motor do navegador e banco de cartas",
+      "scryfallSearch": "Dados de busca",
+      "preconCatalog": "Decks pré-construídos",
+      "bundledAiCatalog": "Catálogo de decks de IA",
+      "deckLibrary": "Biblioteca de decks instalada",
+      "coreVisuals": "Verso da carta e símbolos de mana",
+      "nativeEngine": "Motor nativo"
+    },
+    "capabilityStates": {
+      "ready": "Pronto",
+      "not-ready": "Não pronto",
+      "reload-required": "Recarga necessária",
+      "not-applicable": "Não aplicável",
+      "not-installed": "Não instalado"
+    }
+  },
   "artChain": {
     "emptyState": "Usando a arte padrão do Scryfall. Adicione regras abaixo para personalizar.",
     "moveUp": "Mover para cima",
@@ -232,6 +486,60 @@
       "oldest": "Impressão Mais Antiga",
       "preferBorderless": "Preferir Sem Borda",
       "preferExtended": "Preferir Arte Estendida"
+    }
+  },
+  "llm": {
+    "title": "Oponentes LLM",
+    "intro": "Opcional. Ao ligar o Phase a um fornecedor de LLM, podes entregar um lugar de IA — ou os bots de um draft — a esse modelo em vez da IA integrada. Nada disto é usado até activares um fornecedor e atribuí-lo a um lugar, e qualquer falha volta para a IA integrada a meio do jogo.",
+    "empty": "Nenhum fornecedor configurado. A IA integrada controla todos os lugares.",
+    "addProvider": "Adicionar fornecedor",
+    "unnamed": "Fornecedor sem nome",
+    "name": "Nome",
+    "namePlaceholder": "Dá um nome a este fornecedor (p. ex. «Claude»)",
+    "enable": "Activar este fornecedor",
+    "remove": "Remover este fornecedor",
+    "provider": "Fornecedor",
+    "model": "Modelo",
+    "modelId": "ID do modelo",
+    "customModel": "Personalizado…",
+    "modelPlaceholder": "ID do modelo (p. ex. gpt-5, claude-sonnet-5)",
+    "endpoint": "Endpoint",
+    "endpointPlaceholder": "https://o-teu-servidor/v1",
+    "apiKey": "Chave de API",
+    "apiKeyPlaceholder": "Cola a tua chave de API",
+    "apiKeyOptional": "Opcional para servidores locais",
+    "apiKeyMissing": "Introduz novamente a tua chave de API. As chaves não são guardadas após recarregar, e este fornecedor não é usado nos lugares de IA nem nos bots do draft até o fazeres.",
+    "apiKeyStorage": "Mantida em memória apenas nesta sessão do navegador. As chaves de API nunca são escritas em disco e ficam excluídas da exportação de cópia de segurança e da sincronização na nuvem, por isso terás de a introduzir novamente após recarregar. Uma chave de API exige também um endpoint https://, a menos que o servidor esteja em localhost.",
+    "apiKeyGet": "Obter uma chave",
+    "test": "Testar ligação",
+    "testing": "A testar…",
+    "testOk": "Ligado.",
+    "defaultPrompt": {
+      "connected": "Ligado. Usá-lo como oponente predefinido?",
+      "ready": "Usar este fornecedor como oponente predefinido?",
+      "action": "Usar como predefinido",
+      "badge": "Oponente predefinido"
+    },
+    "defaultOpponent": {
+      "label": "Oponente predefinido",
+      "hint": "Os oponentes de IA usam este fornecedor, a menos que escolhas outro para um lugar ao preparar uma partida. Inclui o oponente das partidas de draft.",
+      "engine": "IA integrada do motor"
+    },
+    "draftToggle": {
+      "label": "Usar para os bots do draft",
+      "hint": "Os lugares de bot de um draft escolhem com o modelo, usando o contexto de colecções do formato.",
+      "profile": "Fornecedor para o draft"
+    },
+    "testHint": "Envia um pedido real e verifica a resposta tal como o faria um turno de jogo.",
+    "errors": {
+      "engineUnavailable": "Não foi possível carregar o motor.",
+      "requestNotBuilt": "Este fornecedor não está totalmente configurado.",
+      "undecodable": "O endpoint respondeu, mas não com algo que o jogo possa usar.",
+      "emptyBody": "O endpoint devolveu uma resposta vazia.",
+      "cancelled": "O teste foi cancelado.",
+      "timedOut": "O endpoint não respondeu a tempo.",
+      "unreachable": "Não foi possível contactar o endpoint. Verifica o URL e se o fornecedor permite pedidos a partir do navegador.",
+      "oversized": "O endpoint devolveu muitos mais dados do que uma resposta de chat."
     }
   }
 }

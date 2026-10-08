@@ -1,9 +1,15 @@
-import { isTauri } from "./sidecar";
+import { canUseLanBridge } from "./lan";
 import { useMultiplayerStore } from "../stores/multiplayerStore";
 import {
   DEFAULT_MULTIPLAYER_SERVER_URL,
   OFFICIAL_MULTIPLAYER_SERVER_URL,
+  parseWebSocketUrl,
 } from "../config/multiplayerServer";
+
+// Re-exported from the config leaf, which needs it to validate the runtime
+// /config.js override and cannot import this module without a cycle. One
+// implementation, and every existing import of it from here still resolves.
+export { parseWebSocketUrl };
 
 const DEFAULT_PORT = 9374;
 
@@ -42,51 +48,31 @@ export function flagForServer(url: string): FlagCode | null {
   return SERVER_PRESETS.find((p) => p.url === url)?.flag ?? null;
 }
 
-export function parseWebSocketUrl(value: string): URL | null {
-  try {
-    const url = new URL(value);
-    if ((url.protocol !== "ws:" && url.protocol !== "wss:") || !url.host) {
-      return null;
-    }
-    return url;
-  } catch {
-    return null;
-  }
-}
-
 export function isValidWebSocketUrl(value: string): boolean {
   return parseWebSocketUrl(value) !== null;
 }
 
 /**
- * Detect the best WebSocket server URL by trying in order:
- * 1. Tauri sidecar on localhost
- * 2. Last-used server address from store
- * 3. Default production server
+ * The fallback server a socket opens on when the caller carries no explicit
+ * origin: the hosting server the player chose in the server picker, falling
+ * back to this build's default when none is chosen or the stored value is
+ * unusable.
+ *
+ * A join or spectate origin is NOT read from here — it is carried explicitly
+ * by the route (`?server=`) from the source that listed the game, so browsing
+ * one authority and joining another cannot silently switch the player's
+ * hosting target.
+ *
+ * Reachability is deliberately not consulted. The desktop shell reaches its own
+ * native engine over a Tauri IPC bridge (`services/nativeEngineSocket.ts`) on an
+ * ephemeral port, never through a URL from here, so probing localhost can only
+ * capture an unrelated phase-server and silently override the player's choice.
+ *
+ * Stays `async` for its awaiting callers; there is nothing left to wait for.
  */
 export async function detectServerUrl(): Promise<string> {
-  // Step 1: If running in Tauri, check localhost sidecar
-  if (isTauri()) {
-    const sidecarUrl = await tryHealthCheck(`http://localhost:${DEFAULT_PORT}/health`);
-    if (sidecarUrl) {
-      return `ws://localhost:${DEFAULT_PORT}/ws`;
-    }
-  }
-
-  // Step 2: Try the stored server address
-  const stored = useMultiplayerStore.getState().serverAddress;
-  if (stored && isValidWebSocketUrl(stored)) {
-    const httpUrl = wsUrlToHealthUrl(stored);
-    if (httpUrl) {
-      const reachable = await tryHealthCheck(httpUrl);
-      if (reachable) {
-        return stored;
-      }
-    }
-  }
-
-  // Step 3: Fall back to stored address or default production server
-  return isValidWebSocketUrl(stored) ? stored : DEFAULT_SERVER;
+  const stored = useMultiplayerStore.getState().hostingServer;
+  return stored !== null && isValidWebSocketUrl(stored) ? stored : DEFAULT_SERVER;
 }
 
 /**
@@ -190,10 +176,12 @@ export function formatJoinShare(code: string, publicUrl: string): string | null 
  * browser blocks it before the handshake is ever attempted, so the failure is
  * otherwise indistinguishable from an unreachable server. Loopback hosts are
  * exempt: browsers treat `localhost`/`127.0.0.1` as potentially trustworthy, so
- * `ws://localhost` is permitted even from an HTTPS origin (this is the Tauri
- * sidecar path). Outside a browser (`window` undefined) nothing is blocked.
+ * `ws://localhost` is permitted even from an HTTPS origin — which is what makes
+ * a `CODE@localhost:9374` join code work. Outside a browser (`window`
+ * undefined) nothing is blocked.
  */
 export function mixedContentBlockReason(serverAddress: string): string | null {
+  if (canUseLanBridge(serverAddress)) return null;
   const url = parseWebSocketUrl(serverAddress);
   if (!url || url.protocol !== "ws:") {
     return null;
@@ -209,27 +197,4 @@ export function mixedContentBlockReason(serverAddress: string): string | null {
     `Host phase-server behind HTTPS — a wss:// reverse proxy or tunnel (ngrok, Cloudflare, Caddy) — ` +
     `or open the app over http://.`
   );
-}
-
-/** Convert ws:// URL to http:// health check URL. */
-function wsUrlToHealthUrl(wsUrl: string): string | null {
-  if (!isValidWebSocketUrl(wsUrl)) {
-    return null;
-  }
-  return wsUrl
-    .replace(/^ws:\/\//, "http://")
-    .replace(/^wss:\/\//, "https://")
-    .replace(/\/ws\/?$/, "/health");
-}
-
-async function tryHealthCheck(url: string): Promise<boolean> {
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 2000);
-    const response = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeoutId);
-    return response.ok;
-  } catch {
-    return false;
-  }
 }

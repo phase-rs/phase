@@ -1,0 +1,128 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 44,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "[−X]: ~ deals X damage to target creature."
+      },
+      "node": {
+        "Spell": {
+          "source_text": "~ deals X damage to target creature.",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 35,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "~ deals X damage to target creature"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "DealDamage",
+                    "amount": {
+                      "type": "Ref",
+                      "qty": {
+                        "type": "Variable",
+                        "name": "X"
+                      }
+                    },
+                    "target": {
+                      "type": "Typed",
+                      "type_filters": [
+                        "Creature"
+                      ],
+                      "controller": null,
+                      "properties": []
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              }
+            ],
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
+          },
+          "shell": {
+            "sub_link": null,
+            "cost": {
+              "type": "RemoveCounter",
+              "count": 4294967295,
+              "counter_type": {
+                "type": "OfType",
+                "data": "loyalty"
+              },
+              "target": null,
+              "selection": "SingleObject"
+            },
+            "activation_restrictions": [
+              {
+                "type": "AsSorcery"
+              }
+            ],
+            "description": "[−X]: ~ deals X damage to target creature."
+          },
+          "die_results": [],
+          "root_transforms": []
+        }
+      }
+    }
+  ],
+  "source_text": "[−X]: Chandra Nalaar deals X damage to target creature.",
+  "card_name": "Chandra Nalaar"
+}

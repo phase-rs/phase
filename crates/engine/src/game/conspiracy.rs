@@ -98,6 +98,7 @@ pub fn start_with_conspiracy(state: &mut GameState, id: ObjectId, hidden_agenda:
     if !is_conspiracy(obj) {
         return;
     }
+    // allow-raw-zone: pregame conspiracy setup begins from outside the game, not a zone move (CR 400.11 + CR 905.4).
     obj.zone = Zone::Command;
     // CR 905.4a: hidden-agenda conspiracies start face down; others face up.
     obj.face_down = hidden_agenda;
@@ -105,6 +106,7 @@ pub fn start_with_conspiracy(state: &mut GameState, id: ObjectId, hidden_agenda:
     obj.controller = obj.owner;
 
     if !state.command_zone.contains(&id) {
+        // allow-raw-zone: pregame conspiracy setup begins from outside the game, not a zone move (CR 400.11 + CR 905.4).
         state.command_zone.push_back(id);
     }
 

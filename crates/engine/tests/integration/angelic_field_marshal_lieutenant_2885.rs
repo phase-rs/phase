@@ -7,7 +7,7 @@
 //!    Lieutenant — As long as you control your commander, this creature gets
 //!    +2/+2 and creatures you control have vigilance."
 //!
-//! The fixed parser (PR #3039, `try_split_and_foreign_keyword_grant`) splits the
+//! The fixed parser (PR #3039, `try_split_and_foreign_subject_grant`) splits the
 //! single Lieutenant clause into two `StaticDefinition`s, BOTH gated on
 //! `ControlsCommander { Own }`:
 //!   def0: affected = SelfRef                          → +2/+2

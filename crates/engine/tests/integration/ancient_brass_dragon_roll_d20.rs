@@ -214,8 +214,15 @@ fn ancient_brass_dragon_zero_targets_is_clean_no_op() {
         .act(GameAction::SelectTargets { targets: vec![] })
         .expect("selecting zero targets must be a clean no-op");
 
+    // CR 603.12 + CR 603.3b: the reflexive is its own stack object, so let it
+    // RESOLVE and then STOP. Passing priority into an already-empty stack
+    // advances phases instead, and by turn 3 P1 is decked — elimination exiles
+    // every card that player owned, including the graveyard cards this row
+    // measures. The observation point for "clean no-op" is the first settled
+    // empty stack, not an unbounded pass loop.
     for _ in 0..30 {
         match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
             WaitingFor::Priority { .. } => {
                 if runner.act(GameAction::PassPriority).is_err() {
                     break;
@@ -224,6 +231,18 @@ fn ancient_brass_dragon_zero_targets_is_clean_no_op() {
             _ => break,
         }
     }
+
+    // Positive reach guard: the loop's error/other-prompt breaks may exit
+    // before the observation point, and the negative assertions below would
+    // vacuously pass on an unresolved trigger. Prove the settled window first.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && runner.state().stack.is_empty(),
+        "the zero-target reflexive must resolve to a settled priority window with an \
+         empty stack before the no-op is measured, got {:?} with {} stack entries",
+        runner.state().waiting_for,
+        runner.state().stack.len()
+    );
 
     // No graveyard card moved (still in a graveyard) and the battlefield count
     // did not grow from reanimation.

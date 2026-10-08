@@ -30,8 +30,8 @@ use engine::game::scenario::{GameScenario, P0};
 use engine::parser::oracle::{parse_oracle_text, ParsedAbilities};
 use engine::parser::oracle_nom::condition::parse_inner_condition;
 use engine::types::ability::{
-    CastManaObjectScope, CastManaSpentMetric, Comparator, Effect, QuantityExpr, QuantityRef,
-    ReplacementCondition, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+    CastManaObjectScope, CastManaSpentMetric, Comparator, Effect, FilterProp, QuantityExpr,
+    QuantityRef, ReplacementCondition, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
 };
 use engine::types::counter::CounterType;
 use engine::types::identifiers::ObjectId;
@@ -282,9 +282,9 @@ fn enters_with_counter_subject_covers_this_creature_and_that_artifact() {
 /// Test 5 (class-level) — the filtered died-this-turn arm: (a) "a non-Zombie
 /// creature died this turn" → filtered gate; (b) the bare "a creature died this
 /// turn" still yields the UNFILTERED ref (no Morbid regression); (c) a
-/// name-negation ("a creature not named Ebondeath, Dracolich died this turn") is
-/// NOT claimed by the arm (parse_type_phrase leaves "not named …" leftover → the
-/// arm rejects → clean gap). Revert-probe: remove the filtered arm → (a) errors.
+/// name-negation ("a creature not named Ebondeath, Dracolich died this turn")
+/// folds into the same arm as `Not(Named)`. Revert-probe: remove the filtered
+/// arm → (a) errors.
 #[test]
 fn filtered_died_this_turn_arm_and_clean_gaps() {
     // (a) filtered non-Zombie form.
@@ -329,21 +329,37 @@ fn filtered_died_this_turn_arm_and_clean_gaps() {
         tf.type_filters
     );
 
-    // (c) Ebondeath name-negation stays a clean gap — the filtered arm is the ONLY
-    // producer of a fully-consumed died-this-turn→Graveyard gate, so assert the
-    // phrase never parses to one.
-    let ebondeath =
-        parse_inner_condition("a creature not named ebondeath, dracolich died this turn");
-    let claimed_as_died_gate = matches!(
-        &ebondeath,
-        Ok((rest, StaticCondition::QuantityComparison {
-            lhs: QuantityExpr::Ref { qty: QuantityRef::ZoneChangeCountThisTurn { to: Some(Zone::Graveyard), .. } },
-            ..
-        })) if rest.trim().is_empty()
-    );
-    assert!(
-        !claimed_as_died_gate,
-        "Ebondeath name-negation must stay a clean gap, not a mis-parsed died gate: {ebondeath:?}"
+    // (c) Ebondeath's name-negation is now a typed died gate: the shared died
+    // subject folds "not named X" into `Not(Named)` over the same creature
+    // filter (CR 201.2). It's a name predicate, not a self-exclusion.
+    let (rest, cond) =
+        parse_inner_condition("a creature not named ebondeath, dracolich died this turn")
+            .expect("Ebondeath's not-named died gate must parse");
+    assert!(rest.trim().is_empty(), "must fully consume, left: {rest:?}");
+    let StaticCondition::QuantityComparison {
+        lhs:
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ZoneChangeCountThisTurn {
+                        to: Some(Zone::Graveyard),
+                        filter: TargetFilter::Typed(tf),
+                        ..
+                    },
+            },
+        ..
+    } = cond
+    else {
+        panic!("Ebondeath must parse to a died-this-turn gate, got {cond:?}");
+    };
+    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    assert_eq!(
+        tf.properties,
+        vec![FilterProp::Not {
+            prop: Box::new(FilterProp::Named {
+                name: "ebondeath, dracolich".to_string()
+            })
+        }],
+        "the exclusion is Not(Named), never Another"
     );
 }
 
@@ -462,7 +478,7 @@ fn push_death(runner: &mut engine::game::scenario::GameRunner, obj: ObjectId) {
         Some(Zone::Battlefield),
         Zone::Graveyard,
     );
-    runner.state_mut().zone_changes_this_turn.push(rec);
+    runner.state_mut().zone_changes_this_turn.push_back(rec);
 }
 
 /// Test 7(a) + 7(i) — Undead Sprinter runtime: with a non-Zombie creature dead

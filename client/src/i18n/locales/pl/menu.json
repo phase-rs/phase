@@ -50,7 +50,9 @@
     },
     "preview": {
       "cta": "Wypróbuj wersję zapowiadającą",
-      "tooltip": "Zagraj w najnowszą wersję zapowiadającą — nowe karty i poprawki trafiają tu przed każdym wydaniem."
+      "tooltip": "Zagraj w najnowszą wersję zapowiadającą — nowe karty i poprawki trafiają tu przed każdym wydaniem.",
+      "backCta": "Wróć do wersji stabilnej",
+      "backTooltip": "Wróć do aktualnej wersji wydania."
     },
     "coverage": {
       "title": "Otwórz panel obsługi kart",
@@ -115,6 +117,8 @@
     "coverageThresholdHint": "Wyklucz talie poniżej tego progu obsługi przez silnik",
     "bracket": "Poziom",
     "bracketHint": "Losowe AI wybiera z tych poziomów. Talie bez tagów są wykluczane podczas filtrowania.",
+    "bracketPoolEmpty": "Żadne talie nie odpowiadają wybranym poziomom. Losowe AI będzie dobierać ze wszystkich dozwolonych talii.",
+    "cedhPoolEmpty": "Brak talii poziomu 5. Nie można przydzielić talii losowemu AI.",
     "opponentLabel": "Przeciwnik {{number}}",
     "deck": "Talia",
     "difficulty": "Poziom trudności",
@@ -129,7 +133,9 @@
       "feed": "Kanał",
       "user": "Użytkownik",
       "precon": "Precon"
-    }
+    },
+    "brain": "Sterowany przez",
+    "brainEngine": "AI silnika"
   },
   "feedManager": {
     "title": "Zarządzaj kanałami",
@@ -141,6 +147,7 @@
     "lastRefreshed": "Ostatnio odświeżono: {{date}}",
     "addCustomFeed": "Dodaj własny kanał",
     "add": "Dodaj",
+    "offlineUnavailable": "Aktualizacje kanałów są niedostępne offline.",
     "done": "Gotowe"
   },
   "importDeck": {
@@ -153,9 +160,21 @@
     "urlHint": "Importuje publiczną talię z Moxfield lub Archidekt.",
     "import": "Importuj",
     "importing": "Importowanie…",
+    "importAsOathbreaker": "Skonfiguruj jako talię Oathbreaker",
+    "oathbreakerSetupTitle": "Skonfiguruj Oathbreakera",
+    "oathbreakerSetupDescription": "Wybierz Oathbreakera i zaklęcie sygnaturowe z tej listy.",
+    "oathbreakerLabel": "Oathbreaker",
+    "signatureSpellLabel": "Zaklęcie sygnaturowe",
+    "chooseOathbreaker": "Wybierz Oathbreakera",
+    "chooseSignatureSpell": "Wybierz zaklęcie sygnaturowe",
+    "confirmOathbreakerImport": "Importuj talię Oathbreaker",
+    "backToImport": "Powrót do importowania",
     "errorInvalidUrl": "Wprowadź prawidłowy URL talii Moxfield lub Archidekt.",
+    "errorOffline": "Importy z URL nie są dostępne offline. Użyj Wklej tekst lub Z pliku.",
     "errorNetworkFailure": "Nie udało się połączyć z usługą importu. Sprawdź połączenie i spróbuj ponownie.",
     "errorGeneric": "Nie udało się zaimportować talii.",
+    "errorNoOathbreaker": "Ta lista nie zawiera kwalifikującego się Oathbreakera.",
+    "errorNoSignatureSpell": "Ten Oathbreaker nie ma kwalifikującego się zaklęcia sygnaturowego na tej liście.",
     "errorNoCards": "Nie znaleziono kart. Wklej talię w formacie MTGA lub .dck.",
     "fileSupports": "Obsługuje formaty .dck, .dec, .txt oraz MTGA",
     "chooseFile": "Wybierz plik",
@@ -303,6 +322,7 @@
     "online": "Online",
     "draft": "Draft",
     "decks": "Talie",
+    "tournament": "Turnieje",
     "alpha": "Alfa",
     "profile": "Profil",
     "settings": "Ustawienia",

@@ -1,13 +1,15 @@
-import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useEngineCardData } from "../../hooks/useEngineCardData.ts";
 import type { TokenSearchFilters } from "../../services/scryfall.ts";
-import type { TokenImageRef } from "../../adapter/types.ts";
-import { CARD_BACK_URL } from "../../services/scryfall.ts";
+import type { FaceDownCause, TokenImageRef } from "../../adapter/types.ts";
+import { faceDownMarkerName, faceDownMarkerRef } from "./faceDownMarker.ts";
 import { getBevelBorderStyle } from "./cardFrame.ts";
+import { getCardImageSrcSetProps } from "./cardImageSrcSet.ts";
+import { CardArtFallback } from "./CardArtFallback.tsx";
+import { CardBackFallback } from "./CardBackFallback.tsx";
+import { UnimplementedMechanicsBadge } from "./UnimplementedMechanicsBadge.tsx";
 import { ManaSymbol } from "../mana/ManaSymbol.tsx";
-import { RichLabel } from "../mana/RichLabel.tsx";
 
 interface CardImageProps {
   cardName: string;
@@ -21,6 +23,12 @@ interface CardImageProps {
   tokenFilters?: TokenSearchFilters;
   tokenImageRef?: TokenImageRef | null;
   faceDown?: boolean;
+  /**
+   * Which keyword action turned the permanent face down. Selects the marker
+   * token paper play uses (Morph / Manifest / A Mysterious Creature); without
+   * it — or for a cause with no printed marker — the generic card back stays.
+   */
+  faceDownCause?: FaceDownCause | null;
   /**
    * Renders a {T} symbol overlay in the corner to mark a tapped battlefield
    * permanent. Used by selection modals — which display cards upright rather
@@ -54,23 +62,35 @@ export function CardImage({
   tokenFilters,
   tokenImageRef,
   faceDown = false,
+  faceDownCause,
   tapIndicator = false,
   oracleId,
   faceName,
   oracleText,
 }: CardImageProps) {
   const { t } = useTranslation("game");
-  const { src, isLoading } = useCardImage(faceDown ? "" : cardName, {
+  // A face-down permanent shows the marker token for the ability that turned it
+  // face down, the way paper play does. With no marker (unknown cause, or the
+  // Ixidron class, which has no printing) the lookup is skipped entirely and the
+  // generic card back is rendered exactly as before.
+  const faceDownMarker = faceDownMarkerRef(faceDown, faceDownCause);
+  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(faceDown ? "" : cardName, {
     size,
     faceIndex,
-    isToken: faceDown ? false : isToken,
+    isToken: faceDown ? faceDownMarker !== null : isToken,
     tokenFilters: faceDown ? undefined : tokenFilters,
-    tokenImageRef: faceDown ? undefined : tokenImageRef,
+    tokenImageRef: faceDown ? (faceDownMarker ?? undefined) : tokenImageRef,
     oracleId: faceDown ? undefined : oracleId,
     faceName: faceDown ? undefined : faceName,
   });
-  const [imageError, setImageError] = useState(false);
-  const fallbackData = useEngineCardData(!faceDown && oracleText === undefined ? cardName : null);
+  // Only resolve rules text when the art lookup has definitively failed. On the
+  // first render `src` is null for every card while useCardImage is loading; an
+  // eager fallback lookup here used to make all seven mulligan cards initialize
+  // card-data queries even though their artwork resolved a moment later.
+  const showArtFallback = !faceDown && !isLoading && !src;
+  const fallbackData = useEngineCardData(
+    showArtFallback && oracleText == null ? cardName : null,
+  );
   const resolvedOracleText = oracleText ?? fallbackData?.oracle_text ?? undefined;
 
   const tappedStyle = tapped ? "rotate-[90deg] origin-center" : "";
@@ -80,7 +100,8 @@ export function CardImage({
     ? getBevelBorderStyle(colors)
     : undefined;
 
-  if (!faceDown && (isLoading || !src)) {
+  // Genuinely still resolving art — pulse until the async lookup settles.
+  if (!faceDown && isLoading) {
     return (
       <div
         className={`${baseClasses} bg-gray-700 shadow-md animate-pulse`}
@@ -90,45 +111,39 @@ export function CardImage({
     );
   }
 
-  if (!faceDown && imageError) {
-    return (
-      <div
-        className={`${baseClasses} bg-gray-800 shadow-md overflow-hidden flex flex-col p-2`}
-        style={borderStyle ?? { border: "1px solid #4b5563" }}
-        role="img"
-        aria-label={cardName}
-      >
-        <div className="text-xs font-semibold text-gray-100 mb-1 truncate">{cardName}</div>
-        {resolvedOracleText && (
-          <div className="text-[10px] text-gray-300 whitespace-pre-wrap leading-tight overflow-hidden">
-            <RichLabel text={resolvedOracleText} size="xs" />
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  const renderedSrc = faceDown ? CARD_BACK_URL : (src ?? "");
-  const renderedAlt = faceDown ? t("card.faceDownName") : cardName;
+  const renderedAlt = faceDown
+    ? (faceDownMarkerName(true, faceDownCause) ?? t("card.faceDownName"))
+    : cardName;
 
   return (
     <div className="relative inline-block w-fit select-none">
-      <img
-        src={renderedSrc}
-        alt={renderedAlt}
-        draggable={false}
-        onError={() => setImageError(true)}
-        className={`${baseClasses} shadow-lg object-cover`}
-        style={borderStyle ?? { border: "1px solid #4b5563" }}
-      />
-      {unimplementedMechanics && unimplementedMechanics.length > 0 && (
-        <span
-          className="absolute top-0.5 left-0.5 bg-amber-500 text-black text-[8px] font-bold rounded-sm px-0.5 leading-tight"
-          title={t("card.unimplemented", { mechanics: unimplementedMechanics.join(", ") })}
-        >
-          !
-        </span>
+      {faceDown && (!faceDownMarker || !src) ? (
+        <CardBackFallback
+          className={`${baseClasses} shadow-lg`}
+          style={borderStyle ?? { border: "1px solid #4b5563" }}
+        />
+      ) : showArtFallback ? (
+        // Swapped in place of the `<img>` rather than early-returned, so the
+        // overlay badges below stay on screen: an artless card must not also
+        // lose its unimplemented-mechanics warning.
+        <CardArtFallback
+          name={fallbackData?.name ?? cardName}
+          oracleText={resolvedOracleText}
+          className={baseClasses}
+          style={borderStyle ?? { border: "1px solid #4b5563" }}
+        />
+      ) : (
+        <img
+          src={src!}
+          {...getCardImageSrcSetProps(src, rungs)}
+          alt={renderedAlt}
+          draggable={false}
+          onError={() => advanceFailedSource?.(src!)}
+          className={`${baseClasses} shadow-lg object-cover`}
+          style={borderStyle ?? { border: "1px solid #4b5563" }}
+        />
       )}
+      <UnimplementedMechanicsBadge mechanics={unimplementedMechanics} variant="overlay" />
       {tapIndicator && (
         <span
           className="absolute top-1 right-1 flex items-center justify-center rounded-full bg-black/70 p-1 shadow-md ring-1 ring-white/20"

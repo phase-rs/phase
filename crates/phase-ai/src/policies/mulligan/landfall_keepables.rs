@@ -1,14 +1,13 @@
 //! `LandfallKeepablesMulligan` — feature-driven mulligan policy for landfall decks.
 //!
-//! CR 103.5 (`docs/MagicCompRules.txt:295`): deciding to keep after the
-//! mulligan process. When a deck's landfall commitment is meaningful, opening
-//! hands that combine a landfall payoff with a workable land count are
-//! strongly preferred over hands without a payoff.
+//! CR 103.5: deciding to keep after the mulligan process. When a deck's
+//! landfall commitment is meaningful, opening hands that combine a landfall
+//! payoff with a workable land count are strongly preferred over hands
+//! without a payoff.
 //!
 //! Opts out for decks where `features.landfall.commitment <= 0.3` — the
 //! baseline `KeepablesByLandCount` policy is the sole voice for those decks.
 
-use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 
@@ -16,7 +15,7 @@ use crate::features::DeckFeatures;
 use crate::plan::PlanSnapshot;
 use crate::policies::registry::{PolicyId, PolicyReason};
 
-use super::{MulliganPolicy, MulliganScore, TurnOrder};
+use super::{is_land_source, MulliganPolicy, MulliganScore, TurnOrder};
 
 /// Commitment threshold below which this policy opts out. Matches the
 /// plan-mandated 0.3 boundary — fewer than ~1 payoff in the deck does not
@@ -58,7 +57,7 @@ impl MulliganPolicy for LandfallKeepablesMulligan {
             let Some(obj) = state.objects.get(&oid) else {
                 continue;
             };
-            if obj.card_types.core_types.contains(&CoreType::Land) {
+            if is_land_source(obj) {
                 land_count += 1;
             }
             if features.landfall.payoff_names.contains(&obj.name) {

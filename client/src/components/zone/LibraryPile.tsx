@@ -1,18 +1,24 @@
 import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { ObjectId } from "../../adapter/types.ts";
+import type { GameObject, ObjectId } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
-import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
-import { CARD_BACK_URL } from "../../services/scryfall.ts";
+import { objectImageProps } from "../../services/cardImageLookup.ts";
+import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { CASTABLE_AFFORDANCE_IDLE } from "../../viewmodel/castableAffordance.ts";
-import { playOrCastActionsForObject } from "../../viewmodel/cardActionChoice.ts";
-import { isLibraryCardRevealedToViewer } from "../../viewmodel/gameStateView.ts";
+import {
+  playOrCastActionsForObject,
+  resolveSingleActionDispatch,
+} from "../../viewmodel/cardActionChoice.ts";
+import { isLibraryCardRevealedToViewer, resolvePileSeat } from "../../viewmodel/gameStateView.ts";
+import { CardArtFallback } from "../card/CardArtFallback.tsx";
+import { CardBackFallback } from "../card/CardBackFallback.tsx";
+import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 
 interface LibraryPileProps {
   playerId: number;
@@ -25,71 +31,93 @@ interface LibraryPileProps {
    * graveyard/exile click→view→cast flow. Without this prop the pile falls back
    * to its standalone click-to-play behavior.
    */
-  onView?: () => void;
+  onView?: (launcher: HTMLButtonElement) => void;
 }
 
-function TopCard({ cardName }: { cardName: string }) {
-  const { src } = useCardImage(cardName, { size: "normal" });
+function VisibleTopCard({ object }: { object: GameObject }) {
+  const imageProps = objectImageProps(object);
+  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(
+    imageProps.cardName,
+    {
+      size: "normal",
+      faceIndex: imageProps.faceIndex,
+      isToken: imageProps.isToken,
+      tokenFilters: imageProps.tokenFilters,
+      tokenImageRef: imageProps.tokenImageRef,
+      oracleId: imageProps.oracleId,
+      faceName: imageProps.faceName,
+    },
+  );
 
-  if (!src) {
+  if (isLoading) {
     return (
-      <div
-        className="h-full w-full rounded-lg bg-gray-700 border border-gray-600"
-      />
+      <div className="h-full w-full animate-pulse rounded-lg border border-gray-600 bg-gray-700" />
     );
+  }
+  if (!src) {
+    return <CardArtFallback name={object.name} className="h-full w-full rounded-lg" />;
   }
 
   return (
     <img
       src={src}
-      alt={cardName}
+      {...getCardImageSrcSetProps(src, rungs)}
+      alt={object.name}
       className="h-full w-full rounded-lg object-cover"
       draggable={false}
+      onError={() => advanceFailedSource?.(src)}
     />
   );
+}
+
+function HiddenTopCard() {
+  return <CardBackFallback className="h-full w-full rounded-lg" />;
 }
 
 export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
   const { t } = useTranslation("game");
   const myId = usePlayerId();
+  const pileSeat = useGameStore((s) => resolvePileSeat(s.gameState, "library", playerId));
+  const myPileSeat = useGameStore((s) => resolvePileSeat(s.gameState, "library", myId));
   const count = useGameStore(
-    (s) => s.gameState?.players[playerId]?.library?.length ?? 0,
+    (s) => s.gameState?.players[pileSeat]?.library?.length ?? 0,
   );
   const topObjectId = useGameStore((s) => {
-    const lib = s.gameState?.players[playerId]?.library;
+    const lib = s.gameState?.players[pileSeat]?.library;
     if (!lib || lib.length === 0) return null;
     // library[0] = top of library (engine convention from zones.rs)
     return lib[0];
   });
+  // A card flight is presenting the top card itself, so the pile shows a back
+  // in its place.
+  const topInFlight = useAnimationStore(
+    (s) => topObjectId != null && s.flightVeiledObjectIds.has(topObjectId),
+  );
   const isRevealed = useGameStore((s) => {
     if (topObjectId == null) return false;
     return s.gameState?.revealed_cards?.includes(topObjectId) ?? false;
   });
-  const topCardName = useGameStore((s) => {
+  const visibleTopObject = useGameStore((s) => {
     if (topObjectId == null) return null;
-    const peek =
-      playerId === myId &&
-      (s.gameState?.players[playerId]?.can_look_at_top_of_library ?? false);
-    // Gate visibility on the engine's reveal sets (mirrors OpponentHand), never
-    // on name redaction: single-player renders the raw, unredacted state, so the
-    // top card name is present even for an opponent's hidden top. CR 701.20b
-    // (public reveal) and CR 701.20e (private look, e.g. Mishra's Bauble) are
-    // the only windows that expose an opponent's top.
+    // Rust has already resolved public reveals, private looks, and continuous
+    // top-card permissions into the per-object display projection.
     const revealedToMe = isLibraryCardRevealedToViewer(s.gameState ?? null, topObjectId, myId);
-    if (!peek && !revealedToMe) return null;
-    return s.gameState?.objects[topObjectId]?.name ?? null;
+    if (!revealedToMe) return null;
+    return s.gameState?.objects[topObjectId] ?? null;
   });
+  const topCardName = visibleTopObject?.name ?? null;
 
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const canActForWaitingState = useCanActForWaitingState();
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
-  const inspectObject = useUiStore((s) => s.inspectObject);
-  const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
+  // `hoverProps` owns the long-press → sticky-preview gesture and swallows the
+  // click that follows it in the capture phase, so this component needs neither
+  // its own useLongPress nor a firedRef guard on the button.
   const hoverProps = useInspectHoverProps();
   const dispatchAction = useGameDispatch();
 
-  const isMyLibrary = playerId === myId;
+  const isMyLibrary = pileSeat === myPileSeat;
   const hasPriority = waitingFor?.type === "Priority" && canActForWaitingState;
 
   // CR 401.5 + CR 118.9 + CR 305.9: cast/play-action surfacing is engine-
@@ -108,22 +136,15 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
 
   const handlePlay = useCallback(() => {
     if (playActions.length === 0 || topObjectId == null) return;
-    if (playActions.length === 1) {
-      void dispatchAction(playActions[0]);
-    } else {
-      // Multiple options (e.g., cast normal + alt-cost) — defer to the shared
-      // ability-choice modal so the player can pick.
-      setPendingAbilityChoice({ objectId: topObjectId as ObjectId, actions: playActions });
-    }
+    // #506: one authority for the lone-action decision. Multiple options (e.g.
+    // cast normal + alt-cost) defer to the shared ability-choice modal.
+    const auto = resolveSingleActionDispatch(
+      playActions,
+      useGameStore.getState().gameState?.objects[topObjectId],
+    );
+    if (auto) void dispatchAction(auto);
+    else setPendingAbilityChoice({ objectId: topObjectId as ObjectId, actions: playActions });
   }, [playActions, topObjectId, dispatchAction, setPendingAbilityChoice]);
-
-  const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(
-    useCallback(() => {
-      if (topObjectId == null || topCardName == null) return;
-      inspectObject(topObjectId as ObjectId);
-      setPreviewSticky(true);
-    }, [inspectObject, setPreviewSticky, topObjectId, topCardName]),
-  );
 
   if (count === 0) return null;
 
@@ -146,7 +167,7 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
     <div
       className="relative"
       title={canPlay ? playLabel : libraryLabel}
-      data-library-pile={playerId}
+      data-library-pile={pileSeat}
       style={{ width: w, height: h }}
     >
       {/* Stack layers */}
@@ -166,16 +187,12 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
       {/* Top card */}
       <button
         type="button"
-        onClick={() => {
-          if (longPressFired.current) {
-            longPressFired.current = false;
-            return;
-          }
+        onClick={(event) => {
           // Prefer opening the viewer when the top is visible — the modal is
           // where play-from-top happens (mirrors graveyard/exile). Fall back to
           // direct cast only when no viewer is wired.
           if (canView) {
-            onView();
+            onView(event.currentTarget);
             return;
           }
           if (canPlay) handlePlay();
@@ -183,8 +200,8 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
         disabled={!canView && !canPlay && topCardName == null}
         aria-label={canPlay ? playLabel : libraryLabel}
         data-library-top-cast={canPlay ? "true" : "false"}
+        data-grouped-ids={isPeeking && topObjectId != null ? String(topObjectId) : undefined}
         {...topHoverProps}
-        {...longPressHandlers}
         className={`relative block h-full w-full overflow-hidden rounded-lg border shadow-md ${
           canPlay
             ? `border-amber-400 ${CASTABLE_AFFORDANCE_IDLE} cursor-pointer`
@@ -195,15 +212,10 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
                 : "border-gray-600 cursor-default"
         }`}
       >
-        {isPeeking ? (
-          <TopCard cardName={topCardName} />
+        {visibleTopObject && !topInFlight ? (
+          <VisibleTopCard object={visibleTopObject} />
         ) : (
-          <img
-            src={CARD_BACK_URL}
-            alt={t("zone.libraryAlt")}
-            className="h-full w-full rounded-lg object-cover"
-            draggable={false}
-          />
+          <HiddenTopCard />
         )}
       </button>
 

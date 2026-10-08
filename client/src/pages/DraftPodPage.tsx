@@ -8,42 +8,121 @@
  * 4. Deckbuilding: LimitedDeckBuilder (reuses Quick Draft component)
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useNavigate, useSearchParams } from "react-router";
+import { useLocation, useNavigate, useSearchParams } from "react-router";
 
-import { CardPreview } from "../components/card/CardPreview";
 import { MenuSelect } from "../components/ui/MenuSelect";
 import type { CardHoverInfo } from "../components/card/CardPreview";
+import { HoverCardPreview } from "../components/card/HoverCardPreview";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
+import {
+  useDraftShellChrome,
+  useInShell,
+  type DraftShellPhoneAction,
+  type DraftShellTopAction,
+} from "../components/chrome/ShellContext";
+import { usePreferencesStore } from "../stores/preferencesStore";
 import { CubeSetupPanel } from "../components/draft/CubeSetupPanel";
 import { DraftIntro } from "../components/draft/DraftIntro";
 import { DraftPodLobby } from "../components/draft/DraftPodLobby";
 import { DraftProgress } from "../components/draft/DraftProgress";
 import { EliminationBracket } from "../components/draft/EliminationBracket";
-import { HostControls } from "../components/draft/HostControls";
+import { HostControls, useHostDraftTopActions } from "../components/draft/HostControls";
 import { LimitedDeckBuilder } from "../components/draft/LimitedDeckBuilder";
-import { PackDisplay } from "../components/draft/PackDisplay";
+import { PackDisplay, type PackDisplayController } from "../components/draft/PackDisplay";
 import { PickTimer } from "../components/draft/PickTimer";
+import { draftKindForEntry, type DraftKind } from "../components/draft/draftKind";
+import { distinctJoined, isSharedStackDistribution, type SharedStackPileDecision } from "../adapter/draft-adapter";
+import type { DraftPauseReason } from "../network/draftProtocol";
+import { PodIcon } from "../components/draft/PodIcon";
 import { PoolPanel } from "../components/draft/PoolPanel";
 import { ScoreBadge } from "../components/draft/ScoreBadge";
 import { SeatStatusRing } from "../components/draft/SeatStatusRing";
 import { SetSelector } from "../components/draft/SetSelector";
 import { StandingsTable } from "../components/draft/StandingsTable";
-import { menuButtonClass } from "../components/menu/buttonStyles";
-import { MenuShell } from "../components/menu/MenuShell";
+import { WinstonPileTable } from "../components/draft/WinstonPileTable";
+import { PodErrorBanner } from "../components/draft/PodErrorBanner";
 import {
+  getResponsiveDraftLayout,
+  loadDraftWorkspacePreferences,
+  repairDraftWorkspacePackScale,
+  repairDraftWorkspacePileScale,
+  saveDraftWorkspacePreferences,
+  setArrivingCardBoardPreferences,
+  type DraftWorkspacePreferences,
+  type ResponsiveDraftLayout,
+} from "../components/draft/workspace/workspacePreferences";
+import { DraftWorkspace } from "../components/draft/workspace/DraftWorkspace";
+import { resolveWorkspacePickPlacement } from "../components/draft/workspace/workspacePlacement";
+import {
+  useDraftWorkspaceDrag,
+  type DraftDropRequest,
+  type DraftPickInteractionSnapshot,
+} from "../components/draft/workspace/useDraftWorkspaceDrag";
+import {
+  countProjectedNames,
+  projectWorkspacePartition,
+} from "../components/draft/workspace/workspaceProjection";
+import { DialogShell } from "../components/modal/DialogShell";
+import { menuButtonClass } from "../components/menu/buttonStyles";
+import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
+import {
+  COMMANDER_P2P_SEAT_CEILING,
+  draftPodScreen,
+  DRAFT_OFFLINE_ERROR,
+  intergamePromptKey,
+  isMultiplayerDraftPodLive,
   useMultiplayerDraftStore,
-  type MultiplayerDraftPhase,
+  type DraftPodScreen,
+  type GuestDraftResumeOutcome,
 } from "../stores/multiplayerDraftStore";
-import { useDraftPodStore } from "../stores/draftPodStore";
+import type { DraftPickDestination, DraftPickPlacementHint } from "../stores/draftStore";
+import {
+  LOBBY_HOST_NAME_MAX_CHARS,
+  LOBBY_LABEL_MAX_CHARS,
+  LOBBY_LISTING_MAX_SEATS,
+  podListingEligible,
+  useDraftPodStore,
+} from "../stores/draftPodStore";
+import { useEffectiveOffline } from "../stores/connectivityStore";
 
 // ── Setup Mode ────────────────────────────────────────────────────────
 
 type SetupMode = "choose" | "host" | "join";
 
+function readPickInteraction(): DraftPickInteractionSnapshot {
+  const state = useMultiplayerDraftStore.getState();
+  return {
+    interactionGeneration: state.interactionGeneration,
+    pickInteractionLocked: state.pickInteractionLocked,
+    pendingPickIntent: state.pendingPickIntent,
+  };
+}
+
+function subscribePickInteraction(listener: () => void): () => void {
+  return useMultiplayerDraftStore.subscribe((state, previous) => {
+    if (
+      state.interactionGeneration !== previous.interactionGeneration
+      || state.pickInteractionLocked !== previous.pickInteractionLocked
+      || state.pendingPickIntent !== previous.pendingPickIntent
+    ) listener();
+  });
+}
+
+/** Any entry of this length fits the lobby's byte bound for a password. */
+const POD_PASSWORD_MAX_LENGTH = 32;
+
+/** The offline sentinel is a translation key and is translated; any other
+ *  message is shown as written. */
+function usePodErrorMessage(error: string | null): string | null {
+  const { t } = useTranslation("draft");
+  return error === DRAFT_OFFLINE_ERROR ? t("offline.startUnavailable") : error;
+}
+
 function PodSetup() {
   const { t } = useTranslation("draft");
+  const effectiveOffline = useEffectiveOffline();
   const [mode, setMode] = useState<SetupMode>("choose");
 
   const config = useDraftPodStore((s) => s.config);
@@ -52,6 +131,11 @@ function PodSetup() {
   const setHostDisplayName = useDraftPodStore((s) => s.setHostDisplayName);
   const guestDisplayName = useDraftPodStore((s) => s.guestDisplayName);
   const setGuestDisplayName = useDraftPodStore((s) => s.setGuestDisplayName);
+  const adoptSavedDisplayName = useDraftPodStore((s) => s.adoptSavedDisplayName);
+  const listing = useDraftPodStore((s) => s.listing);
+  const setListing = useDraftPodStore((s) => s.setListing);
+  const adoptRememberedListing = useDraftPodStore((s) => s.adoptRememberedListing);
+  const [showPassword, setShowPassword] = useState(() => listing.password !== "");
   const joinCode = useDraftPodStore((s) => s.joinCode);
   const setJoinCode = useDraftPodStore((s) => s.setJoinCode);
   const createPod = useDraftPodStore((s) => s.createPod);
@@ -60,10 +144,64 @@ function PodSetup() {
   const loadingPool = useDraftPodStore((s) => s.loadingPool);
   const poolMode = useDraftPodStore((s) => s.poolMode);
   const setPoolMode = useDraftPodStore((s) => s.setPoolMode);
+  const setDraftMode = useDraftPodStore((s) => s.setDraftMode);
+  const setSetDraftMode = useDraftPodStore((s) => s.setSetDraftMode);
   const setCubeForm = useDraftPodStore((s) => s.setCubeForm);
-  const kindDescription = config.kind === "Premier"
-    ? t("podSetup.kindPremierDesc")
-    : t("podSetup.kindTraditionalDesc");
+  const allowedPodSizes = useDraftPodStore((s) =>
+    s.procedureCacheKey?.kind === s.config.kind
+    && s.procedureCacheKey.tournamentFormat === s.config.tournamentFormat
+      ? s.allowedPodSizes
+      : null,
+  );
+  const packDistribution = useDraftPodStore((s) => s.packDistribution);
+  const allowedSetLayouts = useDraftPodStore((s) => s.allowedSetLayouts);
+  const packsPerPlayer = useDraftPodStore((s) => s.packsPerPlayer);
+  const cubeMinDeckSize = useDraftPodStore((s) =>
+    s.procedureCacheKey?.kind === s.config.kind
+    && s.procedureCacheKey.tournamentFormat === s.config.tournamentFormat
+      ? s.cubeMinDeckSize
+      : null,
+  );
+  const refreshProcedure = useDraftPodStore((s) => s.refreshProcedure);
+
+  // Seed both name inputs below from the saved multiplayer identity, so
+  // hosting or joining a pod is not one more place to retype a name the player
+  // already saved. On mount rather than per render: `adoptSavedDisplayName`
+  // fills only an empty field, so re-seeding on every render would re-fill the
+  // input mid-edit (measured: clearing it and typing "Bea" under a dependency-
+  // less effect lands "AliceBea") instead of leaving it editable.
+  useEffect(() => {
+    adoptSavedDisplayName();
+  }, [adoptSavedDisplayName]);
+
+  useEffect(() => {
+    adoptRememberedListing();
+  }, [adoptRememberedListing]);
+
+  // The kind radios record intent (`setConfig`) but publish nothing, so the
+  // ENGINE's per-kind axes — booster count and allowed seat set — are re-read here
+  // whenever the selected kind changes. Without this the set selector would
+  // have no booster count to build a pack list against on the default entry,
+  // which reaches this page with no `?kind=` deep link to load one.
+  useEffect(() => {
+    if (effectiveOffline) return;
+    void refreshProcedure();
+  }, [effectiveOffline, refreshProcedure, config.kind, config.tournamentFormat]);
+  // Total over `DraftKind`: a future kind is a TS2741 at this literal rather than
+  // a blank line under the radios. Values are already-resolved strings, which is
+  // the right shape regardless -- but NOT for the reason this comment used to
+  // give. It claimed `react-i18next.d.ts` types `t`'s key so a `t(variable)`
+  // lookup would not typecheck. Measured: it does not. `t()` keys are unchecked
+  // in this client, which is why the interpolated lookups elsewhere on this page
+  // and in the draft components were replaced with total `Record`s rather than
+  // trusted.
+  const kindDescription: Record<Exclude<DraftKind, "Quick">, string> = {
+    Premier: t("podSetup.kindPremierDesc"),
+    Traditional: t("podSetup.kindTraditionalDesc"),
+    Sealed: t("podSetup.kindSealedDesc"),
+    CommanderDraft: t("podSetup.kindCommanderDraftDesc"),
+    Winston: t("podSetup.kindWinstonDesc"),
+  };
   const tournamentDescription = config.tournamentFormat === "Swiss"
     ? t("podSetup.tournamentSwissDesc")
     : t("podSetup.tournamentEliminationDesc");
@@ -72,16 +210,42 @@ function PodSetup() {
     : t("podSetup.policyCasualDesc");
   const podSizeDescription = t("podSetup.podSizeDesc", { count: config.podSize });
   const podSizeItems = useMemo(
-    () =>
-      [4, 6, 8].map((n) => ({
-        value: String(n),
-        label: t("podSetup.playerCount", { count: n }),
-      })),
-    [t],
+    () => (allowedPodSizes ?? []).map((podSize) => ({
+      value: String(podSize),
+      label: t("podSetup.playerCount", { count: podSize }),
+    })),
+    [allowedPodSizes, t],
   );
   const podSizeLabel =
     podSizeItems.find((item) => item.value === String(config.podSize))?.label ??
     t("podSetup.playerCount", { count: config.podSize });
+  const configErrorMessage = usePodErrorMessage(configError);
+  const listingEligible = podListingEligible(config.podSize);
+  const listed = listing.isPublic && listingEligible;
+  const hostName = hostDisplayName.trim();
+
+  if (effectiveOffline) {
+    return (
+      <div className="mx-auto flex w-full max-w-2xl flex-col gap-6">
+        {mode !== "choose" && (
+          <button
+            onClick={() => setMode("choose")}
+            className="w-fit text-sm text-white/50 hover:text-white/80"
+          >
+            {t("podSetup.back")}
+          </button>
+        )}
+        <div className="rounded-card border border-amber-400/20 bg-amber-400/5 px-5 py-4 text-sm text-amber-100">
+          {t("offline.unavailableDescription")}
+        </div>
+        {configErrorMessage && (
+          <div className="rounded-lg border border-red-400/20 bg-red-400/5 px-4 py-3 text-sm text-red-300">
+            {configErrorMessage}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   if (mode === "choose") {
     return (
@@ -155,6 +319,7 @@ function PodSetup() {
             value={hostDisplayName}
             onChange={(e) => setHostDisplayName(e.target.value)}
             placeholder={t("podSetup.namePlaceholder")}
+            maxLength={LOBBY_HOST_NAME_MAX_CHARS}
             className="rounded-lg border border-white/10 bg-black/30 px-4 py-2 text-white placeholder-white/30 outline-none focus:border-emerald-400/40"
           />
         </div>
@@ -164,8 +329,8 @@ function PodSetup() {
           <label className="text-sm font-medium text-white/60">
             {t("podSetup.draftType")}
           </label>
-          <div className="flex gap-4">
-            <label className="flex items-center gap-2 text-sm text-white/70">
+          <div className="flex flex-wrap gap-x-4 gap-y-1">
+            <label className="flex min-h-11 items-center gap-2 py-2 text-sm text-white/70">
               <input
                 type="radio"
                 name="draftKind"
@@ -175,7 +340,7 @@ function PodSetup() {
               />
               {t("podSetup.kindPremier")}
             </label>
-            <label className="flex items-center gap-2 text-sm text-white/70">
+            <label className="flex min-h-11 items-center gap-2 py-2 text-sm text-white/70">
               <input
                 type="radio"
                 name="draftKind"
@@ -185,8 +350,38 @@ function PodSetup() {
               />
               {t("podSetup.kindTraditional")}
             </label>
+            <label className="flex min-h-11 items-center gap-2 py-2 text-sm text-white/70">
+              <input
+                type="radio"
+                name="draftKind"
+                checked={config.kind === "Sealed"}
+                onChange={() => setConfig({ kind: "Sealed" })}
+                className="accent-emerald-400"
+              />
+              {t("podSetup.kindSealed")}
+            </label>
+            <label className="flex min-h-11 items-center gap-2 py-2 text-sm text-white/70">
+              <input
+                type="radio"
+                name="draftKind"
+                checked={config.kind === "CommanderDraft"}
+                onChange={() => setConfig({ kind: "CommanderDraft" })}
+                className="accent-emerald-400"
+              />
+              {t("podSetup.kindCommanderDraft")}
+            </label>
+            <label className="flex min-h-11 items-center gap-2 py-2 text-sm text-white/70">
+              <input
+                type="radio"
+                name="draftKind"
+                checked={config.kind === "Winston"}
+                onChange={() => setConfig({ kind: "Winston" })}
+                className="accent-emerald-400"
+              />
+              {t("podSetup.kindWinston")}
+            </label>
           </div>
-          <p className="text-xs text-white/40">{kindDescription}</p>
+          <p className="text-xs text-white/40">{kindDescription[config.kind]}</p>
         </div>
 
         {/* Tournament Format (D-04) */}
@@ -258,6 +453,7 @@ function PodSetup() {
             label={podSizeLabel}
             selectedValue={String(config.podSize)}
             items={podSizeItems}
+            disabled={allowedPodSizes === null}
             onSelect={(value) => setConfig({ podSize: Number(value) })}
             menuLayout="dropdown"
             fitContainer
@@ -265,6 +461,78 @@ function PodSetup() {
             className="min-h-[44px] !rounded-lg border border-white/10 !bg-black/30 px-3 !py-2 text-base text-white shadow-none !hover:bg-black/30 !focus-visible:ring-emerald-400/50"
           />
           <p className="text-xs text-white/40">{podSizeDescription}</p>
+        </div>
+
+        <div className="flex flex-col gap-2">
+          {/* Above the seat ceiling the host's choice stays shown and
+              applies again within it. */}
+          <label
+            className={`flex min-h-11 items-center gap-2 py-2 text-sm ${
+              listingEligible ? "text-white/70" : "cursor-not-allowed text-white/40"
+            }`}
+          >
+            <input
+              type="checkbox"
+              checked={listing.isPublic}
+              disabled={!listingEligible}
+              onChange={(e) => setListing({ isPublic: e.target.checked })}
+              className="accent-emerald-400"
+            />
+            {t("podSetup.listInLobby")}
+          </label>
+          {!listingEligible && (
+            <p className="text-xs text-white/40">
+              {t("podSetup.listingSeatLimit", { max: LOBBY_LISTING_MAX_SEATS })}
+            </p>
+          )}
+          {listed && (
+            <>
+              <label className="flex min-h-11 items-center gap-2 py-2 text-sm text-white/70">
+                <input
+                  type="checkbox"
+                  checked={showPassword}
+                  onChange={(e) => {
+                    const next = e.target.checked;
+                    setShowPassword(next);
+                    if (!next) setListing({ password: "" });
+                  }}
+                  className="accent-emerald-400"
+                />
+                {t("podSetup.setPassword")}
+              </label>
+              {showPassword && (
+                <input
+                  type="password"
+                  value={listing.password}
+                  onChange={(e) => setListing({ password: e.target.value })}
+                  placeholder={t("podSetup.passwordPlaceholder")}
+                  aria-label={t("podSetup.passwordPlaceholder")}
+                  maxLength={POD_PASSWORD_MAX_LENGTH}
+                  className="rounded-lg border border-white/10 bg-black/30 px-4 py-2 text-white placeholder-white/30 outline-none focus:border-emerald-400/40"
+                />
+              )}
+              <div className="flex flex-col gap-1 pt-1">
+                <label htmlFor="pod-setup-room-name" className="text-sm font-medium text-white/60">
+                  {t("podSetup.roomName")} <span className="text-white/40">{t("podSetup.optional")}</span>
+                </label>
+                <input
+                  id="pod-setup-room-name"
+                  type="text"
+                  value={listing.roomName}
+                  onChange={(e) => setListing({ roomName: e.target.value })}
+                  maxLength={LOBBY_LABEL_MAX_CHARS}
+                  // It is the default `podListingRequest` sends for a blank room name.
+                  placeholder={
+                    hostName
+                      ? t("hostSetup.roomNameDefaultPlaceholder", { ns: "multiplayer", name: hostName })
+                      : t("podSetup.roomNamePlaceholder")
+                  }
+                  className="rounded-lg border border-white/10 bg-black/30 px-4 py-2 text-white placeholder-white/30 outline-none focus:border-emerald-400/40"
+                />
+                <p className="text-xs text-white/40">{t("podSetup.roomNameHelp")}</p>
+              </div>
+            </>
+          )}
         </div>
 
         {/* Pool source: Set vs Cube tab switch */}
@@ -283,6 +551,7 @@ function PodSetup() {
           <button
             type="button"
             onClick={() => setPoolMode("cube")}
+            disabled={packDistribution === "AllAtOnce"}
             className={
               poolMode === "cube"
                 ? "border-b-2 border-emerald-400 px-4 py-2 text-sm font-medium text-white"
@@ -293,18 +562,92 @@ function PodSetup() {
           </button>
         </div>
 
-        {poolMode === "set" ? (
+        {poolMode === "set" || packDistribution === "AllAtOnce" ? (
           <>
-            {/* Set selector — reuse the Quick Draft component */}
+            {/* A Chaos pod draws each (seat, round) booster from its own
+                privately-assigned set. A shared stack shuffles every booster
+                together before the first decision, so no seat holds the packs
+                generated for it and the assignment only hides which sets the
+                pool is made of — `DraftProcedure::validate_source` refuses the
+                pair outright.
+
+                RENDER THE PUBLISHED CAPABILITY. `allowed_set_layouts` is the
+                engine's own list, read by `validate_source` and by the server's
+                admission guard, so what is offered here and what is accepted
+                cannot disagree. This used to ask
+                `isSharedStackDistribution(packDistribution)` and conclude "then
+                no Chaos" — a second authority over a rule the engine owns,
+                correct only while the rule happens to track the distribution.
+                `null` means NOT PUBLISHED YET, and renders nothing: an absent
+                contract is not permission, and offering a control the engine
+                may refuse is the guessing this list exists to remove. The radio
+                returns when the engine says Chaos is admitted. */}
+            {(allowedSetLayouts?.includes("Chaos") ?? false) && (
+              <div className="flex flex-col gap-1">
+                <span className="text-sm font-medium text-white/60">{t("podSetup.setDraftMode")}</span>
+                <div className="flex gap-4">
+                  <label className="flex min-h-11 items-center gap-2 py-2 text-sm text-white/70">
+                    <input
+                      type="radio"
+                      name="setDraftMode"
+                      checked={setDraftMode === "uniform"}
+                      onChange={() => setSetDraftMode("uniform")}
+                      className="accent-emerald-400"
+                    />
+                    {t("podSetup.uniformPacks")}
+                  </label>
+                  <label className="flex min-h-11 items-center gap-2 py-2 text-sm text-white/70">
+                    <input
+                      type="radio"
+                      name="setDraftMode"
+                      checked={setDraftMode === "chaos"}
+                      onChange={() => setSetDraftMode("chaos")}
+                      className="accent-emerald-400"
+                    />
+                    {t("podSetup.chaosPacks")}
+                  </label>
+                </div>
+                <p className="text-xs text-white/40">
+                  {setDraftMode === "chaos"
+                    ? t("podSetup.chaosSelectorHint")
+                    : t("podSetup.setSelectorHint")}
+                </p>
+              </div>
+            )}
             <div className="rounded-[16px] border border-white/8 bg-white/3 px-4 py-3 text-sm text-white/45">
-              {t("podSetup.setSelectorHint")}
+              {setDraftMode === "chaos"
+                ? t("podSetup.chaosSelectorDetail")
+                : t("podSetup.setSelectorHint")}
             </div>
-            <SetSelector
-              onStartDraft={(setCode) => {
-                setConfig({ setCode });
-                void createPod();
-              }}
-            />
+            {/* A Uniform pod carries a pack-ordered SEQUENCE to the host, so the host
+                arranges one set per booster exactly as a local draft does. Chaos
+                reuses this selector as a distinct candidate-set chooser; draft-wasm
+                privately resolves the seat-by-round assignments from the host seed.
+                `packsPerPlayer` is the ENGINE's per-kind booster count, so a
+                Uniform Sealed pod asks for six and a Uniform draft pod for three
+                without this page knowing either number; until it loads the list is
+                locked at zero rather than guessing one. Deliberately NOT
+                `fixedPackCount`: naming one set still fills every booster (a
+                short sequence repeats its last entry), so the old one-click
+                single-set pod survives alongside the arranged one. */}
+            {packsPerPlayer === null ? (
+              <div className="text-sm text-white/50">{t("podSetup.loadingPool")}</div>
+            ) : (
+              <SetSelector
+                defaultPackCount={packsPerPlayer}
+                startLabel={t("podSetup.createPod")}
+                candidatePool={setDraftMode === "chaos"}
+                onStartDraft={(packs) => {
+                  if (packs.length === 0) return;
+                  setConfig({
+                    packs,
+                    setCode: distinctJoined(packs.map((pack) => pack.code), "+"),
+                    setName: distinctJoined(packs.map((pack) => pack.name), " · "),
+                  });
+                  void createPod();
+                }}
+              />
+            )}
           </>
         ) : (
           <CubeSetupPanel
@@ -312,14 +655,15 @@ function PodSetup() {
               setCubeForm({ cubeName, cubeListText, settings });
               void createPod();
             }}
-            disabled={loadingPool}
+            minimumDeckSize={cubeMinDeckSize ?? undefined}
+            disabled={loadingPool || cubeMinDeckSize === null}
           />
         )}
 
         {/* Error */}
-        {configError && (
+        {configErrorMessage && (
           <div className="rounded-lg border border-red-400/20 bg-red-400/5 px-4 py-3 text-sm text-red-300">
-            {configError}
+            {configErrorMessage}
           </div>
         )}
 
@@ -371,9 +715,9 @@ function PodSetup() {
       </div>
 
       {/* Error */}
-      {configError && (
+      {configErrorMessage && (
         <div className="rounded-lg border border-red-400/20 bg-red-400/5 px-4 py-3 text-sm text-red-300">
-          {configError}
+          {configErrorMessage}
         </div>
       )}
 
@@ -409,6 +753,7 @@ function PairingPhaseView() {
   const { t } = useTranslation("draft");
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 py-8">
+      <PodErrorBanner />
       <h2 className="text-center text-xl font-medium text-white">
         {t("podPhaseView.tournamentPairings")}
       </h2>
@@ -419,6 +764,7 @@ function PairingPhaseView() {
 
 function MatchInProgressView() {
   const { t } = useTranslation("draft");
+  const draftCardPreviewMode = usePreferencesStore((s) => s.draftCardPreviewMode);
   const navigate = useNavigate();
   const matchPairing = useMultiplayerDraftStore((s) => s.matchPairing);
   const startMatch = useMultiplayerDraftStore((s) => s.startMatch);
@@ -434,6 +780,7 @@ function MatchInProgressView() {
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 py-8">
+      <PodErrorBanner />
       <h2 className="text-center text-xl font-medium text-white">
         {t("podPhaseView.matchesInProgress")}
       </h2>
@@ -481,9 +828,10 @@ function MatchInProgressView() {
         </button>
         {showPool && <PoolPanel onCardHover={setHoveredCard} />}
       </div>
-      <CardPreview
-        cardName={hoveredCard?.name ?? null}
-        sourcePrinting={hoveredCard?.sourcePrinting}
+      <HoverCardPreview
+        card={hoveredCard}
+        mode={draftCardPreviewMode}
+        hoverDelayMs={0}
         mobileLayout="compact"
         onDismiss={() => setHoveredCard(null)}
       />
@@ -497,6 +845,7 @@ function RoundCompleteView() {
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 py-8">
+      <PodErrorBanner />
       <h2 className="text-center text-xl font-medium text-white">
         {t("podPhaseView.roundComplete")}
       </h2>
@@ -512,23 +861,40 @@ function RoundCompleteView() {
 
 // ── Between Games View (Bo3) ─────────────────────────────────────────
 
-function BetweenGamesView() {
+function BetweenGamesView({
+  responsiveLayout,
+  fillEmbeddedHeight,
+  onDismiss,
+}: {
+  responsiveLayout: ResponsiveDraftLayout;
+  fillEmbeddedHeight: boolean;
+  onDismiss: () => void;
+}) {
   const { t } = useTranslation("draft");
   const sideboardPrompt = useMultiplayerDraftStore((s) => s.sideboardPrompt);
   const playDrawPrompt = useMultiplayerDraftStore((s) => s.playDrawPrompt);
   const sideboardSubmitted = useMultiplayerDraftStore((s) => s.sideboardSubmitted);
   const seatIndex = useMultiplayerDraftStore((s) => s.seatIndex);
   const submitSideboard = useMultiplayerDraftStore((s) => s.submitSideboard);
+  const setIntergameWorkspaceState = useMultiplayerDraftStore((s) => s.setIntergameWorkspaceState);
   const choosePlayDraw = useMultiplayerDraftStore((s) => s.choosePlayDraw);
   const timerRemainingMs = useMultiplayerDraftStore((s) => s.timerRemainingMs);
-  const mainDeck = useMultiplayerDraftStore((s) => s.mainDeck);
   const submittedDeck = useMultiplayerDraftStore((s) => s.submittedDeck);
+  const view = useMultiplayerDraftStore((s) => s.view);
+  const intergameWorkspace = useMultiplayerDraftStore((s) => s.intergameWorkspaceState);
+  const tabletLayout = responsiveLayout === "tablet-portrait" || responsiveLayout === "tablet-landscape";
+  const [workspacePreferences, setWorkspacePreferences] = useState<DraftWorkspacePreferences>(loadDraftWorkspacePreferences);
+  const handlePreferencesChange = useCallback((next: DraftWorkspacePreferences) => {
+    setWorkspacePreferences(next);
+    saveDraftWorkspacePreferences(next);
+  }, []);
 
   // Play/draw choice prompt (shown to the loser of the previous game)
   if (playDrawPrompt) {
     const timerSec = timerRemainingMs != null ? Math.ceil(timerRemainingMs / 1000) : null;
     return (
       <div className="mx-auto flex w-full max-w-md flex-col items-center gap-6 py-8">
+        <PodErrorBanner />
         <h2 className="text-xl font-medium text-white">{t("betweenGames.game", { number: playDrawPrompt.gameNumber })}</h2>
         <ScoreBadge score={playDrawPrompt.score} player={seatIndex === 0 ? 0 : 1} size="md" />
         <p className="text-sm text-white/60">{t("betweenGames.lostPreviousGame")}</p>
@@ -549,6 +915,9 @@ function BetweenGamesView() {
             {t("betweenGames.drawFirst")}
           </button>
         </div>
+        <button onClick={onDismiss} className={menuButtonClass({ tone: "neutral", size: "xs" })}>
+          {t("betweenGames.hideOverlay")}
+        </button>
       </div>
     );
   }
@@ -557,6 +926,7 @@ function BetweenGamesView() {
   if (sideboardSubmitted) {
     return (
       <div className="mx-auto flex w-full max-w-md flex-col items-center gap-6 py-8">
+        <PodErrorBanner />
         <h2 className="text-xl font-medium text-white">{t("betweenGames.sideboarding")}</h2>
         {sideboardPrompt && (
           <ScoreBadge score={sideboardPrompt.score} player={seatIndex === 0 ? 0 : 1} size="md" />
@@ -564,18 +934,28 @@ function BetweenGamesView() {
         <p className="text-sm text-white/60">
           {t("betweenGames.waitingSideboard")}
         </p>
+        {submittedDeck.length > 0 && (
+          <p className="text-sm text-white/50">
+            {submittedDeck.join(", ")}
+          </p>
+        )}
         <div className="h-6 w-6 animate-spin rounded-full border-2 border-white/20 border-t-emerald-400" />
+        <button onClick={onDismiss} className={menuButtonClass({ tone: "neutral", size: "xs" })}>
+          {t("betweenGames.hideOverlay")}
+        </button>
       </div>
     );
   }
 
   // Sideboard editing (reuse deck from submitted or current mainDeck)
-  if (sideboardPrompt) {
+  if (sideboardPrompt && view && intergameWorkspace) {
     const timerSec = timerRemainingMs != null ? Math.ceil(timerRemainingMs / 1000) : null;
-    const currentDeck = submittedDeck.length > 0 ? submittedDeck : mainDeck;
 
     return (
-      <div className="mx-auto flex w-full max-w-4xl flex-col gap-4 py-8">
+      <div className={tabletLayout
+        ? `mx-auto flex ${fillEmbeddedHeight ? "h-full flex-1" : "h-[calc(100dvh_-_4rem)]"} min-h-0 w-full max-w-none flex-col gap-4 overflow-hidden`
+        : "mx-auto flex w-full max-w-4xl flex-col gap-4 py-8"}
+      >
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <h2 className="text-xl font-medium text-white">
@@ -590,49 +970,265 @@ function BetweenGamesView() {
         <p className="text-sm text-white/50">
           {t("betweenGames.sideboardHint")}
         </p>
-        {/* Reuse the LimitedDeckBuilder for sideboard editing */}
-        <LimitedDeckBuilder />
-        <button
-          onClick={() => {
-            // Submit current deck state as sideboard submission
-            submitSideboard(sideboardPrompt.matchId, currentDeck, []);
-          }}
-          className={menuButtonClass({ tone: "emerald", size: "md" })}
-        >
-          {t("betweenGames.submitSideboard")}
-        </button>
+        <div className={tabletLayout ? "min-h-0 flex-1 overflow-hidden" : undefined}>
+          <LimitedDeckBuilder
+            local={{
+              view,
+              workspace: intergameWorkspace,
+              preferences: workspacePreferences,
+              interactionLocked: false,
+              capabilities: { kind: "fixed-pool" },
+              onWorkspaceChange: setIntergameWorkspaceState,
+              onPreferencesChange: handlePreferencesChange,
+              onSubmitDeck: (_commanders) => {
+                const partition = projectWorkspacePartition(intergameWorkspace, view.pool);
+                submitSideboard(
+                  sideboardPrompt.matchId,
+                  partition.mainDeck,
+                  countProjectedNames(partition.sideboard),
+                );
+              },
+            }}
+            showSuggestions
+            responsiveLayout={responsiveLayout}
+            responsiveHeightMode={tabletLayout ? "container" : "viewport"}
+          />
+        </div>
       </div>
     );
   }
 
-  // Fallback — should not reach here
+  // Fallback — unreachable BY CONSTRUCTION, and retained only for the function's
+  // totality: `draftPodScreen` answers `"betweenGames"` only when
+  // `sideboardPrompt !== null`, and the `sideboardSubmitted` branch above fires
+  // before this one. It keeps the banner and the dismiss control so it cannot
+  // become a dead end if the rule ever widens.
   return (
     <div className="mx-auto flex w-full max-w-md flex-col items-center gap-6 py-8">
+      <PodErrorBanner />
       <p className="text-sm text-white/60">{t("betweenGames.preparingNext")}</p>
+        <button onClick={onDismiss} className={menuButtonClass({ tone: "neutral", size: "xs" })}>
+          {t("betweenGames.hideOverlay")}
+        </button>
     </div>
   );
 }
 
-function DraftingPhaseContent() {
+function DraftingPhaseContent({
+  responsiveLayout,
+  phoneLayout,
+  mobileWorkspaceOpen,
+  setMobileWorkspaceOpen,
+}: {
+  responsiveLayout: ResponsiveDraftLayout;
+  phoneLayout: boolean;
+  mobileWorkspaceOpen: boolean;
+  setMobileWorkspaceOpen: (open: boolean) => void;
+}) {
   const { t } = useTranslation("draft");
+  const draftCardPreviewMode = usePreferencesStore((s) => s.draftCardPreviewMode);
+  const draftDoubleClickConfirmPick = usePreferencesStore((s) => s.draftDoubleClickConfirmPick);
   const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
   const [introDismissed, setIntroDismissed] = useState(false);
-  const podSize = useDraftPodStore((s) => s.config.podSize);
+  const [workspacePreferences, setWorkspacePreferences] = useState<DraftWorkspacePreferences>(loadDraftWorkspacePreferences);
   const view = useMultiplayerDraftStore((s) => s.view);
   const selectedCard = useMultiplayerDraftStore((s) => s.selectedCard);
+  const workspaceState = useMultiplayerDraftStore((s) => s.workspaceState);
+  const pendingPickIntent = useMultiplayerDraftStore((s) => s.pendingPickIntent);
+  const interactionGeneration = useMultiplayerDraftStore((s) => s.interactionGeneration);
+  const pickInteractionLocked = useMultiplayerDraftStore((s) => s.pickInteractionLocked);
   const selectCard = useMultiplayerDraftStore((s) => s.selectCard);
-  const confirmPick = useMultiplayerDraftStore((s) => s.confirmPick);
-  const autoPickCard = useMultiplayerDraftStore((s) => s.autoPickCard);
   const paused = useMultiplayerDraftStore((s) => s.paused);
   const pauseReason = useMultiplayerDraftStore((s) => s.pauseReason);
+  // THIS viewer's seat, for the shared-stack table's "is it my turn" test. The
+  // engine publishes `active_seat` but no viewer identity, and `active_pile` is
+  // public, so the comparison needs the seat the transport assigned us.
+  const seatIndex = useMultiplayerDraftStore((s) => s.seatIndex);
+  const phoneToolbarPinned = phoneLayout && !mobileWorkspaceOpen;
+  const handlePreferencesChange = useCallback((next: DraftWorkspacePreferences) => {
+    if (useMultiplayerDraftStore.getState().pickInteractionLocked) return;
+    setWorkspacePreferences(next);
+    saveDraftWorkspacePreferences(next);
+    // SYNCHRONOUSLY, not from an effect. Cards reach the pool on paths that
+    // resolve no placement of their own -- a shared-stack take collects a whole
+    // pile, a timed-out seat's decision is applied by the host and broadcast --
+    // so the store has to know which columns this board currently means. An
+    // effect runs after commit, and a `viewUpdated` landing in that window made
+    // `installEventView` place and publish the arrivals against the PREVIOUS
+    // columns. This is the only path that changes `deck`: the scale setters
+    // below spread `current` and touch one numeric field.
+    setArrivingCardBoardPreferences(next.deck);
+  }, []);
+  // Mount only. The change path publishes for itself, above.
+  useEffect(() => {
+    setArrivingCardBoardPreferences(loadDraftWorkspacePreferences().deck);
+  }, []);
+  const setPackScale = useCallback((next: number) => {
+    setWorkspacePreferences((current) => {
+      const updated = { ...current, packScale: repairDraftWorkspacePackScale(next) };
+      saveDraftWorkspacePreferences(updated);
+      return updated;
+    });
+  }, []);
+  // The pile surface's own scale, stored beside the pack surface's and never
+  // shared with it: see `DRAFT_WORKSPACE_PILE_SCALE_DEFAULT`.
+  const setPileScale = useCallback((next: number) => {
+    setWorkspacePreferences((current) => {
+      const updated = { ...current, pileScale: repairDraftWorkspacePileScale(next) };
+      saveDraftWorkspacePreferences(updated);
+      return updated;
+    });
+  }, []);
+  const handleDrop = useCallback((request: DraftDropRequest) => {
+    const state = useMultiplayerDraftStore.getState();
+    const outcome = request.source.kind === "pick"
+      ? state.submitPick(request.source.instanceIds[0], request.destination, request.placementHint)
+      : state.submitPickWithDraftEffect(
+        request.source.authorityId,
+        request.source.instanceIds,
+        request.destination,
+        request.placementHint,
+      );
+    return {
+      requestToken: request.requestToken,
+      interactionGeneration: request.interactionGeneration,
+      outcome,
+    };
+  }, []);
+  const resolveCollapsedSideboardColumn = useCallback((sourceInstanceId: string) => {
+    const placement = useMultiplayerDraftStore.getState().workspaceState?.placements[sourceInstanceId];
+    return Math.min(
+      workspacePreferences.sideboard.columnCount - 1,
+      Math.max(0, placement?.column ?? 0),
+    );
+  }, [workspacePreferences.sideboard.columnCount]);
+  const interactionLocked = paused || pickInteractionLocked;
+  // Read once, so the surface selection and the two gates above it cannot drift.
+  const sharedStack = view?.shared_stack ?? null;
+  const dragController = useDraftWorkspaceDrag({
+    enabled: introDismissed && !interactionLocked,
+    workspaceProjectionEnabled: responsiveLayout === "desktop",
+    retainLastValidWorkspaceTarget: true,
+    readPickInteraction,
+    subscribePickInteraction,
+    onDrop: handleDrop,
+    resolveCollapsedSideboardColumn,
+  });
+  const handleConfirmPick = useCallback((
+    destination: DraftPickDestination,
+    placementHint?: DraftPickPlacementHint,
+  ) => {
+    const state = useMultiplayerDraftStore.getState();
+    if (placementHint !== undefined || destination !== "deck") {
+      return state.confirmPick(destination, placementHint);
+    }
+    const card = state.view?.current_pack?.find((entry) => entry.instance_id === state.selectedCard);
+    const resolvedPlacement = card !== undefined && state.view !== null && state.workspaceState !== null
+      ? resolveWorkspacePickPlacement(
+        card,
+        destination,
+        state.view.pool,
+        state.view.pool_groups,
+        state.workspaceState,
+        workspacePreferences.deck,
+      )
+      : { column: 0 };
+    return state.confirmPick(destination, resolvedPlacement);
+  }, [workspacePreferences.deck]);
+  const handleSharedStackDecision = useCallback((pile: number, decision: SharedStackPileDecision) => {
+    void useMultiplayerDraftStore.getState().submitSharedStackDecision(pile, decision);
+  }, []);
+  const handleAutoPick = useCallback(() => {
+    const state = useMultiplayerDraftStore.getState();
+    const { view: currentView, workspaceState } = state;
+    const placementHints = currentView !== null && currentView.current_pack !== null && workspaceState !== null
+      ? Object.fromEntries(currentView.current_pack.map((card) => [
+        card.instance_id,
+        resolveWorkspacePickPlacement(
+          card,
+          "deck",
+          currentView.pool,
+          currentView.pool_groups,
+          workspaceState,
+          workspacePreferences.deck,
+        ),
+      ]))
+      : undefined;
+    return state.autoPickCard(placementHints);
+  }, [workspacePreferences.deck]);
+  const packController = useMemo<PackDisplayController>(() => ({
+    kind: "local-workspace",
+    view,
+    selectedCard,
+    pendingIntent: pendingPickIntent,
+    interactionGeneration,
+    interactionLocked,
+    doubleClickPick: draftDoubleClickConfirmPick,
+    dragController,
+    selectCard,
+    pickCard: (instanceId, destination, placementHint) => useMultiplayerDraftStore.getState().submitPick(instanceId, destination, placementHint),
+    pickCardStep: (instanceIds, destination, placementHint) => useMultiplayerDraftStore.getState().submitPickStep(instanceIds, destination, placementHint),
+    confirmPick: handleConfirmPick,
+    pickCardWithDraftEffect: (effectInstanceId, instanceIds, destination, placementHint) => useMultiplayerDraftStore.getState().submitPickWithDraftEffect(effectInstanceId, instanceIds, destination, placementHint),
+    autoPickCard: handleAutoPick,
+  }), [
+    dragController, handleAutoPick, handleConfirmPick, interactionGeneration, interactionLocked, pendingPickIntent,
+    selectCard, selectedCard, view, draftDoubleClickConfirmPick,
+  ]);
 
   if (!introDismissed) {
-    return <DraftIntro mode="pod" podSize={podSize} onContinue={() => setIntroDismissed(true)} />;
+    // The engine procedure authorizes the Commander variant, and its seat list
+    // supplies the player count. Both come from the view, never from
+    // `draftPodStore.config` — a guest's local config is never populated from
+    // the host's pod, so it still holds this client's own defaults. Reading a
+    // kind label or the count from that config would render the wrong intro.
+    //
+    // `phase` can reach "drafting" from a `statusChanged` event that carries no view,
+    // so `view` is genuinely nullable here. In that window the seat count is unknown
+    // and nothing is rendered: an intro sentence stating a confident wrong number is
+    // worse than a frame with no intro, and the following `viewUpdated` supplies it.
+    if (!view) return null;
+
+    // The DISTRIBUTION is asked first, ahead of the launch capability. A
+    // shared-stack pod's capability is `None`, exactly like an ordinary pod's,
+    // so a capability-first test falls through to the pod copy and explains a
+    // Winston draft as opening packs and passing them — a procedure it does not
+    // have. Both reads are engine-published procedure facts; only their order
+    // makes one of them wrong.
+    const sharedStack = isSharedStackDistribution(view.distribution)
+      ? view.distribution.SharedStackPiles
+      : null;
+
+    return (
+      <DraftIntro
+        mode={sharedStack !== null
+          ? "winston"
+          : view.launch_capability === "CommanderMultiplayer"
+            ? "commander"
+            : "pod"}
+        podSize={view.seats.length}
+        packCount={view.pack_count}
+        cardsPerPack={view.cards_per_pack}
+        packSizes={view.pack_sizes}
+        pileCount={sharedStack?.pile_count}
+        minDeckSize={view.min_deck_size}
+        onContinue={() => setIntroDismissed(true)}
+      />
+    );
   }
 
-  // Wire `pauseReason` is `DraftPauseReason` (PascalCase) — same shape as the
-  // i18n key path, so no boundary conversion. Falls back to a generic key if
-  // the engine ever emits an unknown reason (defensive only).
+  // A total `Record` over `DraftPauseReason`, not an interpolated key. Same
+  // device as `PICK_STATUS_KEY` and `REFUSAL_KEY`, for the reason measured
+  // there: an interpolated `t()` does NOT typecheck its key, so a reason the
+  // engine grows later would reach the banner as its own key text. This way it
+  // is a TS2741 at this literal. The `??` is the "not paused for a named
+  // reason" fallback, not a defence against an unknown variant -- the wire
+  // refuses those.
+  const PAUSE_REASON_KEY = {
+    PlayerDisconnected: "podPhaseView.pauseReason.PlayerDisconnected",
+    PausedByHost: "podPhaseView.pauseReason.PausedByHost",
+    DisconnectGraceExpired: "podPhaseView.pauseReason.DisconnectGraceExpired",
+  } as const satisfies Record<DraftPauseReason, string>;
   const pauseKey = pauseReason ?? "PausedByHost";
 
   return (
@@ -642,60 +1238,273 @@ function DraftingPhaseContent() {
           role="status"
           className="mb-3 rounded-lg border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100"
         >
-          ⚠ {t(`podPhaseView.pauseReason.${pauseKey}`)}
+          ⚠ {t(PAUSE_REASON_KEY[pauseKey])}
         </div>
       )}
-      <div className="flex gap-4">
-        <div className="flex min-w-0 flex-1 flex-col">
-          <SeatStatusRing />
+      <div
+        data-responsive-draft-layout={responsiveLayout}
+        className={responsiveLayout === "desktop"
+          ? "flex w-full min-w-0 flex-col gap-4"
+          : responsiveLayout === "phone-portrait"
+            ? "relative flex h-[calc(100dvh_-_11rem)] min-h-0 w-full min-w-0 flex-col"
+            : responsiveLayout === "phone-landscape"
+              ? "relative block h-[calc(100dvh_-_4rem)] w-full min-w-0 overflow-hidden pb-[58px]"
+              : responsiveLayout === "tablet-portrait"
+                ? "grid h-[calc(100dvh_-_8rem)] w-full min-w-0 grid-rows-[minmax(0,56%)_minmax(0,44%)] gap-2"
+                : "grid h-[calc(100dvh_-_8rem)] w-full min-w-0 grid-cols-[minmax(340px,40%)_minmax(0,60%)] gap-2"}
+      >
+        <div className={responsiveLayout === "desktop"
+          ? "w-full min-w-0"
+          : "h-full min-h-0 w-full min-w-0 overflow-hidden"}>
+          {responsiveLayout === "desktop" && <SeatStatusRing />}
+          {/* `DraftProgress` describes a PICK-AND-PASS step — a pack number and a
+              pick step out of that pack's total — and neither exists under a
+              shared stack: the turn is a whole-pile decision and the engine
+              publishes no pick step for it. So it is gated on the same
+              engine-published discriminator that selects the surface below,
+              rather than rendering a frozen pack bar beside the piles.
+
+              `PickTimer` IS NOT GATED, and the asymmetry is the point. The host
+              re-arms the pick clock on every applied shared-stack decision
+              (`P2PDraftHost.handleSharedStackDecision`) and expiry runs
+              `autoDecideSharedStackTurn`, which applies the first legal decision
+              for the active seat — it takes the pile for them. A player who
+              cannot see that clock loses a turn with no warning, which is worse
+              than the frozen-bar problem the gate above avoids. `PickTimer`
+              self-gates on `pod_policy === "Competitive"` and a non-null
+              remaining time, which is exactly the condition under which the
+              sweep can fire, so rendering it unconditionally shows it precisely
+              when it is real. */}
+          {responsiveLayout === "desktop" && sharedStack === null && <DraftProgress view={view} />}
           <PickTimer />
-          <DraftProgress view={view} />
-          <PackDisplay
-            view={view}
-            selectedCard={selectedCard}
-            onSelectCard={selectCard}
-            onConfirmPick={confirmPick}
-            showAutoPick
-            onAutoPick={autoPickCard}
-            onCardHover={setHoveredCard}
-          />
+          {sharedStack !== null && view !== null ? (
+            /* The ENGINE's discriminator, not a kind check: `shared_stack` is
+               status-gated to `Drafting` and present only under
+               `PackDistribution::SharedStackPiles`, so a non-null value means
+               exactly "a live pile turn", and `current_pack` — which drives
+               `PackDisplay` — is null for every seat in such a draft. */
+            <WinstonPileTable
+              sharedStack={sharedStack}
+              seats={view.seats}
+              viewerSeat={seatIndex}
+              playFirstChooser={view.play_first_chooser}
+              interactionLocked={interactionLocked}
+              onDecide={handleSharedStackDecision}
+              pileScale={workspacePreferences.pileScale}
+              setPileScale={setPileScale}
+              responsiveLayout={responsiveLayout}
+            />
+          ) : (
+            <PackDisplay
+              controller={packController}
+              presentation={{ packScale: workspacePreferences.packScale, setPackScale }}
+              enableDraftEffects
+              onCardHover={setHoveredCard}
+              responsiveLayout={responsiveLayout}
+              phoneToolbarPinned={phoneToolbarPinned}
+              mobileWorkspaceOpen={mobileWorkspaceOpen}
+            />
+          )}
         </div>
-        <PoolPanel view={view} onCardHover={setHoveredCard} />
+        {view && workspaceState && (
+          <div className={responsiveLayout === "desktop"
+            ? "w-full min-w-0"
+            : phoneLayout
+              ? "h-0 min-h-0 w-full min-w-0"
+              : "h-full min-h-0 w-full min-w-0"}>
+            <DraftWorkspace
+              pool={view.pool}
+              poolGroups={view.pool_groups}
+              workspace={workspaceState}
+              preferences={workspacePreferences}
+              interactionLocked={interactionLocked}
+              dragController={dragController}
+              onWorkspaceChange={(next) => useMultiplayerDraftStore.getState().setWorkspaceState(next)}
+              onPreferencesChange={handlePreferencesChange}
+              onCardHover={setHoveredCard}
+              responsiveLayout={responsiveLayout}
+              mobileOverlay
+              mobileWorkspaceOpen={mobileWorkspaceOpen}
+              onMobileWorkspaceOpenChange={setMobileWorkspaceOpen}
+            />
+          </div>
+        )}
       </div>
-      <CardPreview cardName={hoveredCard?.name ?? null} sourcePrinting={hoveredCard?.sourcePrinting} />
+      <HoverCardPreview
+        card={hoveredCard}
+        mode={draftCardPreviewMode}
+        hoverDelayMs={0}
+      />
     </>
   );
 }
 
-function PodDeckBuilder() {
+function PodDeckBuilder({ responsiveLayout }: { responsiveLayout: ResponsiveDraftLayout }) {
   const view = useMultiplayerDraftStore((s) => s.view);
-  const mainDeck = useMultiplayerDraftStore((s) => s.mainDeck);
-  const landCounts = useMultiplayerDraftStore((s) => s.landCounts);
-  const addToDeck = useMultiplayerDraftStore((s) => s.addToDeck);
-  const removeFromDeck = useMultiplayerDraftStore((s) => s.removeFromDeck);
-  const setLandCount = useMultiplayerDraftStore((s) => s.setLandCount);
+  const workspace = useMultiplayerDraftStore((s) => s.workspaceState);
+  const interactionLocked = useMultiplayerDraftStore((s) => s.pickInteractionLocked);
   const submitDeck = useMultiplayerDraftStore((s) => s.submitDeck);
+  const autoSuggestLands = useMultiplayerDraftStore((s) => s.autoSuggestLands);
+  const submissionError = useMultiplayerDraftStore((s) => s.error);
+  const [preferences, setPreferences] = useState<DraftWorkspacePreferences>(loadDraftWorkspacePreferences);
+  const handlePreferencesChange = useCallback((next: DraftWorkspacePreferences) => {
+    setPreferences(next);
+    saveDraftWorkspacePreferences(next);
+  }, []);
+
+  if (!view || !workspace) return null;
 
   return (
     <LimitedDeckBuilder
-      view={view}
-      mainDeck={mainDeck}
-      landCounts={landCounts}
-      onAddToDeck={addToDeck}
-      onRemoveFromDeck={removeFromDeck}
-      onSetLandCount={setLandCount}
-      onSubmitDeck={submitDeck}
-      showSuggestions={false}
+      local={{
+        view,
+        workspace,
+        preferences,
+        interactionLocked,
+        capabilities: { kind: "editable-pool", suggestions: true },
+        onWorkspaceChange: (next) => useMultiplayerDraftStore.getState().setWorkspaceState(next),
+        onPreferencesChange: handlePreferencesChange,
+        onAddBasicLand: (name) => useMultiplayerDraftStore.getState().addBasicLand(name),
+        onRemoveBasicLand: (name) => useMultiplayerDraftStore.getState().removeBasicLand(name),
+        onAutoSuggestLands: autoSuggestLands,
+        onSubmitDeck: submitDeck,
+      }}
+      submissionError={submissionError}
+      showSuggestions
+      responsiveLayout={responsiveLayout}
     />
   );
 }
 
 function CompleteView({ onLeave }: { onLeave: () => void }) {
   const { t } = useTranslation("draft");
+  const navigate = useNavigate();
+  // Primitive selectors, matching this file's existing convention. The
+  // component reads state and dispatches; it computes no game state. The seat
+  // count the LAUNCH carries is still read inside the store from `view.seats` —
+  // the read below is a transport-capability check against the store's own
+  // exported ceiling, not a game-state derivation.
+  const view = useMultiplayerDraftStore((s) => s.view);
+  const role = useMultiplayerDraftStore((s) => s.role);
+  const commanderLaunch = useMultiplayerDraftStore((s) => s.commanderLaunch);
+  const launchCommanderGame = useMultiplayerDraftStore((s) => s.launchCommanderGame);
+  const joinCommanderGame = useMultiplayerDraftStore((s) => s.joinCommanderGame);
+  const cancelCommanderLaunch = useMultiplayerDraftStore((s) => s.cancelCommanderLaunch);
+  const joinPending = useMultiplayerDraftStore((s) => s.commanderJoinPending);
+  // Non-null exactly when this client may launch. The engine procedure
+  // authorizes it — the page must not infer it from a draft-kind label — and
+  // only the host holds the session the decks are assembled from. Carrying the
+  // VIEW rather than a boolean is what lets the seat-ceiling read below narrow
+  // without an optional chain, and keeps that read off every other role's path.
+  const launchableView =
+    view?.launch_capability === "CommanderMultiplayer" && role === "host" ? view : null;
+  // `commanderLaunch` is the store's ONLY observable of a launch. The host's is
+  // written by its own local emit on the FIRST iteration of
+  // `sendCommanderLaunches` — the host is pod seat 0, `liveSeatDecks` is built
+  // in `view.seats` order, and `sendToSeat`'s seat-0 arm turns that send into a
+  // local event. The loop is synchronous, so the position does not matter to
+  // behaviour; what matters is that the window between the CLICK and that write
+  // is the whole `hostRoom` round-trip, covered by the store's
+  // `commanderLaunchInFlight` re-entry guard rather than by this flag.
+  const launchInFlight = commanderLaunch !== null;
+  // The invitation IS the authorization: a guest holds a `commanderLaunch` only
+  // because this pod's host addressed one to its seat. Nothing here is derived
+  // from the pod view — the seat that joins arrives on the wire as
+  // `playerIdentity`.
+  const canJoin = role === "guest" && commanderLaunch !== null;
+  // D5. The pod can legally seat more players than the P2P transport carries
+  // (the engine's Commander Draft format allows eight, `P2PHostAdapter` throws
+  // above six), and `launchCommanderGame` refuses such a pod outright. Showing
+  // an enabled button whose only outcome is an error banner is the worse
+  // failure, so the refusal is stated up front instead.
+  const seatCount = launchableView?.seats.length ?? 0;
+  const overSeatCeiling = seatCount > COMMANDER_P2P_SEAT_CEILING;
+  // Only an IN-FLIGHT launch disables the button. Being over the transport's
+  // seat ceiling does not: such a pod still has a playable outcome (a local
+  // game against the engine, every drafted deck included), so the ceiling
+  // changes WHICH game the button starts, not whether it starts one. Disabling
+  // it here is what left 7- and 8-seat pods with no way to play at all.
+  // One source for the two places a disabled button has to say so — the
+  // attribute the browser enforces and the class that shows it.
+  const launchDisabled = launchInFlight;
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col items-center gap-6 py-8">
+      {/* `launchCommanderGame` reports a payload refusal by writing `error` and
+          NOT navigating, so without this banner that failure is invisible and
+          the launch button reads as dead. Same placement as the other phase
+          views (`PairingPhaseView`, `MatchInProgressView`, ...).
+
+          It is also the whole recovery path for a join that dials a room the
+          host has already cancelled: `cancelCommanderLaunch` tears the game
+          room down but reaches only sessions on the GAME adapter, so a guest
+          that never pressed Join keeps its `commanderLaunch` and its Join
+          button. That press rejects on a dead Peer and lands here. Nothing
+          latches — the store clears its in-flight handle in a `finally` and
+          deliberately leaves `commanderLaunch` set — so the guest can dismiss
+          this banner and press Join again once the host relaunches (a relaunch
+          overwrites `commanderLaunch` on the pod wire), or leave below. */}
+      <PodErrorBanner />
       <h1 className="menu-display text-3xl text-white">{t("podComplete.title")}</h1>
       <FormatStandings />
+      {launchableView && (
+        <div className="flex w-full flex-col items-center gap-3">
+          {launchInFlight && (
+            // `role="status"` — a polite live region, because the launch button
+            // goes disabled in the same render and a screen-reader user who
+            // just pressed it would otherwise be told nothing. Styled as this
+            // file's passive waiting prose (`RoundCompleteView`).
+            <p role="status" className="text-center text-sm text-white/50">
+              {t("podComplete.waitingForPlayers")}
+            </p>
+          )}
+          <button
+            onClick={() => void launchCommanderGame(navigate)}
+            disabled={launchDisabled}
+            className={menuButtonClass({ tone: "indigo", size: "md", disabled: launchDisabled })}
+          >
+            {overSeatCeiling
+              ? t("podComplete.launchLocalCommanderGame")
+              : t("podComplete.launchCommanderGame")}
+          </button>
+          {overSeatCeiling && (
+            <p className="max-w-md text-center text-sm text-white/50">
+              {t("podComplete.seatCeiling", { seats: seatCount, max: COMMANDER_P2P_SEAT_CEILING })}
+            </p>
+          )}
+          {launchInFlight && (
+            <button
+              onClick={() => void cancelCommanderLaunch()}
+              className={menuButtonClass({ tone: "neutral", size: "sm" })}
+            >
+              {t("podComplete.cancelCommanderLaunch")}
+            </button>
+          )}
+        </div>
+      )}
+      {canJoin && (
+        // The guest's mirror of the host's waiting block above, deliberately
+        // the same shape. The join parks until every live seat has joined AND
+        // the host starts the game, so without this the button is
+        // indistinguishable from a dead one for minutes — which is the very
+        // complaint this whole change exists to answer.
+        <div className="flex w-full flex-col items-center gap-3">
+          {joinPending && (
+            // `role="status"`, as the host's is: the button goes disabled in
+            // the same render, so a screen-reader user who just pressed it
+            // would otherwise be told nothing at all.
+            <p role="status" className="text-center text-sm text-white/50">
+              {t("podComplete.joiningCommanderGame")}
+            </p>
+          )}
+          <button
+            onClick={() => void joinCommanderGame(navigate)}
+            disabled={joinPending}
+            className={menuButtonClass({ tone: "indigo", size: "md", disabled: joinPending })}
+          >
+            {t("podComplete.joinCommanderGame")}
+          </button>
+        </div>
+      )}
       <button
         onClick={onLeave}
         className={menuButtonClass({ tone: "emerald", size: "md" })}
@@ -709,20 +1518,35 @@ function CompleteView({ onLeave }: { onLeave: () => void }) {
 function PodErrorView({
   phase,
   onLeave,
+  onRetry,
 }: {
   phase: "error" | "kicked" | "hostLeft";
   onLeave: () => void;
+  onRetry: () => void;
 }) {
   const { t } = useTranslation("draft");
+  const recoveryFailure = useMultiplayerDraftStore((s) => s.guestRecoveryFailure);
+  const reason = usePodErrorMessage(useMultiplayerDraftStore((s) => s.error));
+  // A recovery failure's own message wins over the store error, because a
+  // retry that fails offline writes the offline sentinel while the recovery
+  // failure and its retry stay.
   const message =
     phase === "kicked"
       ? t("podError.kicked")
       : phase === "hostLeft"
         ? t("podError.hostLeft")
-        : t("podError.connection");
+        : recoveryFailure?.message ?? reason ?? t("podError.connection");
   return (
     <div className="flex flex-col items-center justify-center gap-4 py-24">
       <div className="text-xl font-medium text-red-300">{message}</div>
+      {phase === "error" && recoveryFailure?.kind === "retryable" && (
+        <button
+          onClick={onRetry}
+          className={menuButtonClass({ tone: "emerald", size: "md" })}
+        >
+          {t("podError.retry")}
+        </button>
+      )}
       <button
         onClick={onLeave}
         className={menuButtonClass({ tone: "neutral", size: "md" })}
@@ -736,21 +1560,37 @@ function PodErrorView({
 // ── Phase-based Content ───────────────────────────────────────────────
 
 function phaseContent(
-  phase: MultiplayerDraftPhase,
+  screen: DraftPodScreen,
   onLeave: () => void,
+  responsiveLayout: ResponsiveDraftLayout,
+  fillEmbeddedHeight: boolean,
+  phoneLayout: boolean,
+  mobileWorkspaceOpen: boolean,
+  setMobileWorkspaceOpen: (open: boolean) => void,
+  onDismissOverlay: () => void,
+  onRetry: () => void,
 ): React.ReactNode {
-  switch (phase) {
+  // No `default` arm: `tsc` is what makes a future `DraftPodScreen` member
+  // impossible to forget here.
+  switch (screen) {
     case "idle":
     case "connecting":
       return <PodSetup />;
     case "lobby":
       return <DraftPodLobby onLeave={onLeave} />;
     case "drafting":
-      return <DraftingPhaseContent />;
+      return (
+        <DraftingPhaseContent
+          responsiveLayout={responsiveLayout}
+          phoneLayout={phoneLayout}
+          mobileWorkspaceOpen={mobileWorkspaceOpen}
+          setMobileWorkspaceOpen={setMobileWorkspaceOpen}
+        />
+      );
     case "deckbuilding":
-      return <PodDeckBuilder />;
+      return <PodDeckBuilder responsiveLayout={responsiveLayout} />;
     case "betweenGames":
-      return <BetweenGamesView />;
+      return <BetweenGamesView responsiveLayout={responsiveLayout} fillEmbeddedHeight={fillEmbeddedHeight} onDismiss={onDismissOverlay} />;
     case "pairing":
       return <PairingPhaseView />;
     case "matchInProgress":
@@ -762,45 +1602,330 @@ function phaseContent(
     case "error":
     case "kicked":
     case "hostLeft":
-      return <PodErrorView phase={phase} onLeave={onLeave} />;
+      return <PodErrorView phase={screen} onLeave={onLeave} onRetry={onRetry} />;
   }
 }
 
 // ── Page ───────────────────────────────────────────────────────────────
 
-export function DraftPodPage() {
+function DraftPodPageContent() {
+  const { t } = useTranslation("draft");
   const phase = useMultiplayerDraftStore((s) => s.phase);
+  const screen = useMultiplayerDraftStore(draftPodScreen);
+  const promptKey = useMultiplayerDraftStore(intergamePromptKey);
+  const playDrawPending = useMultiplayerDraftStore((s) => s.playDrawPrompt !== null);
+  const [dismissedPromptKey, setDismissedPromptKey] = useState<string | null>(null);
+  const sideboardPrompt = useMultiplayerDraftStore((s) => s.sideboardPrompt);
+  const playDrawPrompt = useMultiplayerDraftStore((s) => s.playDrawPrompt);
+  const sideboardSubmitted = useMultiplayerDraftStore((s) => s.sideboardSubmitted);
+  const view = useMultiplayerDraftStore((s) => s.view);
+  const intergameWorkspace = useMultiplayerDraftStore((s) => s.intergameWorkspaceState);
   const leave = useMultiplayerDraftStore((s) => s.leave);
+  const resumeDraft = useMultiplayerDraftStore((s) => s.resumeDraft);
   const resetPod = useDraftPodStore((s) => s.reset);
   const resumeHostedPod = useDraftPodStore((s) => s.resumeHostedPod);
+  const enterKindForEntry = useDraftPodStore((s) => s.enterKindForEntry);
   const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams] = useSearchParams();
+  const entryGeneration = useRef(0);
+  const retryController = useRef<AbortController | null>(null);
+  const entry = searchParams.get("entry");
+  // One resolver over the slug map instead of a `<kind>Requested` boolean per kind:
+  // the fifth kind adds a map entry in `draftKind.ts` and nothing here.
+  const requestedKind = draftKindForEntry(searchParams.get("kind"));
+  const resumeRequested = searchParams.get("resume") === "1";
+  const entryMode = entry === "host" || entry === "guest" || entry === "auto"
+    ? entry
+    : resumeRequested ? "host" : "auto";
+  const [responsiveViewport, setResponsiveViewport] = useState(() => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  }));
+  const [podStatusOpen, setPodStatusOpen] = useState(false);
+  const [mobileWorkspaceOpen, setMobileWorkspaceOpen] = useState(false);
+  const endingDraftLatch = useRef(false);
+  const [endingDraft, setEndingDraft] = useState(false);
+
+  const responsiveLayout: ResponsiveDraftLayout = getResponsiveDraftLayout(
+    responsiveViewport.width,
+    responsiveViewport.height,
+  );
+  const phoneLayout = responsiveLayout === "phone-portrait" || responsiveLayout === "phone-landscape";
+  const tabletLayout = responsiveLayout === "tablet-portrait" || responsiveLayout === "tablet-landscape";
+  const compactHostControlsLayout = phoneLayout || tabletLayout;
+  const phoneDrafting = phase === "drafting" && phoneLayout;
+  const responsiveDrafting = phase === "drafting" && (phoneLayout || tabletLayout);
+  const phoneDeckbuilding = phase === "deckbuilding" && phoneLayout;
+  const handleEndDraft = useCallback(() => {
+    if (endingDraftLatch.current) return;
+    if (!window.confirm(t("hostControls.endDraftConfirm"))) return;
+
+    endingDraftLatch.current = true;
+    setEndingDraft(true);
+    void (async () => {
+      try {
+        await leave(false);
+        resetPod();
+        navigate("/");
+      } catch (err) {
+        console.error("[DraftPodPage] failed to end draft:", err);
+        endingDraftLatch.current = false;
+        setEndingDraft(false);
+      }
+    })();
+  }, [leave, navigate, resetPod, t]);
+  const endDraftAction = useMemo<DraftShellTopAction>(() => ({
+    id: "end-draft",
+    label: t("hostControls.endDraft"),
+    tone: "danger",
+    disabled: endingDraft,
+    onClick: handleEndDraft,
+  }), [endingDraft, handleEndDraft, t]);
+  const hostDraftTopActions = useHostDraftTopActions({
+    enabled: phase === "drafting" || phase === "deckbuilding",
+    endDraftAction,
+  });
+  const betweenGamesEditorActive = screen === "betweenGames"
+    && sideboardPrompt !== null
+    && view !== null
+    && intergameWorkspace !== null
+    && !sideboardSubmitted
+    && playDrawPrompt === null;
+  const tabletDeckbuilding = tabletLayout && (phase === "deckbuilding" || betweenGamesEditorActive);
+  const fillEmbeddedHeight = useInShell()
+    && (responsiveDrafting || phoneDeckbuilding || tabletDeckbuilding);
 
   useEffect(() => {
-    if (searchParams.get("resume") !== "1") return;
-    void resumeHostedPod();
-  }, [resumeHostedPod, searchParams]);
+    const refreshViewport = () => setResponsiveViewport({
+      width: window.innerWidth,
+      height: window.innerHeight,
+    });
+    window.addEventListener("resize", refreshViewport);
+    window.addEventListener("orientationchange", refreshViewport);
+    return () => {
+      window.removeEventListener("resize", refreshViewport);
+      window.removeEventListener("orientationchange", refreshViewport);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!responsiveDrafting) {
+      setPodStatusOpen(false);
+    }
+  }, [responsiveDrafting]);
+
+  useEffect(() => {
+    if (!phoneLayout) {
+      setMobileWorkspaceOpen(false);
+    }
+  }, [phoneLayout]);
+
+  const handleOpenPodStatus = useCallback(() => {
+    setPodStatusOpen(true);
+  }, []);
+
+  const phoneAction: DraftShellPhoneAction | undefined = useMemo(() => {
+    if (!responsiveDrafting) return undefined;
+    return {
+      icon: <PodIcon className="h-6 w-6 opacity-70" />,
+      label: t("landing.podInProgress"),
+      onClick: handleOpenPodStatus,
+    };
+  }, [handleOpenPodStatus, responsiveDrafting, t]);
+
+  useDraftShellChrome(
+    phoneDrafting
+      ? "phone-drafting"
+      : phoneDeckbuilding
+        ? "phone-deckbuilding"
+        : tabletDeckbuilding
+          ? "tablet-deckbuilding"
+        : tabletLayout && phase === "drafting"
+          ? "tablet-drafting"
+          : "default",
+    phoneAction,
+    "pod",
+    !phoneLayout,
+    hostDraftTopActions,
+  );
+
+  useEffect(() => {
+    const generation = entryGeneration;
+    const routeToken = ++generation.current;
+    const controller = new AbortController();
+
+    void (async () => {
+      if (entryMode === "host" || entryMode === "auto") {
+        // A host locator gets first claim on automatic entry. A guest locator
+        // is considered only after a terminal/invalid host locator has actually
+        // been cleared, so a damaged host record cannot steal a guest's route.
+        const outcome = await resumeHostedPod({
+          silent: entryMode === "auto",
+          entry: entryMode,
+          routeToken,
+          signal: controller.signal,
+        });
+        if (generation.current !== routeToken) return;
+        if (entryMode === "host" || outcome === "resumed" || outcome === "superseded") return;
+
+        if (outcome === "absent" || outcome === "terminal" || outcome === "invalid") {
+          const guestOutcome: GuestDraftResumeOutcome = await resumeDraft({
+            routeToken,
+            signal: controller.signal,
+          });
+          if (generation.current !== routeToken || guestOutcome === "superseded") return;
+          if (guestOutcome === "resumed" || guestOutcome === "failed") return;
+        }
+      } else {
+        const guestOutcome: GuestDraftResumeOutcome = await resumeDraft({
+          routeToken,
+          signal: controller.signal,
+        });
+        if (generation.current !== routeToken || guestOutcome === "superseded") return;
+        return;
+      }
+    })();
+    return () => {
+      controller.abort();
+      retryController.current?.abort();
+      retryController.current = null;
+      if (generation.current === routeToken) generation.current++;
+    };
+  }, [entryMode, location.pathname, location.search, resumeDraft, resumeHostedPod]);
+
+  const retryGuestRecovery = useCallback(() => {
+    retryController.current?.abort();
+    const controller = new AbortController();
+    retryController.current = controller;
+    const routeToken = ++entryGeneration.current;
+    void resumeDraft({ routeToken, signal: controller.signal }).finally(() => {
+      if (retryController.current === controller) retryController.current = null;
+    });
+  }, [resumeDraft]);
+
+  useEffect(() => {
+    // A resumed pod's kind comes from its persisted session, which is the higher
+    // authority — a URL intent must never overwrite it.
+    if (resumeRequested) return;
+    if (requestedKind === null) return;
+    void enterKindForEntry(requestedKind);
+  }, [requestedKind, enterKindForEntry, resumeRequested]);
 
   const handleLeave = useCallback(async () => {
-    await leave(true);
+    await leave(false);
     resetPod();
     navigate("/");
   }, [leave, resetPod, navigate]);
 
+  // A dismissal is scoped to the prompt it was made about, so it expires by
+  // construction when the next game's prompt — or the same game's play/draw
+  // decision — arrives: no effect, no cleanup, and no latch that could outlive
+  // the window it was hiding.
+  const overlayDismissed = promptKey !== null && promptKey === dismissedPromptKey;
+  const visibleScreen: DraftPodScreen = overlayDismissed ? phase : screen;
+
+  // `showBack` stays on `phase`: it is `idle`/`connecting` only — both of which
+  // `draftPodScreen` returns verbatim — and it is a session-level affordance,
+  // not a screen-level one.
   const showBack = phase === "idle" || phase === "connecting";
 
   return (
-    <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
+    <div className={`menu-scene relative flex flex-col overflow-hidden ${fillEmbeddedHeight ? "h-full min-h-0 flex-1" : phoneDrafting ? "h-dvh min-h-0 overscroll-none" : tabletLayout && phase === "drafting" ? "h-full min-h-0" : "min-h-screen"}`}>
       <ScreenChrome onBack={showBack ? handleLeave : undefined} />
 
       {/* Centered MenuShell column — same responsive framing as every other
           out-of-match surface. Each phase view renders its own heading, so no
           MenuShell title is passed. */}
-      <MenuShell layout="stacked">
-        <div className="flex w-full flex-col">{phaseContent(phase, handleLeave)}</div>
+      <MenuShell
+        layout="stacked"
+        contentWidthClass="max-w-none"
+        compactTopPadding={
+          (phoneLayout && (phase === "drafting" || phase === "deckbuilding"))
+          || tabletDeckbuilding
+        }
+        fillEmbeddedHeight={fillEmbeddedHeight}
+      >
+        <div className={`flex w-full flex-col ${fillEmbeddedHeight ? "h-full min-h-0 flex-1" : ""}`}>
+          {screen === "betweenGames" && overlayDismissed && (
+            <div
+              role="status"
+              className="mb-3 flex items-center justify-between gap-3 rounded-xl border border-amber-400/25 bg-amber-400/10 px-4 py-2"
+            >
+              <span className="text-sm text-white/70">
+                {t(playDrawPending ? "betweenGames.hiddenNoticePlayDraw" : "betweenGames.hiddenNotice")}
+              </span>
+              <button
+                onClick={() => setDismissedPromptKey(null)}
+                className={menuButtonClass({ tone: "neutral", size: "xs" })}
+              >
+                {t("betweenGames.showOverlay")}
+              </button>
+            </div>
+          )}
+          {phaseContent(
+            visibleScreen,
+            handleLeave,
+            responsiveLayout,
+            fillEmbeddedHeight,
+            phoneLayout,
+            mobileWorkspaceOpen,
+            setMobileWorkspaceOpen,
+            () => setDismissedPromptKey(promptKey),
+            retryGuestRecovery,
+          )}
+        </div>
       </MenuShell>
 
-      <HostControls />
+      {podStatusOpen && (
+        <DialogShell
+          title={t("landing.podInProgress")}
+          onClose={() => setPodStatusOpen(false)}
+          size="sm"
+        >
+          <SeatStatusRing />
+        </DialogShell>
+      )}
+
+      {!((phase === "drafting" || phase === "deckbuilding") && compactHostControlsLayout) && (
+        <HostControls
+          draftTopActions={hostDraftTopActions}
+          endDraftAction={endDraftAction}
+        />
+      )}
     </div>
   );
+}
+
+function DraftPodOfflineUnavailable() {
+  const { t } = useTranslation(["draft", "menu"]);
+  const navigate = useNavigate();
+
+  return (
+    <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
+      <MenuShell
+        title={t("offline.unavailableTitle", { ns: "draft" })}
+        description={t("offline.unavailableDescription", { ns: "draft" })}
+        layout="stacked"
+      >
+        <MenuPanel className="relative z-10 flex w-full max-w-3xl flex-col items-start gap-4 px-5 py-6">
+          <button
+            onClick={() => navigate("/")}
+            className={menuButtonClass({ tone: "neutral", size: "sm" })}
+          >
+            {t("nav.home", { ns: "menu" })}
+          </button>
+        </MenuPanel>
+      </MenuShell>
+    </div>
+  );
+}
+
+export function DraftPodPage() {
+  const effectiveOffline = useEffectiveOffline();
+  const draftPodLive = useMultiplayerDraftStore(isMultiplayerDraftPodLive);
+
+  if (effectiveOffline && !draftPodLive) return <DraftPodOfflineUnavailable />;
+
+  return <DraftPodPageContent />;
 }

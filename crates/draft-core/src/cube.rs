@@ -2,6 +2,7 @@ use rand::seq::SliceRandom;
 use serde::Serialize;
 
 use engine::database::CardDatabase;
+use engine::parser::oracle::draft_effect_from_oracle_text;
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
 use engine::types::mana::ManaColor;
@@ -161,6 +162,10 @@ fn card_instance_from_face(face: &CardFace, index: usize, copy: u32) -> DraftCar
         colors: face.color_identity.iter().map(mana_color_letter).collect(),
         cmc: face.mana_cost.mana_value().min(u32::from(u8::MAX)) as u8,
         type_line: type_line(face),
+        draft_effect: face
+            .oracle_text
+            .as_deref()
+            .and_then(draft_effect_from_oracle_text),
     }
 }
 
@@ -221,6 +226,10 @@ impl CubePackSource {
 }
 
 impl PackSource for CubePackSource {
+    fn booster_pack_pool(&self) -> Option<Vec<String>> {
+        Some(self.cards.iter().map(|card| card.name.clone()).collect())
+    }
+
     fn generate_pack(
         &self,
         _rng: &mut dyn rand::RngCore,
@@ -301,6 +310,7 @@ mod tests {
                 colors: Vec::new(),
                 cmc: 0,
                 type_line: String::new(),
+                draft_effect: None,
             })
             .collect();
         let source = CubePackSource::new(cards);
@@ -385,6 +395,15 @@ mod tests {
         assert_eq!(cards.len(), 1);
         // Resolved to the real printed card via the oracle-id fallback.
         assert_eq!(cards[0].name, "Spider-Woman, Stunning Savior");
+        let counted = CubeListEntry {
+            count: 3,
+            ..entries[0].clone()
+        };
+        let source = CubePackSource::new(cube_cards_from_entries(&[counted], &db).unwrap());
+        assert_eq!(
+            source.booster_pack_pool(),
+            Some(vec!["Spider-Woman, Stunning Savior".to_string(); 3])
+        );
     }
 
     #[test]

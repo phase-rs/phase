@@ -1,0 +1,87 @@
+name: Preview Web Image
+
+# Preview twin of release.yml's build-web-image, called by deploy.yml after
+# build-pages. phase-web:sha-<12> and phase-server:sha-<12> are built from the
+# same commit, but either can be missing (their jobs fail independently), and
+# the two :preview tags can name different commits. The payload is the
+# github-pages artifact deploy-pages published in the calling run, so the image
+# serves Pages' files (404.html included) plus the base image's 50x.html; the
+# chart's nginx uses neither as an error page.
+
+on:
+  workflow_call:
+    inputs:
+      deploy_sha:
+        description: Commit the calling deploy published to Pages
+        required: true
+        type: string
+      pages_artifact_id:
+        description: Id of the github-pages artifact that build-pages uploaded and deployed
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  DEPLOY_SHA: ${{ inputs.deploy_sha }}
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/phase-web
+
+jobs:
+  push:
+    name: Build & push web image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - name: Download the deployed Pages artifact
+        # Kept 1 day (upload-pages-artifact default): re-run only within 24 h
+        # of the Pages upload. By id: if a newer github-pages artifact exists in
+        # the run, download-artifact drops this id and the step fails rather
+        # than packaging the other one.
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ inputs.pages_artifact_id }}
+          path: ${{ runner.temp }}/pages
+
+      - name: Unpack the bundle
+        # upload-pages-artifact stores the site as a single artifact.tar, and a
+        # download by id lands under the artifact's name.
+        run: |
+          mkdir -p client/dist
+          tar -xf "$RUNNER_TEMP/pages/github-pages/artifact.tar" -C client/dist
+          test -s client/dist/index.html
+
+      - name: Compute image tags
+        id: image
+        run: echo "short_sha=${DEPLOY_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # No setup-qemu-action: phase-web.Dockerfile is FROM + COPY, nothing runs
+      # in either target rootfs.
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Build and push preview web image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false
+        with:
+          context: client
+          file: deploy/phase-web.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:preview
+            ${{ env.IMAGE_NAME }}:sha-${{ steps.image.outputs.short_sha }}

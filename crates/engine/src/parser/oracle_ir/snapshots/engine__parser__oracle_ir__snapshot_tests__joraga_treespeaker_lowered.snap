@@ -1,0 +1,174 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 555
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": {
+          "type": "Fixed",
+          "colors": [
+            "Green",
+            "Green"
+          ]
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "duration": null,
+      "description": "{T}: Add {G}{G}.",
+      "target_prompt": null,
+      "activation_restrictions": [
+        {
+          "type": "LevelCounterRange",
+          "data": {
+            "minimum": 1,
+            "maximum": 4
+          }
+        }
+      ],
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false,
+      "is_mana_ability": true
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "affected": {
+        "type": "SelfRef"
+      },
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 1
+        },
+        {
+          "type": "SetToughness",
+          "value": 2
+        }
+      ],
+      "condition": {
+        "type": "HasCounters",
+        "counters": {
+          "type": "OfType",
+          "data": "level"
+        },
+        "minimum": 1,
+        "maximum": 4
+      },
+      "affected_zone": null,
+      "effect_zone": null,
+      "active_zones": [],
+      "characteristic_defining": false,
+      "description": "LEVEL 1-4 / 1/2"
+    },
+    {
+      "mode": "Continuous",
+      "affected": {
+        "type": "SelfRef"
+      },
+      "modifications": [
+        {
+          "type": "SetPower",
+          "value": 1
+        },
+        {
+          "type": "SetToughness",
+          "value": 4
+        }
+      ],
+      "condition": {
+        "type": "HasCounters",
+        "counters": {
+          "type": "OfType",
+          "data": "level"
+        },
+        "minimum": 5
+      },
+      "affected_zone": null,
+      "effect_zone": null,
+      "active_zones": [],
+      "characteristic_defining": false,
+      "description": "LEVEL 5+ / 1/4"
+    },
+    {
+      "mode": "Continuous",
+      "affected": {
+        "type": "Typed",
+        "type_filters": [
+          "Creature",
+          {
+            "Subtype": "Elf"
+          }
+        ],
+        "controller": "You",
+        "properties": []
+      },
+      "modifications": [
+        {
+          "type": "GrantAbility",
+          "definition": {
+            "kind": "Activated",
+            "effect": {
+              "type": "Mana",
+              "produced": {
+                "type": "Fixed",
+                "colors": [
+                  "Green",
+                  "Green"
+                ]
+              }
+            },
+            "cost": {
+              "type": "Tap"
+            },
+            "sub_ability": null,
+            "duration": null,
+            "description": "{T}: Add {G}{G}.",
+            "target_prompt": null,
+            "condition": null,
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false,
+            "is_mana_ability": true
+          }
+        }
+      ],
+      "condition": {
+        "type": "HasCounters",
+        "counters": {
+          "type": "OfType",
+          "data": "level"
+        },
+        "minimum": 5
+      },
+      "affected_zone": null,
+      "effect_zone": null,
+      "active_zones": [],
+      "characteristic_defining": false,
+      "description": "Elves you control have \"{T}: Add {G}{G}.\""
+    }
+  ],
+  "replacements": [],
+  "extractedKeywords": [
+    {
+      "LevelUp": {
+        "type": "Cost",
+        "shards": [
+          "Green"
+        ],
+        "generic": 1
+      }
+    }
+  ]
+}

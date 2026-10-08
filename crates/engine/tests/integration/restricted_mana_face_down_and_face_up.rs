@@ -120,6 +120,8 @@ fn face_down_spell_mana_rejects_every_production_context() {
                 source_types: &["Creature".to_string()],
                 source_subtypes: &[],
                 ability_tag: None,
+                mana_color_constraint:
+                    engine::types::mana::ActivationManaColorConstraint::Unrestricted,
             }
         )
         .is_none(),

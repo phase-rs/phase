@@ -24,10 +24,13 @@
 //! CR 613.4b: layer 7b sets the chosen base power/toughness.
 //! CR 601.2f: the additional cost is part of the spell's total cost.
 
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::engine::apply_as_current;
+use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
 
 const VINCENTS_ORACLE: &str = "Tiered (Choose one additional cost.)\n\
     Until end of turn, target creature you control gains \"When this creature dies, return it to the battlefield tapped under its owner's control\" and has the chosen base power and toughness.\n\
@@ -153,6 +156,89 @@ fn set_base_pt_applies_before_counter_layer() {
         outcome.power_toughness(creature),
         (4, 3),
         "base set 3/2 (7b) then +1/+1 counter (7c) = 4/3"
+    );
+}
+
+/// CR 603.6c + CR 603.10a + CR 400.7e: the temporary GrantTrigger supplied by
+/// Vincent's selected mode must use last-known information when the creature
+/// dies, then return that new object tapped under its owner's control. The
+/// lethal damage is dealt by a second spell through the normal cast pipeline,
+/// rather than moving the creature directly between zones.
+#[test]
+fn granted_dies_trigger_returns_selected_creature_tapped() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let creature = scenario.add_vanilla(P1, 2, 2);
+    let gain_control = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Temporary Control",
+            true,
+            "Gain control of target creature until end of turn.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Vincent's Limit Break", true, VINCENTS_ORACLE)
+        .with_mana_cost(base_cost())
+        .id();
+    let lethal_damage = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock", true, "Shock deals 3 damage to any target.")
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    scenario.with_mana_pool(P0, black_pool(4));
+
+    let mut runner = scenario.build();
+    runner.cast(gain_control).target_object(creature).resolve();
+    assert_eq!(runner.state().objects[&creature].owner, P1);
+    assert_eq!(runner.state().objects[&creature].controller, P0);
+
+    runner
+        .cast(spell)
+        .modes(&[0])
+        .target_object(creature)
+        .resolve();
+
+    let mut committed = runner.cast(lethal_damage).target_object(creature).commit();
+    apply_as_current(committed.state_mut(), GameAction::PassPriority)
+        .expect("P0 passes priority for Shock");
+    apply_as_current(committed.state_mut(), GameAction::PassPriority)
+        .expect("P1 passes priority for Shock");
+
+    let pending = committed.state();
+    assert_eq!(
+        pending.objects[&creature].zone,
+        Zone::Graveyard,
+        "state-based actions must move the creature to its graveyard before the dies trigger resolves"
+    );
+    assert_eq!(
+        pending.stack.len(),
+        1,
+        "the granted dies trigger must be pending on the stack after the death"
+    );
+
+    apply_as_current(committed.state_mut(), GameAction::PassPriority)
+        .expect("P0 passes priority for the granted dies trigger");
+    apply_as_current(committed.state_mut(), GameAction::PassPriority)
+        .expect("P1 passes priority for the granted dies trigger");
+
+    let returned = &committed.state().objects[&creature];
+    assert_eq!(
+        returned.zone,
+        Zone::Battlefield,
+        "the granted trigger must return the dead creature to the battlefield"
+    );
+    assert_eq!(
+        returned.owner, P1,
+        "the returned creature must remain under its owner's identity"
+    );
+    assert_eq!(
+        returned.controller, P1,
+        "the granted trigger must return the creature under its owner's control"
+    );
+    assert!(
+        returned.tapped,
+        "the granted trigger must return the creature tapped"
     );
 }
 

@@ -2,13 +2,11 @@ use std::collections::HashSet;
 
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
-use crate::game::zones;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{ConniveSubject, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
-use crate::types::player::PlayerId;
 use crate::types::proposed_event::{AppliedReplacementKey, CounterPlacement, ProposedEvent};
 use crate::types::zones::Zone;
 
@@ -49,7 +47,10 @@ pub fn resolve(
     // Super-Genius — "If a creature you control would connive, instead you draw
     // a card, then that creature connives") before the draw/discard/counter
     // pipeline runs. The top-level resolve seeds an empty `applied` set.
-    propose_connive(state, conniver_id, count, HashSet::new(), events)
+    let conniver = state
+        .capture_connive_subject(conniver_id)
+        .ok_or(EffectError::ObjectNotFound(conniver_id))?;
+    propose_connive(state, conniver, count, HashSet::new(), events)
 }
 
 /// CR 701.50a + CR 614.1a + CR 616.1f: Propose a connive action through the
@@ -61,27 +62,26 @@ pub fn resolve(
 /// still-applicable connive replacements (CR 616.1f) without self-invoking.
 pub(crate) fn propose_connive(
     state: &mut GameState,
-    conniver_id: ObjectId,
+    conniver: ConniveSubject,
     count: u32,
     applied: HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let proposed = ProposedEvent::Connive {
-        object_id: conniver_id,
+        object_id: conniver.object_id(),
+        subject: Box::new(conniver.snapshot.clone()),
         count,
         applied,
     };
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(ProposedEvent::Connive {
-            object_id,
-            count: final_count,
-            ..
-        }) => resolve_connive_effect(state, object_id, final_count, events),
+            count: final_count, ..
+        }) => resolve_connive_effect(state, conniver, final_count, events),
         ReplacementResult::Execute(_) => {
             // Defensive: a non-Connive survivor cannot occur (the pipeline only
             // substitutes same-variant survivor events for count-modifier
             // replacements). Fall back to the original count.
-            resolve_connive_effect(state, conniver_id, count, events)
+            resolve_connive_effect(state, conniver, count, events)
         }
         ReplacementResult::Prevented => {
             // CR 701.50f + CR 701.50b: A replacement fully replaced the connive
@@ -103,7 +103,7 @@ pub(crate) fn propose_connive(
 /// replacement pipeline — CR 614.5).
 pub(crate) fn resolve_connive_effect(
     state: &mut GameState,
-    conniver_id: ObjectId,
+    conniver: ConniveSubject,
     count: u32,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
@@ -120,85 +120,40 @@ pub(crate) fn resolve_connive_effect(
     }
 
     // CR 701.50a: The conviving permanent's controller draws and discards.
-    let controller = state
-        .objects
-        .get(&conniver_id)
-        .map(|obj| obj.controller)
-        .unwrap_or(PlayerId(0));
+    let controller = conniver.snapshot.controller;
 
-    // Step 1: Draw `count` cards for the controller.
-    // CR 614.1a + CR 614.6 + CR 704.3: Route through the single-authority
-    // helper so post-replacement continuations drain in the same step.
-    let result = super::draw::draw_through_replacement(
+    // Step 1: Draw `count` cards for the controller. The frame retains the
+    // connive tail through any per-unit replacement pause.
+    match super::draw::start_draw_sequence_with_origin(
         state,
         controller,
         count,
-        events,
-        |state, event, events| {
-            let ProposedEvent::Draw {
-                player_id,
-                count: draw_count,
-                ..
-            } = event
-            else {
-                return;
-            };
-            // CR 121.1 + CR 613.11: route card selection through the single
-            // `select_cards_to_draw` authority so a `DrawFromBottom` static is
-            // honored on the connive draw too.
-            let cards_to_draw =
-                super::draw::select_cards_to_draw(state, player_id, draw_count as usize);
-
-            if draw_count > 0 && cards_to_draw.len() < draw_count as usize {
-                if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {
-                    p.drew_from_empty_library = true;
-                }
-            }
-
-            for obj_id in cards_to_draw {
-                zones::move_to_zone(state, obj_id, Zone::Hand, events);
-                // CR 121.1 + CR 504.1: Increment counters first; embed the
-                // resulting per-step ordinal into the event.
-                let (nth_in_turn, nth_in_step) =
-                    if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {
-                        p.cards_drawn_this_turn = p.cards_drawn_this_turn.saturating_add(1);
-                        p.cards_drawn_this_step = p.cards_drawn_this_step.saturating_add(1);
-                        (p.cards_drawn_this_turn, p.cards_drawn_this_step)
-                    } else {
-                        (1, 1)
-                    };
-                events.push(GameEvent::CardDrawn {
-                    player_id,
-                    object_id: obj_id,
-                    nth_in_turn,
-                    nth_in_step,
-                });
-                super::drawn_this_turn_choice::record_drawn_card(state, player_id, obj_id);
-                // CR 702.94a: Connive draws count as draws for miracle tracking.
-                super::draw::record_first_draw_and_enqueue_miracle(state, player_id, obj_id);
-            }
+        HashSet::new(),
+        crate::types::game_state::DrawSequenceOrigin::ConniveTail {
+            conniver: Box::new(conniver),
+            count,
         },
-    );
-    match result {
-        ReplacementResult::Execute(_) => {}
-        ReplacementResult::Prevented => {
-            // Draw was prevented — skip the discard step
-            // CR 701.50f + CR 701.50b: the EffectResolved carries the CONNIVER's
-            // id (LKI if it left the battlefield) so "whenever a creature you
-            // control connives" matches the conniving permanent, not the source.
-            events.push(GameEvent::EffectResolved {
-                kind: EffectKind::Connive,
-                source_id: conniver_id,
-                subject: None,
-            });
-            return Ok(());
-        }
-        ReplacementResult::NeedsChoice(_) => {
-            return Ok(());
-        }
+        events,
+    ) {
+        ReplacementResult::Execute(_) | ReplacementResult::Prevented => {}
+        ReplacementResult::NeedsChoice(_) => return Ok(()),
     }
 
-    // Step 2: Discard `count` cards.
+    Ok(())
+}
+
+/// CR 701.50a/701.50d: Complete a connive after its draw instruction settles.
+///
+/// `count` is the original resolved connive count, not the number of cards
+/// actually drawn; a partial or replaced draw still discards up to that count.
+pub(crate) fn apply_connive_tail(
+    state: &mut GameState,
+    conniver: ConniveSubject,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) {
+    let controller = conniver.snapshot.controller;
+
     let hand_cards: Vec<ObjectId> = state
         .players
         .iter()
@@ -216,22 +171,23 @@ pub(crate) fn resolve_connive_effect(
             discard_all_and_count_nonlands(state, &hand_cards, controller, events)
         else {
             // Replacement choice interrupted the discard loop — waiting_for already set.
-            return Ok(());
+            return;
         };
-        add_connive_counters(state, conniver_id, nonland_count, events);
+        add_connive_counters(state, &conniver, nonland_count, events);
     } else {
         // Player must choose which cards to discard
+        let source_id = conniver.object_id();
         state.waiting_for = WaitingFor::ConniveDiscard {
             player: controller,
-            conniver_id,
+            conniver,
             // CR 701.50b: metadata only (the discard handler ignores this field);
             // the conniving permanent is the natural source reference here.
-            source_id: conniver_id,
+            source_id,
             cards: hand_cards,
             count: discard_count,
         };
         // Don't emit EffectResolved yet — it will be emitted when the choice is made
-        return Ok(());
+        return;
     }
 
     // CR 701.50f + CR 701.50b: the EffectResolved carries the CONNIVER's id (LKI
@@ -239,10 +195,9 @@ pub(crate) fn resolve_connive_effect(
     // matches the conniving permanent, not the causing source.
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Connive,
-        source_id: conniver_id,
-        subject: None,
+        source_id: conniver.object_id(),
+        subject: Some(Box::new(conniver.snapshot)),
     });
-    Ok(())
 }
 
 /// Discard all given cards and return how many were nonland.
@@ -286,7 +241,7 @@ fn is_nonland_card(state: &GameState, object_id: ObjectId) -> bool {
 /// CR 701.50b: If the creature left the battlefield, skip the counter.
 pub(crate) fn add_connive_counters(
     state: &mut GameState,
-    conniver_id: ObjectId,
+    conniver: &ConniveSubject,
     count: u32,
     events: &mut Vec<GameEvent>,
 ) {
@@ -294,22 +249,20 @@ pub(crate) fn add_connive_counters(
         return;
     }
     // CR 701.50b: Skip if the conniver has left the battlefield
-    let on_battlefield = state
-        .objects
-        .get(&conniver_id)
-        .is_some_and(|o| o.zone == Zone::Battlefield);
-    if !on_battlefield {
+    let Some(conniver_object) = state.objects.get(&conniver.object_id()) else {
+        return;
+    };
+    if conniver_object.zone != Zone::Battlefield
+        || crate::types::identifiers::ObjectIncarnationRef::from_object(conniver_object)
+            != conniver.identity()
+    {
         return;
     }
 
     let proposed = ProposedEvent::AddCounter {
         placement: CounterPlacement::Object {
-            actor: state
-                .objects
-                .get(&conniver_id)
-                .map(|obj| obj.controller)
-                .unwrap_or(crate::types::player::PlayerId(0)),
-            object_id: conniver_id,
+            actor: conniver_object.controller,
+            object_id: conniver.object_id(),
             counter_type: CounterType::Plus1Plus1,
         },
         count,
@@ -756,13 +709,13 @@ mod tests {
         match &waiting {
             WaitingFor::ConniveDiscard {
                 player,
-                conniver_id,
+                conniver: pending_conniver,
                 cards,
                 count,
                 ..
             } => {
                 assert_eq!(*player, PlayerId(0));
-                assert_eq!(*conniver_id, conniver);
+                assert_eq!(pending_conniver.object_id(), conniver);
                 assert_eq!(*count, 1);
                 let hand_cards: HashSet<ObjectId> = cards.iter().copied().collect();
                 let expected: HashSet<ObjectId> = [extra, connive_draw].into_iter().collect();
@@ -1024,13 +977,13 @@ mod tests {
         match state.waiting_for.clone() {
             WaitingFor::ConniveDiscard {
                 player,
-                conniver_id,
+                conniver: pending_conniver,
                 count,
                 cards,
                 ..
             } => {
                 assert_eq!(player, PlayerId(0));
-                assert_eq!(conniver_id, conniver);
+                assert_eq!(pending_conniver.object_id(), conniver);
                 assert_eq!(count, 1, "the plain connive discards exactly 1");
                 let hand_cards: HashSet<ObjectId> = cards.iter().copied().collect();
                 let expected: HashSet<ObjectId> =
@@ -1229,13 +1182,13 @@ mod tests {
         match state.waiting_for.clone() {
             WaitingFor::ConniveDiscard {
                 player,
-                conniver_id,
+                conniver: pending_conniver,
                 count,
                 cards,
                 ..
             } => {
                 assert_eq!(player, PlayerId(0));
-                assert_eq!(conniver_id, conniver);
+                assert_eq!(pending_conniver.object_id(), conniver);
                 assert_eq!(count, 1, "the plain connive discards exactly 1");
                 let hand_cards: HashSet<ObjectId> = cards.iter().copied().collect();
                 let expected: HashSet<ObjectId> =
@@ -1395,7 +1348,7 @@ mod tests {
     /// replacement reads "you draw a card, THEN that creature connives" — the
     /// "then" fixes the printed order, so the connive runs only AFTER the parked
     /// draw choice resolves. The applier defers the connive into the DEDICATED
-    /// `state.pending_connive_reentry` slot and returns `Prevented`; the
+    /// stack-owned Connive re-entry and returns `Prevented`; the
     /// post-replacement-choice epilogue
     /// (`engine_replacement::handle_replacement_choice`) drains that slot once the
     /// leading draw fully delivers (AFTER the Priority reset), so the resulting
@@ -1420,7 +1373,7 @@ mod tests {
     /// the continuation mid-draw, the connive's `ConniveDiscard` is then clobbered
     /// to `Priority` by the epilogue reset, so `waiting_for` is NOT
     /// `ConniveDiscard`. (2) Revert ONLY E2 (defer still writes the field, no
-    /// epilogue drain): post-resume `state.pending_connive_reentry` is stranded
+    /// epilogue drain): the stack-owned Connive re-entry is stranded
     /// `Some(..)` instead of `None`, and the connive never resumes
     /// (`waiting_for == Priority`). (3) Revert ONLY C (no field stashed, applier
     /// runs `Effect::Connive` synchronously): the pre-resume "0 counters" / "0
@@ -1474,9 +1427,9 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         // POST-FIX: the leading DRAW parked its replacement-ordering choice; the
-        // connive was DEFERRED into the dedicated slot, not run. (Pre-fix without
-        // STEP C: the connive ran early and clobbered this with ConniveDiscard, and
-        // the field was never stashed.)
+        // connive was DEFERRED into the stack-owned draw authority, not run.
+        // (Pre-fix without STEP C: the connive ran early and clobbered this with
+        // ConniveDiscard, and no re-entry was stashed.)
         assert!(
             matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
             "leading draw must park a ReplacementChoice (the draw's choice), got {:?}",
@@ -1484,11 +1437,11 @@ mod tests {
         );
         assert!(
             matches!(
-                state.pending_connive_reentry,
+                state.active_connive_reentry(),
                 Some(PendingConniveReentry { .. })
             ),
-            "the deferred connive must be stashed in pending_connive_reentry, got {:?}",
-            state.pending_connive_reentry
+            "the deferred connive must be stack-owned, got {:?}",
+            state.active_connive_reentry()
         );
         // The connive has NOT run yet: no +1/+1 counter, no Connive completion.
         assert_eq!(
@@ -1515,34 +1468,44 @@ mod tests {
             "the connive must not complete before the draw choice resolves"
         );
 
+        let serialized = serde_json::to_string(
+            &crate::types::resolution::ResolutionStateWire::from_game_state(state),
+        )
+        .expect("connive prompt serializes as v2 frames");
+        let mut state =
+            serde_json::from_str::<crate::types::resolution::ResolutionStateWire>(&serialized)
+                .expect("connive prompt restores from v2 frames")
+                .into_game_state();
+        state.rehydrate_rng();
+
         // Resolve the draw's ordering choice through the REAL action pipeline.
         // The whole resume (apply both count-modifiers, complete the modified
-        // leading draw, then drain the deferred pending_connive_reentry) runs
+        // leading draw, then drain the deferred Connive re-entry) runs
         // within this one resume; fold its returned events in.
         let resume = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
             .expect("draw replacement ordering choice");
         events.extend(resume.events.iter().cloned());
 
         // POST-FIX CRUX: the deferred connive resumed in printed order. The
-        // dedicated slot is drained to None, and the surviving plain connive now
+        // stack-owned re-entry is drained to None, and the surviving plain connive now
         // pauses on its own ConniveDiscard (the modified leading draw plus the
         // connive's own draw leave 2+ cards in hand). This ConniveDiscard surviving
-        // the epilogue's Priority reset is exactly what the dedicated-slot drain
+        // the epilogue's Priority reset is exactly what the dedicated re-entry drain
         // (run AFTER the reset) buys over the round-1 mid-draw DeliveryTail drain.
         assert!(
-            state.pending_connive_reentry.is_none(),
-            "pending_connive_reentry must be drained to None after the draw choice resolves, got {:?}",
-            state.pending_connive_reentry
+            state.active_connive_reentry().is_none(),
+            "the Connive re-entry must be drained after the draw choice resolves, got {:?}",
+            state.active_connive_reentry()
         );
         match state.waiting_for.clone() {
             WaitingFor::ConniveDiscard {
                 player,
-                conniver_id,
+                conniver: pending_conniver,
                 count,
                 ..
             } => {
                 assert_eq!(player, PlayerId(0));
-                assert_eq!(conniver_id, conniver);
+                assert_eq!(pending_conniver.object_id(), conniver);
                 assert_eq!(count, 1, "the resumed plain connive discards exactly 1");
             }
             other => {
@@ -1594,6 +1557,110 @@ mod tests {
         );
     }
 
+    /// G1 regression: the original conniver completes by exact identity/LKI;
+    /// a battlefield -> graveyard -> battlefield round trip under the same
+    /// storage id must not put a counter on the returned object.
+    #[test]
+    fn phase0_g1_pending_connive_reentry_rebinds_same_id_return() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::ability::{QuantityModification, ReplacementDefinition};
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::PendingConniveReentry;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let _leader = install_leader_replacement(&mut state, PlayerId(0));
+        let conniver = make_battlefield_creature(&mut state, PlayerId(0));
+        let original_identity = state
+            .capture_connive_subject(conniver)
+            .expect("fixture conniver exists")
+            .identity();
+
+        // Two one-shot draw replacements make Leader's replacement draw pause
+        // on a real CR 616.1 choice, leaving its connive tail in the dedicated
+        // carrier before it can resolve.
+        for modification in [
+            QuantityModification::Times { factor: 2 },
+            QuantityModification::Plus { value: 1 },
+        ] {
+            let host = make_battlefield_creature(&mut state, PlayerId(0));
+            let mut replacement = ReplacementDefinition::new(ReplacementEvent::Draw)
+                .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw);
+            replacement.quantity_modification = Some(modification);
+            replacement.consume_on_apply = true;
+            state
+                .objects
+                .get_mut(&host)
+                .expect("replacement host exists")
+                .replacement_definitions
+                .push(replacement);
+        }
+        for index in 0..6 {
+            add_card_to_library(&mut state, PlayerId(0), &format!("Card {index}"), false);
+        }
+
+        let ability = make_connive_ability(conniver, conniver);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("Leader connive resolves to the pause");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. })
+                && matches!(state.active_connive_reentry(), Some(PendingConniveReentry { .. })),
+            "reach guard: Leader's deferred connive tail must be pending at the draw replacement choice"
+        );
+
+        let before = state.objects[&conniver].incarnation;
+        crate::game::zones::move_to_zone(&mut state, conniver, Zone::Graveyard, &mut events);
+        crate::game::zones::move_to_zone(&mut state, conniver, Zone::Battlefield, &mut events);
+        assert!(
+            state.objects[&conniver].incarnation > before,
+            "reach guard: the same storage id must now identify a new CR 400.7 incarnation"
+        );
+
+        let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("resume the parked Leader draw");
+        events.extend(result.events);
+        let waiting = state.waiting_for.clone();
+        let WaitingFor::ConniveDiscard { cards, .. } = waiting else {
+            panic!(
+                "the raw-id reentry must reach ConniveDiscard, got {:?}",
+                state.waiting_for
+            );
+        };
+        let waiting_for_discard = state.waiting_for.clone();
+        crate::game::engine_resolution_choices::handle_resolution_choice(
+            &mut state,
+            waiting_for_discard,
+            GameAction::SelectCards {
+                cards: vec![cards[0]],
+            },
+            &mut events,
+        )
+        .expect("discard for the re-bound connive");
+
+        assert_eq!(
+            state.objects[&conniver]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "the deferred connive belongs to the departed incarnation; a same-id return must remain untouched"
+        );
+        assert!(
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::Connive,
+                        subject: Some(subject),
+                        ..
+                    } if subject.identity == original_identity
+                )
+            }),
+            "the original conniver's exact event snapshot must complete the parked connive"
+        );
+    }
+
     /// CR 701.50a + CR 614.5 + CR 616.1f: the Leader connive replacement's
     /// leading draw is itself replaced by a draw-PREVENT replacement (Living
     /// Conundrum "skip that draw" shape). CR 701.50a's "instead you draw a card,
@@ -1607,7 +1674,7 @@ mod tests {
     /// Two applicable mandatory replacements on the leading `Draw 1` force a
     /// CR 616.1 ordering `ReplacementChoice` so the leading draw PARKS (a lone
     /// Prevent would auto-apply without a choice) and the connive DEFERS into
-    /// `pending_connive_reentry`. Choosing one Prevent fully prevents the leading
+    /// the stack-owned Connive re-entry. Choosing one Prevent fully prevents the leading
     /// draw -> `continue_replacement` returns `ReplacementResult::Prevented` ->
     /// the Prevented arm of `handle_replacement_choice`. The chosen Prevent is
     /// consumed (`consume_on_apply`); the OTHER Prevent survives. The drain added
@@ -1624,7 +1691,7 @@ mod tests {
     /// connive ran), and control returns to Priority. Pre-fix (Step 3 reverted),
     /// the Prevented arm never drains the slot: it stays STRANDED `Some(..)`, NO
     /// `EffectResolved { Connive }` is emitted, and waiting_for falls through to
-    /// Priority. So the `pending_connive_reentry.is_none()` AND the
+    /// Priority. So the Connive re-entry emptiness AND the
     /// `EffectResolved { Connive }` count == 1 assertions BOTH flip on revert.
     /// (Verified non-vacuous by neutering Step 3 and watching this test fail.)
     #[test]
@@ -1686,11 +1753,11 @@ mod tests {
         );
         assert!(
             matches!(
-                state.pending_connive_reentry,
+                state.active_connive_reentry(),
                 Some(PendingConniveReentry { .. })
             ),
-            "the deferred connive must be stashed before the draw choice resolves, got {:?}",
-            state.pending_connive_reentry
+            "the deferred connive must be stack-owned before the draw choice resolves, got {:?}",
+            state.active_connive_reentry()
         );
 
         // Resolve the leading draw's ordering choice (either index is a Prevent).
@@ -1707,9 +1774,9 @@ mod tests {
         // assertions are FALSE pre-fix (Step 3 reverted: the slot stays Some and no
         // EffectResolved { Connive } is emitted).
         assert!(
-            state.pending_connive_reentry.is_none(),
-            "pending_connive_reentry must be drained to None after the prevented draw, got {:?}",
-            state.pending_connive_reentry
+            state.active_connive_reentry().is_none(),
+            "the Connive re-entry must be drained after the prevented draw, got {:?}",
+            state.active_connive_reentry()
         );
         assert!(
             matches!(state.waiting_for, WaitingFor::Priority { .. }),

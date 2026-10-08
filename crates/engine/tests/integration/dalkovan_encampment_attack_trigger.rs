@@ -7,7 +7,7 @@
 //!   `{2}{W}, {T}: Whenever you attack this turn, create two 1/1 red Warrior
 //!    creature tokens that are tapped and attacking. ...`
 //!
-//! The inner clause is a delayed triggered ability (CR 603.7c) whose condition
+//! The inner clause is a delayed triggered ability (CR 603.7b) whose condition
 //! is prefix-stripped to the bare string `"you attack"`. Before the #433 fix the
 //! trigger parser only recognized the prefixed forms `"whenever you attack"` /
 //! `"when you attack"`, so the bare condition fell through to
@@ -34,7 +34,7 @@ const DALKOVAN_ATTACK_ABILITY: &str =
      Warrior creature tokens that are tapped and attacking. Sacrifice \
      them at the beginning of the next end step.";
 
-/// CR 508.1 + CR 603.7c: activating Dalkovan Encampment's ability creates a
+/// CR 508.1 + CR 603.7a + CR 603.7b: activating Dalkovan Encampment's ability creates a
 /// "Whenever you attack this turn" delayed trigger; declaring an attacker fires
 /// it and creates two 1/1 red Warrior tokens that are tapped and attacking.
 #[test]
@@ -77,7 +77,7 @@ fn dalkovan_encampment_delayed_trigger_creates_warrior_tokens() {
 
     // Activate the {2}{W},{T} ability through the activation pipeline, paying the
     // mana cost from the funded pool; resolution creates the "Whenever you attack
-    // this turn" delayed trigger (CR 603.7c).
+    // this turn" delayed trigger (CR 603.7b).
     runner.activate(encampment, ability_index).resolve();
 
     // Declare the attacker — this is the event the delayed trigger watches.

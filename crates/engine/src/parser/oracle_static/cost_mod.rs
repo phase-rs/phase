@@ -4,7 +4,9 @@
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use crate::parser::oracle_nom::error::oracle_err;
 use crate::types::ability::CastTimingPermission;
+use crate::types::mana::{ManaCost, ManaCostShard};
 
 /// CR 602.1: Parse the leading keyword of a "<Keyword> abilities of …" class-wide
 /// activation cost-modification static, returning the canonical keyword string that
@@ -20,12 +22,22 @@ use crate::types::ability::CastTimingPermission;
 /// here (Firion class). Ordered longest-first so "power-up" wins before any
 /// shorter prefix could.
 pub(crate) fn parse_taggable_ability_keyword(input: &str) -> OracleResult<'_, &'static str> {
+    parse_taggable_ability_tag(input).map(|(rest, tag)| (rest, tag.keyword_str()))
+}
+
+/// Same taggable-keyword grammar as [`parse_taggable_ability_keyword`], but
+/// returning the typed `AbilityTag` rather than its string projection — for
+/// callers (e.g. `ActivateAsInstant`'s tag-scoped timing permission) that
+/// store and compare the tag itself instead of reconstructing it from text.
+/// Single authority for the keyword list: the string form now delegates here
+/// instead of duplicating the `alt()` arms.
+pub(crate) fn parse_taggable_ability_tag(input: &str) -> OracleResult<'_, AbilityTag> {
     alt((
-        value(AbilityTag::PowerUp.keyword_str(), tag("power-up")),
-        value(AbilityTag::Exhaust.keyword_str(), tag("exhaust")),
-        value(AbilityTag::Outlast.keyword_str(), tag("outlast")),
-        value(AbilityTag::Boast.keyword_str(), tag("boast")),
-        value(AbilityTag::Equip.keyword_str(), tag("equip")),
+        value(AbilityTag::PowerUp, tag("power-up")),
+        value(AbilityTag::Exhaust, tag("exhaust")),
+        value(AbilityTag::Outlast, tag("outlast")),
+        value(AbilityTag::Boast, tag("boast")),
+        value(AbilityTag::Equip, tag("equip")),
     ))
     .parse(input)
 }
@@ -94,25 +106,48 @@ pub(crate) fn parse_action_cost_reduction(text: &str, lower: &str) -> Option<Sta
     )
 }
 
+/// CR 601.2f + CR 602.1 + CR 606.1 + CR 115.9b + CR 118.7: the parsed head of an
+/// activated-ability cost-modifier line, as produced by
+/// [`parse_activated_ability_cost_head`].
+///
+/// A named alias rather than a bare tuple in the signature: the head grew a
+/// `targets` axis (the CR 115.9b "that target[s] <X>" clause) and six positional
+/// members in a return type is where the shape stops documenting itself.
+pub(crate) struct ActivatedAbilityCostHead<'a> {
+    /// The ability-tag keyword the runtime gate matches (`"activated"` / `"loyalty"`).
+    pub keyword: &'static str,
+    /// The source-scope subject phrase, with any target clause already split off.
+    pub subject: &'a str,
+    /// CR 115.9b: the optional "that target[s] <X>" restriction.
+    pub targets: Option<TargetFilter>,
+    /// The literal `{N}`; meaningless when `is_x` is true.
+    pub amount: u32,
+    /// True when the amount was the variable `{X}`, whose referent the caller parses.
+    pub is_x: bool,
+    /// CR 118.7: the direction of the adjustment.
+    pub mode: CostModifyMode,
+}
+
 /// CR 601.2f + CR 602.1 + CR 606.1 + CR 118.7: shared grammar head for
-/// "<activated|loyalty> abilities of <subject> cost {N|X} <less|more> to activate".
-/// Returns `(keyword_tag, subject_slice, amount, is_x, mode)` with the remainder
-/// positioned immediately after "activate", so the static caller can continue with
-/// `opt(parse_where_x_is_self_stat)` and the transient-effect caller can ignore the
-/// tail. Single authority for both the permanent-static form (dispatch.rs) and the
-/// transient (this-turn) form, which lowers to a `GenericEffect` carrying the same
-/// `StaticMode::ReduceAbilityCost` for a `Duration::UntilEndOfTurn` (oracle_effect,
-/// The Dining Car's chaos body).
+/// "<activated|loyalty> abilities of <subject> [that target[s] <X>] cost {N|X}
+/// <less|more> to activate", returned as an [`ActivatedAbilityCostHead`] with the
+/// remainder positioned immediately after "activate", so the static caller can
+/// continue with `opt(parse_where_x_is_self_stat)` and the transient-effect caller
+/// can ignore the tail. Single authority for both the permanent-static form
+/// (dispatch.rs) and the transient (this-turn) form, which lowers to a
+/// `GenericEffect` carrying the same `StaticMode::ReduceAbilityCost` for a
+/// `Duration::UntilEndOfTurn` (oracle_effect, The Dining Car's chaos body).
 /// The input must already be lowercase (mana braces are case-stable: `{2}`, `{x}`).
 pub(crate) fn parse_activated_ability_cost_head(
     i: &str,
-) -> OracleResult<'_, (&'static str, &str, u32, bool, CostModifyMode)> {
+) -> OracleResult<'_, ActivatedAbilityCostHead<'_>> {
     let (i, keyword) = alt((
         value("activated", tag("activated abilities of ")),
         value("loyalty", tag("loyalty abilities of ")),
     ))
     .parse(i)?;
     let (i, subject) = take_until(" cost ").parse(i)?;
+    let (_, (subject, targets)) = split_ability_target_restriction(subject)?;
     let (i, _) = tag(" cost ").parse(i)?;
     // CR 107.3 + CR 601.2f: the amount is a fixed `{N}` (Training Grounds) or the
     // variable `{X}` (Agatha), whose value is supplied by a trailing referent the
@@ -132,16 +167,109 @@ pub(crate) fn parse_activated_ability_cost_head(
         value(CostModifyMode::Raise, tag("more to activate")),
     ))
     .parse(i)?;
-    Ok((i, (keyword, subject, amount_n, is_x, mode)))
+    Ok((
+        i,
+        ActivatedAbilityCostHead {
+            keyword,
+            subject,
+            targets,
+            amount: amount_n,
+            is_x,
+            mode,
+        },
+    ))
+}
+
+/// CR 115.9b + CR 602.2b: the optional intervening target restriction on an
+/// activated-ability cost modifier — "… that target[s] <subject> …".
+/// Returns the source subject and parsed target filter. Input is lowercase.
+pub(crate) fn split_ability_target_restriction(
+    i: &str,
+) -> OracleResult<'_, (&str, Option<TargetFilter>)> {
+    let parsed = (
+        take_until::<_, _, OracleError<'_>>(" that target"),
+        alt((
+            tag::<_, _, OracleError<'_>>(" that targets "),
+            tag::<_, _, OracleError<'_>>(" that target "),
+        )),
+        nom::combinator::rest::<_, OracleError<'_>>,
+    )
+        .parse(i);
+    if let Ok((rest, (subject, _, target_text))) = parsed {
+        let (_, _) = eof::<_, OracleError<'_>>.parse(rest)?;
+        let (filter, remainder) = parse_type_phrase_folding(target_text.trim());
+        if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+            return Ok(("", (subject.trim(), Some(filter))));
+        }
+        let (filter, remainder) = parse_target(target_text.trim());
+        if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+            return Ok(("", (subject.trim(), Some(filter))));
+        }
+        return Err(oracle_err(i));
+    }
+    Ok(("", (i.trim(), None)))
+}
+
+/// [`split_ability_target_restriction`] for a phrase that must carry NOTHING
+/// but an optional target restriction between its ability subject and ` cost`.
+/// Any other qualifier there ("equip abilities you activate OF OTHER
+/// EQUIPMENT cost …") restricts which abilities the modifier applies to, and
+/// this parser has no field for it, so the line is refused (a nom `Verify`
+/// error) rather than emitted as a broader, unrestricted modifier.
+pub(crate) fn split_bare_ability_target_restriction(
+    i: &str,
+) -> OracleResult<'_, Option<TargetFilter>> {
+    map(
+        nom::combinator::verify(split_ability_target_restriction, |(residue, _)| {
+            residue.trim().is_empty()
+        }),
+        |(_, targets)| targets,
+    )
+    .parse(i)
+}
+
+/// [`split_ability_target_restriction`] for a phrase that may also name the
+/// abilities' SOURCES: "equip abilities you activate OF OTHER EQUIPMENT cost …"
+/// (Bladehold War-Whip). Returns `(source filter, target restriction)`. The
+/// qualifier must be exactly `of <type phrase>`; anything else is refused like
+/// [`split_bare_ability_target_restriction`]. Input is lowercase.
+pub(crate) fn split_ability_source_and_target_restriction(
+    i: &str,
+) -> OracleResult<'_, (Option<TargetFilter>, Option<TargetFilter>)> {
+    let (rest, (residue, targets)) = split_ability_target_restriction(i)?;
+    let residue = residue.trim();
+    if residue.is_empty() {
+        return Ok((rest, (None, targets)));
+    }
+    let (subject, _) = tag::<_, _, OracleError<'_>>("of ").parse(residue)?;
+    let (_, source) = parse_ability_source_subject(subject)?;
+    Ok((rest, (Some(source), targets)))
+}
+
+/// CR 602.2: the `<sources>` of an ability-scoped cost modifier ("abilities of
+/// other Equipment", "the first activated ability of an artifact"). A subject
+/// the type-phrase grammar can't consume whole, or reads as "any object", is
+/// refused rather than widened to every ability.
+pub(crate) fn parse_ability_source_subject(subject: &str) -> OracleResult<'_, TargetFilter> {
+    let (source, remainder) = parse_type_phrase_folding(subject);
+    if !remainder.trim().is_empty() || matches!(source, TargetFilter::Any) {
+        return Err(nom::Err::Error(OracleError::new(
+            subject,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    Ok((remainder, source))
 }
 
 pub(crate) fn parse_activated_cost_reduction_minimum_mana(lower: &str) -> Option<u32> {
     preceded(
-        take_until::<_, _, OracleError<'_>>(
-            "this effect can't reduce the mana in that cost to less than ",
-        ),
+        take_until::<_, _, OracleError<'_>>("this effect can't reduce the mana in "),
         preceded(
-            tag("this effect can't reduce the mana in that cost to less than "),
+            (
+                tag("this effect can't reduce the mana in "),
+                alt((tag("that cost"), tag("that ability's activation cost"))),
+                tag(" to less than "),
+            ),
             alt((value(1, tag("one mana")), nom_primitives::parse_number)),
         ),
     )
@@ -167,7 +295,7 @@ pub(crate) fn parse_cost_payment_prohibition_statics(
     let (_, _) = (opt(tag::<_, _, OracleError<'_>>(".")), eof)
         .parse(after_suffix)
         .ok()?;
-    let (filter, filter_remainder) = parse_type_phrase(filter_text.trim());
+    let (filter, filter_remainder) = parse_type_phrase_folding(filter_text.trim());
     if !filter_remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
         return None;
     }
@@ -307,7 +435,7 @@ fn parse_cast_spells_alternative_cost(text: &str) -> Option<StaticDefinition> {
         .parse(remainder_lower.as_str())
         .is_ok();
 
-    let base_filter = parse_type_phrase(filter_original).0;
+    let base_filter = parse_type_phrase_folding(filter_original).0;
     let affected = apply_spell_keyword_subject_constraints(base_filter, None, None, Vec::new());
 
     let cost = parse_oracle_cost(cost_slice);
@@ -370,6 +498,18 @@ pub(crate) fn parse_alt_cost_frequency_prefix(input: &str) -> OracleResult<'_, C
 ///
 /// Strict-fails to `None` (never misparses) when the payment cannot be parsed
 /// as an `AbilityCost` (Dream Halls discard, Bolas's Citadel life-as-MV).
+///
+/// CR 107.3c + CR 118.9: a trailing "where X is that spell's mana value"
+/// defines the alternative-cost X rather than leaving it for the caster to
+/// choose. The binding is only valid for the standalone `{X}` mana-cost shape.
+fn parse_x_bound_to_spell_mana_value(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = opt(tag(",")).parse(input)?;
+    let (input, _) =
+        preceded(opt(tag(" ")), tag("where x is that spell's mana value")).parse(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    Ok((input, ()))
+}
+
 pub(crate) fn parse_spells_alternative_cost(text: &str) -> Option<StaticDefinition> {
     type VE<'a> = OracleError<'a>;
 
@@ -440,10 +580,44 @@ pub(crate) fn parse_spells_alternative_cost(text: &str) -> Option<StaticDefiniti
     let type_prefix_original = subject.original[..type_prefix_lower.len()].trim();
     let after_spells = after_spells_lower.trim();
 
+    // CR 601.2a + CR 118.9: optional origin-zone qualifier on the subject — "a
+    // spell you cast from exile" (Warped Space, Dragon's Smile, Tlincalli
+    // Hunter), "a colorless spell you cast from your hand" (Darksteel
+    // Monolith). Shared zone authority with the keyword-grant subject walk;
+    // the runtime filter compares the cast's origin zone.
+    let (after_spells, zone_filter) =
+        match super::keyword_grant::parse_cast_origin_zone_qualifier(after_spells) {
+            Some((rest, prop)) => (rest, Some(prop)),
+            None => (after_spells, None),
+        };
+
+    let parsed_cost = parse_oracle_cost(cost_slice);
+    if !supported_alternative_cast_cost(&parsed_cost) {
+        return None;
+    }
+
+    // CR 107.3c + CR 118.9: Kentaro-class alternatives bind their lone `{X}`
+    // to the spell's mana value. This is distinct from an announced X, which
+    // is left as `ManaCostShard::X` by normal cost parsing.
+    let spell_mana_value_x = parse_x_bound_to_spell_mana_value(after_spells)
+        .is_ok_and(|(rest, _)| rest.trim().is_empty());
+    let cost = if spell_mana_value_x {
+        match parsed_cost {
+            AbilityCost::Mana {
+                cost: ManaCost::Cost { shards, generic: 0 },
+            } if shards == vec![ManaCostShard::X] => AbilityCost::Mana {
+                cost: ManaCost::SelfManaValue,
+            },
+            _ => return None,
+        }
+    } else {
+        parsed_cost
+    };
+
     // Optional "with mana value N or greater" qualifier (Jodah MV-5+ class). If
     // an MV qualifier is present but does not parse cleanly into FilterProp::Cmc,
     // strict-fail (None) rather than over-broadening to any spell.
-    let mv_filter = if after_spells.is_empty() {
+    let mv_filter = if after_spells.is_empty() || spell_mana_value_x {
         None
     } else {
         let (prop, consumed) = parse_mana_value_suffix(after_spells, &mut ParseContext::default())?;
@@ -463,18 +637,39 @@ pub(crate) fn parse_spells_alternative_cost(text: &str) -> Option<StaticDefiniti
 
     // CR 118.9: a bare leading article ("a"/"an") with no type word — "a spell you
     // cast" (As Foretold) — scopes to any spell, same as the no-prefix case.
-    let base_filter = if matches!(type_prefix_lower.trim(), "" | "a" | "an") {
-        TargetFilter::Typed(TypedFilter::card())
+    let (base_filter, color_props) = if matches!(type_prefix_lower.trim(), "" | "a" | "an") {
+        (TargetFilter::Typed(TypedFilter::card()), Vec::new())
     } else {
-        parse_type_phrase(type_prefix_original).0
+        // CR 601.2a: singular subjects carry an article before the type word —
+        // "a creature spell", "a colorless spell" — peel it before the type
+        // phrase so the article is not read as a type word. Grammar tokens are
+        // matched on the LOWERCASE view (mixed-case input must not skip the
+        // peel); only the preserved type tail hands the original-case slice on.
+        let prefix_lower = type_prefix_lower.trim();
+        let after_article = opt(alt((tag::<_, _, VE<'_>>("a "), tag("an "))))
+            .parse(prefix_lower)
+            .map_or(prefix_lower, |(rest, _)| rest);
+        // CR 105.2: peel a color-quality prefix ("colorless spell" — Darksteel
+        // Monolith) via the shared authority — `parse_type_phrase_folding` drops the
+        // word, which would silently over-broaden the grant to any spell. The
+        // helper expects the word with its trailing space, so re-pad the
+        // trimmed prefix slice.
+        let padded = format!("{after_article} ");
+        let (rest_padded, color_prop) = super::shared::peel_color_quality_prefix(&padded);
+        let rest = rest_padded.trim();
+        let base = if rest.is_empty() {
+            TargetFilter::Typed(TypedFilter::card())
+        } else {
+            // End-anchored original tail: the peels only removed a prefix, so
+            // the remaining type words are the last `rest.len()` bytes of the
+            // trimmed original slice (the TextPair length-mapping convention).
+            let tail = &type_prefix_original[type_prefix_original.len() - rest.len()..];
+            parse_type_phrase_folding(tail).0
+        };
+        (base, color_prop.into_iter().collect::<Vec<_>>())
     };
     let affected =
-        apply_spell_keyword_subject_constraints(base_filter, None, mv_filter, Vec::new());
-
-    let cost = parse_oracle_cost(cost_slice);
-    if !supported_alternative_cast_cost(&cost) {
-        return None;
-    }
+        apply_spell_keyword_subject_constraints(base_filter, zone_filter, mv_filter, color_props);
 
     Some(
         StaticDefinition::new(StaticMode::CastWithAlternativeCost {
@@ -493,7 +688,7 @@ pub(crate) fn parse_spells_alternative_cost(text: &str) -> Option<StaticDefiniti
 /// you cast." (Conspiracy Unraveler class).
 /// Structural sibling of `parse_spells_alternative_cost` — same output shape
 /// (`CastWithAlternativeCost`), different cost verb prefix.
-/// Verified: CR 118.9 (docs/MagicCompRules.txt:1014), CR 701.59a.
+/// Verified: CR 118.9, CR 701.59a.
 pub(crate) fn parse_collect_evidence_alt_cost(text: &str) -> Option<StaticDefinition> {
     type VE<'a> = OracleError<'a>;
 
@@ -542,7 +737,7 @@ pub(crate) fn parse_collect_evidence_alt_cost(text: &str) -> Option<StaticDefini
     let base_filter = if type_prefix_original.is_empty() {
         TargetFilter::Typed(TypedFilter::card())
     } else {
-        parse_type_phrase(type_prefix_original).0
+        parse_type_phrase_folding(type_prefix_original).0
     };
     let affected = apply_spell_keyword_subject_constraints(base_filter, None, None, Vec::new());
 
@@ -564,9 +759,9 @@ pub(crate) fn parse_collect_evidence_alt_cost(text: &str) -> Option<StaticDefini
 /// "[As long as <cond>, ]You may [cost] rather than pay [card-ref's] [keyword] cost[s]."
 /// An optional leading "As long as <cond>," gate (New Perspectives) is split off via
 /// `try_split_inverted_as_long_as` and attached as a `StaticCondition`.
-/// Verified: CR 702.29a (docs/MagicCompRules.txt:4202),
-///           CR 702.122a (docs/MagicCompRules.txt:4870),
-///           CR 118.9 (docs/MagicCompRules.txt:1014).
+/// Verified: CR 702.29a,
+///           CR 702.122a,
+///           CR 118.9.
 pub(crate) fn parse_alternative_keyword_cost(text: &str) -> Option<StaticDefinition> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
@@ -645,4 +840,138 @@ fn parse_alternative_keyword_cost_body(text: &str) -> Option<StaticDefinition> {
         .description(text.to_string())
         .active_zones(vec![Zone::Battlefield]),
     )
+}
+
+/// CR 118.9 + CR 601.2b: Parse a "cast [filter] by paying life equal to its
+/// mana value rather than paying its mana cost" alternative-cost grant static.
+/// Demon of Fate's Design class. Structural sibling of
+/// `parse_cast_spells_alternative_cost` — same output shape
+/// (`CastWithAlternativeCost`), but with a once-per-turn frequency prefix and a
+/// life-as-mana-value cost instead of a fixed mana/energy payment.
+///
+/// Pattern: "[Once during each of your turns, ]you may cast [filter] by paying
+/// life equal to its mana value rather than paying its mana cost."
+///
+/// Verified: CR 118.9 (alternative costs), CR 601.2b (casting permissions).
+pub(crate) fn parse_cast_by_paying_life_alt_cost(text: &str) -> Option<StaticDefinition> {
+    type VE<'a> = OracleError<'a>;
+
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+
+    // CR 118.9 + CR 601.2b: peel an optional once-per-turn frequency prefix
+    // ("Once during each of your turns, " / "Once each turn, ") before the
+    // "you may cast" grant proper. Absent → `Unlimited`.
+    //
+    // "once during each of your turns, " carries an explicit DuringYourTurn
+    // timing gate (the grant only functions on the controller's turn).
+    // "once each turn, " (As Foretold) has no such restriction.
+    let your_turn_prefix =
+        tag::<_, _, OracleError<'_>>("once during each of your turns, ").parse(tp.lower);
+    let (tp, frequency, condition) = if let Ok((rest_lower, _)) = your_turn_prefix {
+        let consumed = tp.lower.len() - rest_lower.len();
+        (
+            TextPair::new(&tp.original[consumed..], rest_lower),
+            CastFrequency::OncePerTurn,
+            Some(StaticCondition::DuringYourTurn),
+        )
+    } else if let Ok((rest_lower, freq)) = parse_alt_cost_frequency_prefix(tp.lower) {
+        let consumed = tp.lower.len() - rest_lower.len();
+        (
+            TextPair::new(&tp.original[consumed..], rest_lower),
+            freq,
+            None,
+        )
+    } else {
+        (tp, CastFrequency::Unlimited, None)
+    };
+
+    // Prefix: "you may cast ".
+    let tp = nom_tag_tp(&tp, "you may cast ")?.trim_start();
+
+    // Filter slice: everything up to " by paying life equal to ".
+    let (after_filter_lower, filter_lower) =
+        take_until::<_, _, VE<'_>>(" by paying life equal to ")
+            .parse(tp.lower)
+            .ok()?;
+    let filter_len = filter_lower.len();
+    let filter_original = tp.original[..filter_len].trim();
+    let after_filter = TextPair::new(&tp.original[filter_len..], after_filter_lower);
+    let after_filter = nom_tag_tp(&after_filter, " by paying life equal to ")?;
+
+    // Quantity reference: "its mana value" → SelfManaValue.
+    let after_qty = nom_tag_tp(&after_filter, "its mana value")?;
+
+    // Tail: " rather than paying its mana cost" (with optional trailing period).
+    let after_tail = nom_tag_tp(&after_qty, " rather than paying its mana cost")?;
+    let remainder = after_tail.lower.trim().trim_end_matches('.');
+    if !remainder.is_empty() {
+        return None;
+    }
+
+    // Build the type filter from the filter phrase (e.g. "an enchantment spell").
+    // Strip leading article before parsing — "an enchantment spell" → "enchantment spell".
+    let filter_lower_trimmed = filter_original.to_lowercase();
+    let filter_for_parse = if let Ok((rest, _)) =
+        alt((tag::<_, _, VE<'_>>("an "), tag("a "))).parse(filter_lower_trimmed.as_str())
+    {
+        // Use original-case text past the article for type parsing.
+        let article_len = filter_lower_trimmed.len() - rest.len();
+        filter_original[article_len..].trim()
+    } else {
+        filter_original
+    };
+
+    // Optional zone qualifier: "from your hand" (Access Maze: "a spell from your
+    // hand"). Strip it before the spell-noun suffix so "spell from your hand" →
+    // "spell" → "" (card filter). Uses nom `tag` on the lowercased text to find
+    // the suffix " from your hand" at the end of the filter phrase.
+    let filter_lower_for_zone = filter_for_parse.to_lowercase();
+    let (filter_for_parse, zone_filter) =
+        // allow-noncombinator: structural suffix removal on a pre-lowered filter phrase.
+        if let Some(before) = filter_lower_for_zone.strip_suffix(" from your hand") {
+            (
+                filter_for_parse[..before.len()].trim(),
+                Some(FilterProp::InZone { zone: Zone::Hand }),
+            )
+        } else {
+            (filter_for_parse, None)
+        };
+
+    // Strip trailing "spell" / "spells" before type parsing — "enchantment spell" →
+    // "enchantment". `parse_type_phrase_folding` expects bare type words.
+    let filter_for_parse = strip_cost_mod_spell_noun_suffix(filter_for_parse);
+
+    let base_filter = if filter_for_parse.is_empty() {
+        TargetFilter::Typed(TypedFilter::card())
+    } else {
+        let (filter, remainder) = parse_type_phrase_folding(filter_for_parse);
+        if !remainder.trim().is_empty() {
+            return None;
+        }
+        filter
+    };
+    let affected =
+        apply_spell_keyword_subject_constraints(base_filter, zone_filter, None, Vec::new());
+
+    let cost = AbilityCost::PayLife {
+        amount: QuantityExpr::Ref {
+            qty: QuantityRef::SelfManaValue,
+        },
+    };
+
+    let mut def = StaticDefinition::new(StaticMode::CastWithAlternativeCost {
+        cost,
+        timing_permission: None,
+        frequency,
+    })
+    .affected(affected)
+    .description(text.to_string())
+    .active_zones(vec![Zone::Battlefield]);
+
+    if let Some(cond) = condition {
+        def = def.condition(cond);
+    }
+
+    Some(def)
 }

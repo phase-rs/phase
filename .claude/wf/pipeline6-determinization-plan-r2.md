@@ -404,4 +404,4 @@ All tests in `determinize.rs` `#[cfg(test)]` unless noted. Runtime tests drive t
 | **701.20a** | "To reveal a card, show that card to all players for a brief time." | `pinned_known_ids` (revealed cards pinned). |
 | **701.20e** | private-look visibility (the looker only) | `pinned_known_ids` private_look guard. |
 
-All verified present in `docs/MagicCompRules.txt` during round-1 planning (400.2/401.2/401.3/402.1/701.20a at lines 1935, 1996, 1998, 2010, 3438); 701.20e in the same 701.20 block — the implementer re-greps each before writing the annotation per the CR protocol.
+All verified present in `docs/MagicCompRules.txt` during round-1 planning (400.2/401.2/401.3/402.1/701.20a); 701.20e in the same 701.20 block — the implementer re-greps each before writing the annotation per the CR protocol.

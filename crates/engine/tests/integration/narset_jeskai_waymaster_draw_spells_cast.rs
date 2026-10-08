@@ -43,9 +43,11 @@ fn spell_record(name: &str) -> SpellCastRecord {
         colors: vec![ManaColor::Blue],
         mana_value: 1,
         has_x_in_cost: false,
+        has_adventure: false,
         from_zone: Zone::Hand,
         cast_variant: engine::types::game_state::CastingVariant::Normal,
         was_kicked: false,
+        spell_object_id: None,
     }
 }
 

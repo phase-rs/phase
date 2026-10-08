@@ -1,0 +1,192 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "SearchLibrary",
+        "filter": {
+          "type": "Typed",
+          "type_filters": [
+            "Card"
+          ],
+          "controller": null,
+          "properties": []
+        },
+        "count": {
+          "type": "Fixed",
+          "value": 1
+        },
+        "reveal": false
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": {
+              "type": "Cost",
+              "shards": [
+                "Black"
+              ],
+              "generic": 1
+            }
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "SelfRef"
+            },
+            "count": 1
+          }
+        ]
+      },
+      "sub_ability": {
+        "kind": "Spell",
+        "effect": {
+          "type": "ChangeZone",
+          "origin": "Library",
+          "destination": "Hand",
+          "target": {
+            "type": "Any"
+          },
+          "owner_library": false,
+          "enter_transformed": false,
+          "enter_tapped": false,
+          "enters_attacking": false
+        },
+        "cost": null,
+        "sub_ability": {
+          "kind": "Spell",
+          "effect": {
+            "type": "Shuffle",
+            "target": {
+              "type": "Controller"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": null,
+          "description": null,
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        },
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "duration": null,
+      "description": "Solved — {1}{B}, Sacrifice this ~: Search your library for a card, put it into your hand, then shuffle. Activate only as a sorcery.",
+      "target_prompt": null,
+      "activation_restrictions": [
+        {
+          "type": "IsSolved"
+        },
+        {
+          "type": "AsSorcery"
+        }
+      ],
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "Token",
+          "name": "Skeleton",
+          "power": {
+            "type": "Fixed",
+            "value": 2
+          },
+          "toughness": {
+            "type": "Fixed",
+            "value": 1
+          },
+          "types": [
+            "Creature",
+            "Skeleton"
+          ],
+          "colors": [
+            "Black"
+          ],
+          "keywords": [],
+          "tapped": false,
+          "count": {
+            "type": "Fixed",
+            "value": 1
+          },
+          "owner": {
+            "type": "Controller"
+          },
+          "enters_attacking": false
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": {
+        "type": "SelfRef"
+      },
+      "origin": null,
+      "destination": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": null,
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "When this ~ enters, create a 2/1 black Skeleton creature token and suspect it.",
+      "constraint": null,
+      "condition": null,
+      "batched": false
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": [],
+  "solveCondition": {
+    "type": "ObjectCount",
+    "filter": {
+      "type": "Typed",
+      "type_filters": [
+        "Creature",
+        {
+          "Subtype": "Skeleton"
+        }
+      ],
+      "controller": "You",
+      "properties": [
+        {
+          "type": "Suspected"
+        }
+      ]
+    },
+    "comparator": "EQ",
+    "threshold": 0
+  }
+}

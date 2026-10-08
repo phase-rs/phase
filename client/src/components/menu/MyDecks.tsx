@@ -9,12 +9,16 @@ import {
   RANDOM_DECK_SELECTION,
   listSavedDeckNames,
   getDeckMeta,
+  captureSavedDeck,
   deleteDeck,
   MAX_FOLDER_NAME_LENGTH,
   type DeckFolder,
 } from "../../constants/storage";
+import { withSavedDeckLibrary } from "../../services/savedDeckTransaction";
+import { attemptSavedDeckWrite } from "../../services/savedDeckWriteFailure";
 import { PROFILE_REPLACED_EVENT } from "../../stores/cloudSyncStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
+import { useEffectiveOffline } from "../../stores/connectivityStore";
 import { useDeckFolders } from "../../hooks/useDeckFolders";
 import { DeckActionsMenu } from "./DeckActionsMenu";
 import { FolderActionsMenu } from "./FolderActionsMenu";
@@ -34,6 +38,7 @@ import { FeedManagerModal } from "./FeedManagerModal";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { ManaSymbol } from "../mana/ManaSymbol";
 import { useCardImage } from "../../hooks/useCardImage";
+import type { DeckVisualIdentity } from "../../services/deckParser";
 import {
   evaluateDeckCompatibilityBatch,
   type DeckCompatibilityResult,
@@ -49,6 +54,7 @@ import {
 } from "../../services/randomDeckSelection";
 import { ImportDeckModal } from "./ImportDeckModal";
 import { PreconDeckModal } from "./PreconDeckModal";
+import type { ImportSession } from "./importSession";
 import { savePreconDeck } from "../../services/preconDecks";
 import type { DeckEntry as PreconDeckEntry } from "../../hooks/useDecks";
 import { MenuPanel } from "./MenuShell";
@@ -57,15 +63,17 @@ import { useSetSymbol } from "../../hooks/useSetSymbols";
 import {
   getDeckCardCount,
   getDeckColorIdentity,
-  getRepresentativeCard,
+  getDeckColorIdentityPips,
+  getRepresentativeDeckVisual,
   isBundledDeck,
 } from "./deckHelpers";
 import { BASIC_LAND_NAMES } from "../../constants/game";
-import { BracketEstimateChip } from "../deck-builder/BracketEstimateChip";
+import { BracketEstimateChip, ManualBracketChip } from "../deck-builder/BracketEstimateChip";
 import { MenuSelect } from "../ui/MenuSelect";
 import { TextPromptDialog } from "../ui/TextPromptDialog";
 import { useBracketEstimate } from "../../hooks/useBracketEstimate";
 import { getSharedAdapter } from "../../adapter/wasm-adapter";
+import { isCommanderFamilyFormat } from "../../types/bracket";
 const PRECON_PREFIX = "[Pre-built] ";
 const PRECON_PAGE_SIZE = 12;
 /** Sentinel section ids for the virtual/system folders in the collapse set. */
@@ -173,14 +181,24 @@ function savedPreconMatchesSetFilter(deckName: string, setFilter: string): boole
   return code != null && (setFilter === PRECON_SET_ALL || code === setFilter);
 }
 
-function DeckArtTile({ cardName }: { cardName: string | null }) {
-  const { src, isLoading } = useCardImage(cardName ?? "", { size: "art_crop" });
+function DeckArtTile({ visual }: { visual: DeckVisualIdentity | null }) {
+  const { src, isLoading, advanceFailedSource } = useCardImage(visual?.name ?? "", {
+    size: "art_crop",
+    sourcePrinting: visual?.sourcePrinting,
+  });
 
-  if (!cardName || isLoading || !src) {
+  if (!visual || isLoading || !src) {
     return <div className="absolute inset-0 animate-pulse bg-gray-800" />;
   }
 
-  return <img src={src} alt="" className="absolute inset-0 h-full w-full object-cover" />;
+  return (
+    <img
+      src={src}
+      alt=""
+      className="absolute inset-0 h-full w-full object-cover"
+      onError={() => advanceFailedSource?.(src)}
+    />
+  );
 }
 
 export function StatusBadge({ label, active }: { label: string; active: boolean }) {
@@ -195,9 +213,7 @@ export function StatusBadge({ label, active }: { label: string; active: boolean 
   );
 }
 
-/** Inner component so the hook is always called unconditionally (Rules of Hooks).
- * Returns null for non-Commander decks — the hook handles that check. */
-function BracketChipForDeck({ candidate }: { candidate: DeckCatalogCandidate }) {
+function EstimatedBracketChipForDeck({ candidate }: { candidate: DeckCatalogCandidate }) {
   const { estimate } = useBracketEstimate({
     deck: candidate.deck,
     commanders: candidate.deck.commander ?? [],
@@ -205,6 +221,16 @@ function BracketChipForDeck({ candidate }: { candidate: DeckCatalogCandidate }) 
     adapter: getSharedAdapter(),
   });
   return <BracketEstimateChip tier={estimate?.tier ?? null} />;
+}
+
+/** Bracket tags apply only to Commander-family formats. A manual declaration
+ * takes precedence without scheduling an estimate for that deck. */
+function BracketChipForDeck({ candidate }: { candidate: DeckCatalogCandidate }) {
+  if (!isCommanderFamilyFormat(candidate.knownFormat)) return null;
+  if (candidate.bracket != null) {
+    return <ManualBracketChip bracket={candidate.bracket} />;
+  }
+  return <EstimatedBracketChipForDeck candidate={candidate} />;
 }
 
 interface DeckTileProps {
@@ -238,23 +264,32 @@ const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onC
     const timer = setTimeout(() => setConfirmingDelete(false), 3000);
     return () => clearTimeout(timer);
   }, [confirmingDelete]);
-  const colors = compatibility?.color_identity?.length
-    ? compatibility.color_identity
-    : feedDeckOverride?.colors?.length
-      ? feedDeckOverride.colors
-      : preconDeckOverride
-        ? getPreconColorIdentity(preconDeckOverride)
-        : getDeckColorIdentity(deckName);
+  const colors = compatibility?.color_identity
+    ?? feedDeckOverride?.colors
+    ?? (preconDeckOverride
+      ? getPreconColorIdentity(preconDeckOverride)
+      : getDeckColorIdentity(deckName));
+  const colorPips = getDeckColorIdentityPips(colors);
   const count = feedDeckOverride
     ? feedDeckOverride.main.reduce((sum, e) => sum + e.count, 0)
     : preconDeckOverride
       ? preconDeckOverride.mainBoard.reduce((sum, e) => sum + e.count, 0)
     : getDeckCardCount(deckName);
-  const representativeCard = feedDeckOverride
-    ? (feedDeckOverride.commander?.[0] ?? feedDeckOverride.main.find((e) => !BASIC_LAND_NAMES.has(e.name))?.name ?? null)
-    : preconDeckOverride
-      ? (preconDeckOverride.commander?.[0]?.name ?? preconDeckOverride.mainBoard.find((e) => !BASIC_LAND_NAMES.has(e.name))?.name ?? null)
-    : getRepresentativeCard(deckName);
+  const feedCommander = feedDeckOverride?.commander?.[0];
+  const feedMain = feedDeckOverride?.main.find((entry) => !BASIC_LAND_NAMES.has(entry.name));
+  const preconName = preconDeckOverride?.commander?.[0]?.name
+    ?? preconDeckOverride?.mainBoard.find((entry) => !BASIC_LAND_NAMES.has(entry.name))?.name;
+  const representativeVisual: DeckVisualIdentity | null = preconDeckOverride
+    ? preconName
+      ? { name: preconName }
+      : null
+    : feedDeckOverride
+      ? feedCommander
+        ? { name: feedCommander }
+        : feedMain
+          ? { name: feedMain.name }
+          : null
+      : getRepresentativeDeckVisual(deckName);
   const feedOrigin = getDeckFeedOrigin(deckName);
   const feedForBadge = useCachedFeed(feedOrigin ?? "");
   const feedBadge = !hideFeedBadge && feedOrigin ? (feedForBadge?.name ?? t("deckTile.feedBadge")) : null;
@@ -279,17 +314,19 @@ const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onC
 
       {/* Art header: real Scryfall card art + color identity + source/state badges. */}
       <div className="relative h-28 overflow-hidden">
-        <DeckArtTile cardName={representativeCard} />
+        <DeckArtTile visual={representativeVisual} />
         <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/15 to-transparent" />
 
         {/* Color identity as actual Scryfall mana symbols, clustered top-right.
             A dark backing chip keeps the bright pips legible over any card art —
             without it the gold/white symbols wash out against light artwork. */}
-        <div className="absolute right-2 top-2 z-10 flex items-center gap-0.5 rounded-full bg-black/75 px-2 py-1 shadow-[0_2px_8px_rgba(0,0,0,0.6)] ring-1 ring-white/20 backdrop-blur-sm">
-          {(colors.length ? colors : ["C"]).map((color) => (
-            <ManaSymbol key={color} shard={color} size="xs" />
-          ))}
-        </div>
+        {colorPips && (
+          <div className="absolute right-2 top-2 z-10 flex items-center gap-0.5 rounded-full bg-black/75 px-2 py-1 shadow-[0_2px_8px_rgba(0,0,0,0.6)] ring-1 ring-white/20 backdrop-blur-sm">
+            {colorPips.map((color) => (
+              <ManaSymbol key={color} shard={color} size="xs" />
+            ))}
+          </div>
+        )}
 
         {/* Top-left: selected check only — the source label lives in the body so
             it never competes with the color-identity mana pips. Hover actions
@@ -549,7 +586,7 @@ const FeedDeckTile = memo(function FeedDeckTile({
 
 function PreconSetBadge({ deck }: { deck: PreconDeckEntry | undefined }) {
   const { t } = useTranslation("menu");
-  const setIcon = useSetSymbol(deck?.code);
+  const { src: setIcon, isLoading, advanceFailedSource } = useSetSymbol(deck?.code);
   if (!deck?.code) return null;
 
   return (
@@ -562,10 +599,11 @@ function PreconSetBadge({ deck }: { deck: PreconDeckEntry | undefined }) {
           src={setIcon}
           alt={t("deckTile.setIconAlt", { code: deck.code })}
           className="h-[18px] w-[18px] invert"
+          onError={() => advanceFailedSource(setIcon)}
         />
-      ) : (
+      ) : !isLoading ? (
         deck.code
-      )}
+      ) : null}
     </span>
   );
 }
@@ -612,6 +650,7 @@ export function MyDecks({
   onActiveDeckCompatChange,
 }: MyDecksProps) {
   const { t } = useTranslation("menu");
+  const effectiveOffline = useEffectiveOffline();
   const [activeTab, setActiveTab] = useState<MyDecksTab>("decks");
   const [deckNames, setDeckNames] = useState<string[]>([]);
   const [showImport, setShowImport] = useState(false);
@@ -686,6 +725,7 @@ export function MyDecks({
   const [sortAsc, setSortAsc] = useState(mode !== "select");
   const [searchQuery, setSearchQuery] = useState("");
   const [folderPrompt, setFolderPrompt] = useState<FolderPromptRequest | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   // Folder/star organization (user decks only). The grouping authority +
   // mutators come from useDeckFolders; collapse state lives in preferences so
@@ -716,24 +756,26 @@ export function MyDecks({
   const handleFolderPromptConfirm = useCallback(
     (folderName: string) => {
       if (!folderPrompt) return;
-      switch (folderPrompt.kind) {
-        case "create": {
-          createFolder(folderName);
-          break;
+      const prompt = folderPrompt;
+      void (async () => {
+        switch (prompt.kind) {
+          case "create": {
+            await createFolder(folderName);
+            break;
+          }
+          case "create-and-assign": {
+            await createFolder(folderName, prompt.deckName);
+            break;
+          }
+          case "rename": {
+            await renameFolder(prompt.folderId, folderName);
+            break;
+          }
         }
-        case "create-and-assign": {
-          const folder = createFolder(folderName);
-          if (folder) assignDeck(folderPrompt.deckName, folder.id);
-          break;
-        }
-        case "rename": {
-          renameFolder(folderPrompt.folderId, folderName);
-          break;
-        }
-      }
+      })();
       setFolderPrompt(null);
     },
-    [folderPrompt, createFolder, assignDeck, renameFolder],
+    [folderPrompt, createFolder, renameFolder],
   );
   const handleFolderPromptCancel = useCallback(() => {
     setFolderPrompt(null);
@@ -751,6 +793,9 @@ export function MyDecks({
   const confirmDeleteFolder = useCallback(() => {
     if (!folderPendingDelete) return;
     const { id } = folderPendingDelete;
+    // The folder header (including its kebab launcher) disappears on delete.
+    // Search is the nearest surviving deck control in both manage/select modes.
+    searchInputRef.current?.focus();
     deleteFolder(id);
     // Drop the now-dead id from the persisted collapse set so it can't leak.
     setCollapsedFolderIds(collapsedFolderIds.filter((existing) => existing !== id));
@@ -1189,6 +1234,7 @@ export function MyDecks({
             : null,
           selected_format_reasons: [],
           color_identity: getPreconColorIdentity(candidate.preconDeck),
+          color_distribution: [],
           coverage: coverageFromPct(candidate.coveragePct),
         };
         return [];
@@ -1262,25 +1308,42 @@ export function MyDecks({
   const showEvaluationStatus = mode === "manage"
     && (isScanningUserDecks || isScanningCoverage || (isEvaluating && !requiresCompatibilityFilter));
 
-  const materializePreconDeck = useCallback((deckName: string): boolean => {
+  /** Resolves false only when saving the precon was refused; the deck must not be selected then. */
+  const materializePreconDeck = useCallback(async (deckName: string): Promise<boolean> => {
     const candidate = legalPreconByName.get(deckName);
-    if (!candidate || candidate.source.type !== "precon") return false;
-    savePreconDeck(deckName, preconCandidateToDeckEntry(candidate));
+    if (!candidate || candidate.source.type !== "precon") return true;
+    const saved = await attemptSavedDeckWrite("save", () =>
+      savePreconDeck(deckName, preconCandidateToDeckEntry(candidate), { type: "replace" }),
+    );
+    if (!saved.ok) return false;
     setDeckNames(listSavedDeckNames());
     return true;
   }, [legalPreconByName]);
 
-  const handleTileClick = useCallback((deckName: string) => {
+  // Bumped by every select-mode choice, so a choice whose precon save or random pick finishes after a newer choice does not select.
+  const selectionRequest = useRef(0);
+  // A choice pending when this surface unmounts (e.g. the caller navigated
+  // away) must not select once it finishes either.
+  useEffect(() => {
+    return () => {
+      selectionRequest.current += 1;
+    };
+  }, []);
+
+  const handleTileClick = useCallback(async (deckName: string) => {
     if (mode === "manage") {
       onEditDeck?.(deckName);
       return;
     }
-    materializePreconDeck(deckName);
+    const request = ++selectionRequest.current;
+    if (!(await materializePreconDeck(deckName))) return;
+    if (request !== selectionRequest.current) return;
     onSelectDeck?.(deckName);
   }, [materializePreconDeck, mode, onEditDeck, onSelectDeck]);
 
   const handleRandomDeckClick = useCallback(async () => {
     if (mode !== "select" || randomSelectableCandidates.length === 0 || isPickingRandomDeck) return;
+    const request = ++selectionRequest.current;
     if (randomSelectionMode === "defer") {
       onSelectDeck?.(RANDOM_DECK_SELECTION);
       return;
@@ -1323,7 +1386,7 @@ export function MyDecks({
       })),
       { selectedFormat: selectedFormatForCompatibility },
     );
-    if (pick) handleTileClick(pick.deckName);
+    if (pick && request === selectionRequest.current) handleTileClick(pick.deckName);
   }, [
     compatibilities,
     deckCandidatesByName,
@@ -1339,33 +1402,42 @@ export function MyDecks({
     t,
   ]);
 
-  const handleImported = (name: string, names: string[]) => {
+  const handleImported = (name: string, names: string[], session: ImportSession) => {
     setDeckNames(names);
-    if (mode === "select") {
+    if (mode === "select" && session === "open") {
+      selectionRequest.current += 1;
       onSelectDeck?.(name);
     }
   };
 
   const handleRefreshAll = async () => {
+    if (effectiveOffline) return;
     setIsRefreshing(true);
     try {
-      await refreshAllFeeds();
-      setDeckNames(listSavedDeckNames());
+      const refreshed = await attemptSavedDeckWrite("updateFeeds", refreshAllFeeds);
+      if (refreshed.ok) setDeckNames(listSavedDeckNames());
     } finally {
       setIsRefreshing(false);
     }
   };
 
-  const handleAdoptDeck = useCallback((deckName: string) => {
+  const handleAdoptDeck = useCallback(async (deckName: string) => {
     const newName = prompt(t("myDecks.saveAsPrompt"), deckName);
     if (!newName) return;
-    adoptFeedDeck(deckName, newName);
-    setDeckNames(listSavedDeckNames());
+    const adopted = await attemptSavedDeckWrite("save", () => adoptFeedDeck(deckName, newName));
+    if (adopted.ok) setDeckNames(listSavedDeckNames());
   }, [t]);
 
-  const handleDeleteDeck = useCallback((deckName: string) => {
-    deleteDeck(deckName);
-    setDeckNames(listSavedDeckNames());
+  const handleDeleteDeck = useCallback(async (deckName: string) => {
+    const deck = captureSavedDeck(deckName);
+    if (deck.raw === null) {
+      // The precon section wires its tiles to this same handler, and a precon that is not
+      // saved (the common case) names nothing here — deleteDeck would refuse it as "changed".
+      setDeckNames(listSavedDeckNames());
+      return;
+    }
+    const deleted = await attemptSavedDeckWrite("delete", () => withSavedDeckLibrary((txn) => deleteDeck(txn, deck)));
+    if (deleted.ok) setDeckNames(listSavedDeckNames());
   }, []);
 
   const handleFeedManagerClose = () => {
@@ -1469,6 +1541,25 @@ export function MyDecks({
   const wrapperClass = bare
     ? "flex w-full min-w-0 flex-col items-center gap-4"
     : "flex w-full min-w-0 max-w-5xl flex-col items-center gap-6 px-4 py-5";
+  const importDeckTile = (
+    <AddDeckTile
+      label={t("myDecks.importDeckTile")}
+      onClick={() => setShowImport(true)}
+      icon={
+        <path d="M10.75 4.75a.75.75 0 0 0-1.5 0v4.5h-4.5a.75.75 0 0 0 0 1.5h4.5v4.5a.75.75 0 0 0 1.5 0v-4.5h4.5a.75.75 0 0 0 0-1.5h-4.5v-4.5Z" />
+      }
+    />
+  );
+  const preconstructedDeckTile = (
+    <AddDeckTile
+      label={t("myDecks.preconstructedTile")}
+      onClick={() => setShowPrecon(true)}
+      icon={
+        <path d="M3 3.5A1.5 1.5 0 0 1 4.5 2h7A1.5 1.5 0 0 1 13 3.5v13a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 3 16.5v-13Zm11.25.5a.75.75 0 0 1 .75.75v11.5a.75.75 0 0 1-1.5 0V4.75a.75.75 0 0 1 .75-.75Zm2.5 1.5a.75.75 0 0 1 .75.75v8.5a.75.75 0 0 1-1.5 0v-8.5a.75.75 0 0 1 .75-.75Z" />
+      }
+    />
+  );
+  const deckEntryTiles = <>{importDeckTile}{preconstructedDeckTile}</>;
 
   return (
     <Wrapper className={wrapperClass}>
@@ -1521,10 +1612,15 @@ export function MyDecks({
         )}
         {mode === "manage" && activeTab === "subscriptions" && (
           <div className="flex flex-wrap gap-2 self-start sm:self-auto">
+            {effectiveOffline && (
+              <p className="w-full text-xs text-amber-200 sm:w-auto sm:self-center">
+                {t("feedManager.offlineUnavailable")}
+              </p>
+            )}
             <button
               onClick={handleRefreshAll}
-              disabled={isRefreshing}
-              className={menuButtonClass({ tone: "neutral", size: "sm", disabled: isRefreshing })}
+              disabled={effectiveOffline || isRefreshing}
+              className={menuButtonClass({ tone: "neutral", size: "sm", disabled: effectiveOffline || isRefreshing })}
             >
               {isRefreshing ? t("myDecks.refreshing") : t("myDecks.refreshAll")}
             </button>
@@ -1547,6 +1643,7 @@ export function MyDecks({
             <path fillRule="evenodd" d="M9.965 11.026a5 5 0 1 1 1.06-1.06l2.755 2.754a.75.75 0 1 1-1.06 1.06l-2.755-2.754ZM10.5 7a3.5 3.5 0 1 1-7 0 3.5 3.5 0 0 1 7 0Z" clipRule="evenodd" />
           </svg>
           <input
+            ref={searchInputRef}
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
@@ -1718,21 +1815,26 @@ export function MyDecks({
       )}
 
       {visibleDeckCount === 0 ? (
-        <div className="flex w-full flex-col items-center justify-center gap-4 rounded-[20px] border border-dashed border-white/10 bg-black/12 px-6 py-12 text-center">
-          <div className="text-lg font-medium text-white">{t("myDecks.empty.title")}</div>
-          <div className="max-w-md text-sm leading-6 text-slate-400">
-            {mode === "select"
-              ? t("myDecks.empty.selectHint")
-              : t("myDecks.empty.manageHint")}
-          </div>
+        <div className="flex w-full flex-col gap-6">
           {mode === "manage" && (
-            <button
-              onClick={() => setActiveFilter("all")}
-              className={menuButtonClass({ tone: "neutral", size: "sm" })}
-            >
-              {t("myDecks.showAllDecksButton")}
-            </button>
+            <div className={DECK_GRID_CLASS}>{deckEntryTiles}</div>
           )}
+          <div className="flex w-full flex-col items-center justify-center gap-4 rounded-[20px] border border-dashed border-white/10 bg-black/12 px-6 py-12 text-center">
+            <div className="text-lg font-medium text-white">{t("myDecks.empty.title")}</div>
+            <div className="max-w-md text-sm leading-6 text-slate-400">
+              {mode === "select"
+                ? t("myDecks.empty.selectHint")
+                : t("myDecks.empty.manageHint")}
+            </div>
+            {mode === "manage" && (
+              <button
+                onClick={() => setActiveFilter("all")}
+                className={menuButtonClass({ tone: "neutral", size: "sm" })}
+              >
+                {t("myDecks.showAllDecksButton")}
+              </button>
+            )}
+          </div>
         </div>
       ) : (
         <div className="flex w-full flex-col gap-6">
@@ -1779,20 +1881,7 @@ export function MyDecks({
                   }
                 />
               )}
-              <AddDeckTile
-                label={t("myDecks.importDeckTile")}
-                onClick={() => setShowImport(true)}
-                icon={
-                  <path d="M10.75 4.75a.75.75 0 0 0-1.5 0v4.5h-4.5a.75.75 0 0 0 0 1.5h4.5v4.5a.75.75 0 0 0 1.5 0v-4.5h4.5a.75.75 0 0 0 0-1.5h-4.5v-4.5Z" />
-                }
-              />
-              <AddDeckTile
-                label={t("myDecks.preconstructedTile")}
-                onClick={() => setShowPrecon(true)}
-                icon={
-                  <path d="M3 3.5A1.5 1.5 0 0 1 4.5 2h7A1.5 1.5 0 0 1 13 3.5v13a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 3 16.5v-13Zm11.25.5a.75.75 0 0 1 .75.75v11.5a.75.75 0 0 1-1.5 0V4.75a.75.75 0 0 1 .75-.75Zm2.5 1.5a.75.75 0 0 1 .75.75v8.5a.75.75 0 0 1-1.5 0v-8.5a.75.75 0 0 1 .75-.75Z" />
-                }
-              />
+              {deckEntryTiles}
             </div>
           </div>
 
@@ -1971,7 +2060,7 @@ export function MyDecks({
       <PreconDeckModal
         open={showPrecon}
         onClose={() => setShowPrecon(false)}
-        onImported={(name) => handleImported(name, listSavedDeckNames())}
+        onImported={(name, session) => handleImported(name, listSavedDeckNames(), session)}
       />
       <FeedManagerModal
         open={showFeedManager}

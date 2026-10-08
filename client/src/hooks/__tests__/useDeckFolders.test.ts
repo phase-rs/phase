@@ -1,8 +1,10 @@
 import { act, renderHook } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { groupSavedDecks, useDeckFolders } from "../useDeckFolders";
-import { DECK_FOLDERS_KEY, type DeckFolder, type DeckMeta } from "../../constants/storage";
+import { DECK_FOLDERS_KEY, STORAGE_KEY_PREFIX, type DeckFolder, type DeckMeta } from "../../constants/storage";
+import { setSavedDeckTxnLockWaitForTests, withSavedDeckLibrary } from "../../services/savedDeckTransaction";
+import { installFifoWebLocks, resetSavedDeckLibraryForTests, uninstallWebLocks } from "../../test/helpers/webLocks";
 import { PROFILE_REPLACED_EVENT } from "../../stores/cloudSyncStore";
 
 beforeEach(() => {
@@ -106,15 +108,17 @@ describe("groupSavedDecks", () => {
 });
 
 describe("useDeckFolders (reactive)", () => {
-  it("regroups after membership + star mutations made through the hook", () => {
+  it("regroups after membership + star mutations made through the hook", async () => {
+    // assignDeck/toggleStar now require the deck to exist (captured, unchanged) at the mutation.
+    localStorage.setItem(STORAGE_KEY_PREFIX + "Burn", JSON.stringify({ main: [], sideboard: [] }));
     const { result } = renderHook(() => useDeckFolders());
 
     let folderId = "";
-    act(() => {
-      folderId = result.current.createFolder("Aggro")!.id;
+    await act(async () => {
+      folderId = (await result.current.createFolder("Aggro"))!.id;
     });
-    act(() => {
-      result.current.assignDeck("Burn", folderId);
+    await act(async () => {
+      await result.current.assignDeck("Burn", folderId);
     });
 
     // A membership change (metadata only — folder registry unchanged) must
@@ -122,8 +126,8 @@ describe("useDeckFolders (reactive)", () => {
     const grouped = result.current.group(["Burn"]);
     expect(grouped.folders.find((f) => f.folder.id === folderId)?.decks).toEqual(["Burn"]);
 
-    act(() => {
-      result.current.toggleStar("Burn");
+    await act(async () => {
+      await result.current.toggleStar("Burn");
     });
     const afterStar = result.current.group(["Burn"]);
     expect(afterStar.starred).toEqual(["Burn"]);
@@ -164,6 +168,25 @@ describe("useDeckFolders (reactive)", () => {
     expect(result.current.folders.map((f) => f.name)).toEqual(["From Phone"]);
   });
 
+  it("returns stable identities for createFolder/renameFolder/deleteFolder/assignDeck/toggleStar across rerenders", () => {
+    const { result, rerender } = renderHook(() => useDeckFolders());
+    const first = {
+      createFolder: result.current.createFolder,
+      renameFolder: result.current.renameFolder,
+      deleteFolder: result.current.deleteFolder,
+      assignDeck: result.current.assignDeck,
+      toggleStar: result.current.toggleStar,
+    };
+
+    rerender();
+
+    expect(result.current.createFolder).toBe(first.createFolder);
+    expect(result.current.renameFolder).toBe(first.renameFolder);
+    expect(result.current.deleteFolder).toBe(first.deleteFolder);
+    expect(result.current.assignDeck).toBe(first.assignDeck);
+    expect(result.current.toggleStar).toBe(first.toggleStar);
+  });
+
   it("removes the window listeners on unmount", () => {
     const { result, unmount } = renderHook(() => useDeckFolders());
     unmount();
@@ -172,5 +195,41 @@ describe("useDeckFolders (reactive)", () => {
       window.dispatchEvent(new Event("phase-decks-changed"));
     });
     expect(result.current.folders).toHaveLength(0);
+  });
+});
+
+describe("useDeckFolders: create waits behind the saved-deck library lock", () => {
+  beforeEach(async () => {
+    installFifoWebLocks();
+    await resetSavedDeckLibraryForTests();
+  });
+
+  afterEach(() => {
+    uninstallWebLocks();
+  });
+
+  it("a folder create refused behind a held lock does not write the folder registry unguarded", async () => {
+    let releaseHolder!: () => void;
+    const held = new Promise<void>((resolve) => {
+      releaseHolder = resolve;
+    });
+    const holder = withSavedDeckLibrary(() => held);
+    await vi.waitFor(async () => {
+      expect((await navigator.locks.query()).held).toHaveLength(1);
+    });
+
+    setSavedDeckTxnLockWaitForTests(20);
+    const { result } = renderHook(() => useDeckFolders());
+    let created: DeckFolder | null = null;
+    await act(async () => {
+      created = await result.current.createFolder("Aggro");
+    });
+
+    expect(created).toBeNull();
+    expect(localStorage.getItem(DECK_FOLDERS_KEY)).toBeNull();
+
+    setSavedDeckTxnLockWaitForTests(Number.POSITIVE_INFINITY);
+    releaseHolder();
+    await holder;
   });
 });

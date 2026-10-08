@@ -50,7 +50,9 @@
     },
     "preview": {
       "cta": "Try Preview",
-      "tooltip": "Play the latest preview build — newest cards & fixes land here before each release."
+      "tooltip": "Play the latest preview build — newest cards & fixes land here before each release.",
+      "backCta": "Back to release",
+      "backTooltip": "Return to the current release build."
     },
     "coverage": {
       "title": "Open the coverage dashboard",
@@ -115,6 +117,8 @@
     "coverageThresholdHint": "Exclude decks below this engine-support threshold",
     "bracket": "Bracket",
     "bracketHint": "Random AI picks from these brackets. Untagged decks are excluded when filtering.",
+    "bracketPoolEmpty": "No decks match the selected brackets. Random AI will draw from all legal decks.",
+    "cedhPoolEmpty": "No bracket-5 decks available. Random AI seats cannot be filled.",
     "opponentLabel": "Opponent {{number}}",
     "deck": "Deck",
     "difficulty": "Difficulty",
@@ -129,7 +133,9 @@
       "feed": "Feed",
       "user": "User",
       "precon": "Precon"
-    }
+    },
+    "brain": "Driven by",
+    "brainEngine": "Engine AI"
   },
   "feedManager": {
     "title": "Manage Feeds",
@@ -141,6 +147,7 @@
     "lastRefreshed": "Last refreshed: {{date}}",
     "addCustomFeed": "Add Custom Feed",
     "add": "Add",
+    "offlineUnavailable": "Feed updates are unavailable while offline.",
     "done": "Done"
   },
   "importDeck": {
@@ -153,9 +160,21 @@
     "urlHint": "Imports a public deck from Moxfield or Archidekt.",
     "import": "Import",
     "importing": "Importing…",
+    "importAsOathbreaker": "Set up as an Oathbreaker deck",
+    "oathbreakerSetupTitle": "Set up Oathbreaker",
+    "oathbreakerSetupDescription": "Choose the Oathbreaker and signature spell from this list.",
+    "oathbreakerLabel": "Oathbreaker",
+    "signatureSpellLabel": "Signature spell",
+    "chooseOathbreaker": "Choose an Oathbreaker",
+    "chooseSignatureSpell": "Choose a signature spell",
+    "confirmOathbreakerImport": "Import Oathbreaker Deck",
+    "backToImport": "Back to import",
     "errorInvalidUrl": "Enter a valid Moxfield or Archidekt deck URL.",
+    "errorOffline": "URL imports are unavailable offline. Use Paste Text or From File instead.",
     "errorNetworkFailure": "Couldn't reach the deck import service. Check your connection and try again.",
     "errorGeneric": "Failed to import deck.",
+    "errorNoOathbreaker": "This list has no eligible Oathbreaker.",
+    "errorNoSignatureSpell": "This Oathbreaker has no eligible signature spell in this list.",
     "errorNoCards": "Couldn't find any cards. Paste a deck in MTGA or .dck format.",
     "fileSupports": "Supports .dck, .dec, .txt, and MTGA format",
     "chooseFile": "Choose File",
@@ -303,6 +322,7 @@
     "online": "Online",
     "draft": "Draft",
     "decks": "Decks",
+    "tournament": "Tournaments",
     "alpha": "Alpha",
     "profile": "Profile",
     "settings": "Settings",

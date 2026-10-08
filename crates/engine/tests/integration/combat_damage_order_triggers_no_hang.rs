@@ -29,6 +29,7 @@
 //!     its power to the player it is attacking, in the combat damage step.
 
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::{effects::attach::attach_to, game_object::AttachTarget};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::phase::Phase;
@@ -68,6 +69,110 @@ const DRAW_ON_COMBAT_DAMAGE_MANDATORY: &str =
 /// `OptionalEffectChoice`.
 const GAIN_ON_COMBAT_DAMAGE_MANDATORY: &str =
     "Whenever this creature deals combat damage to a player, gain 1 life.";
+
+const ONCE_PER_TURN_COMBAT_DAMAGE: &str = "Whenever a creature you control deals combat \
+     damage to a player, draw a card. This ability triggers only once each turn.";
+
+/// Exact Oracle text for Calix, Guided by Fate, verified against Scryfall.
+const CALIX_GUIDED_BY_FATE: &str = "Constellation — Whenever Calix or another enchantment you \
+     control enters, put a +1/+1 counter on target creature.\nWhenever Calix or an enchanted \
+     creature you control deals combat damage to a player, you may create a token that's a copy of \
+     a nonlegendary enchantment you control. Do this only once each turn.";
+
+const TEST_AURA: &str = "Enchant creature";
+
+#[test]
+fn once_per_turn_combat_damage_trigger_admits_one_of_two_qualifying_attackers() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(
+        P0,
+        "Once-per-turn watcher",
+        1,
+        1,
+        ONCE_PER_TURN_COMBAT_DAMAGE,
+    );
+    let attacker_a = scenario
+        .add_creature(P0, "Qualifying attacker A", 2, 2)
+        .id();
+    let attacker_b = scenario
+        .add_creature(P0, "Qualifying attacker B", 2, 2)
+        .id();
+    scenario.with_library_top(P0, &["L0", "L1", "L2"]);
+
+    let mut runner = scenario.build();
+    let hand_before = runner.state().players[P0.0 as usize].hand.len();
+    run_combat(&mut runner, vec![attacker_a, attacker_b], vec![]);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().players[P0.0 as usize].hand.len(),
+        hand_before + 1,
+        "two qualifying combat-damage candidates must admit only one once-per-turn trigger"
+    );
+}
+
+#[test]
+fn calix_once_per_turn_combat_trigger_declines_once_then_returns_to_priority() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let calix = scenario
+        .add_creature_from_oracle(P0, "Calix, Guided by Fate", 2, 2, CALIX_GUIDED_BY_FATE)
+        .id();
+    let enchanted_attacker = scenario
+        .add_creature(P0, "Aura-enchanted attacker", 2, 2)
+        .id();
+    let aura = scenario
+        .add_enchantment_from_oracle(P0, "Test Aura", TEST_AURA)
+        .with_subtypes(vec!["Aura"])
+        .id();
+
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), aura, enchanted_attacker);
+    assert_eq!(
+        runner.state().objects[&aura].attached_to,
+        Some(AttachTarget::Object(enchanted_attacker)),
+        "the Aura's attachment pointer identifies the enchanted attacker"
+    );
+    assert!(
+        runner.state().objects[&enchanted_attacker]
+            .attachments
+            .contains(&aura),
+        "the enchanted attacker retains the reciprocal attachment"
+    );
+
+    assert_eq!(
+        runner.state().objects[&aura].attached_to,
+        Some(AttachTarget::Object(enchanted_attacker)),
+        "the legal Aura remains attached immediately before combat damage"
+    );
+    run_combat(&mut runner, vec![calix, enchanted_attacker], vec![]);
+
+    // Combat leaves the admitted trigger on the stack with a priority window.
+    // Resolve that window before checking the optional effect it produces.
+    runner.advance_until_stack_empty();
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::OptionalEffectChoice { player: P0, .. }
+    ));
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("declining Calix's only admitted combat-damage trigger succeeds");
+    runner.advance_until_stack_empty();
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "after declining the only Calix trigger, priority resumes without a second prompt"
+    );
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ),
+        "two qualifying attackers must not produce a second Calix optional prompt"
+    );
+}
 
 /// Primary regression — two same-controller creatures with combat-damage
 /// triggers attack unblocked, both deal combat damage to P1, and the resulting

@@ -143,7 +143,7 @@ fn deflecting_swat_retargets_opponent_spell_on_stack() {
         controller: P1,
         kind: StackEntryKind::Spell {
             card_id: CardId(77),
-            ability: Some(bolt_ability),
+            ability: Some(Box::new(bolt_ability)),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 0,
         },
@@ -173,6 +173,7 @@ fn deflecting_swat_retargets_opponent_spell_on_stack() {
         scope,
         current_targets,
         legal_new_targets,
+        ..
     } = &runner.state().waiting_for
     else {
         unreachable!();

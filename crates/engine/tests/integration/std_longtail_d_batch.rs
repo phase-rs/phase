@@ -5,7 +5,8 @@
 //! SHIPPED (0-Unimplemented + discriminating runtime/derived assertion that
 //! flips on revert):
 //!   - Laughing Jasper Flint — "Creatures you control but don't own are
-//!     Mercenaries in addition to their other types" (LT-F type-grant). Two
+//!     Mercenaries in addition to their other types" (LT-F type-grant; its
+//!     upkeep cast line is an honest gap, see its test). Two
 //!     parser arms: a generic consonant+y → "-ies" plural rule in `parse_subtype`
 //!     ("Mercenaries" → "Mercenary"), and a "<creatures you control> but don't
 //!     own" negated-ownership qualifier in the static dispatch arm.
@@ -105,14 +106,14 @@ fn assert_zero_unimplemented_kw(
 
 const LJF_ORACLE: &str = "Creatures you control but don't own are Mercenaries in addition to their other types.\nAt the beginning of your upkeep, exile the top X cards of target opponent's library, where X is the number of outlaws you control. Until end of turn, you may cast spells from among those cards, and mana of any type can be spent to cast those spells.";
 
+/// Both lines are fully supported. The upkeep line's ", and mana of any type
+/// can be spent to cast those spells" rides the "you may cast spells from
+/// among those cards" grant it follows (CR 609.4b, #9213).
 #[test]
 fn laughing_jasper_flint_zero_unimplemented() {
-    assert_zero_unimplemented(
-        LJF_ORACLE,
-        "Laughing Jasper Flint",
-        &["Legendary".to_string(), "Creature".to_string()],
-        &["Goblin".to_string(), "Mercenary".to_string()],
-    );
+    let types = ["Legendary".to_string(), "Creature".to_string()];
+    let subtypes = ["Goblin".to_string(), "Mercenary".to_string()];
+    assert_zero_unimplemented(LJF_ORACLE, "Laughing Jasper Flint", &types, &subtypes);
 }
 
 #[test]
@@ -591,11 +592,10 @@ fn choreographed_sparks_copy_grant_is_supported() {
 }
 
 #[test]
-fn leyline_of_transformation_nonbattlefield_grant_is_deferred() {
-    // The first clause (creatures you control are the chosen type) parses; the
-    // "same is true for creature spells you control and creature cards you own
-    // that aren't on the battlefield" continuous non-battlefield grant is not
-    // modeled.
+fn leyline_of_transformation_nonbattlefield_grant_is_modeled() {
+    // The complete same-is-true static has one dynamic recipient filter spanning
+    // creatures on the battlefield, creature spells, and owned creature cards in
+    // the other card zones.
     let dbg = parsed_debug(
         "If this card is in your opening hand, you may begin the game with it on the battlefield.\nAs this enchantment enters, choose a creature type.\nCreatures you control are the chosen type in addition to their other types. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.",
         "Leyline of Transformation",
@@ -603,8 +603,8 @@ fn leyline_of_transformation_nonbattlefield_grant_is_deferred() {
         &[],
     );
     assert!(
-        dbg.contains("Unimplemented"),
-        "Leyline of Transformation non-battlefield grant must remain honestly Unimplemented"
+        !dbg.contains("Unimplemented"),
+        "Leyline of Transformation's same-is-true continuation must be fully modeled: {dbg}"
     );
 }
 
@@ -656,6 +656,7 @@ fn nowhere_to_run_hexproof_bypass_and_ward_suppression_ship() {
             StaticMode::SuppressTriggers {
                 events,
                 source_filter,
+                ..
             } => Some((events, source_filter)),
             _ => None,
         })

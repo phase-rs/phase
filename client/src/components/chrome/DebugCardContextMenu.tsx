@@ -1,4 +1,15 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+  type RefObject,
+} from "react";
+import { createPortal } from "react-dom";
+import { useTranslation } from "react-i18next";
 
 import type {
   CounterType,
@@ -9,9 +20,13 @@ import type {
   Zone,
 } from "../../adapter/types";
 import { useGameStore } from "../../stores/gameStore";
-import { useUiStore } from "../../stores/uiStore";
+import {
+  useUiStore,
+  type DebugContextMenuSurface,
+} from "../../stores/uiStore";
 import { useGameDispatch } from "../../hooks/useGameDispatch";
 import { useIsMobile } from "../../hooks/useIsMobile";
+import { useFocusScopePortalBranch } from "../ui/FocusScope";
 
 // How a submenu's panel is rendered: stacked inline below its button (mobile,
 // where there is no horizontal room) or as a side flyout (tablet/desktop). The
@@ -26,6 +41,41 @@ type SubmenuName = "zone" | "controller" | "keywords";
 // flyout panel below — used to decide which side has room and to keep the panel
 // on-screen. (12rem = 192px.)
 const FLYOUT_WIDTH = 192;
+
+// A debug menu mixes traditional menu rows with compact command buttons (for
+// counters, edited P/T, and keyword toggles). Keyboard traversal must include
+// every command without crossing into an open child menu. Keeping selection in
+// one helper also makes native `disabled` and ARIA-disabled filtering uniform.
+const MENU_COMMAND_SELECTOR = [
+  "button",
+  '[role="menuitem"]',
+  '[role="menuitemcheckbox"]',
+  '[role="menuitemradio"]',
+].join(", ");
+
+function isEnabledCurrentMenuCommand(
+  command: HTMLElement,
+  menu: HTMLElement,
+): boolean {
+  return (
+    command.closest<HTMLElement>('[role="menu"]') === menu &&
+    !command.matches(':disabled, [aria-disabled="true"]')
+  );
+}
+
+function currentMenuCommands(menu: HTMLElement): HTMLElement[] {
+  return Array.from(
+    menu.querySelectorAll<HTMLElement>(MENU_COMMAND_SELECTOR),
+  ).filter((command) => isEnabledCurrentMenuCommand(command, menu));
+}
+
+function closestCurrentMenuCommand(
+  target: HTMLElement,
+  menu: HTMLElement,
+): HTMLElement | null {
+  const command = target.closest<HTMLElement>(MENU_COMMAND_SELECTOR);
+  return command && isEnabledCurrentMenuCommand(command, menu) ? command : null;
+}
 
 // Everything a submenu needs to render its toggle row and panel, except its own
 // label/badge/children. Bundled so the parent can hand it to every submenu with
@@ -64,13 +114,36 @@ const COMMON_KEYWORDS: readonly Keyword[] = [
   "Defender",
 ];
 
-export function DebugCardContextMenu() {
+export function DebugCardContextMenu({
+  surface,
+  anchorRef,
+}: {
+  surface: DebugContextMenuSurface;
+  anchorRef?: RefObject<HTMLElement | null>;
+}) {
   const menu = useUiStore((s) => s.debugContextMenu);
   const closeMenu = useUiStore((s) => s.closeDebugContextMenu);
 
-  if (!menu) return null;
+  useEffect(
+    () => () => {
+      if (useUiStore.getState().debugContextMenu?.surface === surface) {
+        useUiStore.getState().closeDebugContextMenu();
+      }
+    },
+    [surface],
+  );
 
-  return <DebugCardContextMenuInner objectId={menu.objectId} x={menu.x} y={menu.y} onClose={closeMenu} />;
+  if (!menu || menu.surface !== surface) return null;
+
+  return (
+    <DebugCardContextMenuInner
+      objectId={menu.objectId}
+      x={menu.x}
+      y={menu.y}
+      onClose={closeMenu}
+      anchorRef={anchorRef}
+    />
+  );
 }
 
 function DebugCardContextMenuInner({
@@ -78,19 +151,51 @@ function DebugCardContextMenuInner({
   x,
   y,
   onClose,
+  anchorRef,
 }: {
   objectId: ObjectId;
   x: number;
   y: number;
   onClose: () => void;
+  anchorRef?: RefObject<HTMLElement | null>;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
-  const obj = useGameStore((s) => s.gameState?.objects[objectId]);
+  const fallbackAnchorRef = useRef<HTMLElement | null>(null);
+  const liveObject = useGameStore((s) => s.gameState?.objects[objectId]);
+  const retainedObjectRef = useRef(liveObject);
+  if (liveObject) retainedObjectRef.current = liveObject;
+  const obj = liveObject ?? retainedObjectRef.current;
   const players = useGameStore((s) => s.gameState?.players);
   const dispatch = useGameDispatch();
   const isMobile = useIsMobile();
+  const headerId = useId();
   // Accordion: at most one submenu open at a time. Opening another collapses it.
   const [openSubmenu, setOpenSubmenu] = useState<SubmenuName | null>(null);
+
+  useFocusScopePortalBranch({
+    active: Boolean(obj),
+    containerRef: ref,
+    anchorRef: anchorRef ?? fallbackAnchorRef,
+    onDismiss: onClose,
+  });
+
+  useLayoutEffect(() => {
+    // An engine/debug snapshot can remove this object before an async action's
+    // dispatch promise settles. Retain the last render through this layout
+    // handoff so the portal unregisters while its focused owner and exact
+    // anchor are both still available, then let the store close unmount it.
+    if (!liveObject) onClose();
+  }, [liveObject, onClose]);
+
+  useLayoutEffect(() => {
+    // Scoped modal launchers provide an exact restoration authority. Preserve
+    // the legacy standalone game-surface behavior until it has one too, rather
+    // than moving focus into a menu that can only dismiss back to <body>.
+    if (anchorRef) {
+      const menu = ref.current;
+      if (menu) currentMenuCommands(menu)[0]?.focus();
+    }
+  }, [anchorRef]);
 
   const anchorBottom = y > window.innerHeight / 2;
   const left = Math.max(8, Math.min(x, window.innerWidth - 232));
@@ -112,6 +217,86 @@ function DebugCardContextMenuInner({
     open: openSubmenu === name,
     onToggle: () => setOpenSubmenu((cur) => (cur === name ? null : name)),
   });
+
+  const handleMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+
+    // Number fields retain their native cursor and increment/decrement keys.
+    if (target instanceof HTMLInputElement) return;
+
+    if (event.key === "ArrowRight") {
+      const trigger = target.closest<HTMLButtonElement>(
+        "[data-debug-submenu-trigger]",
+      );
+      if (!trigger || !event.currentTarget.contains(trigger)) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      if (trigger.getAttribute("aria-expanded") !== "true") {
+        trigger.click();
+      }
+      requestAnimationFrame(() => {
+        const panelId = trigger.getAttribute("aria-controls");
+        const panel = panelId ? document.getElementById(panelId) : null;
+        if (panel) currentMenuCommands(panel)[0]?.focus();
+      });
+      return;
+    }
+
+    if (event.key === "ArrowLeft") {
+      const panel = target.closest<HTMLElement>(
+        "[data-debug-submenu-panel]",
+      );
+      const triggerId = panel?.getAttribute("aria-labelledby");
+      const trigger = triggerId
+        ? document.getElementById(triggerId)
+        : null;
+      if (
+        !(trigger instanceof HTMLButtonElement) ||
+        !event.currentTarget.contains(trigger)
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      if (trigger.getAttribute("aria-expanded") === "true") {
+        trigger.click();
+      }
+      trigger.focus();
+      return;
+    }
+
+    if (
+      event.key !== "ArrowDown" &&
+      event.key !== "ArrowUp" &&
+      event.key !== "Home" &&
+      event.key !== "End"
+    ) {
+      return;
+    }
+
+    const currentMenu = target.closest<HTMLElement>('[role="menu"]');
+    if (!currentMenu || !event.currentTarget.contains(currentMenu)) return;
+    const controls = currentMenuCommands(currentMenu);
+    if (controls.length === 0) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    const currentControl = closestCurrentMenuCommand(target, currentMenu);
+    const currentIndex = currentControl ? controls.indexOf(currentControl) : -1;
+    if (event.key === "Home") {
+      controls[0].focus();
+    } else if (event.key === "End") {
+      controls[controls.length - 1].focus();
+    } else if (event.key === "ArrowDown") {
+      controls[(currentIndex + 1 + controls.length) % controls.length].focus();
+    } else {
+      const previousIndex = currentIndex < 0 ? 0 : currentIndex - 1;
+      controls[(previousIndex + controls.length) % controls.length].focus();
+    }
+  };
 
   useEffect(() => {
     const handlePointerDown = (e: PointerEvent) => {
@@ -145,17 +330,14 @@ function DebugCardContextMenuInner({
 
   const onBattlefield = obj.zone === "Battlefield";
   const isCreature = obj.card_types?.core_types?.includes("Creature") ?? false;
-  const isPlaneswalker = obj.card_types?.core_types?.includes("Planeswalker") ?? false;
-  const isClass = obj.card_types?.subtypes?.includes("Class") ?? false;
-  const isSaga = obj.card_types?.subtypes?.includes("Saga") ?? false;
-  const hasLoreCounters = isClass || isSaga;
   const hasSummoningSickness = obj.has_summoning_sickness ?? false;
   const currentKeywords = obj.keywords ?? [];
 
-  return (
+  return createPortal(
     <div
       ref={ref}
       role="menu"
+      aria-labelledby={headerId}
       className={
         "fixed z-[120] w-56 rounded-lg border border-gray-700 bg-gray-900/95 py-1 shadow-xl backdrop-blur-sm " +
         // Mobile expands submenus inline, so the menu can grow tall and needs to
@@ -171,9 +353,13 @@ function DebugCardContextMenuInner({
           : { top: y }),
       }}
       onContextMenu={(e) => e.preventDefault()}
+      onKeyDown={handleMenuKeyDown}
     >
       {/* Card name header */}
-      <div className="truncate border-b border-gray-800 px-3 py-1.5 font-mono text-xs font-semibold text-gray-300">
+      <div
+        id={headerId}
+        className="truncate border-b border-gray-800 px-3 py-1.5 font-mono text-xs font-semibold text-gray-300"
+      >
         {obj.name || `Object ${objectId}`}
         {obj.class_level != null && (
           <span className="ml-1 text-amber-400">Lv.{obj.class_level}</span>
@@ -185,13 +371,14 @@ function DebugCardContextMenuInner({
         <ZoneSubmenu
           chrome={submenuProps("zone")}
           currentZone={obj.zone}
-          onSelectZone={(zone, libraryPosition) =>
+          onSelectZone={(zone, simulate, libraryPosition) =>
             dispatchDebug({
               type: "MoveToZone",
               data: {
                 object_id: objectId,
                 to_zone: zone,
                 ...(libraryPosition ? { library_position: libraryPosition } : {}),
+                simulate,
               },
             })
           }
@@ -248,18 +435,22 @@ function DebugCardContextMenuInner({
       {/* Counter actions */}
       {onBattlefield && (
         <div className="border-b border-gray-800 py-0.5">
-          {isCreature && (
-            <>
-              <CounterRow label="+1/+1" objectId={objectId} counterType="P1P1" current={obj.counters?.P1P1 ?? 0} onDispatch={dispatchDebugKeepOpen} />
-              <CounterRow label="-1/-1" objectId={objectId} counterType="M1M1" current={obj.counters?.M1M1 ?? 0} onDispatch={dispatchDebugKeepOpen} />
-            </>
-          )}
-          {isPlaneswalker && (
-            <CounterRow label="Loyalty" objectId={objectId} counterType="loyalty" current={obj.counters?.loyalty ?? 0} onDispatch={dispatchDebugKeepOpen} />
-          )}
-          {hasLoreCounters && (
-            <CounterRow label="Lore" objectId={objectId} counterType="lore" current={obj.counters?.lore ?? 0} onDispatch={dispatchDebugKeepOpen} />
-          )}
+          {Object.entries(obj.counters ?? {})
+            .flatMap(([counterType, count]) => {
+              const current = count ?? 0;
+              return current > 0
+                ? [
+                    <CounterRow
+                      key={counterType}
+                      label={counterType}
+                      objectId={objectId}
+                      counterType={counterType}
+                      current={current}
+                      onDispatch={dispatchDebugKeepOpen}
+                    />,
+                  ]
+                : [];
+            })}
         </div>
       )}
 
@@ -295,7 +486,8 @@ function DebugCardContextMenuInner({
           onClick={() => dispatchDebug({ type: "RemoveObject", data: { object_id: objectId } })}
         />
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -346,6 +538,8 @@ function Submenu({
   badge?: ReactNode;
   children: ReactNode;
 }) {
+  const panelId = useId();
+  const triggerId = useId();
   const inline = flyout === "inline";
   // Inline (mobile) stacks below the button with its own scroll. The side flyout
   // is absolutely positioned; anchor its top or bottom to the button so it grows
@@ -361,8 +555,13 @@ function Submenu({
   return (
     <div className="relative">
       <button
+        id={triggerId}
         role="menuitem"
         type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? panelId : undefined}
+        data-debug-submenu-trigger
         onClick={onToggle}
         className="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs text-gray-300 transition-colors hover:bg-white/10"
       >
@@ -374,7 +573,14 @@ function Submenu({
         )}
       </button>
       {open && (
-        <div className={panelClass} style={inline ? undefined : { maxHeight }}>
+        <div
+          id={panelId}
+          role="menu"
+          aria-labelledby={triggerId}
+          data-debug-submenu-panel
+          className={panelClass}
+          style={inline ? undefined : { maxHeight }}
+        >
           {children}
         </div>
       )}
@@ -388,27 +594,54 @@ function ZoneSubmenu({
   chrome,
 }: {
   currentZone: Zone;
-  onSelectZone: (zone: Zone, libraryPosition?: LibraryPosition) => void;
+  onSelectZone: (
+    zone: Zone,
+    simulate: boolean,
+    libraryPosition?: LibraryPosition,
+  ) => void;
   chrome: SubmenuChrome;
 }) {
+  const { t } = useTranslation("game");
+  // Off by default: a debug move stages the board raw. On, the engine runs the
+  // real pipeline — ETB replacements and triggers, leave/dies triggers, SBAs.
+  const [runEtb, setRunEtb] = useState(false);
+
   return (
     <Submenu label="Zone" badge={currentZone} {...chrome}>
+      <button
+        role="menuitemcheckbox"
+        type="button"
+        aria-checked={runEtb}
+        onClick={() => setRunEtb((cur) => !cur)}
+        className={
+          "flex w-full items-center gap-2 border-b border-gray-800 px-3 py-1 text-left text-xs transition-colors hover:bg-white/10 " +
+          (runEtb ? "text-cyan-300" : "text-gray-400")
+        }
+      >
+        <span className="w-3 text-center text-[10px]">{runEtb ? "✓" : ""}</span>
+        <span>{t("debugMove.runEtbEffects")}</span>
+      </button>
       {ZONES.filter((z) => z !== currentZone).map((zone) =>
         zone === "Library" ? (
           <div key={zone}>
             <MenuItem
               label="Library (top)"
-              onClick={() => onSelectZone(zone, { type: "Top" })}
+              onClick={() => onSelectZone(zone, runEtb, { type: "Top" })}
               compact
             />
             <MenuItem
               label="Library (bottom)"
-              onClick={() => onSelectZone(zone, { type: "Bottom" })}
+              onClick={() => onSelectZone(zone, runEtb, { type: "Bottom" })}
               compact
             />
           </div>
         ) : (
-          <MenuItem key={zone} label={zone} onClick={() => onSelectZone(zone)} compact />
+          <MenuItem
+            key={zone}
+            label={zone}
+            onClick={() => onSelectZone(zone, runEtb)}
+            compact
+          />
         ),
       )}
     </Submenu>
@@ -462,7 +695,9 @@ function CounterRow({
       <span>{label}</span>
       <div className="flex items-center gap-1">
         <button
+          role="menuitem"
           type="button"
+          aria-label={`${label}: −1`}
           onClick={() =>
             onDispatch({ type: "ModifyCounters", data: { object_id: objectId, counter_type: counterType, delta: -1 } })
           }
@@ -472,7 +707,9 @@ function CounterRow({
         </button>
         <span className="w-5 text-center font-mono text-amber-400">{current}</span>
         <button
+          role="menuitem"
           type="button"
+          aria-label={`${label}: +1`}
           onClick={() =>
             onDispatch({ type: "ModifyCounters", data: { object_id: objectId, counter_type: counterType, delta: 1 } })
           }
@@ -542,6 +779,7 @@ function PowerToughnessInput({
         }}
       />
       <button
+        role="menuitem"
         type="button"
         onClick={() => onSet(parseInt(power) || 0, parseInt(toughness) || 0)}
         className="rounded bg-cyan-800/50 px-1.5 py-0.5 text-[10px] text-cyan-300 transition-colors hover:bg-cyan-700/50"
@@ -588,7 +826,9 @@ function KeywordSubmenu({
           return (
             <button
               key={kwStr}
+              role="menuitemcheckbox"
               type="button"
+              aria-checked={hasKeyword}
               onClick={() =>
                 onDispatch(
                   hasKeyword

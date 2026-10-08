@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { EngineWorkerClient } from "../engine-worker-client";
+import type { GameEvent } from "../types";
 
 const notifyEngineSlow = vi.hoisted(() => vi.fn());
 vi.mock("../../game/engineRecovery", () => ({
@@ -35,6 +36,22 @@ class MockWorker {
   replyResult(id: number, data: unknown): void {
     this.onmessage?.({ data: { type: "result", id, data } } as MessageEvent);
   }
+
+  /** Simulate a typed failure reply for a previously-posted request id. */
+  replyError(
+    id: number,
+    message: string,
+    actionRejection?: unknown,
+  ): void {
+    this.onmessage?.({
+      data: { type: "error", id, message, actionRejection },
+    } as MessageEvent);
+  }
+
+  /** Simulate failure to load or execute the worker script itself. */
+  emitError(message: string): void {
+    this.onerror?.({ message } as ErrorEvent);
+  }
 }
 
 function currentWorker(): MockWorker {
@@ -44,6 +61,54 @@ function currentWorker(): MockWorker {
 
 beforeEach(() => {
   vi.stubGlobal("Worker", MockWorker);
+});
+
+describe("EngineWorkerClient initialization", () => {
+  it("resolves normally when the worker initializes before the deadline", async () => {
+    vi.useFakeTimers();
+    const client = new EngineWorkerClient();
+    const promise = client.initialize();
+    const worker = currentWorker();
+    const reqId = worker.posted[0].id as number;
+
+    worker.replyResult(reqId, null);
+
+    await expect(promise).resolves.toBeUndefined();
+    await vi.advanceTimersByTimeAsync(30_000);
+  });
+
+  it("rejects when WASM initialization returns a typed worker error", async () => {
+    const client = new EngineWorkerClient();
+    const promise = client.initialize();
+    const worker = currentWorker();
+    const reqId = worker.posted[0].id as number;
+
+    worker.replyError(reqId, "WASM initialization failed");
+
+    await expect(promise).rejects.toThrow("WASM initialization failed");
+  });
+
+  it("rejects when the worker script fails during initialization", async () => {
+    const client = new EngineWorkerClient();
+    const promise = client.initialize();
+
+    currentWorker().emitError("Worker script failed to load");
+
+    await expect(promise).rejects.toThrow("Worker script failed to load");
+  });
+
+  it("rejects when the worker never responds to initialization", async () => {
+    vi.useFakeTimers();
+    const client = new EngineWorkerClient();
+    const promise = client.initialize();
+    const rejection = expect(promise).rejects.toThrow(
+      "Engine worker init timed out after 30000ms",
+    );
+
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    await rejection;
+  });
 });
 
 afterEach(() => {
@@ -99,5 +164,138 @@ describe("EngineWorkerClient request timeout", () => {
     // rejection that fails the run).
     await vi.advanceTimersByTimeAsync(60_000);
     await expect(promise).resolves.toEqual({ stack: [] });
+  });
+});
+
+describe("EngineWorkerClient local-seat legal actions", () => {
+  it.each([
+    ["getLegalActions", (c: EngineWorkerClient) => c.getLegalActions(2)],
+    ["getSnapshot", (c: EngineWorkerClient) => c.getSnapshot(2)],
+    ["resumeRestoredGameState", (c: EngineWorkerClient) => c.resumeRestoredGameState(2)],
+    ["resumeMultiplayerHostState", (c: EngineWorkerClient) => c.resumeMultiplayerHostState("{}", 2)],
+  ])("%s posts the viewer id the caller names", async (type, call) => {
+    const client = new EngineWorkerClient();
+    const pending = call(client);
+    const worker = currentWorker();
+    const posted = worker.posted[0];
+
+    expect(posted).toMatchObject({ type, viewerId: 2 });
+
+    worker.replyResult(posted.id as number, null);
+    await pending;
+    client.dispose();
+  });
+});
+
+describe("EngineWorkerClient viewer transition projection", () => {
+  it("posts the viewer id and event slice to the transition endpoint", async () => {
+    const client = new EngineWorkerClient();
+    const events: GameEvent[] = [{ type: "GameStarted" }];
+    const pending = client.getViewerTransitionSnapshot(1, events);
+    const worker = currentWorker();
+    const posted = worker.posted[0];
+
+    expect(posted).toMatchObject({
+      type: "getViewerTransitionSnapshot",
+      viewerId: 1,
+      events,
+    });
+
+    const answer = {
+      state: { state: { waiting_for: { type: "Priority", player: 1 } } },
+      actions: [],
+      autoPassRecommended: false,
+      events,
+    };
+    worker.replyResult(posted.id as number, answer);
+
+    await expect(pending).resolves.toEqual(answer);
+    client.dispose();
+  });
+
+  it("surfaces recoverable Rust validation errors from the transition endpoint", async () => {
+    const client = new EngineWorkerClient();
+    const pending = client.getViewerTransitionSnapshot(256, []);
+    const worker = currentWorker();
+    const requestId = worker.posted[0].id as number;
+
+    worker.replyError(requestId, "INVALID_VIEWER_ID: 256 exceeds u8 range");
+
+    await expect(pending).rejects.toThrow("INVALID_VIEWER_ID: 256 exceeds u8 range");
+    client.dispose();
+  });
+
+  it("does not treat malformed event input as a successful snapshot", async () => {
+    const client = new EngineWorkerClient();
+    const pending = client.getViewerTransitionSnapshot(0, []);
+    const worker = currentWorker();
+    const requestId = worker.posted[0].id as number;
+
+    worker.replyError(requestId, "INVALID_TRANSITION_EVENTS: invalid event payload");
+
+    await expect(pending).rejects.toThrow("INVALID_TRANSITION_EVENTS: invalid event payload");
+    client.dispose();
+  });
+});
+
+describe("EngineWorkerClient canonical card names", () => {
+  it("posts the name list to the canonical-name endpoint", async () => {
+    const client = new EngineWorkerClient();
+    const pending = client.canonicalCardNames(["Revival/Revenge"]);
+    const worker = currentWorker();
+    const posted = worker.posted[0];
+
+    expect(posted).toMatchObject({
+      type: "canonicalCardNames",
+      names: ["Revival/Revenge"],
+    });
+
+    worker.replyResult(posted.id as number, ["Revival // Revenge"]);
+
+    await expect(pending).resolves.toEqual(["Revival // Revenge"]);
+    client.dispose();
+  });
+});
+
+describe("EngineWorkerClient structured action rejections", () => {
+  it("preserves engine rejection metadata and stale disposition", async () => {
+    const client = new EngineWorkerClient();
+    const promise = client.submitAction(0, { type: "PassPriority" });
+    const worker = currentWorker();
+    const reqId = worker.posted[0].id as number;
+    const rejection = {
+      code: "stale_action" as const,
+      disposition: "stale" as const,
+      message: "That action is based on outdated game state.",
+      related_object_ids: [7],
+    };
+
+    worker.replyError(reqId, rejection.message, rejection);
+
+    await expect(promise).rejects.toMatchObject({
+      code: "STALE_ACTION",
+      recoverable: false,
+      rejection,
+    });
+  });
+
+  it("rejects a malformed DTO without surfacing its untrusted message", async () => {
+    const client = new EngineWorkerClient();
+    const promise = client.submitAction(0, { type: "PassPriority" });
+    const worker = currentWorker();
+    const reqId = worker.posted[0].id as number;
+
+    worker.replyError(reqId, "untrusted diagnostic", {
+      code: "stale_action",
+      disposition: "invalid",
+      message: "untrusted diagnostic",
+      related_object_ids: [7],
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: "ACTION_REJECTED",
+      message: "The engine rejected that action.",
+      rejection: undefined,
+    });
   });
 });

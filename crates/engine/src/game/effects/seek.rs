@@ -45,10 +45,8 @@ pub fn resolve(
     // Collect library objects that match the filter.
     // CR 107.3a + CR 601.2b: ability-context filter evaluation.
     let ctx = FilterContext::from_ability(ability);
-    let library_scope = player
-        .library
-        .iter()
-        .take(from_top.unwrap_or(player.library.len()));
+    let library = state.library_of(player.id);
+    let library_scope = library.iter().take(from_top.unwrap_or(library.len()));
     let mut matching: Vec<_> = library_scope
         .filter(|&&obj_id| matches_target_filter(state, obj_id, &filter, &ctx))
         .copied()
@@ -82,7 +80,8 @@ pub fn resolve(
     let reqs: Vec<ZoneMoveRequest> = matching[..pick_count]
         .iter()
         .map(|&card_id| {
-            let mut req = ZoneMoveRequest::effect(card_id, destination, ability.source_id);
+            let mut req = ZoneMoveRequest::effect(card_id, destination, ability.source_id)
+                .hand_taker(ability.controller);
             req.mods.enter_tapped = enter_tapped;
             if track_exiled {
                 req = req.track_exiled_by_source();
@@ -94,7 +93,7 @@ pub fn resolve(
     // CR 616.1: a `Moved` redirect (or, for a battlefield entry, an as-enters
     // choice) can surface a player choice mid-batch. `move_objects_simultaneously`
     // parks `state.waiting_for` and stashes the undelivered tail in
-    // `state.pending_batch_deliveries`; bail before emitting `EffectResolved` so
+    // the active `BatchDelivery` frame; bail before emitting `EffectResolved` so
     // the surfaced prompt is not clobbered and no later pick overwrites the
     // parked replacement. The resume path
     // (`zone_pipeline::drain_pending_batch_deliveries`) finishes the batch.
@@ -495,8 +494,7 @@ mod tests {
             "per-card ordering prompt must be parked"
         );
         let stash = state
-            .pending_batch_deliveries
-            .as_ref()
+            .active_batch_delivery()
             .expect("the undelivered tail must be stashed for the resume path");
         // Fix-4: the re-stash must carry the batch-uniform request context so
         // the drain rebuilds equivalent requests — seek attributes every move to

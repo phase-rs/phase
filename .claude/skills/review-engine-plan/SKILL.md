@@ -7,7 +7,60 @@ description: Review phase.rs engine, parser, AI, frontend, or rules implementati
 
 Review the plan as an architectural gate. Reject the plan if any required dimension is missing, superficial, or contradicted by code evidence.
 
+## Probe policy — answer a concrete design uncertainty
+
+**You are not a read-only reviewer.** Building and running throwaway probes is an expected part of this
+review, and it is the only instrument that can refute a plan whose prose is internally consistent but
+whose runtime behaviour differs. Static review structurally cannot catch a predicate that reads
+correctly and answers wrongly on a real board.
+
+Prefer existing tests, fixtures, commands or supported tool APIs. Small probes may answer a disputed premise; they do not authorize a separate driver, seeding service or verification framework. Honor the caller's execution constraints, including a no-build constraint, and report unavailable evidence rather than bypassing it.
+
+In every engine-implementer mode, use the supplied original task and scope/attempt history and follow its [task scope](../engine-implementer/SKILL.md#task-scope-and-verification-work) and [run limits](../engine-implementer/SKILL.md#run-limits). Machinery, before or after measurement, needs the orchestrator's accepted expansion case. A reviewer can identify a missing check, but returns it to the orchestrator instead of independently expanding or repairing tooling. Required correctness evidence remains required.
+
+When execution is permitted, use an isolated `CARGO_TARGET_DIR` and the worktree's absolute path; never build in a checkout another process (e.g. Tilt) owns; serialize probe activity behind any active implementation executor.
+
+## Scout fact pack
+
+A scout fact pack may accompany the plan, the same one the planner received. Treat it as unverified leads: check anything you rely on, and look beyond it. A missing fact is not evidence of absence, and the pack never bounds a sweep: check 3's `rg` of existing instances and check 9's construction/consumption enumeration are yours to run in full.
+
+## Review the change
+
+This applies in every mode. Findings are defects in the change under review: what it introduces, the premises it rests on, and what it states it delivers but does not.
+
+- A defect is **pre-existing** when it reproduces at the change's base. The change **depends on** it when a test or acceptance row the change asserts cannot pass, or would have to be weakened, without fixing it. Run that one probe only when the answer changes what happens next.
+- A pre-existing defect the change depends on is a finding (`behavior`; in charter mode, a decision finding).
+- Any other pre-existing defect goes in a separate **Pre-existing** list after the findings, once, with its evidence. It is untagged, never blocks, and is not repeated in a later round.
+- Aim probes at the change's own claims. Do not hunt for pre-existing defects.
+
 ## Required Checks
+
+0. **Probe the plan, don't just read it**
+   - The plan's central premise is yours to test, not merely to assess. Probe it against a real
+     committed fixture or dump where one exists — synthetic state proves a predicate reads a field, a
+     real board proves what it answers in production. A premise that only ever held on synthetic input
+     is the highest-value refutation available to you.
+   - The assertions worth probing are the ones whose falsity would change the design: a predicate's
+     runtime verdict, which route or branch is actually taken, an observed count or delta, "X never
+     happens", "this conjunct is what refuses". Where the plan asserts one of these from reading alone
+     and you doubt it, go measure it — the finding is the wrong assertion, never the missing paperwork.
+   - **Believe a probe only if it reached the code under test** — the plan's or your own. A zero with no
+     positive control showing the instrument fires is not a negative result, and a run that didn't exit
+     cleanly didn't measure anything. This is Check 9's paired positive reach-guard applied to the
+     plan's evidence rather than to its tests; the two recurring shapes are a census that reports zero
+     because the instrument never fired, and a discriminator whose verdict is really decided by an
+     upstream conjunct that dominates it.
+   - **Verify every board-census premise against a hostile fixture.** The shape that survives static
+     review is a census predicate that ignores an applicability/filter field and so matches objects
+     with nothing to do with the phenomenon. Run the census on a real fixture that *contains irrelevant
+     objects* and confirm the predicate actually consults the applicability field. A census matching
+     "almost everything" is a defect signature, not a result: **reject the premise** until that field
+     check is shown. A plausible positive result on friendly input does not discharge this.
+   - **A falsified snapshot claim is repaired by reformulation, not refresh.** When an edit falsifies a
+     recorded count, coordinate, or cardinality ("four sites", "two red flags", a per-section tally),
+     say so *and* require the durable form — a symbol name, "every X in §Y", or the command that
+     regenerates the figure. Asking only for a corrected number re-arms the same defect for the next
+     edit, which is how one stale claim becomes a multi-round loop.
 
 1. **Class vs card**
    - Identify how many cards or patterns the plan covers.
@@ -21,6 +74,7 @@ Review the plan as an architectural gate. Reject the plan if any required dimens
 3. **Trace verification**
    - The plan must name an analogous existing feature and list the file path trace followed end to end.
    - Reject plans that did not trace an existing feature.
+   - When the plan adds another instance of an existing pattern (a second adapter, another caller of a shared bring-up, a new arm beside existing arms), `rg` the existing instances and list each obligation they carry that none of the plan's steps covers. An omitted behavior makes no claim, so no other check collides with it.
 
 4. **Abstraction layer correctness**
    - Parser logic belongs in `parser/`.
@@ -58,6 +112,12 @@ Review the plan as an architectural gate. Reject the plan if any required dimens
    - Cast-pipeline runtime tests must be planned via the `/card-test` recipe with the card's verbatim Oracle text, not a paraphrase.
    - If the plan adds a field to an existing enum variant or struct, require an enumeration of every construction/consumption site of that variant and how each threads the new field (resume/continuation paths, single-vs-multi-pick branches, and adapter payload constructors are the recurring drop points).
 
+9a. **Reference readings**
+   - Find every parity, preservation or copied-route row in the Verification Matrix, including rows the plan did not list under Reference Readings. A row missing from that list is itself a finding.
+   - For each row, derive the expected value yourself from the card's verbatim Oracle text and the CR, then compare it with both the plan's derivation and the measured reference.
+   - Reject a plan that asserts parity with, or preservation of, a reading nobody derived. Reject one whose derivation disagrees with its measured reference but does not take the [defective-reference route](../engine-implementer/SKILL.md#defective-reference-route).
+   - Tag the finding `behavior`.
+
 10. **Identity / provenance contract**
    - For any "this way", "that source", "chosen", "cast using", "from among them", selected target/mode, duration-bound effect, replacement predicate, or controller/owner-relative text, require the plan to name the source phrase/rules concept, selected authority type and id/value, binding time/event, live vs snapshotted/latched semantics, storage location, consumption point, invalidation/expiration behavior, and a multi-authority hostile fixture.
    - Reject plans that rely on rescanning matching permissions, sources, costs, replacements, tracked sets, controllers, owners, or choices at consumption time unless they prove the rescan is equivalent for a multi-authority fixture.
@@ -67,10 +127,52 @@ Review the plan as an architectural gate. Reject the plan if any required dimens
    - Include permissions, costs, choice provenance, tracked sets, duration snapshots, source/controller/owner shifts, and serialization/protocol/card-data boundaries when those are touched.
    - Require negative tests for semantically adjacent sibling variants that are plausibly affected, or a concrete explanation for why a sibling is unreachable/out of scope.
 
+12. **Sizing section** (severity depends on context)
+   - Verify a Sizing section exists and is consistent with the plan body: a plan whose body names N independently tested behaviors must not report fewer units.
+   - Blocking **only when the review's spawn inputs declare a phase-fit context** (the `/engine-implementer` and `/implement-task` pipelines). For any other consumer of this skill — standalone planner runs, `/batch-mechanics`, contributor plan reviews — a missing Sizing section is a non-blocking note, never a rejection; the "reject if any required dimension is missing" rule is not extended to Sizing outside phase-fit context.
+
+## Modes
+
+Ordinary mode is everything above. Three additional modes activate when the caller's spawn inputs name them; each scopes this file's mandatory language here, in this file — a spawn prompt never overrides this text.
+
+### Charter mode (spawn inputs: a phase charter + the originating plan/task)
+
+Review the decomposition, not per-phase detail. Checklist:
+
+- **Seam green-tree safety** — every phase boundary leaves the tree compiling and tests green (strict-failure tags are the sanctioned way to hold coverage waiting between phases).
+- **Each phase independently reviewable and shippable against its charter entry** — this does not mean every phase carries a full end-to-end test: a discriminating test the deferral list writes `DEFERRED(phase n)` with a named landing phase is accepted; a deferral with no named landing phase is rejected.
+- **Deferral lists complete and phase-attributed** — everything the full task needs that a phase omits names the phase that lands it.
+- **Linear ordering respects dependencies** — infrastructure before consumer.
+- **Recursive gate check** — no individual phase itself trips the T1∧T2 conjunction defined in `/engine-implementer`.
+- **Premise verification present** — charter mode preserves engine-planner Step 0.
+- **Scope entries are a rule, not an inventory** — literal paths or directories, no globs (T2 directory expansion and the orchestrator's `SCOPE_PATHS` materialization consume concrete paths, as does `/implement-task`'s snapshot pathspec machinery). A missing compiler-forced site, shared registration file, or comment-only file is **not** a finding — the scope rule admits those at materialization. A missing path of any other class is.
+- **No code-state assertions** — a sentence stating how the code behaves today ("no offer mints one", "the gate records this outcome") is a finding of class *premise*. If no phase decision rests on it, the repair is a correction: delete the sentence, since the phase plan names and measures the claim. If a phase boundary, ordering, or unit count — or any other frozen decision: a goal, an architecture decision, a seam, a deferral attribution — rests on it, it is a design finding, and the reviewer measures the assertion before reporting — a probe, not a reading.
+- **Architecture only** — acceptance rows and claims a phase must establish belong to the phase plan; in the charter they are a correction (delete them). Each phase names its addenda file. A re-charter round also reads the addenda that led to it.
+
+Corrections — a figure, a citation, wording — are returned for the orchestrator to apply, not to the planner, and a round whose findings are all corrections is a clean round. Checks that do not apply to a charter: 6 (nom compliance), 9 (verification matrix), 11 (scope matrix), and check 3's full end-to-end trace requirement — those apply later, to each phase plan under phase-plan mode. A charter's feasibility exit (a report that no green-tree seam exists) is reviewed on its named evidence: every candidate split point named, each shown to leave the tree non-compiling or tests red.
+
+### Phase-plan mode (spawn inputs: charter + phase index + that phase's deferral allowlist)
+
+Review one phase's plan given the charter. All ordinary checks apply to the phase's own claims, with this scoping: deferral-listed items are exempt unless the phase plan forecloses or contradicts them — **deferred ≠ gap; foreclosure = gap**.
+
+- **Row-level rule for check 9:** a Verification Matrix row written `DEFERRED(phase n)` with a named landing phase is accepted; a deferred row with no named landing phase is rejected.
+- **Pattern-coverage scoping for check 1:** "reject one-card plans" is assessed against the **charter's** class attribution, not the phase's own diff — a dependency-seam infrastructure phase covers zero cards by itself by construction; its class coverage lives in the charter and lands with the consumer phase.
+- **Check 12 is inherent and blocking in this mode:** a phase plan without a Sizing section, or one inconsistent with its body, is a blocking finding — the section is the measured input for the orchestrator's per-phase re-adjudication.
+
+### Sizing-audit mode (spawn input: a plan + its sizing addendum)
+
+Check **only** Sizing consistency against the plan body (check 12's substance, nothing else). Used by `/engine-implementer` for pre-existing plans on both of its input paths — for an already review-clean plan because re-running the other checks would be redundant, and for a pre-existing draft because the addendum must be audited before the phase-fit gate adjudicates, which is earlier than any full review round.
+
 ## Review Loop
 
-Return every gap to the planner. Require a revised full plan, then re-review the entire revised plan with fresh context. Repeat until a full round returns clean or the caller stops the process.
+Return every gap to the caller. Standalone, require a revised full plan and re-review the entire revised plan with fresh context until a round returns no behavior gap. A round whose gaps are all wording or other text fixes, each with its replacement text, is closed by applying them, with no further review. In the engine-implementer pipeline, return each result to the orchestrator, whose [run limits](../engine-implementer/SKILL.md#run-limits) decide what happens next from your tags; switching modes or phases does not reset that history.
 
 ## Output
 
 Lead with blockers and material gaps. For each issue, include evidence and the required revision. If the plan is clean, say that no blocking gaps were found and name any residual assumptions.
+
+Tag every blocking finding `behavior`, `text` or `machinery` as the orchestrator's [run limits](../engine-implementer/SKILL.md#run-limits) define them; when in doubt, `behavior`. In charter mode, classify as decision finding or correction instead.
+
+- A `text` finding quotes the old text at its coordinate and gives the replacement.
+- A finding that names a pattern gives the predicate, the command, and every matching site with its disposition. That list is the fix's scope; a sample leaves the rest of the class live.
+- On a round after the first, read what changed since the last reviewed plan first, and check each sentence added beyond the prior findings' supplied text. The least-reviewed sentence in a revision is the one nobody asked for.

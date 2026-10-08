@@ -58,6 +58,40 @@
                 }
             }
         ],
+        "Sakashima of a Thousand Faces": [
+            {
+                "name": "Sakashima of a Thousand Faces",
+                "manaCost": "{3}{U}",
+                "manaValue": 4.0,
+                "colors": [
+                    "U"
+                ],
+                "colorIdentity": [
+                    "U"
+                ],
+                "types": [
+                    "Creature"
+                ],
+                "subtypes": [
+                    "Human",
+                    "Rogue"
+                ],
+                "supertypes": [
+                    "Legendary"
+                ],
+                "power": "3",
+                "toughness": "1",
+                "text": "You may have Sakashima enter as a copy of another creature you control, except it has Sakashima's other abilities.\nThe \"legend rule\" doesn't apply to permanents you control.\nPartner (You can have two commanders if both have partner.)",
+                "layout": "normal",
+                "type": "Legendary Creature — Human Rogue",
+                "keywords": [
+                    "Partner"
+                ],
+                "identifiers": {
+                    "scryfallOracleId": "8ecdaf4b-4442-42da-9714-4257a83faf50"
+                }
+            }
+        ],
         "Counterspell": [
             {
                 "name": "Counterspell",

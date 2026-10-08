@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useNavigate } from "react-router";
 
+import { useEffectiveOffline } from "../stores/connectivityStore";
 import { useMultiplayerStore } from "../stores/multiplayerStore";
 
 /**
@@ -9,14 +10,16 @@ import { useMultiplayerStore } from "../stores/multiplayerStore";
  * with the hosting lifecycle — the store itself stays router-free.
  */
 export function useHostingSession(): void {
+  const effectiveOffline = useEffectiveOffline();
   const pendingGameRoute = useMultiplayerStore((s) => s.pendingGameRoute);
   const clearPendingGameRoute = useMultiplayerStore((s) => s.clearPendingGameRoute);
   const resumeServerHosting = useMultiplayerStore((s) => s.resumeServerHosting);
   const navigate = useNavigate();
 
   useEffect(() => {
+    if (effectiveOffline) return;
     resumeServerHosting();
-  }, [resumeServerHosting]);
+  }, [effectiveOffline, resumeServerHosting]);
 
   useEffect(() => {
     if (pendingGameRoute) {

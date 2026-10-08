@@ -1,31 +1,59 @@
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::{alpha1, multispace0};
-use nom::combinator::{map, not, opt, success, value};
+use nom::character::complete::{alpha1, multispace0, multispace1};
+use nom::combinator::{map, map_opt, not, opt, peek, rest, success, value};
 use nom::multi::fold_many1;
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCostOrigin,
-    AdditionalCostPaymentSource, ChoiceType, Effect, ModalChoice, ModalSelectionCondition,
-    ModalSelectionConstraint, PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition,
-    StaticCondition, TargetFilter, TargetSelectionMode, TriggerCondition,
+    AdditionalCostPaymentSource, ChoiceType, ControllerRef, Effect, ModalChoice,
+    ModalSelectionCondition, ModalSelectionConstraint, PlayerFilter, QuantityExpr, QuantityRef,
+    ReplacementDefinition, StaticCondition, TargetFilter, TargetSelectionMode, TriggerCondition,
+    TypedFilter,
 };
 use crate::types::replacements::ReplacementEvent;
+use crate::types::triggers::TriggerMode;
 
 use super::oracle::{find_activated_colon, strip_activated_constraints};
+use super::oracle_classifier::has_trigger_prefix;
 use super::oracle_cost::parse_oracle_cost;
-use super::oracle_effect::{parse_effect_chain_with_context, try_parse_named_choice};
+#[cfg(test)]
+use super::oracle_effect::lower_ability_ir;
+use super::oracle_effect::{
+    conditions::{
+        split_leading_conditional, strip_routed_leading_general_conditional, LeadingConditionRoute,
+    },
+    parse_ability_ir_with_context, try_parse_named_choice,
+};
 use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::doc::PrintedTriggerIndex;
+use super::oracle_ir::effect_chain::{
+    AbilityIr, AbilityShellIr, EffectChainIr, ModalModeIr, ModalPayloadIr,
+};
+use super::oracle_ir::replacement::ReplacementIr;
+use super::oracle_ir::static_ir::StaticIr;
+use super::oracle_ir::trigger::{
+    ModalIr, ReflexiveParent, ReflexiveParentIr, TriggerBody, TriggerIr,
+};
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::primitives::{self as nom_primitives, scan_preceded};
-use super::oracle_static::{parse_pt_mod, parse_static_line};
+use super::oracle_quantity::parse_cda_quantity;
+#[cfg(test)]
+use super::oracle_static::parse_static_line;
+use super::oracle_static::{parse_pt_mod, parse_static_line_ir};
+#[cfg(test)]
 use super::oracle_trigger::parse_trigger_lines;
+use super::oracle_trigger::parse_trigger_lines_at_index_ir;
+use super::oracle_trigger::unhoisted_modal_guard_body;
 use super::oracle_util::{parse_mana_symbols, strip_reminder_text, TextPair};
-use crate::parser::oracle_ir::ast::{ModalHeaderAst, ModeAst, OracleBlockAst};
+use crate::parser::oracle_ir::ast::{
+    parsed_clause, ModalHeaderAst, ModalOptionality, ModeAst, OracleBlockAst, ReflexiveModalParent,
+};
+use crate::types::mana::ManaCost;
 
 pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(OracleBlockAst, usize)> {
     let line = strip_reminder_text(lines.get(start)?.trim());
@@ -123,16 +151,24 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
             // out the cost so the lowering builds an `Effect::Sacrifice` whose
             // `WhenYouDo` sub carries the modal, instead of firing the modes
             // unconditionally on the trigger.
-            let (trigger_line, optional_cost) = match split_reflexive_optional_cost(&trigger_line) {
-                Some((trigger, cost)) => (trigger, Some(cost)),
-                None => (trigger_line, None),
+            let (trigger_line, reflexive_parent) = classify_reflexive_modal_parent(trigger_line);
+            // CR 603.4: the modal splitter accepts a header that opens with the
+            // trigger's intervening-if ("Whenever X, if Y, choose one —"), so the
+            // guard lands in `header.raw` and the plain-modal lowering, which
+            // replaces the trigger body, would never see it. Return it to the
+            // trigger line so the trigger parser hoists it or fails the trigger
+            // closed. A reflexive parent keeps it in the header for
+            // `reflexive_modal_connector`.
+            let trigger_line = match (&reflexive_parent, split_leading_conditional(&header.raw)) {
+                (None, Some((guard, _))) => format!("{trigger_line}, {guard}"),
+                _ => trigger_line,
             };
             return Some((
                 OracleBlockAst::TriggeredModal {
                     trigger_line,
                     header,
                     modes,
-                    optional_cost,
+                    reflexive_parent,
                 },
                 next,
             ));
@@ -153,6 +189,7 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
             chooser: PlayerFilter::Controller,
             selection: TargetSelectionMode::Chosen,
             dynamic_max_choices: None,
+            optionality: ModalOptionality::Mandatory,
         };
         return Some((OracleBlockAst::Modal { header, modes }, next));
     }
@@ -172,6 +209,7 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
             chooser: PlayerFilter::Controller,
             selection: TargetSelectionMode::Chosen,
             dynamic_max_choices: None,
+            optionality: ModalOptionality::Mandatory,
         };
         return Some((OracleBlockAst::Modal { header, modes }, next));
     }
@@ -187,10 +225,14 @@ fn parse_pawprint_run(input: &str) -> OracleResult<'_, u8> {
 pub(crate) fn collect_mode_asts(lines: &[&str], start: usize) -> Vec<ModeAst> {
     let mut modes = Vec::new();
 
-    for raw in lines.iter().skip(start) {
+    for (line_index, raw) in lines.iter().enumerate().skip(start) {
         let line = strip_reminder_text(raw.trim());
         if let Some(stripped) = line.strip_prefix('•') {
-            modes.push(parse_mode_ast(stripped.trim()));
+            modes.push(parse_mode_ast(
+                stripped.trim(),
+                line.as_str(),
+                Some(line_index),
+            ));
         } else if let Some(stripped) = line.strip_prefix('+') {
             // CR 702.172: Spree mode lines use `+ {cost} — effect` format
             let stripped = stripped.trim();
@@ -199,6 +241,8 @@ pub(crate) fn collect_mode_asts(lines: &[&str], start: usize) -> Vec<ModeAst> {
                 let body = strip_mode_separator(rest);
                 modes.push(ModeAst {
                     raw: body.to_string(),
+                    source_text: line.to_string(),
+                    source_line: Some(line_index),
                     label: None,
                     body: body.to_string(),
                     mode_cost: Some(cost),
@@ -212,6 +256,8 @@ pub(crate) fn collect_mode_asts(lines: &[&str], start: usize) -> Vec<ModeAst> {
             let body = strip_mode_separator(rest);
             modes.push(ModeAst {
                 raw: body.to_string(),
+                source_text: line.to_string(),
+                source_line: Some(line_index),
                 label: None,
                 body: body.to_string(),
                 mode_cost: None,
@@ -225,12 +271,14 @@ pub(crate) fn collect_mode_asts(lines: &[&str], start: usize) -> Vec<ModeAst> {
     modes
 }
 
-fn parse_mode_ast(text: &str) -> ModeAst {
+fn parse_mode_ast(text: &str, source_text: &str, source_line: Option<usize>) -> ModeAst {
     if let Some((label, body)) = split_short_label_prefix(text, 4) {
         if let Some((cost, rest)) = parse_mana_symbols(body) {
             let body = strip_mode_separator(rest);
             return ModeAst {
                 raw: text.to_string(),
+                source_text: source_text.to_string(),
+                source_line,
                 label: Some(label.to_string()),
                 body: body.to_string(),
                 mode_cost: Some(cost),
@@ -240,6 +288,8 @@ fn parse_mode_ast(text: &str) -> ModeAst {
 
         return ModeAst {
             raw: text.to_string(),
+            source_text: source_text.to_string(),
+            source_line,
             label: Some(label.to_string()),
             body: body.to_string(),
             mode_cost: None,
@@ -257,6 +307,8 @@ fn parse_mode_ast(text: &str) -> ModeAst {
     if let Some((label, body)) = split_mode_flavor_label(text) {
         return ModeAst {
             raw: text.to_string(),
+            source_text: source_text.to_string(),
+            source_line,
             label: Some(label.to_string()),
             body: body.to_string(),
             mode_cost: None,
@@ -266,6 +318,8 @@ fn parse_mode_ast(text: &str) -> ModeAst {
 
     ModeAst {
         raw: text.to_string(),
+        source_text: source_text.to_string(),
+        source_line,
         label: None,
         body: text.to_string(),
         mode_cost: None,
@@ -354,6 +408,8 @@ fn distribute_shared_mode_effect(header_full_text: &str, modes: Vec<ModeAst>) ->
             let distributed = format!("{prefix}{target_phrase}{suffix}");
             ModeAst {
                 raw: mode.raw,
+                source_text: mode.source_text,
+                source_line: mode.source_line,
                 label: mode.label,
                 body: distributed,
                 mode_cost: mode.mode_cost,
@@ -483,6 +539,7 @@ fn parse_tiered_shared_effect_block(
         chooser: PlayerFilter::Controller,
         selection: TargetSelectionMode::Chosen,
         dynamic_max_choices: None,
+        optionality: ModalOptionality::Mandatory,
     };
     Some((OracleBlockAst::Modal { header, modes }, next))
 }
@@ -537,13 +594,13 @@ fn anchor_modes_match_labels(modes: &[ModeAst], labels: &[String]) -> bool {
     if modes.len() != labels.len() {
         return false;
     }
-    let mode_labels: Vec<String> = modes
+    let Some(mode_labels): Option<Vec<String>> = modes
         .iter()
-        .filter_map(|m| m.label.as_ref().map(|s| s.to_lowercase()))
-        .collect();
-    if mode_labels.len() != modes.len() {
+        .map(|mode| mode.label.as_ref().map(|label| label.to_lowercase()))
+        .collect()
+    else {
         return false;
-    }
+    };
     let mut wanted: Vec<String> = labels.iter().map(|s| s.to_lowercase()).collect();
     for actual in &mode_labels {
         match wanted.iter().position(|w| w == actual) {
@@ -665,14 +722,16 @@ pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
     };
 
     // CR 700.2 + CR 107.3m / CR 603.12a: a `Dynamic { qty }` header ("choose up
-    // to X / up to that many") has min 0 (decline all modes) and a placeholder
-    // max of `usize::MAX` that `build_modal_choice` clamps to `mode_count`; the
-    // live cap is carried in `dynamic_max_choices` and resolved at runtime from
-    // `qty` (cast {X} for CostXPaid, or the resolution-local repeated-payment
-    // count for TimesCostPaidThisResolution).
+    // to X / up to that many" / "choose up to X, where X is <expr>") has min 0
+    // (decline all modes) and a placeholder max of `usize::MAX` that
+    // `build_modal_choice` clamps to `mode_count`; the live cap is carried in
+    // `dynamic_max_choices` (already a `QuantityExpr`, no re-wrap) and resolved
+    // at runtime from `qty` (cast {X} for CostXPaid, the resolution-local
+    // repeated-payment count for TimesCostPaidThisResolution, or the redefining
+    // where-X-is quantity for Bumi/Riku).
     let (min_choices, max_choices, dynamic_max_choices) = match count_spec {
         ModalCountSpec::Fixed { min, max } => (min, max, None),
-        ModalCountSpec::Dynamic { qty } => (0, usize::MAX, Some(QuantityExpr::Ref { qty })),
+        ModalCountSpec::Dynamic { qty } => (0, usize::MAX, Some(qty)),
     };
     let mut allow_repeat_modes = false;
     let mut constraints = Vec::new();
@@ -711,6 +770,20 @@ pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
         TargetSelectionMode::Chosen
     };
 
+    // CR 608.2c: "you may choose N" makes the triggered ability optional; "you
+    // may choose up to N" only lowers min_choices (handled by count parsing).
+    let optionality = if tag::<_, _, OracleError<'_>>("you may choose ")
+        .parse(header_lower.as_str())
+        .is_ok()
+        && tag::<_, _, OracleError<'_>>("you may choose up to ")
+            .parse(header_lower.as_str())
+            .is_err()
+    {
+        ModalOptionality::MayDecline
+    } else {
+        ModalOptionality::Mandatory
+    };
+
     Some(ModalHeaderAst {
         raw: text.to_string(),
         min_choices,
@@ -720,6 +793,7 @@ pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
         chooser,
         selection,
         dynamic_max_choices,
+        optionality,
     })
 }
 
@@ -917,17 +991,115 @@ fn split_triggered_modal_header(line: &str) -> Option<(String, String)> {
     None
 }
 
-/// CR 603.12 + CR 700.2b: Recognize a reflexive optional-cost trigger header of
-/// the shape `"<trigger>, you may <cost>. When you do"` (Caesar, Legion's
+/// CR 603.12: Classify how a triggered modal's mode list is
+/// introduced, and reduce `trigger_line` to what the trigger parser should see.
+///
+/// This is the single authority for that question. The reflexive CONNECTOR
+/// decides whether a reflexive exists at all; the `"you may "` marker only says
+/// whether the parent instruction is optional. Keying the whole decision on the
+/// marker — as this dispatch did — silently answered
+/// "no reflexive here" for every mandatory parent, and the mode list then
+/// attached straight to the trigger with the printed instruction discarded.
+/// A mandatory parent must still retain the shared trigger-prefix shape;
+/// non-triggered effects keep their original line and existing route.
+///
+/// * `MayPay` — `trigger_line` is reduced to the bare trigger condition and the
+///   instruction text travels separately, because that optional instruction is
+///   lowered by the resolution-time path.
+/// * `Mandatory` — the terminal connector is removed and the printed
+///   instruction remains in `trigger_line`. The trigger parser lowers that
+///   instruction as the parent chain; lowering then hangs the modal off it.
+/// * `None` — no connector: a plain triggered modal (Pip-Boy 3000).
+fn classify_reflexive_modal_parent(trigger_line: String) -> (String, Option<ReflexiveModalParent>) {
+    if let Some((trigger, cost)) = split_reflexive_optional_cost(&trigger_line) {
+        return (trigger, Some(ReflexiveModalParent::MayPay(cost)));
+    }
+    if let Some(instruction) = strip_terminal_reflexive_connector(&trigger_line)
+        .filter(|instruction| has_trigger_prefix(&instruction.to_lowercase()))
+    {
+        return (
+            instruction.to_string(),
+            Some(ReflexiveModalParent::Mandatory),
+        );
+    }
+    (trigger_line, None)
+}
+
+/// CR 603.12 + CR 603.4 + CR 608.2a: A reflexive modal can retain an
+/// intervening-if condition between its connector and modal header, as in
+/// `When you do, if <condition>, choose one`. The modal splitter keeps that
+/// condition in `header.raw`, so parse it through the shared conditional
+/// parser and compose it with the reflexive marker rather than discarding it.
+fn reflexive_modal_connector(
+    header: &ModalHeaderAst,
+    ctx: &mut ParseContext,
+) -> Result<AbilityCondition, Box<Effect>> {
+    match strip_routed_leading_general_conditional(&header.raw, ctx) {
+        // CR 115.1 + CR 608.2c: a target P/T threshold guard's
+        // `TargetMatchesFilter { subject_slot: None }` reads the gated node's own
+        // first object target, and a mode may announce its own target, so the
+        // guard cannot bind the antecedent "that creature" here; refuse it.
+        (Some((_, LeadingConditionRoute::TargetPtThreshold)), _) => {
+            return Err(Box::new(Effect::unimplemented(
+                "modal_reflexive_condition",
+                &header.raw,
+            )));
+        }
+        (Some((guard, LeadingConditionRoute::General)), _) => {
+            return Ok(AbilityCondition::when_you_do_with_guard(guard));
+        }
+        (None, _) => {}
+    }
+
+    // `strip_routed_leading_general_conditional` returns `None` both for a header
+    // with no guard and for an unmodeled leading conditional. Only the first
+    // may become a bare `WhenYouDo`: lowering the second that way would make
+    // an unsupported intervening-if condition silently permissive.
+    if split_leading_conditional(&header.raw).is_some() {
+        return Err(Box::new(Effect::unimplemented(
+            "modal_reflexive_condition",
+            &header.raw,
+        )));
+    }
+
+    Ok(AbilityCondition::WhenYouDo)
+}
+
+/// CR 603.12: remove a bare reflexive connector after `trigger_line`'s final
+/// sentence break, leaving the parent instruction for ordinary trigger parsing.
+///
+/// `split_triggered_modal_header` has already taken the mode list away, so the
+/// connector is the entire tail — there is no reflexive body left here to
+/// consume. The classifier separately validates that the remaining prefix is
+/// a trigger before accepting this terminal connector as a mandatory parent.
+fn strip_terminal_reflexive_connector(trigger_line: &str) -> Option<&str> {
+    let lower = trigger_line.to_lowercase();
+    let mut tail = lower.as_str();
+    let mut connector_start = None;
+    while let Ok((after, _)) =
+        terminated(take_until::<_, _, OracleError<'_>>(". "), tag(". ")).parse(tail)
+    {
+        connector_start = Some(lower.len() - after.len() - 2);
+        tail = after;
+    }
+    let tail = tail.trim().trim_end_matches(',').trim();
+    if !nom_condition::match_when_you_do(tail).is_ok_and(|(rest, ())| rest.is_empty()) {
+        return None;
+    }
+    trigger_line.get(..connector_start?).map(str::trim_end)
+}
+
+/// CR 603.12 + CR 700.2b: Recognize a reflexive optional-instruction trigger
+/// header of the shape `"<trigger>, you may <instruction>. When you do"` (Caesar, Legion's
 /// Emperor) and split it into the bare trigger condition (`"Whenever you
-/// attack"`) and the cost effect text (`"Sacrifice another creature"`, with the
+/// attack"`) and the instruction text (`"Sacrifice another creature"`, with the
 /// `"you may "` optional marker and the trailing `". When you do"` reflexive
 /// connector stripped). Returns `None` for a plain triggered modal (Pip-Boy
 /// 3000's `"Whenever equipped creature attacks ..."`), which has neither a
-/// `"you may "` optional cost nor a `"when you do"` reflexive connector — that
+/// `"you may "` optional instruction nor a `"when you do"` reflexive connector — that
 /// modal attaches directly to the trigger's execute.
 ///
-/// The cost text is returned with an uppercased leading letter so it parses as
+/// The instruction text is returned with an uppercased leading letter so it parses as
 /// an imperative effect clause (`parse_effect_chain` expects sentence case).
 fn split_reflexive_optional_cost(trigger_line: &str) -> Option<(String, String)> {
     // Combinator (run on lowercase, slice original by equal ASCII byte offset):
@@ -943,9 +1115,17 @@ fn split_reflexive_optional_cost(trigger_line: &str) -> Option<(String, String)>
         terminated(take_until::<_, _, OracleError<'_>>(". "), tag(". "))
             .parse(after_marker)
             .ok()?;
-    // The connector remainder must be exactly the reflexive "when you do".
-    let (rest, ()) = nom_condition::match_when_you_do(connector).ok()?;
-    if !rest.is_empty() {
+    // The connector remainder must be the reflexive "when you do" or its
+    // repeated-payment form, "when you pay this cost one or more times".
+    let when_you_do =
+        nom_condition::match_when_you_do(connector).is_ok_and(|(rest, ())| rest.is_empty());
+    let repeated_payment = terminated(
+        tag::<_, _, OracleError<'_>>("when you pay this cost one or more times"),
+        multispace0,
+    )
+    .parse(connector.trim())
+    .is_ok_and(|(rest, _)| rest.is_empty());
+    if !when_you_do && !repeated_payment {
         return None;
     }
 
@@ -962,6 +1142,428 @@ fn split_reflexive_optional_cost(trigger_line: &str) -> Option<(String, String)>
     Some((trigger_orig.to_string(), cost_cased))
 }
 
+/// Native document payload for a Priority-1 modal block.  The document router
+/// owns all source spans; this type deliberately carries only nested parser IR.
+pub(crate) enum OracleBlockIr {
+    Activated(AbilityIr),
+    Modal {
+        choice: ModalChoice,
+        modes: Vec<ModalModeIr>,
+    },
+    Triggered(Vec<TriggerIr>),
+    AsEnters {
+        replacement: ReplacementIr,
+        children: Vec<(usize, Vec<AnchorModeIr>)>,
+    },
+}
+
+pub(crate) enum AnchorModeIr {
+    Trigger(Box<TriggerIr>),
+    Static(Box<StaticIr>),
+    /// The bullet is still a first-class document item when no native trigger
+    /// or static grammar accepts it. This preserves its printed slot and exact
+    /// source line instead of silently dropping the label's semantics.
+    Unsupported(Box<AbilityIr>),
+}
+
+/// CR 603.2c + CR 608.2c: A self-source damage trigger establishes the
+/// damaged player as the referent for a nested modal mode's "that player".
+/// The ordinary trigger classifier retains its historical `TargetPlayer`
+/// treatment of the normalized `~` surface; modal modes instead require the
+/// event-player context to parse their independent effect chains correctly.
+///
+/// This consumes the trigger parser's typed output instead of recognizing a
+/// second, narrower Oracle grammar here. In particular, the trigger parser
+/// already accounts for combat/noncombat, plural damage verbs, and thresholds.
+fn modal_relative_player_scope_for_trigger(trigger: &TriggerIr) -> Option<ControllerRef> {
+    match (
+        &trigger.condition,
+        &trigger.partial_def.valid_source,
+        &trigger.partial_def.valid_target,
+    ) {
+        (TriggerMode::DamageDone, Some(TargetFilter::SelfRef), Some(TargetFilter::Player)) => {
+            Some(ControllerRef::TriggeringPlayer)
+        }
+        (
+            TriggerMode::DamageDone,
+            Some(TargetFilter::SelfRef),
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: Some(ControllerRef::Opponent),
+                ..
+            })),
+        ) if type_filters.is_empty() => Some(ControllerRef::TriggeringPlayer),
+        _ => None,
+    }
+}
+
+pub(crate) fn lower_oracle_block_ir(
+    block: OracleBlockAst,
+    card_name: &str,
+    host_self_reference: Option<TargetFilter>,
+    ctx: &mut ParseContext,
+) -> OracleBlockIr {
+    match block {
+        OracleBlockAst::ActivatedModal {
+            cost_text,
+            header,
+            modes,
+            constraints,
+        } => {
+            let payload = ModalPayloadIr {
+                choice: build_modal_choice(&header, &modes),
+                modes: parse_modal_mode_irs(&modes, AbilityKind::Activated, ctx),
+            };
+            let mut ability = modal_marker_ir(&header, AbilityKind::Activated, payload, ctx);
+            ability.shell.cost = Some(parse_oracle_cost(&cost_text));
+            ability.shell.activation_restrictions = constraints.restrictions;
+            OracleBlockIr::Activated(ability)
+        }
+        OracleBlockAst::Modal { header, modes } => OracleBlockIr::Modal {
+            choice: build_modal_choice(&header, &modes),
+            modes: parse_modal_mode_irs(&modes, AbilityKind::Spell, ctx),
+        },
+        OracleBlockAst::TriggeredModal {
+            trigger_line,
+            header,
+            modes,
+            reflexive_parent,
+        } => {
+            let mut trigger_ctx = ctx.clone_for_independent_body();
+            // CR 603.1: `parse_trigger_lines_at_index_ir` parses a NEW printed
+            // trigger line, which establishes its own event authority. Any outer
+            // `trigger_zone_change` would be unrelated, so this enters an
+            // INDEPENDENT body by name rather than relying on a clone's default.
+            trigger_ctx.host_self_reference = host_self_reference;
+            let mut triggers = parse_trigger_lines_at_index_ir(
+                &trigger_line,
+                card_name,
+                Some(PrintedTriggerIndex::placeholder()),
+                &mut trigger_ctx,
+            );
+            ctx.diagnostics.extend(trigger_ctx.diagnostics);
+            for trigger in &mut triggers {
+                // CR 603.4: a trailing "if <guard>" left on the trigger line that
+                // did not hoist would be silently dropped when the modal payload
+                // replaces the body; fail the trigger closed instead.
+                if let Some(gap_body) = unhoisted_modal_guard_body(trigger) {
+                    trigger.body = Some(gap_body);
+                    continue;
+                }
+                // `body_context` is captured before normal trigger-body parsing.
+                // Clone it per sibling: each mode receives all trigger-established
+                // facts, but no mode can leak chain-local state into another.
+                let mut mode_ctx = trigger.body_context.clone();
+                mode_ctx.diagnostics.clear();
+                // CR 608.2c vs CR 603.12: a NON-reflexive modal mode body is
+                // ordinary text of the same resolving triggered ability, so the
+                // plain clone above correctly keeps the trigger's proven
+                // zone-change authority. A REFLEXIVE modal parent ("… When you
+                // do, choose one —") is a CR 603.12 body with its own event
+                // authority, so it must enter an independent body by name.
+                if reflexive_parent.is_some() {
+                    mode_ctx = mode_ctx.clone_for_independent_body();
+                }
+                if let Some(scope) = modal_relative_player_scope_for_trigger(trigger) {
+                    mode_ctx.relative_player_scope = Some(scope);
+                }
+                let reflexive_connector = match reflexive_parent
+                    .as_ref()
+                    .map(|_| reflexive_modal_connector(&header, &mut mode_ctx))
+                    .transpose()
+                {
+                    Ok(connector) => connector,
+                    Err(effect) => {
+                        let actor = mode_ctx.actor.clone();
+                        ctx.diagnostics.extend(mode_ctx.diagnostics);
+                        trigger.body =
+                            Some(TriggerBody::EffectChain(EffectChainIr::single_clause(
+                                &header.raw,
+                                AbilityKind::Spell,
+                                parsed_clause(*effect),
+                                None,
+                                actor,
+                                true,
+                            )));
+                        continue;
+                    }
+                };
+                let payload = ModalIr {
+                    marker: EffectChainIr::single_clause(
+                        &header.raw,
+                        AbilityKind::Spell,
+                        parsed_clause(modal_marker_effect(&header)),
+                        None,
+                        mode_ctx.actor.clone(),
+                        true,
+                    ),
+                    choice: build_modal_choice(&header, &modes),
+                    modes: parse_modal_mode_irs(&modes, AbilityKind::Spell, &mut mode_ctx),
+                    optionality: header.optionality,
+                };
+                ctx.diagnostics.extend(mode_ctx.diagnostics);
+                // CR 603.12: the printed instruction the mode list rides on is
+                // whatever `classify_reflexive_modal_parent` found. Compute the
+                // body before assigning it — the mandatory arm reads the chain
+                // the trigger parser already produced.
+                let body = match &reflexive_parent {
+                    Some(ReflexiveModalParent::MayPay(cost_text)) => {
+                        TriggerBody::Reflexive(Box::new(ReflexiveParentIr {
+                            parent: ReflexiveParent::MayPay {
+                                cost: parse_oracle_cost(cost_text),
+                                payment_chain: Some(
+                                    parse_ability_ir_with_context(
+                                        cost_text,
+                                        AbilityKind::Spell,
+                                        &mut ParseContext {
+                                            actor: ctx.actor.clone(),
+                                            in_trigger: true,
+                                            ..Default::default()
+                                        },
+                                    )
+                                    .body,
+                                ),
+                            },
+                            connector: reflexive_connector
+                                .clone()
+                                .expect("reflexive parent has a connector"),
+                            effect_chain: EffectChainIr::single_clause(
+                                cost_text,
+                                AbilityKind::Spell,
+                                parsed_clause(Effect::PayCost {
+                                    cost: parse_oracle_cost(cost_text),
+                                    scale: None,
+                                    payer: TargetFilter::Controller,
+                                }),
+                                None,
+                                None,
+                                true,
+                            ),
+                            modal: Some(payload.clone()),
+                        }))
+                    }
+                    // CR 603.12 + CR 608.2c: a mandatory parent. The trigger
+                    // parser already lowered the printed instruction — the same
+                    // path that handles every non-modal reflexive — so take
+                    // that chain as the parent and hang the mode list off it as
+                    // the CR 603.12 reflexive body. Replacing it (as this arm
+                    // did) dropped the instruction from the card entirely.
+                    Some(ReflexiveModalParent::Mandatory) => match trigger.body.take() {
+                        Some(TriggerBody::EffectChain(instruction)) => {
+                            TriggerBody::Reflexive(Box::new(ReflexiveParentIr {
+                                parent: ReflexiveParent::Mandatory { instruction },
+                                connector: reflexive_connector
+                                    .clone()
+                                    .expect("reflexive parent has a connector"),
+                                effect_chain: payload.marker.clone(),
+                                modal: Some(payload.clone()),
+                            }))
+                        }
+                        // The connector is there but the instruction did not
+                        // lower to a plain chain. These shapes carry their own
+                        // root transforms and nesting them here would misreport
+                        // what the card does, so keep the pre-existing plain
+                        // modal rather than invent a parent.
+                        Some(
+                            TriggerBody::Reflexive(_)
+                            | TriggerBody::Modal(_)
+                            | TriggerBody::Vote(_)
+                            | TriggerBody::Pile(_),
+                        )
+                        | None => TriggerBody::Modal(Box::new(payload.clone())),
+                    },
+                    None => TriggerBody::Modal(Box::new(payload.clone())),
+                };
+                trigger.body = Some(body);
+                if matches!(header.optionality, ModalOptionality::MayDecline) {
+                    trigger.modifiers.optional = true;
+                }
+            }
+            OracleBlockIr::Triggered(triggers)
+        }
+        OracleBlockAst::AsEntersAnchorWordModal {
+            header_text,
+            labels,
+            modes,
+        } => {
+            // `ReplacementIr` is the bounded wrapper permitted for the native
+            // as-enters header. The execute choice is a typed replacement payload,
+            // never a document-level pre-lowered node.
+            let replacement = ReplacementIr {
+                definition: ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::Choose {
+                            choice_type: ChoiceType::Labeled { options: labels },
+                            persist: true,
+                            selection: TargetSelectionMode::Chosen,
+                        },
+                    ))
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination_zone(crate::types::zones::Zone::Battlefield)
+                    .description(header_text.trim().to_string()),
+                source_text: header_text,
+                execute_ir: None,
+            };
+            let children = modes
+                .iter()
+                .map(|mode| anchor_mode_irs(mode, card_name, ctx))
+                .collect();
+            OracleBlockIr::AsEnters {
+                replacement,
+                children,
+            }
+        }
+    }
+}
+
+fn modal_marker_ir(
+    header: &ModalHeaderAst,
+    kind: AbilityKind,
+    modal: ModalPayloadIr,
+    ctx: &ParseContext,
+) -> AbilityIr {
+    AbilityIr {
+        source_text: header.raw.clone(),
+        body: EffectChainIr::single_clause(
+            &header.raw,
+            kind,
+            parsed_clause(modal_marker_effect(header)),
+            None,
+            ctx.actor.clone(),
+            ctx.in_trigger,
+        ),
+        shell: AbilityShellIr::default(),
+        die_results: vec![],
+        root_transforms: vec![],
+        modal: Some(modal),
+    }
+}
+
+/// CR 608.2c + CR 608.2k: The subject a modal mode body may inherit for
+/// pronoun anaphora. Only a real non-self, non-`Any` trigger subject routes a
+/// mode-body "it"/"that creature" to the triggering object (e.g. an
+/// equipped-creature trigger's "that creature"). A `SelfRef`/`Any` subject is
+/// cleared so mode-internal referents bind mode-body anaphors: a typed target
+/// introduced by the mode's OWN earlier sentence takes "it" via
+/// `parent_target_available` → `ParentTarget`, and "that player" resolves to
+/// `ParentTargetController` (CR 608.2c: instructions are read in written
+/// order; the mode's own earlier instruction is the nearest antecedent).
+/// Trigger-established facts that outrank the subject are unaffected: the
+/// DamageDone player scope is re-seeded per mode by
+/// `modal_relative_player_scope_for_trigger`, and `object_pronoun_ref` pins
+/// (including a specific untargeted object a trigger condition introduced;
+/// CR 608.2k) still serve bare pronouns whenever no mode-internal referent
+/// precedes them.
+/// Restores the filtering the retired pre-IR path applied via
+/// `derive_modal_subject` (#6811 ported the context threading but dropped the
+/// filter; issue #7031 — plus the silent "that player" → TriggeringPlayer
+/// misbind the same commit introduced, e.g. Disciple of Perdition).
+fn mode_anaphor_subject(subject: Option<TargetFilter>) -> Option<TargetFilter> {
+    match subject {
+        Some(TargetFilter::SelfRef | TargetFilter::Any) => None,
+        other => other,
+    }
+}
+
+fn parse_modal_mode_irs(
+    modes: &[ModeAst],
+    kind: AbilityKind,
+    base_ctx: &mut ParseContext,
+) -> Vec<ModalModeIr> {
+    modes
+        .iter()
+        .map(|mode| {
+            let mut mode_ctx = base_ctx.clone();
+            // CR 608.2c: each mode body continues whatever body `base_ctx`
+            // describes, so the plain clone inherits exactly the authority
+            // `base_ctx` holds — a reset base stays reset, and no mode can
+            // invent authority its parent lacked.
+            mode_ctx.subject = mode_anaphor_subject(mode_ctx.subject.take());
+            mode_ctx.diagnostics.clear();
+            let mut ability = parse_ability_ir_with_context(&mode.body, kind, &mut mode_ctx);
+            guard_unsupported_mode_qualifiers_ir(&mut ability, kind, &mode_ctx);
+            base_ctx.diagnostics.extend(mode_ctx.diagnostics);
+            ModalModeIr {
+                source_text: mode.source_text.clone(),
+                source_line: mode.source_line,
+                ability: Box::new(ability),
+            }
+        })
+        .collect()
+}
+
+fn anchor_mode_irs(
+    mode: &ModeAst,
+    card_name: &str,
+    base_ctx: &mut ParseContext,
+) -> (usize, Vec<AnchorModeIr>) {
+    let line = mode
+        .source_line
+        .expect("collected as-enters anchor modes have independent bullet lines");
+    let Some(label) = mode.label.as_ref() else {
+        return (line, vec![unsupported_anchor_mode_ir(mode, base_ctx)]);
+    };
+    let body = mode.body.trim();
+    let lower = body.to_lowercase();
+    if alt((
+        tag::<_, _, OracleError<'_>>("when "),
+        tag("whenever "),
+        tag("at "),
+    ))
+    .parse(lower.as_str())
+    .is_ok()
+    {
+        let mut mode_ctx = base_ctx.clone_for_independent_body();
+        // CR 603.1: an anchor mode whose body is a printed trigger line spawns a
+        // DISTINCT triggered ability, which establishes its own event authority,
+        // so this enters an INDEPENDENT body by name.
+        mode_ctx.diagnostics.clear();
+        let triggers = parse_trigger_lines_at_index_ir(body, card_name, None, &mut mode_ctx);
+        base_ctx.diagnostics.extend(mode_ctx.diagnostics);
+        let children = triggers
+            .into_iter()
+            .map(|mut trigger| {
+                if matches!(&trigger.condition, TriggerMode::Unknown(_)) || trigger.body.is_none() {
+                    unsupported_anchor_mode_ir(mode, base_ctx)
+                } else {
+                    attach_chosen_label_to_trigger_ir(&mut trigger, label);
+                    AnchorModeIr::Trigger(Box::new(trigger))
+                }
+            })
+            .collect();
+        return (line, children);
+    }
+    match parse_static_line_ir(body) {
+        Some(mut static_ir) => {
+            attach_chosen_label_to_static_ir(&mut static_ir, label);
+            (line, vec![AnchorModeIr::Static(Box::new(static_ir))])
+        }
+        None => (line, vec![unsupported_anchor_mode_ir(mode, base_ctx)]),
+    }
+}
+
+fn unsupported_anchor_mode_ir(mode: &ModeAst, ctx: &ParseContext) -> AnchorModeIr {
+    let source = mode.source_text.clone();
+    AnchorModeIr::Unsupported(Box::new(AbilityIr {
+        source_text: source.clone(),
+        body: EffectChainIr::single_clause(
+            &source,
+            AbilityKind::Spell,
+            parsed_clause(Effect::unimplemented("as_enters_anchor_mode", &source)),
+            None,
+            ctx.actor.clone(),
+            ctx.in_trigger,
+        ),
+        shell: AbilityShellIr::default(),
+        die_results: vec![],
+        root_transforms: vec![],
+        modal: None,
+    }))
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn lower_oracle_block(
     block: OracleBlockAst,
     card_name: &str,
@@ -992,9 +1594,26 @@ pub(crate) fn lower_oracle_block(
             trigger_line,
             header,
             modes,
-            optional_cost,
+            reflexive_parent,
         } => {
             let mut triggers = parse_trigger_lines(&trigger_line, card_name);
+            let reflexive_connector = match reflexive_parent
+                .as_ref()
+                .map(|_| reflexive_modal_connector(&header, &mut ParseContext::default()))
+                .transpose()
+            {
+                Ok(connector) => connector,
+                Err(effect) => {
+                    for trigger in &mut triggers {
+                        trigger.execute = Some(Box::new(
+                            AbilityDefinition::new(AbilityKind::Spell, effect.as_ref().clone())
+                                .description(header.raw.clone()),
+                        ));
+                    }
+                    result.triggers.extend(triggers);
+                    return;
+                }
+            };
             // CR 608.2k + CR 301.5a: Derive the trigger subject from the parsed
             // trigger so modal-mode pronoun anaphora ("that creature") binds to
             // `TriggeringSource` instead of an unbound `ParentTarget`. Pip-Boy
@@ -1014,7 +1633,7 @@ pub(crate) fn lower_oracle_block(
             // the single-authority scope resolver expects. Without this, bullet-
             // line modes hit the `unwrap_or(ControllerRef::You)` fallback in
             // `oracle_target.rs` while the inline `"; or"` form (which threads the
-            // same scope via `try_parse_inline_modal`) resolved correctly — the
+            // same scope via `try_parse_inline_modal_ir`) resolved correctly — the
             // two modal surface forms of Grenzo, Havoc Raiser disagreed (#2346).
             let relative_player_scope = super::oracle_trigger::relative_player_scope_for_condition(
                 &trigger_line.to_lowercase(),
@@ -1027,34 +1646,60 @@ pub(crate) fn lower_oracle_block(
                 relative_player_scope,
                 host_self_reference,
             );
+            if matches!(header.optionality, ModalOptionality::MayDecline) {
+                // CR 608.2c: Resolution-time optionality lives on the execute
+                // ability (`build_triggered_ability` clones it); the trigger
+                // definition flag is stamped for coverage and card-data export.
+                modal_ability.optional = true;
+            }
 
-            let execute = match optional_cost {
+            // CR 603.12: `None` means the modal attaches directly; either
+            // reflexive arm makes it the `WhenYouDo` body of the printed parent.
+            // `Mandatory` needs the per-trigger execute the trigger parser
+            // produced, so it is resolved inside the loop below.
+            let execute = match &reflexive_parent {
                 // CR 603.12 + CR 700.2b: The modal is gated behind a reflexive
-                // optional cost. Build `Effect::Sacrifice { optional }` whose
+                // optional instruction. Build `Effect::Sacrifice { optional }` whose
                 // `WhenYouDo` sub_ability carries the modal, so the modes are
-                // chosen and resolved only after the controller pays the cost
+                // chosen and resolved only after the controller performs that instruction
                 // (Caesar, Legion's Emperor). The decline path is handled by
                 // `should_resolve_subability_on_optional_decline` (WhenYouDo →
                 // false), so declining the sacrifice resolves no modes.
-                Some(cost_text) => {
-                    modal_ability.condition = Some(AbilityCondition::WhenYouDo);
+                Some(ReflexiveModalParent::MayPay(cost_text)) => {
+                    modal_ability.condition = reflexive_connector.clone();
                     let mut cost_ability = crate::parser::oracle_effect::parse_effect_chain(
-                        &cost_text,
+                        cost_text,
                         AbilityKind::Spell,
                     );
-                    // CR 118.12 + CR 701.21: "you may sacrifice" makes the
-                    // sacrifice cost optional during resolution; the controller
-                    // is prompted before paying it.
+                    // CR 603.12 + CR 701.21: "you may sacrifice" makes the
+                    // sacrifice instruction optional during resolution; the
+                    // controller chooses whether to perform it.
                     cost_ability.optional = true;
                     cost_ability.sub_ability = Some(Box::new(modal_ability));
                     Box::new(cost_ability)
+                }
+                // CR 603.12 + CR 608.2c: a mandatory parent stays in the trigger
+                // line, so the parent is the trigger's own execute and the modal
+                // becomes its reflexive body.
+                Some(ReflexiveModalParent::Mandatory) => {
+                    modal_ability.condition = reflexive_connector.clone();
+                    Box::new(modal_ability)
                 }
                 // Plain triggered modal (Pip-Boy): the modal attaches directly.
                 None => Box::new(modal_ability),
             };
 
             for trigger in &mut triggers {
-                trigger.execute = Some(execute.clone());
+                match (&reflexive_parent, trigger.execute.take()) {
+                    (Some(ReflexiveModalParent::Mandatory), Some(mut instruction)) => {
+                        instruction.sub_ability = Some(execute.clone());
+                        trigger.execute = Some(instruction);
+                    }
+                    _ => trigger.execute = Some(execute.clone()),
+                }
+                if matches!(header.optionality, ModalOptionality::MayDecline) {
+                    trigger.optional = true;
+                }
             }
             result.triggers.extend(triggers);
         }
@@ -1080,6 +1725,7 @@ pub(crate) fn lower_oracle_block(
 /// Falls back to a no-op placeholder static with an `Unrecognized` condition
 /// when a mode body parses to neither a trigger nor a static — preserves the
 /// choice shape for the coverage report instead of silently dropping a mode.
+#[cfg(test)]
 fn lower_as_enters_anchor_word_modal(
     header_text: String,
     labels: Vec<String>,
@@ -1190,16 +1836,48 @@ fn lower_as_enters_anchor_word_modal(
             description: Some(format!("CR 614.12c [{label}]: {body}")),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
+            room_door: None,
+            granting_object: None,
         };
         result.statics.push(placeholder);
     }
 }
 
-/// Attach a `ChosenLabelIs` intervening-if to a parsed trigger. Composes with
-/// any pre-existing condition via `TriggerCondition::And` so the linked
-/// ability remains rule-correct even if the body itself carries an "if"
-/// clause (none in current corpus, future-safe).
+/// Attach the anchor gate before trigger lowering. Composes through the same
+/// `intervening_if` field ordinary trigger parsing uses, so lowering remains
+/// the sole definition-assembly seam.
+fn attach_chosen_label_to_trigger_ir(trigger: &mut TriggerIr, label: &str) {
+    let gate = TriggerCondition::ChosenLabelIs {
+        label: label.to_string(),
+    };
+    trigger.modifiers.intervening_if = Some(match trigger.modifiers.intervening_if.take() {
+        None => gate,
+        Some(existing) => TriggerCondition::And {
+            conditions: vec![gate, existing],
+        },
+    });
+}
+
+/// Attach the anchor gate before static lowering. `StaticIr` is the permitted
+/// bounded static wrapper for this whole-line grammar.
+fn attach_chosen_label_to_static_ir(static_ir: &mut StaticIr, label: &str) {
+    let gate = StaticCondition::ChosenLabelIs {
+        label: label.to_string(),
+    };
+    static_ir.definition.condition = Some(match static_ir.definition.condition.take() {
+        None => gate,
+        Some(existing) => StaticCondition::And {
+            conditions: vec![gate, existing],
+        },
+    });
+}
+
+/// Attach a `ChosenLabelIs` intervening-if to a parsed trigger. Kept only for
+/// the legacy lowering compatibility tests below.
+#[cfg(test)]
 fn attach_chosen_label_to_trigger(
     trigger: &mut crate::types::ability::TriggerDefinition,
     label: &str,
@@ -1219,8 +1897,8 @@ fn attach_chosen_label_to_trigger(
     // battlefield-only behavior is correct.
 }
 
-/// Attach a `ChosenLabelIs` gate to a parsed static. Composes with any
-/// pre-existing condition via `StaticCondition::And`.
+/// Attach a `ChosenLabelIs` gate to a parsed static for legacy tests.
+#[cfg(test)]
 fn attach_chosen_label_to_static(
     static_def: &mut crate::types::ability::StaticDefinition,
     label: &str,
@@ -1236,6 +1914,7 @@ fn attach_chosen_label_to_static(
     });
 }
 
+#[cfg(test)]
 pub(crate) fn build_modal_ability(
     kind: AbilityKind,
     header: &ModalHeaderAst,
@@ -1260,8 +1939,9 @@ pub(crate) fn build_modal_ability(
 /// controls"` / `"that player's library"` anaphor resolves to the player the
 /// condition introduced (the damaged player) rather than falling back to the
 /// caster (`ControllerRef::You`). This mirrors the inline `"; or"` modal path
-/// (`try_parse_inline_modal`); both must thread the same scope so bullet-line
+/// (`try_parse_inline_modal_ir`); both must thread the same scope so bullet-line
 /// and inline modal forms of the same trigger agree (issue #2346).
+#[cfg(test)]
 fn build_modal_ability_with_subject(
     kind: AbilityKind,
     header: &ModalHeaderAst,
@@ -1289,6 +1969,7 @@ fn build_modal_ability_with_subject(
 /// `resolve_it_pronoun`'s gating: only non-self, non-Any subjects route mode-
 /// body "that creature" to `TriggeringSource`; self-triggers (like Saga
 /// chapters that name themselves) keep the legacy `ParentTarget` semantics.
+#[cfg(test)]
 fn derive_modal_subject(
     triggers: &[crate::types::ability::TriggerDefinition],
 ) -> Option<TargetFilter> {
@@ -1305,6 +1986,7 @@ fn modal_marker_effect(_header: &ModalHeaderAst) -> Effect {
         static_abilities: vec![],
         duration: None,
         target: None,
+        end_cost: None,
     }
 }
 
@@ -1334,6 +2016,20 @@ fn header_is_opponent_chooser_with_additional_cost(
     has_mode_cost || has_additional_cost_constraint
 }
 
+/// CR 700.2 / CR 702.172a: when any mode carries a per-mode cost, preserve a
+/// positional `mode_costs` entry for every mode (zero cost where omitted) so
+/// consumers indexing by mode index stay aligned.
+fn build_mode_costs(modes: &[ModeAst]) -> Vec<ManaCost> {
+    if modes.iter().any(|m| m.mode_cost.is_some()) {
+        modes
+            .iter()
+            .map(|m| m.mode_cost.clone().unwrap_or_else(ManaCost::zero))
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
 fn build_modal_choice(header: &ModalHeaderAst, modes: &[ModeAst]) -> ModalChoice {
     let mode_count = modes.len();
     let mode_pawprints: Vec<u8> = modes.iter().filter_map(|m| m.mode_pawprint).collect();
@@ -1356,7 +2052,7 @@ fn build_modal_choice(header: &ModalHeaderAst, modes: &[ModeAst]) -> ModalChoice
             mode_count,
             !mode_pawprints.is_empty(),
         ),
-        mode_costs: modes.iter().filter_map(|m| m.mode_cost.clone()).collect(),
+        mode_costs: build_mode_costs(modes),
         mode_pawprints,
         entwine_cost: None,
         // CR 700.2e: the player who chooses the mode(s).
@@ -1405,6 +2101,7 @@ fn cap_modal_constraints(
         .collect()
 }
 
+#[cfg(test)]
 fn lower_mode_abilities(
     modes: &[ModeAst],
     kind: AbilityKind,
@@ -1422,6 +2119,7 @@ fn lower_mode_abilities(
 /// typed attachment-host self-reference so a `"that creature"` copy-token
 /// anaphor inside a modal mode body of an Aura/bestow card remaps to the
 /// enchanted host. `None` for non-Aura cards.
+#[cfg(test)]
 fn lower_mode_abilities_with_subject(
     modes: &[ModeAst],
     kind: AbilityKind,
@@ -1439,6 +2137,7 @@ fn lower_mode_abilities_with_subject(
 /// For DamageDone triggers the damaged player is the triggering
 /// player; "that player" in each modal branch must resolve to them, not the
 /// caster or `ParentTargetController`.
+#[cfg(test)]
 pub(crate) fn lower_mode_abilities_with_scope(
     modes: &[ModeAst],
     kind: AbilityKind,
@@ -1452,12 +2151,9 @@ pub(crate) fn lower_mode_abilities_with_scope(
         relative_player_scope,
         ..Default::default()
     };
-    modes
-        .iter()
-        .map(|mode| {
-            let parsed = parse_effect_chain_with_context(&mode.body, kind, &mut ctx);
-            guard_unsupported_mode_qualifiers(&mode.body, parsed, kind)
-        })
+    parse_modal_mode_irs(modes, kind, &mut ctx)
+        .into_iter()
+        .map(|mode| lower_ability_ir(&mode.ability))
         .collect()
 }
 
@@ -1473,15 +2169,38 @@ pub(crate) fn lower_mode_abilities_with_scope(
 /// The `relative_player_scope` from the trigger condition (e.g.
 /// `TriggeringPlayer` for DamageDone triggers) is propagated into every mode
 /// body so "that player" anaphora resolve to the correct player.
-pub(crate) fn try_parse_inline_modal(
-    effect_body: &str,
-    relative_player_scope: Option<crate::types::ability::ControllerRef>,
-) -> Option<AbilityDefinition> {
-    let em_dash_pos = effect_body.find('\u{2014}')?;
-    let header_text = effect_body[..em_dash_pos].trim();
-    let modes_text = effect_body[em_dash_pos + '\u{2014}'.len_utf8()..].trim();
-
-    let header = parse_modal_header_ast(header_text)?;
+/// Split the mode list of an INLINE modal body (header and modes on one line)
+/// into `ModeAst`s, or `None` when it does not carry two or more modes.
+///
+/// CR 700.2: "A spell or ability is modal if it has two or more options in a
+/// bulleted list preceded by instructions for a player to choose a number of
+/// those options." Two inline shapes reach this seam:
+///
+///   * **bullet-delimited** — `• Mode one. • Mode two.` This is the printed form
+///     CR 700.2 describes. It arrives inline (rather than as its own lines,
+///     which `collect_mode_asts` handles) whenever a preprocessor has already
+///     joined the bullet lines into a single body — as the Saga chapter
+///     preprocessor does for a `"{rN} — Choose one —"` chapter (CR 714.2b).
+///   * **`"; or "`-delimited** — `mode one; or mode two`.
+///
+/// Bullets are tried first because a bulleted body is the printed modal form,
+/// and `"; or "` can legitimately occur *inside* a single bullet's text.
+///
+/// Bullet bodies are lowered through `parse_mode_ast`, the same building block
+/// the line-based path uses, so an inline `• Defense! — …` mode gets identical
+/// label/cost/pawprint treatment to its own-line counterpart rather than a
+/// second, divergent label parser.
+fn split_inline_mode_asts(modes_text: &str) -> Option<Vec<ModeAst>> {
+    // allow-noncombinator: structural delimiter split for modal modes
+    let bulleted: Vec<ModeAst> = modes_text
+        .split(['\u{2022}', '\u{00b7}'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|body| parse_mode_ast(body, body, None))
+        .collect();
+    if bulleted.len() >= 2 {
+        return Some(bulleted);
+    }
 
     let raw_modes: Vec<&str> = modes_text
         .split("; or ") // allow-noncombinator: structural delimiter split for modal modes
@@ -1492,31 +2211,104 @@ pub(crate) fn try_parse_inline_modal(
         return None;
     }
 
-    let modes: Vec<ModeAst> = raw_modes
-        .iter()
-        .map(|body| {
-            let body = body.trim_end_matches('.');
-            ModeAst {
-                raw: body.to_string(),
-                label: None,
-                body: body.to_string(),
-                mode_cost: None,
-                mode_pawprint: None,
-            }
-        })
-        .collect();
-
-    let mode_abilities = lower_mode_abilities_with_scope(
-        &modes,
-        AbilityKind::Spell,
-        None,
-        relative_player_scope,
-        None,
-    );
     Some(
-        AbilityDefinition::new(AbilityKind::Spell, modal_marker_effect(&header))
-            .with_modal(build_modal_choice(&header, &modes), mode_abilities),
+        raw_modes
+            .iter()
+            .map(|body| {
+                let body = body.trim_end_matches('.');
+                ModeAst {
+                    raw: body.to_string(),
+                    source_text: body.to_string(),
+                    source_line: None,
+                    label: None,
+                    body: body.to_string(),
+                    mode_cost: None,
+                    mode_pawprint: None,
+                }
+            })
+            .collect(),
     )
+}
+
+/// Split an inline modal body into its header AST and mode ASTs.
+///
+/// Shared by the IR path (`try_parse_inline_modal_ir`, used by triggers) and the
+/// `AbilityDefinition` path (`try_parse_inline_modal_ability`, used by Saga
+/// chapters) so both agree on what counts as an inline modal.
+fn split_inline_modal_parts(effect_body: &str) -> Option<(ModalHeaderAst, Vec<ModeAst>)> {
+    let em_dash_pos = effect_body.find('\u{2014}')?;
+    let header_text = effect_body[..em_dash_pos].trim();
+    let modes_text = effect_body[em_dash_pos + '\u{2014}'.len_utf8()..].trim();
+
+    let header = parse_modal_header_ast(header_text)?;
+    let modes = split_inline_mode_asts(modes_text)?;
+    Some((header, modes))
+}
+
+/// Parse an inline modal body directly into an `AbilityDefinition`.
+///
+/// CR 700.2b: the controller of a modal *triggered* ability chooses the mode(s)
+/// as it is put on the stack. A Saga chapter ability is a triggered ability
+/// (CR 714.2b), so a chapter whose body is `"Choose one — • … • …"` must become
+/// a real modal ability rather than a sequential chain of every bullet.
+///
+/// Lowers through the same chokepoints as the trigger modal path
+/// (`oracle_trigger`'s `TriggerBody::Modal` arm): the marker chain through
+/// `lower_effect_chain_ir` + `finalize_effect_chain`, each mode through
+/// `lower_ability_ir`. Callers that already hold a `ParseContext` and want the
+/// IR should use [`try_parse_inline_modal_ir`] instead; this wrapper exists for
+/// definition-level callers that have no IR pipeline of their own.
+///
+/// `ctx` is the caller's body context, threaded to the marker and every mode
+/// exactly as the trigger modal path threads its live trigger-body context, so
+/// a trigger-only clause in a mode lowers with its event referent.
+pub(crate) fn try_parse_inline_modal_ability(
+    effect_body: &str,
+    ctx: &ParseContext,
+) -> Option<AbilityDefinition> {
+    let modal = try_parse_inline_modal_ir(effect_body, ctx)?;
+    let mut ability = crate::parser::oracle_effect::lower_effect_chain_ir(&modal.marker);
+    crate::parser::oracle_effect::finalize_effect_chain(&mut ability);
+    // CR 603.3c + CR 700.2b: "you may choose one —" lets the controller choose
+    // no mode, a choice made as the ability is put on the stack. The engine
+    // models that decline as `optional` on the ability that resolves, as the
+    // block-level modal lowering does; `ModalChoice.min_choices` stays 1.
+    if matches!(modal.optionality, ModalOptionality::MayDecline) {
+        ability.optional = true;
+    }
+    Some(
+        ability.with_modal(
+            modal.choice,
+            modal
+                .modes
+                .iter()
+                .map(|mode| crate::parser::oracle_effect::lower_ability_ir(&mode.ability))
+                .collect(),
+        ),
+    )
+}
+
+pub(crate) fn try_parse_inline_modal_ir(effect_body: &str, ctx: &ParseContext) -> Option<ModalIr> {
+    let (header, modes) = split_inline_modal_parts(effect_body)?;
+
+    let mut mode_ctx = ctx.clone();
+    // CR 700.2 + CR 608.2c: an INLINE modal ("choose one — …; or …") is ordinary
+    // text of the body the caller is already parsing, so the plain clone keeps
+    // the caller's zone-change authority. `oracle_trigger` calls this with the
+    // live trigger body context.
+    Some(ModalIr {
+        marker: EffectChainIr::single_clause(
+            effect_body,
+            AbilityKind::Spell,
+            parsed_clause(modal_marker_effect(&header)),
+            None,
+            ctx.actor.clone(),
+            ctx.in_trigger,
+        ),
+        choice: build_modal_choice(&header, &modes),
+        modes: parse_modal_mode_irs(&modes, AbilityKind::Spell, &mut mode_ctx),
+        optionality: header.optionality,
+    })
 }
 
 /// Replace a parsed mode ability with `Effect::Unimplemented` when the mode body
@@ -1538,6 +2330,8 @@ pub(crate) fn try_parse_inline_modal(
 /// (e.g. `TotalManaValueAtMost`) or filter extensions (core-type + subtype
 /// disjunction in `that's a X or Y`) are introduced, this guard will be
 /// tightened to only fire on the residual unsupported forms.
+#[cfg(test)]
+#[allow(dead_code)]
 fn guard_unsupported_mode_qualifiers(
     body: &str,
     parsed: AbilityDefinition,
@@ -1564,15 +2358,49 @@ fn guard_unsupported_mode_qualifiers(
     if dig_with_total_mv || put_counter_with_thats_a {
         return AbilityDefinition::new(
             kind,
-            Effect::Unimplemented {
-                name: "modal_mode_unsupported_qualifier".into(),
-                description: Some(body.to_string()),
-            },
+            Effect::unimplemented("modal_mode_unsupported_qualifier", body),
         )
         .description(body.to_string());
     }
 
     parsed
+}
+
+/// IR-native qualifier guard for the modal migration. It inspects every parsed
+/// clause against its enclosing mode source; it never lowers an `AbilityIr`
+/// merely to decide whether a restrictive qualifier was swallowed.
+fn guard_unsupported_mode_qualifiers_ir(
+    ability: &mut AbilityIr,
+    kind: AbilityKind,
+    ctx: &ParseContext,
+) {
+    let lower = ability.source_text.to_lowercase();
+    let has_unsupported_qualifier = ability.body.clauses.iter().any(|clause| {
+        let dig_with_total_mv = matches!(&clause.parsed.effect, Effect::Dig { .. })
+            && nom_primitives::scan_contains(&lower, "with total mana value");
+        let put_counter_with_thats_a = matches!(
+            &clause.parsed.effect,
+            Effect::PutCounterAll { .. } | Effect::PutCounter { .. }
+        ) && nom_primitives::scan_contains(&lower, "that's a ");
+        dig_with_total_mv || put_counter_with_thats_a
+    });
+
+    if !has_unsupported_qualifier {
+        return;
+    }
+
+    let source = ability.source_text.clone();
+    ability.body = EffectChainIr::single_clause(
+        &source,
+        kind,
+        parsed_clause(Effect::unimplemented(
+            "modal_mode_unsupported_qualifier",
+            &source,
+        )),
+        None,
+        ctx.actor.clone(),
+        ctx.in_trigger,
+    );
 }
 
 /// Parse the "choose N" count from the modal header line.
@@ -1700,6 +2528,12 @@ pub(super) const ABILITY_WORD_NAMES: &[&str] = &[
     "flurry",
     "formidable",
     "grandeur",
+    // CR 207.2c: Adventures in the Forgotten Realms (AFR) flavor ability word —
+    // not in the rulebook enumeration, but italicized and rules-meaningless in
+    // exactly the same way (Pixie Guide: "Grant an Advantage — If you would roll
+    // one or more dice, instead roll that many dice plus one and ignore the
+    // lowest roll."). Peeling it lets the body reach the ordinary parser.
+    "grant an advantage",
     "hellbent",
     "heroic",
     "imprint",
@@ -1817,11 +2651,14 @@ pub(super) fn extract_ability_word_reminder_body(raw: &str) -> Option<String> {
 /// CR 700.2: The recognized shape of a modal header's count phrase. `Fixed`
 /// holds a statically-resolved `(min, max)` pair; `Dynamic { qty }` marks a
 /// "choose up to X / up to that many" header whose maximum resolves at runtime
-/// from `qty` and is clamped to `mode_count` (CR 700.2d). `qty` is
-/// `CostXPaid` for the cast-{X} subclass (CR 107.3m, The Ruinous Wrecking Crew)
-/// and `TimesCostPaidThisResolution` for the repeated-optional-payment subclass
-/// (CR 603.12a, Hawkeye, Master Marksman). LOW-1: `Copy` is dropped because
-/// `QuantityRef` is not `Copy`.
+/// from `qty` and is clamped to `mode_count` (CR 700.2d). `qty` is a full
+/// `QuantityExpr` matching the sink type `ModalChoice.dynamic_max_choices:
+/// Option<QuantityExpr>`: the cast-{X} subclass (CR 107.3m, The Ruinous Wrecking
+/// Crew) and the repeated-optional-payment subclass (CR 603.12a, Hawkeye, Master
+/// Marksman) wrap their `QuantityRef` in `QuantityExpr::Ref`, while the
+/// "where X is <expr>" subclass (CR 700.2 + CR 601.2b, Bumi/Riku) carries
+/// `parse_cda_quantity`'s `QuantityExpr` directly. LOW-1: `Copy` is dropped
+/// because `QuantityExpr` is not `Copy`.
 ///
 /// Known coverage gap (empty in the current corpus): the
 /// `TimesCostPaidThisResolution` cap is emitted cost-agnostically here, but the
@@ -1835,7 +2672,7 @@ pub(super) fn extract_ability_word_reminder_body(raw: &str) -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ModalCountSpec {
     Fixed { min: usize, max: usize },
-    Dynamic { qty: QuantityRef },
+    Dynamic { qty: QuantityExpr },
 }
 
 /// Scan for modal count override phrases at word boundaries using nom combinators.
@@ -1870,23 +2707,58 @@ fn scan_modal_count_override(text: &str) -> Option<ModalCountSpec> {
                 },
                 alt((tag("one or more"), tag("any number"))),
             ),
+            // CR 700.2 + CR 700.2d + CR 601.2b: "choose up to X, where X is <expr>"
+            // REDEFINES the modal maximum to a dynamic quantity other than the cast
+            // {X} (Bumi: Lesson cards in your graveyard; Riku: modes chosen for the
+            // triggering spell), and such cards carry no cast {X}. Parse <expr> via
+            // the shared `parse_cda_quantity` where-X-is quantity parser, bounded by
+            // the header/bullets terminator (em-dash U+2014, en-dash, hyphen) or
+            // end-of-input; min_choices = 0. Placed BEFORE the `CostXPaid` arm so
+            // the where form is claimed by the quantity parser instead of resolving
+            // `CostXPaid` == 0 (which would silently make the modal choose nothing).
+            // `map_opt` fails (letting `alt` fall through) when <expr> is not a
+            // recognized CDA quantity, so an unrecognized where-clause falls to the
+            // fixed default rather than a wrong dynamic cap.
+            map_opt(
+                preceded(
+                    (
+                        tag::<_, _, OracleError<'_>>("choose up to x"),
+                        opt(tag(",")),
+                        multispace0,
+                        tag("where"),
+                        multispace1,
+                        tag("x"),
+                        multispace1,
+                        tag("is"),
+                        multispace1,
+                    ),
+                    alt((
+                        terminated(take_until("\u{2014}"), peek(tag("\u{2014}"))),
+                        terminated(take_until("\u{2013}"), peek(tag("\u{2013}"))),
+                        terminated(take_until(" -"), peek(tag(" -"))),
+                        rest,
+                    )),
+                ),
+                |expr_slice: &str| {
+                    parse_cda_quantity(expr_slice.trim()).map(|qty| ModalCountSpec::Dynamic { qty })
+                },
+            ),
             // CR 700.2 + CR 107.3m: "choose up to X —" — the maximum is the cast
             // {X}, resolved live at runtime; `parse_number` fails on bare "x" so
             // this arm cannot shadow the numeric "choose up to N" arm below.
             //
-            // A trailing ", where X is <expr>" clause REDEFINES X to a different
-            // quantity (e.g. Bumi "where X is the number of Lesson cards in your
-            // graveyard"; Riku "where X is the number of times you chose a
-            // mode") and the card carries no cast {X}. Such headers must NOT be
-            // read as the cast {X} — the negative lookahead guards them out so
-            // they fall through to the fixed default rather than resolving
-            // `CostXPaid` (which is 0 for a card with no {X}, silently making
-            // the modal choose nothing). Parsing the redefining quantity into
-            // `dynamic_max_choices` is a follow-up; this PR's scope is the
-            // cast-{X} subclass (The Ruinous Wrecking Crew).
+            // A trailing ", where X is <expr>" clause is handled by the
+            // where-X-is arm above (it REDEFINES X and the card carries no cast
+            // {X}). The negative lookahead here stays as belt-and-suspenders so a
+            // bare-{X}-with-trailing-"where" that the arm above failed to parse
+            // still falls through to the fixed default rather than resolving
+            // `CostXPaid` (which is 0 for a card with no {X}, silently making the
+            // modal choose nothing).
             value(
                 ModalCountSpec::Dynamic {
-                    qty: QuantityRef::CostXPaid,
+                    qty: QuantityExpr::Ref {
+                        qty: QuantityRef::CostXPaid,
+                    },
                 },
                 terminated(
                     tag::<_, _, OracleError<'_>>("choose up to x"),
@@ -1895,25 +2767,21 @@ fn scan_modal_count_override(text: &str) -> Option<ModalCountSpec> {
             ),
             // CR 603.12a + CR 700.2d: "choose up to that many." (Hawkeye, Master
             // Marksman) caps the modal at the resolution-local count of repeated
-            // optional payments. MED-1: match the PERIOD/bare/bullet-terminated
-            // header form ONLY — the negative lookahead rejects a following
-            // em-dash (Tranquil Frillback's "choose up to that many —", whose
-            // reflexive condition is NOT WhenYouDo and so is not handled by the
-            // repeated-optional-payment driver) and a following noun phrase (the
+            // optional payments. Accept the em-dash modal form used by Tranquil
+            // Frillback while rejecting a following noun phrase (the
             // non-modal selection clauses "choose up to that many target
             // creatures you control" / "...creatures tapped this way"). Only a
             // clean termination (period / end / bullet) yields the dynamic cap,
             // so an unhandled card is never silently false-greened.
             value(
                 ModalCountSpec::Dynamic {
-                    qty: QuantityRef::TimesCostPaidThisResolution,
+                    qty: QuantityExpr::Ref {
+                        qty: QuantityRef::TimesCostPaidThisResolution,
+                    },
                 },
                 terminated(
                     tag::<_, _, OracleError<'_>>("choose up to that many"),
-                    not(preceded(
-                        multispace0,
-                        alt((tag("\u{2014}"), tag("\u{2013}"), tag("-"), alpha1)),
-                    )),
+                    not(preceded(multispace0, alpha1)),
                 ),
             ),
             // CR 700.2a / CR 700.2d: "choose up to N —" is a modal header where
@@ -1931,7 +2799,123 @@ fn scan_modal_count_override(text: &str) -> Option<ModalCountSpec> {
 
 #[cfg(test)]
 mod tests {
+    use crate::parser::oracle_util::normalize_card_name_refs;
+
     use super::*;
+
+    #[test]
+    fn inline_modal_ir_keeps_marker_and_modes_typed() {
+        let modal = try_parse_inline_modal_ir(
+            "Choose one — Draw a card; or Create a Treasure token.",
+            &ParseContext::default(),
+        )
+        .expect("inline modal should parse into typed trigger IR");
+
+        assert_eq!(modal.marker.clauses.len(), 1);
+        assert!(matches!(
+            modal.marker.clauses[0].parsed.effect,
+            Effect::GenericEffect { .. }
+        ));
+        assert_eq!(modal.choice.mode_count, 2);
+        assert_eq!(modal.modes.len(), 2);
+        assert!(modal.modes.iter().all(|mode| {
+            !matches!(
+                mode.ability.body.clauses[0].parsed.effect,
+                Effect::Unimplemented { .. }
+            )
+        }));
+    }
+
+    /// CR 700.2: "An ability is modal if it has two or more options in a
+    /// bulleted list preceded by instructions for a player to choose." The
+    /// bulleted list *is* the printed modal form, so an inline body whose modes
+    /// arrive as bullets must split on the bullets — not only on `"; or "`.
+    #[test]
+    fn inline_modal_splits_bullet_delimited_modes() {
+        let modes = split_inline_mode_asts(
+            "• Target creature gets +2/+2 until end of turn. • You gain 2 life.",
+        )
+        .expect("two bullets are two modes");
+
+        assert_eq!(modes.len(), 2);
+        assert_eq!(
+            modes[0].body,
+            "Target creature gets +2/+2 until end of turn."
+        );
+        assert_eq!(modes[1].body, "You gain 2 life.");
+    }
+
+    /// Bulleted modes route through `parse_mode_ast`, the same building block
+    /// the own-line path uses, so a named bullet (`• Defense! — …`) yields the
+    /// same label/body split inline as it does on its own line.
+    #[test]
+    fn inline_modal_bullet_modes_split_label_from_body() {
+        let modes = split_inline_mode_asts(
+            "• Combine Powers! — Draw a card. • Defense! — You gain 3 life.",
+        )
+        .expect("two named bullets are two modes");
+
+        assert_eq!(modes.len(), 2);
+        assert_eq!(modes[0].label.as_deref(), Some("Combine Powers!"));
+        assert_eq!(modes[0].body, "Draw a card.");
+        assert_eq!(modes[1].label.as_deref(), Some("Defense!"));
+        assert_eq!(modes[1].body, "You gain 3 life.");
+    }
+
+    /// Anti-widening control. Bullet splitting must not lower the bar for what
+    /// counts as a modal: CR 700.2 requires *two or more* options, so a single
+    /// bullet stays a plain effect chain, and a body with no bullets and no
+    /// `"; or "` is still not modal.
+    #[test]
+    fn inline_modal_declines_bodies_with_fewer_than_two_modes() {
+        assert!(split_inline_mode_asts("• Draw a card.").is_none());
+        assert!(split_inline_mode_asts("Draw a card. You gain 2 life.").is_none());
+        assert!(
+            try_parse_inline_modal_ir("Choose one — • Draw a card.", &ParseContext::default())
+                .is_none()
+        );
+        // No "choose" header, so the em-dash is a flavor title, not a modal head.
+        assert!(try_parse_inline_modal_ir(
+            "Fight! — • Draw a card. • You gain 2 life.",
+            &ParseContext::default()
+        )
+        .is_none());
+    }
+
+    /// CR 603.3c + CR 700.2b: an inline trigger modal ("you may choose one — A;
+    /// or B") lets the controller choose no mode. The trigger parser reads "you
+    /// may" as trigger optionality before the modal body is parsed, so this pins
+    /// that the inline modal path keeps it. The plain "choose one" trigger is the
+    /// control.
+    #[test]
+    fn inline_modal_trigger_you_may_choose_one_is_optional() {
+        for (text, optional) in [
+            (
+                "When this creature enters, you may choose one \u{2014} Draw a card; or You gain 2 life.",
+                true,
+            ),
+            (
+                "When this creature enters, choose one \u{2014} Draw a card; or You gain 2 life.",
+                false,
+            ),
+        ] {
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                text,
+                "Test Creature",
+                &[],
+                &["Creature".into()],
+                &[],
+            );
+            let trigger = parsed
+                .triggers
+                .first()
+                .unwrap_or_else(|| panic!("{text}: must parse to a trigger"));
+            let execute = trigger.execute.as_deref().expect("trigger has an ability");
+            assert!(execute.modal.is_some(), "{text}: must be modal");
+            assert_eq!(trigger.optional, optional, "{text}: trigger.optional");
+            assert_eq!(execute.optional, optional, "{text}: execute.optional");
+        }
+    }
 
     #[test]
     fn extract_ability_word_reminder_body_increment() {
@@ -2011,6 +2995,8 @@ mod tests {
     fn bare_target_mode(body: &str) -> ModeAst {
         ModeAst {
             raw: format!("{body}."),
+            source_text: format!("{body}."),
+            source_line: None,
             label: None,
             body: body.to_string(),
             mode_cost: None,
@@ -2132,6 +3118,32 @@ mod tests {
     }
 
     #[test]
+    fn parse_modal_header_you_may_choose_fixed_count_sets_optional_trigger() {
+        // CR 608.2c: Shadrix Silverquill — "you may choose two" declines the
+        // entire triggered ability; when accepted, exactly two modes are chosen.
+        let header =
+            parse_modal_header_ast("you may choose two. Each mode must target a different player.")
+                .expect("modal header recognized");
+        assert_eq!(header.optionality, ModalOptionality::MayDecline);
+        assert_eq!(header.min_choices, 2);
+        assert_eq!(header.max_choices, 2);
+        assert_eq!(
+            header.constraints,
+            vec![ModalSelectionConstraint::DifferentTargetPlayers]
+        );
+    }
+
+    #[test]
+    fn parse_modal_header_you_may_choose_up_to_does_not_set_optional_trigger() {
+        // "you may choose up to N" lowers min_choices only; the trigger stays mandatory.
+        let header =
+            parse_modal_header_ast("you may choose up to two.").expect("modal header recognized");
+        assert_eq!(header.optionality, ModalOptionality::Mandatory);
+        assert_eq!(header.min_choices, 0);
+        assert_eq!(header.max_choices, 2);
+    }
+
+    #[test]
     fn parse_modal_choose_count_variants() {
         assert_eq!(parse_modal_choose_count("choose one —"), fixed(1, 1));
         assert_eq!(parse_modal_choose_count("choose two —"), fixed(2, 2));
@@ -2196,7 +3208,9 @@ mod tests {
         assert_eq!(
             parse_modal_choose_count("choose up to x —"),
             ModalCountSpec::Dynamic {
-                qty: QuantityRef::CostXPaid
+                qty: QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid
+                }
             }
         );
     }
@@ -2210,29 +3224,33 @@ mod tests {
         assert_eq!(
             parse_modal_choose_count("choose up to that many"),
             ModalCountSpec::Dynamic {
-                qty: QuantityRef::TimesCostPaidThisResolution
+                qty: QuantityExpr::Ref {
+                    qty: QuantityRef::TimesCostPaidThisResolution
+                }
             }
         );
         assert_eq!(
             parse_modal_choose_count("choose up to that many."),
             ModalCountSpec::Dynamic {
-                qty: QuantityRef::TimesCostPaidThisResolution
+                qty: QuantityExpr::Ref {
+                    qty: QuantityRef::TimesCostPaidThisResolution
+                }
             }
         );
     }
 
-    // MED-1 guard: the "that many" arm must NOT match the em-dash header
-    // (Tranquil Frillback, whose reflexive condition is not WhenYouDo and so is
-    // not handled by the repeated-optional-payment driver — matching it would
-    // false-green an unhandled card) nor the non-modal selection clauses
-    // ("choose up to that many target creatures you control"). These fall to the
-    // fixed default. Revert the negative lookahead → both wrongly become Dynamic.
+    // Tranquil Frillback's em-dash header is a repeated-payment modal, while a
+    // following noun phrase is a non-modal selection clause and stays fixed.
     #[test]
-    fn parse_modal_choose_count_up_to_that_many_em_dash_and_noun_are_not_dynamic() {
+    fn parse_modal_choose_count_up_to_that_many_em_dash_is_dynamic_and_noun_is_not() {
         // Tranquil Frillback (em-dash continuation).
         assert_eq!(
             parse_modal_choose_count("choose up to that many \u{2014}"),
-            fixed(1, 1)
+            ModalCountSpec::Dynamic {
+                qty: QuantityExpr::Ref {
+                    qty: QuantityRef::TimesCostPaidThisResolution
+                }
+            }
         );
         // Heroic Feast (non-modal selection clause).
         assert_eq!(
@@ -2241,29 +3259,76 @@ mod tests {
         );
     }
 
-    // CR 700.2 + CR 107.3m: a trailing ", where X is <expr>" clause REDEFINES X
-    // to a quantity other than the cast {X} (Bumi → Lesson cards in graveyard;
-    // Riku → number of times you chose a mode), and such cards carry no {X} in
-    // their cost. These headers must NOT classify as `DynamicCostX` (which
-    // resolves `CostXPaid` == 0 for them, silently choosing nothing); they fall
-    // through to the fixed `(1, 1)` default. This negative discriminates the
-    // word-boundary `not(... "where")` guard — reverting it makes both match
-    // `DynamicCostX`.
+    // CR 700.2 + CR 700.2d + CR 601.2b: a trailing ", where X is <expr>" clause
+    // REDEFINES the modal maximum to a dynamic quantity other than the cast {X}
+    // (Bumi → Lesson cards in your graveyard; Riku → number of modes chosen for
+    // the triggering spell). The where-X-is arm parses <expr> via
+    // `parse_cda_quantity` and classifies the header as `Dynamic`, so the cap
+    // resolves live at runtime (clamped to mode_count, CR 700.2d) instead of
+    // silently falling to the fixed `(1, 1)` default. Revert probe: delete the
+    // where-X-is arm (Part 1.3) → both fall to `fixed(1, 1)`, failing these
+    // positive-shape assertions. These are the previously-pinned negatives,
+    // flipped now that the redefining quantity is parsed.
     #[test]
-    fn parse_modal_choose_count_up_to_x_redefined_is_not_dynamic() {
-        // Bumi, King of Three Trials.
+    fn parse_modal_choose_count_up_to_x_redefined_is_dynamic() {
+        use crate::types::ability::{CountScope, TypeFilter, ZoneRef};
+        // Bumi, King of Three Trials — the cap is the Lesson-card graveyard count.
         assert_eq!(
             parse_modal_choose_count(
                 "choose up to x, where x is the number of lesson cards in your graveyard —"
             ),
-            fixed(1, 1)
+            ModalCountSpec::Dynamic {
+                qty: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        card_types: vec![TypeFilter::Subtype("Lesson".to_string())],
+                        filter: None,
+                        scope: CountScope::Controller,
+                    }
+                }
+            }
         );
-        // Riku of Many Paths.
+        // Riku of Many Paths — the cap is the new modes-chosen event ref.
         assert_eq!(
             parse_modal_choose_count(
                 "choose up to x, where x is the number of times you chose a mode for that spell —"
             ),
-            fixed(1, 1)
+            ModalCountSpec::Dynamic {
+                qty: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextSourceModesChosen
+                }
+            }
+        );
+    }
+
+    // Full-header integration: both cards' complete modal headers must produce
+    // `min_choices == 0` (decline all) and carry a live `dynamic_max_choices`.
+    // Revert probe: delete the where-X-is arm → `dynamic_max_choices` becomes
+    // `None` and min_choices the fixed default, failing these assertions.
+    #[test]
+    fn parse_modal_header_ast_bumi_riku_carry_dynamic_max() {
+        let bumi = parse_modal_header_ast(
+            "choose up to x, where x is the number of lesson cards in your graveyard —",
+        )
+        .expect("Bumi header should parse");
+        assert_eq!(bumi.min_choices, 0);
+        assert!(matches!(
+            bumi.dynamic_max_choices,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount { .. }
+            })
+        ));
+
+        let riku = parse_modal_header_ast(
+            "choose up to x, where x is the number of times you chose a mode for that spell —",
+        )
+        .expect("Riku header should parse");
+        assert_eq!(riku.min_choices, 0);
+        assert_eq!(
+            riku.dynamic_max_choices,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextSourceModesChosen
+            })
         );
     }
 
@@ -2398,6 +3463,318 @@ mod tests {
     }
 
     #[test]
+    fn block_mode_ir_preserves_independent_bullet_provenance() {
+        let lines = ["Choose one —", "• Draw a card.", "• Gain 3 life."];
+        let (block, _) = parse_oracle_block(&lines, 0).expect("modal block");
+        let ir = lower_oracle_block_ir(
+            block,
+            "Provenance Witness",
+            None,
+            &mut ParseContext::default(),
+        );
+        let OracleBlockIr::Modal { choice, modes } = ir else {
+            panic!("plain modal must remain independent document items");
+        };
+
+        assert_eq!(choice.mode_count, 2);
+        assert_eq!(modes[0].source_line, Some(1));
+        assert_eq!(modes[1].source_line, Some(2));
+        assert!(matches!(
+            modes[0].ability.body.clauses[0].parsed.effect,
+            Effect::Draw { .. }
+        ));
+        assert!(matches!(
+            modes[1].ability.body.clauses[0].parsed.effect,
+            Effect::GainLife { .. }
+        ));
+    }
+
+    #[test]
+    fn plain_modal_document_ir_keeps_each_bullet_in_its_exact_printed_slot() {
+        const ORACLE: &str = "Choose one —\n• Draw a card.\n• Gain 3 life.";
+        let mut ir = parse_oracle_ir(ORACLE, "Slot Witness", &[], &[], &[]);
+
+        assert_eq!(
+            ir.items.len(),
+            3,
+            "header plus two independently emitted modes"
+        );
+        assert!(matches!(&ir.items[0].node, OracleNodeIr::Modal(_)));
+        assert!(matches!(&ir.items[1].node, OracleNodeIr::Spell(_)));
+        assert!(matches!(&ir.items[2].node, OracleNodeIr::Spell(_)));
+        for (line, item) in ir.items.iter().enumerate() {
+            let span = item.source.span();
+            assert!(span.is_exact());
+            assert_eq!((span.first_line, span.last_line), (line, line));
+            assert_eq!(
+                item.source.fragment(),
+                Some(ORACLE.lines().nth(line).unwrap())
+            );
+        }
+
+        let lowered = lower_oracle_ir(&mut ir);
+        assert_eq!(
+            lowered.modal.as_ref().map(|choice| choice.mode_count),
+            Some(2)
+        );
+        assert_eq!(lowered.abilities.len(), 2);
+        assert!(matches!(
+            lowered.abilities[0].effect.as_ref(),
+            Effect::Draw { .. }
+        ));
+        assert!(matches!(
+            lowered.abilities[1].effect.as_ref(),
+            Effect::GainLife { .. }
+        ));
+    }
+
+    #[test]
+    fn modal_document_items_keep_exact_slots_for_every_non_nested_modal_surface() {
+        let cases = [
+            (
+                "plain",
+                "Choose one —\n• Draw a card.\n• Gain 3 life.",
+                &[0, 1, 2][..],
+                2,
+            ),
+            (
+                "Spree",
+                "Spree\n+ {1} — Draw a card.\n+ {2} — Gain 3 life.",
+                &[0, 1, 2][..],
+                2,
+            ),
+            (
+                "pawprint",
+                "Choose up to five {P} worth of modes. You may choose the same mode more than once.\n{P} — Draw a card.\n{P}{P} — Gain 3 life.",
+                &[0, 1, 2][..],
+                2,
+            ),
+            (
+                "ordinary Tiered",
+                "Tiered (Choose one additional cost.)\n• Cure — {0} — Draw a card.\n• Cura — {1} — Gain 3 life.",
+                &[0, 1, 2][..],
+                2,
+            ),
+            ("shared-effect Tiered", VINCENTS_ORACLE, &[0, 2, 3, 4][..], 3),
+        ];
+
+        for (name, oracle, expected_lines, expected_mode_count) in cases {
+            let types = vec!["Instant".to_string()];
+            let card_name = if name == "Spree" {
+                "Modal Slot Witness"
+            } else {
+                name
+            };
+            let mut ir = parse_oracle_ir(oracle, card_name, &[], &types, &[]);
+            let span_source = normalize_card_name_refs(oracle, card_name);
+
+            assert_eq!(
+                ir.items.len(),
+                expected_lines.len(),
+                "{name}: header and every printed bullet must retain its own document slot"
+            );
+            for (item, expected_line) in ir.items.iter().zip(expected_lines) {
+                let span = item.source.span();
+                assert!(span.is_exact(), "{name}: slot must have an exact span");
+                assert_eq!(
+                    (span.first_line, span.last_line),
+                    (*expected_line, *expected_line),
+                    "{name}: source-order slot drift"
+                );
+                let expected_fragment = oracle.lines().nth(*expected_line).unwrap();
+                assert_eq!(
+                    item.source.fragment(),
+                    Some(expected_fragment),
+                    "{name}: slot must retain its verbatim printed source"
+                );
+                let expected_start_byte = span_source
+                    .lines()
+                    .take(*expected_line)
+                    .map(|line| line.len() + 1)
+                    .sum::<usize>();
+                assert_eq!(
+                    (span.start_byte, span.end_byte),
+                    (
+                        expected_start_byte,
+                        expected_start_byte + expected_fragment.len()
+                    ),
+                    "{name}: exact source span must bound this header or bullet only"
+                );
+                assert!(
+                    matches!(&item.node, OracleNodeIr::Modal(_) | OracleNodeIr::Spell(_)),
+                    "{name}: migrated modal route may emit only native modal or spell IR"
+                );
+            }
+            assert!(
+                matches!(&ir.items[0].node, OracleNodeIr::Modal(_)),
+                "{name}: root must retain standalone modal metadata"
+            );
+            assert!(
+                ir.items.iter().skip(1).all(|item| matches!(
+                    &item.node,
+                    OracleNodeIr::Spell(ability)
+                        if ability.modal.is_none()
+                            && !matches!(
+                                &ability.body.clauses[0].parsed.effect,
+                                Effect::Unimplemented { .. }
+                            )
+                )),
+                "{name}: every bullet must remain a native, independently lowerable ability"
+            );
+
+            let lowered = lower_oracle_ir(&mut ir);
+            assert_eq!(
+                lowered.modal.as_ref().map(|choice| choice.mode_count),
+                Some(expected_mode_count),
+                "{name}: all source modes must reach modal metadata"
+            );
+            assert_eq!(
+                lowered.abilities.len(),
+                expected_mode_count,
+                "{name}: every source mode must lower exactly once"
+            );
+            assert!(
+                lowered.abilities.iter().all(|ability| !matches!(
+                    ability.effect.as_ref(),
+                    Effect::Unimplemented { .. }
+                )),
+                "{name}: a source-preserving route must still lower each mode"
+            );
+        }
+    }
+
+    #[test]
+    fn activated_and_triggered_modal_modes_remain_nested_with_native_provenance() {
+        const ACTIVATED: &str = "{1}: Choose one —\n• Draw a card.\n• Gain 3 life.";
+        let mut activated_ir = parse_oracle_ir(ACTIVATED, "Nested Activated", &[], &[], &[]);
+        assert_eq!(activated_ir.items.len(), 1);
+        let OracleNodeIr::Spell(activated_item) = &activated_ir.items[0].node else {
+            panic!("activated modal must stay native spell IR, not pre-lowered");
+        };
+        let activated_modes = &activated_item
+            .modal
+            .as_ref()
+            .expect("activated header owns native modal payload")
+            .modes;
+        assert_eq!(
+            activated_modes
+                .iter()
+                .map(|mode| (mode.source_line, mode.source_text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(Some(1), "• Draw a card."), (Some(2), "• Gain 3 life."),],
+            "nested activated modes retain bullet provenance without independent slots"
+        );
+        assert_eq!(activated_ir.items[0].source.span().first_line, 0);
+        assert_eq!(
+            activated_ir.items[0].source.fragment(),
+            Some("{1}: Choose one —")
+        );
+        let activated = lower_oracle_ir(&mut activated_ir);
+        assert_eq!(activated.abilities.len(), 1);
+        assert!(matches!(
+            activated.abilities[0].mode_abilities.as_slice(),
+            [first, second]
+                if matches!(first.effect.as_ref(), Effect::Draw { .. })
+                    && matches!(second.effect.as_ref(), Effect::GainLife { .. })
+        ));
+
+        const TRIGGERED: &str =
+            "Whenever Nested Trigger enters, choose one —\n• Draw a card.\n• Gain 3 life.";
+        let mut triggered_ir = parse_oracle_ir(TRIGGERED, "Nested Trigger", &[], &[], &[]);
+        assert_eq!(triggered_ir.items.len(), 1);
+        let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger)) = &triggered_ir.items[0].node
+        else {
+            panic!("triggered modal must stay parsed trigger IR, not Assembled");
+        };
+        let Some(TriggerBody::Modal(modal)) = trigger.body.as_ref() else {
+            panic!("plain triggered modal must retain its native modal body");
+        };
+        assert_eq!(
+            modal
+                .modes
+                .iter()
+                .map(|mode| (mode.source_line, mode.source_text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(Some(1), "• Draw a card."), (Some(2), "• Gain 3 life."),],
+            "nested trigger modes retain provenance without independent document slots"
+        );
+        assert_eq!(triggered_ir.items[0].source.span().first_line, 0);
+        assert_eq!(
+            triggered_ir.items[0].source.fragment(),
+            Some("Whenever ~ enters, choose one —")
+        );
+        let triggered = lower_oracle_ir(&mut triggered_ir);
+        assert_eq!(triggered.triggers.len(), 1);
+        assert!(matches!(
+            triggered.triggers[0]
+                .execute
+                .as_deref()
+                .map(|execute| execute.mode_abilities.as_slice()),
+            Some([first, second])
+                if matches!(first.effect.as_ref(), Effect::Draw { .. })
+                    && matches!(second.effect.as_ref(), Effect::GainLife { .. })
+        ));
+    }
+
+    #[test]
+    fn build_modal_choice_preserves_positional_mode_costs_with_zero_for_costless_modes() {
+        let modes = vec![
+            ModeAst {
+                raw: "Draw a card.".to_string(),
+                source_text: "Draw a card.".to_string(),
+                source_line: None,
+                label: None,
+                body: "Draw a card.".to_string(),
+                mode_cost: None,
+                mode_pawprint: None,
+            },
+            ModeAst {
+                raw: "Gain 3 life.".to_string(),
+                source_text: "Gain 3 life.".to_string(),
+                source_line: None,
+                label: None,
+                body: "Gain 3 life.".to_string(),
+                mode_cost: Some(ManaCost::generic(1)),
+                mode_pawprint: None,
+            },
+            ModeAst {
+                raw: "Deal 3 damage.".to_string(),
+                source_text: "Deal 3 damage.".to_string(),
+                source_line: None,
+                label: None,
+                body: "Deal 3 damage.".to_string(),
+                mode_cost: Some(ManaCost::generic(2)),
+                mode_pawprint: None,
+            },
+        ];
+        let header = ModalHeaderAst {
+            raw: "Choose one or more —".to_string(),
+            min_choices: 1,
+            max_choices: 3,
+            allow_repeat_modes: false,
+            constraints: vec![],
+            chooser: PlayerFilter::Controller,
+            selection: TargetSelectionMode::Chosen,
+            dynamic_max_choices: None,
+            optionality: ModalOptionality::Mandatory,
+        };
+        let modal = build_modal_choice(&header, &modes);
+        assert_eq!(modal.mode_costs.len(), modal.mode_count);
+        assert_eq!(modal.mode_costs[0], ManaCost::zero());
+        assert_eq!(modal.mode_costs[1], ManaCost::generic(1));
+        assert_eq!(modal.mode_costs[2], ManaCost::generic(2));
+    }
+
+    #[test]
+    fn build_modal_choice_leaves_mode_costs_empty_when_no_mode_has_cost() {
+        let lines = vec!["Choose one —", "• Draw a card.", "• Gain 3 life."];
+        let modes = collect_mode_asts(&lines, 1);
+        let header = parse_modal_header_ast(lines[0]).expect("header should parse");
+        let modal = build_modal_choice(&header, &modes);
+        assert!(modal.mode_costs.is_empty());
+    }
+
+    #[test]
     fn build_modal_choice_leaves_pawprint_budget_unclamped() {
         // CR 700.2i: `max_choices` is the 5-point budget, NOT clamped to the
         // mode_count of 3. This is the cap-bug regression guard at the parser
@@ -2497,9 +3874,12 @@ mod tests {
 
     // ---- Ao, the Dawn Sky (SOC) — modal dies trigger integration ----
 
-    use crate::parser::oracle::parse_oracle_text;
+    use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir, parse_oracle_text};
+    use crate::parser::oracle_ir::doc::OracleNodeIr;
+    use crate::parser::oracle_ir::trigger::TriggerNodeIr;
     use crate::types::ability::{
-        ChoiceType, Effect, StaticCondition, TargetFilter, TriggerCondition,
+        ChoiceType, ControllerRef, Effect, QuantityExpr, QuantityRef, StaticCondition,
+        TargetFilter, TriggerCondition,
     };
     use crate::types::replacements::ReplacementEvent;
     use crate::types::triggers::TriggerMode;
@@ -2665,6 +4045,353 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
             Some(StaticCondition::ChosenLabelIs { label }) if label == "Temur"
         ));
         assert_eq!(parsed.statics[0].modifications.len(), 4);
+    }
+
+    #[test]
+    fn frostcliff_siege_document_ir_is_native_and_preserves_all_bullet_lines() {
+        let mut ir = parse_oracle_ir(FROSTCLIFF_SIEGE_ORACLE, "Frostcliff Siege", &[], &[], &[]);
+        assert_eq!(
+            ir.items.len(),
+            3,
+            "header replacement plus both anchor modes"
+        );
+        assert!(matches!(&ir.items[0].node, OracleNodeIr::Replacement(_)));
+        assert!(matches!(
+            &ir.items[1].node,
+            OracleNodeIr::Trigger(TriggerNodeIr::Parsed(_))
+        ));
+        assert!(matches!(&ir.items[2].node, OracleNodeIr::Static(_)));
+        for (line, item) in ir.items.iter().enumerate() {
+            assert!(item.source.span().is_exact());
+            assert_eq!(
+                (item.source.span().first_line, item.source.span().last_line),
+                (line, line)
+            );
+            assert_eq!(
+                item.source.fragment(),
+                Some(match line {
+                    0 => "As ~ enters, choose Jeskai or Temur.",
+                    _ => FROSTCLIFF_SIEGE_ORACLE.lines().nth(line).unwrap(),
+                })
+            );
+        }
+
+        let lowered = lower_oracle_ir(&mut ir);
+        assert_eq!(lowered.replacements.len(), 1);
+        assert_eq!(lowered.triggers.len(), 1);
+        assert_eq!(lowered.statics.len(), 1);
+        assert!(matches!(
+            lowered.triggers[0].condition.as_ref(),
+            Some(TriggerCondition::ChosenLabelIs { label }) if label == "Jeskai"
+        ));
+        assert!(matches!(
+            lowered.statics[0].condition.as_ref(),
+            Some(StaticCondition::ChosenLabelIs { label }) if label == "Temur"
+        ));
+    }
+
+    #[test]
+    fn as_enters_anchor_mode_that_has_no_native_grammar_is_an_honest_residual() {
+        const ORACLE: &str = "As this enchantment enters, choose A or B.\n\
+• A — Whenever Anchor Residual enters, draw a card.\n\
+• B — This deliberately unsupported anchor body.";
+        let mut ir = parse_oracle_ir(ORACLE, "Anchor Residual", &[], &[], &[]);
+        assert_eq!(
+            ir.items.len(),
+            3,
+            "unsupported labeled bullet still owns a slot"
+        );
+        assert!(matches!(&ir.items[0].node, OracleNodeIr::Replacement(_)));
+        assert!(matches!(
+            &ir.items[1].node,
+            OracleNodeIr::Trigger(TriggerNodeIr::Parsed(_))
+        ));
+        let OracleNodeIr::Spell(residual) = &ir.items[2].node else {
+            panic!("unsupported anchor bullet must not disappear or pre-lower");
+        };
+        assert!(matches!(
+            &residual.body.clauses[0].parsed.effect,
+            Effect::Unimplemented { .. }
+        ));
+        assert_eq!(
+            ir.items[2].source.fragment(),
+            Some("• B — This deliberately unsupported anchor body.")
+        );
+
+        let lowered = lower_oracle_ir(&mut ir);
+        assert_eq!(lowered.abilities.len(), 1);
+        assert!(matches!(
+            lowered.abilities[0].effect.as_ref(),
+            Effect::Unimplemented { .. }
+        ));
+    }
+
+    #[test]
+    fn triggered_modal_spell_pronoun_uses_complete_trigger_body_context() {
+        const ORACLE: &str = "Whenever you cast a spell, choose one —\n\
+• Return it to its owner's hand.\n\
+• Draw a card.";
+        let mut ir = parse_oracle_ir(ORACLE, "Spell Context Witness", &[], &[], &[]);
+        assert!(matches!(
+            ir.items.as_slice(),
+            [item] if matches!(&item.node, OracleNodeIr::Trigger(TriggerNodeIr::Parsed(_)))
+        ));
+
+        let lowered = lower_oracle_ir(&mut ir);
+        let first_mode = &lowered.triggers[0]
+            .execute
+            .as_ref()
+            .expect("triggered modal execute")
+            .mode_abilities[0];
+        match first_mode.effect.as_ref() {
+            Effect::Bounce { target, .. } => assert_eq!(
+                target,
+                &TargetFilter::TriggeringSource,
+                "spell-cast 'it' must remain the triggering spell, not a parent target"
+            ),
+            other => panic!("expected spell-return mode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn modal_siblings_start_from_a_complete_fresh_context() {
+        const SCRY_ORACLE: &str = "When you choose to put two or more cards on the bottom of your library while scrying, choose one —\n\
+• Exile that many cards from the bottom of your library.\n\
+• Draw a card.";
+        let mut scry_ir = parse_oracle_ir(SCRY_ORACLE, "Scry Context Witness", &[], &[], &[]);
+        let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger)) = &scry_ir.items[0].node else {
+            panic!("completed-scry modal must retain parsed trigger IR");
+        };
+        let Some(TriggerBody::Modal(modal)) = trigger.body.as_ref() else {
+            panic!("completed-scry modal must retain its nested mode payload");
+        };
+        assert!(matches!(
+            &modal.modes[0].ability.body.clauses[0].parsed.effect,
+            Effect::ExileTop {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::TriggeringScryBottomCount,
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            &modal.modes[1].ability.body.clauses[0].parsed.effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            }
+        ));
+        let scry_lowered = lower_oracle_ir(&mut scry_ir);
+        assert!(matches!(
+            scry_lowered.triggers[0]
+                .execute
+                .as_ref()
+                .expect("completed-scry modal execute")
+                .mode_abilities[0]
+                .effect
+                .as_ref(),
+            Effect::ExileTop {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::TriggeringScryBottomCount,
+                },
+                ..
+            }
+        ));
+
+        const DAMAGE_ORACLE: &str =
+            "Whenever Context Witness deals combat damage to a player, choose one —\n\
+• Draw a card.\n\
+• Destroy target creature that player controls.";
+        let mut damage_ir = parse_oracle_ir(DAMAGE_ORACLE, "Context Witness", &[], &[], &[]);
+        let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger)) = &damage_ir.items[0].node else {
+            panic!("damage modal must retain parsed trigger IR");
+        };
+        let Some(TriggerBody::Modal(modal)) = trigger.body.as_ref() else {
+            panic!("damage modal must retain nested mode payload");
+        };
+        let mut opponent_controlled_object_trigger = trigger.clone();
+        opponent_controlled_object_trigger.partial_def.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::Opponent),
+        ));
+        assert_eq!(
+            modal_relative_player_scope_for_trigger(&opponent_controlled_object_trigger),
+            None,
+            "an opponent-controlled object is not the damaged player"
+        );
+        assert!(matches!(
+            &modal.modes[0].ability.body.clauses[0].parsed.effect,
+            Effect::Draw {
+                target: TargetFilter::Controller,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &modal.modes[1].ability.body.clauses[0].parsed.effect,
+            Effect::Destroy {
+                target: TargetFilter::Typed(filter),
+                ..
+            } if filter.controller == Some(ControllerRef::TriggeringPlayer)
+        ));
+        let damage_lowered = lower_oracle_ir(&mut damage_ir);
+        assert!(matches!(
+            damage_lowered.triggers[0]
+                .execute
+                .as_ref()
+                .expect("damage modal execute")
+                .mode_abilities[1]
+                .effect
+                .as_ref(),
+            Effect::Destroy {
+                target: TargetFilter::Typed(filter),
+                ..
+            } if filter.controller == Some(ControllerRef::TriggeringPlayer)
+        ));
+
+        const NONCOMBAT_DAMAGE_ORACLE: &str =
+            "Whenever Context Witness deals noncombat damage to an opponent, choose one —\n\
+• Draw a card.\n\
+• Destroy target creature that player controls.";
+        const THRESHOLD_DAMAGE_ORACLE: &str =
+            "Whenever Context Witness deals combat 3 or more damage to a player, choose one —\n\
+• Draw a card.\n\
+• Destroy target creature that player controls.";
+        for oracle in [NONCOMBAT_DAMAGE_ORACLE, THRESHOLD_DAMAGE_ORACLE] {
+            let mut ir = parse_oracle_ir(oracle, "Context Witness", &[], &[], &[]);
+            let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger)) = &ir.items[0].node else {
+                panic!("damage modal sibling must retain parsed trigger IR");
+            };
+            let Some(TriggerBody::Modal(modal)) = trigger.body.as_ref() else {
+                panic!("damage modal sibling must retain nested mode payload");
+            };
+            assert!(matches!(
+                &modal.modes[1].ability.body.clauses[0].parsed.effect,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(filter),
+                    ..
+                } if filter.controller == Some(ControllerRef::TriggeringPlayer)
+            ));
+            let lowered = lower_oracle_ir(&mut ir);
+            assert!(matches!(
+                lowered.triggers[0]
+                    .execute
+                    .as_ref()
+                    .expect("damage modal sibling execute")
+                    .mode_abilities[1]
+                    .effect
+                    .as_ref(),
+                Effect::Destroy {
+                    target: TargetFilter::Typed(filter),
+                    ..
+                } if filter.controller == Some(ControllerRef::TriggeringPlayer)
+            ));
+        }
+
+        const NON_SELF_DAMAGE_ORACLE: &str =
+            "Whenever a creature deals combat damage to a player, choose one —\n\
+• Draw a card.\n\
+• Destroy target creature that player controls.";
+        let mut non_self_damage_ir =
+            parse_oracle_ir(NON_SELF_DAMAGE_ORACLE, "Context Witness", &[], &[], &[]);
+        let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(non_self_trigger)) =
+            &non_self_damage_ir.items[0].node
+        else {
+            panic!("non-self damage modal must retain parsed trigger IR");
+        };
+        assert!(matches!(
+            &non_self_trigger.partial_def.valid_source,
+            Some(TargetFilter::Typed(_))
+        ));
+        assert_eq!(
+            modal_relative_player_scope_for_trigger(non_self_trigger),
+            None,
+            "non-self damage triggers keep their established context"
+        );
+        let Some(TriggerBody::Modal(non_self_modal)) = non_self_trigger.body.as_ref() else {
+            panic!("non-self damage modal must retain nested mode payload");
+        };
+        assert!(matches!(
+            &non_self_modal.modes[1].ability.body.clauses[0].parsed.effect,
+            Effect::Destroy {
+                target: TargetFilter::Typed(filter),
+                ..
+            } if filter.controller == Some(ControllerRef::TriggeringPlayer)
+        ));
+        let non_self_lowered = lower_oracle_ir(&mut non_self_damage_ir);
+        assert!(matches!(
+            non_self_lowered.triggers[0]
+                .execute
+                .as_ref()
+                .expect("non-self damage modal execute")
+                .mode_abilities[1]
+                .effect
+                .as_ref(),
+            Effect::Destroy {
+                target: TargetFilter::Typed(filter),
+                ..
+            } if filter.controller == Some(ControllerRef::TriggeringPlayer)
+        ));
+
+        const CAST_ORACLE: &str = "Whenever you cast a spell, choose one —\n\
+• Return it to its owner's hand.\n\
+• Exile it.";
+        let mut cast_ir = parse_oracle_ir(CAST_ORACLE, "Cast Context Witness", &[], &[], &[]);
+        let cast_lowered = lower_oracle_ir(&mut cast_ir);
+        let cast_modes = &cast_lowered.triggers[0]
+            .execute
+            .as_ref()
+            .expect("spell-cast modal execute")
+            .mode_abilities;
+        assert!(matches!(
+            cast_modes.as_slice(),
+            [first, second]
+                if matches!(first.effect.as_ref(), Effect::Bounce {
+                    target: TargetFilter::TriggeringSource,
+                    ..
+                }) && matches!(second.effect.as_ref(), Effect::ChangeZone {
+                    target: TargetFilter::TriggeringSource,
+                    ..
+                })
+        ));
+
+        const ACTOR_ORACLE: &str = "Choose one —\n\
+• You may sacrifice a creature.\n\
+• Any opponent may sacrifice a creature of their choice.";
+        let mut actor_ir = parse_oracle_ir(ACTOR_ORACLE, "Actor Context Witness", &[], &[], &[]);
+        assert!(matches!(
+            &actor_ir.items[1].node,
+            OracleNodeIr::Spell(ability)
+                if matches!(
+                    &ability.body.clauses[0].parsed.effect,
+                    Effect::Sacrifice {
+                        target: TargetFilter::Typed(filter),
+                        ..
+                    } if filter.controller == Some(ControllerRef::You)
+                )
+        ));
+        assert!(matches!(
+            &actor_ir.items[2].node,
+            OracleNodeIr::Spell(ability)
+                if matches!(
+                    &ability.body.clauses[0].parsed.effect,
+                    Effect::Sacrifice {
+                        target: TargetFilter::Typed(filter),
+                        ..
+                    } if filter.controller == Some(ControllerRef::Opponent)
+                )
+        ));
+        let actor_lowered = lower_oracle_ir(&mut actor_ir);
+        assert!(matches!(
+            actor_lowered.abilities.as_slice(),
+            [first, second]
+                if matches!(first.effect.as_ref(), Effect::Sacrifice {
+                    target: TargetFilter::Typed(filter),
+                    ..
+                } if filter.controller == Some(ControllerRef::You))
+                    && matches!(second.effect.as_ref(), Effect::Sacrifice {
+                        target: TargetFilter::Typed(filter),
+                        ..
+                    } if filter.controller == Some(ControllerRef::Opponent))
+        ));
     }
 
     // ---- Final Act (SOC / M3C) — "Choose one or more —" modal spell ----
@@ -2916,6 +4643,237 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
         );
     }
 
+    /// CR 603.12: the classifier answers on the reflexive CONNECTOR, so the
+    /// `"you may "` marker only chooses between the two parent shapes.
+    ///
+    /// Table-driven on purpose: the marker and the connector are independent
+    /// axes, and the shipped defect was exactly one cell of this table — a
+    /// connector with no marker — being read as "no reflexive at all".
+    #[test]
+    fn classify_reflexive_modal_parent_keys_on_the_connector_not_the_marker() {
+        let rows: &[(&str, Option<ReflexiveModalParent>, &str)] = &[
+            // Marker + connector: Caesar. The instruction leaves `trigger_line`
+            // because a resolution payment is not something the trigger parser
+            // can lower on its own.
+            (
+                "Whenever you attack, you may sacrifice another creature. When you do",
+                Some(ReflexiveModalParent::MayPay(
+                    "Sacrifice another creature".to_string(),
+                )),
+                "Whenever you attack",
+            ),
+            // Connector, NO marker: Cemetery Desecrator. The instruction stays
+            // in `trigger_line`, but its connector is removed before the
+            // ordinary trigger parser lowers the mandatory parent chain.
+            (
+                "When this creature enters or dies, exile another card from a graveyard. When you do",
+                Some(ReflexiveModalParent::Mandatory),
+                "When this creature enters or dies, exile another card from a graveyard",
+            ),
+            // Dialogue Tree is a sorcery, not a triggered parent. Its terminal
+            // connector must stay intact so this targeted reflexive repair does
+            // not alter the non-triggered modal route.
+            (
+                "Scry 1. When you do",
+                None,
+                "Scry 1. When you do",
+            ),
+            // Neither: Pip-Boy 3000 stays a plain triggered modal.
+            (
+                "Whenever equipped creature attacks",
+                None,
+                "Whenever equipped creature attacks",
+            ),
+            // Marker, NO connector: a plain optional effect, not a reflexive.
+            (
+                "Whenever you attack, you may draw a card",
+                None,
+                "Whenever you attack, you may draw a card",
+            ),
+        ];
+        for (line, expected_parent, expected_trigger) in rows {
+            let (trigger, parent) = classify_reflexive_modal_parent(line.to_string());
+            assert_eq!(&parent, expected_parent, "parent for {line:?}");
+            assert_eq!(&trigger.as_str(), expected_trigger, "trigger for {line:?}");
+        }
+    }
+
+    /// CR 603.12 + CR 608.2c: a mandatory instruction printed before the mode
+    /// list is kept and the modal becomes its reflexive body — the
+    /// same shape Caesar's optional parent produces, minus the decline.
+    ///
+    /// Guards the class, not the card: `Mandatory` carries no card-specific
+    /// text, so any printed instruction the trigger parser can lower reaches
+    /// this shape.
+    #[test]
+    fn a_mandatory_parent_keeps_its_instruction_under_the_mode_list() {
+        let parsed = parse_oracle_text(
+            "When this creature enters, exile another card from a graveyard. When you do, choose one —\n• Draw a card.\n• You gain 2 life.",
+            "Class Probe",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let execute = parsed
+            .triggers
+            .first()
+            .and_then(|t| t.execute.as_ref())
+            .expect("the enters trigger must carry an execute");
+        assert!(
+            matches!(*execute.effect, Effect::ChangeZone { .. }),
+            "the printed instruction must survive as the parent effect, got {:?}",
+            execute.effect
+        );
+        assert!(
+            !execute.optional,
+            "a mandatory instruction is not an offer and must not be marked optional"
+        );
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("the mode list must hang off the instruction as its reflexive body");
+        assert_eq!(sub.condition, Some(AbilityCondition::WhenYouDo));
+        assert_eq!(sub.mode_abilities.len(), 2, "both modes must survive");
+    }
+
+    /// CR 603.12: the connector may be followed by an intervening condition
+    /// before the mode list ("When you do, if you control five or more …,
+    /// choose one —"). The modal header split then leaves the trigger line
+    /// ending on the bare connector, which is the second surface this class
+    /// takes — The Cobra King, whose Cobra Coil token was dropped the same way
+    /// Cemetery Desecrator's exile was.
+    ///
+    /// The guard must be retained alongside the marker, so the runtime checks
+    /// it before it creates the reflexive modal trigger.
+    #[test]
+    fn a_mandatory_parent_survives_a_condition_between_connector_and_modes() {
+        let parsed = parse_oracle_text(
+            "At the beginning of each player's upkeep, create a 1/1 blue Serpent creature token named Cobra Coil. When you do, if you control five or more Snakes and/or Serpents, choose one —\n• Strike first — Target Snake or Serpent you control fights target creature an opponent controls.\n• Strike hard — Put a +1/+1 counter on each Snake and Serpent you control.",
+            "The Cobra King",
+            &[],
+            &["Legendary".to_string(), "Creature".to_string()],
+            &["Snake".to_string()],
+        );
+        let execute = parsed
+            .triggers
+            .first()
+            .and_then(|t| t.execute.as_ref())
+            .expect("the upkeep trigger must carry an execute");
+        assert!(
+            matches!(*execute.effect, Effect::Token { .. }),
+            "the printed token instruction must survive as the parent effect, got {:?}",
+            execute.effect
+        );
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("the mode list must hang off the instruction as its reflexive body");
+        let Some(AbilityCondition::And { conditions }) = sub.condition.as_ref() else {
+            panic!(
+                "the reflexive connector and header guard must form a flat conjunction, got {:?}",
+                sub.condition
+            );
+        };
+        assert!(
+            conditions
+                .iter()
+                .any(|condition| matches!(condition, AbilityCondition::WhenYouDo)),
+            "the conjunction must retain the reflexive creation marker"
+        );
+        assert!(
+            conditions.iter().any(|condition| matches!(
+                condition,
+                AbilityCondition::QuantityCheck {
+                    comparator: crate::types::ability::Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 5 },
+                    ..
+                }
+            )),
+            "the conjunction must retain Cobra King's five-or-more threshold"
+        );
+        assert_eq!(sub.mode_abilities.len(), 2, "both modes must survive");
+    }
+
+    /// An unmodeled intervening-if guard is not equivalent to an absent guard.
+    /// Keep this syntactically modal reflexive form explicitly unsupported
+    /// rather than lowering it as an unconditional `WhenYouDo` connector.
+    #[test]
+    fn unmodeled_reflexive_modal_guard_stays_unimplemented() {
+        let parsed = parse_oracle_text(
+            "When this creature enters, draw a card. When you do, if the moon is full, choose one —\n• Draw a card.\n• You gain 2 life.",
+            "Reflexive Guard Probe",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let execute = parsed
+            .triggers
+            .first()
+            .and_then(|trigger| trigger.execute.as_ref())
+            .expect("the trigger must reach the reflexive modal lowering path");
+        let Effect::Unimplemented { name, description } = execute.effect.as_ref() else {
+            panic!(
+                "an unmodeled reflexive guard must not become a bare WhenYouDo modal: {execute:?}"
+            );
+        };
+        assert_eq!(name, "modal_reflexive_condition");
+        assert!(
+            description
+                .as_deref()
+                .is_some_and(|fragment| fragment.contains("if the moon is full")), // allow-noncombinator: assertion over diagnostic output, not parsing dispatch
+            "the unsupported effect must retain the unmodeled guard fragment"
+        );
+        assert!(
+            execute.sub_ability.is_none(),
+            "the parser must not attach an unconditional modal beneath the parent"
+        );
+    }
+
+    /// CR 706.3b: result-table rows belong to the mandatory printed die-roll
+    /// parent, even when its CR 603.12 reflexive body is a modal marker.
+    #[test]
+    fn mandatory_roll_die_parent_retains_its_result_table() {
+        let parsed = parse_oracle_text(
+            "When this creature enters, roll a d20. When you do, choose one —\n• Draw a card.\n• You gain 2 life.\n1—10 | Draw a card.\n11—20 | You gain 2 life.",
+            "Roll Parent Probe",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let execute = parsed
+            .triggers
+            .first()
+            .and_then(|trigger| trigger.execute.as_ref())
+            .expect("the enters trigger must carry its mandatory parent");
+        let Effect::RollDie { results, .. } = execute.effect.as_ref() else {
+            panic!(
+                "the printed roll must remain the parent effect, got {:?}",
+                execute.effect
+            );
+        };
+        assert_eq!(
+            results.len(),
+            2,
+            "the parent roll must retain both immediately following result rows"
+        );
+        assert_eq!(
+            results
+                .iter()
+                .map(|branch| (branch.min, branch.max))
+                .collect::<Vec<_>>(),
+            vec![(1, 10), (11, 20)],
+            "the result ranges must remain attached to the printed parent roll"
+        );
+        assert_eq!(
+            execute
+                .sub_ability
+                .as_ref()
+                .and_then(|sub| sub.condition.clone()),
+            Some(AbilityCondition::WhenYouDo),
+            "the mode list remains the parent roll's reflexive body"
+        );
+    }
+
     #[test]
     fn caesar_lowers_to_reflexive_gated_modal() {
         // CR 603.12 + CR 700.2b: Caesar's attack trigger must lower to an
@@ -2969,6 +4927,93 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
             3,
             "one AbilityDefinition per mode"
         );
+    }
+
+    #[test]
+    fn caesar_reflexive_modal_is_native_before_lowering() {
+        let mut ir = parse_oracle_ir(
+            CAESAR_ORACLE,
+            "Caesar, Legion's Emperor",
+            &[],
+            &["Legendary".to_string(), "Creature".to_string()],
+            &["Human".to_string(), "Soldier".to_string()],
+        );
+        let [item] = ir.items.as_slice() else {
+            panic!("Caesar's block must remain one nested trigger document item");
+        };
+        let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger)) = &item.node else {
+            panic!("Caesar must not escape through a pre-lowered trigger node");
+        };
+        assert_eq!(item.source.span().first_line, 0);
+        assert_eq!(
+            item.source.fragment(),
+            Some("Whenever you attack, you may sacrifice another creature. When you do, choose two —")
+        );
+        let Some(TriggerBody::Reflexive(reflexive)) = trigger.body.as_ref() else {
+            panic!("Caesar must retain its native reflexive-payment trigger body");
+        };
+        assert_eq!(
+            reflexive.connector,
+            AbilityCondition::WhenYouDo,
+            "Caesar's native IR must retain its printed reflexive connector"
+        );
+        let modal = reflexive
+            .modal
+            .as_ref()
+            .expect("Caesar's reflexive payment owns the native modal payload");
+        assert_eq!(
+            (
+                modal.choice.min_choices,
+                modal.choice.max_choices,
+                modal.choice.mode_count
+            ),
+            (2, 2, 3),
+            "Caesar preserves its choose-two-of-three gate before lowering"
+        );
+        assert_eq!(
+            modal
+                .modes
+                .iter()
+                .map(|mode| (mode.source_line, mode.source_text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (Some(1), "• Create two 1/1 red and white Soldier creature tokens with haste that are tapped and attacking."),
+                (Some(2), "• You draw a card and you lose 1 life."),
+                (Some(3), "• ~ deals damage equal to the number of creature tokens you control to target opponent."),
+            ],
+            "Caesar's bullet provenance stays nested under the sole trigger item"
+        );
+        assert!(
+            modal.modes.iter().all(|mode| !matches!(
+                &mode.ability.body.clauses[0].parsed.effect,
+                Effect::Unimplemented { .. }
+            )),
+            "every native Caesar mode must remain lowerable"
+        );
+
+        let lowered = lower_oracle_ir(&mut ir);
+        assert!(
+            lowered.abilities.is_empty(),
+            "nested Caesar bullets must not become standalone spell abilities"
+        );
+        let payment = lowered.triggers[0]
+            .execute
+            .as_deref()
+            .expect("Caesar trigger has its optional payment");
+        assert!(payment.optional, "Caesar's sacrifice payment is optional");
+        assert!(matches!(payment.effect.as_ref(), Effect::Sacrifice { .. }));
+        let gated_modal = payment
+            .sub_ability
+            .as_deref()
+            .expect("payment must gate the modal under its result");
+        assert_eq!(gated_modal.condition, Some(AbilityCondition::WhenYouDo));
+        assert!(matches!(
+            gated_modal.mode_abilities.as_slice(),
+            [first, second, third]
+                if matches!(first.effect.as_ref(), Effect::Token { .. })
+                    && matches!(second.effect.as_ref(), Effect::Draw { .. })
+                    && matches!(third.effect.as_ref(), Effect::DealDamage { .. })
+        ));
     }
 
     // ---- Vincent's Limit Break (FIN) — Tiered shared-effect chosen-P/T ----
@@ -3108,6 +5153,382 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
                 .iter()
                 .all(|a| !matches!(a.effect.as_ref(), Effect::Unimplemented { .. })),
             "standard Tiered modes must be unaffected by the shared-effect arm"
+        );
+    }
+
+    // ---- #7031 — modal mode-body subject filter (`mode_anaphor_subject`) ----
+
+    fn chain_has_unimplemented(ability: &AbilityDefinition) -> bool {
+        matches!(*ability.effect, Effect::Unimplemented { .. })
+            || ability
+                .sub_ability
+                .as_ref()
+                .is_some_and(|s| chain_has_unimplemented(s))
+    }
+
+    const SAURON_DINO_DEVOTEE_ORACLE: &str = "Flying\nWhenever Sauron enters or attacks, choose one —\n• Cure Cancer — You gain 3 life.\n• Turn People into Dinosaurs — Put a saurian counter on another target creature. It's a green Dinosaur with base power and toughness 5/5 for as long as it has a saurian counter on it.";
+
+    /// SHAPE (R8, #7031): Sauron, Dino Devotee's mode-2 second sentence
+    /// ("It's a green Dinosaur with base power and toughness 5/5 for as long
+    /// as it has a saurian counter on it") lowers to the full animation
+    /// payload bound to the MODE'S TARGET — the CR 608.2c nearest antecedent
+    /// introduced by the mode's own first sentence. Revert-fail: with the
+    /// mode-body subject filter reverted, the leaked `SelfRef` subject makes
+    /// the contracted-copula honest-bind gate decline and the clause falls to
+    /// `Effect::Unimplemented`, failing both the zero-Unimplemented
+    /// reach-guard and the modification-set equality.
+    #[test]
+    fn sauron_dino_devotee_mode_body_animation_binds_parent_target() {
+        use crate::types::ability::{ContinuousModification, FilterProp, TypeFilter};
+        use crate::types::card_type::{CoreType, SubtypeSet};
+        use crate::types::counter::{CounterMatch, CounterType};
+        use crate::types::mana::ManaColor;
+        use crate::types::Duration;
+
+        let parsed = parse_oracle_text(
+            SAURON_DINO_DEVOTEE_ORACLE,
+            "Sauron, Dino Devotee",
+            &[],
+            &[],
+            &[],
+        );
+        let trigger = parsed
+            .triggers
+            .first()
+            .expect("enters-or-attacks trigger present");
+        let execute = trigger.execute.as_deref().expect("modal execute");
+        assert_eq!(execute.mode_abilities.len(), 2, "two modes");
+
+        // Zero-Unimplemented reach-guard: makes every negative below
+        // non-vacuous (an Unimplemented chain would short-circuit them).
+        for (i, mode) in execute.mode_abilities.iter().enumerate() {
+            assert!(
+                !chain_has_unimplemented(mode),
+                "mode {i} must lower with zero Unimplemented: {mode:?}"
+            );
+        }
+
+        // Mode-2 head: the counter placement that introduces the antecedent.
+        let mode2 = &execute.mode_abilities[1];
+        match mode2.effect.as_ref() {
+            Effect::PutCounter {
+                counter_type,
+                target: TargetFilter::Typed(filter),
+                ..
+            } => {
+                assert_eq!(counter_type, &CounterType::Generic("saurian".to_string()));
+                assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
+                assert!(
+                    filter.properties.contains(&FilterProp::Another),
+                    "'another target creature' keeps the Another property"
+                );
+            }
+            other => panic!("mode 2 head must be PutCounter on a typed target, got {other:?}"),
+        }
+
+        // Mode-2 second sentence: the restored animation payload.
+        let sub = mode2
+            .sub_ability
+            .as_deref()
+            .expect("mode 2 second sentence present");
+        // CR 611.2b: the peeled `for as long as` duration survives on the
+        // sub-ability wrapper, exactly where the pre-fix export carried it.
+        let expected_condition = StaticCondition::RecipientHasCounters {
+            counters: CounterMatch::OfType(CounterType::Generic("saurian".to_string())),
+            minimum: 1,
+            maximum: None,
+        };
+        assert_eq!(
+            sub.duration,
+            Some(Duration::ForAsLongAs {
+                condition: expected_condition
+            }),
+            "wrapper duration must be ForAsLongAs{{RecipientHasCounters saurian >= 1}}"
+        );
+        match sub.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities,
+                target,
+                ..
+            } => {
+                assert_eq!(
+                    target,
+                    &Some(TargetFilter::ParentTarget),
+                    "the animation must bind the MODE'S TARGET (CR 608.2c)"
+                );
+                let grant = static_abilities.first().expect("one continuous grant");
+                assert_eq!(
+                    grant.affected,
+                    Some(TargetFilter::ParentTarget),
+                    "affected must be the mode's target, never the trigger source"
+                );
+                // CR 613.4b (base P/T, Layer 7b) + CR 613.1e (color, Layer 5) +
+                // CR 613.1d (type, Layer 4) + CR 205.1a (subtype replacement:
+                // RemoveAllSubtypes precedes the granted subtype).
+                assert_eq!(
+                    grant.modifications,
+                    vec![
+                        ContinuousModification::SetPower { value: 5 },
+                        ContinuousModification::SetToughness { value: 5 },
+                        ContinuousModification::SetColor {
+                            colors: vec![ManaColor::Green]
+                        },
+                        ContinuousModification::AddType {
+                            core_type: CoreType::Creature
+                        },
+                        ContinuousModification::RemoveAllSubtypes {
+                            set: SubtypeSet::Creature
+                        },
+                        ContinuousModification::AddSubtype {
+                            subtype: "Dinosaur".to_string()
+                        },
+                    ],
+                    "the exact v0.35.2 animation payload must be restored"
+                );
+            }
+            other => panic!("mode 2 second sentence must be GenericEffect, got {other:?}"),
+        }
+    }
+
+    const DISCIPLE_OF_PERDITION_ORACLE: &str = "When this creature dies, choose one. If you have exactly 13 life, you may choose both instead.\n• You draw a card and you lose 1 life.\n• Exile target opponent's graveyard. That player loses 1 life.";
+
+    /// SHAPE (R8b, #7031 second discriminating card): Disciple of Perdition's
+    /// mode-2 "That player loses 1 life" binds to the TARGETED OPPONENT
+    /// (`ParentTargetController` — the CR 608.2c anaphor to the player target
+    /// chosen earlier in the same mode), restoring the verified v0.35.2
+    /// binding. Revert-fail: with the filter reverted the leaked trigger
+    /// subject flips the "that player" arm to `TriggeringPlayer` — the silent
+    /// misbind #6811 introduced (verified in the pre-fix export).
+    #[test]
+    fn disciple_of_perdition_that_player_binds_to_targeted_opponent() {
+        let parsed = parse_oracle_text(
+            DISCIPLE_OF_PERDITION_ORACLE,
+            "Disciple of Perdition",
+            &[],
+            &[],
+            &[],
+        );
+        let trigger = parsed.triggers.first().expect("dies trigger present");
+        let execute = trigger.execute.as_deref().expect("modal execute");
+        assert_eq!(execute.mode_abilities.len(), 2, "two modes");
+        // Zero-Unimplemented reach-guard for the binding assertion below.
+        for (i, mode) in execute.mode_abilities.iter().enumerate() {
+            assert!(
+                !chain_has_unimplemented(mode),
+                "mode {i} must lower with zero Unimplemented: {mode:?}"
+            );
+        }
+
+        let mode2 = &execute.mode_abilities[1];
+        // Reach-guard: the head is the graveyard exile that introduces the
+        // player-target antecedent.
+        assert!(
+            matches!(mode2.effect.as_ref(), Effect::ChangeZoneAll { .. }),
+            "mode 2 head must be the graveyard exile, got {:?}",
+            mode2.effect
+        );
+        let sub = mode2
+            .sub_ability
+            .as_deref()
+            .expect("mode 2 second sentence present");
+        match sub.effect.as_ref() {
+            Effect::LoseLife { target, .. } => {
+                assert_eq!(
+                    target,
+                    &Some(TargetFilter::ParentTargetController),
+                    "'That player' must bind to the targeted opponent \
+                     (ParentTargetController), not TriggeringPlayer"
+                );
+            }
+            other => panic!("mode 2 second sentence must be LoseLife, got {other:?}"),
+        }
+    }
+
+    const BLIZZARD_SPECTER_ORACLE: &str = "Flying\nWhenever this creature deals combat damage to a player, choose one —\n• That player returns a permanent they control to its owner's hand.\n• That player discards a card.";
+
+    /// SHAPE (R8b negative sibling): Blizzard Specter's "That player" modes
+    /// KEEP their `TriggeringPlayer` binding — the DamageDone trigger scope
+    /// (`modal_relative_player_scope_for_trigger`; CR 608.2c back-reference to
+    /// the damaged player established by the trigger event) is re-seeded per
+    /// mode and outranks the cleared subject in the "that player" rung ladder.
+    /// This proves the subject filter clears ONLY the subject axis, not the
+    /// trigger-established player scope.
+    #[test]
+    fn blizzard_specter_that_player_keeps_triggering_player_scope() {
+        let parsed = parse_oracle_text(BLIZZARD_SPECTER_ORACLE, "Blizzard Specter", &[], &[], &[]);
+        let trigger = parsed
+            .triggers
+            .first()
+            .expect("combat-damage trigger present");
+        let execute = trigger.execute.as_deref().expect("modal execute");
+        assert_eq!(execute.mode_abilities.len(), 2, "two modes");
+        // Zero-Unimplemented reach-guard.
+        for (i, mode) in execute.mode_abilities.iter().enumerate() {
+            assert!(
+                !chain_has_unimplemented(mode),
+                "mode {i} must lower with zero Unimplemented: {mode:?}"
+            );
+        }
+
+        // Mode 1: "That player returns a permanent they control ..." — the
+        // bounce is scoped to the damaged player's permanents.
+        match execute.mode_abilities[0].effect.as_ref() {
+            Effect::Bounce {
+                target: TargetFilter::Typed(filter),
+                ..
+            } => {
+                assert_eq!(
+                    filter.controller,
+                    Some(ControllerRef::TriggeringPlayer),
+                    "mode 1 'that player' must stay the damaged player"
+                );
+            }
+            other => panic!("mode 1 must be Bounce of a typed permanent, got {other:?}"),
+        }
+        // Mode 2: "That player discards a card."
+        match execute.mode_abilities[1].effect.as_ref() {
+            Effect::Discard { target, .. } => {
+                assert_eq!(
+                    target,
+                    &TargetFilter::TriggeringPlayer,
+                    "mode 2 'that player' must stay the damaged player"
+                );
+            }
+            other => panic!("mode 2 must be Discard, got {other:?}"),
+        }
+    }
+
+    // R7 — `mode_anaphor_subject` building-block arms. The inline `"; or"`
+    // modal form funnels through the same `parse_modal_mode_irs` seam as the
+    // bullet form, so these arms exercise the filter at its production entry.
+
+    fn lower_inline_modes(body: &str, ctx: &ParseContext) -> Vec<AbilityDefinition> {
+        let modal = try_parse_inline_modal_ir(body, ctx).expect("inline modal must parse");
+        modal
+            .modes
+            .iter()
+            .map(|mode| lower_ability_ir(&mode.ability))
+            .collect()
+    }
+
+    /// Extract the single continuous grant's affected filter of a
+    /// `GenericEffect` chain node.
+    fn generic_effect_affected(ability: &AbilityDefinition) -> TargetFilter {
+        match ability.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => static_abilities
+                .first()
+                .expect("one continuous grant")
+                .affected
+                .clone()
+                .expect("grant carries an affected filter"),
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    const INLINE_MODAL_WITH_INTERNAL_REFERENT: &str = "Choose one — Draw a card; or Put a +1/+1 counter on target creature. It gains flying until end of turn.";
+    const INLINE_MODAL_WITHOUT_INTERNAL_REFERENT: &str =
+        "Choose one — Draw a card; or It gains flying until end of turn.";
+
+    /// R7(a): a `SelfRef` trigger subject is CLEARED at the mode seam, so the
+    /// mode-internal typed referent binds the mode-body "It" (CR 608.2c —
+    /// the mode's own earlier instruction is the nearest antecedent).
+    #[test]
+    fn mode_anaphor_subject_clears_self_subject_for_mode_internal_referent() {
+        let ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            in_trigger: true,
+            ..Default::default()
+        };
+        let modes = lower_inline_modes(INLINE_MODAL_WITH_INTERNAL_REFERENT, &ctx);
+        assert_eq!(modes.len(), 2);
+        for (i, mode) in modes.iter().enumerate() {
+            assert!(
+                !chain_has_unimplemented(mode),
+                "mode {i} must lower with zero Unimplemented: {mode:?}"
+            );
+        }
+        let sub = modes[1]
+            .sub_ability
+            .as_deref()
+            .expect("mode 2 second sentence present");
+        assert_eq!(
+            generic_effect_affected(sub),
+            TargetFilter::ParentTarget,
+            "cleared self-subject: mode-body 'It' binds the mode's own target"
+        );
+    }
+
+    /// R7(b): a mode-local target is the nearest typed antecedent, even when
+    /// the surrounding trigger has a typed subject — the mode-body "It"
+    /// resolves to that target, not the triggering object.
+    #[test]
+    fn mode_anaphor_subject_retains_typed_subject() {
+        let ctx = ParseContext {
+            subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+            in_trigger: true,
+            ..Default::default()
+        };
+        let modes = lower_inline_modes(INLINE_MODAL_WITH_INTERNAL_REFERENT, &ctx);
+        let sub = modes[1]
+            .sub_ability
+            .as_deref()
+            .expect("mode 2 second sentence present");
+        assert_eq!(
+            generic_effect_affected(sub),
+            TargetFilter::ParentTarget,
+            "mode-local target: mode-body 'It' binds the preceding target creature"
+        );
+    }
+
+    /// R7(c): an `object_pronoun_ref` pin (for example, a specific untargeted
+    /// object previously referred to by a trigger condition; CR 608.2k)
+    /// SURVIVES the subject filter — with no
+    /// mode-internal referent preceding the pronoun, `parent_target_available`
+    /// is false, the ParentTarget branch cannot fire, and `resolve_it_pronoun`
+    /// still serves the pin.
+    #[test]
+    fn mode_anaphor_subject_preserves_object_pronoun_pin_without_referent() {
+        let ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            object_pronoun_ref: Some(TargetFilter::SelfRef),
+            in_trigger: true,
+            ..Default::default()
+        };
+        let modes = lower_inline_modes(INLINE_MODAL_WITHOUT_INTERNAL_REFERENT, &ctx);
+        assert_eq!(
+            generic_effect_affected(&modes[1]),
+            TargetFilter::SelfRef,
+            "with no mode-internal referent the pinned object still serves 'It'"
+        );
+    }
+
+    /// R7(d): with a mode-internal typed referent PRECEDING the pronoun, the
+    /// mode-internal referent outranks the pin — the CR 608.2c
+    /// nearest-antecedent reading within the mode's own instruction sequence
+    /// (Oracle templating uses "this card"/the card name, not "it", when the
+    /// source is meant across an intervening referent). The combination
+    /// (SelfRef/Any subject + zone-pin + modal body) is pool-empty today; this
+    /// pin makes the precedence deliberate so a future contradicting card
+    /// forces a conscious change.
+    #[test]
+    fn mode_anaphor_subject_mode_internal_referent_outranks_pin() {
+        let ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            object_pronoun_ref: Some(TargetFilter::SelfRef),
+            in_trigger: true,
+            ..Default::default()
+        };
+        let modes = lower_inline_modes(INLINE_MODAL_WITH_INTERNAL_REFERENT, &ctx);
+        let sub = modes[1]
+            .sub_ability
+            .as_deref()
+            .expect("mode 2 second sentence present");
+        assert_eq!(
+            generic_effect_affected(sub),
+            TargetFilter::ParentTarget,
+            "a mode-internal referent preceding the pronoun outranks the pin"
         );
     }
 }

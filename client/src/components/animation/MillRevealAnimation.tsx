@@ -1,16 +1,21 @@
 import { motion } from "framer-motion";
 import { useEffect, useRef } from "react";
 
-import { useCardImage } from "../../hooks/useCardImage";
+import {
+  ResolvedAnimationImage,
+  type AnimationImageSnapshot,
+} from "./ResolvedAnimationImage.tsx";
 
-interface MillCard {
+export interface MillCard {
   objectId: number;
-  cardName: string;
+  snapshot: AnimationImageSnapshot | null;
   colors: string[];
 }
 
 interface MillRevealAnimationProps {
   cards: MillCard[];
+  /** The first card's place in its step's mill order, which staggers it. */
+  startIndex?: number;
   from: { x: number; y: number };
   to: { x: number; y: number };
   onComplete: () => void;
@@ -36,7 +41,10 @@ function MillCardElement({
   isLast: boolean;
   onComplete: () => void;
 }) {
-  const { src } = useCardImage(card.cardName, { size: "small" });
+  // `normal`, not `small`: this renders a bare image element with no ladder at
+  // CARD_WIDTH 80 (160 device px at DPR 2), so the real 146px asset would
+  // upscale. Requesting `normal` keeps this overlay byte-identical to before
+  // `small` became a distinct asset.
   const glowColor = card.colors.length > 0
     ? card.colors[0]
     : "#6366f1";
@@ -78,10 +86,29 @@ function MillCardElement({
         overflow: "hidden",
       }}
     >
-      {src ? (
-        <img
-          src={src}
-          alt={card.cardName}
+      {card.snapshot ? (
+        <ResolvedAnimationImage
+          snapshot={card.snapshot}
+          size="normal"
+          alt={card.snapshot.cardName}
+          fallback={(
+            <div
+              style={{
+                width: "100%",
+                height: "100%",
+                backgroundColor: "rgba(0,0,0,0.7)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "white",
+                fontSize: "0.6rem",
+                textAlign: "center",
+                padding: 4,
+              }}
+            >
+              {card.snapshot.cardName}
+            </div>
+          )}
           style={{ width: "100%", height: "100%", objectFit: "cover" }}
         />
       ) : (
@@ -99,7 +126,6 @@ function MillCardElement({
             padding: 4,
           }}
         >
-          {card.cardName}
         </div>
       )}
       <motion.div
@@ -125,6 +151,7 @@ function MillCardElement({
 
 export function MillRevealAnimation({
   cards,
+  startIndex = 0,
   from,
   to,
   onComplete,
@@ -134,7 +161,7 @@ export function MillRevealAnimation({
 
   // Safety timeout: if onAnimationComplete never fires, clean up after expected duration + buffer
   useEffect(() => {
-    const expectedMs = (displayedCards.length - 1) * STAGGER_MS + FLIGHT_DURATION * 1000 + 500;
+    const expectedMs = (startIndex + displayedCards.length - 1) * STAGGER_MS + FLIGHT_DURATION * 1000 + 500;
     const timer = setTimeout(() => {
       if (!completedRef.current) {
         completedRef.current = true;
@@ -142,7 +169,7 @@ export function MillRevealAnimation({
       }
     }, expectedMs);
     return () => clearTimeout(timer);
-  }, [displayedCards.length, onComplete]);
+  }, [displayedCards.length, onComplete, startIndex]);
 
   const handleComplete = () => {
     if (!completedRef.current) {
@@ -159,7 +186,7 @@ export function MillRevealAnimation({
           card={card}
           from={from}
           to={to}
-          index={i}
+          index={startIndex + i}
           isLast={i === displayedCards.length - 1}
           onComplete={handleComplete}
         />

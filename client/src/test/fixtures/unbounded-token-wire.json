@@ -1,0 +1,27 @@
+{
+  "unbounded_families": [
+    {
+      "family": "tokens",
+      "player": 0,
+      "state": {
+        "data": {
+          "certainty": "Conditional",
+          "prompted": 0
+        },
+        "type": "Scheduled"
+      }
+    }
+  ],
+  "unbounded_pile": [
+    402,
+    403,
+    404,
+    407
+  ],
+  "unbounded_resources": [
+    {
+      "axis": "TokensCreated",
+      "player": 0
+    }
+  ]
+}

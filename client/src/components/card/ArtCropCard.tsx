@@ -3,16 +3,19 @@ import { useTranslation } from "react-i18next";
 
 import type { PTColor } from "../../viewmodel/cardProps";
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useLocalizedCardName } from "../../hooks/useEngineCardData.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
+import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
-import { CARD_BACK_URL } from "../../services/scryfall.ts";
+import { faceDownMarkerName, faceDownMarkerRef } from "./faceDownMarker.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { COUNTER_COLORS, computePTDisplay, toRoman } from "../../viewmodel/cardProps.ts";
-import { loyaltyStartIconClasses } from "../../viewmodel/costLabel.ts";
-import { ManaFontIcon } from "../icons/ManaFontIcon.tsx";
+import { COUNTER_COLORS, computePTDisplay, hasOtherPrintedFace, toRoman } from "../../viewmodel/cardProps.ts";
 import { CounterTooltip } from "../ui/CounterTooltip.tsx";
+import { LoyaltyBadge } from "../ui/LoyaltyBadge.tsx";
+import { CardArtFallback } from "./CardArtFallback.tsx";
+import { CardBackFallback } from "./CardBackFallback.tsx";
 import { frameNeedsLightText, getCardDisplayColors, getFrameGradient } from "./cardFrame.ts";
 
 interface ArtCropCardProps {
@@ -28,6 +31,7 @@ const PT_COLORS: Record<PTColor, string> = {
 export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardProps) {
   const { t } = useTranslation("game");
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
+  const counterDisplay = useCounterDisplay(objectId);
   const isMobile = useIsMobile();
   const inspectObject = useUiStore((s) => s.inspectObject);
   const isCompactHeight = useIsCompactHeight();
@@ -35,19 +39,36 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,
   );
 
-  const cardName = obj?.face_down ? t("card.faceDownName") : (obj?.name ?? "");
+  // Same rule as `PermanentCard`: the tile always backs a face-down
+  // permanent (the live face is blanked per CR 708.2a); the controller's peek
+  // is the hover preview (#7547).
+  const renderCardBack = obj?.face_down === true;
+  const canonicalCardName = obj?.name ?? "";
+  const localizedCardName = useLocalizedCardName(renderCardBack ? null : canonicalCardName) ?? canonicalCardName;
+  const cardName = renderCardBack
+    ? (faceDownMarkerName(true, obj?.face_down_cause) ?? t("card.faceDownName"))
+    : localizedCardName;
   const imageLookup = obj
     ? cardImageLookup(obj)
     : { name: "", faceIndex: 0, oracleId: undefined, faceName: undefined };
   const isToken = obj?.display_source === "Token";
-  const { src: cardSrc, isLoading: cardLoading } = useCardImage(obj?.face_down ? "" : imageLookup.name, {
-    size: "art_crop",
+  // A face-down permanent shows the marker token for the ability that turned it
+  // face down (Morph / Manifest / A Mysterious Creature), the way paper play
+  // does. Without a marker the card back is rendered exactly as before.
+  const faceDownMarker = faceDownMarkerRef(obj?.face_down ?? false, obj?.face_down_cause);
+  const imageIsToken = renderCardBack ? faceDownMarker !== null : isToken;
+  const { src: cardSrc, isLoading: cardLoading, advanceFailedSource } = useCardImage(renderCardBack ? "" : imageLookup.name, {
+    size: imageIsToken ? "normal" : "art_crop",
     faceIndex: imageLookup.faceIndex,
-    isToken: obj?.face_down ? false : isToken,
-    tokenFilters: !obj?.face_down && isToken && obj ? tokenFiltersForObject(obj) : undefined,
-    tokenImageRef: !obj?.face_down && isToken && obj ? obj.token_image_ref : undefined,
-    oracleId: obj?.face_down ? undefined : imageLookup.oracleId,
-    faceName: obj?.face_down ? undefined : imageLookup.faceName,
+    isToken: renderCardBack ? faceDownMarker !== null : isToken,
+    tokenFilters: !renderCardBack && isToken && obj ? tokenFiltersForObject(obj) : undefined,
+    tokenImageRef: renderCardBack
+      ? (faceDownMarker ?? undefined)
+      : isToken && obj
+        ? obj.token_image_ref
+        : undefined,
+    oracleId: renderCardBack ? undefined : imageLookup.oracleId,
+    faceName: renderCardBack ? undefined : imageLookup.faceName,
   });
 
   const { frameGradient, lightText, ptDisplay } = useMemo(() => {
@@ -63,16 +84,16 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
 
   if (!obj) return null;
 
-  const src = obj.face_down ? CARD_BACK_URL : cardSrc;
-  const isLoading = obj.face_down ? false : cardLoading;
-  const hasDfc = !obj.face_down && obj.back_face != null;
-  // Filter out loyalty counters — shown separately as the loyalty badge
-  const counters = Object.entries(obj.counters).filter((entry): entry is [string, number] => entry[1] != null && entry[0] !== "loyalty");
+  const src = cardSrc;
+  const isLoading = renderCardBack ? false : cardLoading;
+  // CR 712 vs CR 710: `back_face != null` is NOT "has a second face" — a
+  // Kamigawa flip card stores its alternative half in the same slot and has no
+  // face 1 to inspect. Use the engine-provided layout discriminant.
+  const hasDfc = !renderCardBack && hasOtherPrintedFace(obj);
+  // CR 306.5c: the engine already split the loyalty TOTAL out of the pill strip, so this site
+  // classifies nothing — it renders the rows it is given, in the order it is given them.
+  const counters = pillsOf(counterDisplay);
   const devotionValue = obj.devotion ?? null;
-  // mana-font shield glyph for the current loyalty total (null when out of the
-  // glyph range → the plain silver-ring badge below remains the fallback).
-  const loyaltyShield = obj.loyalty != null ? loyaltyStartIconClasses(obj.loyalty) : null;
-
   // --- Dynamic Text Sizing Logic ---
   let ptNumClass = "text-[14px]";
   let ptSlashClass = "text-[13px]";
@@ -88,17 +109,8 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     }
   }
 
-  let loyaltyClass = "text-[14px]";
-  if (obj.loyalty != null) {
-    const loyaltyChars = String(obj.loyalty).length;
-    if (loyaltyChars >= 3) {
-      loyaltyClass = "text-[11px] tracking-tighter";
-    } else if (loyaltyChars >= 2) {
-      loyaltyClass = "text-[13px] tracking-tight";
-    }
-  }
-
-  if (!obj.face_down && (isLoading || !src)) {
+  // Genuinely still resolving art — pulse until the async lookup settles.
+  if (!renderCardBack && isLoading) {
     return (
       <div className="relative" style={{ width: "var(--art-crop-w)", height: "var(--art-crop-h)" }}>
         <div className="absolute inset-0 rounded-[6px] bg-[#151515] p-[3px] shadow-md">
@@ -108,7 +120,6 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     );
   }
 
-  const renderedSrc = obj.face_down ? CARD_BACK_URL : (src ?? "");
   const headerHeight = isCompactHeight
     ? "clamp(8px, calc(var(--art-crop-h) * 0.16), 12px)"
     : "clamp(8px, calc(var(--art-crop-h) * 0.18), 20px)";
@@ -175,12 +186,27 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
           {/* 4. ART AREA */}
           <div className="flex-1 w-full px-[2px] pb-[2px] flex flex-col relative z-0">
             <div className="w-full h-full relative rounded-[1.5px] overflow-hidden border border-black/80 shadow-[inset_0_1px_3px_rgba(0,0,0,0.6)] bg-black">
-              <img
-                src={renderedSrc}
-                alt={cardName}
-                draggable={false}
-                className="absolute inset-0 w-full h-full object-cover"
-              />
+              {/* Issue #6156: a token with no official paper printing (Kibo,
+                  Uktabi Prince's Banana) resolves to a null src, as does any
+                  card whose art fetch is rejected. Swapping only the art —
+                  rather than returning a bare tile before the frame — keeps the
+                  header name, P/T box, counters and loyalty badge on screen, so
+                  an artless permanent loses its picture but never its game
+                  state. Face-down cards instead use marker-only art followed
+                  by the shared fixed-back presentation. */}
+              {renderCardBack && (!faceDownMarker || !src) ? (
+                <CardBackFallback className="absolute inset-0 h-full w-full" />
+              ) : src ? (
+                <img
+                  src={src}
+                  alt={cardName}
+                  draggable={false}
+                  onError={() => advanceFailedSource?.(src)}
+                  className="absolute inset-0 w-full h-full object-cover"
+                />
+              ) : (
+                <CardArtFallback name={cardName} variant="artCrop" className="absolute inset-0 w-full h-full" />
+              )}
 
               <div className="absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-black/50 to-transparent pointer-events-none" />
 
@@ -191,16 +217,27 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
               {/* Top-right overlay stack: counter badges kept clear of the
                   bottom P/T and loyalty badges. */}
               <div className="absolute top-0.5 right-0.5 z-[60] flex flex-col items-end gap-0.5">
-                {counters.map(([type, count]) => (
-                  <CounterTooltip key={type} type={type} count={count}>
-                    <span
-                      className={`rounded-full flex items-center justify-center font-bold text-white shadow-md border border-black/50 ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
-                      style={counterStyle}
+                {counters.map((row) => {
+                  const type = row.counter;
+                  // CR 732.2a / CR 701.34a: an accepted counter-growth loop pumps this
+                  // counter unboundedly — render ∞ instead of the (still-finite) real count.
+                  const unbounded = isUnbounded(row);
+                  return (
+                    <CounterTooltip
+                      key={type}
+                      type={type}
+                      count={row.count}
+                      isUnbounded={unbounded}
                     >
-                      {count}
-                    </span>
-                  </CounterTooltip>
-                ))}
+                      <span
+                        className={`rounded-full flex items-center justify-center font-bold text-white shadow-md border border-black/50 ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
+                        style={counterStyle}
+                      >
+                        {unbounded ? "∞" : row.count}
+                      </span>
+                    </CounterTooltip>
+                  );
+                })}
               </div>
 
               {hasDfc && (
@@ -274,31 +311,22 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
         </div>
       )}
 
-      {/* Floating loyalty — shifts left when P/T is also visible (animated
-          planeswalker-creature). mana-font shield glyph when a numeral exists,
-          else the plain silver-ring badge (also the FOUC fallback path). */}
-      {obj.loyalty != null && (loyaltyShield ? (
-        <div
-          className={`absolute -bottom-[5px] z-20 font-bold leading-none text-amber-300 drop-shadow-[0_1px_2px_rgba(0,0,0,0.9)] ${ptDisplay ? "-left-[5px]" : "-right-[5px]"}`}
-          style={{ fontSize: "clamp(7px, calc(var(--art-crop-h) * 0.11), 12px)" }}
-        >
-          <ManaFontIcon
-            iconClass={loyaltyShield}
-            fallbackText={String(obj.loyalty)}
-            label={String(obj.loyalty)}
-          />
-        </div>
-      ) : (
-        <div className={`absolute -bottom-[3px] z-20 ${ptDisplay ? "-left-[3px]" : "-right-[3px]"}`}>
-          <div className="rounded-full bg-gradient-to-b from-[#e2e4e6] to-[#888c91] p-[2px] shadow-[inset_0_1px_1px_rgba(255,255,255,0.9),inset_0_-1px_1px_rgba(0,0,0,0.5),0_2px_4px_rgba(0,0,0,0.8)] border border-black/80">
-            <div className="bg-gray-800 border-[1px] border-amber-600/50 rounded-full px-2.5 py-[1px] min-w-[2.75rem] flex justify-center items-center shadow-[inset_0_2px_4px_rgba(0,0,0,0.8),inset_0_1px_2px_rgba(0,0,0,0.9),0_1px_0_rgba(255,255,255,0.2)]">
-              <span className={`font-bold text-amber-400 leading-none ${loyaltyClass}`}>
-                {obj.loyalty}
-              </span>
-            </div>
-          </div>
-        </div>
-      ))}
+      {obj.loyalty != null && (
+        <LoyaltyBadge
+          amount={obj.loyalty}
+          kind="total"
+          isUnbounded={isUnbounded(counterDisplay.loyalty)}
+          size="battlefield"
+          reinforcedTopRim
+          className="absolute z-30"
+          style={{
+            position: "absolute",
+            fontSize: "clamp(13px, calc(var(--art-crop-h) * 0.19), 22px)",
+            bottom: "-5px",
+            ...(ptDisplay ? { left: "-5px" } : { right: "-5px" }),
+          }}
+        />
+      )}
     </div>
   );
 });

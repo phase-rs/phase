@@ -1,4 +1,12 @@
 import type { GameFormat, TokenImageRef } from "../adapter/types";
+import { formatMetadata } from "../data/formatRegistry";
+import type { CardImageSource, ImageRungs } from "./visualPacks/types.ts";
+
+interface ScryfallImageFace {
+  small?: string | null;
+  normal?: string | null;
+  art_crop?: string | null;
+}
 
 interface ScryfallDataEntry {
   oracle_id: string;
@@ -6,7 +14,7 @@ interface ScryfallDataEntry {
    * single-faced cards. Used to resolve `faceIndex` from an engine-reported
    * `printed_ref.face_name`. */
   face_names: string[];
-  faces: Array<{ normal: string; art_crop: string }>;
+  faces: ScryfallImageFace[];
   layout?: string;
   name: string;
   mana_cost: string;
@@ -15,6 +23,14 @@ interface ScryfallDataEntry {
   colors: string[];
   color_identity: string[];
   keywords: string[];
+  /**
+   * Emitted only for `token:` entries by `scripts/gen-scryfall-images.sh`
+   * (P/T as printed, so `"*"`-valued printings stay distinguishable).
+   * Read by the local token-hit validator — never a card lookup key.
+   */
+  power?: string | null;
+  toughness?: string | null;
+  oracle_text?: string | null;
 }
 
 /**
@@ -33,6 +49,74 @@ interface ScryfallDataEntry {
 export const CARD_BACK_URL =
   "https://backs.scryfall.io/normal/0/a/0aeebaf5-8c7d-4636-9e82-8c27447861f7.jpg";
 
+declare const manaSymbolShardBrand: unique symbol;
+/** A mana shard string admitted by the finite Scryfall card-symbol catalog. */
+export type ManaSymbolShard = string & { readonly [manaSymbolShardBrand]: true };
+
+/**
+ * The catalog below is the COMPLETE set published by Scryfall's `/symbology`
+ * endpoint — all 84 symbols, every one of which has an SVG asset.
+ *
+ * "Complete" is the definition on purpose, rather than "the ones we happen to
+ * have needed". A symbol missing from here is not merely un-rendered: it is
+ * also never installed by `coreDescriptors()`, so it breaks offline in exactly
+ * the way this catalog exists to prevent. `manaSymbolCatalog.test.ts` pins the
+ * full expected set against an independently-authored literal, because a test
+ * that derives its expectation from `MANA_SYMBOL_SHARDS` cannot see an omission.
+ */
+const SINGLE_MANA_SYMBOL_SHARDS = [
+  "W", "U", "B", "R", "G", "C", "S", "T", "Q", "E", "P", "X", "Y", "Z", "A", "∞", "½", "CHAOS",
+  // One colored mana or two life, one-half white/red mana, one mana from a
+  // legendary source, one potential land drop, planeswalker, ticket counter.
+  "H", "HW", "HR", "L", "D", "PW", "TK",
+] as const;
+const COMPOSITE_MANA_SYMBOL_SHARDS = [
+  "W/U", "W/B", "U/B", "U/R", "B/R", "B/G", "R/W", "R/G", "G/W", "G/U",
+  "2/W", "2/U", "2/B", "2/R", "2/G",
+  "W/P", "U/P", "B/P", "R/P", "G/P",
+  "W/U/P", "W/B/P", "U/B/P", "U/R/P", "B/R/P", "B/G/P", "R/W/P", "R/G/P", "G/W/P", "G/U/P",
+  "C/W", "C/U", "C/B", "C/R", "C/G",
+  // Colorless Phyrexian: one colorless mana or two life.
+  "C/P",
+] as const;
+const FINITE_NUMERIC_MANA_SYMBOL_SHARDS: readonly string[] = [
+  ...Array.from({ length: 21 }, (_, value) => String(value)),
+  "100",
+  "1000000",
+];
+const MANA_SYMBOL_SHARD_SET = new Set<string>([
+  ...SINGLE_MANA_SYMBOL_SHARDS,
+  ...COMPOSITE_MANA_SYMBOL_SHARDS,
+  ...FINITE_NUMERIC_MANA_SYMBOL_SHARDS,
+]);
+
+/** True when `shard` has a corresponding Scryfall card-symbol SVG. */
+export function isManaSymbolShard(shard: string): shard is ManaSymbolShard {
+  return MANA_SYMBOL_SHARD_SET.has(shard);
+}
+
+/** Every admitted mana shard, for callers that must enumerate the whole
+ *  finite catalog (e.g. pre-caching every symbol for offline play). */
+export const MANA_SYMBOL_SHARDS: readonly ManaSymbolShard[] =
+  Array.from(MANA_SYMBOL_SHARD_SET) as ManaSymbolShard[];
+
+/** The URL- and asset-key-safe code for an admitted mana shard: strips the
+ *  hybrid/Phyrexian slash separators and spells out the two symbols with no
+ *  ASCII representation, matching Scryfall's `card-symbols` filenames. Also
+ *  usable verbatim as an `[A-Za-z0-9_-]+` visual-pack asset-key suffix. */
+export function manaSymbolCode(shard: string): string {
+  return shard === "∞"
+    ? "INFINITY"
+    : shard === "½"
+      ? "HALF"
+      : shard.replace(/\//g, "");
+}
+
+/** Build the authoritative Scryfall source URL for an admitted mana shard. */
+export function manaSymbolSourceUrl(shard: string): string {
+  return `https://svgs.scryfall.io/card-symbols/${encodeURIComponent(manaSymbolCode(shard))}.svg`;
+}
+
 export interface PrintingEntry {
   id: string;
   set: string;
@@ -42,7 +126,7 @@ export interface PrintingEntry {
   border_color: string;
   frame_effects: string[];
   full_art: boolean;
-  faces: Array<{ normal: string; art_crop: string }>;
+  faces: ScryfallImageFace[];
 }
 
 type ScryfallDataMap = Record<string, ScryfallDataEntry>;
@@ -57,16 +141,86 @@ let printingsDataPromise: Promise<PrintingsDataMap | null> | null = null;
 let tokenImagesDataPromise: Promise<TokenImagesDataMap | null> | null = null;
 let scryfallQueue: Promise<void> = Promise.resolve();
 
+function isNonEmptyRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && Object.keys(value).length > 0;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+function isScryfallImageFace(value: unknown): value is ScryfallImageFace {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const face = value as ScryfallImageFace;
+  return (face.small === undefined || face.small === null || typeof face.small === "string")
+    && (face.normal === undefined || face.normal === null || typeof face.normal === "string")
+    && (face.art_crop === undefined || face.art_crop === null || typeof face.art_crop === "string");
+}
+
+function isScryfallDataEntry(value: unknown): value is ScryfallDataEntry {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const entry = value as Partial<ScryfallDataEntry>;
+  return typeof entry.oracle_id === "string"
+    && typeof entry.name === "string"
+    && typeof entry.mana_cost === "string"
+    && typeof entry.cmc === "number"
+    && typeof entry.type_line === "string"
+    && isStringArray(entry.face_names)
+    && isStringArray(entry.colors)
+    && isStringArray(entry.color_identity)
+    && isStringArray(entry.keywords)
+    && (entry.layout === undefined || typeof entry.layout === "string")
+    && Array.isArray(entry.faces)
+    && entry.faces.length > 0
+    && entry.faces.every(isScryfallImageFace);
+}
+
+function isScryfallDataMap(value: unknown): value is ScryfallDataMap {
+  return isNonEmptyRecord(value) && Object.values(value).every(isScryfallDataEntry);
+}
+
+function isPrintingEntry(value: unknown): value is PrintingEntry {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const entry = value as Partial<PrintingEntry>;
+  return typeof entry.id === "string"
+    && typeof entry.set === "string"
+    && typeof entry.set_name === "string"
+    && typeof entry.collector_number === "string"
+    && typeof entry.released_at === "string"
+    && typeof entry.border_color === "string"
+    && isStringArray(entry.frame_effects)
+    && typeof entry.full_art === "boolean"
+    && Array.isArray(entry.faces)
+    && entry.faces.length > 0
+    && entry.faces.every(isScryfallImageFace);
+}
+
+function isPrintingsDataMap(value: unknown): value is PrintingsDataMap {
+  return isNonEmptyRecord(value)
+    && Object.values(value).every((printings) =>
+      Array.isArray(printings) && printings.length > 0 && printings.every(isPrintingEntry));
+}
+
 export function loadScryfallData(): Promise<ScryfallDataMap | null> {
   if (!scryfallDataPromise) {
-    scryfallDataPromise = fetch(__SCRYFALL_DATA_URL__)
-      .then((r) => r.json() as Promise<ScryfallDataMap>)
-      .then((data) => {
-        scryfallDataResolved = data;
-        scryfallFoldedNameIndex = buildFoldedNameIndex(data);
-        return data;
-      })
+    const pending = (async () => {
+      const response = await fetch(__SCRYFALL_DATA_URL__);
+      if (!response.ok) return null;
+      const data: unknown = await response.json();
+      if (!isScryfallDataMap(data)) return null;
+      const foldedNameIndex = buildFoldedNameIndex(data);
+      scryfallDataResolved = data;
+      scryfallFoldedNameIndex = foldedNameIndex;
+      return data;
+    })()
       .catch(() => null);
+    scryfallDataPromise = pending;
+    void pending.then((data) => {
+      if (!data && scryfallDataPromise === pending) scryfallDataPromise = null;
+    });
   }
   return scryfallDataPromise;
 }
@@ -75,15 +229,66 @@ let printingsDataResolved: PrintingsDataMap | null = null;
 
 export function loadPrintingsData(): Promise<PrintingsDataMap | null> {
   if (!printingsDataPromise) {
-    printingsDataPromise = fetch(__SCRYFALL_PRINTINGS_URL__)
-      .then((r) => r.json() as Promise<PrintingsDataMap>)
-      .then((data) => {
-        printingsDataResolved = data;
-        return data;
-      })
+    const pending = (async () => {
+      const response = await fetch(__SCRYFALL_PRINTINGS_URL__);
+      if (!response.ok) return null;
+      const data: unknown = await response.json();
+      if (!isPrintingsDataMap(data)) return null;
+      printingsDataResolved = data;
+      return data;
+    })()
       .catch(() => null);
+    printingsDataPromise = pending;
+    void pending.then((data) => {
+      if (!data && printingsDataPromise === pending) printingsDataPromise = null;
+    });
   }
   return printingsDataPromise;
+}
+
+/**
+ * True when both card-data maps are already in memory, so a caller that needs
+ * them can run without a fetch.
+ *
+ * `scryfall-data.json` is 36,748,238 bytes and `scryfall-printings.json` is
+ * 39,541,979 bytes, and the two loaders above memoize at module scope — so this
+ * is the difference between a free read and a 76 MB download-and-parse. It
+ * exists so a PASSIVE surface can decline to be what triggers that: the
+ * visual-pack panel measures curated drift on mount, and a user who opens
+ * Preferences without having rendered a card must not pay for a measurement
+ * they never asked for.
+ *
+ * WHICH SESSIONS REACH THE RESIDENT STATE, precisely, because the two maps are
+ * NOT loaded together and the conjunction is much narrower than "has drawn a
+ * card":
+ *
+ *  - `scryfall-data.json` is the common one. `fetchCardImageAsset` and
+ *    `fetchCardImageAssetByOracleId` each await `loadScryfallData` and nothing
+ *    else, so any rendered card image has it.
+ *  - `scryfall-printings.json` is reached only on CONDITIONAL paths: the
+ *    placeholder fallback in `resolveImageAssetWithPrintingFallback` (only when
+ *    the resolved art is a placeholder), `resolveStrategyInBackground` in
+ *    `useCardImage` (only inside the `artChain.length > 0` branch), and the
+ *    deck-pinned lookup (only when a `sourcePrinting` is set).
+ *
+ * So a user on the DEFAULT empty art chain, with no overrides and no
+ * `(SET) NUM` annotations in their decks, can play a whole game and still have
+ * the printings map unloaded — and this stays false for the life of the tab.
+ * That user is not exotic; `PackSelector` ships a `curatedDefaultNote` written
+ * for exactly them. For them the drift badge does not appear on mount, and
+ * becomes available only when something else loads printings or when they
+ * select the curated option, which plans a membership and loads both.
+ *
+ * The conjunction is still the right test and must NOT be widened:
+ * `planCuratedPack` needs both maps, so either one missing means measuring
+ * would fetch. Its failure direction is the safe one — it declines to measure
+ * rather than declining to protect.
+ *
+ * Same shape as `isLocaleArtReady`: a synchronous predicate over this module's
+ * own resolved state, doubling as the caller's "do I need to load?" gate.
+ */
+export function isCardDataResident(): boolean {
+  return scryfallDataResolved !== null && printingsDataResolved !== null;
 }
 
 function loadTokenImagesData(): Promise<TokenImagesDataMap | null> {
@@ -93,6 +298,99 @@ function loadTokenImagesData(): Promise<TokenImagesDataMap | null> {
       .catch(() => null);
   }
   return tokenImagesDataPromise;
+}
+
+/**
+ * Per-locale card-art map: English Scryfall printing id → the same printing's
+ * exact localized face URLs (`scryfall-images.v2.<lng>.json`, generated by
+ * `scripts/gen-scryfall-locale-images.sh` by joining MTGJSON `foreignData`
+ * to Scryfall's all-cards bulk export).
+ *
+ * Only one locale is resolved at a time — the UI renders in exactly one
+ * language — mirroring how `scryfallDataResolved` holds a single module-global
+ * map rather than threading data through every call site.
+ */
+interface LocalizedArtEntry {
+  id: string;
+  faces: Array<{ small?: string; normal?: string; art_crop?: string }>;
+}
+
+function isLocalizedArtEntry(value: unknown): value is LocalizedArtEntry {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const entry = value as Partial<LocalizedArtEntry>;
+  return typeof entry.id === "string"
+    && Array.isArray(entry.faces)
+    && entry.faces.length > 0
+    && entry.faces.every((face) =>
+      Boolean(face)
+      && typeof face.small === "string"
+      && typeof face.normal === "string"
+      && typeof face.art_crop === "string"
+    );
+}
+
+function parseLocalizedArtMap(value: unknown): Map<string, LocalizedArtEntry> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return new Map();
+  const map = new Map<string, LocalizedArtEntry>();
+  for (const [key, entry] of Object.entries(value)) {
+    if (isLocalizedArtEntry(entry)) map.set(key, entry);
+  }
+  return map;
+}
+
+let localeArtResolved: { lang: string; map: Map<string, LocalizedArtEntry> } | null = null;
+const localeArtPromises = new Map<string, Promise<Map<string, LocalizedArtEntry>>>();
+/**
+ * The locale the app currently wants. Set synchronously on every request so a
+ * slow fetch for a language the user has already switched away from cannot
+ * install itself over the newer one (de → fr → de resolves out of order).
+ */
+let desiredArtLang = "en";
+
+/**
+ * True when `localizeImageUrl` already resolves in `lang` — i.e. the installed
+ * map matches it. English is ready only when *no* map is installed, because
+ * English is defined by the absence of one: reporting it ready unconditionally
+ * would let a de → en switch skip the load that clears the German map, leaving
+ * `localizeImageUrl` serving German art under an English key.
+ *
+ * This doubles as the caller's "do I need to load?" gate, so the two meanings
+ * must not diverge.
+ */
+export function isLocaleArtReady(lang: string): boolean {
+  return lang === "en" ? localeArtResolved === null : localeArtResolved?.lang === lang;
+}
+
+/**
+ * Load the card-art map for `lang`. English clears any resolved map and resolves
+ * immediately. A missing file (404 for a locale not yet published) resolves to an
+ * empty map, so every card falls back to English art — localized art is
+ * best-effort display data, never a hard dependency.
+ */
+export function loadLocaleArt(lang: string): Promise<Map<string, LocalizedArtEntry>> {
+  desiredArtLang = lang;
+  if (lang === "en") {
+    localeArtResolved = null;
+    return Promise.resolve(new Map<string, LocalizedArtEntry>());
+  }
+  let promise = localeArtPromises.get(lang);
+  if (!promise) {
+    // Same shape as `ensureCardLocale` (engineRuntime.ts), the content-sidecar
+    // sibling of this loader: an async IIFE with an early return on !ok, so the
+    // "missing file" path yields an empty map without widening the value type.
+    promise = (async () => {
+      const resp = await fetch(
+        __SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE__.replace("{lng}", lang),
+      );
+      if (!resp.ok) return new Map<string, LocalizedArtEntry>();
+      return parseLocalizedArtMap(await resp.json());
+    })().catch(() => new Map<string, LocalizedArtEntry>());
+    localeArtPromises.set(lang, promise);
+  }
+  return promise.then((map) => {
+    if (desiredArtLang === lang) localeArtResolved = { lang, map };
+    return map;
+  });
 }
 
 export function hasAlternatePrintingsSync(oracleId: string): boolean {
@@ -122,7 +420,7 @@ export function resolvePrintingImageUrl(
   size: ImageSize,
 ): string | null {
   const face = printing.faces[faceIndex] ?? printing.faces[0];
-  const url = face?.[size === "small" || size === "large" ? "normal" : size] ?? null;
+  const url = localFaceImageUrl(face, size) ?? null;
   return url && !isPlaceholderImageUrl(url) ? url : null;
 }
 
@@ -147,6 +445,42 @@ export function pickOldestPrinting(printings: PrintingEntry[]): PrintingEntry {
 export function resolveOracleIdSync(cardName: string): string | null {
   if (!scryfallDataResolved) return null;
   return lookupEntryByName(cardName)?.oracle_id ?? null;
+}
+
+export interface AlternateCardFace {
+  name: string;
+  faceIndex: number;
+  side: "front" | "back";
+}
+
+const PHYSICAL_MULTI_FACE_LAYOUTS = new Set([
+  "transform",
+  "modal_dfc",
+  "meld",
+  "double_faced_token",
+  "reversible_card",
+]);
+
+export function resolveAlternateCardFaceSync(
+  cardName: string,
+): AlternateCardFace | null | undefined {
+  if (!scryfallDataResolved) return undefined;
+  const entry = lookupEntryByName(cardName);
+  if (!entry) return undefined;
+  if (entry.faces.length < 2 || !entry.layout || !PHYSICAL_MULTI_FACE_LAYOUTS.has(entry.layout)) {
+    return null;
+  }
+
+  const normalizedName = normalizeCardName(cardName).toLowerCase();
+  const currentFaceIndex = entry.face_names.indexOf(normalizedName);
+  const activeFaceIndex = currentFaceIndex >= 0 ? currentFaceIndex : 0;
+  const alternateFaceIndex = activeFaceIndex === 0 ? 1 : 0;
+  const displayFaceNames = entry.name.split(" // ");
+  return {
+    name: displayFaceNames[alternateFaceIndex] ?? entry.face_names[alternateFaceIndex],
+    faceIndex: alternateFaceIndex,
+    side: alternateFaceIndex === 0 ? "front" : "back",
+  };
 }
 
 /**
@@ -193,11 +527,158 @@ const SCRYFALL_DELAY_MS = 100;
 const MAX_RETRIES = 3;
 const BASE_BACKOFF_MS = 1000;
 
-export type ImageSize = "small" | "normal" | "large" | "art_crop";
+const IMAGE_SIZES = ["small", "normal", "large", "art_crop"] as const;
+
+export type ImageSize = (typeof IMAGE_SIZES)[number];
+
+/**
+ * Intrinsic pixel width of each Scryfall image variant, measured from the JPEG
+ * SOF markers of the assets themselves. Only the two rungs the `srcset` ladder
+ * offers are listed — see `deriveImageUrl` for why `large` is not one of them.
+ */
+export const IMAGE_SIZE_WIDTHS: Record<"small" | "normal", number> = {
+  small: 146,
+  normal: 488,
+};
+
+/**
+ * A Scryfall CDN image URL carries exactly five path segments, the first of
+ * which is the size variant:
+ *
+ *   `https://cards.scryfall.io/normal/front/w/r/war-room.jpg?1783905318`
+ *                              └─ 1 ──┘└─ 2 ┘└3┘└4┘└──── 5 ────┘
+ *
+ * Splitting (rather than `new URL()`) is deliberate: this runs on every image
+ * the client renders, including `""` for face-down cards and bare filenames
+ * from test mocks, and `new URL()` *throws* on both. `URL.parse()` returns null
+ * instead of throwing but is Chrome 126+/Safari 18+ only — narrower than the
+ * browsers this ladder's `200px` fallback exists to serve. String splitting
+ * has no failure mode: unrecognized input simply isn't size-derivable.
+ *
+ * Returns null for anything that is not a five-segment sized URL, which
+ * correctly excludes `CARD_BACK_URL` (four segments) and the
+ * `errors.scryfall.com/soon.jpg` placeholder (one) — the latter must stay
+ * byte-identical or `isPlaceholderImageUrl`'s `===` stops gating the
+ * printing-fallback chain.
+ */
+function splitSizedImageUrl(
+  url: string | null | undefined,
+): { scheme: string; segments: string[]; size: ImageSize } | null {
+  if (!url) return null;
+  const [scheme, rest, ...extra] = url.split("://");
+  if (rest === undefined || extra.length > 0) return null;
+  // `segments[0]` is the host; the five path segments follow it.
+  const segments = rest.split("/");
+  if (segments.length !== 6) return null;
+  const size = segments[1];
+  if (!IMAGE_SIZES.includes(size as ImageSize)) return null;
+  return { scheme, segments, size: size as ImageSize };
+}
+
+/** The size variant a Scryfall image URL serves, or null if it isn't one. */
+export function imageUrlSize(url: string | null | undefined): ImageSize | null {
+  return splitSizedImageUrl(url)?.size ?? null;
+}
+
+/**
+ * Rewrite a Scryfall image URL to a different size variant, returning the input
+ * unchanged when it isn't a size-derivable URL. The query string rides on the
+ * final path segment, so it is preserved without special handling.
+ */
+export function deriveImageUrl(url: string, size: ImageSize): string {
+  const parsed = splitSizedImageUrl(url);
+  if (!parsed) return url;
+  const segments = [...parsed.segments];
+  segments[1] = size;
+  return `${parsed.scheme}://${segments.join("/")}`;
+}
+
+/**
+ * Rewrite a Scryfall image URL to the active locale's printing of the same card,
+ * returning the input unchanged when there is no locale loaded, the URL is not a
+ * sized Scryfall URL, or that printing has no localized sibling.
+ *
+ * Reusing `splitSizedImageUrl` is load-bearing, not stylistic. It rejects
+ * `CARD_BACK_URL` (four path segments) and the `errors.scryfall.com/soon.jpg`
+ * placeholder (one) — and the placeholder MUST come back byte-identical or
+ * `isPlaceholderImageUrl`'s `===` stops gating the printing-fallback chain,
+ * silently disabling art fallback for every card with missing art. A regex that
+ * merely found a UUID in the path would rewrite both.
+ *
+ * The trailing `?<timestamp>` is dropped: it is the *English* printing's
+ * cache-buster and means nothing for a different Scryfall object. Omitting it
+ * costs only the ability to notice a re-scan of that art.
+ */
+function localizeImageUrl(url: string): string {
+  if (!localeArtResolved) return url;
+  const parsed = splitSizedImageUrl(url);
+  if (!parsed) return url;
+  // segments: [host, size, face, id[0], id[1], "<id>.jpg?<timestamp>"]
+  const filename = parsed.segments[5];
+  // A UUID contains no `.`, so the first dot always ends the id.
+  const dot = filename.indexOf(".");
+  if (dot < 0) return url;
+  const localized = localeArtResolved.map.get(filename.slice(0, dot));
+  if (!localized) return url;
+  const faceIndex = parsed.segments[2] === "back" ? 1 : 0;
+  const face = localized.faces[faceIndex] ?? localized.faces[0];
+  if (!face) return url;
+  const localizedUrl = parsed.size === "art_crop"
+    ? face.art_crop
+    : parsed.size === "small"
+      ? face.small
+      : face.normal;
+  return localizedUrl ?? url;
+}
+
+/**
+ * Resolve one stored local face to a URL for the requested size.
+ *
+ * `scryfall-data.json` stores only `normal` and `art_crop` per face; `small` is
+ * derived from the `normal` URL. `large` deliberately collapses to `normal`:
+ * the 672px asset is ~+51 KB and ~+90% more decoded bitmap per card, and the
+ * only `large` consumer (`AttachmentFan`) renders at 176-384 CSS px where it
+ * would buy nothing — on a platform with this app's documented Safari/iOS OOM
+ * history. Do not "fix" this without measuring that memory cost.
+ */
+function localFaceImageUrl(
+  face: ScryfallImageFace | undefined,
+  size: ImageSize,
+): string | undefined {
+  if (!face) return undefined;
+  // Localization is applied here, at the single funnel every stored-URL path
+  // reaches (`resolveImageUrl`, `resolvePrintingImageUrl`, and the local token
+  // lookup), rather than in each caller. Size derivation and localization
+  // commute — `deriveImageUrl` rewrites segment 1, `localizeImageUrl` rewrites
+  // segments 3-5 — so the order below is immaterial.
+  if (size === "art_crop") {
+    return face.art_crop ? localizeImageUrl(face.art_crop) : undefined;
+  }
+  if (size === "small") {
+    const url = face.small ?? (face.normal ? deriveImageUrl(face.normal, "small") : undefined);
+    return url ? localizeImageUrl(url) : undefined;
+  }
+  return face.normal ? localizeImageUrl(face.normal) : undefined;
+}
 
 export interface CardImageAsset {
   src: string;
   isRotated: boolean;
+  source: CardImageSource;
+  rungs?: ImageRungs;
+  semantic: {
+    oracleId?: string;
+    englishPrintingId?: string;
+    faceIndex: number;
+    alias?: string;
+  };
+}
+
+function remoteImageSource(src: string, size: ImageSize): { source: CardImageSource; rungs?: ImageRungs } {
+  const rungs = size === "art_crop" || imageUrlSize(src) === null
+    ? undefined
+    : { small: deriveImageUrl(src, "small"), normal: deriveImageUrl(src, "normal") };
+  return { source: { kind: "remote", src, rungs }, rungs };
 }
 
 function isSidewaysLayout(layout: string | undefined): boolean {
@@ -210,6 +691,7 @@ function isFlipLayout(layout: string | undefined): boolean {
 
 export interface ScryfallCard {
   id?: string;
+  oracle_id?: string;
   name: string;
   mana_cost: string;
   cmc: number;
@@ -226,21 +708,9 @@ export interface ScryfallCard {
   }>;
 }
 
-const SCRYFALL_LEGALITY_KEY_OVERRIDES: Partial<Record<GameFormat, string | null>> = {
-  Archenemy: null,
-  Brawl: "standardbrawl",
-  DuelCommander: "duel",
-  FreeForAll: null,
-  HistoricBrawl: "brawl",
-  Limited: null,
-  TinyLeaders: null,
-  TwoHeadedGiant: null,
-};
-
+/** The engine-published key of `format`'s legality table; undefined when the card data records none. */
 export function scryfallLegalityKey(format: GameFormat): string | undefined {
-  const override = SCRYFALL_LEGALITY_KEY_OVERRIDES[format];
-  if (override === null) return undefined;
-  return override ?? format.toLowerCase();
+  return formatMetadata(format)?.legality_key ?? undefined;
 }
 
 interface ScryfallSearchResponse {
@@ -369,6 +839,16 @@ function buildFoldedNameIndex(data: ScryfallDataMap): Map<string, string> {
     if (!index.has(folded)) {
       index.set(folded, key);
     }
+    // Decks saved while the deck repair rewrote a bare "/" to " // " carry a
+    // name like "Summon: Choco/Mog" as "Summon: Choco // Mog"; index that
+    // spelling too.
+    if (!key.includes("//")) {
+      const parts = key.split("/").map((part) => part.trim()).filter(Boolean);
+      if (parts.length > 1) {
+        const spaced = foldDiacritics(parts.join(" // "));
+        if (!index.has(spaced)) index.set(spaced, key);
+      }
+    }
   }
   return index;
 }
@@ -380,14 +860,18 @@ function resolveNameLookupKey(name: string): string {
   const folded = foldDiacritics(normalized);
   const foldedHit = scryfallFoldedNameIndex?.get(folded);
   if (foldedHit) return foldedHit;
-  // A combined multi-face name ("Front // Back", or a hand-typed glued
-  // "Front//Back") is not itself an export key — multi-face cards are keyed by
-  // oracle id, spaced display name, and front-face name. When the combined form
-  // misses, fall back to the front face so the card still resolves to its
-  // entry. A single card whose own name contains "//" (e.g. "SP//dr, Piloted by
-  // Peni") is a primary key and already returned above, so it never splits here.
-  if (normalized.includes("//")) {
-    const frontFace = normalized.split("//")[0].trim();
+  // A combined multi-face name ("Front // Back", a hand-typed glued
+  // "Front//Back", or a single-slash "Front/Back") is not itself an export key —
+  // multi-face cards are keyed by oracle id, spaced display name, and front-face
+  // name. When the combined form misses, fall back to the front face so the card
+  // still resolves to its entry. The separator is the first "//", or the first
+  // "/" when there is none, as in the engine's `split_composite_name`. A single
+  // card whose own name contains a separator ("SP//dr, Piloted by Peni",
+  // "Summon: Choco/Mog") is a primary key and already returned above, so it
+  // never splits here.
+  const separator = normalized.includes("//") ? "//" : "/";
+  if (normalized.includes(separator)) {
+    const frontFace = normalized.split(separator)[0].trim();
     if (frontFace && frontFace !== normalized) {
       if (scryfallDataResolved[frontFace]) return frontFace;
       const frontFolded = scryfallFoldedNameIndex?.get(foldDiacritics(frontFace));
@@ -431,6 +915,19 @@ export interface LocalSearchCardOverrides {
   legalities: Record<string, string>;
 }
 
+function localFaceImageUris(face: ScryfallImageFace): Record<string, string> | undefined {
+  const imageUris: Record<string, string> = {};
+  const artCrop = localFaceImageUrl(face, "art_crop");
+  const normal = localFaceImageUrl(face, "normal");
+  const small = localFaceImageUrl(face, "small");
+  const large = localFaceImageUrl(face, "large");
+  if (artCrop) imageUris.art_crop = artCrop;
+  if (normal) imageUris.normal = normal;
+  if (small) imageUris.small = small;
+  if (large) imageUris.large = large;
+  return Object.keys(imageUris).length > 0 ? imageUris : undefined;
+}
+
 /**
  * Build a display `ScryfallCard` for an engine search result. Rules data comes
  * from the engine (the `overrides`); presentation data — artwork, printed type
@@ -445,6 +942,8 @@ export function buildLocalSearchCard(overrides: LocalSearchCardOverrides): Scryf
       ? scryfallDataResolved?.[overrides.oracleId.toLowerCase()]
       : undefined) ?? scryfallDataResolved?.[overrides.name.toLowerCase()];
   const face = entry?.faces[0];
+  // Use the same stored-URL funnel as every card sink so deck-builder search
+  // preserves exact small/localized URLs rather than reconstructing CDN paths.
   return {
     name: entry?.name ?? overrides.name,
     mana_cost: entry?.mana_cost ?? "",
@@ -454,9 +953,7 @@ export function buildLocalSearchCard(overrides: LocalSearchCardOverrides): Scryf
     color_identity: overrides.colorIdentity,
     keywords: entry?.keywords ?? [],
     legalities: overrides.legalities,
-    image_uris: face
-      ? { art_crop: face.art_crop, normal: face.normal, small: face.normal, large: face.normal }
-      : undefined,
+    image_uris: face ? localFaceImageUris(face) : undefined,
   };
 }
 
@@ -542,9 +1039,17 @@ function resolveImageAsset(
   size: ImageSize,
   diagnosticName: string,
 ): CardImageAsset {
+  const src = resolveImageUrl(entry, faceIndex, size, diagnosticName);
+  const remote = remoteImageSource(src, size);
   return {
-    src: resolveImageUrl(entry, faceIndex, size, diagnosticName),
+    src,
     isRotated: isSidewaysLayout(entry.layout),
+    ...remote,
+    semantic: {
+      oracleId: entry.oracle_id.toLowerCase(),
+      faceIndex,
+      alias: diagnosticName.toLowerCase().normalize("NFC"),
+    },
   };
 }
 
@@ -552,16 +1057,16 @@ function isPlaceholderImageUrl(url: string): boolean {
   return url === "https://errors.scryfall.com/soon.jpg";
 }
 
-function resolvePrintingFallbackImageUrl(
+function resolvePrintingFallback(
   oracleId: string,
   faceIndex: number,
   size: ImageSize,
-): string | null {
+): { id: string; url: string } | null {
   const printings = printingsDataResolved?.[oracleId.toLowerCase()] ?? [];
   for (const printing of printings) {
     if (printing.set === "plst") continue;
     const url = resolvePrintingImageUrl(printing, faceIndex, size);
-    if (url && !isPlaceholderImageUrl(url)) return url;
+    if (url && !isPlaceholderImageUrl(url)) return { id: printing.id, url };
   }
   return null;
 }
@@ -576,8 +1081,14 @@ async function resolveImageAssetWithPrintingFallback(
   if (!isPlaceholderImageUrl(asset.src)) return asset;
 
   await loadPrintingsData();
-  const fallback = resolvePrintingFallbackImageUrl(entry.oracle_id, faceIndex, size);
-  return fallback ? { ...asset, src: fallback } : asset;
+  const fallback = resolvePrintingFallback(entry.oracle_id, faceIndex, size);
+  if (!fallback) return asset;
+  return {
+    ...asset,
+    src: fallback.url,
+    ...remoteImageSource(fallback.url, size),
+    semantic: { ...asset.semantic, englishPrintingId: fallback.id.toLowerCase() },
+  };
 }
 
 function resolveImageUrl(
@@ -587,7 +1098,7 @@ function resolveImageUrl(
   diagnosticName: string,
 ): string {
   const face = entry.faces[faceIndex] ?? entry.faces[0];
-  const url = face?.[size === "small" || size === "large" ? "normal" : size];
+  const url = localFaceImageUrl(face, size);
   if (!url) {
     throw new Error(`No ${size} image for "${diagnosticName}"`);
   }
@@ -615,6 +1126,11 @@ export interface TokenSearchFilters {
    *  vanilla printing — never an arbitrary same-shape printing that carries
    *  extra abilities (e.g. a Doctor Who 1/1 Human token with Ward 2). */
   hasAbilities?: boolean;
+  /** Printed keyword base names, lowercased (`["flying"]`, `["first strike"]`).
+   *  Narrow the most specific query rung with `kw:` clauses and validate the
+   *  local hit, so same-shape tokens with different keywords resolve to
+   *  distinct art. Absent for vanilla and rules-text-only tokens. */
+  keywords?: string[];
 }
 
 export async function fetchTokenImageUrl(
@@ -622,13 +1138,14 @@ export async function fetchTokenImageUrl(
   size: ImageSize = "normal",
   filters?: TokenSearchFilters,
 ): Promise<string> {
-  const localUrl = await fetchTokenImageFromLocal(tokenName, size);
+  const localUrl = await fetchTokenImageFromLocal(tokenName, size, filters);
   if (localUrl) return localUrl;
 
   const colorClause = buildTokenColorClause(filters?.colors);
   const subtypes = filters?.subtypes ?? [];
 
   // Progressive fallback ladder:
+  //   0. (keywords present only) Full shape plus `kw:` clauses.
   //   1. Most specific: name + P/T + colors + every subtype.
   //   2. Drop trailing subtypes one at a time (keeps the leading subtype
   //      longest — for MTG creature tokens the first subtype is the race
@@ -646,7 +1163,25 @@ export async function fetchTokenImageUrl(
   // pre-fix behavior) for a token type whose only printings carry abilities,
   // rather than producing no image at all. See issue #502.
   const vanillaOnly = filters?.hasAbilities === false;
+  const keywords = filters?.keywords ?? [];
   const queries: string[] = [];
+  if (keywords.length > 0) {
+    // Most specific rung: full shape plus `kw:` clauses, so same-shape
+    // tokens with different keywords resolve to distinct art. A miss (an
+    // engine keyword Scryfall does not know, or no such printing) costs one
+    // query and degrades to the ladder below — never to no image.
+    queries.push(
+      buildTokenQuery(
+        tokenName,
+        filters?.power,
+        filters?.toughness,
+        colorClause,
+        subtypes,
+        vanillaOnly,
+        keywords,
+      ),
+    );
+  }
   for (let n = subtypes.length; n >= 0; n--) {
     queries.push(
       buildTokenQuery(
@@ -684,10 +1219,15 @@ export async function fetchTokenImageUrl(
   throw new Error(`No token image found for "${tokenName}"`);
 }
 
-export async function fetchTokenImageByRef(
+export interface TokenImageAssetByRef {
+  src: string;
+  faceIndex: number;
+}
+
+export async function fetchTokenImageAssetByRef(
   ref: TokenImageRef,
   size: ImageSize = "normal",
-): Promise<string | null> {
+): Promise<TokenImageAssetByRef | null> {
   const data = await loadTokenImagesData();
   if (!data) return null;
 
@@ -696,7 +1236,7 @@ export async function fetchTokenImageByRef(
     const faceIndex = ref.face_name
       ? Math.max(0, idEntry.face_names.indexOf(ref.face_name.toLowerCase()))
       : 0;
-    return resolveImageUrl(idEntry, faceIndex, size, idEntry.name);
+    return { src: resolveImageUrl(idEntry, faceIndex, size, idEntry.name), faceIndex };
   }
 
   if (ref.scryfall_oracle_id) {
@@ -706,23 +1246,90 @@ export async function fetchTokenImageByRef(
       const faceIndex = ref.face_name
         ? Math.max(0, oracleEntry.face_names.indexOf(ref.face_name.toLowerCase()))
         : 0;
-      return resolveImageUrl(oracleEntry, faceIndex, size, oracleEntry.name);
+      return { src: resolveImageUrl(oracleEntry, faceIndex, size, oracleEntry.name), faceIndex };
     }
   }
 
   return null;
 }
 
+export async function fetchTokenImageByRef(
+  ref: TokenImageRef,
+  size: ImageSize = "normal",
+): Promise<string | null> {
+  return (await fetchTokenImageAssetByRef(ref, size))?.src ?? null;
+}
+
 async function fetchTokenImageFromLocal(
   tokenName: string,
   size: ImageSize,
+  filters?: TokenSearchFilters,
 ): Promise<string | null> {
   const data = await loadScryfallData();
   const key = `token:${tokenName.toLowerCase()}`;
   const entry = data?.[key];
   if (!entry) return null;
+  // The local map holds ONE printing per token name (last bulk row wins),
+  // so the hit is only usable when it matches the requested shape — a 1/1
+  // Goblin must not serve the stored 2/1-haste art, nor a white Spirit the
+  // stored blue one. On any mismatch, fall through to the remote ladder.
+  if (filters && !tokenLocalEntryMatches(entry, filters)) return null;
   const face = entry.faces[0];
-  return face?.[size === "small" || size === "large" ? "normal" : size] ?? null;
+  return localFaceImageUrl(face, size) ?? null;
+}
+
+/**
+ * Whether a local `token:` entry may serve a filtered token lookup. Every
+ * axis the filters constrain must agree; unconstrained axes (null power for
+ * a noncreature token, absent colors, no keywords) are skipped. Unknown
+ * filter values never match — they fall through to the remote ladder rather
+ * than serving possibly-wrong art.
+ */
+function tokenLocalEntryMatches(
+  entry: ScryfallDataEntry,
+  filters: TokenSearchFilters,
+): boolean {
+  if (filters.power != null && String(entry.power ?? "") !== String(filters.power)) {
+    return false;
+  }
+  if (
+    filters.toughness != null
+    && String(entry.toughness ?? "") !== String(filters.toughness)
+  ) {
+    return false;
+  }
+  if (filters.colors != null) {
+    const wanted = new Set(
+      filters.colors.map((c) => (MANA_COLOR_TO_SCRYFALL[c] ?? "").toLowerCase()),
+    );
+    wanted.delete("");
+    const actual = new Set((entry.colors ?? []).map((c) => c.toLowerCase()));
+    if (wanted.size !== actual.size || ![...wanted].every((c) => actual.has(c))) {
+      return false;
+    }
+  }
+  if (filters.subtypes != null && filters.subtypes.length > 0) {
+    const typeLine = (entry.type_line ?? "").toLowerCase();
+    if (!filters.subtypes.every((s) => typeLine.includes(s.toLowerCase()))) {
+      return false;
+    }
+  }
+  if (filters.hasAbilities === false && !tokenEntryIsVanilla(entry)) {
+    return false;
+  }
+  if (filters.keywords != null && filters.keywords.length > 0) {
+    const entryKeywords = new Set((entry.keywords ?? []).map((k) => k.toLowerCase()));
+    if (!filters.keywords.every((k) => entryKeywords.has(k.toLowerCase()))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function tokenEntryIsVanilla(entry: ScryfallDataEntry): boolean {
+  return (
+    (entry.keywords?.length ?? 0) === 0 && (entry.oracle_text?.trim() ?? "") === ""
+  );
 }
 
 function buildTokenQuery(
@@ -732,6 +1339,7 @@ function buildTokenQuery(
   colorClause: string,
   subtypes: string[],
   vanillaOnly: boolean,
+  keywords: string[] = [],
 ): string {
   let query = `t:token !"${name}"`;
   if (power != null) query += ` pow=${power}`;
@@ -742,6 +1350,11 @@ function buildTokenQuery(
     // Quote to defend against subtypes with spaces (e.g. multi-word
     // creature types from supplemental sets).
     query += ` t:"${s.toLowerCase()}"`;
+  }
+  for (const k of keywords) {
+    // `kw:` matches a printing carrying the keyword (any parameterization).
+    // Quoted for multi-word keywords ("first strike").
+    query += ` kw:"${k.toLowerCase().replace(/"/g, "")}"`;
   }
   // `is:vanilla` (a documented Scryfall predicate — a card with no abilities)
   // narrows the search to ability-less printings so an ability-less engine

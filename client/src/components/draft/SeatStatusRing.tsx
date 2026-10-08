@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 
-import type { SeatPublicView } from "../../adapter/draft-adapter";
+import { isSharedStackDistribution, type SeatPublicView } from "../../adapter/draft-adapter";
 import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
 import { BotIndicator } from "./BotIndicator";
 
@@ -8,9 +8,13 @@ const EMPTY_SEATS: SeatPublicView[] = [];
 
 // ── Pick status colors ──────────────────────────────────────────────────
 
+// `Waiting` reads as "drafting, but not this seat's turn" — the shared-stack
+// seat that owes no decision yet. So it takes the same neutral treatment as
+// `Pending` at lower emphasis, sitting between `Pending` and `NotDrafting`.
 const PICK_STATUS_BORDER: Record<SeatPublicView["pick_status"], string> = {
   Pending: "border-white/20",
   Picked: "border-green-400/30",
+  Waiting: "border-white/10",
   TimedOut: "border-red-400/30",
   NotDrafting: "border-white/10",
 };
@@ -18,18 +22,36 @@ const PICK_STATUS_BORDER: Record<SeatPublicView["pick_status"], string> = {
 const PICK_STATUS_DOT: Record<SeatPublicView["pick_status"], string> = {
   Pending: "bg-white/30",
   Picked: "bg-green-400",
+  Waiting: "bg-white/20",
   TimedOut: "bg-red-400",
   NotDrafting: "bg-white/10",
 };
 
 // ── Seat Badge ──────────────────────────────────────────────────────────
 
+/**
+ * Which per-seat tally the badge shows.
+ *
+ * `"packs"` is the pick-and-pass reading: `active_pack_count` is the engine's
+ * 0-or-1 presence signal for a booster a seat is holding right now. Under a
+ * shared stack no seat ever holds a booster — the engine publishes 0 for every
+ * seat by construction — so that badge would sit at zero for the whole draft
+ * while the number a Winston player actually tracks goes unshown. `"drafted"`
+ * is that number: how many cards the seat has taken, which is open information
+ * at the table because everyone watches the piles move.
+ *
+ * A typed axis rather than a `boolean`, so a third reading (a sealed pool's
+ * size, say) is a variant rather than a second flag.
+ */
+type SeatTally = "packs" | "drafted";
+
 interface SeatBadgeProps {
   seat: SeatPublicView;
   isLocal: boolean;
+  tally: SeatTally;
 }
 
-function SeatBadge({ seat, isLocal }: SeatBadgeProps) {
+function SeatBadge({ seat, isLocal, tally }: SeatBadgeProps) {
   const { t } = useTranslation("draft");
   const botLabel = t("lobby.botSeat");
   // Disconnected humans get a red border that overrides the pick-status colour.
@@ -40,29 +62,122 @@ function SeatBadge({ seat, isLocal }: SeatBadgeProps) {
     : isLocal
       ? "border-emerald-400/40"
       : PICK_STATUS_BORDER[seat.pick_status];
+  const faceUpNames = seat.face_up_draft_cards.map((card) => card.name).join(", ");
+  const count = tally === "drafted" ? seat.drafted_card_count : seat.active_pack_count;
+  const seatName = seat.display_name || t("seat.label", { number: seat.seat_index + 1 });
 
   return (
     <div
-      className={`flex items-center gap-1.5 rounded-[12px] border bg-black/18 px-2 py-1 backdrop-blur-md ${borderColor}`}
+      data-seat-badge
+      className={`relative flex h-full min-h-[40px] w-full min-w-[15ch] flex-col items-start rounded-[8px] border bg-black/18 px-1.5 py-0.5 pr-14 backdrop-blur-md ${borderColor}`}
     >
-      <div
-        className={`h-1.5 w-1.5 rounded-full ${
-          showDisconnected
-            ? "bg-rose-400"
-            : PICK_STATUS_DOT[seat.pick_status]
-        }`}
-        aria-label={
-          showDisconnected ? t("seat.disconnected") : t("seat.connected")
-        }
-      />
-      <span
-        className={`truncate text-xs ${
-          showDisconnected ? "text-white/40 line-through" : "text-white/70"
-        }`}
-      >
-        {seat.display_name || t("seat.label", { number: seat.seat_index + 1 })}
+      <div className="flex min-w-0 items-center gap-1.5">
+        <div
+          className={`h-1.5 w-1.5 rounded-full ${
+            showDisconnected
+              ? "bg-rose-400"
+              : PICK_STATUS_DOT[seat.pick_status]
+          }`}
+          aria-label={
+            showDisconnected ? t("seat.disconnected") : t("seat.connected")
+          }
+        />
+        <span
+          className={`truncate ${
+            showDisconnected ? "text-white/40 line-through" : "text-white/70"
+          }`}
+        >
+          {seat.display_name || t("seat.label", { number: seat.seat_index + 1 })}
+        </span>
+        {seat.is_bot && <BotIndicator label={botLabel} size="sm" />}
+      </div>
+      {faceUpNames && (
+        <span
+          className="max-w-full break-words text-[10px] leading-tight text-amber-200"
+          title={faceUpNames}
+        >
+          {t("seat.faceUpDraftCards", { cards: faceUpNames })}
+        </span>
+      )}
+      <span className="sr-only">
+        {t(tally === "drafted" ? "seat.draftedCardCount" : "seat.activePackCount", { count, player: seatName })}
       </span>
-      {seat.is_bot && <BotIndicator label={botLabel} size="sm" />}
+      {/* Icon BESIDE the number, not behind it. A digit centred on the artwork
+          had to be outlined to stay legible against it, and a three-digit
+          count — which a shared-stack pool reaches — sat over the busiest part
+          of the icon. Side by side, the number is read against the badge's own
+          background and needs no stroke. The badge reserves the width with
+          `pr-14`, matching the ring's own `calc(15ch+3.5rem)` column floor. */}
+      <span
+        data-seat-tally={tally}
+        className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-1"
+        aria-hidden="true"
+      >
+        <img
+          src={tally === "drafted" ? "/icons/cards.svg" : "/icons/packs.svg"}
+          alt=""
+          className={`h-5 w-5 shrink-0 object-contain ${count === 0 ? "opacity-35 grayscale" : ""}`}
+        />
+        <span className="font-mono text-xs font-bold tabular-nums text-jade">{count}</span>
+      </span>
+    </div>
+  );
+}
+
+interface SeatStatusRingLayoutProps {
+  seats: SeatPublicView[];
+  passDirection: "Left" | "Right" | undefined;
+  localSeat: number | null;
+  passDirectionLabel: string;
+  tally: SeatTally;
+  /** Whether packs move between seats at all. False under a shared stack,
+   *  where every booster was shuffled into one pile before the draft began —
+   *  so there is no direction to point, and an arrow would describe a rule the
+   *  format does not have. */
+  passesPacks: boolean;
+}
+
+export function SeatStatusRingLayout({
+  seats,
+  passDirection,
+  localSeat,
+  passDirectionLabel,
+  tally,
+  passesPacks,
+}: SeatStatusRingLayoutProps) {
+  const arrow = passDirection === "Right" ? "←" : "→";
+  const arrowElement = (
+    <span
+      aria-hidden="true"
+      data-pass-arrow
+      className="flex w-4 shrink-0 items-center justify-center text-sm text-white/40"
+    >
+      {arrow}
+    </span>
+  );
+
+  return (
+    <div
+      data-seat-status-ring
+      data-pass-direction={passDirection ?? "Left"}
+      className="mb-2 grid grid-cols-[repeat(auto-fit,minmax(calc(15ch+3.5rem),1fr))] gap-1 text-xs"
+    >
+      {passesPacks && <span className="sr-only">{passDirectionLabel}</span>}
+      {seats.map((seat) => (
+        <div
+          key={seat.seat_index}
+          data-seat-pass-unit
+          className="flex min-w-0 items-stretch gap-1.5"
+        >
+          {passesPacks && passDirection === "Right" && arrowElement}
+          <SeatBadge
+            seat={seat}
+            isLocal={seat.seat_index === localSeat}
+            tally={tally}
+          />
+          {passesPacks && passDirection !== "Right" && arrowElement}
+        </div>
+      ))}
     </div>
   );
 }
@@ -75,39 +190,29 @@ export function SeatStatusRing() {
   const seats = useMultiplayerDraftStore((s) => s.view?.seats ?? EMPTY_SEATS);
   const passDirection = useMultiplayerDraftStore((s) => s.view?.pass_direction);
   const localSeat = useMultiplayerDraftStore((s) => s.seatIndex);
+  // The ENGINE's PROCEDURE discriminator, not `shared_stack`. Both answer "is
+  // this a shared-stack pod" during the draft, but `shared_stack` is
+  // status-gated to `Drafting` — and this ring is also rendered in the pod
+  // status dialog, which opens in deckbuilding, during matches and after the
+  // pod completes. Keyed on the live stack it would go back to showing packs
+  // and pass arrows for a Winston pod the moment the last card was taken.
+  // Emphatically not a kind check either, and not `active_pack_count === 0`,
+  // which is also what an ordinary draft reads between rounds.
+  const distribution = useMultiplayerDraftStore((s) => s.view?.distribution ?? null);
+  const sharedStack = isSharedStackDistribution(distribution);
 
   if (seats.length === 0) return null;
 
-  // Top row: seats 0-3, Bottom row: seats 4-7
-  const topRow = seats.slice(0, 4);
-  const bottomRow = seats.slice(4, 8);
-
   return (
-    <div className="flex flex-col gap-2 mb-4">
-      <div className="grid grid-cols-4 gap-2">
-        {topRow.map((seat) => (
-          <SeatBadge
-            key={seat.seat_index}
-            seat={seat}
-            isLocal={seat.seat_index === localSeat}
-          />
-        ))}
-      </div>
-      {/* Pass direction indicator */}
-      <div className="flex justify-center text-white/40 text-sm">
-        {passDirection === "Left"
-          ? t("seat.passingLeft")
-          : t("seat.passingRight")}
-      </div>
-      <div className="grid grid-cols-4 gap-2">
-        {bottomRow.map((seat) => (
-          <SeatBadge
-            key={seat.seat_index}
-            seat={seat}
-            isLocal={seat.seat_index === localSeat}
-          />
-        ))}
-      </div>
-    </div>
+    <SeatStatusRingLayout
+      seats={seats}
+      passDirection={passDirection}
+      localSeat={localSeat}
+      passDirectionLabel={passDirection === "Right"
+        ? t("seat.passingRight")
+        : t("seat.passingLeft")}
+      tally={sharedStack ? "drafted" : "packs"}
+      passesPacks={!sharedStack}
+    />
   );
 }

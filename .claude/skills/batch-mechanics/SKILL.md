@@ -95,7 +95,7 @@ When a teammate finishes implementing, direct them through these steps **in orde
 >      ./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data
 >    else
 >      cargo clippy --all-targets -- -D warnings
->      cargo test -p engine
+>      cargo test -p phase-engine
 >      ./scripts/gen-card-data.sh
 >    fi
 >    ```

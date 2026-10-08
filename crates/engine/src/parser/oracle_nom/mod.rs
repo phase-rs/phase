@@ -10,11 +10,14 @@
 pub mod bridge;
 pub mod condition;
 pub mod context;
+pub mod defender_exception;
 pub mod duration;
 pub mod enchant;
+pub mod enters_under;
 pub mod error;
 pub mod filter;
 pub mod player_counter_difference;
+pub mod prevention;
 pub mod primitives;
 pub mod quantity;
 pub mod return_as_aura;

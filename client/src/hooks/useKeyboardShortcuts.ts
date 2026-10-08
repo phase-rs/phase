@@ -1,14 +1,18 @@
 import { useEffect } from "react";
 
-import { isMultiplayerMode, useGameStore } from "../stores/gameStore";
+import {
+  canExportAuthoritativeState,
+  isAuthorityRemote,
+  useGameStore,
+} from "../stores/gameStore";
 import { useUiStore } from "../stores/uiStore";
 import { dispatchAction } from "../game/dispatch";
-import { getPlayerId } from "./usePlayerId";
+import { getCanActForWaitingState, getPlayerId } from "./usePlayerId";
 import { useAltToggle } from "./useAltToggle";
 import { useShiftHeld } from "./useShiftHeld";
 import {
   copyGameStateDebugSnapshot,
-  exportGameStateDebugZip,
+  exportAuthoritativeGameStateZip,
 } from "../services/gameStateExport";
 
 /**
@@ -71,8 +75,16 @@ export function useKeyboardShortcuts(): void {
         return;
       }
 
-      const { gameState, waitingFor, dispatch, undo, stateHistory, gameMode } =
-        useGameStore.getState();
+      const {
+        gameState,
+        waitingFor,
+        dispatch,
+        undo,
+        stateHistory,
+        gameMode,
+        manaPaymentShortcutActions,
+        adapter,
+      } = useGameStore.getState();
       const uiState = useUiStore.getState();
 
       // Flex Layout edit mode owns Escape while active so it can't fall through
@@ -98,9 +110,9 @@ export function useKeyboardShortcuts(): void {
           break;
 
         case " ":
-          if (waitingFor?.type === "Priority") {
+          if (waitingFor?.type === "Priority" && getCanActForWaitingState()) {
             e.preventDefault();
-            dispatch({ type: "PassPriority" });
+            dispatchAction({ type: "PassPriority" });
           }
           break;
 
@@ -134,7 +146,7 @@ export function useKeyboardShortcuts(): void {
           // Suppressed in multiplayer — the store's undo() already returns
           // early in that mode, but gating the shortcut here also avoids
           // swallowing the keystroke.
-          if (!e.ctrlKey && !e.metaKey && !isMultiplayerMode(gameMode)) {
+          if (!e.ctrlKey && !e.metaKey && !isAuthorityRemote(gameMode)) {
             e.preventDefault();
             if (stateHistory.length > 0) {
               undo();
@@ -146,18 +158,11 @@ export function useKeyboardShortcuts(): void {
         case "T":
           if (waitingFor?.type === "ManaPayment") {
             e.preventDefault();
-            // Tap all untapped lands controlled by the player
-            const gs = useGameStore.getState().gameState;
-            const mp = waitingFor.data.player;
-            if (gs) {
-              for (const id of gs.battlefield) {
-                const o = gs.objects[id];
-                if (o && !o.tapped && o.controller === mp
-                    && o.card_types.core_types.includes("Land")) {
-                  dispatch({ type: "TapLandForMana", data: { object_id: id } });
-                }
+            void (async () => {
+              for (const action of manaPaymentShortcutActions) {
+                await dispatch(action);
               }
-            }
+            })();
           }
           break;
 
@@ -186,9 +191,19 @@ export function useKeyboardShortcuts(): void {
         case "D":
           if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
             e.preventDefault();
-            if (gameState) {
-              exportGameStateDebugZip(gameState)
-                .then((filename) => console.log(`[Debug] Game state exported to ${filename}`))
+            if (adapter?.exportPersistenceState && canExportAuthoritativeState(gameMode)) {
+              exportAuthoritativeGameStateZip(adapter)
+                .then((result) => {
+                  if (result.kind === "failed") {
+                    console.error("[Debug] Game state export failed");
+                  } else if (result.kind === "requested") {
+                    console.log(`[Debug] Game state export requested (${result.filename})`);
+                  } else if (result.path) {
+                    console.log(`[Debug] Game state exported to ${result.path}`);
+                  } else {
+                    console.log(`[Debug] Game state exported ${result.filename}`);
+                  }
+                })
                 .catch((err) => console.error("[Debug] Failed to export:", err));
             }
           } else if (!e.ctrlKey && !e.metaKey) {

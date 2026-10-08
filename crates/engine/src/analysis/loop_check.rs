@@ -61,6 +61,7 @@ use crate::analysis::resource::{
 };
 use crate::types::game_state::GameState;
 use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 use serde::{Deserialize, Serialize};
 
 /// How a confirmed net-progress loop reaches a win (or merely accrues unbounded
@@ -123,10 +124,15 @@ pub struct LoopCertificate {
     pub unbounded: Vec<ResourceAxis>,
     /// The classified win condition derived from `unbounded`.
     pub win_kind: WinKind,
-    /// CR 104.4b vs CR 732.2a/CR 732.6: whether the cycle is all-mandatory (no
-    /// "may"/choice once started). `true` ⇒ a forced loop the live path would draw
-    /// (CR 732.4) absent a net resource; `false` ⇒ an optional loop a player chooses
-    /// to repeat. The detector cannot infer optionality from two states alone, so
+    /// CR 732.5 / CR 732.2b: whether NO living player has a meaningful priority action
+    /// that could break the loop — the producer's own measurement, not a property of the
+    /// cycle's contents. (`game::engine::interactive_loop_bridge` assigns it from
+    /// `no_living_player_has_meaningful_priority_action`, which probes EVERY living player
+    /// as the priority holder.) CR 732.5 is why that is the right question: no player can
+    /// be forced to take an action that would end a loop, so a loop is unbreakable exactly
+    /// when nobody HAS such an action to take voluntarily; CR 732.2b is the shortcut-side
+    /// counterpart — the window in which another player would name a different choice.
+    /// The detector cannot infer optionality from two states alone, so
     /// the caller (which drives the actions) supplies it.
     pub mandatory: bool,
     /// CR 110.1: non-recycled per-cycle remainder of battlefield permanents (the "+1
@@ -134,6 +140,13 @@ pub struct LoopCertificate {
     /// paths require an identical battlefield); wired now so an object-growth path
     /// populates it with no further change. NOT a `ResourceAxis` — concrete permanents.
     pub residual_board_delta: BoardDelta,
+    /// CR 732.2a: the measured resource signature of ONE repetition, published only by a
+    /// producer that narrowed the CR 704 repetition bound (the bounded cycle offer).
+    /// `None` for every other offer, and for every save written before this field existed
+    /// — in which case a drive falls back to the recurrence disjunct, i.e. exactly shipped
+    /// behaviour. `skip_serializing_if` keeps the existing payload byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_cycle: Option<crate::analysis::resource::PeriodicDelta>,
 }
 
 impl LoopCertificate {
@@ -146,10 +159,17 @@ impl LoopCertificate {
     }
 }
 
-/// CR 732.2a: the public, log/display summary a `WaitingFor::RespondToShortcut` carries
-/// to each responding opponent — "the player with priority suggests repeating this loop
-/// N times". Every field is derived from public board state (the confirmed certificate +
-/// the proposer's declared count), so there is no hidden information to redact.
+/// CR 732.2a: the log/display summary a `WaitingFor::RespondToShortcut` carries to each
+/// responding opponent — "the player with priority suggests repeating this loop N times".
+///
+/// Every field EXCEPT [`ShortcutProposal::template`] is derived from public board state (the
+/// confirmed certificate + the proposer's declared count). `template` is NOT: it is the
+/// proposer's `DecisionTemplate` moved here verbatim by `game::engine::handle_declare_shortcut`,
+/// and its pins can name objects in hidden zones. It is redacted per viewer in
+/// `game::visibility::filter_state_for_viewer` through the shared `pins_name_hidden_source`
+/// authority — all-or-nothing per CR 732.2b, the whole template is dropped and never trimmed.
+/// The blanket "no hidden information to redact" this doc used to claim is exactly what let
+/// this carrier drift from the `WaitingFor::LoopShortcut` offer it is copied from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShortcutProposal {
     /// CR 732.2a: the player with priority who proposed the shortcut. This is separate from
@@ -173,13 +193,60 @@ pub struct ShortcutProposal {
     /// streams (skip-if-none), so this is a byte-preserving addition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<DecisionTemplate>,
+    /// CR 732.2a: copied verbatim off the confirmed certificate so the drive reads ONE
+    /// authority for what a conformant cycle looks like. `None` for every offer whose
+    /// producer states no per-period signature (see [`LoopCertificate::per_cycle`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_cycle: Option<crate::analysis::resource::PeriodicDelta>,
+    /// CR 732.2b/c: the responder whose named place is this proposal's current ending point.
+    /// CR 732.2b makes the place they named "the new ending point of the proposed sequence",
+    /// and CR 732.2c's third sentence owes the different game choice to the player who then
+    /// has priority — so this is the seat that obligation belongs to.
+    ///
+    /// `None` is "nobody has shortened", the state every mint writes. A later shortening
+    /// OVERWRITES it, because the last named place is the ending point and its namer is who
+    /// then has priority; an `Accept` neither sets nor clears it, because an `Accept` names no
+    /// place. Two consumers read it, and naming both here is why neither restates the rule:
+    /// `game::engine`'s ending-seat authority, and its fixed materializer's route answer — a
+    /// captured object-growth period a responder shortened is PERFORMED rather than elided,
+    /// because the elision's licence is an unbounded advance that a shortening declines.
+    ///
+    /// A seat identity is public board state, so this carries no redaction seam of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shortened_by: Option<PlayerId>,
+}
+
+impl ShortcutProposal {
+    /// CR 732.2b: every place a responder may name to shorten this proposal — "a place where
+    /// they will make a game choice that's different than what's been proposed". A place at or
+    /// past the proposed count names no such choice, so the range ends one below the count.
+    ///
+    /// A proposal of zero repetitions offers nothing to diverge from, and that is a value of the
+    /// return type rather than an error: the empty range's floor sits above its ceiling, and
+    /// `contains` refuses every place against it, zero included.
+    pub fn shortening_places(&self) -> std::ops::RangeInclusive<u32> {
+        match self.count {
+            IterationCount::Fixed(iterations) => iterations
+                .checked_sub(1)
+                .map_or(std::ops::RangeInclusive::new(1, 0), |last| 0..=last),
+            // CR 704.5a: the drain runs until a player loses, so the proposal names no count
+            // and no place is past its end.
+            IterationCount::UntilLethal => 0..=u32::MAX,
+        }
+    }
 }
 
 /// CR 732.2b/c: an opponent's answer to a proposed loop shortcut. `Accept` lets the
-/// shortcut proceed; `Shorten` names an earlier stopping point (Phase 3 realizes this
-/// conservatively as decline-to-manual — the opponent receives a real priority window
-/// instead of the loop being auto-taken; finite-K materialization is Phase 4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// shortcut proceed; `Shorten` names an earlier stopping point.
+///
+/// CR 732.2b lets a shortening player name the PLACE now and the choice later — "the player
+/// doesn't need to specify at this time what the new choice will be" — which is why `Shorten`
+/// carries `at_iteration` and no choice payload.
+///
+/// `at_iteration` is a partial-advance instruction, not a stop signal: the named place becomes
+/// the proposal's count, the poll runs on to the last player, and the shortcut is then taken to
+/// that place (CR 732.2c). `ShortcutProposal::shortened_by` carries whose place it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ShortcutResponse {
     /// CR 732.2c: this player agrees to take the shortcut.
     Accept,
@@ -204,7 +271,8 @@ pub enum ShortcutResponse {
 /// `controller` is the loop's controlling player (so the consumed-axis constraint
 /// is scoped to *their* life/mana and opponent depletion reads as progress, and
 /// the win classifier can tell an opponent loss from self-mill/lifegain), and
-/// `mandatory` records whether the driven cycle contained an optional choice. The
+/// `mandatory` records whether no living player had a meaningful priority action that
+/// could break the loop (CR 732.5). The
 /// caller, which drove the actions, knows both.
 pub fn detect_loop(
     cycle_start: &GameState,
@@ -254,7 +322,7 @@ pub fn detect_loop(
         return None;
     }
 
-    let win_kind = classify_win_kind(controller, delta);
+    let win_kind = classify_win_kind(controller, delta, Some(cycle_end));
     Some(LoopCertificate {
         unbounded,
         win_kind,
@@ -271,6 +339,9 @@ pub fn detect_loop(
         // Invariant pinned by `residual_empty_for_constant_depth` (T12). (No CR
         // annotation: this is an invariant/plumbing comment, not rule-implementing code.)
         residual_board_delta: crate::analysis::resource::board_delta(cycle_start, cycle_end),
+        // CR 732.2a: `detect_loop` states no CR 704 repetition bound, so it publishes no
+        // per-period signature either. Only the bounded-cycle offer does.
+        per_cycle: None,
     })
 }
 
@@ -404,7 +475,7 @@ pub(crate) fn live_mandatory_loop_winner(
     // reaches the poison branch before the Advantage fallthrough, so the winner's own
     // lifegain does not mask a rising-poison loss.
     if !matches!(
-        classify_win_kind(winner, delta),
+        classify_win_kind(winner, delta, Some(cycle_end)),
         WinKind::LethalDamage | WinKind::PoisonLoss
     ) {
         return None;
@@ -463,11 +534,51 @@ pub(crate) fn live_mandatory_loop_winner(
 /// (the one non-faller) is. A transient intra-cycle dip that recovers to a
 /// non-negative NET delta would still kill the winner via the CR 704.5a SBA at low
 /// absolute life before the extrapolated win — a net-delta check cannot see it.
-/// Per-resolution granularity IS SBA granularity here (CR 704.3 checks whenever a
-/// player would get priority, between resolutions), and consecutive ring frames are
-/// consecutive resolutions (a non-sampling beat clears the ring), so requiring
-/// `life[winner]` non-decreasing across the matched window (prior frame → every
-/// subsequent ring frame → the live state) is exactly right. Winner draw-from-empty
+/// Per-resolution granularity IS SBA granularity here, but NOT because ring frames are
+/// consecutive resolutions — they are not, and never were. The shipped CR 603.3b
+/// `OrderTriggers` exemption already retains the ring across a non-sampling beat (dump D
+/// measured 35 such beats in one drive), and `WaitingFor::is_forced_cascade_window`
+/// extends that to every forced pre-priority window (CR 603.3d / CR 603.5 + CR 608.2 /
+/// CR 903.9a / CR 704.5j / CR 310.11 / CR 703.1 + CR 117.3a). The invariant this guard
+/// actually needs is weaker and true:
+/// **every point at which CR 704.5a could fire is either sampled or clears the ring.**
+/// CR 704.3 fixes those points: SBAs are checked whenever a player would get priority,
+/// and every such point arrives as `WaitingFor::Priority`, which is deliberately not a
+/// forced-cascade window and therefore samples or clears. The retained windows are
+/// exempt for three DIFFERENT reasons, and the weaker invariant is what covers all
+/// three:
+/// the between-resolutions members (CR 603.3b / CR 603.3d / CR 903.9a / CR 704.5j /
+/// CR 310.11) sit inside the CR 704.3 fixpoint itself, where no life total moves; the
+/// MID-resolution member (`OptionalEffectChoice`, CR 603.5 + CR 608.2) is a pause in the
+/// middle of a resolution, where life absolutely can move — but CR 608.2 performs no SBA
+/// check mid-resolution, so a life change there is not a CR 704.5a point being skipped,
+/// it is a life change that the very next CR 704.3 check (a `Priority` window) observes;
+/// the TURN-BASED members (CR 703.1 + CR 117.3a — untap CR 502.3, declare attackers
+/// CR 508.1/508.1g, declare blockers CR 509.1, cleanup discard CR 514.1) precede the
+/// step's own grant of priority (CR 508.2 is the explicit case), and the DECLARATION
+/// itself moves no life: untapping, declaring, exerting/enlisting and discarding change
+/// no life, and anything that WOULD (an attack trigger) uses the stack and therefore
+/// resolves at an observed `Priority` beat.
+/// That is a claim about the declaration only, and the two life-moving neighbours it
+/// deliberately excludes are why the class is drawn where it is:
+/// * CR 508.1h / CR 509.1d put the declaration's COSTS in a separate sub-step
+///   ("Costs may include paying mana, tapping permanents, sacrificing permanents,
+///   discarding cards, and so on"), and a Phyrexian symbol in an attack or block tax is
+///   paid with 2 life (CR 107.4f) — measured in-code: `engine_combat::handle_pay_combat_tax`
+///   pays through `casting::pay_unless_cost`, which settles `life_payments` via
+///   `life_costs::pay_life_as_cost`. So declaring CAN move life, at
+///   `WaitingFor::CombatTaxPayment` — which is deliberately NOT a member and therefore
+///   clears the ring.
+/// * `AssignCombatDamage` / `AssignBlockerDamage` are likewise NOT members despite being
+///   turn-based (CR 510.1c / CR 510.1d): CR 510.2 deals the assigned damage with no
+///   intervening priority. That window-keyed exclusion is necessary but NOT sufficient,
+///   because the window opens only for a damage DIVISION choice — an unblocked attacker
+///   deals CR 510.2 damage with no window at all. The sufficient guard is event-keyed:
+///   `GameState::invalidate_loop_ring_on_unobserved_life_move`, called from
+///   `game::combat_damage::apply_combat_damage`.
+///
+/// So requiring `life[winner]` non-decreasing across the matched window (prior frame →
+/// every subsequent ring frame → the live state) is exactly right. Winner draw-from-empty
 /// is correctly unreachable (a non-faller never crosses a loss SBA).
 pub(crate) fn winner_life_never_dips(frames: &[&GameState], winner: PlayerId) -> bool {
     let mut prev: Option<i32> = None;
@@ -519,7 +630,14 @@ pub(crate) fn fallers_lives_pairwise_equal(frames: &[&GameState], fallers: &[Pla
 /// / life loss from / mill on a player who is *not* the loop's controller is an
 /// opponent loss condition; the corpus rows are two-player, so any non-controller
 /// player is the opponent.
-pub(crate) fn classify_win_kind(controller: PlayerId, delta: &ResourceVector) -> WinKind {
+///
+/// `state` supplies the library storage authority (`GameState::zone_storage_seat`);
+/// `None` is the stateless static analysis, whose seats are their own storage.
+pub(crate) fn classify_win_kind(
+    controller: PlayerId,
+    delta: &ResourceVector,
+    state: Option<&GameState>,
+) -> WinKind {
     // CR 704.5a: a player at 0 life loses — so unbounded damage is a WIN only when
     // the damaged player is an OPPONENT (a non-controller). Damage to the loop's
     // own controller (self-ping offset by lifegain) is an advantage engine, not a
@@ -557,11 +675,14 @@ pub(crate) fn classify_win_kind(controller: PlayerId, delta: &ResourceVector) ->
     }
     // CR 104.3c / CR 121.4: an unbounded *downward* library delta on a player
     // other than the loop's controller is a mill/deck-out win. The controller
-    // milling *themselves* is not a win, so require an opponent victim.
+    // milling *themselves* is not a win, so require an opponent victim whose
+    // library is not the controller's own (a shared pile draws for both).
+    let library_holder =
+        |seat: PlayerId| state.map_or(seat, |s| s.zone_storage_seat(Zone::Library, seat));
     if delta
         .library_delta
         .iter()
-        .any(|(pid, &n)| n < 0 && *pid != controller)
+        .any(|(pid, &n)| n < 0 && library_holder(*pid) != library_holder(controller))
     {
         return WinKind::Decking;
     }
@@ -589,6 +710,13 @@ mod tests {
     fn pid(n: u8) -> PlayerId {
         PlayerId(n)
     }
+
+    // The CR 704.3 partition `winner_life_never_dips` rests on — `Priority` DISJOINT from
+    // the retained class, over both priority seats — is asserted by
+    // `types::game_state::forced_cascade_window_tests::forced_cascade_window_class`, which
+    // covers it strictly more completely (thirteen members and eight non-members, including both
+    // `Priority` seats). A second weaker row here would only be a place for the two to
+    // drift apart.
 
     fn battlefield_creature(state: &mut GameState, id: u64, controller: u8) -> ObjectId {
         let oid = ObjectId(id);
@@ -873,6 +1001,44 @@ mod tests {
         );
     }
 
+    /// CR 104.3c: under a shared pile the controller draws from the pile it drains, so a
+    /// cycle that empties it is self-mill from either seat; a per-seat library still decks
+    /// the opponent.
+    #[test]
+    fn shared_pile_drain_is_advantage_per_seat_drain_is_decking() {
+        let mut delta = ResourceVector::default();
+        delta.library_delta.insert(pid(0), -2);
+        delta.library_delta.insert(pid(1), -2);
+
+        let dandan = GameState::new(crate::types::format::FormatConfig::dandan(), 2, 7);
+        for controller in [pid(0), pid(1)] {
+            assert_eq!(
+                classify_win_kind(controller, &delta, Some(&dandan)),
+                WinKind::Advantage,
+                "shared pile, controller {controller:?}: draining the pile is not decking an opponent"
+            );
+        }
+
+        let standard = GameState::new_two_player(7);
+        assert_eq!(
+            classify_win_kind(pid(0), &delta, Some(&standard)),
+            WinKind::Decking,
+            "reach: per-seat libraries, the opponent's library falls"
+        );
+        assert_eq!(
+            classify_win_kind(pid(0), &delta, None),
+            WinKind::Decking,
+            "reach: stateless analysis reads each seat as its own library"
+        );
+
+        let mut start = dandan.clone();
+        battlefield_creature(&mut start, 500, 0);
+        let end = start.clone();
+        let cert = detect_loop(&start, &end, &delta, pid(0), false)
+            .expect("a pile-draining cycle is still a loop");
+        assert_eq!(cert.win_kind, WinKind::Advantage);
+    }
+
     /// `covers` is a superset test: a certificate naming more axes than expected
     /// still covers, but one missing the expected axis does not.
     #[test]
@@ -885,6 +1051,7 @@ mod tests {
             win_kind: WinKind::LethalDamage,
             mandatory: true,
             residual_board_delta: BoardDelta::default(),
+            per_cycle: None,
         };
         assert!(cert.covers(&[ResourceAxis::DamageDealt(pid(1))]));
         assert!(cert.covers(&[
@@ -952,12 +1119,12 @@ mod tests {
 
         // LOAD-BEARING: same delta, victim-as-controller flips the classification.
         assert_eq!(
-            classify_win_kind(pid(0), &delta),
+            classify_win_kind(pid(0), &delta, None),
             WinKind::LethalDamage,
             "real controller P0: P1 life-loss is lethal"
         );
         assert_eq!(
-            classify_win_kind(pid(1), &delta),
+            classify_win_kind(pid(1), &delta, None),
             WinKind::Advantage,
             "victim-as-controller P1: own life-loss is not a win => Advantage (param is load-bearing)"
         );
@@ -983,9 +1150,9 @@ mod tests {
         assert!(cert.covers(&[ResourceAxis::LibraryDelta(pid(1))]));
 
         // LOAD-BEARING: same delta, victim-as-controller is self-mill => Advantage.
-        assert_eq!(classify_win_kind(pid(0), &delta), WinKind::Decking);
+        assert_eq!(classify_win_kind(pid(0), &delta, None), WinKind::Decking);
         assert_eq!(
-            classify_win_kind(pid(1), &delta),
+            classify_win_kind(pid(1), &delta, None),
             WinKind::Advantage,
             "self-mill (controller == victim) is advantage, not a deck-out win"
         );
@@ -1016,7 +1183,7 @@ mod tests {
         let mut self_dmg = ResourceVector::default();
         self_dmg.damage_dealt.insert(pid(0), 1);
         assert_eq!(
-            classify_win_kind(pid(0), &self_dmg),
+            classify_win_kind(pid(0), &self_dmg, None),
             WinKind::Advantage,
             "damage to the loop's own controller is not a win (CR 704.5a): \
              a player loses only when THEY reach 0 life"
@@ -1026,7 +1193,7 @@ mod tests {
         let mut opp_dmg = ResourceVector::default();
         opp_dmg.damage_dealt.insert(pid(1), 1);
         assert_eq!(
-            classify_win_kind(pid(0), &opp_dmg),
+            classify_win_kind(pid(0), &opp_dmg, None),
             WinKind::LethalDamage,
             "unbounded damage to an OPPONENT is still lethal (CR 704.5a)"
         );
@@ -1414,6 +1581,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         }
     }
@@ -1755,6 +1923,7 @@ mod tests {
                 &prior,
                 &current,
                 &saproling_class,
+                pid(0),
             ),
             "the frames must be a valid fodder cover (so the None in (1) is non-vacuous)"
         );

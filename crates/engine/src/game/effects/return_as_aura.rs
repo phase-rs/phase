@@ -34,17 +34,16 @@
 //! adds, so the grants depend on the removal and apply after it).
 
 use crate::game::filter::{matches_target_filter, FilterContext};
-use crate::game::replacement::{self, ReplacementResult};
+use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{
     ContinuousModification, Duration, Effect, EffectError, EffectKind, ResolvedAbility,
     TargetFilter, TargetRef,
 };
 use crate::types::card_type::{CoreType, SubtypeSet};
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
-use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
 /// CR 614.1 + CR 614.12: Resolve a `Effect::ReturnAsAura` sub-effect.
@@ -130,50 +129,26 @@ pub fn resolve(
             obj.trigger_definitions.clear();
         }
 
-        // CR 303.4g + CR 614.6 + CR 616.1: No legal object to enchant → owner's
-        // graveyard. Route the Battlefield → Graveyard move through the
-        // replacement pipeline so leaves-the-battlefield replacements
-        // (Rest in Peace → exile, Leyline of the Void → exile, regen shields,
-        // etc.) can intercept the zone change exactly as they would for any
-        // other LTB event.
-        let proposed = ProposedEvent::zone_change(
-            returned_id,
-            Zone::Battlefield,
-            Zone::Graveyard,
-            Some(ability.source_id),
+        // CR 303.4g + CR 614.1 + CR 616.1: No legal object to enchant proposes
+        // the owner's-graveyard move through the replacement-safe pipeline.
+        // Keep the sole resolution event in the typed completion: Rest in Peace
+        // / Leyline redirects, prevention, and a CR 616.1 choice all settle the
+        // proposed event before the ReturnAsAura tail runs exactly once.
+        let result = zone_pipeline::move_objects_simultaneously_then(
+            state,
+            vec![ZoneMoveRequest::effect(
+                returned_id,
+                Zone::Graveyard,
+                ability.source_id,
+            )],
+            Some(BatchCompletion::ReturnAsAuraNoTargetComplete {
+                source_id: ability.source_id,
+            }),
+            events,
         );
-        match replacement::replace_event(state, proposed, events) {
-            ReplacementResult::Execute(ProposedEvent::ZoneChange {
-                object_id,
-                to: dest,
-                ..
-            }) => {
-                crate::game::zones::move_to_zone(state, object_id, dest, events);
-                crate::game::layers::mark_layers_full(state);
-            }
-            ReplacementResult::Execute(_) => {
-                // Pipeline preserves the event variant; other variants are
-                // unreachable for a `zone_change`-seeded pipeline.
-            }
-            ReplacementResult::Prevented => {
-                // Move was prevented by a replacement (e.g., regen shield);
-                // CR 704.5n SBA will sweep any residual unattached Aura.
-            }
-            ReplacementResult::NeedsChoice(player) => {
-                // CR 616.1: Multi-replacement player choice — install the
-                // picker and defer EffectResolved. After the player picks,
-                // CR 704.5n SBA sweeps the still-orphaned Aura on the next
-                // pass, yielding the same end state for the rare contested
-                // case (no post-replacement continuation is stashed here).
-                state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
-                return Ok(());
-            }
+        if matches!(result, BatchMoveResult::NeedsChoice) {
+            return Ok(());
         }
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::ReturnAsAura,
-            source_id: ability.source_id,
-            subject: None,
-        });
         return Ok(());
     }
 
@@ -205,6 +180,21 @@ pub fn resolve(
         subject: None,
     });
     Ok(())
+}
+
+/// CR 303.4g + CR 614.1 + CR 616.1: The no-host proposed graveyard move has
+/// settled. Its destination may have been replaced or the move prevented, but
+/// this ReturnAsAura instruction has completed and emits one resolution event.
+pub(crate) fn complete_no_target_delivery(
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::ReturnAsAura,
+        source_id,
+        subject: None,
+    });
+    BatchMoveResult::Done
 }
 
 /// CR 614.1d + CR 113.10 + CR 303.4a + CR 702.5a: Install the Aura's

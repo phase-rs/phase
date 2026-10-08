@@ -21,9 +21,9 @@
 #       zone containers, and direct `GameObject::zone` assignment. Any of these
 #       skips replacement consultation, `ZoneChanged`, triggers, and draw
 #       bookkeeping. Gameplay zone changes go through zone_pipeline.
-#       Unlike (A), this section is FULL-TREE, not diff-only: it is a ratchet
-#       against a frozen baseline, so a pre-existing site cannot be quietly
-#       duplicated into a new one. See scripts/zone_authority_census.py.
+#       Unlike (A), this section is FULL-TREE, not diff-only: every classified
+#       site requires a nonempty `allow-raw-zone:` annotation. See
+#       scripts/zone_authority_census.py.
 #
 # Exempt: lines (or the line immediately above) with
 #     // allow-raw-authority: <reason>      (A)
@@ -145,7 +145,7 @@ if ! python3 "$(dirname "$0")/zone_authority_census_tests.py"; then
     FAIL=1
 fi
 
-# (B) Raw zone mutation — full-tree ratchet against the frozen baseline.
+# (B) Raw zone mutation — full-tree hard gate requiring explicit annotations.
 if ! python3 "$(dirname "$0")/zone_authority_census.py" --check; then
     FAIL=1
 fi
@@ -163,12 +163,9 @@ fi
 # lifted the scanner ceiling a workspace-wide scan used to hit (`CensusError:
 # crates/draft-wasm/src/suggest.rs:437: brace tracking desynced`).
 #
-# Widening surfaced ZERO new producers: `ReplacementEvent::Draw` occurs in exactly
-# two crates (engine, mtgish-import). The other ten are not producer-free merely by
-# assumption — phase-ai builds `ReplacementDefinition`s with the same constructor
-# and struct-literal idioms this census matches, just never with `Draw`. So the
-# frozen population is unchanged at 7 rows, and now covers the surface it always
-# claimed to.
+# The census scans the complete workspace. phase-ai builds
+# `ReplacementDefinition`s with the same constructor and struct-literal idioms
+# this census matches, just never with `Draw`.
 #
 # Outside the workspace, and NOT scanned: `client/src-tauri` and
 # `lobby-worker/broker-wasm` (Cargo `exclude`; 4 `.rs` files, zero mentions of
@@ -176,6 +173,17 @@ fi
 # local Tauri build, which an rglob would descend into — making the scanned
 # population depend on whether a developer had run one.
 if ! python3 "$(dirname "$0")/draw_replacement_census.py" --producers --check; then
+    FAIL=1
+fi
+
+# (D) Post-replacement continuation producer/consumer surface — full-tree
+# ratchet against the frozen baseline. Plan 03's CR 121.2 draw state machine
+# reaches this surface through delayed replacement work, and CR 616.1g requires
+# that work to run only after the replacement's modified event is handled. A
+# `Template` or `Resolved` continuation can hold arbitrary ability work, so this
+# freezes every syntactic construction, installation, stash, and dispatch site
+# rather than pretending source inspection can prove a site cannot reach Draw.
+if ! python3 "$(dirname "$0")/post_replacement_continuation_census.py" --check; then
     FAIL=1
 fi
 

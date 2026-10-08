@@ -6,8 +6,13 @@ import type {
   GameState,
   MatchConfig,
   PersistedGameState,
+  PlayerId,
 } from "../adapter/types";
+import { isCustomGameFormat } from "../adapter/types";
+import { formatMetadata } from "../data/formatRegistry";
 import type { SeatState } from "../multiplayer/seatTypes";
+import type { FullSessionKey } from "./multiplayerSession";
+import type { P2PSessionKey } from "./p2pSession";
 import { ACTIVE_GAME_KEY, GAME_CHECKPOINTS_PREFIX, GAME_KEY_PREFIX } from "../constants/storage";
 
 /** Snapshot of an AI seat's configuration at game-start time. The per-seat
@@ -19,6 +24,23 @@ export interface AiSeatMeta {
   difficulty: string;
   deckId?: string | null;
   deckName?: string | null;
+}
+
+/**
+ * Credentials to reconnect a suspended native-engine solo (AI) game.
+ *
+ * Native games are server-authoritative: the game state lives in the local
+ * phase-server's `games.db`, never in IndexedDB. The player token is issued
+ * once at game creation and is the reconnect security boundary — it lives only
+ * client-side, so it must be persisted here for the game to be resumable.
+ * Presence of this field is what marks an `ActiveGameMeta` as a native resume
+ * (which has no local `saveGame` snapshot to validate against).
+ */
+export interface NativeSoloSession {
+  gameCode: string;
+  playerId: PlayerId;
+  playerToken: string;
+  fullKey: FullSessionKey;
 }
 
 export interface ActiveGameMeta {
@@ -37,6 +59,11 @@ export interface ActiveGameMeta {
   formatConfig?: FormatConfig;
   /** Bare 5-char room code for P2P guest resume. */
   p2pRoomCode?: string;
+  /** Present for native-engine solo (AI) games hosted by the local
+   *  phase-server. Its presence marks this pointer as a native resume; on
+   *  resume the client reconnects to the server session rather than loading a
+   *  local snapshot. Absent for in-browser (WASM) AI games. */
+  nativeSession?: NativeSoloSession;
 }
 
 /**
@@ -58,12 +85,21 @@ export interface PersistedP2PHostSession {
   gameId: string;
   /** Bare 5-char room code; the PeerJS prefix is reattached by `hostRoom`. */
   roomCode: string;
+  /** Stable authority identity. A resumed host claims a fresh incarnation. */
+  sessionKey: P2PSessionKey;
   brokerGameCode?: string;
   useBroker: boolean;
   /** PlayerId.0 → token. PlayerId 0 is the host's own slot. */
   playerTokens: Record<number, string>;
   /** PlayerId.0 → deck submitted by that guest (pre-game data). */
   guestDecks: Record<number, unknown>;
+  /**
+   * PlayerId.0 → display name the guest sent with its deck. A reconnecting
+   * guest's `reconnect` frame carries no name, so the host's copy is the only
+   * one that survives a host refresh. Optional: sessions saved before this
+   * field existed resume with commander/fallback labels.
+   */
+  guestNames?: Record<number, string>;
   /** PlayerId.0 → resolved AI deck for AI-controlled seats. */
   aiDecks?: Record<number, unknown>;
   /** Tokens that were kicked — refused on reconnect on resume. */
@@ -77,6 +113,96 @@ export interface PersistedP2PHostSession {
   /** True once `initializeGame` has run; false while still in lobby. */
   gameStarted: boolean;
   seatState?: SeatState;
+  /**
+   * Native AI driver failure retained so reconnecting guests receive the same
+   * terminal fault after the resumed host has restored their state snapshot.
+   */
+  nativeAiDriverFault?: NativeAiDriverFault;
+  /**
+   * Present when the desktop host delegated authority to its local
+   * phase-server. The server persists the game state; IndexedDB retains only
+   * the opaque credentials needed to reconnect each host-local viewer.
+   */
+  nativeSession?: NativeP2PServerSession;
+}
+
+export interface NativeAiDriverFault {
+  id: number;
+  revision: number;
+  message: string;
+}
+
+export interface NativeP2PServerSession {
+  gameCode: string;
+  fullKey: FullSessionKey;
+  /** Native player token keyed by the matching P2P player id. */
+  playerTokens: Record<number, string>;
+}
+
+type LegacyDeckSizeType = "Minimum" | "Exactly";
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+/** Resolve the old numeric field's discriminant from engine-authored rules. */
+function legacyDeckSizeType(
+  formatConfig: Record<string, unknown>,
+): LegacyDeckSizeType | undefined {
+  const format = formatConfig.format;
+  if (typeof format !== "string") return undefined;
+
+  const builtInMetadata = formatMetadata(format as FormatConfig["format"]);
+  if (builtInMetadata) return builtInMetadata.default_config.deck_size.type;
+
+  if (!isCustomGameFormat(format)) return undefined;
+  const structural = asRecord(asRecord(formatConfig.custom_rules)?.structural);
+  const deckSize = asRecord(structural?.deck_size);
+  return deckSize?.type === "Minimum" || deckSize?.type === "Exactly"
+    ? deckSize.type
+    : undefined;
+}
+
+/**
+ * Convert the pre-Commander-Draft save spelling of FormatConfig.deck_size.
+ *
+ * Protocol v42 changed this field from a bare number to DeckSizeRule. Network
+ * peers are version-gated, but IndexedDB saves survive upgrades and have no
+ * protocol handshake to reject them. A legacy local save therefore reached
+ * Rust deserialization with e.g. `deck_size: 100` and was discarded by the
+ * resume fallback. The engine registry (for built-ins) or persisted engine
+ * custom rules supplies the discriminant; without either authority the old
+ * value is left untouched so engine restore fails closed rather than guessing.
+ */
+function normalizeLegacyDeckSizeRule(
+  formatConfig: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!Number.isInteger(formatConfig.deck_size)) return formatConfig;
+
+  const magnitude = formatConfig.deck_size as number;
+  const variant = legacyDeckSizeType(formatConfig);
+  if (!variant) return formatConfig;
+  return {
+    ...formatConfig,
+    deck_size: { type: variant, data: magnitude },
+  };
+}
+
+/** Normalize only the persisted state boundary; never mutate the IDB object. */
+export function migratePersistedGameState<T extends PersistedGameState>(state: T): T {
+  const envelope = "state" in state;
+  const gameState = (envelope ? state.state : state) as GameState;
+  const formatConfig = gameState.format_config;
+  if (!formatConfig || typeof formatConfig !== "object") return state;
+
+  const rawFormatConfig = formatConfig as unknown as Record<string, unknown>;
+  const normalized = normalizeLegacyDeckSizeRule(rawFormatConfig);
+  if (normalized === rawFormatConfig) return state;
+
+  const nextState = { ...gameState, format_config: normalized as unknown as FormatConfig };
+  return (envelope ? { ...state, state: nextState } : nextState) as T;
 }
 
 const P2P_HOST_KEY_PREFIX = "phase-p2p-host:";
@@ -95,6 +221,14 @@ const P2P_HOST_KEY_PREFIX = "phase-p2p-host:";
  */
 let _gameStore: ReturnType<typeof createStore> | undefined;
 
+function isTerminalPersistedState(state: PersistedGameState): boolean {
+  const publicState = "state" in state ? state.state : state;
+  return (
+    publicState.match_phase === "Completed"
+    || (!publicState.match_phase && publicState.waiting_for.type === "GameOver")
+  );
+}
+
 function getGameStore(): ReturnType<typeof createStore> {
   if (!_gameStore) {
     _gameStore = createStore("phase-game-state", "phase-game-state");
@@ -105,12 +239,10 @@ function getGameStore(): ReturnType<typeof createStore> {
 // ── Game State (IndexedDB) ──────────────────────────────────────────────
 
 export async function saveGame(gameId: string, state: PersistedGameState): Promise<void> {
-  const publicState = "state" in state ? state.state : state;
-  if (
-    publicState.match_phase === "Completed"
-    || (!publicState.match_phase && publicState.waiting_for.type === "GameOver")
-  ) {
-    await clearGame(gameId);
+  if (isTerminalPersistedState(state)) {
+    // A terminal StateUpdate can arrive before its recipient-specific GameOver
+    // envelope. The latter carries the terminal access record, so this path
+    // must not clear resumable state before that record has been committed.
     return;
   }
   try {
@@ -118,6 +250,21 @@ export async function saveGame(gameId: string, state: PersistedGameState): Promi
   } catch (err) {
     console.warn("[saveGame] IndexedDB write failed:", err);
   }
+}
+
+/**
+ * Writes a known-resumable authority snapshot. Resume initialization uses this
+ * strict boundary before a host may publish or accept a reconnect: swallowing
+ * a failed write there could replay an already-consumed automation session.
+ */
+export async function saveResumableGameStrict(
+  gameId: string,
+  state: PersistedGameState,
+): Promise<void> {
+  if (isTerminalPersistedState(state)) {
+    throw new Error("Refusing to retain a terminal game as resumable state");
+  }
+  await set(GAME_KEY_PREFIX + gameId, state, getGameStore());
 }
 
 /**
@@ -129,20 +276,53 @@ export async function saveAuthoritativeGame(
   adapter: EngineAdapter,
   fallbackState: GameState,
 ): Promise<void> {
+  await saveGame(gameId, await authoritativePersistenceState(adapter, fallbackState));
+}
+
+/** Commit the engine-authored initial snapshot before a fresh game can start. */
+export async function saveAuthoritativeGameStrict(
+  gameId: string,
+  adapter: EngineAdapter,
+  fallbackState: GameState,
+): Promise<void> {
+  await saveResumableGameStrict(gameId, await authoritativePersistenceState(adapter, fallbackState));
+}
+
+/**
+ * Capture the engine-authored trusted envelope for a persistence boundary
+ * (saves, undo checkpoints). Rendered screen states are viewer projections
+ * (`wire_projection`) that the restore ingress fails closed on, so anything
+ * that may later be restored must come from this boundary. Returns null when
+ * the adapter holds no local engine — callers push/save nothing restorable
+ * rather than an unrestorable projection.
+ */
+export async function captureTrustedCheckpoint(
+  adapter: EngineAdapter,
+): Promise<PersistedGameState | null> {
   const trustedJson = await adapter.exportPersistenceState?.();
-  await saveGame(
-    gameId,
-    trustedJson ? JSON.parse(trustedJson) as PersistedGameState : fallbackState,
-  );
+  return trustedJson ? JSON.parse(trustedJson) as PersistedGameState : null;
+}
+
+async function authoritativePersistenceState(
+  adapter: EngineAdapter,
+  fallbackState: GameState,
+): Promise<PersistedGameState> {
+  return (await captureTrustedCheckpoint(adapter)) ?? fallbackState;
 }
 
 export async function loadGame(gameId: string): Promise<PersistedGameState | null> {
   try {
     const state = await get<PersistedGameState>(GAME_KEY_PREFIX + gameId, getGameStore());
-    return state ?? null;
+    return state ? migratePersistedGameState(state) : null;
   } catch {
     return null;
   }
+}
+
+/** Read a saved game without interpreting an IndexedDB failure as absence. */
+export async function loadGameStrict(gameId: string): Promise<PersistedGameState | null> {
+  const state = await get<PersistedGameState>(GAME_KEY_PREFIX + gameId, getGameStore());
+  return state === undefined ? null : migratePersistedGameState(state);
 }
 
 export async function clearGame(gameId: string): Promise<void> {
@@ -154,6 +334,18 @@ export async function clearGame(gameId: string): Promise<void> {
     // would surface a game the engine has forgotten.
     await del(P2P_HOST_KEY_PREFIX + gameId, getGameStore());
   } catch { /* best effort */ }
+  const active = loadActiveGame();
+  if (active?.id === gameId) {
+    clearActiveGame();
+  }
+}
+
+/** Remove every game-scoped record before reusing a game ID for a fresh start. */
+export async function clearGameStrict(gameId: string): Promise<void> {
+  const store = getGameStore();
+  await del(GAME_CHECKPOINTS_PREFIX + gameId, store);
+  await del(P2P_HOST_KEY_PREFIX + gameId, store);
+  await del(GAME_KEY_PREFIX + gameId, store);
   const active = loadActiveGame();
   if (active?.id === gameId) {
     clearActiveGame();
@@ -181,7 +373,8 @@ export async function loadP2PHostSession(
       P2P_HOST_KEY_PREFIX + gameId,
       getGameStore(),
     );
-    return s ?? null;
+    if (!s || typeof s.sessionKey !== "string" || s.sessionKey.length === 0) return null;
+    return s;
   } catch {
     return null;
   }
@@ -195,16 +388,16 @@ export async function clearP2PHostSession(gameId: string): Promise<void> {
 
 // ── Checkpoints (IndexedDB) ─────────────────────────────────────────────
 
-export async function saveCheckpoints(gameId: string, checkpoints: GameState[]): Promise<void> {
+export async function saveCheckpoints(gameId: string, checkpoints: PersistedGameState[]): Promise<void> {
   try {
     await set(GAME_CHECKPOINTS_PREFIX + gameId, checkpoints, getGameStore());
   } catch { /* best effort */ }
 }
 
-export async function loadCheckpoints(gameId: string): Promise<GameState[]> {
+export async function loadCheckpoints(gameId: string): Promise<PersistedGameState[]> {
   try {
-    const checkpoints = await get<GameState[]>(GAME_CHECKPOINTS_PREFIX + gameId, getGameStore());
-    return checkpoints ?? [];
+    const checkpoints = await get<PersistedGameState[]>(GAME_CHECKPOINTS_PREFIX + gameId, getGameStore());
+    return checkpoints?.map((checkpoint) => migratePersistedGameState(checkpoint)) ?? [];
   } catch {
     return [];
   }

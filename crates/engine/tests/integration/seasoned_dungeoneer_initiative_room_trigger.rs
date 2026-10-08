@@ -153,7 +153,10 @@ fn seasoned_dungeoneer_initiative_retake_lands_on_room_choice() {
             dungeon, options, ..
         } => {
             assert_eq!(*dungeon, DungeonId::Undercity);
-            assert_eq!(options.as_slice(), &[1, 2]);
+            assert_eq!(
+                options.iter().map(|o| o.index).collect::<Vec<_>>(),
+                vec![1, 2]
+            );
         }
         other => panic!("expected ChooseDungeonRoom on re-take, got {other:?}"),
     }

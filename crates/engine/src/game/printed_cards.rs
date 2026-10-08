@@ -1,20 +1,33 @@
+use crate::database::card_db::CardDbHandle;
 use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::database::CardDatabase;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, ConjureSource, ContinuousModification, CopiableValues,
-    CounterSourceRider, Effect, PtValue, QuantityExpr, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, StaticDefinition, TargetFilter, TriggerDefinition, VoteSubject,
+    AbilityDefinition, ConjureSource, CopiableValues, Effect, PtValue, QuantityExpr,
+    ReplacementCondition, ReplacementDefinition, ReplacementMode, RestrictionExpiry,
+    StaticDefinition, TargetFilter, TriggerDefinition, TriggerDefinitionOccurrenceRef,
 };
-use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef};
+// `VoteSubject` is NOT re-imported here: `mod tests`'s only use of it
+// (`crate::types::ability::VoteSubject::Named`) is fully qualified, so a gated
+// import would be an `unused_imports` error.
+#[cfg(test)]
+use crate::types::ability::CounterSourceRider;
+#[cfg(test)]
+use crate::types::ability_visit::visit_effect;
+use crate::types::ability_visit::{
+    visit_ability_def, visit_replacement, visit_static, visit_trigger,
+};
+use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef, PrintedLoyalty};
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::CounterType;
-use crate::types::game_state::GameState;
+use crate::types::format::GameFormat;
+use crate::types::game_state::{GameState, MeldPairRecord, OutsideGameFaces};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use super::game_object::{BackFaceData, GameObject};
@@ -22,6 +35,18 @@ use super::morph::apply_face_down_creature_characteristics;
 use super::public_state::{
     bump_state_revision, finalize_public_state, mark_public_state_all_dirty,
 };
+
+/// Controls whether card-database rehydration may publish a state immediately.
+///
+/// Persisted-game restore must defer publication until the restore owner has
+/// installed every runtime-only field and the engine has completed its single
+/// restore finalization boundary. Ordinary in-memory callers retain the
+/// immediate behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardDbRehydrationFinalization {
+    Immediate,
+    Defer,
+}
 
 /// CR 205.3m: Look up printed core types for a card name from deck-pool faces or
 /// the card-face registry when a runtime `GameObject` lacks characteristic data.
@@ -36,6 +61,8 @@ pub fn printed_core_types_for_name<'a>(state: &'a GameState, name: &str) -> Opti
             pool.registered_sideboard.as_ref(),
             pool.current_main.as_ref(),
             pool.current_sideboard.as_ref(),
+            pool.registered_companion.as_ref(),
+            pool.current_companion.as_ref(),
             pool.registered_commander.as_ref(),
             pool.current_commander.as_ref(),
         ] {
@@ -97,10 +124,8 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
 
     let power = parse_pt(&card_face.power);
     let toughness = parse_pt(&card_face.toughness);
-    let loyalty = card_face
-        .loyalty
-        .as_ref()
-        .and_then(|value| value.parse::<u32>().ok());
+    let printed_loyalty = PrintedLoyalty::from_raw(card_face.loyalty.as_deref());
+    let loyalty = printed_loyalty.map(PrintedLoyalty::off_stack_value);
     // CR 310.4a: Printed defense number for battles.
     let defense = card_face
         .defense
@@ -117,6 +142,7 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     // enters the battlefield, through the CR 614.1c intrinsic replacement
     // channel (`enter_with_counters` on the ZoneChange ProposedEvent).
     obj.loyalty = loyalty;
+    obj.printed_loyalty = printed_loyalty;
     // CR 310.4a: `obj.defense` is the face's printed defense, stored as base
     // data. Defense counters are seeded through the CR 614.1c intrinsic
     // replacement when the battle enters the battlefield.
@@ -133,7 +159,6 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
         replacement.fix_legacy_parse_time_consumed_flag();
     }
     obj.abilities = Arc::new(abilities.clone());
-    obj.trigger_definitions = card_face.triggers.clone().into();
     obj.replacement_definitions = replacements.clone().into();
     obj.static_definitions = card_face.static_abilities.clone().into();
     // CR 702.148a-b: Carry the cleave-cost ability set onto the object so the
@@ -142,14 +167,29 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     obj.color = color.clone();
     obj.base_power = power;
     obj.base_toughness = toughness;
+    obj.layer_base_power = power;
+    obj.layer_base_toughness = toughness;
     obj.base_name = card_face.name.clone();
     obj.base_loyalty = loyalty;
+    obj.base_printed_loyalty = printed_loyalty;
     obj.base_defense = defense;
     obj.base_card_types = card_face.card_type.clone();
     obj.base_mana_cost = card_face.mana_cost.clone();
     obj.base_keywords = keywords;
     obj.base_abilities = Arc::new(abilities);
-    obj.base_trigger_definitions = Arc::new(card_face.triggers.clone());
+    let trigger_definitions = Arc::new(card_face.triggers.clone());
+    if !was_initialized {
+        obj.base_trigger_definitions = trigger_definitions;
+        obj.materialize_base_trigger_definitions();
+    } else if obj.base_trigger_definitions.as_ref() == card_face.triggers.as_slice() {
+        // Rehydrating the same face must preserve the recorded base-set
+        // generation; payload equality here is only an intentional-face
+        // restoration discriminator, never a live trigger identity decision.
+        obj.materialize_base_trigger_definitions();
+    } else {
+        obj.install_trigger_base_definitions(trigger_definitions)
+            .expect("trigger base-set generation must not overflow");
+    }
     obj.base_replacement_definitions = Arc::new(replacements);
     obj.base_static_definitions = Arc::new(card_face.static_abilities.clone());
     obj.base_color = color;
@@ -160,6 +200,10 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     obj.base_printed_ref = obj.printed_ref.clone();
     obj.source_related_token_ids = card_face.metadata.related_token_ids.clone();
     obj.spellbook = card_face.metadata.spellbook.clone();
+    // Evidence that this face's printed text did not parse cleanly. Carried onto
+    // the object so a consumer can tell "this card has no such ability" apart from
+    // "the parser could not read that clause".
+    obj.parse_warnings = card_face.parse_warnings.clone();
     obj.modal = card_face.modal.clone();
     obj.additional_cost = card_face.additional_cost.clone();
     obj.strive_cost = card_face.strive_cost.clone();
@@ -234,15 +278,15 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
             card_face.attraction_lights.clone()
         };
     }
+    // Face install rewrites the printed base: restore the derived art baseline.
+    obj.restore_token_art_baseline();
 }
 
 pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &CardFace) {
     let power = parse_pt(&card_face.power);
     let toughness = parse_pt(&card_face.toughness);
-    let loyalty = card_face
-        .loyalty
-        .as_ref()
-        .and_then(|value| value.parse::<u32>().ok());
+    let printed_loyalty = PrintedLoyalty::from_raw(card_face.loyalty.as_deref());
+    let loyalty = printed_loyalty.map(PrintedLoyalty::off_stack_value);
     // CR 310.4a: Back-face printed defense for DFCs that transform into battles.
     let defense = card_face
         .defense
@@ -254,12 +298,14 @@ pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &Ca
     back_face.power = power;
     back_face.toughness = toughness;
     back_face.loyalty = loyalty;
+    back_face.printed_loyalty = printed_loyalty;
     back_face.defense = defense;
     back_face.card_types = card_face.card_type.clone();
     back_face.mana_cost = card_face.mana_cost.clone();
     back_face.keywords = card_face.keywords.clone();
     back_face.abilities = card_face.abilities.clone();
     back_face.trigger_definitions = card_face.triggers.clone().into();
+    back_face.trigger_printed_origins.clear();
     back_face.replacement_definitions = card_face.replacements.clone().into();
     back_face.static_definitions = card_face.static_abilities.clone().into();
     back_face.color = color;
@@ -269,6 +315,9 @@ pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &Ca
     back_face.strive_cost = card_face.strive_cost.clone();
     back_face.casting_restrictions = card_face.casting_restrictions.clone();
     back_face.casting_options = card_face.casting_options.clone();
+    // Same copy, same reason, as `apply_card_face_to_object`: evidence that THIS
+    // face's printed text did not parse cleanly travels with the face.
+    back_face.parse_warnings = card_face.parse_warnings.clone();
 }
 
 pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) {
@@ -276,26 +325,38 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
     obj.power = back_face.power;
     obj.toughness = back_face.toughness;
     obj.loyalty = back_face.loyalty;
+    obj.printed_loyalty = back_face.printed_loyalty;
     obj.defense = back_face.defense;
     obj.card_types = back_face.card_types.clone();
     obj.mana_cost = back_face.mana_cost.clone();
     obj.keywords = back_face.keywords.clone();
     obj.abilities = Arc::new(back_face.abilities.clone());
-    obj.trigger_definitions = back_face.trigger_definitions.clone();
     obj.replacement_definitions = back_face.replacement_definitions.clone();
     obj.static_definitions = back_face.static_definitions.clone();
     obj.color = back_face.color.clone();
     obj.base_power = back_face.power;
     obj.base_toughness = back_face.toughness;
+    obj.layer_base_power = back_face.power;
+    obj.layer_base_toughness = back_face.toughness;
     obj.base_name = back_face.name.clone();
     obj.base_loyalty = back_face.loyalty;
+    obj.base_printed_loyalty = back_face.printed_loyalty;
     obj.base_defense = back_face.defense;
     obj.base_card_types = back_face.card_types;
     obj.base_mana_cost = back_face.mana_cost.clone();
     obj.base_keywords = back_face.keywords;
     obj.base_abilities = Arc::new(back_face.abilities);
-    obj.base_trigger_definitions =
-        Arc::new(back_face.trigger_definitions.iter_all().cloned().collect());
+    let trigger_definitions = Arc::new(back_face.trigger_definitions.iter_all().cloned().collect());
+    if back_face.trigger_printed_origins.is_empty() {
+        obj.install_trigger_base_definitions(trigger_definitions)
+            .expect("trigger base-set generation must not overflow");
+    } else {
+        obj.install_copiable_trigger_base_definitions(
+            trigger_definitions,
+            Arc::new(back_face.trigger_printed_origins),
+        )
+        .expect("trigger base-set generation must not overflow");
+    }
     obj.base_replacement_definitions = Arc::new(
         back_face
             .replacement_definitions
@@ -316,6 +377,30 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
     obj.strive_cost = back_face.strive_cost;
     obj.casting_restrictions = back_face.casting_restrictions;
     obj.casting_options = back_face.casting_options;
+    // The displayed face's diagnostics replace the outgoing face's. Both
+    // directions matter and both are this one line: a back face the parser could
+    // not fully read starts gating here, and transforming back off it stops.
+    obj.parse_warnings = back_face.parse_warnings;
+    // Face swap rewrites the printed base: restore the derived art baseline.
+    obj.restore_token_art_baseline();
+}
+
+/// CR 400.7 + CR 712.8a (#7565): swap the object's live face with its stored
+/// back face, preserving the stored slot's `layout_kind`. The layout is a
+/// printed property of the CARD PAIR, not of whichever half happens to be
+/// stashed — `snapshot_object_face` hardcodes `None`, so every bare
+/// snapshot/apply/store dance silently erased the marker after one back-face
+/// round trip, muting the split/MDFC cast-face prompt and every other
+/// `layout_kind` consumer. Single authority for all symmetric face swaps.
+pub fn swap_object_faces(obj: &mut GameObject) {
+    let Some(stored) = obj.back_face.take() else {
+        return;
+    };
+    let layout_kind = stored.layout_kind;
+    let mut snapshot = snapshot_object_face(obj);
+    snapshot.layout_kind = layout_kind;
+    apply_back_face_to_object(obj, stored);
+    obj.back_face = Some(snapshot);
 }
 
 /// CR 306.5b + CR 310.4b + CR 614.1c: Seed the intrinsic "enters with N
@@ -366,24 +451,61 @@ fn intrinsic_saga_lore_counter(card_types: &CardType) -> Option<(CounterType, u3
     }
 }
 
+/// CR 306.5b + CR 310.4b: loyalty/defense a face enters with. A Saga's
+/// CR 714.3a lore counter is NOT seeded here — it is the Saga face's own
+/// replacement (`parse_saga_chapters`), which the pipeline applies through
+/// CR 614.12.
+///
+/// `printed_loyalty` is authoritative when present: in particular, an
+/// explicit printed X must remain zero outside the resolving-spell path.
+/// Older serialized objects and lightweight engine constructors predate that
+/// provenance field, but their fixed `loyalty` baseline is still the printed
+/// loyalty number required by CR 306.5b.
+pub fn intrinsic_face_entry_counters(
+    printed_loyalty: Option<PrintedLoyalty>,
+    fallback_loyalty: Option<u32>,
+    resolving_spell_x: Option<u32>,
+    defense: Option<u32>,
+) -> Vec<(CounterType, u32)> {
+    let loyalty = printed_loyalty
+        .map(|value| value.entry_counter_count(resolving_spell_x))
+        .or(fallback_loyalty);
+    intrinsic_face_counters(loyalty, defense)
+}
+
 /// CR 306.5b + CR 310.4b + CR 714.3a: Intrinsic counters for the face a
 /// permanent will have on entry — loyalty/defense from the entering face plus
-/// the Saga lore counter when the entering face is a Saga (CR 712.14a
-/// transformed entry reads the back face here before the physical swap).
+/// the Saga lore counter when the entering face is a Saga (an "enters as a
+/// copy" entry reads the copied face's values here; a transformed entry uses
+/// [`intrinsic_face_entry_counters`] instead, see CR 614.12).
 pub fn intrinsic_entry_counters_for_face(
-    loyalty: Option<u32>,
+    printed_loyalty: Option<PrintedLoyalty>,
+    fallback_loyalty: Option<u32>,
+    resolving_spell_x: Option<u32>,
     defense: Option<u32>,
     card_types: &CardType,
 ) -> Vec<(CounterType, u32)> {
-    let mut counters = intrinsic_face_counters(loyalty, defense);
+    let mut counters = intrinsic_face_entry_counters(
+        printed_loyalty,
+        fallback_loyalty,
+        resolving_spell_x,
+        defense,
+    );
     if let Some(lore) = intrinsic_saga_lore_counter(card_types) {
         counters.push(lore);
     }
     counters
 }
 
-pub fn intrinsic_etb_counters(obj: &GameObject) -> Vec<(CounterType, u32)> {
-    let mut counters = intrinsic_face_counters(obj.loyalty, obj.defense);
+pub fn intrinsic_etb_counters(
+    obj: &GameObject,
+    resolving_spell_x: Option<u32>,
+) -> Vec<(CounterType, u32)> {
+    let loyalty = obj
+        .printed_loyalty
+        .map(|value| value.entry_counter_count(resolving_spell_x))
+        .or(obj.loyalty);
+    let mut counters = intrinsic_face_counters(loyalty, obj.defense);
     // CR 702.156a + CR 107.3m: Ravenous is an intrinsic ETB replacement
     // effect. The paid X is stamped on the object when the spell leaves the
     // stack, before the ZoneChange replacement pipeline applies counters.
@@ -441,7 +563,39 @@ pub fn self_etb_counter_replacements(
         .collect()
 }
 
+pub(crate) fn base_trigger_printed_origins(
+    obj: &GameObject,
+) -> Arc<Vec<Option<crate::types::ability::TriggerPrintedOrigin>>> {
+    if !obj.base_trigger_printed_origins.is_empty() {
+        return Arc::new(obj.base_trigger_printed_origins.clone());
+    }
+    Arc::new(
+        obj.base_printed_ref
+            .clone()
+            .map(|printed_ref| {
+                obj.base_trigger_definitions
+                    .iter()
+                    .enumerate()
+                    .map(|(printed_occurrence, _)| {
+                        Some(crate::types::ability::TriggerPrintedOrigin {
+                            printed_ref: printed_ref.clone(),
+                            printed_occurrence,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![None; obj.base_trigger_definitions.len()]),
+    )
+}
+
 pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
+    // CR 707.2 + CR 710.2: a flipped flip permanent's `base_*` fields hold the
+    // ALTERNATIVE half (written there by `flip::apply_flipped_face_to_object`),
+    // but flipped is a status (CR 110.5) and status is not copied. The copiable
+    // values are the normal half, which `flip` keeps stashed in `back_face`.
+    if let Some(values) = crate::game::flip::flipped_normal_copiable_values(obj) {
+        return values;
+    }
     CopiableValues {
         name: obj.base_name.clone(),
         mana_cost: obj.base_mana_cost.clone(),
@@ -450,25 +604,41 @@ pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
         power: obj.base_power,
         toughness: obj.base_toughness,
         loyalty: obj.base_loyalty,
+        printed_loyalty: obj.base_printed_loyalty,
         keywords: obj.base_keywords.clone(),
         // CopiableValues now shares `Arc<Vec<_>>` with the source object —
         // a copy-effect never mutates the ability set, so refcount sharing
         // is both correct and zero-allocation.
         abilities: Arc::clone(&obj.base_abilities),
         trigger_definitions: Arc::clone(&obj.base_trigger_definitions),
+        trigger_printed_origins: base_trigger_printed_origins(obj),
         replacement_definitions: copiable_replacement_definitions(obj),
         static_definitions: Arc::clone(&obj.base_static_definitions),
+        // CR 709.5 + CR 709.5b: a Room's per-half identities are copiable —
+        // the door-stamped defs above carry both halves' TEXT, this carries
+        // both halves' names and costs. `None` for every non-Room source
+        // (the base types are this snapshot's own Room gate).
+        room_halves: obj
+            .base_card_types
+            .subtypes
+            .iter()
+            .any(|s| s == "Room")
+            .then(|| crate::game::room::own_room_halves(obj)),
+        // CR 707.9b exceptions are folded in by `compute_current_copiable_values`,
+        // never by the printed form.
+        name_origin: Default::default(),
     }
 }
 
 /// CR 707.2 / CR 707.2b: copiable values are the object's printed/defining
 /// characteristics, NOT resolved continuous effects installed by other
 /// permanents (CR 611.2b "for as long as you control ~" locks). A
-/// `ControllerControlsSource`-gated replacement is a runtime continuous effect
-/// durably stored in `base_replacement_definitions` purely so it survives a
-/// layer reset (evaluate_layers rebuilds live defs from base — layers.rs); it is
-/// NOT a printed characteristic. Exclude it from copiable values so that a copy
-/// of the locked host (becomes-a-copy or a copy-token) does not inherit the lock.
+/// `ControllerControlsSource`-gated replacement and a turn-bound, target-bound
+/// die-exile rider are runtime effects durably stored in
+/// `base_replacement_definitions` purely so they survive a layer reset
+/// (evaluate_layers rebuilds live defs from base — layers.rs); neither is a
+/// printed characteristic. Exclude them from copiable values so that a copy of
+/// the affected host does not inherit the lock or die-exile rider.
 ///
 /// Zero-alloc fast path: every printed card has no gated def, so the common case
 /// keeps sharing the source `Arc<Vec<_>>`. A filtered allocation is paid only
@@ -477,14 +647,14 @@ fn copiable_replacement_definitions(obj: &GameObject) -> Arc<Vec<ReplacementDefi
     if !obj
         .base_replacement_definitions
         .iter()
-        .any(is_runtime_control_gated_replacement)
+        .any(is_runtime_non_copiable_replacement)
     {
         return Arc::clone(&obj.base_replacement_definitions);
     }
     Arc::new(
         obj.base_replacement_definitions
             .iter()
-            .filter(|def| !is_runtime_control_gated_replacement(def))
+            .filter(|def| !is_runtime_non_copiable_replacement(def))
             .cloned()
             .collect(),
     )
@@ -502,6 +672,44 @@ pub(crate) fn is_runtime_control_gated_replacement(def: &ReplacementDefinition) 
     )
 }
 
+/// CR 614.1a + CR 514.2: True for a runtime replacement attached to a damaged
+/// target by an effect such as Torch the Tower or Obliterating Bolt. It is
+/// persisted in base only to survive layer resets; it is not a copiable value
+/// and must lapse when that object leaves the battlefield (CR 400.7).
+pub(crate) fn is_runtime_target_die_exile_replacement(def: &ReplacementDefinition) -> bool {
+    def.event == ReplacementEvent::Moved
+        && matches!(def.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(def.expiry, Some(RestrictionExpiry::EndOfTurn))
+        && def.destination_zone == Some(Zone::Graveyard)
+        && def.execute.as_deref().is_some_and(|execute| {
+            matches!(
+                *execute.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    ..
+                }
+            )
+        })
+}
+
+/// CR 614.1a + CR 400.7 + CR 707.2: True for a runtime replacement bound to the
+/// lifetime of the OBJECT hosting it — the "if it would leave the battlefield,
+/// exile it instead" rider installed by Unearth (CR 702.84a) and the
+/// parser-driven reanimation cards (Gruesome Encore, Whip of Erebos, …). It is
+/// stamped `RestrictionExpiry::UntilHostLeavesPlay`. Like the die-exile rider it
+/// is persisted in base only to survive CR 613.1 layer reseeds; it is NOT a
+/// copiable value (a copy of the host must not inherit the exile redirect,
+/// CR 707.2) and must lapse when the host leaves the battlefield (CR 400.7).
+pub(crate) fn is_runtime_host_lifetime_replacement(def: &ReplacementDefinition) -> bool {
+    matches!(def.expiry, Some(RestrictionExpiry::UntilHostLeavesPlay))
+}
+
+pub(crate) fn is_runtime_non_copiable_replacement(def: &ReplacementDefinition) -> bool {
+    is_runtime_control_gated_replacement(def)
+        || is_runtime_target_die_exile_replacement(def)
+        || is_runtime_host_lifetime_replacement(def)
+}
+
 /// CR 707.2 + CR 712.4b: Build the copiable values for a melded permanent
 /// DIRECTLY from the `result` card's face. Meld is LAYER-ONLY: this converter
 /// feeds `install_merge_layer_effect`, so the melded permanent presents the
@@ -514,6 +722,7 @@ pub(crate) fn is_runtime_control_gated_replacement(def: &ReplacementDefinition) 
 /// for a creature card chosen from the format pool, which exists only as a
 /// `CardFace` (no battlefield object to read via `compute_current_copiable_values`).
 pub(crate) fn copiable_values_from_face(result_face: &CardFace) -> CopiableValues {
+    let printed_ref = printed_ref_from_face(result_face);
     CopiableValues {
         name: result_face.name.clone(),
         mana_cost: result_face.mana_cost.clone(),
@@ -521,14 +730,31 @@ pub(crate) fn copiable_values_from_face(result_face: &CardFace) -> CopiableValue
         card_types: result_face.card_type.clone(),
         power: parse_pt(&result_face.power),
         toughness: parse_pt(&result_face.toughness),
-        loyalty: result_face
-            .loyalty
-            .as_ref()
-            .and_then(|value| value.parse::<u32>().ok()),
+        loyalty: PrintedLoyalty::from_raw(result_face.loyalty.as_deref())
+            .map(PrintedLoyalty::off_stack_value),
+        printed_loyalty: PrintedLoyalty::from_raw(result_face.loyalty.as_deref()),
         keywords: result_face.keywords.clone(),
         abilities: Arc::new(result_face.abilities.clone()),
         trigger_definitions: Arc::new(result_face.triggers.clone()),
+        trigger_printed_origins: Arc::new(
+            result_face
+                .triggers
+                .iter()
+                .enumerate()
+                .map(|(printed_occurrence, _)| {
+                    printed_ref.clone().map(|printed_ref| {
+                        crate::types::ability::TriggerPrintedOrigin {
+                            printed_ref,
+                            printed_occurrence,
+                        }
+                    })
+                })
+                .collect(),
+        ),
         replacement_definitions: Arc::new(result_face.replacements.clone()),
+        // A format-pool face is never a Room half pair.
+        room_halves: None,
+        name_origin: Default::default(),
         static_definitions: Arc::new(result_face.static_abilities.clone()),
     }
 }
@@ -539,6 +765,8 @@ pub(crate) fn copiable_values_from_face(result_face: &CardFace) -> CopiableValue
 /// missing keyword trigger so copies function correctly.
 pub(crate) fn ensure_keyword_triggers_for_copiable_values(values: &mut CopiableValues) {
     let triggers = Arc::make_mut(&mut values.trigger_definitions);
+    let origins = Arc::make_mut(&mut values.trigger_printed_origins);
+    origins.resize(triggers.len(), None);
     for keyword in &values.keywords {
         for trigger in KeywordTriggerInstaller::triggers_for(keyword) {
             if triggers.iter().any(|existing| existing == &trigger) {
@@ -550,11 +778,86 @@ pub(crate) fn ensure_keyword_triggers_for_copiable_values(values: &mut CopiableV
                 continue;
             }
             triggers.push(trigger);
+            origins.push(None);
         }
     }
 }
 
-pub fn apply_copiable_values(obj: &mut GameObject, values: &CopiableValues) {
+/// Apply the winning Layer-1 copy effect. The caller supplies the exact
+/// continuous-effect occurrence; a copied payload never imports the source
+/// object's live trigger occurrences.
+pub fn apply_copiable_values(
+    obj: &mut GameObject,
+    values: &CopiableValues,
+    copy_effect: crate::types::ability::CopyEffectInstanceRef,
+) {
+    obj.name = values.name.clone();
+    obj.mana_cost = values.mana_cost.clone();
+    obj.color = values.color.clone();
+    obj.card_types = values.card_types.clone();
+    obj.power = values.power;
+    obj.toughness = values.toughness;
+    // CR 613.1a + CR 613.4b: a copy replaces the copiable baseline seen by
+    // subsequent layer-7b/base-power reads until the next layer reset.
+    obj.layer_base_power = values.power;
+    obj.layer_base_toughness = values.toughness;
+    obj.loyalty = values.loyalty;
+    obj.printed_loyalty = values.printed_loyalty;
+    obj.keywords = values.keywords.clone();
+    // All four ability sets are Arc-shared — refcount bumps, no deep copy.
+    obj.abilities = Arc::clone(&values.abilities);
+    obj.trigger_definitions = values
+        .trigger_definitions
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(copied_slot, definition)| {
+            crate::types::ability::TriggerEntry::new(
+                crate::types::ability::TriggerDefinitionOccurrenceRef::CopiedValue {
+                    copy_effect,
+                    copied_slot,
+                    printed_origin: values
+                        .trigger_printed_origins
+                        .get(copied_slot)
+                        .cloned()
+                        .flatten(),
+                },
+                definition,
+            )
+        })
+        .collect();
+    // CR 613.1a + CR 707.2 + CR 611.2c: a copy effect applies COPIABLE VALUES —
+    // "the values derived from the text printed on the object" (CR 707.2), which
+    // closes "Other effects ..., status, counters, and stickers are not copied."
+    // A replacement created by the resolution of a spell or ability is not a
+    // characteristic at all (CR 611.2c), so a Clone / Vesuvan / Mirrorweave /
+    // Copy-Enchantment recipient must keep the shields it already carries. Without
+    // this, the Layer-1a assignment here would destroy them MID-PASS, before the
+    // tail settle and before the CR 613.2b Layer-1b reseed (which rebuilds the
+    // carried set by reading `live` and so cannot recover them).
+    // `copiable_replacement_definitions` already encodes the producer half of this
+    // invariant; this is its recipient half.
+    obj.replacement_definitions =
+        crate::game::game_object::reseed_replacements_carrying_resolution_effects(
+            &obj.replacement_definitions,
+            &values.replacement_definitions,
+        );
+    obj.static_definitions = Arc::clone(&values.static_definitions).into();
+    // CR 709.5b + CR 707.2: carry the copied Room half data. Layer-derived —
+    // the Step-1 seed clears it, so it expires with this copy effect.
+    obj.copied_room_halves = values.room_halves.clone();
+    // CR 707.9b + CR 707.3 + CR 613.1a: EVERY applied copy assigns the name
+    // origin — a later ordinary copy therefore resets an earlier exception,
+    // and a chained copy of an exception-named copy keeps the folded
+    // exception as its final name.
+    obj.layer1_name_origin = Some(values.name_origin);
+}
+
+/// Materialize copiable values onto a newly constructed object (for example a
+/// duplicate conjure). This is a new base set, not an imaginary ongoing copy
+/// continuous effect, so final explicit and keyword-companion slots receive
+/// printed/base identities.
+pub fn install_copiable_values_as_base(obj: &mut GameObject, values: &CopiableValues) {
     obj.name = values.name.clone();
     obj.mana_cost = values.mana_cost.clone();
     obj.color = values.color.clone();
@@ -562,12 +865,66 @@ pub fn apply_copiable_values(obj: &mut GameObject, values: &CopiableValues) {
     obj.power = values.power;
     obj.toughness = values.toughness;
     obj.loyalty = values.loyalty;
+    obj.printed_loyalty = values.printed_loyalty;
     obj.keywords = values.keywords.clone();
-    // All four ability sets are Arc-shared — refcount bumps, no deep copy.
     obj.abilities = Arc::clone(&values.abilities);
-    obj.trigger_definitions = Arc::clone(&values.trigger_definitions).into();
     obj.replacement_definitions = Arc::clone(&values.replacement_definitions).into();
     obj.static_definitions = Arc::clone(&values.static_definitions).into();
+
+    obj.base_name = values.name.clone();
+    obj.base_mana_cost = values.mana_cost.clone();
+    obj.base_color = values.color.clone();
+    obj.base_card_types = values.card_types.clone();
+    obj.base_power = values.power;
+    obj.base_toughness = values.toughness;
+    obj.layer_base_power = values.power;
+    obj.layer_base_toughness = values.toughness;
+    obj.base_loyalty = values.loyalty;
+    obj.base_printed_loyalty = values.printed_loyalty;
+    obj.base_keywords = values.keywords.clone();
+    obj.base_abilities = Arc::clone(&values.abilities);
+    obj.base_replacement_definitions = Arc::clone(&values.replacement_definitions);
+    obj.base_static_definitions = Arc::clone(&values.static_definitions);
+    obj.install_copiable_trigger_base_definitions(
+        Arc::clone(&values.trigger_definitions),
+        Arc::clone(&values.trigger_printed_origins),
+    )
+    .expect("trigger base-set generation must not overflow");
+    // CR 709.5b: a materialized duplicate of a Room keeps both printed halves.
+    // The base slots hold the LEFT half and a synthesized back face the right
+    // one — identity only (name and door cost): the halves' TEXT rides in the
+    // door-stamped definition sets installed above, and `own_room_halves`
+    // re-derives printed order from this exact shape (`modal_back_face` false).
+    if let Some(halves) = &values.room_halves {
+        // CR 707.9b: an exception-named copy ("except its name is X") keeps X
+        // as its copiable name even when materialized (reachable via
+        // Impossible Man copying a Room + Snowborn Simulacra / Vona de Iedo
+        // conjuring a duplicate of that permanent). The half identities still
+        // provide door existence and unlock costs. Which HALF name such an
+        // object would show per door is undefined by the CR; keeping X
+        // wholesale is the conservative reading.
+        if values.name_origin != crate::types::ability::CopiedNameOrigin::Exception {
+            obj.name = halves.left.name.clone();
+            obj.base_name = halves.left.name.clone();
+        }
+        obj.mana_cost = halves.left.mana_cost.clone();
+        obj.base_mana_cost = halves.left.mana_cost.clone();
+        obj.modal_back_face = false;
+        obj.back_face = halves
+            .right
+            .as_ref()
+            .map(|right| crate::game::game_object::BackFaceData {
+                name: right.name.clone(),
+                mana_cost: right.mana_cost.clone(),
+                ..Default::default()
+            });
+    }
+    // CR 707.9b: a folded name EXCEPTION is part of the materialized base —
+    // the Step-1 seed restores the runtime marker from this every pass.
+    obj.base_name_origin = (values.name_origin
+        == crate::types::ability::CopiedNameOrigin::Exception)
+        .then_some(crate::types::ability::CopiedNameOrigin::Exception);
+    obj.base_characteristics_initialized = true;
 }
 
 pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
@@ -576,14 +933,86 @@ pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
         power: obj.power,
         toughness: obj.toughness,
         loyalty: obj.loyalty,
+        printed_loyalty: obj.printed_loyalty,
         defense: obj.defense,
         card_types: obj.card_types.clone(),
         mana_cost: obj.mana_cost.clone(),
         keywords: obj.keywords.clone(),
         // BackFaceData still stores Vec<T>; deep-clone when snapshotting.
         abilities: (*obj.abilities).clone(),
-        trigger_definitions: obj.trigger_definitions.clone(),
-        replacement_definitions: obj.replacement_definitions.clone(),
+        trigger_definitions: obj
+            .trigger_definitions
+            .iter_all()
+            .map(|entry| entry.definition.clone())
+            .collect(),
+        trigger_printed_origins: if obj.base_trigger_printed_origins.is_empty()
+            && !obj.trigger_definitions.iter_all().any(|entry| {
+                matches!(
+                    &entry.occurrence,
+                    TriggerDefinitionOccurrenceRef::CopiedValue { .. }
+                )
+            }) {
+            Vec::new()
+        } else {
+            obj.trigger_definitions
+                .iter_all()
+                .map(|entry| match &entry.occurrence {
+                    TriggerDefinitionOccurrenceRef::Printed { printed_index, .. } => {
+                        if obj.base_trigger_printed_origins.is_empty() {
+                            obj.base_printed_ref.clone().map(|printed_ref| {
+                                crate::types::ability::TriggerPrintedOrigin {
+                                    printed_ref,
+                                    printed_occurrence: *printed_index,
+                                }
+                            })
+                        } else {
+                            obj.base_trigger_printed_origins
+                                .get(*printed_index)
+                                .cloned()
+                                .flatten()
+                        }
+                    }
+                    TriggerDefinitionOccurrenceRef::CopiedValue { printed_origin, .. } => {
+                        printed_origin.clone()
+                    }
+                    TriggerDefinitionOccurrenceRef::KeywordCompanion { .. }
+                    | TriggerDefinitionOccurrenceRef::CopyRetained { .. }
+                    | TriggerDefinitionOccurrenceRef::Granted { .. }
+                    | TriggerDefinitionOccurrenceRef::ExpandedGrant { .. }
+                    | TriggerDefinitionOccurrenceRef::Unmaterialized => None,
+                })
+                .collect()
+        },
+        // CR 611.2c + CR 613.1 (issue #8485): a face snapshot captures the FACE's
+        // characteristics. A replacement created by the resolution of a spell or
+        // ability is not one of them, so it must not ride out with the face.
+        //
+        // This filter is load-bearing for correctness, not tidiness.
+        // `apply_back_face_to_object` writes this vector to BOTH the live store and
+        // `base_replacement_definitions`. A `Resolution`-origin def reaching base
+        // breaks the precondition that
+        // `game_object::reseed_replacements_carrying_resolution_effects` relies on
+        // ("no baseline ever contains a `Resolution` member"): the carry-over would
+        // then compute `base ++ live_resolution` on EVERY layer pass, growing the
+        // shield count by one per pass without bound — a Maze of Ith / regeneration /
+        // Fog shield would prevent N damage events instead of one. Reachable on any
+        // transform round-trip, which stashes the live face and restores it.
+        //
+        // Same guard `copiable_replacement_definitions` (producer side) and
+        // `GameObject::sync_missing_base_characteristics` (back-fill side) already
+        // apply. Filtering HERE rather than at the base write also stops the live
+        // write from restoring a stale, possibly already-consumed shield.
+        //
+        // Consequence, deliberate and documented: a transform DROPS a carried
+        // resolution shield rather than duplicating it. See the removal-paths note
+        // on `reseed_replacements_carrying_resolution_effects`.
+        replacement_definitions: obj
+            .replacement_definitions
+            .iter_all()
+            .filter(|d| !d.is_resolution_installed())
+            .cloned()
+            .collect::<Vec<_>>()
+            .into(),
         // Snapshot: deref the Arc to satisfy `Definitions::from(Vec<T>)`.
         static_definitions: (*obj.base_static_definitions).clone().into(),
         color: obj.color.clone(),
@@ -593,7 +1022,11 @@ pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
         strive_cost: obj.strive_cost.clone(),
         casting_restrictions: obj.casting_restrictions.clone(),
         casting_options: obj.casting_options.clone(),
+        // The outgoing face's diagnostics ride out with it, so the return trip
+        // restores them rather than inheriting whatever the other face had.
+        parse_warnings: obj.parse_warnings.clone(),
         layout_kind: None,
+        is_swap_snapshot: true,
     }
 }
 
@@ -619,6 +1052,7 @@ pub fn snapshot_object_base_face(obj: &GameObject) -> BackFaceData {
         power: obj.base_power,
         toughness: obj.base_toughness,
         loyalty: obj.base_loyalty,
+        printed_loyalty: obj.base_printed_loyalty,
         defense: obj.base_defense,
         card_types: obj.base_card_types.clone(),
         mana_cost: obj.base_mana_cost.clone(),
@@ -627,6 +1061,7 @@ pub fn snapshot_object_base_face(obj: &GameObject) -> BackFaceData {
         // Share the Arc rather than deep-cloning the Vec — semantically
         // identical and avoids an allocation on every face-down resolution.
         trigger_definitions: Arc::clone(&obj.base_trigger_definitions).into(),
+        trigger_printed_origins: obj.base_trigger_printed_origins.clone(),
         replacement_definitions: Arc::clone(&obj.base_replacement_definitions).into(),
         static_definitions: Arc::clone(&obj.base_static_definitions).into(),
         color: obj.base_color.clone(),
@@ -637,7 +1072,12 @@ pub fn snapshot_object_base_face(obj: &GameObject) -> BackFaceData {
         strive_cost: obj.strive_cost.clone(),
         casting_restrictions: obj.casting_restrictions.clone(),
         casting_options: obj.casting_options.clone(),
+        // Face-derived, with no base/live split to choose between: nothing writes
+        // `parse_warnings` except a face install, so the live field IS the printed
+        // face's diagnostics and the layer system never touches it.
+        parse_warnings: obj.parse_warnings.clone(),
         layout_kind: None,
+        is_swap_snapshot: true,
     }
 }
 
@@ -647,23 +1087,67 @@ pub fn snapshot_object_base_face(obj: &GameObject) -> BackFaceData {
 // `Effect::Conjure` (digital-only, no CR entry) creates a card from outside the
 // game (`game/effects/conjure.rs`). The handler resolves the conjured face from
 // `GameState::card_face_registry`, which previously held *every* card face in the
-// database — a full-DB clone on each game init. To avoid that allocation spike,
-// `rehydrate_game_from_card_db` now scopes the registry to exactly the faces a
-// game can reach as Conjure targets: the transitive closure of conjure names
-// over the seed faces present in the game (objects + deck pools).
+// database — a full-DB clone on each game init. `rehydrate_game_from_card_db` now
+// scopes the registry to the transitive closure of outside-the-game names over the
+// seed faces present in the game (objects + deck pools), by two legs: meld results
+// always, and conjure targets and spellbook faces only when the game's format
+// admits digital-only cards (`GameFormat::admits_digital_only_cards`).
 //
-// These walkers yield every conjure name reachable from a `CardFace`. They
-// traverse every nested ability/effect/cost carrier. The core `walk_effect`
-// match is wildcard-free so any future `Effect` variant that carries a nested
-// `Box<Effect>` / `Box<AbilityDefinition>` must be handled here at compile time.
+// These wrappers yield every conjure name reachable from a `CardFace`. The
+// traversal itself lives in `crate::types::ability_visit`, which owns the
+// wildcard-free `Effect` / `ContinuousModification` / `AbilityCost` matches: a
+// future variant carrying a nested `Box<Effect>` / `Box<AbilityDefinition>` is a
+// compile error there. These wrappers supply only the conjure/meld
+// name-extraction leaf (`collect_conjure_names`).
 //
-// TODO: consolidate with coverage traversal (`game/coverage.rs`). The coverage
-// pass builds `ParsedItem` trees rather than yielding `Effect`s, so no reusable
-// visitor exists today; extracting one is out of scope for this memory fix.
+// The reusable visitor this file's TODO asked for now exists:
+// `crate::types::ability_visit`. `game/coverage.rs` is still NOT migrated — its
+// pass builds `ParsedItem` trees rather than yielding `Effect`s, and
+// `coverage::ability_tree_any` is deliberately narrower (it has a `_ => {}`
+// wildcard); broadening it would change the coverage report. See the
+// `types::ability_visit` module doc.
 // ---------------------------------------------------------------------------
 
-/// Collect every conjure name reachable from a single card face's ability set.
-fn collect_conjure_names_from_face(face: &CardFace, out: &mut Vec<String>) {
+/// Outside-the-game card names a game's faces can reach, split by what kind of
+/// card can produce them. The meld leg is paper (CR 701.42); the digital leg
+/// exists only on Arena-only cards.
+#[derive(Default)]
+struct OutsideGameSeeds {
+    meld: Vec<String>,
+    digital: Vec<String>,
+}
+
+/// Which legs of [`OutsideGameSeeds`] a game can reach.
+#[derive(Clone, Copy)]
+enum OutsideGameLegs {
+    Paper,
+    PaperAndDigital,
+}
+
+impl OutsideGameLegs {
+    fn of(format: GameFormat) -> Self {
+        if format.admits_digital_only_cards() {
+            OutsideGameLegs::PaperAndDigital
+        } else {
+            OutsideGameLegs::Paper
+        }
+    }
+}
+
+impl OutsideGameSeeds {
+    /// Move into `out` the seed legs `legs` admits.
+    fn drain_admitted_by(self, legs: OutsideGameLegs, out: &mut Vec<String>) {
+        out.extend(self.meld);
+        match legs {
+            OutsideGameLegs::Paper => {}
+            OutsideGameLegs::PaperAndDigital => out.extend(self.digital),
+        }
+    }
+}
+
+/// Collect every outside-the-game name reachable from a single card face's
+/// ability set.
+fn collect_conjure_names_from_face(face: &CardFace, out: &mut OutsideGameSeeds) {
     for ability in &face.abilities {
         walk_ability_def(ability, out);
     }
@@ -678,220 +1162,20 @@ fn collect_conjure_names_from_face(face: &CardFace, out: &mut Vec<String>) {
     }
     // Alchemy spellbook: every card a spellbook draft can produce must be in the
     // registry to be instantiable by the conjure path.
-    out.extend(face.metadata.spellbook.iter().cloned());
+    out.digital.extend(face.metadata.spellbook.iter().cloned());
 }
 
-fn walk_ability_def(def: &AbilityDefinition, out: &mut Vec<String>) {
-    walk_effect(&def.effect, out);
-    if let Some(cost) = &def.cost {
-        walk_cost(cost, out);
-    }
-    if let Some(sub) = &def.sub_ability {
-        walk_ability_def(sub, out);
-    }
-    if let Some(else_ability) = &def.else_ability {
-        walk_ability_def(else_ability, out);
-    }
-    for mode in &def.mode_abilities {
-        walk_ability_def(mode, out);
-    }
-    // "unless [player] pays {cost}" — the cost may be an EffectCost that conjures.
-    if let Some(unless_pay) = &def.unless_pay {
-        walk_cost(&unless_pay.cost, out);
-    }
-}
-
-fn walk_trigger(trigger: &TriggerDefinition, out: &mut Vec<String>) {
-    if let Some(execute) = &trigger.execute {
-        walk_ability_def(execute, out);
-    }
-    if let Some(unless_pay) = &trigger.unless_pay {
-        walk_cost(&unless_pay.cost, out);
-    }
-}
-
-fn walk_replacement(replacement: &ReplacementDefinition, out: &mut Vec<String>) {
-    if let Some(execute) = &replacement.execute {
-        walk_ability_def(execute, out);
-    }
-    // The mode carries the decline continuation (and, for MayCost, a cost),
-    // either of which may conjure. Descend into both.
-    match &replacement.mode {
-        ReplacementMode::MayCost { cost, decline } => {
-            walk_cost(cost, out);
-            if let Some(decline) = decline {
-                walk_ability_def(decline, out);
-            }
-        }
-        ReplacementMode::Optional { decline } => {
-            if let Some(decline) = decline {
-                walk_ability_def(decline, out);
-            }
-        }
-        ReplacementMode::Mandatory => {}
-    }
-    // `runtime_execute` holds a resolution-time continuation that is never
-    // present on a printed/static `CardFace`; skipped intentionally.
-}
-
-fn walk_static(static_def: &StaticDefinition, out: &mut Vec<String>) {
-    for modification in &static_def.modifications {
-        walk_continuous_mod(modification, out);
-    }
-}
-
-fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<String>) {
-    match modification {
-        ContinuousModification::GrantAbility { definition } => walk_ability_def(definition, out),
-        ContinuousModification::GrantTrigger { trigger } => walk_trigger(trigger, out),
-        ContinuousModification::GrantStaticAbility { definition } => walk_static(definition, out),
-        ContinuousModification::CopyValues { values, .. } => walk_copiable_values(values, out),
-        // Remaining modifications carry no nested ability/effect carriers.
-        // GrantAllActivatedAbilitiesOf / GrantAllTriggeredAbilitiesOf only hold a
-        // source `TargetFilter`; the granted abilities/triggers are pulled live
-        // from the provider objects at layer collection time, not nested here.
-        ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
-        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
-        | ContinuousModification::SetName { .. }
-        | ContinuousModification::AddPower { .. }
-        | ContinuousModification::AddToughness { .. }
-        | ContinuousModification::SetPower { .. }
-        | ContinuousModification::SetToughness { .. }
-        | ContinuousModification::AddKeyword { .. }
-        | ContinuousModification::AddKeywordWithDerivedCost { .. }
-        | ContinuousModification::RemoveKeyword { .. }
-        | ContinuousModification::RemoveAllAbilities
-        | ContinuousModification::AddType { .. }
-        | ContinuousModification::RemoveType { .. }
-        | ContinuousModification::AddSubtype { .. }
-        | ContinuousModification::RemoveSubtype { .. }
-        | ContinuousModification::SetCardTypes { .. }
-        | ContinuousModification::RemoveAllSubtypes { .. }
-        | ContinuousModification::SetDynamicPower { .. }
-        | ContinuousModification::SetDynamicToughness { .. }
-        | ContinuousModification::SetPowerDynamic { .. }
-        | ContinuousModification::SetToughnessDynamic { .. }
-        | ContinuousModification::AddDynamicPower { .. }
-        | ContinuousModification::AddDynamicToughness { .. }
-        | ContinuousModification::AddDynamicKeyword { .. }
-        | ContinuousModification::AddAllCreatureTypes
-        | ContinuousModification::AddAllBasicLandTypes
-        | ContinuousModification::AddAllLandTypes
-        | ContinuousModification::AddChosenSubtype { .. }
-        | ContinuousModification::AddChosenColor
-        | ContinuousModification::RemoveChosenKeyword
-        | ContinuousModification::AddChosenKeyword
-        | ContinuousModification::SetColor { .. }
-        | ContinuousModification::AddColor { .. }
-        | ContinuousModification::AddStaticMode { .. }
-        | ContinuousModification::SwitchPowerToughness
-        | ContinuousModification::AssignDamageFromToughness
-        | ContinuousModification::AssignDamageAsThoughUnblocked
-        | ContinuousModification::AssignNoCombatDamage
-        | ContinuousModification::ChangeController
-        | ContinuousModification::SetBasicLandType { .. }
-        | ContinuousModification::SetChosenBasicLandType
-        | ContinuousModification::SetChosenName
-        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
-        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
-        | ContinuousModification::AddSupertype { .. }
-        | ContinuousModification::RemoveSupertype { .. }
-        | ContinuousModification::AddCounterOnEnter { .. }
-        | ContinuousModification::SetStartingLoyalty { .. }
-        | ContinuousModification::RemoveManaCost => {}
-    }
-}
-
-fn walk_copiable_values(values: &CopiableValues, out: &mut Vec<String>) {
-    for ability in values.abilities.iter() {
-        walk_ability_def(ability, out);
-    }
-    for trigger in values.trigger_definitions.iter() {
-        walk_trigger(trigger, out);
-    }
-    for static_def in values.static_definitions.iter() {
-        walk_static(static_def, out);
-    }
-    for replacement in values.replacement_definitions.iter() {
-        walk_replacement(replacement, out);
-    }
-}
-
-fn walk_cost(cost: &AbilityCost, out: &mut Vec<String>) {
-    match cost {
-        AbilityCost::EffectCost { effect } => walk_effect(effect, out),
-        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
-            for sub in costs {
-                walk_cost(sub, out);
-            }
-        }
-        AbilityCost::PerCounter { base, .. } => walk_cost(base, out),
-        // Remaining costs carry no nested effect/cost carriers.
-        AbilityCost::Mana { .. }
-        | AbilityCost::ManaDynamic { .. }
-        | AbilityCost::Tap
-        | AbilityCost::Untap
-        | AbilityCost::Loyalty { .. }
-        | AbilityCost::Sacrifice(_)
-        | AbilityCost::PayLife { .. }
-        | AbilityCost::Discard { .. }
-        | AbilityCost::Exile { .. }
-        | AbilityCost::ExileMaterials { .. }
-        | AbilityCost::CollectEvidence { .. }
-        | AbilityCost::ExileWithAggregate { .. }
-        | AbilityCost::TapCreatures { .. }
-        | AbilityCost::RemoveCounter { .. }
-        | AbilityCost::PayEnergy { .. }
-        | AbilityCost::PaySpeed { .. }
-        | AbilityCost::ReturnToHand { .. }
-        | AbilityCost::Unattach
-        | AbilityCost::UnattachFrom { .. }
-        | AbilityCost::Mill { .. }
-        | AbilityCost::Exert
-        | AbilityCost::Blight { .. }
-        | AbilityCost::Reveal { .. }
-        | AbilityCost::Behold { .. }
-        | AbilityCost::Waterbend { .. }
-        | AbilityCost::NinjutsuFamily { .. }
-        // CR 118.9: a borrowed keyword cost carries no nested effect/cost carrier.
-        | AbilityCost::KeywordCostOfCastSpell { .. }
-        | AbilityCost::Unimplemented { .. } => {}
-    }
-}
-
-/// Yield every conjure name carried by `effect` and its nested ability/effect
-/// carriers. The match is wildcard-free, so a new `Effect` variant forces a
-/// decision here (compile error until handled). That guarantee is necessary but
-/// not sufficient: a variant wrongly added to the leaf arm, or a new nested
-/// *struct field* (which is field access, not a match arm), compiles silently.
-/// `walker_covers_every_nested_carrier` is the complementary safety net for
-/// those cases — extend it whenever a carrier is added.
-fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
+/// The conjure/meld name extraction that `visit_effect` used to inline. Split
+/// out so the traversal itself is reusable (see `types::ability_visit`).
+fn collect_conjure_names(effect: &Effect, out: &mut OutsideGameSeeds) {
     match effect {
-        Effect::Intensify { .. } => {}
-        Effect::ApplyPerpetual { .. } => {}
-        // CR 614.11: A one-shot draw replacement nests its substitute Effect
-        // (Words of Worship/Wilding). Walk it so any conjure name it carries is
-        // surfaced (GainLife/Token carry none today, but it is a nested carrier).
-        Effect::CreateDrawReplacement { replacement_effect } => {
-            walk_effect(replacement_effect, out)
-        }
-        // CR 614.1a: A planeswalk replacement nests its substitute Effect (Fixed
-        // Point in Time: chaos ensues). Walk it so any conjure name it carries is
-        // surfaced (ChaosEnsues carries none today, but it is a nested carrier).
-        Effect::CreatePlaneswalkReplacement { replacement_effect } => {
-            walk_effect(replacement_effect, out)
-        }
-        // Heist exiles a card from an opponent's library at random; it does not
-        // name a conjure card, so there is no static face to preload.
-        Effect::Heist { .. } | Effect::HeistExile => {}
         Effect::Conjure { cards, .. } => {
             // Only named-conjure has a static card name to seed into the face
             // registry. Duplicate-conjure copies a card already in play (its face
             // travels on the referenced object), so there is nothing to preload.
             for conjure_card in cards {
                 if let ConjureSource::Named { name } = &conjure_card.source {
-                    out.push(name.clone());
+                    out.digital.push(name.clone());
                 }
             }
         }
@@ -901,342 +1185,57 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         // `card_face_registry`. `source` and `partner` are live battlefield
         // objects the resolver finds by printed identity — they need no registry
         // seeding.
-        Effect::Meld { result, .. } => out.push(result.clone()),
-        // A spellbook draft conjures the chosen card, but the list lives on the
-        // card face (`metadata.spellbook`), not in the effect — the registry
-        // seed collects it directly from the face (see
-        // `collect_conjure_names_from_face`), so nothing to gather here.
-        Effect::DraftFromSpellbook { .. } => {}
-        Effect::TurnFaceUp { .. } => {}
-        Effect::TurnFaceDown { .. } => {}
-        // Nested-ability carriers — descend.
-        Effect::Vote {
-            per_choice_effect,
-            subject,
-            ..
-        } => {
-            for sub in per_choice_effect {
-                walk_ability_def(sub, out);
-            }
-            // CR 701.38b: object-pool votes (Council's Judgment, Prime
-            // Minister's Cabinet Room) leave `per_choice_effect` empty and
-            // carry the sole nested AbilityDefinition in `outcome_template`.
-            // Walk it so any conjure name a future object-vote outcome names is
-            // surfaced (the current exile-only class carries none).
-            if let VoteSubject::Objects {
-                outcome_template, ..
-            } = subject
-            {
-                walk_ability_def(outcome_template, out);
-            }
-        }
-        Effect::SeparateIntoPiles {
-            chosen_pile_effect,
-            unchosen_pile_effect,
-            ..
-        } => {
-            walk_ability_def(chosen_pile_effect, out);
-            if let Some(unchosen) = unchosen_pile_effect {
-                walk_ability_def(unchosen, out);
-            }
-        }
-        Effect::RevealFromHand { on_decline, .. } => {
-            if let Some(sub) = on_decline {
-                walk_ability_def(sub, out);
-            }
-        }
-        // Only the delayed `effect` is walked; the `condition`'s embedded
-        // TriggerDefinition has `execute: None` by construction (it is a matcher,
-        // not a payload), so it carries no conjure name.
-        Effect::CreateDelayedTrigger { effect, .. } => walk_ability_def(effect, out),
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            ..
-        }
-        | Effect::FlipCoins {
-            win_effect,
-            lose_effect,
-            ..
-        } => {
-            if let Some(sub) = win_effect {
-                walk_ability_def(sub, out);
-            }
-            if let Some(sub) = lose_effect {
-                walk_ability_def(sub, out);
-            }
-        }
-        Effect::FlipCoinUntilLose { win_effect } => walk_ability_def(win_effect, out),
-        Effect::RollDie { results, .. } => {
-            for branch in results {
-                walk_ability_def(&branch.effect, out);
-            }
-        }
-        Effect::ChooseOneOf { branches, .. } => {
-            for branch in branches {
-                walk_ability_def(branch, out);
-            }
-        }
-        // GenericEffect applies static abilities at resolution; their
-        // modifications can grant abilities/triggers that themselves conjure.
-        // Descend into the granted definitions rather than treating it as a leaf.
-        Effect::GenericEffect {
-            static_abilities, ..
-        } => {
-            for static_def in static_abilities {
-                walk_static(static_def, out);
-            }
-        }
-        // Carries a nested ReplacementDefinition whose execute/decline/cost may conjure.
-        Effect::AddTargetReplacement { replacement, .. } => walk_replacement(replacement, out),
-        // Counter's `source_rider` may apply a static to the countered source
-        // (LosesAbilities) that grants an ability that conjures. The Destroy
-        // rider carries no static.
-        Effect::Counter { source_rider, .. } => {
-            if let Some(CounterSourceRider::LosesAbilities { static_def, .. }) = source_rider {
-                walk_static(static_def, out);
-            }
-        }
-        // Tokens and emblems can host granted static/triggered abilities that conjure.
-        Effect::Token {
-            static_abilities, ..
-        } => {
-            for static_def in static_abilities {
-                walk_static(static_def, out);
-            }
-        }
-        Effect::CreateEmblem { statics, triggers } => {
-            for static_def in statics {
-                walk_static(static_def, out);
-            }
-            for trigger in triggers {
-                walk_trigger(trigger, out);
-            }
-        }
-        // Leaf effects with no nested ability/effect carrier.
-        Effect::StartYourEngines { .. }
-        | Effect::ChangeSpeed { .. }
-        | Effect::DealDamage { .. }
-        | Effect::ApplyPostReplacementDamage { .. }
-        // CR 120.1: leaf effect — the source/recipient filters carry no nested
-        // ability or effect to walk.
-        | Effect::EachDealsDamageEqualToPower { .. }
-        | Effect::EachSourceDealsDamage { .. }
-        | Effect::Draw { .. }
-        | Effect::Pump { .. }
-        | Effect::PairWith { .. }
-        | Effect::Destroy { .. }
-        | Effect::Regenerate { .. }
-        | Effect::RemoveAllDamage { .. }
-        | Effect::CounterAll { .. }
-        | Effect::GainLife { .. }
-        | Effect::LoseLife { .. }
-        | Effect::ExchangeLifeWithStat { .. }
-        | Effect::ExchangeLifeTotals { .. }
-        // CR 701.26a/b: all tap/untap scopes are leaf effects here.
-        | Effect::SetTapState { .. }
-        | Effect::RemoveCounter { .. }
-        | Effect::Sacrifice { .. }
-        | Effect::DiscardCard { .. }
-        | Effect::Mill { .. }
-        | Effect::Scry { .. }
-        | Effect::PumpAll { .. }
-        | Effect::DamageAll { .. }
-        | Effect::DamageEachPlayer { .. }
-        | Effect::DestroyAll { .. }
-        | Effect::ChangeZone { .. }
-        | Effect::ChangeZoneAll { .. }
-        | Effect::Dig { .. }
-        | Effect::GainControl { .. }
-        | Effect::GainControlAll { .. }
-        | Effect::ControlNextTurn { .. }
-        | Effect::Attach { .. }
-        | Effect::UnattachAll { .. }
-        | Effect::Surveil { .. }
-        | Effect::Fight { .. }
-        | Effect::Bounce { .. }
-        | Effect::BounceAll { .. }
-        | Effect::Explore
-        | Effect::ExploreAll { .. }
-        | Effect::Investigate
-        | Effect::Tribute { .. }
-        | Effect::TimeTravel
-        | Effect::BecomeMonarch
-        | Effect::NoOp
-        | Effect::Proliferate
-        | Effect::ProliferateTarget { .. }
-        | Effect::EndTheTurn
-        | Effect::EndCombatPhase
-        | Effect::Populate
-        | Effect::Clash
-        | Effect::Behold { .. }
-        | Effect::SwitchPT { .. }
-        | Effect::CopySpell { .. }
-        | Effect::EpicCopy { .. }
-        | Effect::CastCopyOfCard { .. }
-        | Effect::CopyTokenOf { .. }
-        // owner/type_filter are TargetFilters; no nested ability carrier and the
-        // copy source comes from the format pool, so this is a leaf for conjure
-        // collection.
-        | Effect::CreateTokenCopyFromPool { .. }
-        | Effect::Myriad
-        | Effect::Encore
-        | Effect::ExileHaunting { .. }
-        | Effect::HideawayConceal { .. }
-        | Effect::CopyTokenBlockingAttacker { .. }
-        | Effect::BecomeCopy { .. }
-        | Effect::GainActivatedAbilitiesOfTarget { .. }
-        | Effect::ChooseCard { .. }
-        | Effect::PutCounter { .. }
-        | Effect::PutCounterAll { .. }
-        | Effect::MultiplyCounter { .. }
-        // Builds its PutCounter/RemoveCounter branches at resolution — carries no
-        // static conjure name to preload.
-        | Effect::ChooseCounterAdjustment { .. }
-        | Effect::DoublePT { .. }
-        | Effect::DoublePTAll { .. }
-        | Effect::MoveCounters { .. }
-        | Effect::Animate { .. }
-        | Effect::RegisterBending { .. }
-        | Effect::Cleanup { .. }
-        | Effect::Mana { .. }
-        | Effect::Discard { .. }
-        | Effect::Shuffle { .. }
-        | Effect::Transform { .. }
-        | Effect::SearchLibrary { .. }
-        | Effect::SearchOutsideGame { .. }
-        | Effect::RevealHand { .. }
-        | Effect::Reveal { .. }
-        | Effect::RevealTop { .. }
-        | Effect::ExileTop { .. }
-        | Effect::TargetOnly { .. }
-        | Effect::Choose { .. }
-        | Effect::OpponentGuess { .. }
-        | Effect::SwapChosenLabels { .. }
-        | Effect::ChooseDamageSource { .. }
-        | Effect::Suspect { .. }
-        | Effect::Unsuspect { .. }
-        | Effect::Connive { .. }
-        | Effect::PhaseOut { .. }
-        | Effect::PhaseIn { .. }
-        | Effect::ForceBlock { .. }
-        | Effect::ForceAttack { .. }
-        | Effect::SolveCase
-        | Effect::BecomePrepared { .. }
-        | Effect::BecomeUnprepared { .. }
-        | Effect::BecomeSaddled { .. }
-        | Effect::BecomeBlocked { .. }
-        | Effect::SetClassLevel { .. }
-        | Effect::AddRestriction { .. }
-        | Effect::ReduceNextSpellCost { .. }
-        | Effect::GrantNextSpellAbility { .. }
-        | Effect::AddPendingETBCounters { .. }
-        | Effect::AddPendingEntersModifications { .. }
-        | Effect::PayCost { .. }
-        | Effect::CastFromZone { .. }
-        | Effect::FreeCastFromZones { .. }
-        | Effect::ExileResolvingSpellInsteadOfGraveyard
-        | Effect::PreventDamage { .. }
-        | Effect::LoseTheGame { .. }
-        | Effect::WinTheGame { .. }
-        | Effect::RingTemptsYou
-        | Effect::VentureIntoDungeon
-        | Effect::VentureInto { .. }
-        | Effect::TakeTheInitiative
-        | Effect::Planeswalk
-        | Effect::ChaosEnsues
-        | Effect::RedistributeLifeTotals
-        | Effect::ReverseTurnOrder
-        | Effect::OpenAttractions { .. }
-        | Effect::RollToVisitAttractions
-        | Effect::AssembleContraptions { .. }
-        | Effect::AssembleContraptionsFromRollDifference
-        | Effect::CrankContraptions { .. }
-        | Effect::ReassembleContraption { .. }
-        | Effect::AssembleContraptionOnSprocket { .. }
-        | Effect::ReassembleContraptionOnSprocket { .. }
-        | Effect::PutSticker { .. }
-        | Effect::ApplySticker { .. }
-        | Effect::ProcessRadCounters
-        | Effect::GrantCastingPermission { .. }
-        | Effect::ChooseFromZone { .. }
-        | Effect::RememberCard { .. }
-        | Effect::ForEachCategory { .. }
-        | Effect::ChooseObjectsIntoTrackedSet { .. }
-        | Effect::ChooseAndSacrificeRest { .. }
-        | Effect::EachPlayerCopyChosen { .. }
-        | Effect::Exploit { .. }
-        | Effect::GainEnergy { .. }
-        | Effect::GivePlayerCounter { .. }
-        | Effect::LoseAllPlayerCounters { .. }
-        | Effect::ExileFromTopUntil { .. }
-        | Effect::RevealUntil { .. }
-        | Effect::Discover { .. }
-        | Effect::Cascade
-        | Effect::Ripple { .. }
-        | Effect::MiracleCast { .. }
-        | Effect::MadnessCast { .. }
-        | Effect::PutAtLibraryPosition { .. }
-        | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
-        | Effect::PutOnTopOrBottom { .. }
-        | Effect::GiftDelivery { .. }
-        | Effect::Goad { .. }
-        | Effect::GoadAll { .. }
-        | Effect::Detain { .. }
-        | Effect::SetRoomDoorLock { .. }
-        | Effect::ExchangeControl { .. }
-        | Effect::ChangeTargets { .. }
-        | Effect::Manifest { .. }
-        | Effect::ManifestDread
-        | Effect::Cloak { .. }
-        | Effect::ExtraTurn { .. }
-        | Effect::GrantExtraLoyaltyActivations { .. }
-        | Effect::SkipNextTurn { .. }
-        | Effect::SkipNextStep { .. }
-        | Effect::AdditionalPhase { .. }
-        | Effect::Double { .. }
-        | Effect::RuntimeHandled { .. }
-        | Effect::Incubate { .. }
-        | Effect::Amass { .. }
-        | Effect::Monstrosity { .. }
-        | Effect::Renown { .. }
-        | Effect::Bolster { .. }
-        | Effect::Adapt { .. }
-        | Effect::Learn
-        | Effect::Forage
-        | Effect::Harness
-        | Effect::CollectEvidence { .. }
-        | Effect::Endure { .. }
-        | Effect::BlightEffect { .. }
-        | Effect::Seek { .. }
-        | Effect::SetLifeTotal { .. }
-        | Effect::SetDayNight { .. }
-        | Effect::GiveControl { .. }
-        | Effect::RemoveFromCombat { .. }
-        | Effect::CreateDamageReplacement { .. }
-        | Effect::CombineHost { .. }
-        | Effect::ChooseAugmentAndCombineWithHost { .. }
-        // CR 614.12 + CR 303.4: ReturnAsAura.grants carry typed
-        // ContinuousModifications, never conjured card names.
-        | Effect::ReturnAsAura { .. }
-        | Effect::Specialize
-        // CR 608.2d + CR 122.1: counter-kind choice / consume carry no conjure names.
-        | Effect::ChooseCounterKind { .. }
-        | Effect::PutChosenCounter { .. }
-        | Effect::Unimplemented { .. } => {}
+        Effect::Meld { result, .. } => out.meld.push(result.clone()),
+        _ => {}
     }
 }
 
-/// Collect every conjure name seeded by the faces present in the game: each
-/// object's printed face (resolved via the database) plus every deck-pool face
-/// (carried inline as `DeckEntry.card`).
+fn walk_ability_def(def: &AbilityDefinition, out: &mut OutsideGameSeeds) {
+    let _ = visit_ability_def(def, &mut |effect| {
+        collect_conjure_names(effect, out);
+        ControlFlow::Continue(())
+    });
+}
+
+fn walk_trigger(trigger: &TriggerDefinition, out: &mut OutsideGameSeeds) {
+    let _ = visit_trigger(trigger, &mut |effect| {
+        collect_conjure_names(effect, out);
+        ControlFlow::Continue(())
+    });
+}
+
+fn walk_replacement(replacement: &ReplacementDefinition, out: &mut OutsideGameSeeds) {
+    let _ = visit_replacement(replacement, &mut |effect| {
+        collect_conjure_names(effect, out);
+        ControlFlow::Continue(())
+    });
+}
+
+fn walk_static(static_def: &StaticDefinition, out: &mut OutsideGameSeeds) {
+    let _ = visit_static(static_def, &mut |effect| {
+        collect_conjure_names(effect, out);
+        ControlFlow::Continue(())
+    });
+}
+
+#[cfg(test)]
+fn walk_effect(effect: &Effect, out: &mut OutsideGameSeeds) {
+    let _ = visit_effect(effect, &mut |e| {
+        collect_conjure_names(e, out);
+        ControlFlow::Continue(())
+    });
+}
+
+/// Collect every outside-the-game name seeded by the faces present in the game:
+/// each object's printed face (resolved via the database) plus every deck-pool
+/// face (carried inline as `DeckEntry.card`).
 ///
 /// Boundary: only printed faces are seeds. A sourceless object (a token or
 /// emblem with no `printed_ref`) whose granted ability conjures would not seed
 /// its target. No current card hits this; revisit if a printed-faceless
 /// conjure source is ever added.
-fn collect_seed_conjure_names(state: &GameState, db: &CardDatabase) -> Vec<String> {
-    let mut names: Vec<String> = Vec::new();
+fn collect_seed_conjure_names(state: &GameState, db: &CardDatabase) -> OutsideGameSeeds {
+    let mut names = OutsideGameSeeds::default();
 
     for object in state.objects.values() {
         if let Some(printed_ref) = &object.printed_ref {
@@ -1252,6 +1251,8 @@ fn collect_seed_conjure_names(state: &GameState, db: &CardDatabase) -> Vec<Strin
             &pool.registered_sideboard,
             &pool.current_main,
             &pool.current_sideboard,
+            &pool.registered_companion,
+            &pool.current_companion,
             &pool.registered_commander,
             &pool.current_commander,
         ];
@@ -1265,16 +1266,32 @@ fn collect_seed_conjure_names(state: &GameState, db: &CardDatabase) -> Vec<Strin
     names
 }
 
-/// Build the scoped Conjure registry: the transitive closure of conjure-target
-/// faces reachable from the seed faces present in the game. The closure follows
-/// conjure names (a conjured card may itself conjure another) to a fixpoint.
-/// Returns the registry plus every conjure name encountered along the way (used
-/// by the debug-only walker-coverage safety net).
+/// Build the scoped outside-the-game face registry: the transitive closure of
+/// faces reachable from the seed faces present in the game, taking the seed legs
+/// the game's format admits. The closure follows those names (a conjured card may
+/// itself conjure another) to a fixpoint, applying the same format gate at every
+/// step. Returns the registry plus every admitted name encountered along the way
+/// (used by the debug-only walker-coverage safety net).
 pub(crate) fn build_conjure_registry(
     state: &GameState,
     db: &CardDatabase,
 ) -> (HashMap<String, CardFace>, Vec<String>) {
-    let mut pending = collect_seed_conjure_names(state, db);
+    let legs = OutsideGameLegs::of(state.format_config.format);
+    let mut pending = Vec::new();
+    collect_seed_conjure_names(state, db).drain_admitted_by(legs, &mut pending);
+    resolve_outside_game_closure(pending, legs, db)
+}
+
+/// Resolve `pending` outside-the-game names, and every name their faces reach
+/// under `legs`, to a fixpoint. Returns the resolved faces keyed as the Conjure
+/// and meld resolvers look them up, plus every admitted name encountered.
+fn resolve_outside_game_closure(
+    mut pending: Vec<String>,
+    legs: OutsideGameLegs,
+    db: &CardDatabase,
+) -> (HashMap<String, CardFace>, Vec<String>) {
+    // Fed only from `pending`, so a gated-out name can never reach the debug
+    // safety net in `rehydrate_card_db_metadata` or `card_subset.rs`'s universe.
     let mut all_collected = pending.clone();
 
     // Transitive closure: resolve each pending name, insert its face, and walk
@@ -1291,7 +1308,9 @@ pub(crate) fn build_conjure_registry(
             continue;
         };
         let before = pending.len();
-        collect_conjure_names_from_face(face, &mut pending);
+        let mut seeds = OutsideGameSeeds::default();
+        collect_conjure_names_from_face(face, &mut seeds);
+        seeds.drain_admitted_by(legs, &mut pending);
         all_collected.extend_from_slice(&pending[before..]);
         registry.insert(key, face.clone());
     }
@@ -1299,17 +1318,74 @@ pub(crate) fn build_conjure_registry(
     (registry, all_collected)
 }
 
-/// CR 712 / CR 715 / CR 722: Attach the other printed face to `obj.back_face`
-/// when absent. Required for transformed zone changes (Fable of the
-/// Mirror-Breaker chapter III, Ajani flip triggers), adventurer casts, MDFC
-/// casts, and prepare spell access. Without this, `deliver_replaced_zone_change`
-/// silently skips transform when `back_face` is `None` and saga ETB lore-counter
-/// replacements fire on the front face.
-pub fn populate_back_face_if_dfc(obj: &mut GameObject, db: &CardDatabase, card_face: &CardFace) {
-    if obj.back_face.is_some() {
+/// Faces from outside the game `face` can reach, resolved for both sides of
+/// the digital-only format gate. A card entering mid-game carries these so its
+/// entry can extend the game's registry without consulting the database.
+pub fn outside_game_faces_for(face: &CardFace, db: &CardDatabase) -> OutsideGameFaces {
+    let closure = |legs| {
+        let mut seeds = OutsideGameSeeds::default();
+        collect_conjure_names_from_face(face, &mut seeds);
+        let mut pending = Vec::new();
+        seeds.drain_admitted_by(legs, &mut pending);
+        resolve_outside_game_closure(pending, legs, db).0
+    };
+    let paper = closure(OutsideGameLegs::Paper);
+    let sorted = |faces: HashMap<String, CardFace>| {
+        let mut faces: Vec<(String, CardFace)> = faces.into_iter().collect();
+        faces.sort_by(|(a, _), (b, _)| a.cmp(b));
+        faces.into_iter().map(|(_, face)| face).collect::<Vec<_>>()
+    };
+    let digital = closure(OutsideGameLegs::PaperAndDigital)
+        .into_iter()
+        .filter(|(key, _)| !paper.contains_key(key))
+        .collect();
+    OutsideGameFaces {
+        paper: sorted(paper),
+        digital: sorted(digital),
+    }
+}
+
+/// CR 701.42a: add the outside-the-game faces a card entering mid-game can
+/// reach — its meld pair's combined back — to `card_face_registry`, under this
+/// game's digital-only format gate, exactly as if it had started in the game.
+pub fn extend_card_face_registry(state: &mut GameState, faces: &OutsideGameFaces) {
+    let digital: &[CardFace] = match OutsideGameLegs::of(state.format_config.format) {
+        OutsideGameLegs::Paper => &[],
+        OutsideGameLegs::PaperAndDigital => &faces.digital,
+    };
+    let missing: Vec<&CardFace> = faces
+        .paper
+        .iter()
+        .chain(digital)
+        .filter(|face| {
+            !state
+                .card_face_registry
+                .contains_key(&face.name.to_lowercase())
+        })
+        .collect();
+    if missing.is_empty() {
         return;
     }
+    let registry = Arc::make_mut(&mut state.card_face_registry);
+    for face in missing {
+        registry.insert(face.name.to_lowercase(), face.clone());
+    }
+}
 
+/// CR 712 / CR 715 / CR 722: Build the other printed face for a face-complete
+/// card source. This is shared by normal database hydration and debug card
+/// batches so a paused batch can retain DFC/Adventure/Omen/Meld/Prepare data
+/// without consulting the card database again on resume.
+pub fn back_face_for_card_face(db: &CardDatabase, card_face: &CardFace) -> Option<BackFaceData> {
+    let printed_ref = printed_ref_from_face(card_face);
+    back_face_for_card_face_with_printed_ref(db, card_face, printed_ref.as_ref())
+}
+
+fn back_face_for_card_face_with_printed_ref(
+    db: &CardDatabase,
+    card_face: &CardFace,
+    printed_ref: Option<&PrintedCardRef>,
+) -> Option<BackFaceData> {
     let second_face = db
         .get_by_name(&card_face.name)
         .and_then(|card_rules| match &card_rules.layout {
@@ -1320,6 +1396,13 @@ pub fn populate_back_face_if_dfc(obj: &mut GameObject, db: &CardDatabase, card_f
             CardLayout::Modal(_, back) => Some((LayoutKind::Modal, back)),
             CardLayout::Meld(_, back) => Some((LayoutKind::Meld, back)),
             CardLayout::Omen(_, back) => Some((LayoutKind::Omen, back)),
+            // CR 710.1b: a flip card's alternative name, text box, type line,
+            // power, and toughness live on its bottom half. Stored in the same
+            // `back_face` slot so `flip::flip_permanent` can apply it — the
+            // `LayoutKind::Flip` tag is what keeps it out of every double-faced
+            // path (`transform::is_double_faced_permanent`,
+            // `transform::transform_permanent`, MDFC/Adventure face choice).
+            CardLayout::Flip(_, back) => Some((LayoutKind::Flip, back)),
             // CR 722: Preparation cards expose prepare-spell characteristics.
             CardLayout::Prepare(_, back) => Some((LayoutKind::Prepare, back)),
             _ => None,
@@ -1330,20 +1413,18 @@ pub fn populate_back_face_if_dfc(obj: &mut GameObject, db: &CardDatabase, card_f
                 .as_deref()
                 .and_then(|id| db.get_layout_kind(id))
                 .unwrap_or(LayoutKind::Single);
-            obj.printed_ref
-                .as_ref()
+            printed_ref
                 .and_then(|printed_ref| db.get_other_face_by_printed_ref(printed_ref))
                 .map(|face| (layout_kind, face))
         });
-    let Some((layout_kind, face)) = second_face else {
-        return;
-    };
+    let (layout_kind, face) = second_face?;
 
     let mut back = BackFaceData {
         name: String::new(),
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: Default::default(),
         mana_cost: Default::default(),
@@ -1359,33 +1440,133 @@ pub fn populate_back_face_if_dfc(obj: &mut GameObject, db: &CardDatabase, card_f
         strive_cost: None,
         casting_restrictions: Vec::new(),
         casting_options: Vec::new(),
+        // Empty seed; `apply_card_face_to_back_face` below fills it from the face.
+        parse_warnings: Vec::new(),
         layout_kind: None,
+        is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
     };
     apply_card_face_to_back_face(&mut back, face);
     if layout_kind != LayoutKind::Single {
         back.layout_kind = Some(layout_kind);
     }
-    obj.back_face = Some(back);
+    Some(back)
+}
+
+/// CR 712 / CR 715 / CR 722: Attach the other printed face to `obj.back_face`
+/// when absent. Required for transformed zone changes (Fable of the
+/// Mirror-Breaker chapter III, Ajani flip triggers), adventurer casts, MDFC
+/// casts, and prepare spell access. Without this, `deliver_replaced_zone_change`
+/// silently skips transform when `back_face` is `None` and saga ETB lore-counter
+/// replacements fire on the front face.
+pub fn populate_back_face_if_dfc(obj: &mut GameObject, db: &CardDatabase, card_face: &CardFace) {
+    if obj.back_face.is_none() {
+        obj.back_face =
+            back_face_for_card_face_with_printed_ref(db, card_face, obj.printed_ref.as_ref());
+    }
+}
+
+/// CR 702.146a + CR 712.8c: Restore the swap-snapshot provenance bit on state
+/// serialized before that bit existed.
+///
+/// The pre-change contract was implicit: [`snapshot_object_face`] erased
+/// `layout_kind`, and readers took that erasure to mean "this stored face is the
+/// object's stashed other half". `BackFaceData::is_swap_snapshot` replaced it
+/// with an explicit marker, which `serde(default)` reads as `false` for every
+/// earlier save — so a permanent that was already face-swapped when the game was
+/// stored loads with its provenance gone. Disturb pays for that directly: the
+/// keyword sits on the card's FRONT face and the card is cast transformed
+/// (CR 702.146a), so [`crate::game::keywords::effective_disturb_cost`] can only
+/// reach it through the stashed face, and only through this marker.
+///
+/// The legacy signature is the erased layout AND the object's own record that it
+/// is currently showing its alternative face. Those flags are set by the same
+/// authorities that take the snapshot — face-down (CR 708.2a), flip
+/// (CR 710.1b), transform (CR 712), specialize — so this asks the instance that
+/// already knows instead of inferring a swap from the stored face's shape.
+/// Requiring both halves is what keeps a still-unswapped printed back face out:
+/// such a face carries none of those flags, so an absent layout alone can never
+/// promote it to a snapshot.
+///
+/// Must run BEFORE [`reapply_printed_faces_from_card_db`], which repairs the
+/// erased `layout_kind` and would otherwise consume the signature this reads.
+/// The bit is read at query time and is not part of the public view, so a
+/// restoration needs no revision bump of its own.
+fn restore_legacy_swap_snapshot_provenance(state: &mut GameState) {
+    let object_ids: Vec<_> = state.objects.keys().copied().collect();
+    for object_id in object_ids {
+        let Some(obj) = state.objects.get_mut(&object_id) else {
+            continue;
+        };
+        let shows_alternative_face =
+            obj.face_down || obj.flipped || obj.transformed || obj.specialized_color.is_some();
+        if !shows_alternative_face {
+            continue;
+        }
+        let Some(back_face) = obj.back_face.as_mut() else {
+            continue;
+        };
+        if back_face.is_swap_snapshot || back_face.layout_kind.is_some() {
+            continue;
+        }
+        back_face.is_swap_snapshot = true;
+    }
 }
 
 pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
+    rehydrate_game_from_card_db_with_finalization(
+        state,
+        db,
+        CardDbRehydrationFinalization::Immediate,
+    );
+}
+
+/// Install the shared card-database handle on `state`.
+///
+/// The single authority for `GameState::card_db`. Every path that builds or
+/// restores a game must call this: the Momir Basic emblem's random creature
+/// draw (CR 707.2 + CR 202.3) queries the whole card corpus at resolution
+/// time through this handle, and without it the emblem can create nothing.
+///
+/// Deliberately separate from [`rehydrate_game_from_card_db`], which takes a
+/// borrowed `&CardDatabase` and therefore has no `Arc` to share. Callers that
+/// own the database as an `Arc` (the WASM engine's `CARD_DB`, the server's
+/// session store) call both.
+pub fn install_card_db(state: &mut GameState, db: std::sync::Arc<CardDatabase>) {
+    state.card_db = Some(CardDbHandle::new(db));
+}
+
+/// Rehydrate printed-card state while explicitly choosing whether this call is
+/// its public-state boundary. Restore owners use [`CardDbRehydrationFinalization::Defer`]
+/// so the prepared restore token can perform the sole finalization after all
+/// runtime fields are present.
+pub fn rehydrate_game_from_card_db_with_finalization(
+    state: &mut GameState,
+    db: &CardDatabase,
+    finalization: CardDbRehydrationFinalization,
+) {
     rehydrate_card_db_metadata(state, db);
+    restore_legacy_swap_snapshot_provenance(state);
     let (changed_any, changed_battlefield) = reapply_printed_faces_from_card_db(state, db);
     repair_battlefield_trigger_index_after_face_reapply(state, changed_battlefield);
 
     if changed_any || state.layers_dirty.is_dirty() {
         bump_state_revision(state);
         mark_public_state_all_dirty(state);
-        finalize_public_state(state);
+        if matches!(finalization, CardDbRehydrationFinalization::Immediate) {
+            finalize_public_state(state);
+        }
     }
 }
 
 /// Populate Conjure registry and card-name validation lists on first rehydrate.
 fn rehydrate_card_db_metadata(state: &mut GameState, db: &CardDatabase) {
-    // Populate the Conjure card-face registry (used by the Conjure effect
-    // handler). Scoped to exactly the faces reachable as Conjure targets so we
-    // never clone the entire database into per-game state. Decks with no
-    // conjure cards yield an empty registry and pay no allocation cost.
+    if state.meld_pair_registry.is_empty() {
+        state.meld_pair_registry = Arc::new(build_meld_pair_registry(db));
+    }
+    // Populate the outside-the-game card-face registry (read by the Conjure
+    // handler and by `game/meld.rs`). Scoped to the faces this game's format can
+    // actually reach.
     if state.card_face_registry.is_empty() {
         let (registry, collected_names) = build_conjure_registry(state, db);
 
@@ -1415,54 +1596,124 @@ fn rehydrate_card_db_metadata(state: &mut GameState, db: &CardDatabase) {
         state.all_card_names = db.card_names().into();
     }
 
-    // CR 707.2 + CR 202.3: Build the Momir Basic random-token pool. Gated on the
-    // format AND emptiness: `rehydrate_card_db_metadata` also runs on the
-    // mid-game debug-spawn path (engine-wasm), so without the emptiness guard we
-    // would rescan the full creature corpus on every spawn.
-    //
-    // The emptiness check must watch `momir_pool_faces`, NOT just `momir_pool`:
-    // `momir_pool` is serialized but `momir_pool_faces` is `#[serde(skip)]`
-    // (it holds full `CardFace` values, too heavy to ship). After ANY
-    // deserialize — `restore_game_state` on worker restart/PWA update, or a peer
-    // syncing — `momir_pool` comes back populated while `momir_pool_faces` is
-    // empty. Gating on `momir_pool.is_empty()` alone would then refuse to rebuild
-    // the faces map, leaving `CreateTokenCopyFromPool` with zero hydratable
-    // candidates (every name in the pool misses the empty faces map) and the
-    // emblem silently makes no token. Rebuilding when EITHER is empty restores
-    // the faces map; the rebuild overwrites `momir_pool` wholesale, so a
-    // non-empty pool is regenerated identically (keys are sorted → deterministic
-    // across peers), never duplicated.
-    if state.format_config.format == crate::types::format::GameFormat::Momir
-        && (state.momir_pool.is_empty() || state.momir_pool_faces.is_empty())
+    // CR 400.11 + CR 400.11b: stock the sealed-booster shelf for a game that can
+    // open a pack. Gated on the card scan AND emptiness for the same two reasons
+    // the Momir pool is: the scan walks the whole game's ability trees and the
+    // stocking walks the whole printed corpus, and `rehydrate_card_db_metadata`
+    // also runs on the mid-game debug-spawn path. `booster_shelf` is
+    // `#[serde(skip)]`, so this is also the rebuild after any deserialize; it is
+    // seeded from the persisted `rng_seed` rather than drawn from `state.rng`,
+    // so rebuilding never advances the game stream a restore-count-dependent
+    // number of steps. A restore of a later Bo3 game rebuilds set products from
+    // that game's own seed rather than the shelf carried from game one; see
+    // `match_flow::restart_between_games_with_starting_player`.
+    if state.booster_shelf.is_empty() && crate::game::boosters::game_opens_booster_packs(state, db)
     {
-        let mut pool: std::collections::BTreeMap<i32, Vec<String>> =
-            std::collections::BTreeMap::new();
-        let mut faces: HashMap<String, CardFace> = HashMap::new();
-        for face in db
-            .face_index
-            .values()
-            .filter(|face| face.card_type.core_types.contains(&CoreType::Creature))
-            // CR 202.1b + CR 202.3b + CR 712.8a: `face_index` holds BOTH faces of
-            // every multi-face card, so a transform/flip/meld BACK face (which has
-            // no printed mana cost → `ManaCost::NoCost`, mana value 0) would key
-            // into the pool at MV 0. A back face is not a separately castable
-            // creature *card* (outside the battlefield a DFC has only its front
-            // face's characteristics), so it is never a valid Momir pick. Exclude
-            // costless faces by their data signal: only an ABSENT manaCost maps to
-            // `NoCost`, so modal-DFC creature backs (explicit cost → `Cost{..}`)
-            // and genuine `{0}` creatures (`Cost{generic:0}`) are preserved.
-            .filter(|face| !matches!(face.mana_cost, ManaCost::NoCost))
-        {
-            let mv = face.mana_cost.mana_value() as i32;
-            pool.entry(mv).or_default().push(face.name.clone());
-            faces.insert(face.name.to_lowercase(), face.clone());
+        state.booster_shelf = Arc::new(match &state.booster_pack_pool {
+            Some(names) => crate::game::boosters::build_pool_shelf(db, names),
+            None => crate::game::boosters::build_shelf(db, state.rng_seed),
+        });
+    }
+}
+
+/// CR 701.42b + CR 712.4: derive the physical meld-pair authority from card
+/// database layout metadata and the parsed meld instruction. A forged effect
+/// whose three named faces are not all database-backed meld faces is excluded.
+fn build_meld_pair_registry(db: &CardDatabase) -> HashMap<String, MeldPairRecord> {
+    let mut registry = HashMap::new();
+    for (_, face) in db.face_iter() {
+        let mut effects = Vec::new();
+        collect_meld_effects_from_face(face, &mut effects);
+        for (source, partner, result) in effects {
+            if !meld_front_maps_to_result(db, source, result)
+                || !meld_front_maps_to_result(db, partner, result)
+            {
+                continue;
+            }
+            let key = meld_pair_key(source, partner);
+            registry.insert(
+                key,
+                MeldPairRecord {
+                    source: source.clone(),
+                    partner: partner.clone(),
+                    result: result.clone(),
+                },
+            );
         }
-        // Deterministic selection order regardless of DB iteration order.
-        for names in pool.values_mut() {
-            names.sort();
+    }
+    registry
+}
+
+fn meld_pair_key(source: &str, partner: &str) -> String {
+    format!("{}\0{}", source.to_lowercase(), partner.to_lowercase())
+}
+
+fn meld_front_maps_to_result(db: &CardDatabase, front: &str, result: &str) -> bool {
+    let mtgjson_layout_matches = db.get_by_name(front).is_some_and(|rules| {
+        matches!(
+            &rules.layout,
+            CardLayout::Meld(printed_front, combined_back)
+                if printed_front.name.eq_ignore_ascii_case(front)
+                    && combined_back.name.eq_ignore_ascii_case(result)
+        )
+    });
+    if mtgjson_layout_matches {
+        return true;
+    }
+
+    // The production card-data export intentionally stores faces rather than
+    // reconstructed `CardRules`. Recover the same exact front -> combined-back
+    // relation from the shared oracle id and layout discriminant; checking only
+    // `LayoutKind::Meld` would admit a forged result from a different meld pair.
+    let Some(front_face) = db.get_face_by_name(front) else {
+        return false;
+    };
+    let Some(printed_ref) = printed_ref_from_face(front_face) else {
+        return false;
+    };
+    matches!(
+        db.get_layout_kind(&printed_ref.oracle_id),
+        Some(LayoutKind::Meld)
+    ) && db
+        .get_other_face_by_printed_ref(&printed_ref)
+        .is_some_and(|combined_back| combined_back.name.eq_ignore_ascii_case(result))
+}
+
+fn collect_meld_effects_from_face<'a>(
+    face: &'a CardFace,
+    out: &mut Vec<(&'a String, &'a String, &'a String)>,
+) {
+    for ability in &face.abilities {
+        collect_meld_effects_from_ability(ability, out);
+    }
+    for trigger in &face.triggers {
+        if let Some(execute) = trigger.execute.as_deref() {
+            collect_meld_effects_from_ability(execute, out);
         }
-        state.momir_pool = pool;
-        state.momir_pool_faces = std::sync::Arc::new(faces);
+    }
+}
+
+fn collect_meld_effects_from_ability<'a>(
+    ability: &'a AbilityDefinition,
+    out: &mut Vec<(&'a String, &'a String, &'a String)>,
+) {
+    if let Effect::Meld {
+        source,
+        partner,
+        result,
+        ..
+    } = ability.effect.as_ref()
+    {
+        out.push((source, partner, result));
+    }
+    if let Some(sub) = ability.sub_ability.as_deref() {
+        collect_meld_effects_from_ability(sub, out);
+    }
+    if let Some(otherwise) = ability.else_ability.as_deref() {
+        collect_meld_effects_from_ability(otherwise, out);
+    }
+    for mode in &ability.mode_abilities {
+        collect_meld_effects_from_ability(mode, out);
     }
 }
 
@@ -1549,6 +1800,10 @@ fn reapply_printed_faces_from_card_db(state: &mut GameState, db: &CardDatabase) 
                             CardLayout::Modal(..) => Some(LayoutKind::Modal),
                             CardLayout::Meld(..) => Some(LayoutKind::Meld),
                             CardLayout::Omen(..) => Some(LayoutKind::Omen),
+                            // CR 710.1b: restore the flip tag so a reloaded
+                            // flip permanent's stashed alternative face stays
+                            // excluded from the double-faced paths.
+                            CardLayout::Flip(..) => Some(LayoutKind::Flip),
                             // CR 702.xxx: Prepare (Strixhaven) — treat like Adventure for
                             // back-face layout tracking. Assign when WotC publishes SOS CR update.
                             CardLayout::Prepare(..) => Some(LayoutKind::Prepare),
@@ -1563,6 +1818,15 @@ fn reapply_printed_faces_from_card_db(state: &mut GameState, db: &CardDatabase) 
                         });
                 }
             }
+
+            // CR 710.1c: a flip card's color and mana cost don't change if the
+            // permanent is flipped. A flipped permanent's `printed_ref` names
+            // the ALTERNATIVE half, which carries no printed mana cost, so the
+            // `apply_card_face_to_object` reapply above would blank it on every
+            // reload. Restore both from the (just-refreshed) normal half stashed
+            // in `back_face` — the same values `flip::flip_permanent`
+            // deliberately left untouched when it flipped the permanent.
+            crate::game::flip::restore_normal_cost_and_color_if_flipped(obj);
 
             if is_face_down_battlefield {
                 // CR 708.2a: This reload path only runs while `printed_ref` is
@@ -1705,6 +1969,111 @@ pub fn derive_colors_from_mana_cost(mana_cost: &ManaCost) -> Vec<ManaColor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::format::FormatConfig;
+
+    /// CR 611.2c + CR 613.1 (issue #8485, round-5 HIGH-1): a transform ROUND TRIP
+    /// must not seed `base_replacement_definitions` with a resolution-created
+    /// shield, and must not multiply it once per layer pass.
+    ///
+    /// The bug this pins: `snapshot_object_face` copied the LIVE store verbatim and
+    /// `apply_back_face_to_object` writes that snapshot to live AND base. A
+    /// `Resolution`-origin def in base falsifies the precondition
+    /// `game_object::reseed_replacements_carrying_resolution_effects` depends on, so
+    /// the carry-over computed `base ++ live_resolution` on EVERY pass and the shield
+    /// count grew without bound — a Maze of Ith / regeneration / Fog shield would
+    /// prevent N damage events instead of one. No existing test covered a transform
+    /// round-trip over a live resolution shield, which is how it survived review.
+    ///
+    /// Revert-failing on two independent assertions: un-filter
+    /// `snapshot_object_face` and (a) base holds a `Resolution` def and (b) the
+    /// per-object resolution count GROWS between the two `evaluate_layers` passes.
+    #[test]
+    fn transform_round_trip_does_not_duplicate_a_resolution_shield() {
+        fn printed_def() -> ReplacementDefinition {
+            ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .prevention_shield(crate::types::ability::PreventionAmount::All)
+        }
+        fn resolution_shield() -> ReplacementDefinition {
+            ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .prevention_shield(crate::types::ability::PreventionAmount::All)
+                .expiry(crate::types::ability::RestrictionExpiry::EndOfTurn)
+        }
+        fn resolution_count(state: &GameState, id: ObjectId) -> usize {
+            state.objects[&id]
+                .replacement_definitions
+                .iter_all()
+                .filter(|d| d.is_resolution_installed())
+                .count()
+        }
+
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Front Face".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.base_characteristics_initialized = true;
+            obj.base_replacement_definitions = Arc::new(vec![printed_def()]);
+            obj.replacement_definitions = vec![printed_def()].into();
+            obj.install_resolution_replacement(resolution_shield());
+            let mut back = snapshot_object_face(obj);
+            back.name = "Back Face".to_string();
+            obj.back_face = Some(back);
+        }
+        // Positive reach-guard: the shield really is live before the transform, so
+        // the post-transform assertions are not vacuously satisfied by there being
+        // nothing to duplicate.
+        assert_eq!(resolution_count(&state, id), 1);
+
+        swap_object_faces(state.objects.get_mut(&id).unwrap());
+        assert_eq!(
+            state.objects[&id].name, "Back Face",
+            "reach-guard: the transform must actually have happened"
+        );
+        swap_object_faces(state.objects.get_mut(&id).unwrap());
+        assert_eq!(
+            state.objects[&id].name, "Front Face",
+            "reach-guard: the return transform must actually have happened"
+        );
+
+        // The invariant the whole carry-over rests on.
+        assert!(
+            !state.objects[&id]
+                .base_replacement_definitions
+                .iter()
+                .any(|d| d.is_resolution_installed()),
+            "a transform round-trip must not seed base with a `Resolution` def: \
+             base = {:?}",
+            state.objects[&id].base_replacement_definitions
+        );
+
+        state.layers_dirty.mark_full();
+        crate::game::layers::evaluate_layers(&mut state);
+        let after_first = resolution_count(&state, id);
+        state.layers_dirty.mark_full();
+        crate::game::layers::evaluate_layers(&mut state);
+        let after_second = resolution_count(&state, id);
+        assert_eq!(
+            after_first, after_second,
+            "the resolution-shield count must not grow per layer pass \
+             (pass 1: {after_first}, pass 2: {after_second})"
+        );
+        assert!(
+            after_second <= 1,
+            "at most one copy of the shield may survive, got {after_second}"
+        );
+    }
+
     use crate::database::CardDatabase;
     use crate::game::deck_loading::create_object_from_card_face;
     use crate::game::deck_loading::DeckEntry;
@@ -1729,6 +2098,282 @@ mod tests {
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
     use crate::types::Phase;
+    use std::sync::Arc;
+
+    fn trigger_copiable_values() -> CopiableValues {
+        let mut source = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Trigger Source".to_string(),
+            Zone::Battlefield,
+        );
+        source.base_trigger_definitions = Arc::new(vec![
+            TriggerDefinition::new(TriggerMode::Phase),
+            TriggerDefinition::new(TriggerMode::Attacks),
+        ]);
+        intrinsic_copiable_values(&source)
+    }
+
+    /// A bare "Moved SelfRef -> Exile" redirect with NO expiry stamp — the
+    /// Personal Decoy printed-static shape (CMB1 playtest card). This is the
+    /// fixture that kills shape-widening: the runtime detectors must key on the
+    /// `UntilHostLeavesPlay` expiry stamp, NOT on the redirect shape, so a
+    /// printed-static exile redirect is never misclassified as a runtime rider.
+    fn bare_moved_selfref_exile_rider() -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Battlefield),
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            ))
+    }
+
+    /// R10 (issue #5976): a redirect that lacks the `UntilHostLeavesPlay` stamp
+    /// must be classified as NEITHER a host-lifetime rider NOR non-copiable — the
+    /// detectors key on the expiry stamp, not the Moved->Exile shape, so a
+    /// printed-static exile redirect (Personal Decoy) is never widened into a
+    /// runtime rider.
+    #[test]
+    fn r10_bare_exile_redirect_without_expiry_is_not_runtime_rider() {
+        let def = bare_moved_selfref_exile_rider();
+        assert!(
+            !is_runtime_host_lifetime_replacement(&def),
+            "a redirect with no UntilHostLeavesPlay stamp is NOT a host-lifetime rider"
+        );
+        assert!(
+            !is_runtime_non_copiable_replacement(&def),
+            "a printed-static exile redirect must stay copiable (shape must not widen)"
+        );
+    }
+
+    /// R6 (issue #5976): the same redirect, now stamped `UntilHostLeavesPlay`, IS
+    /// a runtime rider (CR 702.84a) and must be excluded from the host's copiable
+    /// values so a copy does not inherit the exile redirect (CR 707.2). This is
+    /// the production seam the runtime token-copy path
+    /// (`compute_current_copiable_values` -> `copiable_replacement_definitions`)
+    /// consumes.
+    #[test]
+    fn host_lifetime_rider_is_non_copiable_and_excluded_from_copiable_values() {
+        let rider = bare_moved_selfref_exile_rider()
+            .expiry(crate::types::ability::RestrictionExpiry::UntilHostLeavesPlay);
+        assert!(is_runtime_host_lifetime_replacement(&rider));
+        assert!(is_runtime_non_copiable_replacement(&rider));
+
+        let mut obj = GameObject::new(
+            ObjectId(7),
+            CardId(7),
+            PlayerId(0),
+            "Unearthed".to_string(),
+            Zone::Battlefield,
+        );
+        obj.base_replacement_definitions = Arc::new(vec![rider]);
+
+        let copiable = intrinsic_copiable_values(&obj);
+        assert!(
+            copiable
+                .replacement_definitions
+                .iter()
+                .all(|r| !is_runtime_host_lifetime_replacement(r)),
+            "CR 707.2: a copy must not inherit the host-lifetime exile rider"
+        );
+        assert!(
+            copiable.replacement_definitions.is_empty(),
+            "the only rider was the non-copiable host-lifetime one, so copiable defs are empty"
+        );
+    }
+
+    fn copy_recipient(id: u64) -> GameObject {
+        GameObject::new(
+            ObjectId(id),
+            CardId(id),
+            PlayerId(0),
+            "Copy Recipient".to_string(),
+            Zone::Battlefield,
+        )
+    }
+
+    #[test]
+    fn unchanged_copy_across_recomputation_keeps_copy_slots() {
+        let values = trigger_copiable_values();
+        let copy_effect = crate::types::ability::CopyEffectInstanceRef {
+            continuous_effect_id: 17,
+            modification_index: 2,
+        };
+        let mut recipient = copy_recipient(2);
+
+        apply_copiable_values(&mut recipient, &values, copy_effect);
+        let first = recipient
+            .trigger_definitions
+            .iter_all()
+            .map(|entry| entry.occurrence.clone())
+            .collect::<Vec<_>>();
+        apply_copiable_values(&mut recipient, &values, copy_effect);
+        let second = recipient
+            .trigger_definitions
+            .iter_all()
+            .map(|entry| entry.occurrence.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(first, second);
+        assert!(matches!(
+            first.as_slice(),
+            [
+                crate::types::ability::TriggerDefinitionOccurrenceRef::CopiedValue {
+                    copy_effect: first_effect,
+                    copied_slot: 0,
+                    ..
+                },
+                crate::types::ability::TriggerDefinitionOccurrenceRef::CopiedValue {
+                    copy_effect: second_effect,
+                    copied_slot: 1,
+                    ..
+                },
+            ] if *first_effect == copy_effect && *second_effect == copy_effect
+        ));
+    }
+
+    #[test]
+    fn face_snapshot_preserves_layer_copy_trigger_origins() {
+        let mut values = trigger_copiable_values();
+        let component_origin = crate::types::ability::TriggerPrintedOrigin {
+            printed_ref: PrintedCardRef {
+                oracle_id: "component-oracle".to_string(),
+                face_name: "Component Face".to_string(),
+            },
+            printed_occurrence: 3,
+        };
+        values.trigger_printed_origins = Arc::new(vec![Some(component_origin.clone()), None]);
+        let copy_effect = crate::types::ability::CopyEffectInstanceRef {
+            continuous_effect_id: 17,
+            modification_index: 2,
+        };
+        let mut recipient = copy_recipient(2);
+
+        apply_copiable_values(&mut recipient, &values, copy_effect);
+        let snapshot = snapshot_object_face(&recipient);
+
+        assert_eq!(
+            snapshot.trigger_printed_origins,
+            vec![Some(component_origin.clone()), None],
+            "the face snapshot keeps both a merged-component origin and an intentional synthesized slot"
+        );
+
+        apply_back_face_to_object(&mut recipient, snapshot);
+        assert_eq!(
+            recipient.base_trigger_printed_origins,
+            vec![Some(component_origin), None],
+            "the restored face keeps copied trigger identity instead of deriving it from display art"
+        );
+    }
+
+    #[test]
+    fn replacement_copy_and_copy_of_copy_receive_new_recipient_copy_refs() {
+        let values = trigger_copiable_values();
+        let first_copy = crate::types::ability::CopyEffectInstanceRef {
+            continuous_effect_id: 17,
+            modification_index: 2,
+        };
+        let replacement_copy = crate::types::ability::CopyEffectInstanceRef {
+            continuous_effect_id: 18,
+            modification_index: 2,
+        };
+        let mut recipient = copy_recipient(2);
+
+        apply_copiable_values(&mut recipient, &values, first_copy);
+        let first_occurrence = recipient.trigger_definitions[0].occurrence.clone();
+        apply_copiable_values(&mut recipient, &values, replacement_copy);
+        let replacement_occurrence = recipient.trigger_definitions[0].occurrence.clone();
+
+        assert_ne!(first_occurrence, replacement_occurrence);
+
+        let copy_of_copy_effect = crate::types::ability::CopyEffectInstanceRef {
+            continuous_effect_id: 19,
+            modification_index: 2,
+        };
+        let mut copy_of_copy = copy_recipient(3);
+        apply_copiable_values(&mut copy_of_copy, &values, copy_of_copy_effect);
+        assert_ne!(
+            copy_of_copy.trigger_definitions[0].occurrence, replacement_occurrence,
+            "copy-of-copy must be keyed by its own winning copy-effect occurrence"
+        );
+        assert_ne!(
+            recipient.trigger_definition_ref(&recipient.trigger_definitions[0]),
+            copy_of_copy.trigger_definition_ref(&copy_of_copy.trigger_definitions[0]),
+            "copy-of-copy must not import the source object's exact trigger ref"
+        );
+    }
+
+    #[test]
+    fn duplicate_base_install_uses_printed_slots_not_copy_effect_refs() {
+        let values = trigger_copiable_values();
+        let mut first_duplicate = copy_recipient(2);
+        let mut second_duplicate = copy_recipient(3);
+
+        install_copiable_values_as_base(&mut first_duplicate, &values);
+        install_copiable_values_as_base(&mut second_duplicate, &values);
+
+        for duplicate in [&first_duplicate, &second_duplicate] {
+            assert!(duplicate.trigger_definitions.iter_all().all(|entry| {
+                matches!(
+                    entry.occurrence,
+                    crate::types::ability::TriggerDefinitionOccurrenceRef::Printed { .. }
+                )
+            }));
+        }
+        assert_ne!(
+            first_duplicate.trigger_definition_ref(&first_duplicate.trigger_definitions[0]),
+            second_duplicate.trigger_definition_ref(&second_duplicate.trigger_definitions[0]),
+            "fresh duplicated objects retain distinct source incarnation authority"
+        );
+    }
+
+    #[test]
+    fn full_face_replacement_allocates_a_distinct_printed_trigger_base_set() {
+        let mut object = copy_recipient(4);
+        let mut first_face = test_face(
+            "First Face",
+            "first-face-oracle-id",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        first_face.triggers = vec![TriggerDefinition::new(TriggerMode::Phase)];
+        let mut replacement_face = test_face(
+            "Replacement Face",
+            "replacement-face-oracle-id",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        replacement_face.triggers = vec![TriggerDefinition::new(TriggerMode::Attacks)];
+
+        apply_card_face_to_object(&mut object, &first_face);
+        let first = object.trigger_definition_ref(&object.trigger_definitions[0]);
+        apply_card_face_to_object(&mut object, &replacement_face);
+        let replacement = object.trigger_definition_ref(&object.trigger_definitions[0]);
+
+        assert_ne!(
+            first, replacement,
+            "a full face replacement must allocate a new printed trigger base-set generation"
+        );
+        assert!(matches!(
+            replacement.occurrence,
+            crate::types::ability::TriggerDefinitionOccurrenceRef::Printed { .. }
+        ));
+    }
 
     fn test_face(
         name: &str,
@@ -1775,6 +2420,109 @@ mod tests {
             rarities: Default::default(),
             attraction_lights: vec![],
         }
+    }
+
+    /// CR 710.1c: a flip card's color and mana cost don't change if the
+    /// permanent is flipped — including across a state reload.
+    ///
+    /// A flipped permanent's `printed_ref` names the ALTERNATIVE half, which (on
+    /// every real flip card) has no printed mana cost. Without the
+    /// `restore_normal_cost_and_color_if_flipped` call in
+    /// `reapply_printed_faces_from_card_db`, the reapply blanks the cost and the
+    /// permanent silently becomes a {0} object on load. Reverting that call
+    /// fails the mana-cost assertion below.
+    #[test]
+    fn rehydrate_keeps_a_flipped_permanents_mana_cost_and_color() {
+        let normal_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        };
+        let mut normal_half = test_face(
+            "Rehydrate Flip Normal",
+            "rehydrate-flip-oracle-id",
+            vec![CoreType::Creature],
+            normal_cost.clone(),
+        );
+        normal_half.color_override = Some(vec![ManaColor::White]);
+        // CR 710.1b: the alternative half has no printed mana cost and no
+        // printed color indicator — exactly as MTGJSON reports face b.
+        let mut alternative_half = test_face(
+            "Rehydrate Flip Alternative",
+            "rehydrate-flip-oracle-id",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        alternative_half.color_override = Some(vec![]);
+        let db = db_from_faces(&[normal_half.clone(), alternative_half.clone()]);
+
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(31),
+            PlayerId(0),
+            "Rehydrate Flip Alternative".to_string(),
+            Zone::Battlefield,
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        // Post-flip state, exactly as `flip::flip_permanent` leaves it: the
+        // alternative half is displayed, the normal half is stashed, and the
+        // mana cost / color are still the normal half's (CR 710.1c).
+        object.flipped = true;
+        object.printed_ref = printed_ref_from_face(&alternative_half);
+        object.base_printed_ref = object.printed_ref.clone();
+        object.mana_cost = normal_cost.clone();
+        object.base_mana_cost = normal_cost.clone();
+        object.color = vec![ManaColor::White];
+        object.base_color = vec![ManaColor::White];
+        object.back_face = Some(BackFaceData {
+            is_swap_snapshot: false,
+            trigger_printed_origins: Vec::new(),
+            name: normal_half.name.clone(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            printed_loyalty: None,
+            defense: None,
+            card_types: normal_half.card_type.clone(),
+            mana_cost: normal_cost.clone(),
+            keywords: vec![],
+            abilities: vec![],
+            trigger_definitions: Default::default(),
+            replacement_definitions: Default::default(),
+            static_definitions: Default::default(),
+            color: vec![ManaColor::White],
+            printed_ref: printed_ref_from_face(&normal_half),
+            modal: None,
+            additional_cost: None,
+            strive_cost: None,
+            casting_restrictions: vec![],
+            casting_options: vec![],
+            layout_kind: None,
+            parse_warnings: vec![],
+        });
+
+        rehydrate_game_from_card_db(&mut state, &db);
+
+        let object = &state.objects[&id];
+        assert!(
+            object.flipped,
+            "reach guard: the permanent is still flipped"
+        );
+        assert_eq!(
+            object.name, "Rehydrate Flip Alternative",
+            "reach guard: the reapply really did run over the alternative half"
+        );
+        assert_eq!(
+            object.mana_cost, normal_cost,
+            "CR 710.1c: reloading must not blank a flipped permanent's mana cost"
+        );
+        assert_eq!(object.base_mana_cost, normal_cost);
+        assert_eq!(
+            object.color,
+            vec![ManaColor::White],
+            "CR 710.1c: reloading must not blank a flipped permanent's color"
+        );
+        assert_eq!(object.base_color, vec![ManaColor::White]);
     }
 
     /// CR 604.3: explicit all-zone color data is authoritative even when a face
@@ -1940,18 +2688,16 @@ mod tests {
         );
     }
 
-    /// CR 707.2 + CR 202.3: The Momir random-token pool's hydration map
-    /// (`momir_pool_faces`) is `#[serde(skip)]`, while `momir_pool` is
-    /// serialized. After a deserialize-then-rehydrate cycle (`restore_game_state`
-    /// on worker restart / PWA update, or a peer sync), `momir_pool` is populated
-    /// but `momir_pool_faces` is empty. Rehydration MUST rebuild the faces map in
-    /// that state — otherwise `CreateTokenCopyFromPool` finds zero hydratable
-    /// candidates and the Momir emblem silently makes no creature token. This is
-    /// the discriminating guard: it fails if the rebuild is gated on
-    /// `momir_pool.is_empty()` alone (the pre-fix behavior).
+    /// CR 707.2 + CR 202.3: The Momir Basic emblem draws its random creature
+    /// from the WHOLE card corpus at resolution time, through
+    /// `GameState::card_db`. That handle is `#[serde(skip)]`, so a restored or
+    /// peer-synced state comes back with `card_db: None` and the emblem can
+    /// create nothing until `install_card_db` runs again. This guards the
+    /// install itself, and that the handle is a cheap shared pointer rather
+    /// than a copy of the database (`GameState::clone()` runs per candidate
+    /// during AI search).
     #[test]
-    fn momir_pool_faces_rebuilt_after_restore_drops_serde_skip_map() {
-        // A mana-value-4 creature ({3}{G} = MV 4) is the only card in the pool.
+    fn install_card_db_shares_one_database_across_state_clones() {
         let creature = test_face(
             "Test Pool Beast",
             "test-pool-beast-oracle-id",
@@ -1965,34 +2711,43 @@ mod tests {
             "test pool beast": serde_json::to_value(&creature).unwrap(),
         })
         .to_string();
-        let db = CardDatabase::from_json_str(&export).expect("export db should parse");
+        let db = std::sync::Arc::new(
+            CardDatabase::from_json_str(&export).expect("export db should parse"),
+        );
 
         let mut state = GameState::new_two_player(42);
         state.format_config = crate::types::format::FormatConfig::momir();
-
-        // First hydration builds both the pool and the faces map.
-        rehydrate_game_from_card_db(&mut state, &db);
-        assert_eq!(
-            state.momir_pool.get(&4).map(Vec::as_slice),
-            Some(["Test Pool Beast".to_string()].as_slice()),
-            "MV-4 creature must land in the pool keyed by mana value"
-        );
         assert!(
-            state.momir_pool_faces.contains_key("test pool beast"),
-            "faces map must hydrate the MV-4 creature on first build"
+            state.card_db.is_none(),
+            "a fresh state carries no database handle until one is installed"
         );
 
-        // Simulate the serde round-trip: `momir_pool` survives, the
-        // `#[serde(skip)]` faces map comes back empty.
-        state.momir_pool_faces = std::sync::Arc::new(HashMap::new());
-        assert!(!state.momir_pool.is_empty(), "pool persists across serde");
-
-        // Rehydrating a restored game must repopulate the faces map even though
-        // `momir_pool` is non-empty.
-        rehydrate_game_from_card_db(&mut state, &db);
+        install_card_db(&mut state, std::sync::Arc::clone(&db));
         assert!(
-            state.momir_pool_faces.contains_key("test pool beast"),
-            "faces map must be rebuilt after a restore that dropped the skip map"
+            state
+                .card_db
+                .as_ref()
+                .and_then(|handle| handle.get_face_by_name("Test Pool Beast"))
+                .is_some(),
+            "the installed handle must resolve faces from the database it was given"
+        );
+
+        // The clone must share the same allocation, not deep-copy the corpus.
+        let cloned = state.clone();
+        let handle = cloned.card_db.as_ref().expect("clone keeps the handle");
+        assert!(
+            std::sync::Arc::ptr_eq(handle.arc(), &db),
+            "GameState::clone() must share the database, never copy it"
+        );
+
+        // A serde round-trip drops the handle (`#[serde(skip)]`), which is why
+        // every restore path has to reinstall it.
+        state.card_db = None;
+        assert!(state.card_db.is_none());
+        install_card_db(&mut state, db);
+        assert!(
+            state.card_db.is_some(),
+            "reinstall restores the draw source"
         );
     }
 
@@ -2132,8 +2887,51 @@ mod tests {
         obj.cost_x_paid = Some(4);
 
         assert_eq!(
-            intrinsic_etb_counters(&obj),
+            intrinsic_etb_counters(&obj, None),
             vec![(CounterType::Plus1Plus1, 4)]
+        );
+    }
+
+    #[test]
+    fn x_loyalty_uses_the_resolving_spell_x_and_survives_copying() {
+        let resolving = intrinsic_entry_counters_for_face(
+            Some(PrintedLoyalty::X),
+            Some(0),
+            Some(3),
+            None,
+            &CardType::default(),
+        );
+        assert_eq!(resolving, vec![(CounterType::Loyalty, 3)]);
+
+        let mut source = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "X Walker".to_string(),
+            Zone::Battlefield,
+        );
+        source.base_printed_loyalty = Some(PrintedLoyalty::X);
+        source.printed_loyalty = Some(PrintedLoyalty::X);
+        source.base_loyalty = Some(0);
+        source.loyalty = Some(0);
+
+        let values = intrinsic_copiable_values(&source);
+        assert_eq!(values.printed_loyalty, Some(PrintedLoyalty::X));
+
+        let mut copy = GameObject::new(
+            ObjectId(2),
+            CardId(2),
+            PlayerId(0),
+            "Copy".to_string(),
+            Zone::Battlefield,
+        );
+        install_copiable_values_as_base(&mut copy, &values);
+        assert_eq!(copy.printed_loyalty, Some(PrintedLoyalty::X));
+        assert_eq!(copy.base_printed_loyalty, Some(PrintedLoyalty::X));
+        assert_eq!(
+            intrinsic_etb_counters(&copy, None),
+            Vec::new(),
+            "CR 107.3g: a copied X-loyalty permanent that is not resolving a spell has X=0"
         );
     }
 
@@ -2645,6 +3443,200 @@ mod tests {
         CardDatabase::from_json_str(&json).expect("export db should parse")
     }
 
+    /// CR 701.42b + CR 712.4: the production JSON loader's layout metadata,
+    /// not arbitrary effect text, is the authority for canonical meld pairs.
+    #[test]
+    fn real_card_database_builds_only_canonical_meld_pair_registry_entries() {
+        let source_name = "Registry Meld Source";
+        let partner_name = "Registry Meld Partner";
+        let result_name = "Registry Meld Result";
+        let forged_result_name = "Ordinary Forged Result";
+        let cross_pair_result_name = "Other Pair Meld Result";
+        let mut source = test_face(
+            source_name,
+            "registry-meld-source-oracle",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        for result in [result_name, forged_result_name, cross_pair_result_name] {
+            source.abilities.push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Meld {
+                    source: source_name.to_string(),
+                    partner: partner_name.to_string(),
+                    result: result.to_string(),
+                    source_filter: TargetFilter::SelfRef,
+                    partner_filter: TargetFilter::Any,
+                    entry: crate::types::ability::PermanentEntryMode::Normal,
+                },
+            ));
+        }
+        let partner = test_face(
+            partner_name,
+            "registry-meld-partner-oracle",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        let result_for_source = test_face(
+            result_name,
+            "registry-meld-source-oracle",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        let result_for_partner = test_face(
+            result_name,
+            "registry-meld-partner-oracle",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        let other_front = test_face(
+            "Other Pair Meld Front",
+            "other-pair-meld-oracle",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        let cross_pair_result = test_face(
+            cross_pair_result_name,
+            "other-pair-meld-oracle",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        let forged = test_face(
+            forged_result_name,
+            "ordinary-forged-result-oracle",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+
+        let mut export = serde_json::Map::new();
+        for (key, face, layout) in [
+            (source.name.to_lowercase(), &source, "meld"),
+            (
+                result_for_source.name.to_lowercase(),
+                &result_for_source,
+                "meld",
+            ),
+            (partner.name.to_lowercase(), &partner, "meld"),
+            (
+                "hidden partner meld result".to_string(),
+                &result_for_partner,
+                "meld",
+            ),
+            (other_front.name.to_lowercase(), &other_front, "meld"),
+            (
+                cross_pair_result.name.to_lowercase(),
+                &cross_pair_result,
+                "meld",
+            ),
+            (forged.name.to_lowercase(), &forged, "normal"),
+        ] {
+            let mut json = serde_json::to_value(face).unwrap();
+            json["layout"] = serde_json::json!(layout);
+            export.insert(key, json);
+        }
+        let db = CardDatabase::from_json_str(&serde_json::Value::Object(export).to_string())
+            .expect("production CardDatabase export should parse");
+
+        let registry = build_meld_pair_registry(&db);
+        let key = meld_pair_key(source_name, partner_name);
+        assert_eq!(registry.len(), 1, "non-meld result faces are rejected");
+        assert_eq!(
+            registry.get(&key),
+            Some(&MeldPairRecord {
+                source: source_name.to_string(),
+                partner: partner_name.to_string(),
+                result: result_name.to_string(),
+            })
+        );
+
+        let mut state = GameState::new_two_player(42);
+        rehydrate_game_from_card_db(&mut state, &db);
+        assert_eq!(state.meld_pair_registry.as_ref(), &registry);
+    }
+
+    /// CR 701.42b + CR 712.4: MTGJSON publishes a meld pair as three single-face
+    /// groups (two fronts, one shared combined back). Loaded through the real
+    /// parser, that shape must still yield the canonical pair — this is the
+    /// production data shape, not a hand-built `meld` layout fixture.
+    #[test]
+    fn mtgjson_meld_shape_builds_canonical_meld_pair_registry_entry() {
+        let face =
+            |name: &str, face_name: &str, side: &str, oracle: &str, fields: serde_json::Value| {
+                let mut json = serde_json::json!({
+                    "name": name,
+                    "faceName": face_name,
+                    "side": side,
+                    "layout": "meld",
+                    "colors": ["W"],
+                    "colorIdentity": ["W"],
+                    "types": ["Creature"],
+                    "subtypes": ["Angel", "Horror"],
+                    "supertypes": ["Legendary"],
+                    "type": "Legendary Creature — Angel Horror",
+                    "identifiers": { "scryfallOracleId": oracle }
+                });
+                json.as_object_mut()
+                    .unwrap()
+                    .extend(fields.as_object().unwrap().clone());
+                json
+            };
+        let atomic = serde_json::json!({ "data": {
+            "Gisela, the Broken Blade // Brisela, Voice of Nightmares": [face(
+                "Gisela, the Broken Blade // Brisela, Voice of Nightmares",
+                "Gisela, the Broken Blade",
+                "a",
+                "gisela-oracle",
+                serde_json::json!({
+                    "manaCost": "{2}{W}{W}",
+                    "manaValue": 4.0,
+                    "power": "4",
+                    "toughness": "3",
+                    "text": "Flying, first strike, lifelink\nAt the beginning of your end step, if you both own and control Gisela and a creature named Bruna, the Fading Light, exile them, then meld them into Brisela, Voice of Nightmares."
+                }),
+            )],
+            "Bruna, the Fading Light // Brisela, Voice of Nightmares": [face(
+                "Bruna, the Fading Light // Brisela, Voice of Nightmares",
+                "Bruna, the Fading Light",
+                "a",
+                "bruna-oracle",
+                serde_json::json!({
+                    "manaCost": "{5}{W}{W}",
+                    "manaValue": 7.0,
+                    "power": "5",
+                    "toughness": "7",
+                    "text": "When you cast this spell, you may return target Angel or Human creature card from your graveyard to the battlefield.\nFlying, vigilance\n(Melds with Gisela, the Broken Blade.)"
+                }),
+            )],
+            "Brisela, Voice of Nightmares": [face(
+                "Brisela, Voice of Nightmares",
+                "Brisela, Voice of Nightmares",
+                "b",
+                "brisela-oracle",
+                serde_json::json!({
+                    "manaValue": 0.0,
+                    "power": "9",
+                    "toughness": "10",
+                    "subtypes": ["Eldrazi", "Angel"],
+                    "type": "Legendary Creature — Eldrazi Angel",
+                    "text": "Flying, first strike, vigilance, lifelink\nYour opponents can't cast spells with mana value 3 or less."
+                }),
+            )],
+        }});
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, atomic.to_string().as_bytes()).unwrap();
+        let db = CardDatabase::from_mtgjson(file.path()).expect("MTGJSON meld shape loads");
+
+        let key = meld_pair_key("Gisela, the Broken Blade", "Bruna, the Fading Light");
+        assert_eq!(
+            build_meld_pair_registry(&db).get(&key),
+            Some(&MeldPairRecord {
+                source: "Gisela, the Broken Blade".to_string(),
+                partner: "Bruna, the Fading Light".to_string(),
+                result: "Brisela, Voice of Nightmares".to_string(),
+            })
+        );
+    }
+
     fn conjure_ability(target_name: &str, destination: Zone) -> AbilityDefinition {
         AbilityDefinition::new(
             AbilityKind::Spell,
@@ -2704,7 +3696,10 @@ mod tests {
 
         let db = db_from_faces(&[conjurer.clone(), target.clone(), noise_a, noise_b]);
 
-        let mut state = GameState::default();
+        let mut state = GameState {
+            format_config: FormatConfig::historic(),
+            ..Default::default()
+        };
         create_object_from_card_face(&mut state, &conjurer, PlayerId(0));
 
         rehydrate_game_from_card_db(&mut state, &db);
@@ -2730,7 +3725,10 @@ mod tests {
         );
         let db = db_from_faces(std::slice::from_ref(&vanilla));
 
-        let mut state = GameState::default();
+        let mut state = GameState {
+            format_config: FormatConfig::historic(),
+            ..Default::default()
+        };
         create_object_from_card_face(&mut state, &vanilla, PlayerId(0));
 
         rehydrate_game_from_card_db(&mut state, &db);
@@ -2764,7 +3762,10 @@ mod tests {
 
         let db = db_from_faces(&[conjurer.clone(), target.clone()]);
 
-        let mut state = GameState::default();
+        let mut state = GameState {
+            format_config: FormatConfig::historic(),
+            ..Default::default()
+        };
         create_object_from_card_face(&mut state, &conjurer, PlayerId(0));
 
         rehydrate_game_from_card_db(&mut state, &db);
@@ -2808,7 +3809,10 @@ mod tests {
 
         let db = db_from_faces(&[card_a.clone(), card_b.clone(), card_c.clone()]);
 
-        let mut state = GameState::default();
+        let mut state = GameState {
+            format_config: FormatConfig::historic(),
+            ..Default::default()
+        };
         // Seed Card A via the deck pool to also exercise the deck-pool seed path.
         state
             .deck_pools
@@ -2828,13 +3832,194 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Format gating of the digital-only seed legs
+    // -----------------------------------------------------------------------
+
+    /// Build the registry through production rehydration from one battlefield
+    /// seed face, with `format` as the only axis that moves between calls.
+    fn registry_under(
+        format: GameFormat,
+        seed: &CardFace,
+        db: &CardDatabase,
+    ) -> Arc<HashMap<String, CardFace>> {
+        let mut state = GameState::default();
+        state.format_config.format = format;
+        create_object_from_card_face(&mut state, seed, PlayerId(0));
+        rehydrate_game_from_card_db(&mut state, db);
+        state.card_face_registry.clone()
+    }
+
+    const MELD_RESULT: &str = "Meld Result";
+
+    /// A front face whose meld names `MELD_RESULT` — the outside-the-game third
+    /// card whose characteristics the melded permanent presents (CR 712.4b).
+    fn meld_seed_face() -> CardFace {
+        let mut face = test_face(
+            "Meld Front",
+            "oracle-meld-front",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        face.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Meld {
+                source: "Meld Front".to_string(),
+                partner: "Meld Partner".to_string(),
+                result: MELD_RESULT.to_string(),
+                source_filter: TargetFilter::SelfRef,
+                partner_filter: TargetFilter::Any,
+                entry: crate::types::ability::PermanentEntryMode::Normal,
+            },
+        ));
+        face
+    }
+
+    fn plain_face(name: &str, oracle_id: &str) -> CardFace {
+        test_face(
+            name,
+            oracle_id,
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        )
+    }
+
+    #[test]
+    fn registry_skips_conjure_targets_when_the_format_forbids_digital_only_cards() {
+        let mut conjurer = plain_face("Gated Conjurer", "oracle-gated-conjurer");
+        conjurer
+            .abilities
+            .push(conjure_ability("Conjured Spirit", Zone::Battlefield));
+        let db = db_from_faces(&[
+            conjurer.clone(),
+            plain_face("Conjured Spirit", "oracle-spirit"),
+        ]);
+
+        // Reach guard: the open format proves this fixture reaches the seed walk,
+        // so the closed format's emptiness below cannot pass vacuously.
+        assert!(
+            registry_under(GameFormat::Historic, &conjurer, &db).contains_key("conjured spirit"),
+            "an Arena-legal pool seeds the conjure target"
+        );
+        assert!(
+            registry_under(GameFormat::Standard, &conjurer, &db).is_empty(),
+            "a pool with no digital-only card seeds no conjure target"
+        );
+    }
+
+    #[test]
+    fn registry_still_seeds_meld_results_when_the_format_forbids_digital_only_cards() {
+        let front = meld_seed_face();
+        let db = db_from_faces(&[front.clone(), plain_face(MELD_RESULT, "oracle-meld-result")]);
+
+        for format in [GameFormat::Standard, GameFormat::Historic] {
+            assert!(
+                registry_under(format, &front, &db).contains_key("meld result"),
+                "CR 701.42: meld is a paper keyword action, so the meld result seeds under {format:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_gates_spellbook_seeds_on_the_format() {
+        let mut source = plain_face("Spellbook Source", "oracle-spellbook-source");
+        source.metadata.spellbook = vec!["Spellbook Card".to_string()];
+        let db = db_from_faces(&[
+            source.clone(),
+            plain_face("Spellbook Card", "oracle-spellbook-card"),
+        ]);
+
+        assert!(
+            registry_under(GameFormat::Historic, &source, &db).contains_key("spellbook card"),
+            "an Arena-legal pool seeds every spellbook face"
+        );
+        assert!(
+            registry_under(GameFormat::Standard, &source, &db).is_empty(),
+            "a spellbook face is digital-only and follows the same gate"
+        );
+    }
+
+    /// H1: the gate selects effects, not faces — one face carrying both legs
+    /// keeps its meld result and loses its conjure target.
+    #[test]
+    fn registry_gate_splits_per_effect_not_per_face() {
+        let mut front = meld_seed_face();
+        front
+            .abilities
+            .push(conjure_ability("Conjured Spirit", Zone::Battlefield));
+        let db = db_from_faces(&[
+            front.clone(),
+            plain_face(MELD_RESULT, "oracle-meld-result"),
+            plain_face("Conjured Spirit", "oracle-spirit"),
+        ]);
+
+        let registry = registry_under(GameFormat::Standard, &front, &db);
+        assert!(
+            registry.contains_key("meld result"),
+            "reach guard: the walker reached this face's ability list"
+        );
+        assert!(
+            !registry.contains_key("conjured spirit"),
+            "the digital leg on the same face is gated out"
+        );
+    }
+
+    /// H2: the gate holds one hop inside the transitive closure, not only at the
+    /// seed step — the member a seed-only gate would wrongly admit.
+    #[test]
+    fn registry_gate_applies_at_every_closure_step() {
+        let front = meld_seed_face();
+        let mut result = plain_face(MELD_RESULT, "oracle-meld-result");
+        result
+            .abilities
+            .push(conjure_ability("Conjured Spirit", Zone::Battlefield));
+        let db = db_from_faces(&[
+            front.clone(),
+            result,
+            plain_face("Conjured Spirit", "oracle-spirit"),
+        ]);
+
+        let registry = registry_under(GameFormat::Standard, &front, &db);
+        assert!(
+            registry.contains_key("meld result"),
+            "reach guard: the closure resolved and walked the meld result face"
+        );
+        assert!(
+            !registry.contains_key("conjured spirit"),
+            "a digital name reached inside the closure is gated like a seed"
+        );
+    }
+
+    /// H3: a format enforcing no built-in card pool restricts nothing.
+    #[test]
+    fn registry_seeds_conjure_targets_when_the_format_enforces_no_pool() {
+        let mut conjurer = plain_face("Gated Conjurer", "oracle-gated-conjurer");
+        conjurer
+            .abilities
+            .push(conjure_ability("Conjured Spirit", Zone::Battlefield));
+        let db = db_from_faces(&[
+            conjurer.clone(),
+            plain_face("Conjured Spirit", "oracle-spirit"),
+        ]);
+
+        for format in [
+            GameFormat::FreeForAll,
+            GameFormat::Custom(crate::types::custom_format::CustomFormatId(0)),
+        ] {
+            assert!(
+                registry_under(format, &conjurer, &db).contains_key("conjured spirit"),
+                "{format:?} enforces no card pool, so the gate stays open"
+            );
+        }
+    }
+
     /// FIELD-COVERAGE: place an `Effect::Conjure` in EVERY nested ability/effect
     /// carrier and assert the walker collects all names. A future struct gaining
     /// a new `Box<AbilityDefinition>` field is NOT caught by the compiler (it is
     /// struct-field access, not a match arm) — this test is that safety net.
     #[test]
     fn walker_covers_every_nested_carrier() {
-        let mut names: Vec<String> = Vec::new();
+        let mut names = OutsideGameSeeds::default();
 
         // sub_ability / else_ability / mode_abilities on AbilityDefinition.
         let mut def = AbilityDefinition::new(AbilityKind::Spell, Effect::Investigate);
@@ -2954,6 +4139,7 @@ mod tests {
             static_abilities: vec![generic_static],
             duration: None,
             target: None,
+            end_cost: None,
         };
         walk_effect(&generic, &mut names);
 
@@ -3152,7 +4338,7 @@ mod tests {
         ];
         for name in expected {
             assert!(
-                names.iter().any(|n| n == name),
+                names.digital.iter().any(|n| n == name),
                 "walker missed conjure name '{name}' in a nested carrier"
             );
         }
@@ -3298,6 +4484,123 @@ mod tests {
         assert!(
             !obj.card_types.core_types.contains(&CoreType::Creature),
             "bestowed object must not keep Creature core type"
+        );
+    }
+
+    /// A graveyard object whose live face is the BACK half and whose stashed
+    /// FRONT half carries Disturb (CR 702.146a) — the shape a card cast
+    /// transformed for its Disturb cost leaves behind.
+    fn swapped_disturb_object() -> GameObject {
+        let disturb_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 1,
+        };
+
+        let mut front = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Disturb Front Face".to_string(),
+            Zone::Graveyard,
+        );
+        front.keywords = vec![Keyword::Disturb(disturb_cost)];
+
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Disturb Back Face".to_string(),
+            Zone::Graveyard,
+        );
+        obj.transformed = true;
+        obj.back_face = Some(snapshot_object_face(&front));
+        obj
+    }
+
+    /// Strip the provenance marker from a serialized state the way a writer
+    /// that predates the field left it out entirely. The count assertion is the
+    /// abort guard: a silent no-op replace would measure nothing.
+    fn as_legacy_shape(state: &GameState) -> String {
+        const MARKER: &str = "\"is_swap_snapshot\":true";
+        let json = serde_json::to_string(state).expect("state serializes");
+        assert_eq!(
+            json.matches(MARKER).count(),
+            1,
+            "probe must find exactly one marker to strip"
+        );
+        let legacy = json
+            .replace(&format!(",{MARKER}"), "")
+            .replace(&format!("{MARKER},"), "");
+        assert!(
+            !legacy.contains(MARKER),
+            "the legacy shape must carry no marker at all"
+        );
+        legacy
+    }
+
+    /// #7568: a state written before `is_swap_snapshot` existed carries no such
+    /// field, so `serde(default)` reads it as `false` and
+    /// `keywords::effective_disturb_cost` loses the stashed front face it reads
+    /// the keyword through (CR 702.146a). Deserialize exactly that shape and
+    /// prove the cost survives the load.
+    #[test]
+    fn a_legacy_swapped_face_keeps_its_disturb_cost_across_a_load() {
+        let mut state = GameState::new_two_player(42);
+        state.objects.insert(ObjectId(1), swapped_disturb_object());
+
+        assert!(
+            crate::game::keywords::effective_disturb_cost(&state, ObjectId(1)).is_some(),
+            "the current shape must reach Disturb through the swap snapshot"
+        );
+
+        let mut loaded: GameState =
+            serde_json::from_str(&as_legacy_shape(&state)).expect("legacy shape deserializes");
+
+        // The defect itself — and what makes the assertion after the repair
+        // discriminate rather than merely pass.
+        assert!(
+            crate::game::keywords::effective_disturb_cost(&loaded, ObjectId(1)).is_none(),
+            "an unrepaired legacy load loses the Disturb lookup"
+        );
+
+        // Through the public load entry point, not the repair directly, so the
+        // wiring is covered too: an empty database leaves the printed-face pass
+        // with nothing to re-apply, which is exactly what isolates the repair.
+        rehydrate_game_from_card_db(&mut loaded, &CardDatabase::default());
+
+        assert!(
+            crate::game::keywords::effective_disturb_cost(&loaded, ObjectId(1)).is_some(),
+            "the repaired legacy load must offer the Disturb cost again"
+        );
+    }
+
+    /// The guard on the other side: a still-unswapped printed back face carries
+    /// none of the face-state flags, so an absent `layout_kind` must never
+    /// promote it to a snapshot — otherwise every printed DFC back face would
+    /// start granting its front face's Disturb.
+    #[test]
+    fn a_still_unswapped_printed_back_face_is_never_promoted_to_a_snapshot() {
+        let mut state = GameState::new_two_player(42);
+        let mut obj = swapped_disturb_object();
+        // Same stored face, but the object does NOT report showing its
+        // alternative half — this is a printed back face, not a stash.
+        obj.transformed = false;
+        obj.back_face.as_mut().unwrap().is_swap_snapshot = false;
+        state.objects.insert(ObjectId(1), obj);
+
+        restore_legacy_swap_snapshot_provenance(&mut state);
+
+        assert!(
+            !state.objects[&ObjectId(1)]
+                .back_face
+                .as_ref()
+                .unwrap()
+                .is_swap_snapshot,
+            "a printed back face must not be promoted to a swap snapshot"
+        );
+        assert!(
+            crate::game::keywords::effective_disturb_cost(&state, ObjectId(1)).is_none(),
+            "a printed back face must not grant Disturb"
         );
     }
 }

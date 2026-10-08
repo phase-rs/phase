@@ -1,6 +1,8 @@
 import { cleanup, render, screen } from "@testing-library/react";
+import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { useAnimationStore } from "../../../stores/animationStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
 import {
@@ -12,11 +14,20 @@ import {
   buildPlayers,
   buildPriorityWaitingFor,
 } from "../../../test/factories/gameStateFactory.ts";
+import {
+  OPPONENT_HAND_VERTICAL_SCALE,
+  handFanGeometry,
+  handFanVerticalMetrics,
+} from "../handFanPresentation.ts";
 import { OpponentHand } from "../OpponentHand.tsx";
 
 vi.mock("../../../hooks/useCardImage.ts", () => ({
   useCardImage: (cardName: string) => ({
     src: cardName ? `${cardName}.png` : null,
+    isLoading: false,
+  }),
+  useCardBackImage: () => ({
+    src: "card-back.png",
     isLoading: false,
   }),
 }));
@@ -64,6 +75,11 @@ describe("OpponentHand", () => {
 
   afterEach(() => {
     cleanup();
+    Object.defineProperty(window, "innerHeight", {
+      configurable: true,
+      writable: true,
+      value: 768,
+    });
   });
 
   it("uses explicit playerId instead of focusedOpponent", () => {
@@ -73,16 +89,81 @@ describe("OpponentHand", () => {
     expect(screen.queryByAltText("Focused Opponent Card")).toBeNull();
   });
 
-  // CR 701.20e (phase-rs/phase#5251): Glasses of Urza / Gitaxian Probe "look at
-  // target player's hand" surfaces the looked-at cards' identities only to the
-  // looking player (`private_look_player`/`private_look_ids`), distinct from
-  // the public reveal sets already covered above. Before this fix, the
-  // opponent-hand card thumbnail only consulted `revealed_cards` /
-  // `public_revealed_cards`, so a private look never made the card visible to
-  // the looker even though the engine had already sent them its real name.
-  it("shows a card the engine privately looked at for this viewer, without showCards", () => {
+  it("mirrors the shared wide, shallow hand fan geometry", () => {
+    const cards = Array.from({ length: 8 }, (_, index) =>
+      cardObject(100 + index, 1, `Opponent Card ${index + 1}`),
+    );
     useGameStore.setState({
-      gameState: { ...createGameState(), private_look_player: 0, private_look_ids: [22] },
+      gameState: buildGameState({
+        players: buildPlayers([0, { id: 1, hand: cards.map((card) => card.id) }]),
+        objects: buildObjectMap(...cards),
+        battlefield: [],
+        exile: [],
+        stack: [],
+        waiting_for: buildPriorityWaitingFor(),
+        seat_order: [0, 1],
+        eliminated_players: [],
+      }),
+    });
+
+    const { container } = render(<OpponentHand playerId={1} />);
+    const renderedCards = Array.from(
+      container.querySelectorAll<HTMLElement>("[data-opponent-hand-card]"),
+    );
+    const verticalMetrics = handFanVerticalMetrics(false, OPPONENT_HAND_VERTICAL_SCALE);
+    const expectedFan = handFanGeometry(
+      cards.length,
+      "--opponent-hand-card-w",
+      verticalMetrics.arcScale,
+    );
+
+    expect(renderedCards).toHaveLength(cards.length);
+    renderedCards.forEach((card, index) => {
+      expect(Number(card.dataset.handRotation)).toBeCloseTo(-expectedFan.rotation(index));
+      expect(Number(card.dataset.handArc)).toBeCloseTo(expectedFan.arc(index));
+    });
+  });
+
+  it("scales the mirrored fan depth on compact-height screens", () => {
+    Object.defineProperty(window, "innerHeight", {
+      configurable: true,
+      writable: true,
+      value: 440,
+    });
+    const cards = Array.from({ length: 8 }, (_, index) =>
+      cardObject(200 + index, 1, `Compact Opponent Card ${index + 1}`),
+    );
+    useGameStore.setState({
+      gameState: buildGameState({
+        players: buildPlayers([0, { id: 1, hand: cards.map((card) => card.id) }]),
+        objects: buildObjectMap(...cards),
+        battlefield: [],
+        exile: [],
+        stack: [],
+        waiting_for: buildPriorityWaitingFor(),
+        seat_order: [0, 1],
+        eliminated_players: [],
+      }),
+    });
+
+    const { container } = render(<OpponentHand playerId={1} />);
+    const firstCard = container.querySelector<HTMLElement>("[data-opponent-hand-card]");
+
+    expect(Number(firstCard?.dataset.handArc)).toBeCloseTo(
+      16 * OPPONENT_HAND_VERTICAL_SCALE,
+    );
+  });
+
+  it("shows a card when Rust projects its display visibility, without showCards", () => {
+    const state = createGameState();
+    useGameStore.setState({
+      gameState: {
+        ...state,
+        objects: {
+          ...state.objects,
+          22: { ...state.objects[22], display_visible_to_viewer: true },
+        },
+      },
     });
 
     render(<OpponentHand playerId={2} />);
@@ -90,7 +171,7 @@ describe("OpponentHand", () => {
     expect(screen.getByAltText("Explicit Opponent Card")).toBeInTheDocument();
   });
 
-  it("does not show a privately-looked-at card to a player other than the looker", () => {
+  it("does not reconstruct visibility from a private-look payload", () => {
     useGameStore.setState({
       gameState: { ...createGameState(), private_look_player: 1, private_look_ids: [22] },
     });
@@ -98,5 +179,81 @@ describe("OpponentHand", () => {
     render(<OpponentHand playerId={2} />);
 
     expect(screen.queryByAltText("Explicit Opponent Card")).toBeNull();
+  });
+
+  describe("flight veil", () => {
+    const CARD = 11;
+    const cardSelector = `[data-opponent-hand-card="${CARD}"]`;
+
+    function cardNode(container: HTMLElement) {
+      return container.querySelector<HTMLElement>(cardSelector);
+    }
+
+    beforeEach(() => {
+      useAnimationStore.getState().clearQueue();
+    });
+
+    afterEach(() => {
+      useAnimationStore.getState().clearQueue();
+    });
+
+    it("mounts hidden with no entrance when its object is already flight-veiled", () => {
+      useAnimationStore.getState().veilFlight(CARD);
+
+      const { container } = render(<OpponentHand playerId={1} />);
+
+      expect(cardNode(container)!.style.visibility).toBe("hidden");
+      expect(cardNode(container)!.style.opacity).toBe("1");
+      // A face-down card stays face down while veiled.
+      expect(screen.queryByAltText("Focused Opponent Card")).toBeNull();
+    });
+
+    it("keeps today's entrance when it mounts unveiled", () => {
+      const { container } = render(<OpponentHand playerId={1} />);
+
+      expect(cardNode(container)!.style.opacity).toBe("0");
+      expect(cardNode(container)!.style.transform).toBe("translateY(-60px)");
+      expect(cardNode(container)!.style.visibility).toBe("");
+    });
+
+    it("shows without replaying the entrance once the flight releases it", () => {
+      useAnimationStore.getState().veilFlight(CARD);
+      const { container } = render(<OpponentHand playerId={1} />);
+
+      act(() => useAnimationStore.getState().unveilFlight(CARD));
+
+      expect(cardNode(container)!.style.visibility).toBe("");
+      expect(cardNode(container)!.style.opacity).toBe("1");
+    });
+
+    it("stays hidden through an exit that began while veiled", () => {
+      useAnimationStore.getState().veilFlight(CARD);
+      const { container } = render(<OpponentHand playerId={1} />);
+
+      const state = createGameState();
+      act(() => {
+        useGameStore.setState({
+          gameState: {
+            ...state,
+            players: state.players.map((player) =>
+              player.id === 1 ? { ...player, hand: [] } : player,
+            ),
+          },
+        });
+      });
+      act(() => useAnimationStore.getState().unveilFlight(CARD));
+
+      // Still mounted: the exit animation is running.
+      expect(cardNode(container)).not.toBeNull();
+      expect(cardNode(container)!.style.visibility).toBe("hidden");
+    });
+
+    it("addresses the card by a zone-scoped anchor, not an inspection attribute", () => {
+      const { container } = render(<OpponentHand playerId={1} />);
+
+      const matches = container.querySelectorAll(cardSelector);
+      expect(matches).toHaveLength(1);
+      expect(matches[0]).not.toHaveAttribute("data-object-id");
+    });
   });
 });

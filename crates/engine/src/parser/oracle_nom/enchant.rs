@@ -11,23 +11,20 @@
 
 use nom::branch::alt;
 use nom::bytes::complete::tag;
-use nom::combinator::value;
+use nom::character::complete::space1;
+use nom::combinator::{map_opt, opt, value};
+use nom::multi::many0;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::error::OracleResult;
-use super::target::parse_supertype_prefix;
+use super::target::{parse_non_prefix, parse_supertype_prefix, parse_type_filter_word};
 use crate::parser::oracle_target::parse_without_keyword_suffix;
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AttachmentKind, ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct EnchantTypeLeg {
-    pub(crate) type_filter: TypeFilter,
-    pub(crate) properties: Vec<FilterProp>,
-}
 
 /// CR 702.5a: One enchantable core-type or supported subtype token. Core
 /// types and established basic-land subtype legs stay as literal nom arms;
@@ -91,22 +88,33 @@ fn parse_artifact_subtype_enchant_leg(input: &str) -> OracleResult<'_, TypeFilte
 /// such as "snow land", "basic land", or "legendary creature". Reuse the
 /// shared target-phrase supertype recognizer so Aura legality gets the same
 /// `HasSupertype` property as ordinary target phrases.
-pub(crate) fn parse_enchant_qualified_type_leg(input: &str) -> OracleResult<'_, EnchantTypeLeg> {
-    use nom::combinator::opt;
-
+pub(crate) fn parse_enchant_qualified_type_leg(input: &str) -> OracleResult<'_, TypedFilter> {
     let (input, supertype) = opt(parse_supertype_prefix).parse(input)?;
+    let (input, excluded_subtype) = opt(parse_enchant_negated_subtype_prefix).parse(input)?;
     let (input, type_filter) = parse_enchant_type_leg(input)?;
+    let mut typed = TypedFilter::new(type_filter);
+    if let Some(excluded) = excluded_subtype {
+        typed = typed.with_type(excluded);
+    }
     let properties = supertype
         .map(|value| FilterProp::HasSupertype { value })
         .into_iter()
         .collect();
-    Ok((
-        input,
-        EnchantTypeLeg {
-            type_filter,
-            properties,
+    Ok((input, typed.properties(properties)))
+}
+
+/// CR 702.5a + CR 205.3a: A negated canonical subtype adjective restricts
+/// its owning Enchant leg. Preserve the positive head and conjoin the
+/// exclusion, rather than excluding that subtype from every union leg.
+fn parse_enchant_negated_subtype_prefix(input: &str) -> OracleResult<'_, TypeFilter> {
+    map_opt(
+        terminated(preceded(parse_non_prefix, parse_type_filter_word), space1),
+        |type_filter| match type_filter {
+            subtype @ TypeFilter::Subtype(_) => Some(TypeFilter::Non(Box::new(subtype))),
+            _ => None,
         },
-    ))
+    )
+    .parse(input)
 }
 
 /// Separator between enchant list legs. Covers serial-comma (", or "/", and "),
@@ -128,10 +136,7 @@ pub(crate) fn parse_enchant_list_sep(input: &str) -> OracleResult<'_, ()> {
 
 /// Parse a leg list with serial-comma or bare-conjunction separators.
 /// Returns the list in source order.
-pub(crate) fn parse_enchant_type_list(input: &str) -> OracleResult<'_, Vec<EnchantTypeLeg>> {
-    use nom::multi::many0;
-    use nom::sequence::preceded;
-
+pub(crate) fn parse_enchant_type_list(input: &str) -> OracleResult<'_, Vec<TypedFilter>> {
     let (input, first) = parse_enchant_qualified_type_leg(input)?;
     let (input, rest) = many0(preceded(
         parse_enchant_list_sep,
@@ -217,28 +222,21 @@ pub(crate) fn parse_enchant_player_base(input: &str) -> OracleResult<'_, TargetF
 /// runtime Aura identically regardless of whether it was cast normally or
 /// installed by a return-as-Aura effect.
 pub(crate) fn parse_enchant_target_full(input: &str) -> OracleResult<'_, TargetFilter> {
-    use nom::combinator::opt;
-
     let (input, type_legs) = parse_enchant_type_list(input)?;
     let (input, controller) = opt(parse_enchant_controller_suffix).parse(input)?;
     let (input, attachment) = opt(parse_enchant_attachment_qualifier).parse(input)?;
     let (input, without_keyword) = parse_enchant_without_keyword_suffix(input)?;
 
     let mut filters = Vec::with_capacity(type_legs.len());
-    for leg in type_legs {
-        let mut typed = TypedFilter::new(leg.type_filter);
+    for mut typed in type_legs {
         if let Some(c) = controller.clone() {
             typed = typed.controller(c);
         }
 
-        let mut properties = leg.properties;
         if let Some(prop) = attachment.clone() {
-            properties.push(prop);
+            typed.properties.push(prop);
         }
-        properties.extend(without_keyword.iter().cloned());
-        if !properties.is_empty() {
-            typed = typed.properties(properties);
-        }
+        typed.properties.extend(without_keyword.iter().cloned());
 
         filters.push(TargetFilter::Typed(typed));
     }
@@ -253,7 +251,7 @@ pub(crate) fn parse_enchant_target_full(input: &str) -> OracleResult<'_, TargetF
 
 /// CR 702.5a + CR 702.9: Optional trailing "without [keyword]" qualifier on an
 /// enchant line (Trapped in the Tower, Roots). Delegates to the shared target
-/// suffix authority so Aura legal-target sets match `parse_type_phrase`.
+/// suffix authority so Aura legal-target sets match `parse_type_phrase_folding`.
 fn parse_enchant_without_keyword_suffix(input: &str) -> OracleResult<'_, Vec<FilterProp>> {
     match parse_without_keyword_suffix(input) {
         Some((props, consumed)) => Ok((&input[consumed..], props)),
@@ -265,6 +263,121 @@ fn parse_enchant_without_keyword_suffix(input: &str) -> OracleResult<'_, Vec<Fil
 mod tests {
     use super::*;
     use crate::types::keywords::Keyword;
+
+    // SHAPE: CR 702.5a + CR 205.3h: the exclusion belongs to the enchantment
+    // leg, so an artifact Aura remains eligible through the artifact leg.
+    #[test]
+    fn puppet_crafting_negation_is_leg_local_shape() {
+        let (rest, filter) = parse_enchant_target_full("artifact or non-aura enchantment")
+            .expect("Puppet Crafting's complete Enchant clause must parse");
+        assert!(rest.is_empty());
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected two Enchant legs");
+        };
+        assert_eq!(filters.len(), 2);
+        let TargetFilter::Typed(artifact) = &filters[0] else {
+            panic!("expected artifact leg");
+        };
+        assert_eq!(artifact.type_filters, vec![TypeFilter::Artifact]);
+        let TargetFilter::Typed(enchantment) = &filters[1] else {
+            panic!("expected enchantment leg");
+        };
+        assert_eq!(
+            enchantment.type_filters,
+            vec![
+                TypeFilter::Enchantment,
+                TypeFilter::Non(Box::new(TypeFilter::Subtype("Aura".into()))),
+            ]
+        );
+    }
+
+    // SHAPE: CR 702.5a: subtype adjectives compose with the established
+    // supertype, controller, attachment and without-keyword axes.
+    #[test]
+    fn enchant_negated_subtype_composition_and_strict_remainder_shape() {
+        use crate::types::card_type::Supertype;
+
+        for (phrase, supertype, controller) in [
+            ("non-wall creature", None, None),
+            ("nonwall creature", None, None),
+            (
+                "legendary non-wall creature you control",
+                Some(Supertype::Legendary),
+                Some(ControllerRef::You),
+            ),
+        ] {
+            let (rest, filter) = parse_enchant_target_full(phrase).unwrap();
+            assert!(rest.is_empty());
+            let TargetFilter::Typed(typed) = filter else {
+                panic!("expected typed leg")
+            };
+            assert_eq!(
+                typed.type_filters,
+                vec![
+                    TypeFilter::Creature,
+                    TypeFilter::Non(Box::new(TypeFilter::Subtype("Wall".into())))
+                ]
+            );
+            assert_eq!(typed.controller, controller);
+            assert_eq!(
+                typed.properties,
+                supertype
+                    .into_iter()
+                    .map(|value| FilterProp::HasSupertype { value })
+                    .collect::<Vec<_>>()
+            );
+        }
+        let (rest, filter) = parse_enchant_target_full(
+            "non-wall creature with another aura attached to it without flying",
+        )
+        .unwrap();
+        assert!(rest.is_empty());
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected typed leg")
+        };
+        assert_eq!(typed.type_filters.len(), 2);
+        assert!(typed
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::HasAttachment { .. })));
+        assert!(typed.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::WithoutKeyword {
+                value: Keyword::Flying
+            }
+        )));
+        for phrase in [
+            "creature",
+            "snow land you control",
+            "creature or food",
+            "vehicle or creature",
+        ] {
+            assert!(
+                nom::combinator::all_consuming(parse_enchant_target_full)
+                    .parse(phrase)
+                    .is_ok(),
+                "preservation: {phrase}"
+            );
+        }
+        for phrase in [
+            "",
+            "non-Aurora enchantment",
+            "non- enchantment",
+            "non-aura",
+            "nonartifact enchantment",
+            "non-aura enchantment if you control a creature",
+            "artifact or non-aura",
+            "artifact non-aura enchantment",
+            "goblin",
+        ] {
+            assert!(
+                nom::combinator::all_consuming(parse_enchant_target_full)
+                    .parse(phrase)
+                    .is_err(),
+                "must decline: {phrase}"
+            );
+        }
+    }
 
     /// CR 702.5a + CR 702.9: Trapped in the Tower — "Enchant creature without flying".
     #[test]

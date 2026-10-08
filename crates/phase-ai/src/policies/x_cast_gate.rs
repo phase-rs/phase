@@ -15,7 +15,8 @@
 //!    authority, CR 601.2b/f) reports the only legal X is 0, and
 //! 3. the payoff genuinely scales with X (via `x_reference`, the shared
 //!    detector the ramp policy also consumes), with any *fixed* non-X residual
-//!    still being trivial (priced by `self_cost::effect_is_trivial`).
+//!    still being trivial (classified by
+//!    `self_cost::residual_effects_are_trivial_at_x_zero`).
 //!
 //! Rejecting the cast makes the AI `Pass` (always a Priority candidate) and hold
 //! the card — it never loses the card, it just waits until X≥1 is affordable.
@@ -25,8 +26,11 @@
 
 use engine::game::game_object::GameObject;
 use engine::game::max_x_value;
-use engine::types::ability::{AbilityCost, AbilityDefinition, AbilityKind, Effect};
+use engine::types::ability::{
+    AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, QuantityRef,
+};
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard};
@@ -38,7 +42,7 @@ use crate::features::DeckFeatures;
 
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
-use super::self_cost::effect_is_trivial;
+use super::self_cost::{residual_effects_at_x_zero, ResidualVerdict};
 use super::x_reference;
 
 pub struct XCastGatePolicy;
@@ -163,6 +167,7 @@ fn no_op_at_x_zero(
 ) -> bool {
     let mut references_any_x = object_level_x;
     let mut prev_was_x = object_level_x;
+    let mut residual_effects = Vec::new();
     for effect in effects {
         if x_reference::effect_references_x(effect) {
             references_any_x = true;
@@ -175,13 +180,242 @@ fn no_op_at_x_zero(
             prev_was_x = true;
             continue;
         }
-        if !effect_is_trivial(state, ai_player, source_id, ability, effect) {
-            // A fixed, meaningful non-X residual is worth casting at X=0.
-            return false;
-        }
+        residual_effects.push(*effect);
         prev_was_x = false;
     }
     references_any_x
+        && residual_effects_at_x_zero(state, ai_player, source_id, ability, &residual_effects)
+            == ResidualVerdict::TrivialAtXZero
+}
+
+/// Whether a root's payoff is structurally dependent on the announced X.
+/// Kept separate from [`ZeroProof`]: an X-dependent `X + 1` payload is not a
+/// no-op at zero, while an unrelated fixed rider can still be trivial.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum XDependency {
+    XDependent,
+    NotXDependent,
+}
+
+/// Conservative proof of a root's X=0 result. `Unknown` always fails open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ZeroProof {
+    ProvenZero,
+    Meaningful,
+    Unknown,
+}
+
+/// A real spell-level modal is safe to reject only when every selectable root
+/// independently proves that its X-dependent payoff is zero. This deliberately
+/// does not use `collect_definition_effects`: that helper flattens mode/else
+/// branches, destroying the sequential provenance needed by
+/// `PreviousEffectAmount`.
+fn modal_spell_no_op_at_x_zero(
+    state: &GameState,
+    ai_player: PlayerId,
+    object: &GameObject,
+    source_id: ObjectId,
+) -> bool {
+    let Some(modal) = &object.modal else {
+        return false;
+    };
+
+    if modal.mode_count == 0
+        || modal.mode_count != object.abilities.len()
+        || !object
+            .card_types
+            .core_types
+            .iter()
+            .any(|ty| matches!(ty, CoreType::Instant | CoreType::Sorcery))
+        || !object.parse_warnings.is_empty()
+        || !object.trigger_definitions.is_empty()
+        || !object.replacement_definitions.is_empty()
+        || !object.static_definitions.is_empty()
+        || !object.base_trigger_definitions.is_empty()
+        || !object.base_replacement_definitions.is_empty()
+        || !object.base_static_definitions.is_empty()
+    {
+        return false;
+    }
+
+    object.abilities.iter().all(|root| {
+        root.kind == AbilityKind::Spell
+            && matches!(
+                prove_modal_root_at_x_zero(state, ai_player, source_id, root),
+                (XDependency::XDependent, ZeroProof::ProvenZero)
+            )
+    })
+}
+
+/// Prove one selectable modal root without crossing an effect-branch boundary.
+/// A previous-effect amount inherits zero only from the immediately preceding,
+/// mandatory, unconditional definition in this exact `sub_ability` chain.
+fn prove_modal_root_at_x_zero(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    root: &AbilityDefinition,
+) -> (XDependency, ZeroProof) {
+    let mut current = Some(root);
+    let mut previous_zero = false;
+    let mut dependency = XDependency::NotXDependent;
+    let mut proof = ZeroProof::ProvenZero;
+    let mut residuals = Vec::new();
+
+    while let Some(ability) = current {
+        // Else, nested modal metadata/modes, and embedded effect choices all
+        // create alternate execution paths. Never merge them into this root.
+        if ability.else_ability.is_some()
+            || ability.modal.is_some()
+            || !ability.mode_abilities.is_empty()
+            || matches!(ability.effect.as_ref(), Effect::ChooseOneOf { .. })
+        {
+            return (dependency, ZeroProof::Unknown);
+        }
+
+        let mandatory_unconditional = !ability.optional
+            && ability.optional_for.is_none()
+            && ability.optional_player.is_none()
+            && ability.condition.is_none();
+        let effect = ability.effect.as_ref();
+
+        let effect_proof = if x_reference::effect_references_previous_amount(effect) {
+            // `PreviousEffectAmount` is zero only as the exact quantity leaf.
+            // A wrapper such as `that much plus one` has its own zero result and
+            // must not inherit the predecessor proof wholesale.
+            if effect_has_exact_previous_amount(effect) && previous_zero {
+                Some((XDependency::XDependent, ZeroProof::ProvenZero))
+            } else {
+                Some((XDependency::NotXDependent, ZeroProof::Unknown))
+            }
+        } else if effect_has_any_x_reference(effect) {
+            match effect_quantity(effect) {
+                Some(quantity) if quantity.contains_x() => {
+                    let zero_proof = if quantity_is_proven_zero_at_x_zero(quantity) {
+                        ZeroProof::ProvenZero
+                    } else {
+                        ZeroProof::Meaningful
+                    };
+                    Some((XDependency::XDependent, zero_proof))
+                }
+                // X can live outside the scalar payload: for example, a fixed
+                // counter count can still use an X-filtered target. The modal
+                // gate must fail open unless the scalar X behavior is proven.
+                _ => Some((XDependency::XDependent, ZeroProof::Unknown)),
+            }
+        } else {
+            None
+        };
+
+        match effect_proof {
+            Some((XDependency::XDependent, effect_zero)) => {
+                dependency = XDependency::XDependent;
+                proof = combine_zero_proofs(proof, effect_zero);
+                previous_zero = mandatory_unconditional && effect_zero == ZeroProof::ProvenZero;
+            }
+            Some((XDependency::NotXDependent, effect_zero)) => {
+                proof = combine_zero_proofs(proof, effect_zero);
+                previous_zero = false;
+            }
+            None => {
+                residuals.push(effect);
+                previous_zero = false;
+            }
+        }
+
+        if !mandatory_unconditional {
+            previous_zero = false;
+        }
+        current = ability.sub_ability.as_deref();
+    }
+
+    match residual_effects_at_x_zero(state, ai_player, source_id, root, &residuals) {
+        ResidualVerdict::TrivialAtXZero => (dependency, proof),
+        ResidualVerdict::MeaningfulAtXZero => (dependency, ZeroProof::Meaningful),
+        ResidualVerdict::Unknown => (dependency, ZeroProof::Unknown),
+    }
+}
+
+fn effect_has_exact_previous_amount(effect: &Effect) -> bool {
+    matches!(
+        effect_quantity(effect),
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::PreviousEffectAmount { .. }
+        })
+    )
+}
+
+fn combine_zero_proofs(left: ZeroProof, right: ZeroProof) -> ZeroProof {
+    match (left, right) {
+        (ZeroProof::Unknown, _) | (_, ZeroProof::Unknown) => ZeroProof::Unknown,
+        (ZeroProof::Meaningful, _) | (_, ZeroProof::Meaningful) => ZeroProof::Meaningful,
+        (ZeroProof::ProvenZero, ZeroProof::ProvenZero) => ZeroProof::ProvenZero,
+    }
+}
+
+/// The scalar payloads whose zero behavior is explicit. Effects outside this
+/// set still report X-dependence through `x_reference`, but are `Unknown` for
+/// the modal veto rather than guessed to be zero.
+fn effect_quantity(effect: &Effect) -> Option<&QuantityExpr> {
+    match effect {
+        Effect::DealDamage { amount, .. }
+        | Effect::DamageAll { amount, .. }
+        | Effect::DamageEachPlayer { amount, .. }
+        | Effect::GainLife { amount, .. }
+        | Effect::LoseLife { amount, .. } => Some(amount),
+        Effect::Draw { count, .. }
+        | Effect::Mill { count, .. }
+        | Effect::Discard { count, .. }
+        | Effect::Scry { count, .. }
+        | Effect::Surveil { count, .. }
+        | Effect::Sacrifice { count, .. }
+        | Effect::Dig { count, .. }
+        | Effect::ExileTop { count, .. }
+        | Effect::PutAtLibraryPosition { count, .. }
+        | Effect::PutCounter { count, .. }
+        | Effect::PutCounterAll { count, .. }
+        | Effect::CopyTokenOf { count, .. }
+        | Effect::SearchLibrary { count, .. } => Some(count),
+        Effect::Token { count, .. } => Some(count),
+        _ => None,
+    }
+}
+
+/// True when `effect` contains an announced-X reference in either its scalar
+/// payload or its primary target filter. The latter has no structural zero
+/// proof, so [`prove_modal_root_at_x_zero`] treats it as unknown.
+fn effect_has_any_x_reference(effect: &Effect) -> bool {
+    x_reference::effect_references_x(effect)
+        || effect
+            .target_filter()
+            .is_some_and(x_reference::target_filter_references_x)
+}
+
+/// Exact structural zero proof for a `QuantityExpr` that already references X.
+/// In particular, an `Offset { inner: X, offset: 1 }` (X+1) is not zero.
+fn quantity_is_proven_zero_at_x_zero(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable { name },
+        } => name == "X",
+        QuantityExpr::Fixed { value } => *value == 0,
+        QuantityExpr::Offset { inner, offset } => {
+            *offset == 0 && quantity_is_proven_zero_at_x_zero(inner)
+        }
+        QuantityExpr::ClampMin { inner, minimum } => {
+            *minimum <= 0 && quantity_is_proven_zero_at_x_zero(inner)
+        }
+        QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::UpTo { max: inner } => quantity_is_proven_zero_at_x_zero(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            !exprs.is_empty() && exprs.iter().all(quantity_is_proven_zero_at_x_zero)
+        }
+        QuantityExpr::Difference { left, right } => {
+            quantity_is_proven_zero_at_x_zero(left) && quantity_is_proven_zero_at_x_zero(right)
+        }
+        QuantityExpr::Power { .. } | QuantityExpr::Ref { .. } => false,
+    }
 }
 
 fn gate_rejects(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
@@ -202,26 +436,40 @@ fn gate_rejects(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
     ) = match &ctx.candidate.action {
         GameAction::CastSpell { object_id, .. } => {
             let object = state.objects.get(object_id)?;
-            // Conservative modal/multi-Spell-ability guard: a card with more
-            // than one castable spell ability, or a modal `ChooseOneOf`
-            // chain, may have a non-no-op mode at X=0 we do not analyse —
-            // don't gate (miss a veto rather than suppress a real cast).
-            let mut spell_abilities = object
-                .abilities
-                .iter()
-                .filter(|a| a.kind == AbilityKind::Spell);
-            let ability = spell_abilities.next()?;
-            if spell_abilities.next().is_some() {
-                return None;
-            }
-            if collect_definition_effects(ability)
-                .iter()
-                .any(|e| matches!(e, Effect::ChooseOneOf { .. }))
-            {
-                return None;
-            }
             let x_manacost = spell_x_manacost(object)?;
-            (ability, *object_id, x_manacost, true)
+            if object.modal.is_some() {
+                // Spell-level modes are alternatives at cast commitment. A
+                // modal veto is sound only when every selectable mode proves
+                // zero independently; never flatten roots into one chain.
+                if !modal_spell_no_op_at_x_zero(state, ctx.ai_player, object, *object_id) {
+                    return None;
+                }
+                // The modal proof has already supplied the card-local no-op
+                // discriminator; any representative root is sufficient for
+                // the common affordability tail below.
+                let ability = object.abilities.first()?;
+                (ability, *object_id, x_manacost, true)
+            } else {
+                // Conservative modal/multi-Spell-ability guard: a card with more
+                // than one castable spell ability, or a modal `ChooseOneOf`
+                // chain, may have a non-no-op mode at X=0 we do not analyse —
+                // don't gate (miss a veto rather than suppress a real cast).
+                let mut spell_abilities = object
+                    .abilities
+                    .iter()
+                    .filter(|a| a.kind == AbilityKind::Spell);
+                let ability = spell_abilities.next()?;
+                if spell_abilities.next().is_some() {
+                    return None;
+                }
+                if collect_definition_effects(ability)
+                    .iter()
+                    .any(|e| matches!(e, Effect::ChooseOneOf { .. }))
+                {
+                    return None;
+                }
+                (ability, *object_id, x_manacost, true)
+            }
         }
         GameAction::ActivateAbility {
             source_id,
@@ -240,16 +488,23 @@ fn gate_rejects(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
     // with X), the gate can never fire — skip the affordability sweep entirely.
     // AND is commutative, so ordering the cheap card-local predicate before the
     // board-wide sweep cannot change any verdict; it only spares the sweep.
-    let (effects, object_level_x) = payoff_effects_and_x_ref(ctx, object_id, ability, is_spell);
-    if !no_op_at_x_zero(
-        state,
-        ctx.ai_player,
-        object_id,
-        ability,
-        &effects,
-        object_level_x,
-    ) {
-        return None;
+    if !is_spell
+        || state
+            .objects
+            .get(&object_id)
+            .is_none_or(|object| object.modal.is_none())
+    {
+        let (effects, object_level_x) = payoff_effects_and_x_ref(ctx, object_id, ability, is_spell);
+        if !no_op_at_x_zero(
+            state,
+            ctx.ai_player,
+            object_id,
+            ability,
+            &effects,
+            object_level_x,
+        ) {
+            return None;
+        }
     }
 
     // Board-wide affordability sweep LAST, only for genuine no-op-at-X=0 payoffs
@@ -273,8 +528,10 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        Comparator, ContinuousModification, Duration, FilterProp, QuantityExpr, QuantityRef,
-        ReplacementDefinition, StaticDefinition, TargetFilter, TypedFilter,
+        AbilityCondition, CommanderOwnership, Comparator, ContinuousModification, Duration,
+        FilterProp, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
+        OpponentMayScope, QuantityExpr, QuantityRef, ReplacementDefinition, StaticCondition,
+        StaticDefinition, TargetFilter, TypedFilter,
     };
     use engine::types::card_type::CoreType;
     use engine::types::counter::CounterType;
@@ -336,6 +593,14 @@ mod tests {
         }
     }
 
+    fn add_blue_pool(state: &mut GameState, player: PlayerId, count: usize) {
+        for _ in 0..count {
+            let mut unit = colorless_unit();
+            unit.color = ManaType::Blue;
+            state.players[player.0 as usize].mana_pool.add(unit);
+        }
+    }
+
     fn base_state() -> GameState {
         let mut state = GameState::new_two_player(42);
         state.active_player = AI;
@@ -383,6 +648,93 @@ mod tests {
         AbilityDefinition::new(AbilityKind::Spell, effect)
     }
 
+    /// Scryfall's Drown in Dreams shape: `{X}{2}{U}`, a spell-level modal with
+    /// one draw-X root and one mill-(twice X) root. The object-level `ModalChoice`
+    /// is deliberate: mode roots are separate Spell definitions, not an embedded
+    /// `ChooseOneOf` effect.
+    fn drown_in_dreams_source(state: &mut GameState) -> (ObjectId, CardId) {
+        let card_id = CardId(next_id());
+        let id = create_object(
+            state,
+            card_id,
+            AI,
+            "Drown in Dreams".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Blue],
+            generic: 2,
+        };
+        obj.card_types.core_types.push(CoreType::Instant);
+        *Arc::make_mut(&mut obj.abilities) = vec![
+            spell(Effect::Draw {
+                count: x_expr(),
+                target: TargetFilter::Player,
+            }),
+            spell(Effect::Mill {
+                count: QuantityExpr::Multiply {
+                    factor: 2,
+                    inner: Box::new(x_expr()),
+                },
+                target: TargetFilter::Player,
+                destination: Zone::Graveyard,
+            }),
+        ];
+        obj.modal = Some(ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 2,
+            constraints: vec![ModalSelectionConstraint::ConditionalMaxChoices {
+                condition: ModalSelectionCondition::Static {
+                    condition: StaticCondition::ControlsCommander {
+                        ownership: CommanderOwnership::Any,
+                    },
+                },
+                max_choices: 2,
+                otherwise_max_choices: 1,
+            }],
+            ..ModalChoice::default()
+        });
+        (id, card_id)
+    }
+
+    fn modal_x_spell_source(
+        state: &mut GameState,
+        name: &str,
+        modes: Vec<AbilityDefinition>,
+    ) -> (ObjectId, CardId) {
+        let card_id = CardId(next_id());
+        let id = create_object(state, card_id, AI, name.to_string(), Zone::Hand);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X],
+            generic: 0,
+        };
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        let mode_count = modes.len();
+        *Arc::make_mut(&mut obj.abilities) = modes;
+        obj.modal = Some(ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count,
+            ..ModalChoice::default()
+        });
+        (id, card_id)
+    }
+
+    fn draw_previous_amount() -> AbilityDefinition {
+        spell(Effect::Draw {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::PreviousEffectAmount {
+                    channel: engine::types::ability::DamageChannel::Total,
+                    aggregate: engine::types::ability::AggregateFunction::Sum,
+                },
+            },
+            target: TargetFilter::Controller,
+        })
+    }
+
     fn next_id() -> u64 {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(5000);
@@ -400,6 +752,7 @@ mod tests {
             amount: QuantityExpr::Ref {
                 qty: QuantityRef::PreviousEffectAmount {
                     channel: engine::types::ability::DamageChannel::Total,
+                    aggregate: engine::types::ability::AggregateFunction::Sum,
                 },
             },
             player: TargetFilter::Controller,
@@ -442,6 +795,7 @@ mod tests {
                 static_abilities: vec![static_def],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
             x_only_cost(),
         )
@@ -462,6 +816,7 @@ mod tests {
             static_abilities: vec![static_def],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,
+            end_cost: None,
         });
         ability.sub_ability = Some(Box::new(spell(Effect::Destroy {
             target: TargetFilter::TrackedSet {
@@ -526,10 +881,7 @@ mod tests {
                 source_id,
                 ability_index: 0,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Ability,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
         verdict_for(state, candidate, SearchDepth::Root)
     }
@@ -542,10 +894,7 @@ mod tests {
                 targets: Vec::new(),
                 payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Spell),
         };
         verdict_for(state, candidate, SearchDepth::Root)
     }
@@ -568,10 +917,7 @@ mod tests {
                 targets: Vec::new(),
                 payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Spell),
         };
         let config = AiConfig::default();
         let context = AiContext::empty(&config.weights);
@@ -605,10 +951,7 @@ mod tests {
                 source_id,
                 ability_index: 0,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Ability,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
         verdict_for(state, candidate, search_depth)
     }
@@ -660,7 +1003,7 @@ mod tests {
     fn helix_pinnacle_max_x_zero_rejected() {
         // {X}: put X tower counters on ~, with no mana → max X = 0. Discriminating:
         // the reason is `x_cast_zero_no_op`, driven by the PutCounter-X detector.
-        // A `benefit_is_trivial`-delegating gate would NOT reject (Helix's
+        // An `appraise_benefit`-delegating gate would NOT reject (Helix's
         // beneficial self-counter is non-trivial), so a Reject here proves the
         // detector-based gate, not a triviality delegation.
         let mut state = base_state();
@@ -735,7 +1078,8 @@ mod tests {
     #[test]
     fn exsanguinate_max_x_zero_rejected_stale_last_effect_amount() {
         // A stale `last_effect_amount` above the lifegain ceiling would make the
-        // GainLife residual resolve non-trivially through effect_is_trivial. The
+        // GainLife residual resolve non-trivially through the shared residual
+        // classifier. The
         // chain-relative branch short-circuits that path, so it stays gated.
         let mut state = base_state();
         state.last_effect_amount = Some(10); // > TRIVIAL_LIFEGAIN_CEILING
@@ -780,6 +1124,7 @@ mod tests {
             count: QuantityExpr::Ref {
                 qty: QuantityRef::PreviousEffectAmount {
                     channel: engine::types::ability::DamageChannel::Total,
+                    aggregate: engine::types::ability::AggregateFunction::Sum,
                 },
             },
             target: TargetFilter::Controller,
@@ -801,7 +1146,8 @@ mod tests {
     #[test]
     fn fixed_generic_keyword_grant_not_gated() {
         // {X} ability whose only payoff is a FIXED non-X keyword grant (GenericEffect
-        // AddKeyword). effect_is_trivial treats it as trivial, but references_any_x is
+        // AddKeyword). The shared residual classifier treats it as trivial, but
+        // references_any_x is
         // false → the gate stands down. Reverting the references_any_x requirement
         // (gate whenever all effects are trivial) would REJECT this.
         let mut state = base_state();
@@ -815,6 +1161,7 @@ mod tests {
                 static_abilities: vec![static_def],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
             x_only_cost(),
         );
@@ -928,10 +1275,12 @@ mod tests {
     // --- ETB-X-counter creature: object_level_x + Some(cast_facts) branch ---
 
     #[test]
-    fn etb_x_counter_creature_max_x_zero_rejected_via_object_level_x() {
+    fn etb_x_counter_creature_max_x_zero_abstains_for_unmodeled_residual() {
         // A Hangarback-shape {X}{X} creature that "enters with X +1/+1 counters"
         // via a Moved→Battlefield SelfRef replacement. At max X = 0 it would
-        // enter as a 0/0 and die immediately — a guaranteed no-op → Reject.
+        // enter as a 0/0 and die immediately. The object-level X reference is
+        // detected, but the residual replacement is unmodeled, so the gate must
+        // conservatively abstain rather than reject the cast.
         //
         // Unlike every other cast test (whose X payoff is a flat spell-ability
         // effect), this fixture's X reference lives on the spell OBJECT's
@@ -961,13 +1310,7 @@ mod tests {
              replacement, not its spell-ability effect"
         );
 
-        // Revert-failing assertion: if the gate's spell-object X handling
-        // (Some(cast_facts) branch + object_level_x) is reverted, the NoOp
-        // spell ability carries no X and this flips to a non-reject.
-        assert_reject(
-            &verdict_for_cast_with_facts(&state, obj, card),
-            "x_cast_zero_no_op",
-        );
+        assert_not_reject(&verdict_for_cast_with_facts(&state, obj, card));
     }
 
     #[test]
@@ -980,5 +1323,233 @@ mod tests {
         let (obj, card) = etb_x_counter_creature(&mut state);
         add_pool(&mut state, AI, 2);
         assert_not_reject(&verdict_for_cast_with_facts(&state, obj, card));
+    }
+
+    // --- Drown in Dreams: spell-level modal roots (Discord #1544805279936282634) ---
+    #[test]
+    fn modal_root_with_x_filtered_fixed_scalar_fails_open() {
+        let state = base_state();
+        let mut root = spell(Effect::Draw {
+            count: x_expr(),
+            target: TargetFilter::Controller,
+        });
+        root.sub_ability = Some(Box::new(spell(Effect::PutCounter {
+            counter_type: CounterType::Generic("tower".to_string()),
+            count: QuantityExpr::Fixed { value: 0 },
+            target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: x_expr(),
+                },
+            ])),
+        })));
+
+        assert_eq!(
+            prove_modal_root_at_x_zero(&state, AI, ObjectId(0), &root),
+            (XDependency::XDependent, ZeroProof::Unknown),
+            "an X reference outside the scalar payload must prevent a modal veto"
+        );
+    }
+
+    #[test]
+    fn drown_in_dreams_modal_x_zero_rejected() {
+        let mut state = base_state();
+        let (object, card) = drown_in_dreams_source(&mut state);
+
+        assert_reject(&verdict_for_cast(&state, object, card), "x_cast_zero_no_op");
+    }
+
+    #[test]
+    fn drown_in_dreams_modal_x_one_is_not_rejected() {
+        let mut state = base_state();
+        let (object, card) = drown_in_dreams_source(&mut state);
+        add_pool(&mut state, AI, 3);
+        add_blue_pool(&mut state, AI, 1);
+
+        assert_not_reject(&verdict_for_cast(&state, object, card));
+    }
+
+    #[test]
+    fn modal_previous_amount_cannot_cross_mode_boundaries() {
+        let mut state = base_state();
+        let (object, card) = modal_x_spell_source(
+            &mut state,
+            "Cross-mode previous amount",
+            vec![
+                spell(Effect::Draw {
+                    count: x_expr(),
+                    target: TargetFilter::Controller,
+                }),
+                draw_previous_amount(),
+            ],
+        );
+
+        assert_not_reject(&verdict_for_cast(&state, object, card));
+    }
+
+    #[test]
+    fn modal_same_chain_mandatory_previous_amount_is_proven_zero() {
+        let mut state = base_state();
+        let mut first = spell(Effect::Draw {
+            count: x_expr(),
+            target: TargetFilter::Controller,
+        });
+        first.sub_ability = Some(Box::new(draw_previous_amount()));
+        let (object, card) =
+            modal_x_spell_source(&mut state, "Same-chain previous amount", vec![first]);
+
+        assert_reject(&verdict_for_cast(&state, object, card), "x_cast_zero_no_op");
+    }
+
+    #[test]
+    fn modal_optional_or_conditional_predecessor_clears_previous_amount_provenance() {
+        let make_mode = |mut predecessor: AbilityDefinition| {
+            predecessor.sub_ability = Some(Box::new(draw_previous_amount()));
+            predecessor
+        };
+
+        let variants = [
+            make_mode({
+                let mut ability = spell(Effect::Draw {
+                    count: x_expr(),
+                    target: TargetFilter::Controller,
+                });
+                ability.optional = true;
+                ability
+            }),
+            make_mode({
+                let mut ability = spell(Effect::Draw {
+                    count: x_expr(),
+                    target: TargetFilter::Controller,
+                });
+                ability.optional_for = Some(OpponentMayScope::AnyOpponent);
+                ability
+            }),
+            make_mode({
+                let mut ability = spell(Effect::Draw {
+                    count: x_expr(),
+                    target: TargetFilter::Controller,
+                });
+                ability.optional_player = Some(TargetFilter::Any);
+                ability
+            }),
+            make_mode({
+                let mut ability = spell(Effect::Draw {
+                    count: x_expr(),
+                    target: TargetFilter::Controller,
+                });
+                ability.condition = Some(AbilityCondition::IsYourTurn);
+                ability
+            }),
+        ];
+
+        for mode in variants {
+            let mut state = base_state();
+            let (object, card) =
+                modal_x_spell_source(&mut state, "Optional predecessor", vec![mode]);
+            assert_not_reject(&verdict_for_cast(&state, object, card));
+        }
+    }
+
+    #[test]
+    fn modal_wrapped_previous_amount_fails_open() {
+        let previous = || QuantityExpr::Ref {
+            qty: QuantityRef::PreviousEffectAmount {
+                channel: engine::types::ability::DamageChannel::Total,
+                aggregate: engine::types::ability::AggregateFunction::Sum,
+            },
+        };
+        let wrapped = [
+            QuantityExpr::Offset {
+                inner: Box::new(previous()),
+                offset: 1,
+            },
+            QuantityExpr::Sum {
+                exprs: vec![previous(), QuantityExpr::Fixed { value: 1 }],
+            },
+            QuantityExpr::Max {
+                exprs: vec![previous(), QuantityExpr::Fixed { value: 1 }],
+            },
+        ];
+
+        for count in wrapped {
+            let mut state = base_state();
+            let mut first = spell(Effect::Draw {
+                count: x_expr(),
+                target: TargetFilter::Controller,
+            });
+            first.sub_ability = Some(Box::new(spell(Effect::Draw {
+                count,
+                target: TargetFilter::Controller,
+            })));
+            let (object, card) =
+                modal_x_spell_source(&mut state, "Wrapped previous amount", vec![first]);
+            assert_not_reject(&verdict_for_cast(&state, object, card));
+        }
+    }
+
+    #[test]
+    fn modal_x_plus_one_is_meaningful_at_zero() {
+        let mut state = base_state();
+        let (object, card) = modal_x_spell_source(
+            &mut state,
+            "X plus one",
+            vec![spell(Effect::Draw {
+                count: QuantityExpr::Offset {
+                    inner: Box::new(x_expr()),
+                    offset: 1,
+                },
+                target: TargetFilter::Controller,
+            })],
+        );
+
+        assert_not_reject(&verdict_for_cast(&state, object, card));
+    }
+
+    #[test]
+    fn modal_mixed_fixed_mode_and_embedded_choice_fail_open() {
+        let mut state = base_state();
+        let (mixed_object, mixed_card) = modal_x_spell_source(
+            &mut state,
+            "Mixed fixed mode",
+            vec![
+                spell(Effect::Draw {
+                    count: x_expr(),
+                    target: TargetFilter::Controller,
+                }),
+                spell(Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                }),
+            ],
+        );
+        assert_not_reject(&verdict_for_cast(&state, mixed_object, mixed_card));
+
+        let (choice_object, choice_card) = modal_x_spell_source(
+            &mut state,
+            "Embedded choice",
+            vec![spell(Effect::ChooseOneOf {
+                chooser: Default::default(),
+                branches: vec![spell(Effect::Draw {
+                    count: x_expr(),
+                    target: TargetFilter::Controller,
+                })],
+            })],
+        );
+        assert_not_reject(&verdict_for_cast(&state, choice_object, choice_card));
+    }
+
+    #[test]
+    fn modal_extra_object_level_payoff_fails_open() {
+        let mut state = base_state();
+        let (object, card) = drown_in_dreams_source(&mut state);
+        state
+            .objects
+            .get_mut(&object)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::continuous());
+
+        assert_not_reject(&verdict_for_cast(&state, object, card));
     }
 }

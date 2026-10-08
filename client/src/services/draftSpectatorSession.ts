@@ -1,6 +1,7 @@
 import type { SpectatorDraftView } from "../adapter/draft-adapter";
 import { openPhaseSocket } from "./openPhaseSocket";
 import { isValidWebSocketUrl } from "./serverDetection";
+import { startSocketKeepalive } from "./socketKeepalive";
 
 export type DraftSpectatorEvent =
   | { type: "connected" }
@@ -54,7 +55,13 @@ export async function connectDraftSpectator(
     }
   };
 
+  // A spectator on a draft that is not mid-pick — waiting to start, stalled,
+  // or already complete — receives its one view and then nothing, and sends
+  // nothing itself, so the edge closes the socket and there is no re-dial.
+  const stopKeepalive = startSocketKeepalive(socket.ws);
+
   socket.ws.addEventListener("message", onMessage);
+  socket.ws.addEventListener("close", stopKeepalive, { once: true });
   socket.ws.addEventListener("close", () => emit({ type: "disconnected" }));
   socket.ws.send(
     JSON.stringify({ type: "SpectateDraft", data: { draft_code: draftCode } }),
@@ -62,6 +69,7 @@ export async function connectDraftSpectator(
 
   return {
     close: () => {
+      stopKeepalive();
       socket.ws.removeEventListener("message", onMessage);
       socket.close();
     },

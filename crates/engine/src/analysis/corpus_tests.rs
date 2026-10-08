@@ -305,6 +305,7 @@ fn classify_status_compares_against_spec_not_rubber_stamp() {
         win_kind: WinKind::LethalDamage,
         mandatory: false,
         residual_board_delta: BoardDelta::default(),
+        per_cycle: None,
     };
     assert!(
         matches!(
@@ -320,6 +321,7 @@ fn classify_status_compares_against_spec_not_rubber_stamp() {
         win_kind: WinKind::Advantage,
         mandatory: false,
         residual_board_delta: BoardDelta::default(),
+        per_cycle: None,
     };
     assert!(
         matches!(
@@ -345,6 +347,7 @@ fn classify_status_compares_against_spec_not_rubber_stamp() {
         win_kind: WinKind::Advantage,
         mandatory: false,
         residual_board_delta: BoardDelta::default(),
+        per_cycle: None,
     };
     assert!(
         matches!(

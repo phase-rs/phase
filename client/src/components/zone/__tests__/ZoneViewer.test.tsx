@@ -1,8 +1,18 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { useRef, useState } from "react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameAction, GameObject } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
+import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
 import {
   buildGameObjectWithCoreTypes,
@@ -10,14 +20,28 @@ import {
 } from "../../../test/factories/gameObjectFactory.ts";
 import {
   buildGameState,
+  buildManaPaymentWaitingFor,
   buildPlayers,
   buildPriorityWaitingFor,
 } from "../../../test/factories/gameStateFactory.ts";
 import { ZoneViewer } from "../ZoneViewer.tsx";
 
 vi.mock("../../card/CardImage.tsx", () => ({
-  CardImage: ({ cardName, oracleId }: { cardName: string; oracleId?: string }) => (
-    <div aria-label={cardName} data-testid="card-image" data-oracle-id={oracleId ?? ""} />
+  CardImage: ({
+    cardName,
+    oracleId,
+    faceDown,
+  }: {
+    cardName: string;
+    oracleId?: string;
+    faceDown?: boolean;
+  }) => (
+    <div
+      aria-label={faceDown ? "Face-down card" : cardName}
+      data-testid="card-image"
+      data-oracle-id={faceDown ? "" : oracleId ?? ""}
+      data-face-down={String(!!faceDown)}
+    />
   ),
 }));
 
@@ -66,6 +90,47 @@ function makeState(object: GameObject) {
   });
 }
 
+function ActionCloseFocusHarness() {
+  const [open, setOpen] = useState(false);
+  const launcherRef = useRef<HTMLButtonElement | null>(null);
+  const fallbackRef = useRef<HTMLButtonElement | null>(null);
+  const returnFocusRef = useRef<HTMLElement | SVGElement | null>(null);
+  const launcherExists = useGameStore(
+    (state) => (state.gameState?.players[0]?.graveyard.length ?? 0) > 0,
+  );
+
+  return (
+    <>
+      {launcherExists && (
+        <button
+          ref={launcherRef}
+          type="button"
+          onClick={() => {
+            returnFocusRef.current = launcherRef.current;
+            setOpen(true);
+          }}
+        >
+          Graveyard pile
+        </button>
+      )}
+      <button ref={fallbackRef} type="button">
+        Game menu
+      </button>
+      {open && (
+        <ZoneViewer
+          zone="graveyard"
+          playerId={0}
+          returnFocusRef={returnFocusRef}
+          onPrepareActionClose={() => {
+            returnFocusRef.current = fallbackRef.current;
+          }}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </>
+  );
+}
+
 describe("ZoneViewer", () => {
   const dispatch = vi.fn(async () => []);
 
@@ -97,7 +162,15 @@ describe("ZoneViewer", () => {
   });
 
   it("dispatches an engine-provided graveyard CastSpell action", () => {
-    render(<ZoneViewer zone="graveyard" playerId={0} onClose={vi.fn()} />);
+    const prepareActionClose = vi.fn();
+    render(
+      <ZoneViewer
+        zone="graveyard"
+        playerId={0}
+        onClose={vi.fn()}
+        onPrepareActionClose={prepareActionClose}
+      />,
+    );
 
     // The castable card carries the purple "playable" affordance instead of a
     // labeled button; clicking the card itself routes through handleCast and
@@ -108,6 +181,97 @@ describe("ZoneViewer", () => {
     expect(dispatch).toHaveBeenCalledWith(
       expect.objectContaining({ type: "CastSpell" }),
     );
+    expect(prepareActionClose).toHaveBeenCalledTimes(1);
+    expect(prepareActionClose.mock.invocationCallOrder[0]).toBeLessThan(
+      dispatch.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("hands action-close focus to a durable target before an async final-card snapshot", async () => {
+    let resolveDispatch!: (events: never[]) => void;
+    dispatch.mockImplementationOnce(
+      () =>
+        new Promise<never[]>((resolve) => {
+          resolveDispatch = resolve;
+        }),
+    );
+    render(<ActionCloseFocusHarness />);
+    fireEvent.click(screen.getByRole("button", { name: "Graveyard pile" }));
+    const dialog = screen.getByRole("dialog", { name: /Graveyard/ });
+    await waitFor(() => expect(dialog).toHaveFocus());
+
+    fireEvent.click(screen.getByTestId("card-image"));
+    await waitFor(() => expect(dialog).not.toBeInTheDocument());
+    const gameMenu = screen.getByRole("button", { name: "Game menu" });
+    expect(gameMenu).toHaveFocus();
+
+    const current = useGameStore.getState().gameState!;
+    act(() => {
+      useGameStore.setState({
+        gameState: {
+          ...current,
+          objects: {},
+          players: current.players.map((player) =>
+            player.id === 0 ? { ...player, graveyard: [] } : player,
+          ),
+        },
+      });
+      resolveDispatch([]);
+    });
+
+    expect(
+      screen.queryByRole("button", { name: "Graveyard pile" }),
+    ).not.toBeInTheDocument();
+    expect(gameMenu).toHaveFocus();
+    expect(document.body).not.toHaveFocus();
+  });
+
+  it("identifies visible zone cards for contextual errors", () => {
+    render(<ZoneViewer zone="graveyard" playerId={0} onClose={vi.fn()} />);
+
+    expect(screen.getByTestId("card-image").parentElement).toHaveAttribute("data-object-id", "7");
+  });
+
+  it("keeps debug card actions inside the zone viewer focus authority", async () => {
+    const onClose = vi.fn();
+    useUiStore.setState({ debugInteractionMode: true });
+    render(<ZoneViewer zone="graveyard" playerId={0} onClose={onClose} />);
+
+    const dialog = screen.getByRole("dialog", { name: /Graveyard/ });
+    await waitFor(() => expect(dialog).toHaveFocus());
+    const card = within(dialog).getByRole("button", { name: "Flame Jab" });
+    vi.spyOn(card, "getBoundingClientRect").mockReturnValue({
+      bottom: 340,
+      height: 140,
+      left: 120,
+      right: 220,
+      top: 200,
+      width: 100,
+      x: 120,
+      y: 200,
+      toJSON: () => ({}),
+    });
+    fireEvent.click(card);
+
+    const menu = screen.getByRole("menu");
+    expect(dialog).not.toContainElement(menu);
+    expect(menu).toHaveStyle({ left: "170px", top: "270px" });
+    const firstMenuItem = within(menu).getAllByRole("menuitem")[0];
+    expect(firstMenuItem).toHaveFocus();
+
+    fireEvent.keyDown(firstMenuItem, { key: "Escape" });
+
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    await waitFor(() => expect(card).toHaveFocus());
+  });
+
+  it("does not expose an inert visible card as a button", () => {
+    useGameStore.setState({ legalActions: [], legalActionsByObject: {} });
+    render(<ZoneViewer zone="graveyard" playerId={0} onClose={vi.fn()} />);
+
+    expect(screen.queryByRole("button", { name: "Flame Jab" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Flame Jab")).toBeInTheDocument();
   });
 
   it("resolves graveyard card art via printed_ref oracle_id, not name", () => {
@@ -133,25 +297,23 @@ describe("ZoneViewer", () => {
   });
 
   it("shows only the engine-revealed library cards, omitting unrevealed ones", () => {
-    // CR 701.20b: a RevealTop / "play with top revealed" surfaces specific top
-    // cards via `revealed_cards`. Visibility is gated on that engine set, NOT on
-    // the card name — single-player renders the raw, unredacted state, so the
-    // unrevealed cards below carry real names yet must NOT appear in the viewer.
+    // Rust projects identity visibility per object. Real names alone never make
+    // a library card render in the viewer.
     const revealed = makeObject({
       id: 20,
       zone: "Library",
       name: "Llanowar Elves",
+      display_visible_to_viewer: true,
       keywords: [],
       base_keywords: [],
     });
-    // Real names, but absent from revealed_cards → must be filtered out.
+    // Real names, but no engine display projection → must be filtered out.
     const unrevealedA = makeObject({ id: 21, zone: "Library", name: "Black Lotus" });
     const unrevealedB = makeObject({ id: 22, zone: "Library", name: "Mox Sapphire" });
     const base = makeState(revealed);
     const gameState = {
       ...base,
       objects: buildObjectMap(revealed, unrevealedA, unrevealedB),
-      revealed_cards: [revealed.id],
       players: [
         { ...base.players[0], graveyard: [], library: [revealed.id, unrevealedA.id, unrevealedB.id] },
         base.players[1],
@@ -187,6 +349,7 @@ describe("ZoneViewer", () => {
       id: 30,
       zone: "Library",
       name: "Mystic Sanctuary",
+      display_visible_to_viewer: true,
       keywords: [],
       base_keywords: [],
     });
@@ -196,7 +359,6 @@ describe("ZoneViewer", () => {
     const gameState = {
       ...base,
       objects: buildObjectMap(revealed, unrevealed),
-      revealed_cards: [revealed.id],
       players: [
         { ...base.players[0], graveyard: [], library: [revealed.id, unrevealed.id] },
         base.players[1],
@@ -231,6 +393,7 @@ describe("ZoneViewer", () => {
       id: 50,
       zone: "Library",
       name: "Future Sight Top",
+      display_visible_to_viewer: true,
       keywords: [],
       base_keywords: [],
     });
@@ -240,7 +403,6 @@ describe("ZoneViewer", () => {
     const gameState = {
       ...base,
       objects: buildObjectMap(top, buried),
-      revealed_cards: [],
       players: [
         {
           ...base.players[0],
@@ -290,6 +452,7 @@ describe("ZoneViewer", () => {
       controller: 1,
       zone: "Library",
       name: "Courser of Kruphix",
+      display_visible_to_viewer: true,
       keywords: [],
       base_keywords: [],
     });
@@ -304,7 +467,6 @@ describe("ZoneViewer", () => {
     const gameState = {
       ...base,
       objects: buildObjectMap(revealed, unrevealed),
-      revealed_cards: [revealed.id],
       players: [
         { ...base.players[0], graveyard: [] },
         { ...base.players[1], graveyard: [], library: [revealed.id, unrevealed.id] },
@@ -379,5 +541,159 @@ describe("ZoneViewer", () => {
     expect(dispatch).toHaveBeenCalledWith(
       expect.objectContaining({ type: "CastSpell" }),
     );
+  });
+
+  it("shows an engine-provided time-counter count on a visible exiled card", () => {
+    const exiled = makeObject({ zone: "Exile", name: "Rift Bolt" });
+    const base = makeState(exiled);
+    const gameState = {
+      ...base,
+      objects: buildObjectMap(exiled),
+      players: base.players.map((player) => ({ ...player, graveyard: [] })),
+      exile: [exiled.id],
+      derived: {
+        counter_display: {
+          [String(exiled.id)]: { pills: [{ counter: "time", count: 3 }] },
+        },
+      },
+    };
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      legalActions: [],
+      legalActionsByObject: {},
+      spellCosts: {},
+      dispatch,
+      gameMode: "ai",
+    });
+
+    render(<ZoneViewer zone="exile" playerId={0} onClose={vi.fn()} />);
+
+    expect(screen.getByLabelText("3")).toBeInTheDocument();
+  });
+
+  it("does not expose a time-counter badge for a face-down exiled card", () => {
+    const hidden = makeObject({
+      zone: "Exile",
+      name: "Secret Suspend Card",
+      face_down: true,
+    });
+    const base = makeState(hidden);
+    const gameState = {
+      ...base,
+      objects: buildObjectMap(hidden),
+      players: base.players.map((player) => ({ ...player, graveyard: [] })),
+      exile: [hidden.id],
+      derived: {
+        counter_display: {
+          [String(hidden.id)]: { pills: [{ counter: "time", count: 3 }] },
+        },
+      },
+    };
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      legalActions: [],
+      legalActionsByObject: {},
+      spellCosts: {},
+      dispatch,
+      gameMode: "ai",
+    });
+
+    render(<ZoneViewer zone="exile" playerId={0} onClose={vi.fn()} />);
+
+    expect(screen.getByLabelText("Face-down card")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Secret Suspend Card")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("3")).not.toBeInTheDocument();
+  });
+
+  it("renders a time counter without labeling a non-Suspend card as suspended", () => {
+    const exiled = makeObject({
+      zone: "Exile",
+      name: "Timebug",
+      keywords: [],
+      base_keywords: [],
+    });
+    const base = makeState(exiled);
+    const gameState = {
+      ...base,
+      objects: buildObjectMap(exiled),
+      players: base.players.map((player) => ({ ...player, graveyard: [] })),
+      exile: [exiled.id],
+      derived: {
+        counter_display: {
+          [String(exiled.id)]: { pills: [{ counter: "time", count: 2 }] },
+        },
+      },
+    };
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      legalActions: [],
+      legalActionsByObject: {},
+      spellCosts: {},
+      dispatch,
+      gameMode: "ai",
+    });
+
+    render(<ZoneViewer zone="exile" playerId={0} onClose={vi.fn()} />);
+
+    expect(screen.getByLabelText("2")).toBeInTheDocument();
+    expect(screen.queryByText(/suspend/i)).not.toBeInTheDocument();
+  });
+
+  describe("delve from a shared graveyard", () => {
+    const delveTap: GameAction = {
+      type: "TapForConvoke",
+      data: { object_id: 7, mana_type: "Colorless" },
+    };
+
+    function seatOneDelving({ withAction }: { withAction: boolean }) {
+      const object = makeObject();
+      const gameState = buildGameState({
+        active_player: 1,
+        priority_player: 1,
+        players: buildPlayers([{ id: 0, graveyard: [object.id] }, { id: 1 }]),
+        objects: buildObjectMap(object),
+        battlefield: [],
+        exile: [],
+        stack: [],
+        waiting_for: buildManaPaymentWaitingFor({
+          data: { player: 1, convoke_mode: "Delve" },
+        }),
+        derived: { shared_piles: { library: 0, graveyard: 0 } },
+      });
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        legalActions: withAction ? [delveTap] : [],
+        legalActionsByObject: withAction ? { "7": [delveTap] } : {},
+        gameMode: "online",
+      });
+      useMultiplayerStore.setState({ activePlayerId: 1 });
+    }
+
+    afterEach(() => {
+      useMultiplayerStore.setState({ activePlayerId: null });
+    });
+
+    it("offers the engine's delve action to the seat that is not the holder", () => {
+      seatOneDelving({ withAction: true });
+      render(<ZoneViewer zone="graveyard" playerId={0} onClose={vi.fn()} />);
+
+      fireEvent.click(screen.getByTestId("card-image"));
+
+      expect(targetDispatch).toHaveBeenCalledWith(delveTap);
+    });
+
+    it("offers nothing for a card the engine reports no delve action for", () => {
+      seatOneDelving({ withAction: false });
+      render(<ZoneViewer zone="graveyard" playerId={0} onClose={vi.fn()} />);
+
+      expect(screen.getByTestId("card-image")).toBeInTheDocument();
+      fireEvent.click(screen.getByTestId("card-image"));
+
+      expect(targetDispatch).not.toHaveBeenCalled();
+    });
   });
 });

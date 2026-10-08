@@ -84,11 +84,11 @@ impl TacticalPolicy for MillTargetingPolicy {
                 delta += TARGET_BONUS;
             }
 
-            // Check if target's library is empty
-            if let Some(player_state) = ctx.state.players.get(player.0 as usize) {
-                if player_state.library.is_empty() {
-                    delta += EMPTY_LIBRARY_PENALTY;
-                }
+            // CR 401.3 + CR 400.1: library size is public; read it from `library_of`, which resolves a shared pile.
+            if ctx.state.players.get(player.0 as usize).is_some()
+                && ctx.state.library_of(*player).is_empty()
+            {
+                delta += EMPTY_LIBRARY_PENALTY;
             }
         }
 
@@ -141,7 +141,7 @@ mod tests {
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, Chooser, QuantityExpr, ResolvedAbility, TargetFilter,
-        ZoneOwner,
+        ZoneChoiceCandidateSource, ZoneOwner,
     };
     use engine::types::game_state::WaitingFor;
     use engine::types::identifiers::{CardId, ObjectId};
@@ -177,7 +177,9 @@ mod tests {
             additional_zones: Vec::new(),
             zone_owner: ZoneOwner::Controller,
             filter: None,
-            chooser: Chooser::Controller,
+            chooser: Chooser::Controller.into(),
+            candidate_source: ZoneChoiceCandidateSource::Legacy,
+            reciprocal_role: None,
             up_to: false,
             selection: engine::types::ability::CardSelectionMode::Chosen,
             constraint: None,
@@ -209,10 +211,7 @@ mod tests {
             action: GameAction::SelectTargets {
                 targets: vec![target],
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Target),
         };
         let config = AiConfig::default();
         let context = AiContext::empty(&config.weights);
@@ -361,5 +360,39 @@ mod tests {
         );
 
         assert_eq!(delta, 0.0);
+    }
+
+    fn dandan_state_with_pile(pile: usize) -> (GameState, ObjectId) {
+        let mut state = GameState::new(engine::types::format::FormatConfig::dandan(), 2, 42);
+        let source_id = add_source_with_ability(&mut state, mill_with_payoff_ability());
+        for _ in 0..pile {
+            add_library_card(&mut state, OPP);
+        }
+        assert_eq!(state.library_of(OPP).len(), pile, "reach: pile is shared");
+        assert!(
+            state.players[OPP.0 as usize].library.is_empty(),
+            "reach: the pile is held by the canonical seat"
+        );
+        (state, source_id)
+    }
+
+    #[test]
+    fn shared_pile_is_not_an_empty_library_for_the_non_holder_seat() {
+        let (state, source_id) = dandan_state_with_pile(3);
+        let delta = score_delta(
+            score_target(&state, source_id, TargetRef::Player(OPP)),
+            "mill_targeting_score",
+        );
+        assert_eq!(delta, TARGET_BONUS);
+    }
+
+    #[test]
+    fn empty_shared_pile_keeps_the_empty_library_penalty() {
+        let (state, source_id) = dandan_state_with_pile(0);
+        let delta = score_delta(
+            score_target(&state, source_id, TargetRef::Player(OPP)),
+            "mill_targeting_score",
+        );
+        assert_eq!(delta, TARGET_BONUS + EMPTY_LIBRARY_PENALTY);
     }
 }

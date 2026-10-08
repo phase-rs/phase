@@ -30,10 +30,14 @@
 //! Overlord-cycle creature that also carries an enter/attack trigger.
 
 use engine::game::scenario::{GameScenario, P0};
+use engine::types::actions::AlternativeCastDecision;
+use engine::types::card_type::CoreType;
+use engine::types::counter::CounterType;
 use engine::types::game_state::{AlternativeCastKeyword, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
 
 /// Overlord of the Balemurk's full Oracle text, including the Impending keyword
 /// line and the "enters or attacks" trigger that defines the Overlord cycle.
@@ -105,4 +109,44 @@ fn overlord_cycle_creature_surfaces_impending_alternative_cast() {
              creature with both costs affordable, got {other:?}"
         ),
     }
+}
+
+#[test]
+fn overlord_cycle_creature_can_commit_with_impending_cost_choice() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let overlord = scenario
+        .add_creature_to_hand_from_oracle(P0, "Overlord of the Balemurk", 6, 5, OVERLORD_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+            generic: 3,
+        })
+        .from_oracle_text_with_keywords(&["Impending"], OVERLORD_ORACLE)
+        .id();
+
+    let mut runner = scenario.build();
+    add_black_mana(runner.state_mut(), 5);
+
+    // CR 702.176a: with both the printed and impending costs affordable, the
+    // player may choose the impending cost. This drives the same
+    // `ChooseAlternativeCast { Alternative }` branch used by the client modal.
+    let outcome = runner
+        .cast(overlord)
+        .alternative_cast(AlternativeCastDecision::Alternative)
+        .resolve();
+    let state = outcome.state();
+    let object = &state.objects[&overlord];
+
+    outcome.assert_zone(&[overlord], Zone::Battlefield);
+    outcome.assert_counters(overlord, CounterType::Time, 5);
+    assert!(
+        !object.card_types.core_types.contains(&CoreType::Creature),
+        "an impending-cast Overlord with time counters must not be a creature"
+    );
+    assert_eq!(
+        state.players[0].mana_pool.total(),
+        3,
+        "choosing Impending 5-{{1}}{{B}} should spend two mana, not the printed five"
+    );
 }

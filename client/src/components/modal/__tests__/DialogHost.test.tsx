@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { DialogHost } from "../DialogHost.tsx";
 import { DialogShell } from "../DialogShell.tsx";
+import { GAME_Z_LAYER } from "../../../constants/ui.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
 import type { WaitingFor } from "../../../adapter/types.ts";
@@ -20,6 +21,30 @@ const stubGameState = {
   turn_decision_controller: 0,
   active_player: 0,
 } as never;
+
+const damageAssignmentWaitingStates: WaitingFor[] = [
+  {
+    type: "AssignCombatDamage",
+    data: {
+      player: 0,
+      attacker_id: 10,
+      total_damage: 4,
+      blockers: [{ blocker_id: 20, lethal_minimum: 2 }],
+      trample: null,
+      defending_player: 1,
+      attack_target: { type: "Player", data: 1 },
+    },
+  },
+  {
+    type: "AssignBlockerDamage",
+    data: {
+      player: 0,
+      blocker_id: 20,
+      total_damage: 2,
+      attackers: [10, 11],
+    },
+  },
+];
 
 describe("DialogHost", () => {
   beforeEach(() => {
@@ -227,6 +252,21 @@ describe("DialogHost", () => {
     expect(wrapper?.style.pointerEvents).toBe("none");
   });
 
+  it.each([
+    { type: "UntapChoice", data: { player: 0, candidates: [1] } },
+    { type: "ChooseUntapSubset", data: { player: 0, group: [1, 2], max: 1 } },
+  ] as const)("anchors native $type board choices but leaves them click-through", (waitingFor) => {
+    setWaitingFor(waitingFor as never);
+    const { container } = render(
+      <DialogHost>
+        <div data-testid="child" />
+      </DialogHost>,
+    );
+    const wrapper = container.firstElementChild as HTMLElement | null;
+    expect(wrapper?.className ?? "").toMatch(/fixed/);
+    expect(wrapper?.style.pointerEvents).toBe("none");
+  });
+
   it("anchors ward sacrifice choices but leaves them click-through", () => {
     setWaitingFor({
       type: "WardSacrificeChoice",
@@ -246,6 +286,44 @@ describe("DialogHost", () => {
     expect(wrapper?.className ?? "").toMatch(/fixed/);
     expect(wrapper?.className ?? "").toMatch(/z-40/);
     expect(wrapper?.style.pointerEvents).toBe("none");
+  });
+
+  it.each(damageAssignmentWaitingStates)("anchors the $type prompt above combat arrows", (waitingFor) => {
+    setWaitingFor(waitingFor);
+    const { container } = render(
+      <DialogHost>
+        <div data-testid="damage-assignment" />
+      </DialogHost>,
+    );
+
+    const wrapper = container.firstElementChild as HTMLElement | null;
+    expect(wrapper).toHaveClass("fixed", "inset-0", GAME_Z_LAYER.dialogHost);
+    expect(wrapper).not.toHaveClass(GAME_Z_LAYER.combatArrow);
+  });
+
+  it("keeps all-target retarget dialogs interactive", () => {
+    // CR 115.7: a single target is selected on the battlefield, but an `All`
+    // retarget uses RetargetChoiceModal. The host must not make that modal's
+    // target cards and Confirm button inherit `pointer-events: none`.
+    setWaitingFor({
+      type: "RetargetChoice",
+      data: {
+        player: 0,
+        stack_entry_index: 0,
+        scope: { type: "All" },
+        current_targets: [{ Object: 71 }],
+        slots: [],
+        slot_pools: [],
+        legal_new_targets: [{ Object: 27 }, { Object: 43 }],
+      },
+    });
+    const { container } = render(
+      <DialogHost>
+        <div data-testid="retarget-modal" />
+      </DialogHost>,
+    );
+    const wrapper = container.firstElementChild as HTMLElement | null;
+    expect(wrapper?.style.pointerEvents).not.toBe("none");
   });
 
   it("resets peek to false when WaitingFor changes (regression)", () => {

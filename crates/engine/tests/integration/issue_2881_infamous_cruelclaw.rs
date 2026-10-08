@@ -70,6 +70,7 @@ fn infamous_cruelclaw_combat_damage_exiles_until_nonland() {
         "Cruelclaw must install combat-damage trigger"
     );
     let execute = runner.state().objects[&cruelclaw].trigger_definitions[0]
+        .definition
         .execute
         .as_ref()
         .expect("trigger execute");

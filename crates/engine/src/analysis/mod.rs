@@ -1,7 +1,10 @@
 //! Offline game-state analysis used by the infinite-combo detector.
 //!
-//! This module is **purely additive** and changes no game behavior. It provides
-//! the measurement substrate the net-progress loop detector is built on:
+//! This module owns MEASUREMENT and mutates no `GameState`; the reducer is what
+//! reads it — to mint a loop-shortcut offer, to bound that offer, and to bound it
+//! again where the accepted proposal is spent. So a change here can move game
+//! behavior even though nothing here writes a board. It provides the measurement
+//! substrate the net-progress loop detector is built on:
 //!
 //! - [`ResourceVector`] — a snapshot/delta of the *monotone* resources a loop
 //!   can pump (mana, life, damage, library size, tokens, draws, triggers,
@@ -36,6 +39,7 @@ pub mod ability_graph;
 pub mod decision_template;
 pub mod loop_check;
 pub mod resource;
+#[cfg(any(test, feature = "test-support"))]
 pub mod sim;
 
 // The combo corpus + bespoke driver toolkit, shared by the `#[cfg(test)]`
@@ -62,4 +66,5 @@ pub use resource::{
     board_delta, loop_states_equal_modulo_resources, BoardDelta, CounterClass, ObjectClass,
     ResidualPermanent, ResourceAxis, ResourceVector, TriggerKind,
 };
+#[cfg(any(test, feature = "test-support"))]
 pub use sim::{accumulate_events, LoopProbe};

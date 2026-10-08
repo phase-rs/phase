@@ -66,10 +66,19 @@
     "discard": "Descartar",
     "saveAndContinue": "Salvar e continuar"
   },
+  "saveConflict": {
+    "title": "Deck alterado em outro lugar",
+    "bodyChanged": "\"{{name}}\" foi alterado em outro lugar desde que este editor o abriu ou salvou pela última vez, então nada foi salvo. Carregue a versão salva para vê-la (suas alterações não salvas serão descartadas) ou salve sua versão mesmo assim.",
+    "bodyDeleted": "\"{{name}}\" foi excluído em outro lugar desde que este editor o abriu ou salvou pela última vez, então nada foi salvo. Salve sua versão mesmo assim.",
+    "loadSaved": "Carregar versão salva",
+    "saveMine": "Salvar minha versão"
+  },
   "card": {
     "moveToSideboard": "Mover um {{name}} para o sideboard",
     "moveToMain": "Mover um {{name}} para o deck principal",
     "removeOne": "Remover um {{name}}",
+    "addOne": "Adicionar um {{name}}",
+    "copyLimit": "{{name}} está no limite de cópias",
     "makeCommander": "Tornar {{name}} o comandante",
     "makeCommanderTitle": "Tornar este o meu comandante",
     "chooseArtFor": "Escolher arte para {{name}}",
@@ -220,6 +229,10 @@
     "identity": "Identidade:",
     "setAsCommander": "Definir como comandante:",
     "cardCount": "{{count}}/{{expected}} cartas",
+    "cardCountNoMinimum_one": "{{count}} carta",
+    "cardCountNoMinimum_few": "{{count}} cartas",
+    "cardCountNoMinimum_many": "{{count}} cartas",
+    "cardCountNoMinimum_other": "{{count}} cartas",
     "singletonViolations": "Violações de singleton: {{cards}}",
     "colorViolations": "Violações de identidade de cor: {{cards}}",
     "signatureSpell": {
@@ -229,6 +242,11 @@
       "remove": "Remover feitiço de assinatura",
       "mustBeInstantOrSorcery": "O feitiço de assinatura deve ser uma mágica instantânea ou feitiçaria",
       "outsideColorIdentity": "{{name}}: fora da identidade de cor do Oathbreaker"
+    },
+    "companion": {
+      "heading": "Companheiro",
+      "noCompanion": "Nenhum companheiro selecionado",
+      "remove": "Remover companheiro"
     }
   },
   "manaCurve": {
@@ -260,7 +278,9 @@
     "dataVersion": "Dados: {{version}}",
     "aboutBrackets": "Sobre brackets ↗",
     "estimatedChip": "Estimado: B{{tier}}",
-    "estimatedChipFull": "Bracket estimado: B{{tier}} {{label}}"
+    "estimatedChipFull": "Bracket estimado: B{{tier}} {{label}}",
+    "manualChip": "B{{tier}}",
+    "manualChipFull": "Bracket declarado: B{{tier}} {{label}}"
   },
   "bracketPicker": {
     "ariaLabel": "Bracket do deck",

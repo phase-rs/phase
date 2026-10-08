@@ -1,0 +1,141 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "DamageAll",
+          "amount": {
+            "type": "Ref",
+            "qty": {
+              "type": "ObjectCount",
+              "filter": {
+                "type": "Typed",
+                "type_filters": [
+                  {
+                    "Subtype": "Mountain"
+                  }
+                ],
+                "controller": "You",
+                "properties": []
+              }
+            }
+          },
+          "target": {
+            "type": "Typed",
+            "type_filters": [
+              "Creature"
+            ],
+            "controller": null,
+            "properties": [
+              {
+                "type": "Another"
+              },
+              {
+                "type": "WithoutKeyword",
+                "value": "Flying"
+              }
+            ]
+          },
+          "player_filter": {
+            "type": "All"
+          }
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": {
+        "type": "SelfRef"
+      },
+      "origin": null,
+      "destination": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": null,
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "When ~ enters, he deals X damage to each other creature without flying and each player, where X is the number of Mountains you control.",
+      "constraint": null,
+      "condition": null,
+      "batched": false
+    },
+    {
+      "mode": "Exerted",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "GenericEffect",
+          "static_abilities": [
+            {
+              "mode": "Continuous",
+              "affected": {
+                "type": "SelfRef"
+              },
+              "modifications": [
+                {
+                  "type": "AddKeyword",
+                  "keyword": "Flying"
+                }
+              ],
+              "condition": null,
+              "affected_zone": null,
+              "effect_zone": null,
+              "active_zones": [],
+              "characteristic_defining": false,
+              "description": "gain flying"
+            }
+          ],
+          "duration": "UntilEndOfTurn",
+          "target": null
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": "UntilEndOfTurn",
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": {
+        "type": "SelfRef"
+      },
+      "origin": null,
+      "destination": null,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": null,
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "You may exert ~ as he attacks. When you do, he gains flying until end of turn.",
+      "constraint": null,
+      "condition": null,
+      "batched": false
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

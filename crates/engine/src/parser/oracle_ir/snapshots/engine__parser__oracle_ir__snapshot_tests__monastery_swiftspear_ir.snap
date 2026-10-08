@@ -22,22 +22,13 @@ expression: "&ir"
         "fragment": "Haste"
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "Unimplemented",
-            "name": "unknown",
+        "Unsupported": {
+          "unsupported": {
+            "category": "Unknown",
+            "fragment": "Haste",
             "description": "Haste"
           },
-          "cost": null,
-          "sub_ability": null,
-          "duration": null,
-          "description": "Haste",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "min_x_value": 0
         }
       }
     },
@@ -59,22 +50,13 @@ expression: "&ir"
         "fragment": "Prowess (Whenever you cast a noncreature spell, ~ gets +1/+1 until end of turn.)"
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "Unimplemented",
-            "name": "unknown",
+        "Unsupported": {
+          "unsupported": {
+            "category": "Unknown",
+            "fragment": "Prowess",
             "description": "Prowess"
           },
-          "cost": null,
-          "sub_ability": null,
-          "duration": null,
-          "description": "Prowess",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "min_x_value": 0
         }
       }
     }

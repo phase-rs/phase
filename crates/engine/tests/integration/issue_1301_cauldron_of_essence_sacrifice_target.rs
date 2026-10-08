@@ -11,13 +11,8 @@
 //! targets were determined. The card's own Oracle rulings confirm this
 //! explicitly: "Because targets are chosen before costs are paid, the target
 //! of Cauldron of Essence's last ability can't be the creature sacrificed to
-//! pay its cost." This engine pays non-self Sacrifice/Discard/Exile
-//! activation costs BEFORE target selection as a documented shortcut (see
-//! `push_activated_ability_to_stack` in `casting_costs.rs`), which let the
-//! just-sacrificed permanent slip back in as a legal "creature card in your
-//! graveyard" target. The fix excludes a cost-paid object that left the
-//! battlefield from legal targets for any other slot of the same activation
-//! (`exclude_cost_paid_object_that_left_battlefield` in `ability_utils.rs`).
+//! pay its cost." The activation pipeline therefore determines legal graveyard
+//! targets before paying the non-self sacrifice cost.
 
 use engine::game::engine::apply_as_current;
 use engine::game::scenario::{GameScenario, P0};
@@ -148,24 +143,19 @@ fn cauldron_of_essence_rejects_sacrificed_creature_as_its_own_return_target() {
     let mut runner = scenario.build();
     engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
 
-    apply_as_current(
+    let result = apply_as_current(
         runner.state_mut(),
         GameAction::ActivateAbility {
             source_id: cauldron,
             ability_index: 0,
         },
-    )
-    .expect("activating Cauldron of Essence should be legal with lands and a sacrifice target");
-
-    let result = apply_as_current(
-        runner.state_mut(),
-        GameAction::SelectCards { cards: vec![token] },
     );
 
     assert!(
         result.is_err(),
-        "sacrificing the only creature card that could become a graveyard target must fail \
-         the activation rather than silently targeting the sacrificed creature, got {:?}",
+        "without a creature card already in the graveyard, activation must reject before costs \
+         are paid rather than treating the creature to be sacrificed as its future target, got {:?}",
         result
     );
+    assert!(runner.state().battlefield.contains(&token));
 }

@@ -26,3 +26,18 @@ pub(crate) struct StaticIr {
     /// `parse_effect_chain_ir` which is already called by internal sub-parsers.
     pub(crate) body_ir: Option<EffectChainIr>,
 }
+
+impl StaticIr {
+    /// Wrap a recognizer-produced static in the common static lowering path.
+    ///
+    /// Some whole-line recognizers already construct the typed static definition
+    /// they need. They still emit this IR node so source-order document lowering
+    /// owns the final static post-processing.
+    pub(crate) fn from_definition(source_text: &str, definition: StaticDefinition) -> Self {
+        Self {
+            definition,
+            source_text: source_text.to_string(),
+            body_ir: None,
+        }
+    }
+}

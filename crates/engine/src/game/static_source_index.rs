@@ -64,9 +64,17 @@ use super::game_object::GameObject;
 /// That is the soundness foundation — the index over-includes (condition-failing
 /// statics) but never under-includes a real source.
 pub(crate) fn object_sources_continuous_effect(obj: &GameObject) -> bool {
-    obj.static_definitions
-        .iter_all()
-        .any(|def| def.mode == StaticMode::Continuous)
+    defs_source_continuous_effect(obj.static_definitions.as_slice())
+}
+
+/// The predicate above, over a bare definition slice. Layer 1 has to ask the same
+/// question of a set of definitions that is not (yet) on any object — the copiable
+/// static set inside a `CopyValues` payload — to decide whether applying that copy
+/// turns its recipient into a generator mid-pass (`layers.rs`,
+/// `copy_grants_continuous_static`). Sharing one body makes the two answers
+/// impossible to drift apart.
+pub(crate) fn defs_source_continuous_effect(defs: &[crate::types::StaticDefinition]) -> bool {
+    defs.iter().any(|def| def.mode == StaticMode::Continuous)
 }
 
 impl StaticSourceIndex {

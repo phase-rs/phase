@@ -4,12 +4,17 @@ use crate::game::filter::{
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::static_abilities::prohibition_scope_matches_player;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, SearchSelectionConstraint, SharedQuality,
-    TargetFilter, TargetRef,
+    Effect, EffectError, EffectKind, LibraryPosition, QuantityExpr, ResolvedAbility,
+    SearchOrderingHint, SearchSelectionConstraint, SharedQuality, SubAbilityLink, TargetFilter,
+    TargetRef,
 };
 use crate::types::card_type::is_land_subtype;
 use crate::types::events::{GameEvent, PlayerActionKind};
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{
+    ActiveLibrarySearch, ActiveSearchDecisionAuthority, ActiveSearchDecisionControl, GameState,
+    WaitingFor,
+};
+use crate::types::identifiers::ObjectIncarnationRef;
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
@@ -344,20 +349,246 @@ fn allows_hidden_zone_partial_find(filter: &TargetFilter, source_zones: &[Zone])
     source_zones == [Zone::Library] && search_filter_has_stated_quality(filter)
 }
 
-/// CR 701.23a + CR 401.2: Search a library — look through it, find card(s) matching criteria, then shuffle.
-/// CR 401.2: Libraries are normally face-down; searching is an exception that lets a player look through cards.
-pub fn resolve(
-    state: &mut GameState,
+#[derive(Clone)]
+pub(crate) struct PreparedEffectiveSearch {
+    pub searcher: PlayerId,
+    pub effective_library_owner: Option<PlayerId>,
+    pub candidates: Vec<ObjectIncarnationRef>,
+    pub filter: TargetFilter,
+    pub count: usize,
+    pub reveal: bool,
+    pub up_to: bool,
+    pub allows_partial_find: bool,
+    pub constraint: SearchSelectionConstraint,
+    pub ordering_hint: SearchOrderingHint,
+    pub split: Option<crate::types::ability::SearchDestinationSplit>,
+    pub active_search: Option<ActiveLibrarySearch>,
+    pub hidden_event: Option<GameEvent>,
+    pub decision: ActiveSearchDecisionControl,
+}
+
+/// CR 401.4 + CR 608.2c: Report ordered selection only when every reachable
+/// continuation path places the complete selected set on top and no later
+/// instruction destroys that order.
+pub(crate) fn search_ordering_hint(
     ability: &ResolvedAbility,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
-    // CR 107.3a + CR 601.2b: Resolve the count expression against the ability so
-    // `Variable("X")` picks up the caster's announced X. Fixed counts are unaffected.
-    // CR 107.1c + CR 701.23d: Peel `UpTo` from the count expression to derive
-    // the upper-bound expression and propagate the may-pick-fewer flag to
-    // SearchChoice. Plain `QuantityExpr` means a mandatory count; wrapped
-    // in `UpTo` means "any number of" / "up to N" — searcher picks 0..=count.
-    let (filter, count, reveal, target_player, up_to, selection_constraint, split, source_zones) =
+    selection_limit: usize,
+) -> SearchOrderingHint {
+    let Some(continuation) = ability.sub_ability.as_deref() else {
+        return SearchOrderingHint::Unordered;
+    };
+    let outcomes = search_ordering_outcomes(
+        continuation,
+        SearchDisposition {
+            selected_targets_bound: true,
+            ordering: SearchOrderingHint::Unordered,
+            searched_library_owner: known_search_library_owner(ability),
+            selection_limit,
+        },
+    );
+    if outcomes
+        .iter()
+        .all(|outcome| matches!(outcome.ordering, SearchOrderingHint::OrderedToLibraryTop))
+    {
+        SearchOrderingHint::OrderedToLibraryTop
+    } else {
+        SearchOrderingHint::Unordered
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SearchDisposition {
+    selected_targets_bound: bool,
+    ordering: SearchOrderingHint,
+    searched_library_owner: Option<PlayerId>,
+    selection_limit: usize,
+}
+
+fn known_search_library_owner(ability: &ResolvedAbility) -> Option<PlayerId> {
+    if let Some(player) = ability.targets.iter().find_map(|target| match target {
+        TargetRef::Player(player) => Some(*player),
+        TargetRef::Object(_) => None,
+    }) {
+        return Some(player);
+    }
+    match &ability.effect {
+        Effect::SearchLibrary {
+            target_player: None,
+            ..
+        }
+        | Effect::SearchLibrary {
+            target_player: Some(TargetFilter::Controller),
+            ..
+        } => Some(ability.controller),
+        _ => None,
+    }
+}
+
+fn known_shuffle_player(ability: &ResolvedAbility, target: &TargetFilter) -> Option<PlayerId> {
+    match target {
+        TargetFilter::Controller => Some(ability.controller),
+        TargetFilter::OriginalController => {
+            Some(ability.original_controller.unwrap_or(ability.controller))
+        }
+        target if !target.is_context_ref() => {
+            ability.targets.iter().find_map(|target| match target {
+                TargetRef::Player(player) => Some(*player),
+                TargetRef::Object(_) => None,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn search_ordering_outcomes(
+    current: &ResolvedAbility,
+    incoming: SearchDisposition,
+) -> Vec<SearchDisposition> {
+    if current.condition.is_some() {
+        let mut outcomes = search_ordering_after_condition(current, incoming);
+        outcomes.extend(condition_false_search_ordering_outcomes(current, incoming));
+        return outcomes;
+    }
+    search_ordering_after_condition(current, incoming)
+}
+
+fn search_ordering_after_condition(
+    current: &ResolvedAbility,
+    incoming: SearchDisposition,
+) -> Vec<SearchDisposition> {
+    if current.optional {
+        let mut outcomes = search_ordering_after_optional(current, incoming);
+        outcomes.extend(optional_decline_search_ordering_outcomes(current, incoming));
+        if current.optional_for.is_some() {
+            outcomes.push(incoming);
+        }
+        return outcomes;
+    }
+    search_ordering_after_optional(current, incoming)
+}
+
+fn search_ordering_after_optional(
+    current: &ResolvedAbility,
+    incoming: SearchDisposition,
+) -> Vec<SearchDisposition> {
+    if current.unless_pay.is_some() {
+        let mut outcomes = executed_search_ordering_outcomes(current, incoming);
+        outcomes.push(incoming);
+        return outcomes;
+    }
+    executed_search_ordering_outcomes(current, incoming)
+}
+
+fn executed_search_ordering_outcomes(
+    current: &ResolvedAbility,
+    mut disposition: SearchDisposition,
+) -> Vec<SearchDisposition> {
+    match &current.effect {
+        Effect::SearchLibrary { .. } => {
+            // A nested search replaces the continuation's bound targets with
+            // its own found set at the next SearchChoice boundary.
+            disposition.selected_targets_bound = false;
+            disposition.ordering = SearchOrderingHint::Unordered;
+        }
+        Effect::PutAtLibraryPosition {
+            target,
+            count,
+            position,
+        } if disposition.selected_targets_bound => {
+            let places_all_selected = match count {
+                QuantityExpr::Fixed { value: 0 } => true,
+                QuantityExpr::Fixed { value } => {
+                    usize::try_from(*value).is_ok_and(|count| count >= disposition.selection_limit)
+                }
+                _ => false,
+            };
+            disposition.ordering =
+                if matches!(target, TargetFilter::Any | TargetFilter::ParentTarget)
+                    && places_all_selected
+                    && matches!(position, LibraryPosition::Top)
+                {
+                    SearchOrderingHint::OrderedToLibraryTop
+                } else {
+                    SearchOrderingHint::Unordered
+                };
+        }
+        Effect::ChangeZone { .. }
+        | Effect::ChangeZoneAll { .. }
+        | Effect::PutOnTopOrBottom { .. }
+            if disposition.selected_targets_bound =>
+        {
+            disposition.ordering = SearchOrderingHint::Unordered;
+        }
+        Effect::Shuffle { target } => {
+            let preserves_order = matches!(target, TargetFilter::TrackedSet { .. })
+                || matches!(
+                    (
+                        disposition.searched_library_owner,
+                        known_shuffle_player(current, target),
+                    ),
+                    (Some(searched), Some(shuffled)) if searched != shuffled
+                );
+            if !preserves_order {
+                disposition.ordering = SearchOrderingHint::Unordered;
+            }
+        }
+        _ => {}
+    }
+
+    continue_search_ordering(current.sub_ability.as_deref(), disposition)
+}
+
+fn condition_false_search_ordering_outcomes(
+    current: &ResolvedAbility,
+    incoming: SearchDisposition,
+) -> Vec<SearchDisposition> {
+    if let Some(branch) = current.else_ability.as_deref() {
+        return continue_search_ordering(Some(branch), incoming);
+    }
+    if let Some(sub) = current.sub_ability.as_deref() {
+        if super::sub_outlives_false_parent_gate(sub)
+            || (sub.sub_link == SubAbilityLink::SequentialSibling && sub.condition.is_none())
+        {
+            return continue_search_ordering(Some(sub), incoming);
+        }
+    }
+    vec![incoming]
+}
+
+fn optional_decline_search_ordering_outcomes(
+    current: &ResolvedAbility,
+    mut incoming: SearchDisposition,
+) -> Vec<SearchDisposition> {
+    let Some(branch) = super::optional_decline_branch(current) else {
+        return vec![incoming];
+    };
+    incoming.selected_targets_bound = incoming.selected_targets_bound
+        && super::can_inherit_parent_targets(&branch)
+        && super::effect_refs_parent_target(&branch.effect);
+    search_ordering_outcomes(&branch, incoming)
+}
+
+fn continue_search_ordering(
+    next: Option<&ResolvedAbility>,
+    mut disposition: SearchDisposition,
+) -> Vec<SearchDisposition> {
+    let Some(next) = next else {
+        return vec![disposition];
+    };
+    disposition.selected_targets_bound =
+        disposition.selected_targets_bound && super::can_inherit_parent_targets(next);
+    search_ordering_outcomes(next, disposition)
+}
+
+/// CR 701.23a + CR 701.23i: compute one effective search from immutable game
+/// state. Scoped/APNAP preparation calls this for every participant against the
+/// same snapshot and commits the complete group only after all preparations
+/// succeed; ordinary search resolution applies the same prepared value once.
+pub(crate) fn prepare_effective_search(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Result<Option<PreparedEffectiveSearch>, EffectError> {
+    let (filter, count, reveal, target_player, up_to, constraint, split, source_zones) =
         match &ability.effect {
             Effect::SearchLibrary {
                 filter,
@@ -380,119 +611,171 @@ pub fn resolve(
                     source_zones.clone(),
                 )
             }
-            _ => (
-                TargetFilter::Any,
-                1,
-                false,
-                None,
-                false,
-                SearchSelectionConstraint::None,
-                None,
-                vec![Zone::Library],
-            ),
+            _ => {
+                return Err(EffectError::InvalidParam(
+                    "expected SearchLibrary".to_string(),
+                ))
+            }
         };
-
-    // CR 701.23 + CR 609.3: If a CantSearchLibrary static muzzles the cause of
-    // this search, the library can't be searched. Per CR 609.3 ("do as much as
-    // possible"), a multi-zone search (graveyard/hand/library) still searches
-    // the non-library zones — only the library component is suppressed. A
-    // library-only search becomes a no-op: emit the resolution event, skip the
-    // turn-tracking flag, and return.
     let library_muzzled = is_search_muzzled(state, ability.controller);
-    let effective_zones: Vec<Zone> = source_zones
-        .iter()
-        .copied()
+    let effective_zones: Vec<_> = source_zones
+        .into_iter()
         .filter(|zone| !(library_muzzled && *zone == Zone::Library))
         .collect();
     if effective_zones.is_empty() {
+        return Ok(None);
+    }
+    let searched_library = effective_zones.contains(&Zone::Library);
+    let searched_zone_owner = match target_player.as_ref() {
+        Some(filter) => resolve_library_owner(state, ability, filter),
+        None => ability.controller,
+    };
+    let searcher = match target_player.as_ref() {
+        Some(filter) if searcher_is_library_owner(filter) => searched_zone_owner,
+        _ => ability.controller,
+    };
+    let owner = state
+        .players
+        .iter()
+        .find(|player| player.id == searched_zone_owner)
+        .ok_or(EffectError::PlayerNotFound)?;
+    let top_limit = library_search_top_limit(state, searcher);
+    let mut all_ids = Vec::new();
+    let mut looked_at = Vec::new();
+    let mut viewed_cards = Vec::new();
+    for zone in &effective_zones {
+        let zone_ids: Vec<_> = match zone {
+            Zone::Library => match top_limit {
+                Some(limit) => state
+                    .library_of(owner.id)
+                    .iter()
+                    .take(limit as usize)
+                    .copied()
+                    .collect(),
+                None => state.library_of(owner.id).iter().copied().collect(),
+            },
+            Zone::Graveyard => state.graveyard_of(owner.id).iter().copied().collect(),
+            Zone::Hand => owner.hand.iter().copied().collect(),
+            _ => Vec::new(),
+        };
+        if matches!(zone, Zone::Hand | Zone::Library) {
+            for id in &zone_ids {
+                if let Some(object) = state.objects.get(id) {
+                    looked_at.push((
+                        searched_zone_owner,
+                        *zone,
+                        ObjectIncarnationRef::from_object(object),
+                    ));
+                    viewed_cards.push(crate::game::visibility::capture_library_search_card_view(
+                        object,
+                    ));
+                }
+            }
+        }
+        all_ids.extend(zone_ids);
+    }
+    let context = FilterContext::from_ability(ability);
+    let candidates = all_ids
+        .into_iter()
+        .filter(|id| matches_target_filter_in_owner_zone(state, *id, &filter, &context))
+        .filter_map(|id| {
+            state
+                .objects
+                .get(&id)
+                .map(ObjectIncarnationRef::from_object)
+        })
+        .collect();
+    // CR 723.1a + CR 723.5: choose the newest applicable player-control effect
+    // before exposing hidden information, then use the same snapshotted
+    // controller for both audience and decision authority.
+    let effective_library_owner = searched_library.then_some(searched_zone_owner);
+    let controller = crate::game::turn_control::library_search_decision_controller(
+        state,
+        searcher,
+        effective_library_owner,
+    );
+    let learned_audience =
+        crate::game::turn_control::decision_audience_for_controller(searcher, controller);
+    let has_hidden_view = !looked_at.is_empty();
+    let active_search = has_hidden_view
+        .then(|| {
+            ActiveLibrarySearch::try_new(
+                searcher,
+                searched_zone_owner,
+                searched_library.then_some(searched_zone_owner),
+                learned_audience.clone(),
+                looked_at,
+            )
+        })
+        .transpose()
+        .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
+    let hidden_event = has_hidden_view.then(|| GameEvent::HiddenSearchViewed {
+        searcher,
+        cards: viewed_cards,
+        audience: learned_audience,
+    });
+    Ok(Some(PreparedEffectiveSearch {
+        searcher,
+        effective_library_owner,
+        candidates,
+        filter: filter.clone(),
+        count,
+        reveal,
+        up_to,
+        allows_partial_find: allows_hidden_zone_partial_find(&filter, &effective_zones),
+        constraint,
+        split,
+        active_search,
+        hidden_event,
+        ordering_hint: search_ordering_hint(ability, count),
+        decision: ActiveSearchDecisionControl {
+            searcher,
+            searched_zone_owner,
+            authority: ActiveSearchDecisionAuthority::LatchedController { controller },
+        },
+    }))
+}
+
+/// CR 701.23a + CR 401.2: Search a library — look through it, find card(s) matching criteria, then shuffle.
+/// CR 401.2: Libraries are normally face-down; searching is an exception that lets a player look through cards.
+pub fn resolve(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    if state.pending_scoped_library_search.is_some()
+        || !state.active_library_searches.is_empty()
+        || !state.active_search_decision_controls.is_empty()
+    {
+        return Err(EffectError::SearchAlreadyActive);
+    }
+    let Some(prepared) = prepare_effective_search(state, ability)? else {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::SearchLibrary,
             source_id: ability.source_id,
             subject: None,
         });
         return Ok(());
-    }
-    let searched_library = effective_zones.contains(&Zone::Library);
-
-    // CR 701.23a: Determine the library owner and the searcher.
-    //   - Library owner: the player whose library is searched (driven by
-    //     `target_player` when set, caster otherwise).
-    //   - Searcher: the player carrying out the "search" instruction
-    //     (library owner for subject-anchored target_player variants, caster
-    //     otherwise — matching the Oracle-text grammatical subject of
-    //     "search").
-    let library_owner_id = match target_player.as_ref() {
-        Some(filter) => resolve_library_owner(state, ability, filter),
-        None => ability.controller,
     };
-    let searcher_id = match target_player.as_ref() {
-        Some(filter) if searcher_is_library_owner(filter) => library_owner_id,
-        _ => ability.controller,
-    };
-
-    // CR 701.23a: Library search drives the `CantSearchLibrary` muzzle and the
-    // per-turn "searched a library" tracking (Aven Mindcensor, Opposition
-    // Agent, Archive Trap). Only emit the event / set the flag when the library
-    // is among the zones actually searched — a graveyard/hand-only search (or a
-    // muzzled library component) does not count as searching a library.
-    if searched_library {
+    if prepared.effective_library_owner.is_some() {
         events.push(GameEvent::PlayerPerformedAction {
-            player_id: searcher_id,
+            player_id: prepared.searcher,
             action: PlayerActionKind::SearchedLibrary,
+            look_count: None,
+            scry_bottom_count: None,
+            scry_top_count: None,
         });
         state
             .players_who_searched_library_this_turn
-            .insert(searcher_id);
+            .insert(prepared.searcher);
     }
-
-    // CR 701.23a: The candidate set is the union of all searched zones. Every
-    // zone in a multi-zone tutor shares one possessive ("search [player]'s
-    // graveyard, hand, and/or library"), so all searched zones belong to the
-    // library owner — the targeted player for opponent searches, the caster
-    // otherwise. `searcher_id` governs WHO chooses and the shuffle/tracking, not
-    // whose zones are searched. Resolve the owner once.
-    // CR 701.23f + CR 614.1a: A top-N search restriction (Aven Mindcensor) caps
-    // the LIBRARY portion of the candidate set to the top `n` cards
-    // (`library[0]` is the top — see zones.rs). It applies per `searcher`, not
-    // per library owner, and only to the library zone — a multi-zone tutor's
-    // graveyard/hand portions are unrestricted (CR 609.3 "do as much as
-    // possible"). The whole-library shuffle (a separate chain step) is
-    // untouched, and the per-turn search tracking above already fired.
-    // G3: AI needs no change here — the candidate set is truncated BEFORE
-    // `WaitingFor::SearchChoice` is built below, so the AI enumerator inherits
-    // the restriction from `cards`.
-    let library_top_limit = library_search_top_limit(state, searcher_id);
-    let Some(owner) = state.players.iter().find(|p| p.id == library_owner_id) else {
-        return Err(EffectError::PlayerNotFound);
-    };
-    let mut candidate_ids: Vec<crate::types::identifiers::ObjectId> = Vec::new();
-    for zone in &effective_zones {
-        match zone {
-            Zone::Library => match library_top_limit {
-                Some(n) => candidate_ids.extend(owner.library.iter().take(n as usize).copied()),
-                None => candidate_ids.extend(owner.library.iter().copied()),
-            },
-            Zone::Graveyard => candidate_ids.extend(owner.graveyard.iter().copied()),
-            Zone::Hand => candidate_ids.extend(owner.hand.iter().copied()),
-            // CR 701.23a: The parser only ever produces Graveyard/Hand/Library
-            // for `source_zones`; other zones are not searchable tutoring zones.
-            _ => continue,
-        }
+    if let Some(search) = prepared.active_search.clone() {
+        state.active_library_searches.insert(search);
     }
-
-    // CR 107.3a + CR 601.2b: Evaluate the filter with the resolving ability in
-    // scope so dynamic thresholds (e.g. `CmcLE { value: Variable("X") }` for
-    // Nature's Rhythm) resolve against the caster's announced X.
-    // CR 109.5 + CR 400.3: library/graveyard/hand are owner-scoped zones — a
-    // card's control-change LKI must not exclude its owner from a "your X"
-    // filter, so match with ownership standing in for control.
-    let filter_ctx = FilterContext::from_ability(ability);
-    let matching: Vec<crate::types::identifiers::ObjectId> = candidate_ids
-        .into_iter()
-        .filter(|&obj_id| matches_target_filter_in_owner_zone(state, obj_id, &filter, &filter_ctx))
-        .collect();
-
-    if matching.is_empty() {
+    if let Some(event) = prepared.hidden_event.clone() {
+        events.push(event);
+    }
+    if prepared.candidates.is_empty() {
         // CR 701.23b: A player searching a hidden zone isn't required to find
         // cards even if they're present ("fail to find"). Resolve immediately.
         events.push(GameEvent::EffectResolved {
@@ -500,27 +783,28 @@ pub fn resolve(
             source_id: ability.source_id,
             subject: None,
         });
+        state.active_library_searches.remove(&prepared.searcher);
         return Ok(());
     }
-
-    let pick_count = count.min(matching.len());
-    let allows_partial_find = allows_hidden_zone_partial_find(&filter, &effective_zones);
-
-    // CR 608.2c: Propagate the printed-text selection restriction (e.g.,
-    // "with different names") into the choice state so the Select handler
-    // and AI candidate enumerator both see it.
     state.waiting_for = WaitingFor::SearchChoice {
-        player: searcher_id,
-        cards: matching,
-        count: pick_count,
-        reveal,
-        up_to,
-        allows_partial_find,
-        constraint: selection_constraint,
-        // CR 701.23a + CR 608.2c: Carry the cultivate-class split metadata so the
-        // SearchChoice-completion handler can partition the found set.
-        split,
+        player: prepared.searcher,
+        library_owner: prepared.effective_library_owner,
+        cards: prepared
+            .candidates
+            .iter()
+            .map(|identity| identity.object_id)
+            .collect(),
+        count: prepared.count.min(prepared.candidates.len()),
+        reveal: prepared.reveal,
+        up_to: prepared.up_to,
+        allows_partial_find: prepared.allows_partial_find,
+        constraint: prepared.constraint,
+        ordering_hint: prepared.ordering_hint,
+        split: prepared.split,
     };
+    state
+        .active_search_decision_controls
+        .insert(prepared.decision);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::SearchLibrary,
@@ -536,7 +820,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        Comparator, FilterProp, QuantityExpr, QuantityRef, TypeFilter, TypedFilter,
+        AbilityCondition, AbilityCost, Comparator, FilterProp, QuantityExpr, QuantityRef,
+        TypeFilter, TypedFilter, UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -577,6 +862,335 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    #[test]
+    fn ordering_hint_accepts_fixed_one_for_a_one_card_search() {
+        let top = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let search = make_search_ability(TargetFilter::Any, 1).sub_ability(top);
+
+        assert_eq!(
+            search_ordering_hint(&search, 1),
+            SearchOrderingHint::OrderedToLibraryTop
+        );
+    }
+
+    #[test]
+    fn ordering_hint_accepts_fixed_two_for_a_two_card_search() {
+        let top = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 2 },
+                position: LibraryPosition::Top,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
+
+        assert_eq!(
+            search_ordering_hint(&search, 2),
+            SearchOrderingHint::OrderedToLibraryTop
+        );
+    }
+
+    #[test]
+    fn ordering_hint_rejects_fixed_one_for_a_two_card_search() {
+        let top = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
+
+        assert_eq!(
+            search_ordering_hint(&search, 2),
+            SearchOrderingHint::Unordered
+        );
+    }
+
+    #[test]
+    fn ordering_hint_requires_every_branch_to_order_selected_cards_on_top() {
+        let bottom = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Bottom,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut conditional_top = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Top,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        conditional_top.condition = Some(AbilityCondition::IsYourTurn);
+        conditional_top.else_ability = Some(Box::new(bottom));
+        let search = make_search_ability(TargetFilter::Any, 2).sub_ability(conditional_top);
+
+        assert_eq!(
+            search_ordering_hint(&search, 2),
+            SearchOrderingHint::Unordered
+        );
+    }
+
+    #[test]
+    fn ordering_hint_accepts_when_every_branch_orders_selected_cards_on_top() {
+        let else_top = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Top,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut conditional_top = else_top.clone();
+        conditional_top.condition = Some(AbilityCondition::IsYourTurn);
+        conditional_top.else_ability = Some(Box::new(else_top));
+        let search = make_search_ability(TargetFilter::Any, 2).sub_ability(conditional_top);
+
+        assert_eq!(
+            search_ordering_hint(&search, 2),
+            SearchOrderingHint::OrderedToLibraryTop
+        );
+    }
+
+    #[test]
+    fn ordering_hint_preserves_top_order_across_unrelated_optional_instruction() {
+        let mut optional_life = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        optional_life.optional = true;
+        let top = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Top,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(optional_life);
+        let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
+
+        assert_eq!(
+            search_ordering_hint(&search, 2),
+            SearchOrderingHint::OrderedToLibraryTop
+        );
+    }
+
+    #[test]
+    fn ordering_hint_is_unordered_when_unless_payment_skips_ordering_chain() {
+        let mut top = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Top,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        top.sub_link = SubAbilityLink::SequentialSibling;
+        let mut guarded = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(top);
+        guarded.unless_pay = Some(UnlessPayModifier {
+            cost: AbilityCost::Mana {
+                cost: ManaCost::generic(1),
+            },
+            payer: TargetFilter::Controller,
+        });
+        let search = make_search_ability(TargetFilter::Any, 2).sub_ability(guarded);
+
+        assert_eq!(
+            search_ordering_hint(&search, 2),
+            SearchOrderingHint::Unordered
+        );
+    }
+
+    #[test]
+    fn ordering_hint_accounts_for_optional_decline_after_condition_succeeds() {
+        let else_top = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Top,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut conditional_optional_top = else_top.clone();
+        conditional_optional_top.condition = Some(AbilityCondition::IsYourTurn);
+        conditional_optional_top.optional = true;
+        conditional_optional_top.else_ability = Some(Box::new(else_top));
+        let search =
+            make_search_ability(TargetFilter::Any, 2).sub_ability(conditional_optional_top);
+
+        assert_eq!(
+            search_ordering_hint(&search, 2),
+            SearchOrderingHint::Unordered
+        );
+    }
+
+    #[test]
+    fn ordering_hint_requires_optional_else_to_inherit_selected_targets() {
+        let top = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Top,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut optional = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(top.clone());
+        optional.optional = true;
+        optional.else_ability = Some(Box::new(top));
+        let search = make_search_ability(TargetFilter::Any, 2).sub_ability(optional);
+
+        assert_eq!(
+            search_ordering_hint(&search, 2),
+            SearchOrderingHint::Unordered
+        );
+    }
+
+    #[test]
+    fn ordering_hint_tracks_selected_cards_final_linear_placement() {
+        let bottom = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Bottom,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let top = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Top,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(bottom);
+        let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
+
+        assert_eq!(
+            search_ordering_hint(&search, 2),
+            SearchOrderingHint::Unordered
+        );
+    }
+
+    #[test]
+    fn ordering_hint_is_unordered_when_later_shuffle_destroys_top_order() {
+        let shuffle = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let top = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Top,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(shuffle);
+        let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
+
+        assert_eq!(
+            search_ordering_hint(&search, 2),
+            SearchOrderingHint::Unordered
+        );
+    }
+
+    #[test]
+    fn ordering_hint_preserves_top_order_when_later_shuffle_targets_other_player() {
+        let shuffle = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::Opponent,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let top = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Top,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(shuffle);
+        let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
+
+        assert_eq!(
+            search_ordering_hint(&search, 2),
+            SearchOrderingHint::OrderedToLibraryTop
+        );
     }
 
     fn add_library_creature(
@@ -719,7 +1333,12 @@ mod tests {
             .contains(&PlayerId(0)));
 
         match &state.waiting_for {
-            WaitingFor::SearchChoice { cards, .. } => {
+            WaitingFor::SearchChoice {
+                cards,
+                library_owner,
+                ..
+            } => {
+                assert_eq!(*library_owner, Some(PlayerId(0)));
                 assert!(cards.contains(&gy), "graveyard match should be offered");
                 assert!(cards.contains(&hand), "hand match should be offered");
                 assert!(cards.contains(&lib), "library match should be offered");
@@ -757,8 +1376,46 @@ mod tests {
             .players_who_searched_library_this_turn
             .contains(&PlayerId(0)));
         match &state.waiting_for {
-            WaitingFor::SearchChoice { cards, .. } => assert!(cards.contains(&gy)),
+            WaitingFor::SearchChoice {
+                cards,
+                library_owner,
+                ..
+            } => {
+                assert_eq!(*library_owner, None);
+                assert!(cards.contains(&gy));
+            }
             other => panic!("Expected SearchChoice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn muzzled_mixed_zone_search_drops_library_provenance() {
+        let mut state = GameState::new_two_player(42);
+        add_cant_search_library_permanent(&mut state, PlayerId(1), ProhibitionScope::Opponents);
+        let gy = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Target".to_string(),
+            Zone::Graveyard,
+        );
+        let ability = make_multi_zone_named_search(
+            "Target",
+            vec![Zone::Graveyard, Zone::Hand, Zone::Library],
+        );
+
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice {
+                cards,
+                library_owner,
+                ..
+            } => {
+                assert_eq!(*library_owner, None);
+                assert_eq!(cards, &vec![gy]);
+            }
+            other => panic!("Expected SearchChoice, got {other:?}"),
         }
     }
 
@@ -777,6 +1434,7 @@ mod tests {
             GameEvent::PlayerPerformedAction {
                 player_id,
                 action: PlayerActionKind::SearchedLibrary,
+                ..
             } if *player_id == PlayerId(0)
         )));
 
@@ -925,6 +1583,7 @@ mod tests {
             GameEvent::PlayerPerformedAction {
                 player_id,
                 action: PlayerActionKind::SearchedLibrary,
+                ..
             } if *player_id == PlayerId(0)
         )));
         assert!(events.iter().any(|e| matches!(
@@ -1325,17 +1984,25 @@ mod tests {
             AbilityKind::Spell,
         );
         let resolved = build_resolved_from_def(&ability, ObjectId(100), PlayerId(0));
+        assert!(
+            resolved
+                .sub_ability
+                .as_ref()
+                .is_some_and(|sub| sub.context.face_down_in_exile.is_face_down()),
+            "the resolved exile continuation must retain typed concealment"
+        );
 
         let mut events = Vec::new();
         resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
         assert!(matches!(state.waiting_for, WaitingFor::SearchChoice { .. }));
 
-        apply(
+        let selection_result = apply(
             &mut state,
             PlayerId(0),
             GameAction::SelectCards { cards: vec![found] },
         )
         .unwrap();
+        events.extend(selection_result.events);
 
         assert!(
             !matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
@@ -1343,6 +2010,277 @@ mod tests {
         );
         assert_eq!(state.objects[&found].zone, Zone::Hand);
         assert!(state.players[0].hand.contains(&found));
+
+        let concealed_exile = events.iter().find_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                record,
+            } if *object_id == found => Some(record),
+            _ => None,
+        });
+        assert!(
+            concealed_exile.is_some_and(|record| record
+                .trigger_source_context
+                .as_ref()
+                .is_some_and(|context| context.face_down)),
+            "Beseech's library-to-exile record must retain event-time concealment"
+        );
+        assert!(state
+            .zone_changes_this_turn
+            .iter()
+            .rev()
+            .find(|record| record.object_id == found && record.to_zone == Zone::Exile)
+            .and_then(|record| record.trigger_source_context.as_ref())
+            .is_some_and(|context| context.face_down));
+        let owner_events =
+            crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(0));
+        let opponent_events =
+            crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(1));
+        assert!(owner_events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                record,
+            } if *object_id == found
+                && record
+                    .trigger_source_context
+                    .as_ref()
+                    .is_some_and(|context| context.face_down)
+        )));
+        assert!(!opponent_events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                ..
+            } if *object_id == found
+        )));
+    }
+
+    /// CR 701.23a + CR 406.3: a caster searching an opponent's library is the
+    /// only player who learns the selected card when the continuation exiles it
+    /// face down. The library owner and a third-party spectator must receive
+    /// neither the hidden-search witness nor the identity-bearing zone record.
+    #[test]
+    fn cross_owner_search_library_face_down_exile_is_visible_only_to_searcher() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine::apply;
+        use crate::types::ability::{AbilityKind, ControllerRef, Effect};
+        use crate::types::actions::GameAction;
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let found = create_object(
+            &mut state,
+            CardId(104),
+            PlayerId(1),
+            "Opponent Hidden Creature".to_string(),
+            Zone::Library,
+        );
+        state.objects.get_mut(&found).unwrap().card_types.core_types = vec![CoreType::Creature];
+
+        let mut exile_step = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Exile,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(105),
+            PlayerId(0),
+        );
+        exile_step.context.face_down_in_exile = crate::types::ability::ExileConcealment::FaceDown;
+        let search = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                )),
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![Zone::Library],
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(105),
+            PlayerId(0),
+        )
+        .kind(AbilityKind::Spell)
+        .sub_ability(exile_step);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &search, &mut events, 0).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::SearchChoice {
+                player: PlayerId(0),
+                ref cards,
+                ..
+            } if cards.as_slice() == [found]
+        ));
+
+        let selection = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectCards { cards: vec![found] },
+        )
+        .unwrap();
+        events.extend(selection.events);
+
+        assert_eq!(state.objects[&found].zone, Zone::Exile);
+        assert!(state.objects[&found].face_down);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::HiddenSearchViewed {
+                searcher: PlayerId(0),
+                audience,
+                ..
+            } if audience == &[PlayerId(0)]
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                record,
+            } if *object_id == found
+                && record
+                    .trigger_source_context
+                    .as_ref()
+                    .is_some_and(|context| context.face_down)
+        )));
+
+        let searcher_view =
+            crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(0));
+        let owner_view =
+            crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(1));
+        let spectator_view =
+            crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(2));
+        assert!(searcher_view
+            .iter()
+            .any(|event| matches!(event, GameEvent::HiddenSearchViewed { .. })));
+        assert!(searcher_view.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                ..
+            } if *object_id == found
+        )));
+        for view in [&owner_view, &spectator_view] {
+            assert!(!view
+                .iter()
+                .any(|event| matches!(event, GameEvent::HiddenSearchViewed { .. })));
+            assert!(!view.iter().any(|event| matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Library),
+                    to: Zone::Exile,
+                    ..
+                } if *object_id == found
+            )));
+        }
+    }
+
+    /// CR 701.23a + CR 406.3: the search-result continuation keeps its
+    /// face-down exile intent when the selected card comes from a non-library
+    /// source zone. The searcher may identify the card; other viewers must not.
+    #[test]
+    fn multizone_search_face_down_exile_is_visible_only_to_searcher() {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine::apply;
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::AbilityKind;
+        use crate::types::actions::GameAction;
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let found = create_object(
+            &mut state,
+            CardId(106),
+            PlayerId(0),
+            "Hidden Hand Card".to_string(),
+            Zone::Hand,
+        );
+        let ability = parse_effect_chain(
+            "search your graveyard, hand, and/or library for a card, then exile it face down",
+            AbilityKind::Spell,
+        );
+        let resolved = build_resolved_from_def(&ability, ObjectId(107), PlayerId(0));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::SearchChoice {
+                player: PlayerId(0),
+                ref cards,
+                ..
+            } if cards.as_slice() == [found]
+        ));
+
+        let selection = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectCards { cards: vec![found] },
+        )
+        .unwrap();
+        events.extend(selection.events);
+
+        assert_eq!(state.objects[&found].zone, Zone::Exile);
+        assert!(state.objects[&found].face_down);
+
+        let searcher_view =
+            crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(0));
+        let opponent_view =
+            crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(1));
+        assert!(searcher_view.iter().any(|event| matches!(
+            event,
+            GameEvent::HiddenSearchViewed {
+                searcher: PlayerId(0),
+                audience,
+                ..
+            } if audience == &[PlayerId(0)]
+        )));
+        let opponent_state = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1));
+        assert_ne!(opponent_state.objects[&found].name, "Hidden Hand Card");
+        assert!(searcher_view.iter().any(|event| matches!(
+            event,
+            GameEvent::HiddenSearchViewed { cards, .. }
+                if cards.iter().any(|card| card.current_face.name == "Hidden Hand Card")
+        )));
+        assert!(!opponent_view
+            .iter()
+            .any(|event| matches!(event, GameEvent::HiddenSearchViewed { .. })));
+        assert!(!opponent_view.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Hand),
+                to: Zone::Exile,
+                ..
+            } if *object_id == found
+        )));
     }
 
     #[test]
@@ -1545,6 +2483,10 @@ mod tests {
             }
             other => panic!("expected second SearchChoice, got {:?}", other),
         }
+        assert!(
+            state.active_library_searches.get(&PlayerId(0)).is_some(),
+            "the first search must settle before the second session becomes active"
+        );
 
         let result = apply(
             &mut state,
@@ -1558,8 +2500,10 @@ mod tests {
 
         assert_eq!(state.objects[&plains].zone, Zone::Battlefield);
         assert!(state.objects[&plains].tapped);
-        assert!(state.pending_continuation.is_none());
-        assert!(state.pending_repeat_iteration.is_none());
+        assert!(state.active_ability_continuation().is_none());
+        assert!(state.active_repeat_for().is_none());
+        assert!(state.active_library_searches.is_empty());
+        assert!(state.active_search_decision_controls.is_empty());
         assert!(all_events.iter().any(|event| matches!(
             event,
             GameEvent::EffectResolved {
@@ -2200,6 +3144,180 @@ mod tests {
     }
 
     #[test]
+    fn muzzled_mixed_search_keeps_hand_knowledge_without_library_provenance() {
+        let mut state = GameState::new_two_player(42);
+        add_cant_search_library_permanent(&mut state, PlayerId(1), ProhibitionScope::Opponents);
+        let hand_match = create_object(
+            &mut state,
+            CardId(81),
+            PlayerId(0),
+            "Target".to_string(),
+            Zone::Hand,
+        );
+        let hand_nonmatch = create_object(
+            &mut state,
+            CardId(82),
+            PlayerId(0),
+            "Other".to_string(),
+            Zone::Hand,
+        );
+        let library_match = create_object(
+            &mut state,
+            CardId(83),
+            PlayerId(0),
+            "Target".to_string(),
+            Zone::Library,
+        );
+        let ability = make_multi_zone_named_search("Target", vec![Zone::Hand, Zone::Library]);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let record = state.active_library_searches.get(&PlayerId(0)).unwrap();
+        assert_eq!(record.searched_zone_owner(), PlayerId(0));
+        assert_eq!(record.effective_library_owner(), None);
+        assert!(record.looked_at().iter().any(|(_, zone, identity)| {
+            *zone == Zone::Hand && identity.object_id == hand_match
+        }));
+        assert!(record.looked_at().iter().any(|(_, zone, identity)| {
+            *zone == Zone::Hand && identity.object_id == hand_nonmatch
+        }));
+        assert!(!record.looked_at().iter().any(
+            |(_, zone, identity)| *zone == Zone::Library || identity.object_id == library_match
+        ));
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::SearchChoice { ref cards, .. } if cards == &[hand_match]
+        ));
+        assert!(state
+            .active_search_decision_controls
+            .get(&PlayerId(0))
+            .is_some());
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                action: PlayerActionKind::SearchedLibrary,
+                ..
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::HiddenSearchViewed { cards, .. }
+                if cards.iter().all(|card| card.zone == Zone::Hand)
+                    && cards.len() == 2
+        )));
+    }
+
+    #[test]
+    fn unprohibited_mixed_search_records_effective_library_and_real_tracking() {
+        let mut state = GameState::new_two_player(42);
+        let hand_match = create_object(
+            &mut state,
+            CardId(84),
+            PlayerId(0),
+            "Target".to_string(),
+            Zone::Hand,
+        );
+        let library_match = create_object(
+            &mut state,
+            CardId(85),
+            PlayerId(0),
+            "Target".to_string(),
+            Zone::Library,
+        );
+        let ability = make_multi_zone_named_search("Target", vec![Zone::Hand, Zone::Library]);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let record = state.active_library_searches.get(&PlayerId(0)).unwrap();
+        assert_eq!(record.effective_library_owner(), Some(PlayerId(0)));
+        assert!(record
+            .looked_at()
+            .iter()
+            .any(|(_, zone, identity)| *zone == Zone::Hand && identity.object_id == hand_match));
+        assert!(record.looked_at().iter().any(|(_, zone, identity)| {
+            *zone == Zone::Library && identity.object_id == library_match
+        }));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                player_id: PlayerId(0),
+                action: PlayerActionKind::SearchedLibrary,
+                ..
+            }
+        )));
+        assert!(state
+            .players_who_searched_library_this_turn
+            .contains(&PlayerId(0)));
+    }
+
+    #[test]
+    fn nested_search_rejects_before_mutating_outer_session() {
+        let mut state = GameState::new_two_player(42);
+        add_library_creature(&mut state, 86, PlayerId(0), "Target");
+        let ability = make_search_ability(TargetFilter::Any, 1);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        let outer_state = state.clone();
+        let outer_events = events.clone();
+
+        assert_eq!(
+            resolve(&mut state, &ability, &mut events),
+            Err(EffectError::SearchAlreadyActive)
+        );
+        assert_eq!(state, outer_state);
+        assert_eq!(events, outer_events);
+
+        assert_eq!(
+            crate::game::effects::scoped_library_search::start(
+                &mut state,
+                &ability,
+                &[PlayerId(0), PlayerId(1)],
+                None,
+                &mut events,
+            ),
+            Err(EffectError::SearchAlreadyActive)
+        );
+        assert_eq!(state, outer_state);
+        assert_eq!(events, outer_events);
+    }
+
+    #[test]
+    fn ordinary_resolve_rejects_pending_scoped_protocol_but_pure_preparation_remains_available() {
+        use crate::types::game_state::{PendingScopedLibrarySearch, ScopedLibrarySearchPhase};
+
+        let mut state = GameState::new_two_player(42);
+        add_library_creature(&mut state, 87, PlayerId(0), "Target");
+        let ability = make_search_ability(TargetFilter::Any, 1);
+        state.pending_scoped_library_search = Some(PendingScopedLibrarySearch {
+            ability: Box::new(ability.clone()),
+            phase: ScopedLibrarySearchPhase::CollectAcceptance {
+                remaining_players: Vec::new(),
+                accepted_players: Vec::new(),
+                acceptance_authorities: Vec::new(),
+                current_player: None,
+            },
+            after_scope: None,
+        });
+        let before = state.clone();
+        let mut events = Vec::new();
+
+        assert_eq!(
+            resolve(&mut state, &ability, &mut events),
+            Err(EffectError::SearchAlreadyActive)
+        );
+        assert_eq!(state, before);
+        assert!(events.is_empty());
+
+        let prepared = prepare_effective_search(&state, &ability)
+            .expect("pure preparation must not consult protocol occupancy")
+            .expect("search has one effective candidate");
+        assert_eq!(prepared.candidates.len(), 1);
+        assert_eq!(state, before);
+    }
+
+    #[test]
     fn ashiok_permits_own_controller_search() {
         // CR 701.23: Ashiok's static is `cause = Opponents`. Its own controller's
         // searches are not muzzled.
@@ -2445,6 +3563,93 @@ mod tests {
                 .contains(&PlayerId(0)),
             "caster is the searcher for 'search target opponent's library'"
         );
+    }
+
+    #[test]
+    fn cross_owner_graveyard_search_records_owner_without_hidden_tuples() {
+        use crate::types::ability::ControllerRef;
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(88),
+            PlayerId(1),
+            "Opponent grave card".to_string(),
+            Zone::Graveyard,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                )),
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![Zone::Graveyard],
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(9988),
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        assert!(state.active_library_searches.is_empty());
+        let decision = state
+            .active_search_decision_controls
+            .get(&PlayerId(0))
+            .unwrap();
+        assert_eq!(decision.searched_zone_owner, PlayerId(1));
+        assert!(matches!(
+            &state.waiting_for,
+            WaitingFor::SearchChoice { cards, .. } if cards.as_slice() == [card]
+        ));
+    }
+
+    #[test]
+    fn cross_owner_empty_hand_plus_graveyard_search_retains_owner_provenance() {
+        use crate::types::ability::ControllerRef;
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(89),
+            PlayerId(1),
+            "Only grave candidate".to_string(),
+            Zone::Graveyard,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                )),
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![Zone::Hand, Zone::Graveyard],
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(9989),
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        assert!(state.active_library_searches.is_empty());
+        assert_eq!(
+            state
+                .active_search_decision_controls
+                .get(&PlayerId(0))
+                .unwrap()
+                .searched_zone_owner,
+            PlayerId(1)
+        );
+        assert!(matches!(
+            &state.waiting_for,
+            WaitingFor::SearchChoice { cards, .. } if cards.as_slice() == [card]
+        ));
     }
 
     // === CR 701.23f + CR 614.1a: RestrictLibrarySearchToTop runtime enforcement ===
@@ -2777,6 +3982,7 @@ mod tests {
                 GameEvent::PlayerPerformedAction {
                     player_id,
                     action: PlayerActionKind::SearchedLibrary,
+                    ..
                 } if *player_id == PlayerId(1)
             )),
             "CR 701.23f: a restricted (replaced) search still fires SearchedLibrary"

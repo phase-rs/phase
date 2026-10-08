@@ -5,11 +5,19 @@
   },
   "tabs": {
     "gameplay": "Rozgrywka",
+    "ai": "Przeciwnicy AI",
+    "experimental": "Eksperymentalne",
     "visual": "Grafika",
     "combat": "Tempo",
     "audio": "Dźwięk",
     "multiplayer": "Tryb wieloosobowy",
     "data": "Dane"
+  },
+  "experimental": {
+    "title": "Eksperymentalne",
+    "tournaments": "Turnieje",
+    "showTournaments": "Pokazuj turnieje w nawigacji",
+    "showTournamentsDescription": "Turnieje są nadal w fazie rozwoju i mogą ulec zmianie bez uprzedzenia."
   },
   "gameplay": {
     "collapseLands": "Zwiń Lands",
@@ -22,9 +30,20 @@
     "title": "Rozgrywka",
     "language": "Język",
     "cardSize": "Rozmiar kart",
-    "logDefault": "Domyślny dziennik",
+    "commandZone": "Strefa dowodzenia",
+    "autoPass": "Auto-Pass",
+    "skipLowUsePriorityWindows": "Pomijaj rzadko używane okna priorytetu (eksperymentalne)",
+    "skipLowUsePriorityWindowsDescription": "Automatycznie pomijaj własne okna priorytetu przy pustym stosie podczas kroku utrzymania, dobierania i końcowego. Zatrzymania faz oraz Pełna kontrola nadal wstrzymują grę.",
+    "logDockSide": "Pozycja dziennika gry",
     "spellPayment": "Płatność za czary",
     "manualManaPayment": "Ręczna płatność many za czary",
+    "spellPaymentOptions": {
+      "auto": "Automatycznie",
+      "autoExceptSacrificialMana": "Pytaj przed poświęceniem",
+      "manual": "Ręcznie"
+    },
+    "nativeEngine": "Używaj natywnego silnika w lokalnych grach i hostowanym trybie wieloosobowym",
+    "nativeEngineDescription": "Używaj pobranego silnika do lokalnych gier z AI i gier hostowanych przez lobby. Goście nadal łączą się przez połączenie peer-to-peer lobby. Gdy silnik jest niedostępny, używany jest wbudowany silnik.",
     "boardBackground": "Tło pola bitwy",
     "boardBackgroundGroups": {
       "automatic": "Automatyczne",
@@ -49,20 +68,22 @@
       "medium": "Średnie",
       "large": "Duże"
     },
-    "logDefaultOptions": {
-      "open": "Otwarty",
-      "closed": "Zamknięty"
+    "logDockSideOptions": {
+      "left": "Lewo",
+      "right": "Prawo"
     }
   },
   "visual": {
     "title": "Grafika",
     "vfxQuality": "Jakość efektów wizualnych",
+    "cardAnimationStyle": "Animacje kart",
     "keywordStrip": "Pasek słów kluczowych",
     "showKeywords": "Pokaż słowa kluczowe na kartach na polu bitwy",
     "opponentHoverPreview": "Podgląd po najechaniu na przeciwnika",
     "showOpponentBoard": "Pokaż pole bitwy przeciwnika po najechaniu na HUD",
     "multiplayerBoardLayout": "Układ planszy wieloosobowej",
     "multiplayerBoardLayoutOptions": {
+      "auto": "Automatyczny",
       "focused": "Skupiony przeciwnik",
       "split": "Podzielony stół"
     },
@@ -81,6 +102,17 @@
       "side": "Podgląd dokuje się przy krawędzi ekranu, więc nigdy nie zasłania pola bitwy.",
       "shift": "Podgląd pojawia się tylko wtedy, gdy przytrzymasz klawisz Shift, tak jak w Tabletop Simulator."
     },
+    "draftCardPreview": "Podgląd kart podczas draftu",
+    "draftCardPreviewOff": "Wyłączony",
+    "draftCardPreviewHint": "Dotyczy tylko draftu i budowania talii draftowej.",
+    "draftDoubleClickConfirmPick": "Potwierdzanie wyboru podwójnym kliknięciem w drafcie",
+    "draftDoubleClickConfirmPickOptions": {
+      "disabled": "Wyłączone",
+      "enabled": "Włączone"
+    },
+    "cardPreviewFooter": "Informacje podglądu",
+    "showCardPreviewFooter": "Pokazuj informacje pod podglądem karty",
+    "cardPreviewFooterHint": "Obejmuje nazwę karty, dostępne zdolności aktywowane i podpowiedzi klawiaturowe. Alt nadal otwiera szczegóły parsowania, gdy opcja jest ukryta.",
     "cardArtPreferences": "Preferencje grafiki kart",
     "clearArtOverrides_one": "Wyczyść wszystkie nadpisania grafiki ({{count}})",
     "clearArtOverrides_other": "Wyczyść wszystkie nadpisania grafiki ({{count}})",
@@ -91,7 +123,13 @@
       "full": "Pełna",
       "reduced": "Zredukowana",
       "minimal": "Minimalna"
-    }
+    },
+    "cardAnimationStyleOptions": {
+      "webgl": "Nowe",
+      "classic": "Klasyczne"
+    },
+    "cardAnimationPreviewHintHover": "Najedź, aby zobaczyć podgląd",
+    "cardAnimationPreviewHintTap": "Dotknij, aby zobaczyć podgląd"
   },
   "flexLayout": {
     "title": "Elastyczny układ",
@@ -107,9 +145,18 @@
       "right": "Wyrównaj do prawej"
     },
     "presets": {
-      "default": { "label": "Układ 1", "description": "Standardowy, zrównoważony układ." },
-      "layout2": { "label": "Układ 2", "description": "Większe pole bitwy ze schowanymi rękami." },
-      "layout3": { "label": "Układ 3", "description": "Wyższa dolna część." }
+      "default": {
+        "label": "Układ 1",
+        "description": "Standardowy, zrównoważony układ."
+      },
+      "layout2": {
+        "label": "Układ 2",
+        "description": "Większe pole bitwy ze schowanymi rękami."
+      },
+      "layout3": {
+        "label": "Układ 3",
+        "description": "Wyższa dolna część."
+      }
     },
     "zones": {
       "playerHud": "Twój HUD",
@@ -153,13 +200,15 @@
     "signedInAs": "Zalogowano jako {{name}}",
     "syncNow": "Synchronizuj teraz",
     "statusSyncing": "Synchronizowanie…",
+    "statusPaused": "Synchronizacja w chmurze jest wstrzymana, gdy nie masz połączenia z internetem.",
     "statusError": "Synchronizacja nie powiodła się",
     "lastSynced": "Ostatnia synchronizacja: {{time}}",
     "never": "nigdy",
     "conflictTitle": "Obie kopie mają zmiany",
-    "conflictBody": "To urządzenie i Twoje konto w chmurze zawierają dane, a nie możemy ustalić, która kopia jest aktualna. Wybierz, którą zachować — druga zostanie zastąpiona.",
+    "conflictBody": "To urządzenie i Twoje konto w chmurze zawierają dane, a nie możemy ustalić, która kopia jest aktualna. Wybierz jedną kopię albo zachowaj obie kolekcje talii.",
     "keepCloud": "Użyj chmury",
     "keepLocal": "Zachowaj to urządzenie",
+    "keepBothDecks": "Zachowaj obie kolekcje talii",
     "savesNote": "Zapisy gier i pamięć podręczna pozostają na tym urządzeniu.",
     "diffDecks": "Talie: {{added}} dodanych, {{modified}} zmienionych, {{removed}} usuniętych",
     "diffPrefs": "Preferencje są różne",
@@ -188,6 +237,172 @@
     "telemetry": "Wysyłaj anonimowe raporty o awariach i użyciu",
     "telemetryDescription": "Pomaga naprawiać awarie i ustalać priorytety obsługi kart. Bez konta, bez danych osobowych — tylko liczniki błędów i podsumowań gier."
   },
+  "visualPacks": {
+    "title": "Katalog wizualny offline",
+    "description": "Wybierz, które obrazy zaufanych kart chcesz zachować na tym urządzeniu, lub zainstaluj cały aktualny katalog.",
+    "offlineUnavailable": "Pobieranie z sieci jest niedostępne w trybie offline. Połącz się ponownie, aby zaktualizować katalog lub instalować, synchronizować, naprawiać albo wznawiać obrazy.",
+    "availability": {
+      "loading": "Sprawdzam obsługę katalogu wizualnego offline…",
+      "browser": "Pobieranie obrazów offline nie jest skonfigurowane w tej kompilacji.",
+      "browserFuture": "Ta kompilacja nie zawiera zaufanej polityki podpisywania katalogu wymaganej do weryfikacji pobierania obrazów.",
+      "unsupported": "Ta aplikacja komputerowa jest za stara, aby zarządzać katalogami wizualnymi offline. Zaktualizuj aplikację, aby kontynuować.",
+      "empty": "Nie pobrano jeszcze żadnego zaufanego katalogu wizualnego.",
+      "invalid": "Lokalnemu katalogowi wizualnemu nie można ufać. Odśwież go przed kontynuowaniem."
+    },
+    "selector": {
+      "title": "Wybór katalogu",
+      "core": "Podstawowe wizualizacje",
+      "printing": "Wydania z dodatku",
+      "complete": "Uzupełnij aktualny katalog",
+      "curated": "Jeden obraz na kartę",
+      "deck_library": "Biblioteka talii",
+      "curatedNote": "Jeden obraz na kartę, wybrany według twoich Preferencji grafiki kart w zakładce Grafika. Zmień je tam, a ten wybór podąży za nimi.",
+      "curatedDefaultNote": "Jeden obraz na kartę. Nie masz żadnych reguł grafiki, więc pobierana jest domyślna grafika każdej karty — dodaj reguły w Preferencjach grafiki kart w zakładce Grafika, aby wybrać inne wydania.",
+      "deckLibraryNote": "Jeden obraz na każdą kartę używaną we wspólnej bibliotece talii, w tym w gotowych taliach Commander dla SI. Wybór korzysta z Preferencji grafiki kart. Po instalacji aplikacja podczas działania pobiera dodatki i usuwa niepotrzebne już obrazy; usunięcie tego pakietu zatrzymuje tę synchronizację.",
+      "driftNone": "Zainstalowane obrazy już odpowiadają tym ustawieniom.",
+      "driftSummary": "Zainstalowane obrazy są nieaktualne: {{add}} do dodania, {{remove}} do usunięcia, {{refresh}} do odświeżenia.",
+      "setCode": "Ustaw kod",
+      "setPlaceholder": "np. płetwa",
+      "language": "Język obrazu",
+      "currentRoot": "Bieżący katalog główny: {{root}}",
+      "invalidSet": "Wprowadź prawidłowy kod zestawu składający się z trzech do sześciu znaków."
+    },
+    "actions": {
+      "estimate": "Oszacuj pobranie",
+      "estimating": "Skanowanie katalogu Scryfall…",
+      "estimateCurated": "Przelicz rozmiar",
+      "estimatingCurated": "Obliczanie rozmiaru…",
+      "install": "Zainstaluj wybór",
+      "sync": "Synchronizuj obrazy",
+      "cancel": "Anuluj operację",
+      "resume": "Wznów działanie",
+      "retry": "Spróbuj ponownie",
+      "refresh": "Sprawdź katalog Scryfall",
+      "refreshing": "Sprawdzanie katalogu Scryfall…",
+      "verifyMetadata": "Zweryfikuj metadane",
+      "verifyFull": "Sprawdź wszystkie pliki",
+      "repair": "Wybrano naprawę",
+      "removeSelected": "Usuń wybrane",
+      "removeComplete": "Usuń cały katalog",
+      "removeAll": "Usuń wszystkie wizualizacje offline"
+    },
+    "estimate": {
+      "title": "Skanowanie migawki Scryfall",
+      "progressTitle": "Postęp skanowania katalogu",
+      "curatedTitle": "Szacowane pobieranie",
+      "headroomWarning": "To więcej niż wolne miejsce zgłaszane przez tę przeglądarkę. Nadal możesz zainstalować — jeśli miejsca zabraknie, pobieranie można wznowić i zachowuje wszystko, co już zapisano.",
+      "evictionWarning": "Ta przeglądarka nie przyznała trwałego magazynu, więc może usunąć te obrazy, gdy na urządzeniu zabraknie miejsca.",
+      "progress": "Odczytano {{downloaded}} MB z {{total}} MB · przeskanowano {{records}} kart · znaleziono {{images}} obrazów"
+    },
+    "metrics": {
+      "assetRecords": "Rekordy obrazów",
+      "estimatedImageBytes": "Szacowany rozmiar pobierania",
+      "availableBytes": "Dostępne wolne miejsce",
+      "uniqueObjects": "Obrazy do pobrania",
+      "logicalImageBytes": "Bajty obrazu logicznego",
+      "uniqueImageBytes": "Unikalne bajty obrazu",
+      "shardCount": "Odłamki",
+      "shardBytes": "Fragmenty bajtów"
+    },
+    "operation": {
+      "title": "Bieżąca operacja",
+      "states": {
+        "downloading": "Pobieranie",
+        "cancel_requested": "Zażądano anulowania",
+        "finalizing": "Finalizowanie",
+        "failed": "Niepowodzenie — można wznowić",
+        "terminated": "Zatrzymano — tej operacji nie można wznowić",
+        "completed": "Ukończono",
+        "cancelled": "Anulowano"
+      },
+      "id": "Operacja",
+      "root": "Katalog główny",
+      "packs": "Pakiety: {{current}} z {{total}}",
+      "objects": "Obrazy: {{current}} z {{total}}",
+      "objectsUnknown": "Pobrane obrazy: {{current}}",
+      "scanNote": "Łączna liczba rośnie podczas skanowania migawki Scryfall. Pobrane obrazy pozostają lokalnie i są pomijane po wznowieniu.",
+      "estimateNote": "Łączna liczba została ustalona przy starcie tego pobierania. Pobrane obrazy pozostają lokalnie i są pomijane po wznowieniu.",
+      "finalizing": "Kończenie instalacji katalogu"
+    },
+    "status": {
+      "title": "Stan katalogu zainstalowanego",
+      "root": "Katalog główny",
+      "epoch": "Epoka",
+      "revision": "Zainstalowana wersja",
+      "selectorCount": "Selektory",
+      "shardCount": "Odłamki",
+      "installed": "Zainstalowane pakiety",
+      "noneInstalled": "Nie są zainstalowane żadne pakiety wizualne.",
+      "upgradeAvailable": "Dostępna aktualizacja",
+      "receiptRoot": "Zainstalowano z migawki: {{root}}",
+      "membershipDigest": "Odcisk zestawu: {{digest}}",
+      "storageUsage": "Pamięć zajęta przez tę witrynę",
+      "persistence": "Ochrona przed usunięciem",
+      "persistenceState": {
+        "persisted": "Przyznana — ta przeglądarka zachowa te obrazy",
+        "best_effort": "Nieprzyznana — ta przeglądarka może usunąć te obrazy, gdy zabraknie miejsca",
+        "unsupported": "Ta przeglądarka tego nie podaje"
+      }
+    },
+    "verification": {
+      "revision": "Zweryfikowano zainstalowaną wersję {{revision}}.",
+      "healthy": "Nie znaleziono żadnych problemów z weryfikacją.",
+      "issues": {
+        "missing_root_witness": "Brak głównego świadka katalogu",
+        "invalid_root_witness": "Nieprawidłowy świadek główny katalogu",
+        "receipt_metadata": "Metadane paragonu różnią się od zaufanego katalogu",
+        "missing_shard": "Brak fragmentu katalogu",
+        "invalid_shard": "Nieprawidłowy fragment katalogu",
+        "missing_object": "Brakujący obiekt obrazu",
+        "invalid_object_metadata": "Nieprawidłowe metadane obiektu obrazu",
+        "corrupt_object": "Uszkodzony obiekt obrazu",
+        "dependency_drift": "Zainstalowane rekordy zależności różnią się od zaufanego katalogu",
+        "projection_drift": "Zainstalowane rekordy wyszukiwania różnią się od zaufanego katalogu"
+      }
+    },
+    "removal": {
+      "committed": "Usunięcie dokonane w wersji {{revision}}.",
+      "inProgress": "Usuwanie elementów wizualnych offline…"
+    },
+    "cleanup": {
+      "malformed_entry": "Nie można odzyskać źle sformułowanego wpisu w pamięci podręcznej",
+      "unsafe_entry": "Niebezpieczny wpis w pamięci podręcznej pozostał nietknięty",
+      "remove_failed": "Nie można usunąć pliku pamięci podręcznej",
+      "catalog_state": "Nie udało się odzyskać historycznego stanu katalogu"
+    },
+    "packs": {
+      "core": "Podstawowe wizualizacje",
+      "complete": "Uzupełnij aktualny katalog",
+      "curated": "Jeden obraz na kartę",
+      "deckLibrary": "Biblioteka talii",
+      "printing": "Wydania {{set}}",
+      "locale": "Wydania {{set}} ({{language}})"
+    },
+    "errors": {
+      "unsupported_shell": "Ta wersja aplikacji nie obsługuje katalogów wizualnych offline.",
+      "unauthorized": "W tym oknie nie można zarządzać katalogami wizualnymi offline.",
+      "unavailable": "Wizualne zarządzanie katalogiem w trybie offline jest tymczasowo niedostępne.",
+      "invalid_input": "Żądany wybór katalogu jest nieprawidłowy.",
+      "conflict": "Ten wybór jest nieaktualny: katalog lub twoje preferencje grafiki zmieniły się od jego dokonania. Oblicz go ponownie i spróbuj jeszcze raz.",
+      "cancelled": "Operację odwołano.",
+      "network": "Żądanie sieciowe katalogu nie powiodło się.",
+      "storage": "Nie można zapisać katalogu w pamięci urządzenia.",
+      "insufficient_storage": "Za mało wolnego miejsca: to pobieranie wymaga co najmniej {{required}}, a wolne jest tylko {{available}}.",
+      "trust": "Nie można ufać odpowiedzi katalogu.",
+      "emit": "Aplikacja nie mogła zgłosić postępu katalogu.",
+      "internal": "Nie można ukończyć operacji na katalogu."
+    },
+    "confirm": {
+      "cascadeTitle": "Usunąć pakiety zależne?",
+      "cascadeMessage": "Inne zainstalowane pakiety zależą od {{selection}}. Usunąć zamrożony wybór i jego elementy zależne?",
+      "cascadeAction": "Usuń osoby na utrzymaniu",
+      "completeTitle": "Usunąć cały katalog?",
+      "completeMessage": "Usunąć każdy zainstalowany pakiet z katalogu głównego {{selection}}?",
+      "allTitle": "Usunąć wszystkie elementy wizualne offline?",
+      "allMessage": "Usunąć wszystkie zainstalowane pakiety wizualne z tego urządzenia?",
+      "removeAction": "Usuń"
+    }
+  },
   "resetAll": {
     "confirm": "Zresetować wszystkie preferencje do wartości domyślnych? Spowoduje to wyczyszczenie każdego ustawienia w tym oknie.",
     "button": "Zresetuj wszystkie preferencje",
@@ -215,6 +430,45 @@
       "banners": "Wyświetlanie banera na początku tury."
     }
   },
+  "offlinePreparation": {
+    "title": "Przygotowanie offline",
+    "description": "Przygotuj to urządzenie do lokalnej gry offline przed włączeniem pracy offline.",
+    "prepare": "Przygotuj do pracy offline",
+    "preparing": "Przygotowywanie…",
+    "workOffline": "Pracuj offline",
+    "checklistLabel": "Lista gotowości offline",
+    "visualWarning": "Zainstalowane pakiety wizualne wymagają uwagi. Otwórz Pakiety wizualne, aby je naprawić; gra lokalna pozostaje dostępna.",
+    "cardArtMissing": "Nie zainstalowano żadnych obrazów kart. Karty będą wyświetlane offline bez grafiki — zainstaluj pakiet w Pakietach wizualnych poniżej.",
+    "cardArtInstalled": "Zapisane obrazy kart: {{packs}}",
+    "incompleteTitle": "Przygotowanie offline jest niepełne",
+    "incompleteMessage": "Brakuje: {{capabilities}}. Mimo to włączyć pracę offline?",
+    "confirmOffline": "Włącz pracę offline",
+    "states": {
+      "needs-preparation": "Przygotuj to urządzenie przed pracą offline.",
+      "preparing": "Przygotowywanie możliwości gry lokalnej…",
+      "ready": "To urządzenie jest gotowe do lokalnej gry offline.",
+      "failed": "Niektóre wymagane możliwości nie są gotowe.",
+      "reconnect-required": "Połącz się ponownie przed przygotowaniem gry offline.",
+      "reload-or-relaunch-required": "Odśwież aplikację lub uruchom ponownie desktop, a następnie spróbuj ponownie."
+    },
+    "capabilities": {
+      "appShell": "Powłoka aplikacji",
+      "browserEngine": "Silnik przeglądarki i baza kart",
+      "scryfallSearch": "Dane wyszukiwania",
+      "preconCatalog": "Wygenerowane talie",
+      "bundledAiCatalog": "Katalog talii SI",
+      "deckLibrary": "Zainstalowana biblioteka talii",
+      "coreVisuals": "Rewers karty i symbole many",
+      "nativeEngine": "Silnik natywny"
+    },
+    "capabilityStates": {
+      "ready": "Gotowe",
+      "not-ready": "Nie gotowe",
+      "reload-required": "Wymagane odświeżenie",
+      "not-applicable": "Nie dotyczy",
+      "not-installed": "Nie zainstalowano"
+    }
+  },
   "artChain": {
     "emptyState": "Używanie domyślnej grafiki Scryfall. Dodaj reguły poniżej, aby dostosować.",
     "moveUp": "Przesuń w górę",
@@ -232,6 +486,60 @@
       "oldest": "Najstarsze wydanie",
       "preferBorderless": "Preferuj bez ramki",
       "preferExtended": "Preferuj grafikę rozszerzoną"
+    }
+  },
+  "llm": {
+    "title": "Przeciwnicy LLM",
+    "intro": "Opcjonalne. Po podłączeniu Phase do dostawcy LLM możesz oddać miejsce AI — albo boty w drafcie — temu modelowi zamiast wbudowanej AI. Nic z tego nie działa, dopóki nie włączysz dostawcy i nie przypiszesz go do miejsca, a każdy błąd wraca do wbudowanej AI w trakcie gry.",
+    "empty": "Nie skonfigurowano żadnego dostawcy. Wszystkimi miejscami steruje wbudowana AI.",
+    "addProvider": "Dodaj dostawcę",
+    "unnamed": "Dostawca bez nazwy",
+    "name": "Nazwa",
+    "namePlaceholder": "Nazwij tego dostawcę (np. „Claude”)",
+    "enable": "Włącz tego dostawcę",
+    "remove": "Usuń tego dostawcę",
+    "provider": "Dostawca",
+    "model": "Model",
+    "modelId": "Identyfikator modelu",
+    "customModel": "Własny…",
+    "modelPlaceholder": "Identyfikator modelu (np. gpt-5, claude-sonnet-5)",
+    "endpoint": "Endpoint",
+    "endpointPlaceholder": "https://twoj-serwer/v1",
+    "apiKey": "Klucz API",
+    "apiKeyPlaceholder": "Wklej swój klucz API",
+    "apiKeyOptional": "Opcjonalny dla serwerów lokalnych",
+    "apiKeyMissing": "Wpisz klucz API ponownie. Klucze nie są zachowywane po przeładowaniu, a ten dostawca nie jest używany dla miejsc AI ani botów w draftcie, dopóki tego nie zrobisz.",
+    "apiKeyStorage": "Przechowywany w pamięci tylko na czas tej sesji przeglądarki. Klucze API nigdy nie trafiają na dysk i są wyłączone z eksportu kopii zapasowej oraz synchronizacji w chmurze, więc po przeładowaniu trzeba go wpisać ponownie. Klucz API wymaga też endpointu https://, chyba że serwer działa na localhost.",
+    "apiKeyGet": "Zdobądź klucz",
+    "test": "Testuj połączenie",
+    "testing": "Testowanie…",
+    "testOk": "Połączono.",
+    "defaultPrompt": {
+      "connected": "Połączono. Użyć jako domyślnego przeciwnika?",
+      "ready": "Użyć tego dostawcy jako domyślnego przeciwnika?",
+      "action": "Użyj jako domyślnego",
+      "badge": "Domyślny przeciwnik"
+    },
+    "defaultOpponent": {
+      "label": "Domyślny przeciwnik",
+      "hint": "Przeciwnicy AI używają tego dostawcy, chyba że przy konfiguracji meczu wybierzesz innego dla danego miejsca. Dotyczy to także przeciwnika w meczach po drafcie.",
+      "engine": "Wbudowane AI silnika"
+    },
+    "draftToggle": {
+      "label": "Użyj do botów w drafcie",
+      "hint": "Boty w drafcie wybierają kartę modelem, z kontekstem dodatków danego formatu.",
+      "profile": "Dostawca do draftu"
+    },
+    "testHint": "Wysyła prawdziwe zapytanie i sprawdza odpowiedź dokładnie tak, jak zrobiłaby to tura gry.",
+    "errors": {
+      "engineUnavailable": "Nie udało się wczytać silnika.",
+      "requestNotBuilt": "Ten dostawca nie jest w pełni skonfigurowany.",
+      "undecodable": "Endpoint odpowiedział, ale nie czymś, czego gra może użyć.",
+      "emptyBody": "Endpoint zwrócił pustą odpowiedź.",
+      "cancelled": "Test został anulowany.",
+      "timedOut": "Endpoint nie odpowiedział na czas.",
+      "unreachable": "Nie udało się połączyć z endpointem. Sprawdź adres URL oraz to, czy dostawca zezwala na zapytania z przeglądarki.",
+      "oversized": "Endpoint zwrócił znacznie więcej danych niż odpowiedź czatu."
     }
   }
 }

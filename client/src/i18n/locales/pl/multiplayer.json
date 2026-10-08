@@ -1,8 +1,33 @@
 {
+  "lan": {
+    "title": "Sieć lokalna",
+    "guidance": "Wpisz adres serwera, aby dołączyć ręcznie. Strony HTTPS wymagają bezpiecznego serwera wss://; użyj aplikacji komputerowej dla lokalnych adresów ws://.",
+    "unavailable": "Hostowanie i wyszukiwanie LAN wymaga aktualnej aplikacji komputerowej.",
+    "checking": "Sprawdzanie obsługi LAN…",
+    "start": "Rozpocznij hostowanie LAN",
+    "stop": "Zatrzymaj hostowanie LAN",
+    "scan": "Znajdź serwery LAN",
+    "pending": "Przetwarzanie…",
+    "running": "Hostowanie LAN jest aktywne. Udostępnij adres graczom w swojej sieci.",
+    "empty": "Nie znaleziono serwerów LAN. Sprawdź, czy gospodarz działa w tej samej sieci, i spróbuj ponownie.",
+    "add": "Dodaj serwer",
+    "copy": "Kopiuj adres",
+    "copied": "Adres skopiowany",
+    "error": "Operacja LAN nie powiodła się. {{detail}}",
+    "added": "Dodano serwer. Użyj serwera dedykowanego, gdy połączenie będzie zgodne i gotowe.",
+    "originUnavailable": "Hostowanie LAN jest niedostępne dla tej wersji lub pochodzenia aplikacji."
+  },
   "concedeDialog": {
     "title": "Poddać grę?",
-    "message": "Twój przeciwnik zostanie ogłoszony zwycięzcą.",
-    "concede": "Poddaj się"
+    "game": {
+      "label": "Poddaj tę grę",
+      "ordinaryMessage": "Twój przeciwnik wygrywa tę grę.",
+      "matchMessage": "Poddajesz tylko bieżącą grę. Jeśli mecz nie jest rozstrzygnięty, nastąpi sideboard lub kolejna gra."
+    },
+    "match": {
+      "label": "Poddaj cały mecz",
+      "message": "Poddajesz mecz. Twój przeciwnik wygrywa mecz i nie zostaną rozegrane dalsze gry."
+    }
   },
   "takebackDialog": {
     "requestedTitle": "{{name}} prosi o wycofanie ruchu",
@@ -53,24 +78,38 @@
     "matchScore": "Wynik meczu {{p0}}-{{p1}}{{draws}}. Przenoś karty między talią główną a kartami bocznymi, a potem zatwierdź.",
     "draws_one": " ({{count}} remis)",
     "draws_other": " ({{count}} remisów)",
-    "main": "Główna ({{count}}/{{total}})",
+    "main": "Główna ({{count}}, min {{min}})",
+    "mainNoMinimum": "Główna ({{count}})",
     "sideboard": "Karty boczne ({{count}})",
+    "sideboardCapped": "Karty boczne ({{count}}/{{max}})",
     "moveFromSideboard": "Przenieś karty z kart bocznych.",
     "moveFromMain": "Przenieś karty z talii głównej.",
-    "matchesRegistered": "Talia główna odpowiada zarejestrowanemu rozmiarowi ({{total}}).",
-    "submitDisabled": "Talia główna ma {{count}} / {{total}} — zatwierdzanie wyłączone.",
     "resetAria": "Przywróć zarejestrowaną talię",
     "reset": "Resetuj",
     "submitAria": "Zatwierdź talię na następną grę",
-    "submitDeck": "Zatwierdź talię"
+    "submitDeck": "Zatwierdź talię",
+    "readyToSubmit": "Talia jest legalna — można zatwierdzić.",
+    "belowMinimum": "Talia główna wymaga co najmniej {{min}} kart — obecnie {{count}}.",
+    "overSideboardCap": "Karty boczne: {{count}} — maksimum {{max}}."
   },
   "brokerOfflinePrompt": {
     "title": "Serwer poczekalni nieosiągalny",
     "message": "Twoja gra nie będzie publicznie wyświetlana. Nadal możesz być gospodarzem przez P2P — po prostu udostępnij kod pokoju bezpośrednio przeciwnikowi.",
     "continueWithoutLobby": "Kontynuuj bez poczekalni"
   },
+  "lobbyCapability": {
+    "formatNeedsNewerServer": "Ten serwer poczekalni jest za stary, aby wyświetlać gry w wybranym formacie (wymaga protokołu lobby {{needed}})."
+  },
   "joinErrorDialog": {
     "dismiss": "Zamknij"
+  },
+  "reconnectRejected": {
+    "firstMessageInvalid": "Host odrzucił połączenie przed konfiguracją. Odśwież oba okna i spróbuj ponownie.",
+    "versionRequired": "Ten host wymaga protokołu połączenia v{{version}}. Odśwież oba okna i spróbuj ponownie.",
+    "versionMismatch": "Niezgodność protokołu połączenia: klient wysłał v{{guestVersion}}, ale host używa v{{hostVersion}}. Odśwież oba okna.",
+    "malformedAuthority": "Host odrzucił nieprawidłowe uprawnienia połączenia. Dołącz ponownie, używając nowego kodu pokoju.",
+    "frameUndecodable": "Host wysłał wiadomość, której ten klient nie mógł odczytać. Odśwież oba okna i spróbuj ponownie.",
+    "hostDisconnectedBeforeSetup": "Połączenie z hostem zostało przerwane przed zakończeniem konfiguracji."
   },
   "serverOfflinePrompt": {
     "title": "Dobieranie graczy nieosiągalne",
@@ -89,27 +128,38 @@
     "waitTimeJustNow": "przed chwilą",
     "waitTimeMinutes": "{{count}} min temu",
     "waitTimeHours": "{{count}} godz. temu",
-    "buildMismatchTitle": "Gospodarz ma wersję {{version}} ({{commit}}) — twoja kompilacja jest inna. Odśwież, aby zaktualizować.",
     "gameFull": "Ta gra jest pełna.",
     "youAreHosting": "Hostujesz tę grę.",
     "hosting": "Hostowanie",
     "sandboxConfirm": "To jest gra w trybie piaskownicy. Gracze z uprawnieniami debugowania mogą bezpośrednio manipulować stanem gry. Kontynuować?",
     "draftBadgeTitle": "Draft {{kind}} — {{setCode}}",
     "draftBadge": "Draft {{setCode}}",
+    "cubeDraftBadgeTitle": "Draft {{kind}} — {{cubeName}}",
+    "cubeDraftBadge": "Draft {{cubeName}}",
     "p2pBadgeTitle": "Gra peer-to-peer (gospodarz uruchamia silnik)",
     "sandboxBadgeTitle": "Ta gra pozwala na akcje debugowania. Używaj do testów — to nie jest mecz wyczynowy.",
+    "hintSlow": "POWOLNY",
+    "hintSlowTitle": "Ten serwer odpowiadał ostatnio graczom powoli.",
+    "hintUnreliable": "NIESTABILNY",
+    "hintUnreliableTitle": "Gracze często nie mogli się ostatnio połączyć z tym serwerem.",
     "rankedBadgeTitle": "Pokój rankingowy",
     "rankedBadge": "RANKING",
     "anonymous": "Anonimowy",
     "by": "autor: {{name}}",
     "passwordProtected": "Chronione hasłem",
-    "join": "Dołącz"
+    "join": "Dołącz",
+    "originTitle": "Wystawione przez {{name}} {{kind}}",
+    "kindFull": "(serwer gry)",
+    "kindLobbyOnly": "(broker poczekalni)"
+  },
+  "connectionMode": {
+    "label": "Połączenie",
+    "server": "Oficjalny serwer",
+    "p2p": "P2P"
   },
   "serverPicker": {
     "title": "Serwer",
-    "subtitle": "Wybierz region lub połącz się z własną instancją.",
-    "noneLabel": "Brak (tylko P2P)",
-    "directCodes": "bezpośrednie kody",
+    "subtitle": "Wybierz, gdzie hostujesz i które poczekalnie przeglądasz.",
     "official": "Oficjalny",
     "selfHosted": "Własny hosting",
     "customUrlPlaceholder": "wss://twoj-serwer.example/ws",
@@ -118,7 +168,23 @@
     "urlError": "URL musi zaczynać się od ws:// lub wss://",
     "connected": "Połączono",
     "connectionFailed": "Połączenie nie powiodło się",
-    "testing": "Testowanie…"
+    "testing": "Testowanie…",
+    "hostingServer": "Serwer hostujący",
+    "hostingServerHelp": "Tam są tworzone i rejestrowane hostowane przez ciebie gry.",
+    "sources": "Źródła poczekalni",
+    "sourcesHelp": "Otwarte stoły ze wszystkich poniższych źródeł są łączone w jedną listę.",
+    "addSource": "Dodaj źródło",
+    "remove": "Usuń",
+    "useForHosting": "Użyj do hostowania",
+    "sourceStatusConnecting": "Łączenie…",
+    "sourceStatusDegraded": "Niedostępny",
+    "sourceDuplicate": "Ten serwer jest już źródłem poczekalni.",
+    "sourceCapReached": "Można dodać maksymalnie {{max}} źródeł.",
+    "directoryOrigin": "Katalog",
+    "sourceScore": "Wynik {{score}}",
+    "enable": "Włącz",
+    "disable": "Wyłącz",
+    "incompatibleVersion": "Niezgodny — wersja serwera {{version}}"
   },
   "lobbyDraftRooms": {
     "noRooms": "Brak dostępnych pokoi draftu",
@@ -139,10 +205,7 @@
     "createDraft": "Utwórz draft"
   },
   "lobbyView": {
-    "directConnection": "Połączenie bezpośrednie",
     "onlineLobby": "Poczekalnia online",
-    "pickServerTitle": "Wybierz serwer, aby korzystać z trybu poczekalni online",
-    "pickServer": "Wybierz serwer",
     "online": "{{count}} online",
     "format": "Format",
     "allFormats": "Wszystkie formaty",
@@ -154,26 +217,25 @@
     "noFormatGames": "Brak gier {{format}} w tej chwili.",
     "noOpenGames": "Brak otwartych gier w tej chwili.",
     "showAllFormats": "Pokaż wszystkie formaty",
-    "p2pNotice": "Dedykowany serwer niedostępny. Nadal możesz być gospodarzem lub dołączyć bezpośrednio za pomocą 5-znakowego kodu pokoju.",
-    "joinByCode": "Dołącz za pomocą kodu",
     "joinATable": "Dołącz do stołu",
-    "p2pCodePlaceholder": "Wpisz 5-znakowy kod P2P",
     "serverCodePlaceholder": "Wpisz kod lub KOD@IP:PORT",
     "join": "Dołącz",
     "host": "Hostuj",
-    "hostP2PDescription": "Utwórz bezpośredni pokój dla jednego przeciwnika.",
     "hostServerDescription": "Otwórz pokój i czekaj na graczy.",
     "hostDraft": "Hostuj draft",
     "hostGame": "Hostuj grę",
-    "hostP2PGame": "Hostuj grę P2P",
     "passwordRequired": "Wymagane hasło",
     "passwordPlaceholder": "Wpisz hasło",
-    "watch": "Watch"
+    "watch": "Watch",
+    "sourcesDegraded": "Część źródeł poczekalni jest niedostępna",
+    "invalidJoinServer": "Adres serwera w tym kodzie jest nieprawidłowy."
   },
   "hostSetup": {
+    "dedicatedUnavailable": "Żaden serwer dedykowany nie jest teraz dostępny. Możesz hostować grę przez P2P.",
     "hostDirectMatch": "Hostuj mecz bezpośredni",
     "hostMatch": "Hostuj mecz",
-    "p2pNotice": "Dedykowany serwer jest niedostępny, więc ten pokój użyje połączenia bezpośredniego.",
+    "p2pNotice": "Tryb peer-to-peer. Ten pokój łączy graczy bezpośrednio, zamiast działać na serwerze.",
+    "p2pSeatCap": "Stoły P2P mieszczą maksymalnie {{max}} graczy, więc liczba miejsc jest ograniczona.",
     "roomName": "Nazwa pokoju",
     "optional": "(opcjonalnie)",
     "roomNamePlaceholder": "np. Piątkowy wieczór Commander",
@@ -198,6 +260,10 @@
     "startWhenFull": "Rozpocznij po zapełnieniu",
     "ranked": "Rankingowa",
     "listInLobby": "Wyświetl w poczekalni",
+    "hostServer": "Hostuj na",
+    "hostServerHelp": "Który serwer prowadzi tę partię. Twoje ustawienia przeglądania i kodu bezpośredniego nie zmieniają się.",
+    "hostServerScore": "{{name}} — kondycja {{score}}",
+    "hostServerUnscored": "{{name}} — jeszcze nieoceniony",
     "sandboxMode": "Tryb piaskownicy — zezwól na akcje debugowania",
     "sandboxModeHelp": "Gospodarz może bezpośrednio manipulować stanem gry (przenosić karty, zmieniać życie, modyfikować znaczniki) i przyznawać uprawnienia debugowania innym graczom. Używaj do testów lub gry w piaskownicy — nie do meczów wyczynowych. Tego ustawienia nie można zmienić po rozpoczęciu gry.",
     "setPassword": "Ustaw hasło",
@@ -205,7 +271,21 @@
     "back": "Wstecz",
     "opening": "Otwieranie…",
     "hostP2PGame": "Hostuj grę P2P",
-    "hostGame": "Hostuj grę"
+    "hostGame": "Hostuj grę",
+    "savedFormats": "Zapisane formaty niestandardowe",
+    "saveAsCustomFormat": "Zapisz format",
+    "customFormatNamePlaceholder": "Nazwij ten format",
+    "useCustomFormat": "Użyj",
+    "customFormatInUse": "W użyciu",
+    "deleteCustomFormat": "Usuń",
+    "loadingCustomFormat": "Wczytywanie formatu…",
+    "noSavedCustomFormats": "Brak zapisanych formatów niestandardowych.",
+    "customFormatResolveFailed": "Nie udało się wczytać zapisanego formatu.",
+    "customFormatHostingUnavailable": "Hostowanie z formatem niestandardowym nie jest jeszcze obsługiwane — legalność talii nie może zostać dla niego sprawdzona. Na razie zapisz i tylko podglądaj.",
+    "botGameNotice": "Hostujesz grę z Discorda {{code}}. Połączenie i prywatność określa post na Discordzie.",
+    "botSeedIgnored": "Niektórych ustawień z posta na Discordzie nie można tu użyć — sprawdź format i liczbę graczy.",
+    "botP2PNotice": "Twoje urządzenie prowadzi grę. Pozostaw aplikację otwartą i nie rozłączaj się.",
+    "botServerNotice": "Grę prowadzi serwer dedykowany. Może zwolnić lub przejść w tryb offline."
   },
   "page": {
     "deckRejected": "Talia została odrzucona przez gospodarza.",
@@ -221,13 +301,13 @@
     "joinErrorCantJoinTitle": "Nie można dołączyć do tego pokoju",
     "titleLobby": "Dołącz do stołu lub załóż własny.",
     "titleHostSetup": "Skonfiguruj swój stół.",
-    "titleDraftLobby": "Grupa draftu",
     "titleDeckSelect": "Wybierz talię.",
     "descriptionLobby": "Przeglądaj dostępne stoły, dołączaj za pomocą kodu lub załóż nowy mecz.",
     "descriptionHostSetup": "Dostosuj format, prywatność i czas przed otwarciem pokoju.",
-    "descriptionDraftLobby": "Oczekiwanie na graczy dołączających do grupy draftu.",
     "descriptionDeckSelectFormat": "Wybierz talię dla formatu {{format}}.",
     "descriptionDeckSelect": "Wybierz talię, którą chcesz wystawić online.",
+    "offlineUnavailableTitle": "Tryb wieloosobowy jest niedostępny offline.",
+    "offlineUnavailableDescription": "Połącz się ponownie lub wyłącz Tryb Offline, aby hostować lub dołączyć do gry wieloosobowej.",
     "eyebrow": "Rozgrywka sieciowa",
     "activeDeck": "Aktywna talia",
     "edit": "Edytuj",
@@ -235,21 +315,41 @@
     "noDeckWarning": "Nie wybrano talii — musisz wybrać jedną przed hostowaniem.",
     "pickDeck": "Wybierz talię",
     "anonymous": "Anonimowy",
-    "joining": "Dołączanie"
-  },
-  "draftLobbyPanel": {
-    "draftPod": "Grupa draftu",
-    "connecting": "Łączenie z grupą draftu...",
-    "connectionFailed": "Połączenie nie powiodło się.",
-    "playersJoined": "Dołączyło {{joined}}/{{total}} graczy",
-    "seat": "Miejsce {{number}}",
-    "draftInProgress": "Trwa draft. Widok draftu otworzy się automatycznie.",
-    "leaveDraft": "Opuść draft"
+    "joining": "Dołączanie",
+    "joinNeedsServer": "Wybierz serwer, zanim dołączysz do gry.",
+    "serverDraftJoinUnsupported": "Nie można dołączyć z lobby do grup draftu hostowanych na serwerze.",
+    "p2pDraftSpectateUnsupported": "Nie można oglądać grup draftu hostowanych przez gracza.",
+    "alreadyInDraftPod": "Jesteś już w grupie draftu. Opuść ją, zanim dołączysz do innej.",
+    "invalidGameLink": "Ten link do gry jest nieprawidłowy lub niekompletny.",
+    "waitingForHostTitle": "Czekanie na hosta…",
+    "waitingForHostMessage": "Host jeszcze nie otworzył tej gry albo została ona zamknięta. Spróbuj ponownie, gdy host otworzy swój link.",
+    "botLinkBrokerUnreachable": "Nie udało się połączyć z serwerem poczekalni, aby otworzyć tę grę z Discorda. Sprawdź połączenie, a potem ponownie otwórz swój link hosta.",
+    "updatingTitle": "Aktualizowanie do najnowszej wersji…",
+    "updatingMessage": "Dostępna jest nowsza wersja phase.rs. Strona zostanie przeładowana, gdy będzie gotowa.",
+    "refreshAfterGame": "Dokończ bieżącą grę, a potem odśwież, aby zaktualizować.",
+    "updateFailedTitle": "Nie udało się zaktualizować automatycznie",
+    "updateFailedMessage": "Odśwież, aby pobrać najnowszą wersję, lub kontynuuj na tej. Gracze z różnymi wersjami nie mogą dołączyć do tej samej gry.",
+    "continueAnyway": "Kontynuuj mimo to"
   },
   "deckLegalityChip": {
     "checking": "Sprawdzanie talii pod kątem formatu {{format}}…",
     "checkingLegality": "Sprawdzanie zgodności talii z zasadami…",
     "legal": "✓ Dozwolona w formacie {{format}}",
     "notLegal": "Niedozwolona w formacie {{format}}"
+  },
+  "botLink": {
+    "codeUnsupported": "Ten serwer nie obsługuje jeszcze gier z Discorda.",
+    "codeInUse": "Kod tej gry jest wciąż zajęty przez wcześniejszy pokój. Odczekaj kilka minut, a potem ponownie otwórz swój link hosta z Discorda. Jeśli problem się powtarza, rozpocznij nowe /lfg."
+  },
+  "openDesktop": {
+    "title": "Otwieranie aplikacji desktopowej phase.rs…",
+    "invalid": "Tego linku nie można otworzyć w aplikacji desktopowej.",
+    "openApp": "Otwórz aplikację desktopową",
+    "continueInBrowser": "Nie otworzyło się? Kontynuuj w przeglądarce",
+    "getDesktopApp": "Pobierz aplikację desktopową"
+  },
+  "deepLink": {
+    "gameInProgressTitle": "Gra w toku",
+    "gameInProgressBody": "Zakończ lub opuść bieżącą grę, a potem otwórz link ponownie."
   }
 }

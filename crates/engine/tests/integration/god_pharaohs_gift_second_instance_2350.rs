@@ -59,7 +59,7 @@ fn battlefield_object_ids(state: &engine::types::game_state::GameState) -> HashS
 /// GPG's top instruction is the optional "you may exile a creature card from
 /// your graveyard." `resolve_ability_chain` parks at
 /// `WaitingFor::OptionalEffectChoice` (stashing the chain in
-/// `pending_optional_effect`) instead of performing the exile. Accept the
+/// optional-effect frame) instead of performing the exile. Accept the
 /// optional through the real `apply` pipeline so the gating exile and its
 /// `CopyTokenOf` "If you do" rider actually execute — mirroring how the engine
 /// resumes a suspended "you may" decision in production (CR 117.3a: "you may"

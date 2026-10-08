@@ -22,55 +22,114 @@ expression: "&ir"
         "fragment": "{2}{G}: Create a 1/1 green Saproling creature token."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "Token",
-            "name": "Saproling",
-            "power": {
-              "type": "Fixed",
-              "value": 1
-            },
-            "toughness": {
-              "type": "Fixed",
-              "value": 1
-            },
-            "types": [
-              "Creature",
-              "Saproling"
+        "Spell": {
+          "source_text": "Create a 1/1 green Saproling creature token",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 43,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Create a 1/1 green Saproling creature token"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Token",
+                    "name": "Saproling",
+                    "power": {
+                      "type": "Fixed",
+                      "value": 1
+                    },
+                    "toughness": {
+                      "type": "Fixed",
+                      "value": 1
+                    },
+                    "types": [
+                      "Creature",
+                      "Saproling"
+                    ],
+                    "colors": [
+                      "Green"
+                    ],
+                    "keywords": [],
+                    "tapped": false,
+                    "count": {
+                      "type": "Fixed",
+                      "value": 1
+                    },
+                    "owner": {
+                      "type": "Controller"
+                    },
+                    "enters_attacking": false
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": null,
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              }
             ],
-            "colors": [
-              "Green"
-            ],
-            "keywords": [],
-            "tapped": false,
-            "count": {
-              "type": "Fixed",
-              "value": 1
-            },
-            "owner": {
-              "type": "Controller"
-            },
-            "enters_attacking": false
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
           },
-          "cost": {
-            "type": "Mana",
+          "shell": {
+            "sub_link": null,
             "cost": {
-              "type": "Cost",
-              "shards": [
-                "Green"
-              ],
-              "generic": 2
-            }
+              "type": "Mana",
+              "cost": {
+                "type": "Cost",
+                "shards": [
+                  "Green"
+                ],
+                "generic": 2
+              }
+            },
+            "description": "{2}{G}: Create a 1/1 green Saproling creature token.",
+            "stages": [
+              "NormalizeActivatedManaInstead",
+              "ExtractCostReduction",
+              "ExtractManaSpendTrigger"
+            ]
           },
-          "sub_ability": null,
-          "duration": null,
-          "description": "{2}{G}: Create a 1/1 green Saproling creature token.",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "die_results": [],
+          "root_transforms": []
         }
       }
     }

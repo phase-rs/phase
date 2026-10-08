@@ -14,22 +14,30 @@
 //!   2. Runs TWO consecutive turns for the SAME controller (turn N -> N+2),
 //!      checking the token's BASE power is still its printed 3, never 4.
 //!   3. Uses the REAL `Insectile Aberration` transform back face from the
-//!      MTGJSON test fixture (a `layout: transform`, NoCost, 3/2 creature),
-//!      built into a Momir token via `CreateTokenCopyFromPool`, so the
+//!      MTGJSON test fixture (a `layout: transform`, 3/2 creature), built into
+//!      a Momir token via `CreateTokenCopyFromPool`, so the
 //!      transform/copy/`is_token` base-P/T storage path is exercised. The
 //!      firebreathing ability is attached to that real face (the printed back
-//!      face has no firebreathing) while keeping it a real NoCost transform
-//!      face.
+//!      face has no firebreathing).
+//!
+//!      The printed face carries `ManaCost::NoCost`, which
+//!      `create_token_copy_from_pool::face_is_eligible` correctly refuses to
+//!      draw (CR 202.3b — a back face is not a separately castable creature
+//!      card; that guard has its own test in
+//!      `momir_pool_excludes_transform_back_faces`). So this test stamps an
+//!      explicit mana cost on the face purely to make it reachable through the
+//!      real draw path. Everything under test here — the real transform face,
+//!      its base 3/2, the copy pipeline, and the turn machinery — is
+//!      unaffected by that cost.
 //!
 //! CR 611.2a: a continuous effect from a resolved ability with "until end of
 //! turn" lasts until the cleanup step.
 //! CR 514.2: "until end of turn" effects end during the cleanup step.
 //! CR 707.2: a copy uses the copiable values (incl. abilities) of the copied
-//! object. CR 202.3b: a copy of a transform back face has mana value 0.
+//! object.
 
-use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 use engine::database::card_db::CardDatabase;
 use engine::game::effects::create_token_copy_from_pool;
@@ -103,6 +111,13 @@ fn insectile_aberration_firebreather() -> CardFace {
         "printed base power is 3"
     );
     face.abilities = vec![firebreathing_ability()];
+    // See the module doc: a `NoCost` face is deliberately undrawable, so give
+    // the real face a cost to make it reachable through the real draw path.
+    // Base P/T and abilities — the actual subject of this test — are untouched.
+    face.mana_cost = ManaCost::Cost {
+        shards: vec![],
+        generic: 3,
+    };
     face
 }
 
@@ -151,20 +166,15 @@ fn fund(state: &mut GameState, mana: u32) {
 /// Create a Momir token copy of the real transform back face via the REAL
 /// `CreateTokenCopyFromPool` resolver. Returns the token id.
 fn token_copy_of_transform_back(state: &mut GameState) -> ObjectId {
+    // The sole creature in the draw source, so the random pick is forced.
     let face = insectile_aberration_firebreather();
-    let mut by_mv: BTreeMap<i32, Vec<String>> = BTreeMap::new();
-    // CR 202.3b: a transform back-face copy has mana value 0 — it keys at 0.
-    by_mv.insert(0, vec![face.name.clone()]);
-    let mut faces = HashMap::new();
-    faces.insert(face.name.to_lowercase(), face);
-    state.momir_pool = by_mv;
-    state.momir_pool_faces = Arc::new(faces);
+    crate::support::install_synthetic_card_db(state, &[face]);
 
     let effect = Effect::CreateTokenCopyFromPool {
         owner: TargetFilter::Controller,
         type_filter: TargetFilter::Any,
         mv: Comparator::EQ,
-        mv_bound: QuantityExpr::Fixed { value: 0 },
+        mv_bound: QuantityExpr::Fixed { value: 3 },
         selection: CardSelectionMode::Random,
         count: QuantityExpr::Fixed { value: 1 },
         tapped: false,

@@ -22,57 +22,148 @@ expression: "&ir"
         "fragment": "Add two mana in any combination of colors."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "Mana",
-            "produced": {
-              "type": "AnyCombination",
-              "count": {
-                "type": "Fixed",
-                "value": 2
+        "Spell": {
+          "source_text": "Add two mana in any combination of colors. Draw a card.",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 41,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Add two mana in any combination of colors"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Mana",
+                    "produced": {
+                      "type": "AnyCombination",
+                      "count": {
+                        "type": "Fixed",
+                        "value": 2
+                      },
+                      "color_options": [
+                        "White",
+                        "Blue",
+                        "Black",
+                        "Red",
+                        "Green"
+                      ]
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               },
-              "color_options": [
-                "White",
-                "Blue",
-                "Black",
-                "Red",
-                "Green"
-              ]
-            }
-          },
-          "cost": null,
-          "sub_ability": {
-            "kind": "Spell",
-            "effect": {
-              "type": "Draw",
-              "count": {
-                "type": "Fixed",
-                "value": 1
-              },
-              "target": {
-                "type": "Controller"
+              {
+                "id": 1,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 2
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 43,
+                    "end_byte": 54,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 1
+                  },
+                  "fragment": "Draw a card"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Draw",
+                    "count": {
+                      "type": "Fixed",
+                      "value": 1
+                    },
+                    "target": {
+                      "type": "Controller"
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               }
-            },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false,
-            "sub_link": "SequentialSibling"
+            ],
+            "kind": "Spell",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
           },
-          "duration": null,
-          "description": "Add two mana in any combination of colors.\nDraw a card.",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false,
-          "is_mana_ability": true
+          "shell": {
+            "sub_link": null
+          },
+          "die_results": [],
+          "root_transforms": [
+            {
+              "SetMinXValue": 0
+            },
+            {
+              "SetDescription": "Add two mana in any combination of colors.\nDraw a card."
+            }
+          ]
         }
       }
     }

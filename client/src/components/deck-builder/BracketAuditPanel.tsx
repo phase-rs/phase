@@ -6,6 +6,7 @@ import {
   BRACKET_LABEL,
   BRACKET_TIER_CHIP_CLASS,
   BRACKET_TIER_NUMERIC,
+  isBracketMismatch,
   type BracketAxis,
   type BracketEstimate,
   type CommanderBracket,
@@ -52,7 +53,9 @@ export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyR
 
   const tierNum = BRACKET_TIER_NUMERIC[estimate.tier];
   const tierLabel = BRACKET_LABEL[tierNum];
-  const mismatch = manualBracket !== null && manualBracket !== tierNum;
+  // The estimate is a floor: declaring above it is expected (pilot judgment),
+  // so only under-reporting mismatches.
+  const mismatch = isBracketMismatch(manualBracket, estimate.tier);
 
   return (
     <div className="rounded-md border border-white/10 bg-black/20 px-3 py-2">

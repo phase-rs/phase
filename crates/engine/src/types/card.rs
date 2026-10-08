@@ -85,10 +85,17 @@ fn is_zero(v: &u32) -> bool {
     *v == 0
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PrintedCardRef {
     pub oracle_id: String,
     pub face_name: String,
+}
+
+/// A card ability that changes how the booster draft proceeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DraftEffect {
+    AdditionalPick,
 }
 
 /// Exact image reference for a printed token.
@@ -104,6 +111,76 @@ pub struct TokenImageRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub face_name: Option<String>,
     pub preset_id: String,
+}
+
+/// Intrinsic token body for art selection, derived engine-side.
+///
+/// When no exact [`TokenImageRef`] matched, the client falls back to a
+/// shape-based token search. That search must be keyed by the token's
+/// PRINTED (base) characteristics — never live values, which pumps, color
+/// setters, and anthem grants distort. This descriptor is the single
+/// authority for that intrinsic body: it is refreshed whenever a token's
+/// base is installed (creation injectors) and rides copy effects alongside
+/// [`TokenImageRef`], reverting with them.
+///
+/// Display metadata only: it carries no game state and old snapshots
+/// (where it is absent) degrade to the legacy live-field lookup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenArtDescriptor {
+    pub power: Option<i32>,
+    pub toughness: Option<i32>,
+    pub colors: Vec<crate::types::mana::ManaColor>,
+    pub subtypes: Vec<String>,
+    /// Keyword family names (one per printed keyword, e.g.
+    /// `"FirstStrike"`; the art mapping names every recognized variant
+    /// explicitly because `Keyword::kind` collapses ~60 of them to
+    /// `Unknown`); the client formats them into `kw:` predicates. Truly
+    /// unknown keywords carry their raw payload instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
+    /// Whether the printed body carries any abilities at all (keywords,
+    /// activated/triggered abilities, replacement/static definitions).
+    /// Grants never contribute: only `base_*` stores are read.
+    pub has_abilities: bool,
+}
+
+/// CR 306.5b + CR 107.3m: A supported printed planeswalker-loyalty value.
+///
+/// `CardFace::loyalty` deliberately remains raw source data because card data
+/// also contains unsupported expressions such as `*` and `1d4+1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PrintedLoyalty {
+    Fixed(u32),
+    X,
+}
+
+impl PrintedLoyalty {
+    /// Interprets only the printed loyalty forms the runtime can model.
+    pub fn from_raw(raw: Option<&str>) -> Option<Self> {
+        raw.and_then(|value| {
+            if value == "X" {
+                Some(Self::X)
+            } else {
+                value.parse().ok().map(Self::Fixed)
+            }
+        })
+    }
+
+    /// CR 107.3m: only the resolving spell's own X supplies this ETB replacement.
+    pub fn entry_counter_count(self, resolving_spell_x: Option<u32>) -> u32 {
+        match self {
+            Self::Fixed(value) => value,
+            Self::X => resolving_spell_x.unwrap_or(0),
+        }
+    }
+
+    /// CR 107.3g: off the stack, a printed X is zero.
+    pub fn off_stack_value(self) -> u32 {
+        match self {
+            Self::Fixed(value) => value,
+            Self::X => 0,
+        }
+    }
 }
 
 /// CR 702.148a-b + CR 612: The alternate (cleave-cost) text variant of a spell

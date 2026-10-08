@@ -104,9 +104,10 @@ fn timely_ward_cast_targeting_commander_succeeds() {
 fn timely_ward_cast_targeting_noncommander_is_rejected_at_finalize() {
     // CR 601.3d: With a non-commander creature as the chosen target, the
     // target-dependent flash condition fails at the finalize-time validation
-    // gate. The cast must be rejected (and the stack-entry placeholder
-    // popped). Prior to this fix the parser emitted the flash permission
-    // unconditionally and the cast went through against any target.
+    // gate. The cast must be rejected while preserving the stack-entry
+    // announcement placeholder for a corrected choice. Prior to this fix the
+    // parser emitted the flash permission unconditionally and the cast went
+    // through against any target.
     let Some(db) = load_db() else {
         return;
     };
@@ -128,6 +129,7 @@ fn timely_ward_cast_targeting_noncommander_is_rejected_at_finalize() {
         r1.waiting_for
     );
 
+    let before_rejected_target = runner.state().clone();
     let result = runner.act(GameAction::SelectTargets {
         targets: vec![TargetRef::Object(plain_id)],
     });
@@ -136,11 +138,11 @@ fn timely_ward_cast_targeting_noncommander_is_rejected_at_finalize() {
         "targeting a non-commander at instant speed must be rejected at finalize; got {result:?}"
     );
 
-    // After rejection the stack entry for the cancelled cast must have been
-    // popped — the stack is empty again.
-    assert!(
-        runner.state().stack.is_empty(),
-        "stack must be empty after cancelled cast, got {:?}",
-        runner.state().stack
+    // Rejected actions are atomic: preserve the pending target-selection
+    // state, including its announcement placeholder, for a corrected choice.
+    assert_eq!(
+        runner.state(),
+        &before_rejected_target,
+        "finalize rejection must preserve the pre-selection cast state"
     );
 }

@@ -2,18 +2,17 @@ use std::collections::HashSet;
 
 use rand::Rng;
 
-use crate::game::quantity::resolve_quantity;
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     AbilityDefinition, CoinFlipResult, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{
-    GameState, PendingCoinFlip, PendingCoinFlipKind, ResolutionCoinFlip, WaitingFor,
-};
+use crate::types::game_state::{GameState, ResolutionCoinFlip, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
+use crate::types::resolution::{PendingCoinFlip, PendingCoinFlipKind};
 
 use super::resolve_ability_chain;
 
@@ -110,14 +109,19 @@ fn run_flip_branch(
     source_id: ObjectId,
     controller: PlayerId,
     targets: &[TargetRef],
+    chain_root_targets: &[TargetRef],
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     if let Some(def) = branch {
-        let sub = crate::game::ability_utils::build_resolved_from_def_with_targets(
+        // CR 608.2h: propagate so a counter-gated "that many" nested in the
+        // branch still resolves against the live chain-root target (see
+        // `build_resolved_from_def_with_chain_root`'s doc).
+        let sub = crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root(
             def,
             source_id,
             controller,
             targets.to_vec(),
+            chain_root_targets.to_vec(),
         );
         resolve_ability_chain(state, &sub, events, 0)?;
     }
@@ -168,7 +172,7 @@ pub fn resolve(
             // `resume_after_keep` can run the kept flip's branch. `EffectResolved`
             // is deferred until the keep choice resolves. CR 705.2: the kept flip's
             // `CoinFlipped` is recorded for the `flipper`, not the controller.
-            state.pending_coin_flip = Some(PendingCoinFlip {
+            state.push_coin_flip_frame(PendingCoinFlip {
                 source_id: ability.source_id,
                 controller: ability.controller,
                 flipper,
@@ -176,6 +180,7 @@ pub fn resolve(
                 win_effect: win_effect.map(|d| Box::new(d.clone())),
                 lose_effect: lose_effect.map(|d| Box::new(d.clone())),
                 kind: PendingCoinFlipKind::Single,
+                chain_root_targets: ability.context.chain_root_targets.clone(),
             });
             return Ok(());
         }
@@ -194,6 +199,7 @@ pub fn resolve(
         ability.source_id,
         ability.controller,
         &ability.targets,
+        &ability.context.chain_root_targets,
         events,
     )?;
 
@@ -244,13 +250,11 @@ pub fn resolve_flip_coins(
     let flipper = super::resolve_player_for_context_ref(state, ability, flipper);
 
     // CR 107.1: resolve `count` in the ability's context; clamp at zero.
-    let n =
-        resolve_quantity(state, count_expr, ability.controller, ability.source_id).max(0) as u32;
+    let n = resolve_quantity_with_targets(state, count_expr, ability).max(0) as u32;
 
     // CR 705.1 + CR 614.1a: Flip each coin through the replacement pipeline (so
     // Krark's Thumb can double it), routing each outcome through the appropriate
     // branch exactly as the single-flip resolver does.
-    let prior_waiting_for = state.waiting_for.clone();
     for i in 0..n {
         let won = match flip_through_replacement(state, flipper, events) {
             CoinFlipOutcome::Resolved(won) => won,
@@ -259,7 +263,7 @@ pub fn resolve_flip_coins(
             CoinFlipOutcome::Suspended => {
                 // CR 614.1a: doubled flip — stash loop position and resume after
                 // the keep choice. `remaining` excludes the paused flip itself.
-                state.pending_coin_flip = Some(PendingCoinFlip {
+                state.push_coin_flip_frame(PendingCoinFlip {
                     source_id: ability.source_id,
                     controller: ability.controller,
                     flipper,
@@ -269,6 +273,7 @@ pub fn resolve_flip_coins(
                     kind: PendingCoinFlipKind::FlipN {
                         remaining: n - i - 1,
                     },
+                    chain_root_targets: ability.context.chain_root_targets.clone(),
                 });
                 return Ok(());
             }
@@ -280,17 +285,19 @@ pub fn resolve_flip_coins(
             ability.source_id,
             ability.controller,
             &ability.targets,
+            &ability.context.chain_root_targets,
             events,
         )?;
-        // CR 608.2c: a branch may suspend for an optional choice; stop flipping
-        // until the player resolves it.
-        if state.waiting_for != prior_waiting_for {
+        // CR 608.2c: stop only for an interactive resolution choice. A token
+        // branch hands priority back without suspending, and must not truncate
+        // the remaining coin flips.
+        if super::waits_for_resolution_choice(&state.waiting_for) {
             break;
         }
     }
 
-    // CR 608.2c: defer `EffectResolved` if a branch suspended for a player choice.
-    if state.waiting_for == prior_waiting_for {
+    // CR 608.2c: defer `EffectResolved` only when the branch suspended.
+    if !super::waits_for_resolution_choice(&state.waiting_for) {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::FlipCoins,
             source_id: ability.source_id,
@@ -322,6 +329,7 @@ pub fn resolve_until_lose(
         &ability.targets,
         ability.source_id,
         0,
+        &ability.context.chain_root_targets,
         events,
     )? {
         Some(count) => count,
@@ -337,14 +345,16 @@ pub fn resolve_until_lose(
         &ability.targets,
         ability.source_id,
         ability.controller,
+        &ability.context.chain_root_targets,
         events,
     )
 }
 
 /// CR 705 + CR 614.1a: Flip-until-lose loop body, returning `Some(win_count)`
 /// when the losing flip was reached, or `None` if a flip suspended for a keep
-/// choice (in which case `pending_coin_flip` is stashed). `wins_so_far` seeds
+/// choice (in which case the coin-flip frame is parked). `wins_so_far` seeds
 /// the win count when re-entered from `resume_after_keep`.
+#[allow(clippy::too_many_arguments)]
 fn flip_until_lose_loop(
     state: &mut GameState,
     controller: PlayerId,
@@ -352,6 +362,7 @@ fn flip_until_lose_loop(
     targets: &[TargetRef],
     source_id: ObjectId,
     wins_so_far: u32,
+    chain_root_targets: &[TargetRef],
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<u32>, EffectError> {
     // Safety cap prevents infinite loops with pathological RNG seeds.
@@ -364,7 +375,7 @@ fn flip_until_lose_loop(
             // CR 614.6: a prevented flip is neither a win nor the losing flip.
             CoinFlipOutcome::Prevented => continue,
             CoinFlipOutcome::Suspended => {
-                state.pending_coin_flip = Some(PendingCoinFlip {
+                state.push_coin_flip_frame(PendingCoinFlip {
                     source_id,
                     controller,
                     // CR 705: "flip a coin until you lose" is always the controller.
@@ -375,6 +386,7 @@ fn flip_until_lose_loop(
                     kind: PendingCoinFlipKind::UntilLose {
                         wins_so_far: win_count,
                     },
+                    chain_root_targets: chain_root_targets.to_vec(),
                 });
                 return Ok(None);
             }
@@ -385,6 +397,7 @@ fn flip_until_lose_loop(
 
 /// CR 705.2: Run the win effect once per win, then emit `EffectResolved` unless a
 /// win effect suspended for a player choice.
+#[allow(clippy::too_many_arguments)]
 fn finish_until_lose(
     state: &mut GameState,
     win_count: u32,
@@ -392,9 +405,9 @@ fn finish_until_lose(
     targets: &[TargetRef],
     source_id: ObjectId,
     controller: PlayerId,
+    chain_root_targets: &[TargetRef],
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let prior_waiting_for = state.waiting_for.clone();
     for _ in 0..win_count {
         run_flip_branch(
             state,
@@ -402,16 +415,24 @@ fn finish_until_lose(
             source_id,
             controller,
             targets,
+            chain_root_targets,
             events,
         )?;
-        // CR 608.2c: a win effect may suspend for an optional choice.
-        if state.waiting_for != prior_waiting_for {
+        // CR 608.2c: stop only if the win effect suspended for an INTERACTIVE
+        // player choice (an optional "you may", scry, etc.). A win effect that
+        // merely creates permanents hands priority back to the active player
+        // (Priority{opponent} -> Priority{controller}), which is NOT a
+        // suspension — gating on `waits_for_resolution_choice` rather than any
+        // `waiting_for` change lets a multi-win token creator (Mirror March,
+        // #5966) run the win effect for every win instead of stopping after one.
+        if super::waits_for_resolution_choice(&state.waiting_for) {
             break;
         }
     }
 
-    // CR 608.2c: defer `EffectResolved` if the win effect suspended for a player choice.
-    if state.waiting_for == prior_waiting_for {
+    // CR 608.2c: defer `EffectResolved` only if the win effect actually
+    // suspended for a player choice; otherwise the effect has fully resolved.
+    if !super::waits_for_resolution_choice(&state.waiting_for) {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::FlipCoinUntilLose,
             source_id,
@@ -428,7 +449,7 @@ fn finish_until_lose(
 /// Emits EXACTLY ONE `CoinFlipped` for the kept flip (the ignored flips never
 /// "happen", CR 614.6), runs that flip's branch, then continues the resolver's
 /// loop from the stashed position. Each re-entered flip may itself re-suspend and
-/// re-stash `pending_coin_flip`.
+/// re-park the coin-flip frame.
 ///
 /// Returns `Ok(Some(wf))` when the resolver re-suspended for another interactive
 /// choice (`wf` is the new `WaitingFor` — a fresh `CoinFlipKeepChoice` or an
@@ -453,6 +474,7 @@ pub fn resume_after_keep(
         win_effect,
         lose_effect,
         kind,
+        chain_root_targets,
     } = pending;
 
     // CR 705.1 + CR 614.1a + CR 705.2: the single surviving flip is recorded for
@@ -488,7 +510,15 @@ pub fn resume_after_keep(
             } else {
                 lose_effect.as_deref()
             };
-            run_flip_branch(state, branch, source_id, controller, &targets, events)?;
+            run_flip_branch(
+                state,
+                branch,
+                source_id,
+                controller,
+                &targets,
+                &chain_root_targets,
+                events,
+            )?;
             if suspended(state) {
                 return Ok(Some(state.waiting_for.clone()));
             }
@@ -506,7 +536,15 @@ pub fn resume_after_keep(
             } else {
                 lose_effect.as_deref()
             };
-            run_flip_branch(state, branch, source_id, controller, &targets, events)?;
+            run_flip_branch(
+                state,
+                branch,
+                source_id,
+                controller,
+                &targets,
+                &chain_root_targets,
+                events,
+            )?;
             if suspended(state) {
                 return Ok(Some(state.waiting_for.clone()));
             }
@@ -520,14 +558,22 @@ pub fn resume_after_keep(
                         } else {
                             lose_effect.as_deref()
                         };
-                        run_flip_branch(state, branch, source_id, controller, &targets, events)?;
+                        run_flip_branch(
+                            state,
+                            branch,
+                            source_id,
+                            controller,
+                            &targets,
+                            &chain_root_targets,
+                            events,
+                        )?;
                         if suspended(state) {
                             return Ok(Some(state.waiting_for.clone()));
                         }
                     }
                     CoinFlipOutcome::Prevented => continue,
                     CoinFlipOutcome::Suspended => {
-                        state.pending_coin_flip = Some(PendingCoinFlip {
+                        state.push_coin_flip_frame(PendingCoinFlip {
                             source_id,
                             controller,
                             flipper,
@@ -537,6 +583,7 @@ pub fn resume_after_keep(
                             kind: PendingCoinFlipKind::FlipN {
                                 remaining: remaining - i - 1,
                             },
+                            chain_root_targets: chain_root_targets.clone(),
                         });
                         return Ok(Some(state.waiting_for.clone()));
                     }
@@ -563,6 +610,7 @@ pub fn resume_after_keep(
                     &targets,
                     source_id,
                     seed,
+                    &chain_root_targets,
                     events,
                 )? {
                     Some(win_count) => {
@@ -573,6 +621,7 @@ pub fn resume_after_keep(
                             &targets,
                             source_id,
                             controller,
+                            &chain_root_targets,
                             events,
                         )?;
                         if suspended(state) {
@@ -593,6 +642,7 @@ pub fn resume_after_keep(
                     &targets,
                     source_id,
                     controller,
+                    &chain_root_targets,
                     events,
                 )?;
                 if suspended(state) {
@@ -812,6 +862,53 @@ mod tests {
         assert_eq!(state.players[0].life - initial_life, heads);
     }
 
+    #[test]
+    fn flip_coins_continues_after_token_branch_returns_priority() {
+        let mut state = GameState::new_two_player(42);
+        let win_effect = Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Token {
+                name: "Coin Token".to_string(),
+                power: crate::types::ability::PtValue::Fixed(1),
+                toughness: crate::types::ability::PtValue::Fixed(1),
+                types: vec!["Creature".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: crate::types::ability::TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+        ));
+        let ability = ResolvedAbility::new(
+            Effect::FlipCoins {
+                count: QuantityExpr::Fixed { value: 8 },
+                win_effect: Some(win_effect),
+                lose_effect: None,
+                flipper: crate::types::ability::TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_flip_coins(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::CoinFlipped { .. }))
+                .count(),
+            8,
+            "a token branch returns priority but must not stop the flip loop"
+        );
+    }
+
     // --- Issue #432: Ral, Monsoon Mage coin-flip transform ---------------------
     //
     // Ral's trigger is `FlipCoin { win_effect, lose_effect }` carried on an
@@ -857,10 +954,13 @@ mod tests {
         obj.base_power = Some(1);
         obj.base_toughness = Some(3);
         obj.back_face = Some(BackFaceData {
+            is_swap_snapshot: false,
+            trigger_printed_origins: Vec::new(),
             name: "Ral, Leyline Prodigy".to_string(),
             power: None,
             toughness: None,
             loyalty: Some(3),
+            printed_loyalty: None,
             defense: None,
             card_types: CardType {
                 supertypes: vec![],
@@ -881,6 +981,7 @@ mod tests {
             casting_restrictions: vec![],
             casting_options: vec![],
             layout_kind: None,
+            parse_warnings: vec![],
         });
         id
     }
@@ -986,6 +1087,11 @@ mod tests {
             )),
             "FlipCoin EffectResolved fired before the optional choice was made"
         );
+        assert!(state.active_optional_effect_frame().is_some());
+        assert!(matches!(
+            state.resolution_stack.active_predecessor(),
+            Some(crate::types::resolution::ResolutionFrame::AbilityContinuation(_))
+        ));
 
         // Accept the optional exile through the real `apply` pipeline.
         let result = apply(
@@ -1178,6 +1284,7 @@ mod tests {
             controller: PlayerId(0),
             object_id: spell_id,
             card_id: CardId(2),
+            cast_mana_value: None,
         });
 
         let ability = build_resolved_from_def(execute, krark_id, PlayerId(0));
@@ -1261,6 +1368,7 @@ mod tests {
             controller: PlayerId(0),
             object_id: spell_id,
             card_id: CardId(2),
+            cast_mana_value: None,
         });
 
         let ability = build_resolved_from_def(execute, krark_id, PlayerId(0));
@@ -1386,6 +1494,7 @@ mod tests {
             controller: PlayerId(1),
             object_id: ObjectId(999),
             card_id: CardId(2),
+            cast_mana_value: None,
         });
 
         let ability =
@@ -1425,6 +1534,7 @@ mod tests {
             controller: PlayerId(1),
             object_id: ObjectId(999),
             card_id: CardId(2),
+            cast_mana_value: None,
         });
 
         // Lose branch: "that player loses 3 life" — bound to TriggeringPlayer so
@@ -1885,7 +1995,7 @@ mod tests {
             "the process stops on the controller's winning flip"
         );
         assert!(
-            runner.state().pending_repeat_until.is_none(),
+            runner.state().active_repeat_until().is_none(),
             "the repeat loop must be fully drained after the winning flip"
         );
     }

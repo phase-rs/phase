@@ -1,5 +1,3 @@
-import { fetchCardImageUrl } from "./scryfall.ts";
-
 interface AvatarIdentity {
   name: string;
   cardName: string;
@@ -29,6 +27,10 @@ export interface PlayerAvatar {
   cardName: string;
 }
 
+export type PlayerAvatarIdentity =
+  | { kind: "card"; cardName: string }
+  | { kind: "external"; url: string };
+
 export function assignRandomAvatars(playerCount: number, seed?: number | string): PlayerAvatar[] {
   const shuffled = [...PLANESWALKER_IDENTITIES];
   const numericSeed = typeof seed === "string"
@@ -55,14 +57,6 @@ export function assignAvatarForSeat(
 
 export function avatarCardNameForName(name: string): string | null {
   return PLANESWALKER_IDENTITIES.find((id) => id.name === name)?.cardName ?? null;
-}
-
-export async function fetchAvatarArtUrl(cardName: string): Promise<string | null> {
-  try {
-    return await fetchCardImageUrl(cardName, 0, "art_crop");
-  } catch {
-    return null;
-  }
 }
 
 function hashStringToSeed(s: string): number {

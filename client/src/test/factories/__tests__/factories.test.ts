@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import { gameObjectFactory } from "../gameObjectFactory.ts";
-import { gameStateFactory, waitingForFactory } from "../gameStateFactory.ts";
+import {
+  castOfferWaitingForFactory,
+  gameStateFactory,
+  opponentMayChoiceWaitingForFactory,
+  optionalEffectChoiceWaitingForFactory,
+  resolutionOptionalPaymentWaitingForFactory,
+  targetSelectionWaitingForFactory,
+  waitingForFactory,
+} from "../gameStateFactory.ts";
 
 describe("gameObjectFactory convenience methods", () => {
   it("composes card type, supertype, zone, and state methods", () => {
@@ -71,6 +79,82 @@ describe("waitingForFactory", () => {
       data: expect.objectContaining({ player: 1 }),
     });
   });
+
+  it("merges data overrides without discarding variant defaults", () => {
+    const waitingFor = targetSelectionWaitingForFactory.forPlayer(1).build();
+
+    expect(waitingFor).toMatchObject({
+      type: "TargetSelection",
+      data: {
+        player: 1,
+        pending_cast: { object_id: 1, card_id: 1 },
+        target_slots: [{ legal_targets: [], optional: false }],
+      },
+    });
+  });
+
+  it("preserves original indices in resolution optional payment choices", () => {
+    const waitingFor = resolutionOptionalPaymentWaitingForFactory
+      .forPlayer(1)
+      .withData({ costs: [{ index: 2, cost: { type: "Mana", cost: { type: "Cost", shards: [], generic: 2 } } }] })
+      .build();
+    expect(waitingFor.data).toMatchObject({ player: 1, source_id: 1 });
+    expect(waitingFor.data.costs.map((option) => option.index)).toEqual([2]);
+  });
+
+  it("exposes CastOffer's domain fields through chainable factory methods", () => {
+    const waitingFor = castOfferWaitingForFactory.forPlayer(1).adventure(157).build();
+
+    expect(waitingFor).toEqual({
+      type: "CastOffer",
+      data: {
+        player: 1,
+        kind: {
+          type: "Adventure",
+          object_id: 157,
+          card_id: 157,
+          payment_mode: { type: "Auto" },
+        },
+      },
+    });
+  });
+
+  it("switches to ManaSourceSelection without leaking Priority-only keys", () => {
+    const waitingFor = waitingForFactory.manaSourceSelection().build();
+
+    expect(waitingFor.type).toBe("ManaSourceSelection");
+    expect(waitingFor).toEqual({
+      type: "ManaSourceSelection",
+      data: { player: 0, options: [] },
+    });
+  });
+
+  it("builds both optional-effect sibling prompts through the shared hierarchy", () => {
+    expect(
+      optionalEffectChoiceWaitingForFactory
+        .forPlayer(1)
+        .withData({ source_id: 100, decision_subject_id: 44 })
+        .build(),
+    ).toMatchObject({
+      type: "OptionalEffectChoice",
+      data: { player: 1, source_id: 100, decision_subject_id: 44 },
+    });
+    expect(
+      opponentMayChoiceWaitingForFactory
+        .forPlayer(1)
+        .withData({ source_id: 100, decision_subject_id: 44, remaining: [2] })
+        .build(),
+    ).toEqual({
+      type: "OpponentMayChoice",
+      data: {
+        player: 1,
+        source_id: 100,
+        decision_subject_id: 44,
+        description: undefined,
+        remaining: [2],
+      },
+    });
+  });
 });
 
 describe("gameStateFactory convenience methods", () => {
@@ -100,5 +184,24 @@ describe("gameStateFactory convenience methods", () => {
     expect(state.players).toHaveLength(3);
     expect(state.players[2].life).toBe(12);
     expect(state.seat_order).toEqual([0, 1, 2]);
+  });
+
+  it("delegates optional-effect siblings through GameStateFactory", () => {
+    expect(
+      gameStateFactory
+        .optionalEffectChoice({ source_id: 100, decision_subject_id: 44 })
+        .build().waiting_for,
+    ).toMatchObject({
+      type: "OptionalEffectChoice",
+      data: { source_id: 100, decision_subject_id: 44 },
+    });
+    expect(
+      gameStateFactory
+        .opponentMayChoice({ source_id: 100, decision_subject_id: 44 })
+        .build().waiting_for,
+    ).toMatchObject({
+      type: "OpponentMayChoice",
+      data: { source_id: 100, decision_subject_id: 44 },
+    });
   });
 });

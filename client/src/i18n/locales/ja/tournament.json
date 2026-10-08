@@ -1,0 +1,156 @@
+{
+  "page": {
+    "eyebrow": "大会",
+    "landingTitle": "大会",
+    "landingDescription": "大会を作成したり、コードで参加したり、開催中の大会を観戦できます。",
+    "detailDescription": "大会 {{code}}",
+    "backToList": "大会一覧"
+  },
+  "labels": {
+    "code": "コード {{code}}",
+    "roundOf": "ラウンド {{current}} / {{total}}",
+    "created": "作成日 {{date}}",
+    "organizer": "主催者",
+    "entered": "参加中",
+    "spectating": "観戦中",
+    "dropped": "棄権済み"
+  },
+  "status": {
+    "Registration": "参加受付中",
+    "InProgress": "開催中",
+    "Completed": "終了",
+    "Abandoned": "中止"
+  },
+  "bracket": {
+    "Swiss": "スイス式",
+    "SingleElimination": "シングルエリミネーション"
+  },
+  "arity": {
+    "headToHead": "1対1",
+    "pod": "{{seats}}人卓"
+  },
+  "list": {
+    "heading": "参加できる大会",
+    "empty": "現在、大会はありません。",
+    "loading": "大会を読み込み中…",
+    "view": "表示",
+    "entrants_one": "参加者{{count}}人",
+    "entrants_few": "参加者{{count}}人",
+    "entrants_many": "参加者{{count}}人",
+    "entrants_other": "参加者{{count}}人"
+  },
+  "create": {
+    "heading": "大会を作成",
+    "nameLabel": "大会名",
+    "namePlaceholder": "フライデー・ナイト・マジック",
+    "arityLabel": "1試合の人数",
+    "arityHint": "2人は1対1、4人は通常の統率者戦の卓です。",
+    "bracketLabel": "大会方式",
+    "totalRoundsLabel": "ラウンド数",
+    "totalRoundsAuto": "自動",
+    "scoringLabel": "マッチ・ポイント",
+    "winPointsLabel": "勝ち",
+    "drawPointsLabel": "引き分け",
+    "lossPointsLabel": "負け",
+    "formatLabel": "フォーマット",
+    "formatNone": "未指定",
+    "matchTypeLabel": "マッチ形式",
+    "matchTypeBo3": "2本先取",
+    "matchTypeBo1": "1本勝負",
+    "plusRoundsLabel": "追加ラウンド数",
+    "plusRoundsHint": "自動計算のラウンド数に加算します（スイス式＋N）。ラウンド数が自動の場合のみ適用されます。",
+    "submit": "大会を作成",
+    "submitting": "作成中…"
+  },
+  "join": {
+    "heading": "コードで参加",
+    "codeLabel": "大会コード",
+    "codePlaceholder": "大会コードを入力",
+    "displayNameLabel": "表示名",
+    "displayNamePlaceholder": "対戦で使う名前",
+    "submit": "参加",
+    "submitting": "参加中…",
+    "joined": "この大会に参加登録しています。"
+  },
+  "detail": {
+    "loading": "大会を読み込み中…",
+    "organizerControls": "主催者の操作",
+    "startRound": "ラウンドを開始",
+    "startRoundBusy": "開始中…",
+    "endTournament": "大会を終了",
+    "endTournamentBusy": "終了中…",
+    "endTournamentConfirm": "この大会を終了しますか？残りのラウンドは行われません。",
+    "drop": "棄権",
+    "dropBusy": "棄権処理中…",
+    "dropConfirm": "この大会を棄権しますか？再参加はできません。",
+    "reportResult": "結果を報告",
+    "yourPairing": "あなたの対戦",
+    "noPairing": "このラウンドにはあなたの対戦がありません。"
+  },
+  "standings": {
+    "heading": "順位",
+    "empty": "まだ順位はありません。",
+    "rank": "順位",
+    "player": "プレイヤー",
+    "matchPoints": "ポイント",
+    "matchPointsTitle": "マッチ・ポイント",
+    "matchesPlayed": "対戦数",
+    "matchesPlayedTitle": "不戦勝を除く対戦数",
+    "byes": "不戦勝",
+    "byesTitle": "不戦勝となったラウンド数",
+    "tiebreaks": {
+      "headToHead": {
+        "opponentsMatchWinPct": "OMW%",
+        "opponentsMatchWinPctTitle": "対戦相手のマッチ勝率",
+        "gameWinPct": "GW%",
+        "gameWinPctTitle": "ゲーム勝率",
+        "opponentsGameWinPct": "OGW%",
+        "opponentsGameWinPctTitle": "対戦相手のゲーム勝率"
+      },
+      "multiplayer": {
+        "matchWinPct": "MW%",
+        "matchWinPctTitle": "マッチ勝率",
+        "opponentsAvgMatchPoints": "OAMP",
+        "opponentsAvgMatchPointsTitle": "対戦相手の平均マッチ・ポイント",
+        "opponentsMatchWinPct": "OMW%",
+        "opponentsMatchWinPctTitle": "対戦相手のマッチ勝率"
+      }
+    }
+  },
+  "pairings": {
+    "heading": "組み合わせ",
+    "empty": "まだ組み合わせはありません。",
+    "round": "ラウンド{{round}}",
+    "table": "テーブル{{id}}",
+    "pending": "未確定",
+    "versus": "対"
+  },
+  "outcome": {
+    "bye": "不戦勝",
+    "forfeit": "不戦勝 — {{winner}}",
+    "decisive": "{{winner}}の勝ち",
+    "draw": "引き分け",
+    "gameWins": "{{name}} {{wins}}勝"
+  },
+  "report": {
+    "heading": "結果を報告",
+    "winnerLabel": "勝者",
+    "drawOption": "引き分け",
+    "gameWinsLabel": "ゲーム勝利数",
+    "gameWinsFor": "{{name}}のゲーム勝利数",
+    "submit": "結果を送信",
+    "submitting": "送信中…",
+    "cancel": "キャンセル"
+  },
+  "errors": {
+    "notOrganizer": "あなたはこの大会の主催者ではありません。",
+    "notEntered": "あなたはこの大会に参加登録していません。",
+    "serverRejected": "サーバーが拒否しました：{{message}}",
+    "timedOut": "サーバーから応答がありません。もう一度お試しください。",
+    "connectionLost": "ロビーへの接続が切れました。サーバーのアドレスを確認してください。",
+    "aborted": "リクエストはキャンセルされました。",
+    "unsupported": "リクエストは送信されましたが、サーバーが古いため確認できません。再試行する前に大会の状態を確認してください。",
+    "incompatible": "このサーバーは古いため、この対戦構成に対応していません（ロビープロトコル{{needed}}が必要です）。何も送信していません。",
+    "notFound": "そのコードの大会はありません。"
+  }
+}

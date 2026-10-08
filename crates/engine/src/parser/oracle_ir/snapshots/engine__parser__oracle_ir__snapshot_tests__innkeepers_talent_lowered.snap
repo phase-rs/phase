@@ -1,0 +1,203 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 1322
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "SetClassLevel",
+        "level": 2
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": {
+          "type": "Cost",
+          "shards": [
+            "Green"
+          ],
+          "generic": 0
+        }
+      },
+      "sub_ability": null,
+      "duration": null,
+      "description": "{G}: Level 2",
+      "target_prompt": null,
+      "activation_restrictions": [
+        {
+          "type": "AsSorcery"
+        },
+        {
+          "type": "ClassLevelIs",
+          "data": {
+            "level": 1
+          }
+        }
+      ],
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "SetClassLevel",
+        "level": 3
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": {
+          "type": "Cost",
+          "shards": [
+            "Green"
+          ],
+          "generic": 3
+        }
+      },
+      "sub_ability": null,
+      "duration": null,
+      "description": "{3}{G}: Level 3",
+      "target_prompt": null,
+      "activation_restrictions": [
+        {
+          "type": "AsSorcery"
+        },
+        {
+          "type": "ClassLevelIs",
+          "data": {
+            "level": 2
+          }
+        }
+      ],
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "PutCounter",
+          "counter_type": "P1P1",
+          "count": {
+            "type": "Fixed",
+            "value": 1
+          },
+          "target": {
+            "type": "Typed",
+            "type_filters": [
+              "Creature"
+            ],
+            "controller": "You",
+            "properties": []
+          }
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": null,
+      "origin": null,
+      "destination": null,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": "BeginCombat",
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "At the beginning of combat on your turn, put a +1/+1 counter on target creature you control.",
+      "constraint": {
+        "type": "OnlyDuringYourTurn"
+      },
+      "condition": null,
+      "batched": false
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "affected": {
+        "type": "Typed",
+        "type_filters": [
+          "Permanent"
+        ],
+        "controller": "You",
+        "properties": [
+          {
+            "type": "Counters",
+            "counters": {
+              "type": "Any"
+            },
+            "comparator": "GE",
+            "count": {
+              "type": "Fixed",
+              "value": 1
+            }
+          }
+        ]
+      },
+      "modifications": [
+        {
+          "type": "AddKeyword",
+          "keyword": {
+            "Ward": {
+              "type": "Mana",
+              "data": {
+                "type": "Cost",
+                "shards": [],
+                "generic": 1
+              }
+            }
+          }
+        }
+      ],
+      "condition": {
+        "type": "ClassLevelGE",
+        "level": 2
+      },
+      "affected_zone": null,
+      "effect_zone": null,
+      "active_zones": [],
+      "characteristic_defining": false,
+      "description": "Permanents you control with counters on them have ward {1}."
+    }
+  ],
+  "replacements": [
+    {
+      "event": "AddCounter",
+      "execute": null,
+      "mode": {
+        "type": "Mandatory"
+      },
+      "valid_card": null,
+      "description": "If you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead.",
+      "condition": {
+        "type": "ClassLevelGE",
+        "level": 3
+      },
+      "quantity_modification": {
+        "type": "Times",
+        "factor": 2
+      },
+      "valid_player": "You",
+      "counter_replacement_subject": "Actor"
+    }
+  ],
+  "extractedKeywords": []
+}

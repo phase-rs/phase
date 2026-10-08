@@ -46,6 +46,8 @@ fn canonical_client_frames_parse_via_broker() {
         client_version: "0.1.0".into(),
         build_commit: "abc".into(),
         protocol_version: sc::PROTOCOL_VERSION,
+        lobby_protocol_version: Some(sc::LOBBY_PROTOCOL_VERSION),
+        wire_formats: Vec::new(),
     };
     let json = serde_json::to_string(&canonical).unwrap();
     match lb::parse_lobby_client_message(&json) {
@@ -53,14 +55,51 @@ fn canonical_client_frames_parse_via_broker() {
             lb::LobbyClientMessage::ClientHello {
                 client_version,
                 build_commit,
+                lobby_protocol_version,
                 ..
             } => {
                 assert_eq!(client_version, "0.1.0");
                 assert_eq!(build_commit, "abc");
+                // The additive field must survive the canonical -> broker
+                // parse; the broker gates on it.
+                assert_eq!(lobby_protocol_version, Some(lb::LOBBY_PROTOCOL_VERSION));
             }
             other => panic!("expected ClientHello, got {other:?}"),
         },
         other => panic!("expected ClientHello, got {other:?}"),
+    }
+}
+
+/// A canonical create frame's `requested_code` survives the broker's parse.
+#[test]
+fn canonical_create_frame_keeps_requested_code_through_the_broker_parse() {
+    let canonical = sc::ClientMessage::CreateGameWithSettings {
+        deck: sc::DeckData::default(),
+        display_name: "Host".into(),
+        public: true,
+        password: None,
+        timer_seconds: None,
+        player_count: 2,
+        match_config: Default::default(),
+        ai_seats: Vec::new(),
+        format_config: None,
+        room_name: None,
+        host_peer_id: Some("peer-1".into()),
+        draft_metadata: None,
+        start_when_full: true,
+        ranked: false,
+        requested_code: Some("AB12CD".into()),
+        booster_pack_pool: None,
+    };
+    let json = serde_json::to_string(&canonical).unwrap();
+    match lb::parse_lobby_client_message(&json) {
+        lb::ParsedFrame::Message(msg) => match *msg {
+            lb::LobbyClientMessage::CreateGameWithSettings { requested_code, .. } => {
+                assert_eq!(requested_code.as_deref(), Some("AB12CD"));
+            }
+            other => panic!("expected CreateGameWithSettings, got {other:?}"),
+        },
+        other => panic!("expected CreateGameWithSettings, got {other:?}"),
     }
 }
 
@@ -82,6 +121,52 @@ fn non_lobby_frame_routes_to_reject() {
 /// frame serialized by the canonical enum.
 #[test]
 fn lobby_server_messages_byte_identical_to_canonical() {
+    // Error without a code remains byte-identical to existing peers.
+    let lb_error = lb::LobbyServerMessage::error("legacy error");
+    let sc_error = sc::ServerMessage::error("legacy error");
+    assert_eq!(
+        serde_json::to_string(&lb_error).unwrap(),
+        r#"{"type":"Error","data":{"message":"legacy error"}}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&lb_error).unwrap(),
+        serde_json::to_string(&sc_error).unwrap()
+    );
+
+    // Typed errors use the identical canonical and broker wire shape.
+    let lb_typed = lb::LobbyServerMessage::Error {
+        message: "deck invalid".into(),
+        code: Some(lb::ServerErrorCode::DeckRejected),
+    };
+    let sc_typed =
+        sc::ServerMessage::error_with_code(sc::ServerErrorCode::DeckRejected, "deck invalid");
+    assert_eq!(
+        serde_json::to_string(&lb_typed).unwrap(),
+        r#"{"type":"Error","data":{"message":"deck invalid","code":"deck_rejected"}}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&lb_typed).unwrap(),
+        serde_json::to_string(&sc_typed).unwrap()
+    );
+
+    // The requested-room-code reasons (lobby protocol 10), through the same
+    // parameterized constructor on both enums.
+    for (code, wire) in [
+        (lb::ServerErrorCode::GameNotFound, "game_not_found"),
+        (lb::ServerErrorCode::CodeInUse, "code_in_use"),
+    ] {
+        let lb_coded = lb::LobbyServerMessage::error_with_code(code, "m");
+        let sc_coded = sc::ServerMessage::error_with_code(code, "m");
+        assert_eq!(
+            serde_json::to_string(&lb_coded).unwrap(),
+            format!(r#"{{"type":"Error","data":{{"message":"m","code":"{wire}"}}}}"#)
+        );
+        assert_eq!(
+            serde_json::to_string(&lb_coded).unwrap(),
+            serde_json::to_string(&sc_coded).unwrap()
+        );
+    }
+
     // Pong.
     let lb_pong = lb::LobbyServerMessage::Pong { timestamp: 7 };
     let sc_pong = sc::ServerMessage::Pong { timestamp: 7 };
@@ -110,6 +195,7 @@ fn lobby_server_messages_byte_identical_to_canonical() {
     let sc_gc = sc::ServerMessage::GameCreated {
         game_code: "GAME01".into(),
         player_token: "tok".into(),
+        full_key: None,
     };
     assert_eq!(
         serde_json::to_string(&lb_gc).unwrap(),
@@ -146,15 +232,18 @@ fn server_hello_mode_byte_identical() {
         build_commit: "abc".into(),
         protocol_version: lb::PROTOCOL_VERSION,
         mode: lb::ServerMode::LobbyOnly,
+        lobby_protocol_version: Some(lb::LOBBY_PROTOCOL_VERSION),
     };
     let sc_hello = sc::ServerMessage::ServerHello {
         server_version: "0.1.0".into(),
         build_commit: "abc".into(),
         protocol_version: sc::PROTOCOL_VERSION,
         mode: sc::ServerMode::LobbyOnly,
+        lobby_protocol_version: Some(sc::LOBBY_PROTOCOL_VERSION),
         // None + skip_serializing_if keeps the wire identical to the lobby
         // broker's ServerHello, which has no public_url field.
         public_url: None,
+        wire_formats: Vec::new(),
     };
     assert_eq!(
         serde_json::to_string(&lb_hello).unwrap(),

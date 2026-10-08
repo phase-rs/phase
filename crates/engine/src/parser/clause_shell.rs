@@ -68,14 +68,16 @@
 
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{opt, value};
+use nom::bytes::complete::{tag, tag_no_case, take_until};
+use nom::combinator::{map, opt, value};
+use nom::sequence::{delimited, terminated};
 use nom::Parser;
 
 use super::oracle_effect::conditions::{
     strip_leading_general_conditional, strip_unrecognized_conditional_head_when_body_optional,
 };
 use super::oracle_effect::strip_trailing_duration;
+use super::oracle_ir::ast::is_play_from_exile_lifetime_duration;
 use super::oracle_ir::context::ParseContext;
 use super::oracle_nom::bridge::nom_on_lower;
 use crate::types::ability::{
@@ -216,9 +218,23 @@ fn peel_inner(text: String, mut ctx: ClauseContext) -> (String, ClauseContext) {
         }
     }
 
+    // CR 705.2: Redundant "for each flip you won, " coin-flip quantifier — the
+    // flip loop (`finish_until_lose` / the `FlipCoins` win branch) already runs
+    // the win effect once per win, so drop the prefix (no `repeat_for`) and keep
+    // peeling the bare imperative. Must precede the generic for-each peel, which
+    // cannot strip "flip(s) you won" (not a countable clause) and would leave
+    // the text to fall through to an `Unimplemented` "for" dispatch (#5966).
+    if let Some(rest) = super::oracle_effect::lower::strip_redundant_flip_win_quantifier(&text) {
+        return peel_inner(rest, ctx);
+    }
+
     // Repeat-for: "for each [qty], " leading prefix (CR 608.2c: the instruction is
-    // followed as written, once per counted iteration).
-    if ctx.repeat_for.is_none() {
+    // followed as written, once per counted iteration). CR 102.2: "for each
+    // opponent, choose … that player controls" is a per-opponent choice, not a
+    // repeat count, and keeps its prefix.
+    if ctx.repeat_for.is_none()
+        && !super::oracle_effect::is_for_each_opponent_choose_controlled(&text.to_lowercase())
+    {
         let (qty, rest) = peel_for_each_prefix(&text);
         if qty.is_some() {
             ctx.repeat_for = qty;
@@ -315,17 +331,32 @@ fn try_peel_opponent_may_prefix(
     }
     nom_on_lower(text, &lower, |input| {
         alt((
-            // CR 102.2 + CR 603.2: "each of that player's opponents may" — the
-            // caster's opponents, fanned out per-player. Must precede the bare
-            // "each opponent may" arm (which scopes to the controller's
-            // opponents). Apostrophe variants: ASCII ' and curly U+2019 '.
-            value(
-                (None, Some(PlayerFilter::OpponentOfTriggeringPlayer)),
-                tag("each of that player's opponents may "),
+            // CR 102.2 + CR 603.2: "each of ⟨that player | its controller⟩'s
+            // opponents may" — the TRIGGERING player's opponents, fanned out
+            // per-player. Must precede the bare "each opponent may" arm (which
+            // scopes to the ABILITY CONTROLLER's opponents). The subject grammar
+            // itself is the single authority in `oracle_effect::lower`, shared with
+            // the mandatory (no-"may") route so the two cannot drift apart; only
+            // the trailing "may " is this site's own.
+            map(
+                terminated(
+                    super::oracle_effect::lower::parse_each_of_triggering_players_opponents,
+                    tag("may "),
+                ),
+                |scope| (None, Some(scope)),
             ),
-            value(
-                (None, Some(PlayerFilter::OpponentOfTriggeringPlayer)),
-                tag("each of that player\u{2019}s opponents may "),
+            // CR 607.2a + CR 108.3 + CR 608.2d: "the exiled card's owner may"
+            // (Spell Queller) — the owner of each card the source's linked
+            // exile ability exiled makes the choice, fanned out per owner. The
+            // subject grammar is shared with the mandatory route (Skyclave
+            // Apparition's "the exiled card's owner creates …"); only the
+            // trailing "may " is this site's own.
+            map(
+                terminated(
+                    super::oracle_effect::lower::parse_linked_exile_owner_subject,
+                    tag("may "),
+                ),
+                |scope| (None, Some(scope)),
             ),
             value(
                 (None, Some(PlayerFilter::Opponent)),
@@ -404,6 +435,14 @@ fn is_specialized_duration_carrier(text_lower: &str) -> bool {
     use nom::branch::alt;
     use nom::bytes::complete::tag;
     use nom::combinator::value;
+    let (body, duration) = strip_trailing_duration(text_lower);
+    let bare_tracked_exile_grant = duration
+        .as_ref()
+        .is_some_and(is_play_from_exile_lifetime_duration)
+        && tag::<_, _, OracleError<'_>>("cast spells from among ")
+            .parse(body)
+            .is_ok();
+
     let head: nom::IResult<&str, (), OracleError<'_>> = alt((
         // CR 400.7i — impulse-draw bare form (post strip_optional_effect_prefix
         // in the chunk loop). `try_parse_play_from_exile` requires the
@@ -434,8 +473,9 @@ fn is_specialized_duration_carrier(text_lower: &str) -> bool {
         value((), tag("they may cast ")),
         // CR 601.2f — "the next [type] spell you cast this turn ..."
         // next-spell limiter (cost reduction, keyword grant). The
-        // specialized parser at `oracle_effect/mod.rs:571` requires
-        // "this turn" to be present in the input.
+        // specialized parser `oracle_effect::try_parse_grant_next_spell_ability`
+        // requires "this turn" (via `parse_next_spell_subject`) to be present
+        // in the input.
         value((), tag("the next ")),
         // CR 305.2 — "play an additional land this turn" / "play <n> additional
         // lands this turn" (Escape to the Wilds). `try_parse_additional_land_this_turn`
@@ -444,7 +484,7 @@ fn is_specialized_duration_carrier(text_lower: &str) -> bool {
         parse_additional_land_head,
     ))
     .parse(text_lower);
-    head.is_ok()
+    bare_tracked_exile_grant || head.is_ok()
 }
 
 /// CR 305.2: Head matcher for the turn-scoped additional-land grant, used by
@@ -453,13 +493,18 @@ fn is_specialized_duration_carrier(text_lower: &str) -> bool {
 fn parse_additional_land_head(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
     use nom::branch::alt;
     use nom::bytes::complete::tag;
-    use nom::combinator::value;
+    use nom::combinator::{opt, value};
     alt((
         value((), tag("play an additional land")),
+        // CR 305.2: "play <n> additional lands" and the equivalent
+        // "play up to <n> additional lands" (Summer Bloom) — the "up to" is
+        // redundant grammar (land plays are already optional), so it grants the
+        // same +n land-play allowance.
         value(
             (),
             (
                 tag("play "),
+                opt(tag("up to ")),
                 crate::parser::oracle_nom::primitives::parse_number,
                 tag(" additional lands"),
             ),
@@ -500,6 +545,15 @@ pub(crate) fn is_specialized_you_may_retarget_phrase(rest_lower: &str) -> bool {
 /// Accepts either the post-optional-strip body (`pay {U} to end this effect`) or
 /// the full clause surface (`you may pay {U} to end this effect`) so chunk-loop
 /// and full-clause carve-out call sites share one detector.
+///
+/// Deliberately BROADER than [`parse_pay_to_end_effect_mana_cost`] below. This
+/// recognizer accepts ANY cost body (`take_until`) because its job is the
+/// `YouMayBlocklist::ChunkLoop` peel blocklist, which must keep working for a
+/// shape the extractor cannot model — a hypothetical "pay 2 life to end this
+/// effect". Absorption into `Effect::GenericEffect.end_cost` is gated on the
+/// NARROW extractor, so an unmodellable shape falls through to its existing
+/// lowering rather than being silently accepted with dropped semantics. That
+/// asymmetry is the fail-closed boundary; do not collapse the two detectors.
 pub(crate) fn is_you_may_pay_to_end_effect_phrase(text_lower: &str) -> bool {
     value(
         (),
@@ -512,6 +566,43 @@ pub(crate) fn is_you_may_pay_to_end_effect_phrase(text_lower: &str) -> bool {
     )
     .parse(text_lower)
     .is_ok()
+}
+
+/// CR 116.2c + CR 118.1: extract the MANA cost from a Licid-class termination
+/// clause — `[you may ]pay <mana cost> to end this effect[.]`.
+///
+/// > 116.2c Some effects allow a player to take an action at a later time,
+/// > usually to end a continuous effect [...]. Doing so is a special action.
+///
+/// Runs on ORIGINAL-CASE input: `nom_primitives::parse_mana_cost` is
+/// case-sensitive (its shard arms are `tag("W")`, `tag("W/U")`, &c.), so the
+/// English words use `tag_no_case` rather than lowering the whole input and
+/// destroying the symbols.
+///
+/// Deliberately NARROWER than [`is_you_may_pay_to_end_effect_phrase`] above —
+/// see that function's doc for the two-detector asymmetry. This one is the
+/// ABSORPTION gate: it must reject anything whose cost the engine cannot model
+/// as a `ManaCost`, because `types::mana::SpecialAction` admits only payments
+/// made through the mana pool.
+///
+/// Anchored on `eof` so a trailing clause ("… to end this effect and draw a
+/// card") is not absorbed with its tail silently dropped.
+pub(crate) fn parse_pay_to_end_effect_mana_cost(
+    input: &str,
+) -> crate::parser::oracle_nom::error::OracleResult<'_, crate::types::mana::ManaCost> {
+    delimited(
+        (
+            opt(tag_no_case::<_, _, OracleError<'_>>("you may ")),
+            tag_no_case("pay "),
+        ),
+        crate::parser::oracle_nom::primitives::parse_mana_cost,
+        (
+            tag_no_case(" to end this effect"),
+            opt(tag(".")),
+            nom::combinator::eof,
+        ),
+    )
+    .parse(input)
 }
 
 pub(crate) fn is_specialized_you_may_phrase(rest_lower: &str) -> bool {
@@ -879,6 +970,63 @@ mod tests {
         assert_eq!(rest, "cast the exiled card without paying its mana cost");
     }
 
+    /// CR 607.2a + CR 108.3 + CR 608.2d: every spelling of the linked-exile
+    /// owner subject composes with the trailing "may " into the same per-owner
+    /// optional scope, on both the chunk-loop entry (`peel_optional_slots`) and
+    /// the clause shell (`peel_clause`). The subject grammar is the one the
+    /// mandatory route uses, so a spelling cannot peel on one route only.
+    #[test]
+    fn peel_linked_exile_owner_may_captures_owner_scope_across_subjects() {
+        for subject in [
+            "the exiled card's owner",
+            "the exiled cards' owners",
+            "the owner of each card exiled with ~",
+            "the owner of each card exiled with this saga",
+        ] {
+            let text = format!("{subject} may cast that card without paying its mana cost");
+
+            let (is_optional, opponent_may_scope, implicit_scope, rest) =
+                peel_optional_slots(&text);
+            assert!(is_optional, "{subject}");
+            assert_eq!(opponent_may_scope, None, "{subject}");
+            assert_eq!(
+                implicit_scope,
+                Some(PlayerFilter::OwnersOfCardsExiledBySource),
+                "{subject}"
+            );
+            assert_eq!(
+                rest, "cast that card without paying its mana cost",
+                "{subject}"
+            );
+
+            let (peeled, ctx) = peel_clause(&text);
+            assert_eq!(
+                peeled, "cast that card without paying its mana cost",
+                "{subject}"
+            );
+            assert!(ctx.optional, "{subject}");
+            assert_eq!(ctx.opponent_may_scope, None, "{subject}");
+            assert_eq!(
+                ctx.may_implicit_player_scope,
+                Some(PlayerFilter::OwnersOfCardsExiledBySource),
+                "{subject}"
+            );
+        }
+    }
+
+    /// CR 608.2d: the owner subject is optional only when "may" follows it. The
+    /// mandatory form (Skyclave Apparition) is left for the player-scope subject
+    /// peel, which owns it.
+    #[test]
+    fn peel_linked_exile_owner_without_may_is_not_optional() {
+        let text = "the exiled card's owner creates an X/X blue Illusion creature token";
+        let (is_optional, opponent_may_scope, implicit_scope, rest) = peel_optional_slots(text);
+        assert!(!is_optional);
+        assert_eq!(opponent_may_scope, None);
+        assert_eq!(implicit_scope, None);
+        assert_eq!(rest, text);
+    }
+
     #[test]
     fn is_you_may_pay_to_end_effect_phrase_matches_body_and_full_clause() {
         assert!(is_you_may_pay_to_end_effect_phrase(
@@ -889,6 +1037,74 @@ mod tests {
         ));
         assert!(!is_you_may_pay_to_end_effect_phrase(
             "you may pay {u} rather than pay this spell's mana cost"
+        ));
+    }
+
+    /// CR 116.2c + CR 118.1: the NARROW absorption gate. Only a body the
+    /// `SpecialAction` mana-pool contract can model is extracted; everything
+    /// else must fall through to its existing lowering.
+    #[test]
+    fn parse_pay_to_end_effect_mana_cost_accepts_only_mana_bodies() {
+        use crate::types::mana::{ManaCost, ManaCostShard};
+        for (text, expected) in [
+            (
+                "You may pay {W} to end this effect.",
+                ManaCost::Cost {
+                    shards: vec![ManaCostShard::White],
+                    generic: 0,
+                },
+            ),
+            (
+                "pay {1} to end this effect",
+                ManaCost::Cost {
+                    shards: vec![],
+                    generic: 1,
+                },
+            ),
+            (
+                "You may pay {1}{U}{U} to end this effect.",
+                ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+                    generic: 1,
+                },
+            ),
+        ] {
+            let (rest, cost) = parse_pay_to_end_effect_mana_cost(text)
+                .unwrap_or_else(|e| panic!("{text:?} must be absorbed: {e:?}"));
+            assert!(rest.is_empty(), "{text:?} must be consumed to eof");
+            assert_eq!(cost, expected, "{text:?} must extract {expected:?}");
+        }
+
+        // Adjacent grammar: "this turn" is not "this effect".
+        assert!(
+            parse_pay_to_end_effect_mana_cost("you may pay {W} to end this turn").is_err(),
+            "\"to end this turn\" is not the CR 116.2c termination clause"
+        );
+        // A non-mana cost the mana-pool contract cannot model.
+        assert!(
+            parse_pay_to_end_effect_mana_cost("you may pay 2 life to end this effect").is_err(),
+            "CR 118.1: a life payment is not a `ManaCost` and must not be absorbed"
+        );
+    }
+
+    /// The fail-closed asymmetry: the BROAD peel-blocklist recognizer must keep
+    /// accepting the very body the NARROW extractor rejects, or the
+    /// `YouMayBlocklist::ChunkLoop` carve-out stops firing for that shape and
+    /// the clause is silently peeled into a generic optional effect.
+    #[test]
+    fn broad_recognizer_still_accepts_a_body_the_narrow_extractor_rejects() {
+        let non_mana = "you may pay 2 life to end this effect";
+        assert!(
+            is_you_may_pay_to_end_effect_phrase(non_mana),
+            "the peel blocklist must still recognize a non-mana termination cost"
+        );
+        assert!(
+            parse_pay_to_end_effect_mana_cost(non_mana).is_err(),
+            "…while absorption stays gated on the narrow extractor"
+        );
+        // N2: adjacent grammar is rejected by BOTH detectors.
+        assert!(!is_you_may_pay_to_end_effect_phrase(
+            "you may pay {w} to end this turn"
         ));
     }
 

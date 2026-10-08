@@ -13,6 +13,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::phase::Phase;
 const VENTURE_TRIGGER: &str =
@@ -138,7 +139,10 @@ fn branch_room_trigger_and_venture_observer_both_resolve_after_room_choice() {
             dungeon, options, ..
         } => {
             assert_eq!(*dungeon, DungeonId::Undercity);
-            assert_eq!(options.as_slice(), &[1, 2]);
+            assert_eq!(
+                options.iter().map(|o| o.index).collect::<Vec<_>>(),
+                vec![1, 2]
+            );
         }
         other => panic!("expected Undercity branch choice, got {other:?}"),
     }
@@ -196,6 +200,7 @@ fn initiative_attack_trigger_skips_without_initiative() {
         player: P0,
         valid_attacker_ids: vec![attacker],
         valid_attack_targets: vec![AttackTarget::Player(P1)],
+        valid_attack_targets_by_attacker: None,
         attacker_constraints: Default::default(),
     };
     let hand_before = runner.state().players[0].hand.len();
@@ -232,6 +237,7 @@ fn initiative_attack_trigger_draws_with_initiative() {
         player: P0,
         valid_attacker_ids: vec![attacker],
         valid_attack_targets: vec![AttackTarget::Player(P1)],
+        valid_attack_targets_by_attacker: None,
         attacker_constraints: Default::default(),
     };
     let hand_before = runner.state().players[0].hand.len();
@@ -250,6 +256,127 @@ fn initiative_attack_trigger_draws_with_initiative() {
         runner.state().players[0].hand.len(),
         runner.state().waiting_for
     );
+}
+
+/// Discord report: attacking the initiative holder with multiple creatures
+/// produced one venture trigger per creature. CR 726.2 batches the steal as
+/// "whenever ONE OR MORE creatures a player controls deal combat damage" —
+/// one trigger per damaging player per damage step, hence one venture.
+#[test]
+fn multi_attacker_combat_damage_steals_initiative_once() {
+    let (taken, room) = steal_with_attackers(2);
+    assert_eq!(
+        taken, 1,
+        "two simultaneous attackers steal the initiative exactly once"
+    );
+    assert_eq!(
+        room,
+        Some(0),
+        "a single steal ventures exactly once, entering Undercity room 0"
+    );
+}
+
+/// Control: a lone attacker still steals (the batching must not swallow the
+/// only trigger).
+#[test]
+fn single_attacker_combat_damage_still_steals_initiative() {
+    let (taken, room) = steal_with_attackers(1);
+    assert_eq!(taken, 1, "one attacker steals the initiative");
+    assert_eq!(room, Some(0), "the steal ventures into Undercity room 0");
+}
+
+/// P1 holds the initiative; P0 attacks P1 with `count` unblocked 2/2s and
+/// the turn is driven into post-combat. Returns how many times P0 took the
+/// initiative plus P0's resulting Undercity room.
+fn steal_with_attackers(count: usize) -> (usize, Option<u8>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::DeclareAttackers);
+    scenario.add_card_to_library_top(P0, "Plains");
+    scenario.add_card_to_library_top(P0, "Plains");
+    scenario.add_card_to_library_top(P0, "Forest");
+
+    let mut attackers = Vec::new();
+    for i in 0..count {
+        attackers.push(
+            scenario
+                .add_creature(P0, &format!("Steal Probe {i}"), 2, 2)
+                .id(),
+        );
+    }
+
+    let mut runner = scenario.build();
+    runner.state_mut().initiative = Some(P1);
+    runner.state_mut().waiting_for = WaitingFor::DeclareAttackers {
+        player: P0,
+        valid_attacker_ids: attackers.clone(),
+        valid_attack_targets: vec![AttackTarget::Player(P1)],
+        valid_attack_targets_by_attacker: None,
+        attacker_constraints: Default::default(),
+    };
+
+    let mut taken_by_p0 = 0;
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: attackers
+                .iter()
+                .map(|id| (*id, AttackTarget::Player(P1)))
+                .collect(),
+            bands: vec![],
+        })
+        .expect("declare attackers");
+    for _ in 0..300 {
+        if runner.state().phase == Phase::PostCombatMain {
+            break;
+        }
+        if matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
+            engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
+            continue;
+        }
+        let action = match &runner.state().waiting_for {
+            WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                assignments: vec![],
+            },
+            WaitingFor::SearchChoice { cards, count, .. } => {
+                let pick: Vec<_> = cards.iter().take(*count).copied().collect();
+                GameAction::SelectCards { cards: pick }
+            }
+            WaitingFor::TriggerTargetSelection { target_slots, .. } => {
+                let target = target_slots[0]
+                    .legal_targets
+                    .first()
+                    .cloned()
+                    .expect("room trigger must offer a legal target");
+                GameAction::SelectTargets {
+                    targets: vec![target],
+                }
+            }
+            // Only reachable while the bug is present (a second venture
+            // advances out of Secret Entrance): answer it so the run can
+            // complete and the over-count is observable below.
+            WaitingFor::ChooseDungeonRoom { options, .. } => GameAction::ChooseDungeonRoom {
+                room_index: options[0].index,
+            },
+            _ => GameAction::PassPriority,
+        };
+        let result = runner.act(action).expect("combat advances");
+        taken_by_p0 += result
+            .events
+            .iter()
+            .filter(|e| matches!(e, GameEvent::InitiativeTaken { player_id } if *player_id == P0))
+            .count();
+    }
+    assert_eq!(
+        runner.state().initiative,
+        Some(P0),
+        "P0 ends the turn with the initiative"
+    );
+    let progress = &runner.state().dungeon_progress[&P0];
+    assert_eq!(
+        progress.current_dungeon,
+        Some(DungeonId::Undercity),
+        "the steal ventures into Undercity"
+    );
+    (taken_by_p0, Some(progress.current_room))
 }
 
 fn drain_to_priority(runner: &mut GameRunner) {

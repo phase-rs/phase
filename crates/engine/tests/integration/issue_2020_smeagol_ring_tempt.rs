@@ -47,9 +47,9 @@ fn smeagol_ring_tempt_reveal_steals_opponent_land() {
     }
 
     let trigger = &runner.state().objects[&smeagol].trigger_definitions[0];
-    assert_eq!(trigger.mode, TriggerMode::RingTemptsYou);
+    assert_eq!(trigger.definition.mode, TriggerMode::RingTemptsYou);
     assert_eq!(
-        trigger.valid_target,
+        trigger.definition.valid_target,
         Some(TargetFilter::Player),
         "parser must surface opponent player target for RevealUntil"
     );

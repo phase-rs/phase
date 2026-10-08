@@ -2,7 +2,7 @@
 //!
 //! The Cloudflare Worker shell validates through [`crate::protocol::parse_lobby_client_message`],
 //! which calls [`crate::validation::validate_lobby_message`]. The native `phase-server` shell
-//! deserializes the wider [`server_core::protocol::ClientMessage`] and projects lobby frames
+//! deserializes the wider `server_core::protocol::ClientMessage` and projects lobby frames
 //! onto [`crate::protocol::LobbyClientMessage`] without re-parsing, so those frames must be
 //! checked here before any handler runs. Without this gate, oversized display names, passwords,
 //! and deck payloads can be stored, cloned, and broadcast to every lobby subscriber.
@@ -101,6 +101,7 @@ pub struct CreateGameSettingsInbound<'a> {
     pub room_name: Option<&'a str>,
     pub host_peer_id: Option<&'a str>,
     pub draft_metadata: Option<&'a DraftLobbyMetadata>,
+    pub requested_code: Option<&'a str>,
 }
 
 /// Validate a settings-create frame without constructing the owned broker enum.
@@ -115,6 +116,7 @@ pub fn validate_create_game_settings_inbound_fields(
         room_name: fields.room_name,
         host_peer_id: fields.host_peer_id,
         draft_metadata: fields.draft_metadata,
+        requested_code: fields.requested_code,
     })
 }
 
@@ -125,6 +127,7 @@ pub fn guard_create_game_settings_inbound(
     validate_create_game_settings_inbound_fields(&fields)?;
     if let Some(format_config) = fields.format_config {
         format_config.validate_for_player_count(fields.player_count.clamp(2, MAX_PLAYER_COUNT))?;
+        format_config.reject_unimplemented_range_of_influence()?;
     }
     validate_deck_payload("deck", fields.deck)
 }
@@ -172,6 +175,7 @@ pub fn guard_inbound(msg: &LobbyClientMessage) -> Result<(), String> {
             room_name,
             host_peer_id,
             draft_metadata,
+            requested_code,
             ..
         } => guard_create_game_settings_inbound(CreateGameSettingsInbound {
             deck,
@@ -183,6 +187,7 @@ pub fn guard_inbound(msg: &LobbyClientMessage) -> Result<(), String> {
             room_name: room_name.as_deref(),
             host_peer_id: host_peer_id.as_deref(),
             draft_metadata: draft_metadata.as_ref(),
+            requested_code: requested_code.as_deref(),
         })?,
         LobbyClientMessage::JoinGameWithPassword {
             game_code,
@@ -226,10 +231,33 @@ mod tests {
             room_name: None,
             host_peer_id: None,
             draft_metadata: None,
+            requested_code: None,
         })
         .unwrap_err();
 
         assert!(err.contains("main_deck"));
+    }
+
+    #[test]
+    fn borrowed_create_guard_rejects_malformed_requested_code() {
+        let deck = deck(1, 0);
+        let guard = |requested_code: Option<&str>| {
+            guard_create_game_settings_inbound(CreateGameSettingsInbound {
+                deck: &deck,
+                display_name: "Host",
+                password: None,
+                timer_seconds: None,
+                player_count: 2,
+                format_config: None,
+                room_name: None,
+                host_peer_id: None,
+                draft_metadata: None,
+                requested_code,
+            })
+        };
+        let err = guard(Some("bad")).unwrap_err();
+        assert!(err.contains("requested_code"), "{err}");
+        assert!(guard(Some("AB12CD")).is_ok());
     }
 
     #[test]
@@ -245,6 +273,7 @@ mod tests {
             room_name: None,
             host_peer_id: None,
             draft_metadata: None,
+            requested_code: None,
         })
         .unwrap_err();
 
@@ -266,10 +295,65 @@ mod tests {
             room_name: None,
             host_peer_id: None,
             draft_metadata: None,
+            requested_code: None,
         })
         .unwrap_err();
 
         assert!(err.contains("archenemy_player"));
+    }
+
+    #[test]
+    fn borrowed_create_guard_rejects_limited_range_until_supported() {
+        let mut format_config = FormatConfig::standard();
+        format_config.range_of_influence =
+            Some(Box::new(engine::types::format::RangeOfInfluenceConfig {
+                default_range: 0,
+                player_overrides: std::collections::BTreeMap::new(),
+            }));
+
+        let err = guard_create_game_settings_inbound(CreateGameSettingsInbound {
+            deck: &deck(1, 0),
+            display_name: "Host",
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            format_config: Some(&format_config),
+            room_name: None,
+            host_peer_id: None,
+            draft_metadata: None,
+            requested_code: None,
+        })
+        .unwrap_err();
+
+        assert!(err.contains("range_of_influence"));
+    }
+
+    /// Phase 1d production seam: `guard_create_game_settings_inbound` is the
+    /// only inbound gate `format_config.validate_for_player_count` runs
+    /// behind on this path — a deleted `?` here would leave an
+    /// out-of-registry-range `player_count` admitted straight through to
+    /// session creation. Commander's registry range is 2..=6; `player_count`
+    /// is clamped to `MAX_PLAYER_COUNT` (8) before the bounds check, so 8
+    /// still lands outside the range and must be rejected.
+    #[test]
+    fn borrowed_create_guard_rejects_player_count_outside_format_registry_range() {
+        let format_config = FormatConfig::commander();
+
+        let err = guard_create_game_settings_inbound(CreateGameSettingsInbound {
+            deck: &deck(1, 0),
+            display_name: "Host",
+            password: None,
+            timer_seconds: None,
+            player_count: 8,
+            format_config: Some(&format_config),
+            room_name: None,
+            host_peer_id: None,
+            draft_metadata: None,
+            requested_code: None,
+        })
+        .unwrap_err();
+
+        assert!(err.contains("player_count"));
     }
 
     #[test]
@@ -300,6 +384,7 @@ mod tests {
             room_name: None,
             host_peer_id: None,
             draft_metadata: None,
+            requested_code: None,
         })
         .unwrap_err();
 
@@ -336,6 +421,7 @@ mod tests {
             room_name: None,
             host_peer_id: None,
             draft_metadata: None,
+            requested_code: None,
         })
         .unwrap_err();
 

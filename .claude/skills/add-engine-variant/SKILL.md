@@ -20,7 +20,7 @@ If you find yourself about to type `pub enum Foo { ... NewVariant ... }` in `cra
 
 ### Stage 1: Existence verification (5-grep protocol)
 
-The variant might already exist under a different engine-native name. The mtgish AST and the engine vocabulary are not 1:1; the engine often has the concept under a different name.
+The variant might already exist under a different engine-native name. External data formats and the engine vocabulary are not 1:1; the engine often has the concept under a different name.
 
 > The canonical engine surface is `data/engine-inventory.json` (gitignored). Run `cargo engine-inventory` to (re)generate it locally before grepping for existing variants.
 
@@ -46,7 +46,7 @@ rg -n "<concept_keyword>" crates/engine/src/database/synthesis.rs
 **Stage 1 verdicts:**
 
 - **EXISTS_SAME_NAME**: variant exists. Stop. Wire to it.
-- **EXISTS_DIFFERENT_NAME**: concept exists under engine-native name (e.g., mtgish `CreateTriggerUntil` ↔ engine `Effect::CreateDelayedTrigger`). Stop. Map mtgish AST to the existing slot.
+- **EXISTS_DIFFERENT_NAME**: concept exists under an engine-native name (e.g., an external `CreateTriggerUntil` maps to engine `Effect::CreateDelayedTrigger`). Stop. Map the source data to the existing slot.
 - **EXISTS_AS_PARAMETER**: concept exists as a parameter value of a more general variant (e.g., "untapped" exists as `Tap { negated: true }`). Stop. Use the parameter form.
 - **DOES_NOT_EXIST**: proceed to Stage 2.
 
@@ -108,7 +108,7 @@ If you've made it through all three stages with EXTEND_OK / WITHIN_SECTION verdi
 
 1. **Verify CR annotation via grep.** Every new variant carries a CR number, and every CR number is verified by grepping `docs/MagicCompRules.txt` BEFORE the annotation is committed. The 701.x and 702.x ranges are arbitrary sequential assignments and are especially prone to hallucination — do not trust memory.
 
-2. **Update all exhaustive `match` statements.** Use `cargo check -p engine` to find them. NO wildcard fallback arms to silence the compiler — those mask future variant additions.
+2. **Update all exhaustive `match` statements.** Use `cargo check -p phase-engine` to find them. NO wildcard fallback arms to silence the compiler — those mask future variant additions.
 
 3. **Classify the variant in the fail-closed ability-scan walker.** If the enum is traversed by `crates/engine/src/game/ability_scan.rs` (the C0 classifier: `Effect`, `QuantityRef`, `QuantityExpr`, `TargetFilter`, `TriggerCondition`, `StaticCondition`, `ReplacementCondition`, `AbilityCondition`, `Duration`, `PlayerFilter`, `ObjectScope`, `ControllerRef`, and their sub-enums), a NEW *variant* fails to compile there (exhaustive, no `_` fallback) — add an explicit per-axis classification arm. A NEW *field on an EXISTING variant* is only caught if that variant's arm destructures without `..`: NONE arms and projected-resource (axis-3) arms already do (compiler-enforced), but CONSERVATIVE arms keep `..`. So if you add a read-bearing field to a variant the walker classifies as CONSERVATIVE, promote its arm to an explicit destructure and classify the field on every axis. The growing-cascade detector's soundness rests on axis 3, so a silently-dropped projected-resource read is a false combo-win.
 
@@ -118,7 +118,7 @@ If you've made it through all three stages with EXTEND_OK / WITHIN_SECTION verdi
 
    The profiler classification is NOT just kind+scope: three **decision-bearing boolean axes** directly drive `profiles_conflict`'s same-event discriminators, and each must be considered for every new variant/field. (a) `reads_member_bound` — does the resolution consult per-source bound storage (`TrackedSet`/`ExiledBySource`/chosen-attribute/attachment carriers, CR 603.10a look-back)? A missed `true` auto-orders distinct sources reading their own piles (the #5072 R3 HIGH-1 failure mode — Mimic Vat class). (b) `reads_event_live` — does it read the triggering object's CURRENT state (`EventSource`/`EventTarget` scopes, CR 608.2h)? (c) `writes_event_object` — does it mutate the shared event object? (b)×(c) together form the same-event write-then-read feed (`reads_and_writes_event_object()`, gated on `event_object_present` — the #5072 R4 failure mode). Mis-setting any of these is a same-event under-prompt (rules-wrong) or an unclassified over-prompt (sweep RED).
 
-   After classifying, **run the full-DB parity sweep** (`FORGE_TEST_FULL_DB=1 cargo test -p engine ordering_parity_sweep` — NOT in default CI, see #5073) and read the delta. The predicate-keyed conservative classes (`se_member_bound_class`, `se_event_object_class`) absorb new corpus members automatically — no allowlist edit for a conservative flip. But the genuine exact-sets (`SAME_EVENT_MEMBER_BOUND_GENUINE`, `SAME_EVENT_EVENT_OBJECT_GENUINE`) are completeness-asserted: if your new variant makes a card genuinely order-observable (order changes reachable outcome STATES, not merely choice points), the card must be ADDED to the const with per-card CR evidence — the assert failing is the system working, never suppress it with a floor bump.
+   After classifying, **run the full-DB parity sweep** (`FORGE_TEST_FULL_DB=1 cargo test -p phase-engine ordering_parity_sweep` — NOT in default CI, see #5073) and read the delta. The predicate-keyed conservative classes (`se_member_bound_class`, `se_event_object_class`) absorb new corpus members automatically — no allowlist edit for a conservative flip. But the genuine exact-sets (`SAME_EVENT_MEMBER_BOUND_GENUINE`, `SAME_EVENT_EVENT_OBJECT_GENUINE`) are completeness-asserted: if your new variant makes a card genuinely order-observable (order changes reachable outcome STATES, not merely choice points), the card must be ADDED to the const with per-card CR evidence — the assert failing is the system working, never suppress it with a floor bump.
 
 4. **Document runtime status.** If the variant is type-only (no runtime handler yet), add `// RUNTIME: TODO — converter accepts this; engine handler is a no-op stub. CR <X>` on the variant doc-comment. Type-only stubs are acceptable; silent runtime stubs are not.
 
@@ -131,7 +131,7 @@ If you've made it through all three stages with EXTEND_OK / WITHIN_SECTION verdi
 ## Anti-patterns this skill prevents
 
 - "Audit said add variant X" → adding sibling without verification (the audit is wrong about a third of the time per session metrics)
-- "Engine doesn't have it" → without grepping for engine-native names (CreateTriggerUntil mtgish ↔ CreateDelayedTrigger engine)
+- "Engine doesn't have it" → without grepping for engine-native names (external CreateTriggerUntil ↔ CreateDelayedTrigger engine)
 - "Just one more sibling" → ignoring the sibling-cluster smell and compounding parameterization debt
 - "Unify under one type" → crossing CR rule sections and conflating runtime resolvers
 - "Type-only stub returning a placeholder true/false" → masks runtime correctness; pair with real evaluation logic before shipping. The historical example: `ReplacementCondition::CastViaKicker` initially shipped with a `=> true` stub that silently over-applied to non-kicked spells. Resolved by adding `Option<KickerVariant>` to the variant and tracking `SpellContext.kickers_paid` at cast resolution — the runtime now actually evaluates the gate. Always verify the resolver does what the variant doc-comment claims.
@@ -150,7 +150,6 @@ Refusing is the correct outcome when any stage fails. Coverage waits, architectu
 ## Related artifacts
 
 - Workspace `CLAUDE.md` — "Parameterize, don't proliferate" principle (the policy this skill enforces)
-- Crate `mtgish-import/CLAUDE.md` Rule §8 — audit-verdict filter discipline
 - Memory note `feedback_parameterize_dont_proliferate.md` — user directive recording this as a hard rule
 
 ## Inputs / outputs

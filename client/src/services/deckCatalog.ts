@@ -12,6 +12,7 @@ import {
   loadDeckOrigins,
   loadSavedDeck,
   loadSavedDeckBracket,
+  loadSavedDeckFormat,
 } from "../constants/storage";
 import type { CommanderBracket } from "../types/bracket";
 import { getPreconBracket } from "../data/preconBrackets";
@@ -82,9 +83,11 @@ export function knownFormatForSavedDeck(
   feedCache?: Record<string, Feed>,
 ): GameFormat | undefined {
   const origin = getDeckFeedOrigin(deckName);
-  if (!origin) return undefined;
-  const feed = feedCache?.[origin] ?? getCachedFeed(origin);
-  return registeredFeedFormat(origin, feed?.format);
+  if (origin) {
+    const feed = feedCache?.[origin] ?? getCachedFeed(origin);
+    return registeredFeedFormat(origin, feed?.format);
+  }
+  return sourceFormatToGameFormat(loadSavedDeckFormat(deckName));
 }
 
 function cachedFeed(feedId: string, feedCache?: Record<string, Feed>): Feed | null {
@@ -145,7 +148,7 @@ export async function buildDeckCatalog({
       name,
       source: origin ? { type: "saved", feedId: origin } : { type: "saved" },
       deck,
-      knownFormat: origin ? registeredFeedFormat(origin, cachedFeed(origin, feedCache)?.format) : undefined,
+      knownFormat: knownFormatForSavedDeck(name, feedCache),
       bracket: loadSavedDeckBracket(name),
     });
     savedDisplayNames.add(name);

@@ -88,77 +88,169 @@ expression: "&ir"
         "fragment": "Target creature can't be the target of spells or abilities your opponents control this turn. If this spell was kicked, that creature gets +4/+4 until end of turn."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "GenericEffect",
-            "static_abilities": [
+        "Spell": {
+          "source_text": "Target creature can't be the target of spells or abilities your opponents control this turn. If this spell was kicked, that creature gets +4/+4 until end of turn.",
+          "body": {
+            "clauses": [
               {
-                "mode": "Continuous",
-                "affected": {
-                  "type": "ParentTarget"
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 91,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Target creature can't be the target of spells or abilities your opponents control this turn"
                 },
-                "modifications": [
-                  {
-                    "type": "AddKeyword",
-                    "keyword": "Hexproof"
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
                   }
-                ],
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "GenericEffect",
+                    "static_abilities": [
+                      {
+                        "mode": "Continuous",
+                        "affected": {
+                          "type": "ParentTarget"
+                        },
+                        "modifications": [
+                          {
+                            "type": "AddKeyword",
+                            "keyword": "Hexproof"
+                          }
+                        ],
+                        "condition": null,
+                        "affected_zone": null,
+                        "effect_zone": null,
+                        "active_zones": [],
+                        "characteristic_defining": false,
+                        "description": "can't be the target of spells or abilities your opponents control"
+                      }
+                    ],
+                    "duration": "UntilEndOfTurn",
+                    "target": {
+                      "type": "Typed",
+                      "type_filters": [
+                        "Creature"
+                      ],
+                      "controller": null,
+                      "properties": []
+                    }
+                  },
+                  "duration": "UntilEndOfTurn",
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
                 "condition": null,
-                "affected_zone": null,
-                "effect_zone": null,
-                "active_zones": [],
-                "characteristic_defining": false,
-                "description": "can't be the target of spells or abilities your opponents control"
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              },
+              {
+                "id": 1,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 2
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 93,
+                    "end_byte": 161,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 1
+                  },
+                  "fragment": "If this spell was kicked, that creature gets +4/+4 until end of turn"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Pump",
+                    "power": {
+                      "type": "Fixed",
+                      "value": 4
+                    },
+                    "toughness": {
+                      "type": "Fixed",
+                      "value": 4
+                    },
+                    "target": {
+                      "type": "ParentTarget"
+                    }
+                  },
+                  "duration": "UntilEndOfTurn",
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": {
+                  "type": "AdditionalCostPaid"
+                },
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               }
             ],
-            "duration": "UntilEndOfTurn",
-            "target": {
-              "type": "Typed",
-              "type_filters": [
-                "Creature"
-              ],
-              "controller": null,
-              "properties": []
-            }
-          },
-          "cost": null,
-          "sub_ability": {
             "kind": "Spell",
-            "effect": {
-              "type": "Pump",
-              "power": {
-                "type": "Fixed",
-                "value": 4
-              },
-              "toughness": {
-                "type": "Fixed",
-                "value": 4
-              },
-              "target": {
-                "type": "ParentTarget"
-              }
-            },
-            "cost": null,
-            "sub_ability": null,
-            "duration": "UntilEndOfTurn",
-            "description": null,
-            "target_prompt": null,
-            "condition": {
-              "type": "AdditionalCostPaid"
-            },
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false,
-            "sub_link": "SequentialSibling"
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
           },
-          "duration": "UntilEndOfTurn",
-          "description": "Target creature can't be the target of spells or abilities your opponents control this turn. If this spell was kicked, that creature gets +4/+4 until end of turn.",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "shell": {
+            "sub_link": null
+          },
+          "die_results": [],
+          "root_transforms": [
+            {
+              "SetMinXValue": 0
+            },
+            {
+              "SetDescription": "Target creature can't be the target of spells or abilities your opponents control this turn. If this spell was kicked, that creature gets +4/+4 until end of turn."
+            }
+          ]
         }
       }
     }

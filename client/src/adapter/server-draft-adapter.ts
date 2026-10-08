@@ -1,4 +1,5 @@
 import type {
+  AbilityBlockEntry,
   EngineAdapter,
   EngineSnapshot,
   GameAction,
@@ -7,15 +8,23 @@ import type {
   GameState,
   LegalActionsResult,
   ManaCost,
+  ObjectAction,
+  ObjectId,
   PlayerId,
   SubmitResult,
 } from "./types";
-import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, nextSnapshotSeq } from "./types";
+import type {
+  InteractionPreview,
+  InteractionPreviewRequest,
+  InteractionSubmission,
+} from "./generated/interaction";
+import { actionRejectionError, AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, isActionRejection, nextSnapshotSeq } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import {
   HandshakeError,
   openPhaseSocket,
   type PhaseSocket,
+  type PhaseSocketTransport,
 } from "../services/openPhaseSocket";
 import { isValidWebSocketUrl } from "../services/serverDetection";
 import type {
@@ -23,8 +32,10 @@ import type {
   StandingEntry,
   TournamentFormat,
   PodPolicy,
+  DraftKind,
+  SharedStackPileDecision,
 } from "./draft-adapter";
-import type { ServerInfo } from "./ws-adapter";
+import type { FullSessionKey, ServerInfo } from "./ws-adapter";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -36,17 +47,42 @@ export type DraftPhase =
   | "between_rounds"
   | "complete";
 
+/**
+ * Client intent for a server-hosted set draft. This is intentionally not the
+ * persisted engine `DraftSource`: a Chaos request names candidate sets only,
+ * and the native server privately resolves its per-seat pack assignments.
+ */
+export type DraftSourceIntent =
+  | { type: "Uniform"; data: { set_codes: string[] } }
+  | { type: "Chaos"; data: { candidate_codes: string[] } };
+
 /** Settings for creating a new server-hosted draft pod. */
 export interface CreateDraftSettings {
   displayName: string;
-  setCode: string;
-  kind: "Premier" | "Traditional";
+  /**
+   * The set filling each booster, in pack order. One entry per pack the pod
+   * opens; the same set may fill several, and a one-element list fills every
+   * booster (the server repeats the last entry). Mirrors the wire field
+   * Legacy UI input for a Uniform source. New callers may pass `source`
+   * directly; the adapter always serializes the tagged source boundary.
+   */
+  setCodes?: string[];
+  /** Canonical server source intent. Never contains Chaos assignments. */
+  source?: DraftSourceIntent;
+  kind: Exclude<DraftKind, "Quick">;
   public: boolean;
   password?: string;
   timerSeconds?: number;
   tournamentFormat: TournamentFormat;
   podPolicy: PodPolicy;
   podSize: number;
+}
+
+function draftSourceIntent(settings: CreateDraftSettings): DraftSourceIntent {
+  return settings.source ?? {
+    type: "Uniform",
+    data: { set_codes: settings.setCodes ?? [] },
+  };
 }
 
 /** Events emitted by ServerDraftAdapter for UI state updates. */
@@ -60,12 +96,26 @@ export type ServerDraftAdapterEvent =
   | { type: "draftActionRejected"; reason: string }
   | { type: "gameStateUpdated"; state: GameState; events: GameEvent[]; legalResult: LegalActionsResult; logEntries?: GameLogEntry[] }
   | { type: "gameOver"; winner: PlayerId | null; reason: string }
+  | { type: "opponentDisconnected"; graceSeconds: number }
+  | { type: "opponentReconnected" }
   | { type: "actionPendingChanged"; pending: boolean }
   | { type: "disconnected" }
   | { type: "reconnected" }
   | { type: "error"; message: string };
 
 type ServerDraftAdapterEventListener = (event: ServerDraftAdapterEvent) => void;
+
+function fullSessionKeysEqual(
+  left: FullSessionKey | null | undefined,
+  right: FullSessionKey | null | undefined,
+): boolean {
+  return left !== null
+    && left !== undefined
+    && right !== null
+    && right !== undefined
+    && left.game_code === right.game_code
+    && left.generation === right.generation;
+}
 
 // ── ServerDraftAdapter ──────────────────────────────────────────────────
 
@@ -102,11 +152,24 @@ export class ServerDraftAdapter implements EngineAdapter {
   private _playerId: PlayerId | null = null;
   private activeMatchId: string | null = null;
   private _gameCode: string | null = null;
+  /** Full match lifetime announced by DraftMatchStart. */
+  private activeFullKey: FullSessionKey | null = null;
+  /** Full match lifetime whose matching GameStarted has been accepted. */
+  private acceptedFullKey: FullSessionKey | null = null;
 
   // ── Infrastructure ─────────────────────────────────────────────────
-  private ws: WebSocket | null = null;
+  private ws: PhaseSocketTransport | null = null;
   private pendingResolve: ((result: SubmitResult) => void) | null = null;
   private pendingReject: ((error: Error) => void) | null = null;
+  private nextManaPaymentPreviewRequestId = 1;
+  private pendingManaPaymentPreviews = new Map<
+    number,
+    { resolve: (sourceIds: ObjectId[]) => void; reject: (error: Error) => void }
+  >();
+  private pendingInteractionPreviews = new Map<
+    string,
+    { resolve: (preview: InteractionPreview) => void; reject: (error: Error) => void }
+  >();
   private draftResolve: ((view: DraftPlayerView) => void) | null = null;
   private draftReject: ((error: Error) => void) | null = null;
   private initResolve: (() => void) | null = null;
@@ -172,6 +235,7 @@ export class ServerDraftAdapter implements EngineAdapter {
   }
 
   async submitAction(action: GameAction, _actor: PlayerId): Promise<SubmitResult> {
+    this.assertNoPendingSubmission();
     if (this.phase !== "match") {
       throw new AdapterError("PHASE_ERROR", "Not in a match phase", false);
     }
@@ -179,15 +243,103 @@ export class ServerDraftAdapter implements EngineAdapter {
       throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
     }
 
-    this.emit({ type: "actionPendingChanged", pending: true });
+    return this.submitGameFrame(
+      { type: "Action", data: { action } },
+      new AdapterError("WS_CLOSED", "Failed to send action", true),
+    );
+  }
+
+  async submitInteraction(
+    submission: InteractionSubmission,
+    _actor: PlayerId,
+  ): Promise<SubmitResult> {
+    this.assertNoPendingSubmission();
+    if (this.phase !== "match") {
+      throw new AdapterError("PHASE_ERROR", "Not in a match phase", false);
+    }
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
+    }
+
+    return this.submitGameFrame(
+      { type: "Interaction", data: { submission } },
+      new AdapterError("WS_CLOSED", "Failed to send interaction", true),
+    );
+  }
+
+  private assertNoPendingSubmission(): void {
+    if (this.pendingResolve !== null || this.pendingReject !== null) {
+      throw new AdapterError(
+        AdapterErrorCode.ACTION_NOT_SENT,
+        "Another game submission is pending; this submission was not sent.",
+        true,
+      );
+    }
+  }
+
+  private submitGameFrame(frame: unknown, sendFailure: AdapterError): Promise<SubmitResult> {
     return new Promise<SubmitResult>((resolve, reject) => {
+      // Claim before emitting: event listeners run synchronously and may submit
+      // again while handling actionPendingChanged.
       this.pendingResolve = resolve;
       this.pendingReject = reject;
-      if (!this.send({ type: "Action", data: { action } })) {
+      try {
+        this.emit({ type: "actionPendingChanged", pending: true });
+      } catch (error) {
+        if (this.pendingResolve === resolve) {
+          this.pendingResolve = null;
+          this.pendingReject = null;
+        }
+        reject(error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
+      // A synchronous listener may close/dispose the adapter or otherwise
+      // settle this slot. Do not send after that owner has been released.
+      if (this.pendingResolve !== resolve) return;
+      if (!this.send(frame) && this.pendingResolve === resolve) {
         this.pendingResolve = null;
         this.pendingReject = null;
         this.emit({ type: "actionPendingChanged", pending: false });
-        reject(new AdapterError("WS_CLOSED", "Failed to send action", true));
+        reject(sendFailure);
+      }
+    });
+  }
+
+  async previewManaPayment(action: GameAction, _actor: PlayerId): Promise<ObjectId[]> {
+    if (this.phase !== "match") {
+      throw new AdapterError("PHASE_ERROR", "Not in a match phase", false);
+    }
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
+    }
+
+    const requestId = this.nextManaPaymentPreviewRequestId++;
+    return new Promise<ObjectId[]>((resolve, reject) => {
+      this.pendingManaPaymentPreviews.set(requestId, { resolve, reject });
+      if (!this.send({ type: "PreviewManaPayment", data: { request_id: requestId, action } })) {
+        this.pendingManaPaymentPreviews.delete(requestId);
+        reject(new AdapterError("WS_CLOSED", "Failed to send mana-payment preview", true));
+      }
+    });
+  }
+
+  async previewInteraction(
+    request: InteractionPreviewRequest,
+    _actor: PlayerId,
+  ): Promise<InteractionPreview> {
+    if (this.phase !== "match") {
+      throw new AdapterError("PHASE_ERROR", "Not in a match phase", false);
+    }
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
+    }
+
+    return new Promise<InteractionPreview>((resolve, reject) => {
+      this.pendingInteractionPreviews.set(request.requestId, { resolve, reject });
+      // `request` is forwarded VERBATIM — no field is read, reshaped or rebuilt.
+      if (!this.send({ type: "PreviewInteraction", data: { request } })) {
+        this.pendingInteractionPreviews.delete(request.requestId);
+        reject(new AdapterError("WS_CLOSED", "Failed to send interaction preview", true));
       }
     });
   }
@@ -197,10 +349,6 @@ export class ServerDraftAdapter implements EngineAdapter {
       throw new AdapterError("WS_ERROR", "No game state available", false);
     }
     return this.snapshot.state;
-  }
-
-  getAiAction(): GameAction | null {
-    return null;
   }
 
   async getLegalActions(): Promise<LegalActionsResult> {
@@ -251,7 +399,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         type: "CreateDraftWithSettings",
         data: {
           display_name: settings.displayName,
-          set_code: settings.setCode,
+          source: draftSourceIntent(settings),
           kind: settings.kind,
           public: settings.public,
           password: settings.password ?? null,
@@ -266,14 +414,53 @@ export class ServerDraftAdapter implements EngineAdapter {
     });
   }
 
+  /**
+   * Claim the single `draftResolve`/`draftReject` pair for one action.
+   *
+   * THE PAIR IS ONE SLOT, AND EVERY ACTION WANTED IT. `joinDraft`, `submitPick`,
+   * `submitSharedStackDecision` and `submitDeck` each assigned straight into it.
+   * A second action overwrote the first's callbacks, and the next
+   * `DraftStateUpdate` resolved only the survivor and nulled both -- so the
+   * first caller's promise never settled at all. Not a lost result: a
+   * permanently pending `await`, with whatever UI awaited it stuck behind it.
+   *
+   * Single-flight rather than request correlation, because the wire carries no
+   * correlation id: `DraftAction` frames are unlabelled and the server answers
+   * with a bare `DraftStateUpdate`. Adding an id is a protocol change; refusing
+   * to have two in flight is not, and these actions are user-initiated and
+   * mutually exclusive by phase anyway. The refusal is explicit and immediate,
+   * which is the part that matters -- the caller learns now instead of awaiting
+   * forever.
+   *
+   * "In flight" is read off the pair itself rather than a parallel flag, so the
+   * two cannot drift: all sixteen settle sites already null both together, and
+   * each is therefore a release.
+   */
+  private claimDraftAction(
+    action: string,
+    resolve: (view: DraftPlayerView) => void,
+    reject: (error: Error) => void,
+  ): boolean {
+    if (this.draftResolve !== null || this.draftReject !== null) {
+      reject(new AdapterError(
+        "PHASE_ERROR",
+        `Another draft action is still in flight; ${action} was not sent`,
+        false,
+      ));
+      return false;
+    }
+    this.draftResolve = resolve;
+    this.draftReject = reject;
+    return true;
+  }
+
   async joinDraft(
     draftCode: string,
     displayName: string,
     password?: string,
   ): Promise<DraftPlayerView> {
     return new Promise<DraftPlayerView>((resolve, reject) => {
-      this.draftResolve = resolve;
-      this.draftReject = reject;
+      if (!this.claimDraftAction("JoinDraft", resolve, reject)) return;
 
       if (!isValidWebSocketUrl(this.serverUrl)) {
         reject(new AdapterError("WS_ERROR", "Invalid WebSocket URL", false));
@@ -300,15 +487,14 @@ export class ServerDraftAdapter implements EngineAdapter {
       throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
     }
     return new Promise<DraftPlayerView>((resolve, reject) => {
-      this.draftResolve = resolve;
-      this.draftReject = reject;
+      if (!this.claimDraftAction("Pick", resolve, reject)) return;
       const sent = this.send({
         type: "DraftAction",
         data: {
           draft_code: this.draftCode,
           action: {
             type: "Pick",
-            data: { seat: this.seatIndex, card_instance_id: cardInstanceId },
+            data: { seat: this.seatIndex, card_instance_ids: [cardInstanceId] },
           },
         },
       });
@@ -320,20 +506,62 @@ export class ServerDraftAdapter implements EngineAdapter {
     });
   }
 
-  async submitDeck(mainDeck: string[]): Promise<DraftPlayerView> {
+  /**
+   * One whole shared-stack turn decision on the server-authoritative path.
+   *
+   * This exists because `CreateDraftSettings.kind` is
+   * `Exclude<DraftKind, "Quick">`, which admits `"Winston"` the moment the
+   * union widens — a creatable kind with no way to send its only action would
+   * be a half-extension. No shipped UI drives this path today (a P2P pod is
+   * where Winston is played), but a wire client and any future UI use it.
+   *
+   * `pile` is the optimistic-concurrency check against the engine's cursor;
+   * legality is `shared_stack::refusal_for`'s, server-side.
+   */
+  async submitSharedStackDecision(
+    pile: number,
+    decision: SharedStackPileDecision,
+  ): Promise<DraftPlayerView> {
     if (this.seatIndex === null || this.draftCode === null) {
       throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
     }
     return new Promise<DraftPlayerView>((resolve, reject) => {
-      this.draftResolve = resolve;
-      this.draftReject = reject;
+      if (!this.claimDraftAction("SharedStackDecision", resolve, reject)) return;
+      const sent = this.send({
+        type: "DraftAction",
+        data: {
+          draft_code: this.draftCode,
+          action: {
+            type: "SharedStackDecision",
+            data: { seat: this.seatIndex, pile, decision },
+          },
+        },
+      });
+      if (!sent) {
+        this.draftResolve = null;
+        this.draftReject = null;
+        reject(new AdapterError("WS_CLOSED", "Failed to send draft action", true));
+      }
+    });
+  }
+
+  async submitDeck(mainDeck: string[], commanders: string[]): Promise<DraftPlayerView> {
+    if (this.seatIndex === null || this.draftCode === null) {
+      throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
+    }
+    return new Promise<DraftPlayerView>((resolve, reject) => {
+      if (!this.claimDraftAction("SubmitDeck", resolve, reject)) return;
       const sent = this.send({
         type: "DraftAction",
         data: {
           draft_code: this.draftCode,
           action: {
             type: "SubmitDeck",
-            data: { seat: this.seatIndex, main_deck: mainDeck },
+            // Key order mirrors the Rust struct's field order (`seat`,
+            // `main_deck`, `commanders`). `private send(msg: unknown)` means
+            // no typechecker sees this payload, so the byte-exact
+            // `JSON.stringify` assertion in the suite is what pins it.
+            data: { seat: this.seatIndex, main_deck: mainDeck, commanders },
           },
         },
       });
@@ -430,6 +658,12 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.pendingResolve = null;
         this.pendingReject = null;
       }
+      this.rejectPendingManaPaymentPreviews(
+        new AdapterError("WS_CLOSED", "Connection closed during mana-payment preview", true),
+      );
+      this.rejectPendingInteractionPreviews(
+        new AdapterError("WS_CLOSED", "Connection closed during interaction preview", true),
+      );
       if (this.draftReject) {
         this.draftReject(
           new AdapterError("WS_CLOSED", "Connection closed during draft operation", true),
@@ -525,21 +759,60 @@ export class ServerDraftAdapter implements EngineAdapter {
           match_id: string;
           round: number;
           game_code: string;
+          full_key?: FullSessionKey;
           player_token: string;
           your_player: PlayerId;
           opponent_name: string;
         };
+        if (
+          !data.full_key
+          || data.full_key.game_code !== data.game_code
+          || data.full_key.generation < 1
+        ) {
+          this.emit({
+            type: "error",
+            message: "Server omitted a valid Full session identity for the draft match.",
+          });
+          break;
+        }
+        const sameMatch =
+          this.activeMatchId === data.match_id
+          && this._gameCode === data.game_code
+          && this._playerId === data.your_player
+          && fullSessionKeysEqual(this.activeFullKey, data.full_key);
+        if (!sameMatch) {
+          this.snapshot = null;
+          this.acceptedFullKey = null;
+        }
         this.phase = "match";
         this.activeMatchId = data.match_id;
         this._playerId = data.your_player;
         this._gameCode = data.game_code;
-        this.emit({
-          type: "matchStarting",
-          matchId: data.match_id,
-          round: data.round,
-          opponentName: data.opponent_name,
-          gameCode: data.game_code,
-        });
+        this.draftToken = data.player_token;
+        this.activeFullKey = data.full_key;
+        if (!sameMatch) {
+          if (this.draftCode && this.draftToken) {
+            this.send({
+              type: "ReconnectDraft",
+              data: {
+                draft_code: this.draftCode,
+                player_token: this.draftToken,
+              },
+            });
+          } else {
+            this.emit({
+              type: "error",
+              message: "Cannot attach draft match without draft credentials.",
+            });
+          }
+          this.emit({
+            type: "matchStarting",
+            matchId: data.match_id,
+            round: data.round,
+            opponentName: data.opponent_name,
+            gameCode: data.game_code,
+          });
+        }
         break;
       }
 
@@ -576,17 +849,35 @@ export class ServerDraftAdapter implements EngineAdapter {
           your_player: PlayerId;
           legal_actions?: GameAction[];
           auto_pass_recommended?: boolean;
+          end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"];
+          mana_payment_shortcut_actions?: GameAction[];
           spell_costs?: Record<string, ManaCost>;
-          legal_actions_by_object?: Record<string, GameAction[]>;
+          legal_actions_by_object?: Record<string, ObjectAction[]>;
+          activation_block_reasons?: Record<string, AbilityBlockEntry[]>;
+          viewer_interaction?: LegalActionsResult["viewerInteraction"];
           derived?: GameState["derived"];
+          full_key?: FullSessionKey;
         };
+        if (
+          this.activeMatchId === null
+          || this._gameCode === null
+          || this._playerId !== data.your_player
+          || !fullSessionKeysEqual(data.full_key, this.activeFullKey)
+        ) {
+          break;
+        }
+        this.acceptedFullKey = data.full_key ?? null;
         const startedSnapshot = this.cacheSnapshot(
           { ...data.state, derived: data.derived ?? data.state.derived },
           {
             actions: data.legal_actions ?? [],
             autoPassRecommended: data.auto_pass_recommended ?? false,
+            endContinuousEffectOffers: data.end_continuous_effect_offers ?? [],
+            manaPaymentShortcutActions: data.mana_payment_shortcut_actions ?? [],
             spellCosts: data.spell_costs,
             legalActionsByObject: data.legal_actions_by_object,
+            activationBlockReasons: data.activation_block_reasons,
+            viewerInteraction: data.viewer_interaction,
           },
         );
         this._playerId = data.your_player;
@@ -605,18 +896,30 @@ export class ServerDraftAdapter implements EngineAdapter {
           events: GameEvent[];
           legal_actions?: GameAction[];
           auto_pass_recommended?: boolean;
+          end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"];
+          mana_payment_shortcut_actions?: GameAction[];
           spell_costs?: Record<string, ManaCost>;
-          legal_actions_by_object?: Record<string, GameAction[]>;
+          legal_actions_by_object?: Record<string, ObjectAction[]>;
+          activation_block_reasons?: Record<string, AbilityBlockEntry[]>;
+          viewer_interaction?: LegalActionsResult["viewerInteraction"];
           log_entries?: GameLogEntry[];
           derived?: GameState["derived"];
+          full_key?: FullSessionKey;
         };
+        if (!fullSessionKeysEqual(data.full_key, this.acceptedFullKey)) {
+          break;
+        }
         const updateSnapshot = this.cacheSnapshot(
           { ...data.state, derived: data.derived ?? data.state.derived },
           {
             actions: data.legal_actions ?? [],
             autoPassRecommended: data.auto_pass_recommended ?? false,
+            endContinuousEffectOffers: data.end_continuous_effect_offers ?? [],
+            manaPaymentShortcutActions: data.mana_payment_shortcut_actions ?? [],
             spellCosts: data.spell_costs,
             legalActionsByObject: data.legal_actions_by_object,
+            activationBlockReasons: data.activation_block_reasons,
+            viewerInteraction: data.viewer_interaction,
           },
         );
         if (this.pendingResolve) {
@@ -637,14 +940,111 @@ export class ServerDraftAdapter implements EngineAdapter {
       }
 
       case "ActionRejected": {
-        const data = msg.data as { reason: string };
+        const data = msg.data as { rejection?: unknown };
         this.emit({ type: "actionPendingChanged", pending: false });
         if (this.pendingReject) {
+          // Game-phase action rejection. `ServerDraftAdapter` is a full
+          // `EngineAdapter` once the pod's game starts, so it must classify the
+          // engine's stale verdicts exactly as the WebSocket and P2P transports
+          // do — otherwise a stale `ReorderHand` in a server-hosted draft game
+          // still surfaces as the red recoverable error this PR removes
+          // everywhere else.
+          //
+          // The mana-payment preview handler below routes through the same
+          // classifier. Deliberately NOT applied to `DraftActionRejected`: that
+          // carries a pick/pass rejection, which is not a `GameAction` at all,
+          // so no stale-action verdict is possible — it is a separate draft
+          // protocol concern and stays a plain recoverable rejection.
           this.pendingReject(
-            new AdapterError("ACTION_REJECTED", data.reason, true),
+            isActionRejection(data.rejection)
+              ? actionRejectionError(data.rejection)
+              : new AdapterError(AdapterErrorCode.WASM_ERROR, "Server sent an invalid action rejection.", false),
           );
           this.pendingResolve = null;
           this.pendingReject = null;
+        }
+        break;
+      }
+
+      case "ActionFailed": {
+        const data = msg.data as { message: string };
+        if (this.pendingReject) {
+          this.emit({ type: "actionPendingChanged", pending: false });
+          this.pendingReject(new AdapterError("WS_ERROR", data.message, false));
+          this.pendingResolve = null;
+          this.pendingReject = null;
+        } else {
+          this.emit({ type: "error", message: data.message });
+        }
+        break;
+      }
+
+      case "ActionNoOp": {
+        this.emit({ type: "actionPendingChanged", pending: false });
+        if (this.pendingResolve) {
+          this.pendingResolve({ events: [], log_entries: [] });
+          this.pendingResolve = null;
+          this.pendingReject = null;
+        }
+        break;
+      }
+
+      case "ManaPaymentPreview": {
+        const data = msg.data as { request_id: number; source_ids: ObjectId[] };
+        const pending = this.pendingManaPaymentPreviews.get(data.request_id);
+        if (pending) {
+          this.pendingManaPaymentPreviews.delete(data.request_id);
+          pending.resolve(data.source_ids);
+        }
+        break;
+      }
+
+      case "ManaPaymentPreviewRejected": {
+        const data = msg.data as { request_id: number; rejection?: unknown };
+        const pending = this.pendingManaPaymentPreviews.get(data.request_id);
+        if (pending) {
+          this.pendingManaPaymentPreviews.delete(data.request_id);
+          // Same shared classifier as the action path above. A preview is
+          // answered against the same engine state an action would be, so it
+          // can carry the same stale verdict when the state moves underneath
+          // the request — and a stale preview is likewise void rather than
+          // retryable. Non-stale reasons still classify as recoverable
+          // ACTION_REJECTED, so existing surface/retry behavior is unchanged.
+          pending.reject(
+            isActionRejection(data.rejection)
+              ? actionRejectionError(data.rejection)
+              : new AdapterError(AdapterErrorCode.WASM_ERROR, "Server sent an invalid mana-payment rejection.", false),
+          );
+        }
+        break;
+      }
+
+      case "ManaPaymentPreviewFailed": {
+        const data = msg.data as { request_id: number; message: string };
+        const pending = this.pendingManaPaymentPreviews.get(data.request_id);
+        if (pending) {
+          this.pendingManaPaymentPreviews.delete(data.request_id);
+          pending.reject(new AdapterError("WS_ERROR", data.message, false));
+        }
+        break;
+      }
+
+      case "InteractionPreview": {
+        const data = msg.data as { preview: InteractionPreview };
+        const pending = this.pendingInteractionPreviews.get(data.preview.requestId);
+        if (pending) {
+          this.pendingInteractionPreviews.delete(data.preview.requestId);
+          pending.resolve(data.preview);
+        }
+        break;
+      }
+
+      case "InteractionPreviewFailed": {
+        const data = msg.data as { request_id: string; message: string };
+        const pending = this.pendingInteractionPreviews.get(data.request_id);
+        if (pending) {
+          this.pendingInteractionPreviews.delete(data.request_id);
+          pending.reject(new AdapterError("WS_ERROR", data.message, false));
         }
         break;
       }
@@ -656,6 +1056,8 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.phase = "between_rounds";
         this.activeMatchId = null;
         this._gameCode = null;
+        this.activeFullKey = null;
+        this.acceptedFullKey = null;
         this.snapshot = null;
         this.emit({ type: "actionPendingChanged", pending: false });
         this.emit({
@@ -663,6 +1065,29 @@ export class ServerDraftAdapter implements EngineAdapter {
           winner: data.winner,
           reason: data.reason,
         });
+        break;
+      }
+
+      case "OpponentDisconnected": {
+        const data = msg.data as {
+          grace_seconds: number;
+          full_key?: FullSessionKey;
+        };
+        if (!fullSessionKeysEqual(data.full_key, this.acceptedFullKey)) {
+          break;
+        }
+        this.emit({
+          type: "opponentDisconnected",
+          graceSeconds: data.grace_seconds,
+        });
+        break;
+      }
+
+      case "OpponentReconnected": {
+        const data = (msg.data ?? {}) as { full_key?: FullSessionKey };
+        if (fullSessionKeysEqual(data.full_key, this.acceptedFullKey)) {
+          this.emit({ type: "opponentReconnected" });
+        }
         break;
       }
 
@@ -770,6 +1195,20 @@ export class ServerDraftAdapter implements EngineAdapter {
     }
   }
 
+  private rejectPendingManaPaymentPreviews(error: Error): void {
+    for (const { reject } of this.pendingManaPaymentPreviews.values()) {
+      reject(error);
+    }
+    this.pendingManaPaymentPreviews.clear();
+  }
+
+  private rejectPendingInteractionPreviews(error: Error): void {
+    for (const { reject } of this.pendingInteractionPreviews.values()) {
+      reject(error);
+    }
+    this.pendingInteractionPreviews.clear();
+  }
+
   dispose(): void {
     this.disposed = true;
     if (this.pingInterval) {
@@ -788,12 +1227,35 @@ export class ServerDraftAdapter implements EngineAdapter {
     this.draftView = null;
     this.seatIndex = null;
     this.activeMatchId = null;
-    this.pendingResolve = null;
-    this.pendingReject = null;
-    this.draftResolve = null;
-    this.draftReject = null;
-    this.initResolve = null;
-    this.initReject = null;
+    this.activeFullKey = null;
+    this.acceptedFullKey = null;
+    if (this.pendingReject) {
+      this.pendingReject(
+        new AdapterError("WS_CLOSED", "Adapter disposed during action", true),
+      );
+      this.pendingResolve = null;
+      this.pendingReject = null;
+    }
+    this.rejectPendingManaPaymentPreviews(
+      new AdapterError("WS_CLOSED", "Adapter disposed during mana-payment preview", true),
+    );
+    this.rejectPendingInteractionPreviews(
+      new AdapterError("WS_CLOSED", "Adapter disposed during interaction preview", true),
+    );
+    if (this.draftReject) {
+      this.draftReject(
+        new AdapterError("WS_CLOSED", "Adapter disposed during draft operation", true),
+      );
+      this.draftResolve = null;
+      this.draftReject = null;
+    }
+    if (this.initReject) {
+      this.initReject(
+        new AdapterError("WS_CLOSED", "Adapter disposed before draft started", true),
+      );
+      this.initResolve = null;
+      this.initReject = null;
+    }
     this._serverInfo = null;
     this.emit({ type: "actionPendingChanged", pending: false });
     this.listeners = [];

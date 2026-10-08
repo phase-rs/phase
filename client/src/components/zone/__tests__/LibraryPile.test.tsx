@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -6,13 +6,16 @@ import {
   type GameAction,
   type GameObject,
 } from "../../../adapter/types.ts";
+import { useAnimationStore } from "../../../stores/animationStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
+import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
 import { buildGameObjectWithCoreTypes, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
 import { buildGameState, buildPlayers, buildPriorityWaitingFor } from "../../../test/factories/gameStateFactory.ts";
 import { LibraryPile } from "../LibraryPile.tsx";
 
 vi.mock("../../../hooks/useCardImage", () => ({
+  useCardBackImage: () => ({ src: "/test-card-back.png", isLoading: false }),
   useCardImage: () => ({ src: null, isLoading: false }),
 }));
 
@@ -46,6 +49,7 @@ function setStore({
   actions: GameAction[];
 }) {
   const top = makeObject(topCardId, topCardName);
+  top.display_visible_to_viewer = canPeek;
   const gameState = buildGameState({
     active_player: 0,
     objects: buildObjectMap(top),
@@ -100,12 +104,12 @@ function setOpponentLibraryTop(
   topCardName: string,
   reveal: {
     revealedCards?: number[];
-    privateLookPlayer?: number;
-    privateLookIds?: number[];
+    displayVisible?: boolean;
   } = {},
 ) {
   const topCardId = 77;
   const top = makeObject(topCardId, topCardName);
+  top.display_visible_to_viewer = reveal.displayVisible ?? false;
   const gameState = buildGameState({
     active_player: 0,
     objects: buildObjectMap(top),
@@ -124,8 +128,6 @@ function setOpponentLibraryTop(
     exile: [],
     stack: [],
     revealed_cards: reveal.revealedCards ?? [],
-    private_look_player: reveal.privateLookPlayer,
-    private_look_ids: reveal.privateLookIds ?? [],
     waiting_for: buildPriorityWaitingFor(),
   });
 
@@ -138,6 +140,76 @@ function setOpponentLibraryTop(
     gameMode: "ai",
   });
 }
+
+function setSharedLibrary({ shared }: { shared: boolean }) {
+  const top = makeObject(11, "Sol Ring");
+  top.display_visible_to_viewer = true;
+  const action = castAction(11);
+  const gameState = buildGameState({
+    active_player: 0,
+    priority_player: 1,
+    objects: buildObjectMap(top),
+    players: buildPlayers([
+      { id: 0, library: [11, 12, 13] },
+      { id: 1, library: [] },
+    ]),
+    battlefield: [],
+    exile: [],
+    stack: [],
+    revealed_cards: [],
+    waiting_for: buildPriorityWaitingFor({ data: { player: 1 } }),
+    ...(shared ? { derived: { shared_piles: { library: 0, graveyard: 0 } } } : {}),
+  });
+  useGameStore.setState({
+    gameState,
+    waitingFor: gameState.waiting_for,
+    legalActions: [action],
+    legalActionsByObject: { "11": [action] },
+    spellCosts: {},
+    gameMode: "online",
+  });
+  useMultiplayerStore.setState({ activePlayerId: 1 });
+}
+
+describe("LibraryPile shared library", () => {
+  beforeEach(() => {
+    dispatchMock.mockClear();
+  });
+
+  afterEach(() => {
+    cleanup();
+    useMultiplayerStore.setState({ activePlayerId: null });
+  });
+
+  it("renders the holder's pile for the non-holder seat's request", () => {
+    setSharedLibrary({ shared: true });
+    const { container } = render(<LibraryPile playerId={1} />);
+    expect(container.querySelector('[data-library-pile="0"]')).not.toBeNull();
+    expect(container.querySelector('[data-library-pile="1"]')).toBeNull();
+    expect(container.querySelector("button[data-grouped-ids]")).toHaveAttribute(
+      "data-grouped-ids",
+      "11",
+    );
+  });
+
+  it("lets the non-holder seat play from the shared top the engine offers", () => {
+    setSharedLibrary({ shared: true });
+    render(<LibraryPile playerId={0} />);
+    const button = screen.getByRole("button", { name: /play sol ring from top of library/i });
+    expect(button).not.toBeDisabled();
+    fireEvent.click(button);
+    expect(dispatchMock).toHaveBeenCalledWith(expect.objectContaining({ type: "CastSpell" }));
+  });
+
+  it("still refuses the opponent's own library when nothing is shared", () => {
+    setSharedLibrary({ shared: false });
+    render(<LibraryPile playerId={0} />);
+    const button = screen.getByRole("button", { name: /library \(3 cards\)/i });
+    expect(button).toHaveAttribute("data-library-top-cast", "false");
+    fireEvent.click(button);
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+});
 
 describe("LibraryPile play/cast surfacing (#297)", () => {
   beforeEach(() => {
@@ -193,16 +265,15 @@ describe("LibraryPile play/cast surfacing (#297)", () => {
     });
   });
 
-  it("shows opponent library top after a private look peek (Mishra's Bauble)", () => {
-    // CR 701.20e: I (player 0) privately look at the opponent's (player 1) top.
-    // The engine records the look in private_look_player/ids; the pile shows it.
-    setOpponentLibraryTop("Lightning Bolt", { privateLookPlayer: 0, privateLookIds: [77] });
+  it("shows an opponent library top when Rust projects it as visible", () => {
+    setOpponentLibraryTop("Lightning Bolt", { displayVisible: true });
     render(<LibraryPile playerId={1} />);
     const button = screen.getByRole("button", { name: /library \(1 card\)/i });
     expect(button).toBeInTheDocument();
+    expect(button).toHaveAttribute("data-grouped-ids", "77");
     // Peeked tops use the cyan border; card-back alt text is hidden.
     expect(button.className).toContain("border-cyan-600");
-    expect(screen.queryByAltText("Library")).not.toBeInTheDocument();
+    expect(screen.queryByAltText("Card back")).not.toBeInTheDocument();
   });
 
   it("keeps an opponent library top hidden when nothing reveals it (no leak)", () => {
@@ -213,17 +284,16 @@ describe("LibraryPile play/cast surfacing (#297)", () => {
     render(<LibraryPile playerId={1} />);
     const button = screen.getByRole("button", { name: /library \(1 card\)/i });
     expect(button.className).toContain("border-gray-600");
-    expect(screen.getByAltText("Library")).toBeInTheDocument();
+    expect(button).not.toHaveAttribute("data-grouped-ids");
+    expect(screen.getByAltText("Card back")).toBeInTheDocument();
   });
 
-  it("shows an opponent library top that is publicly revealed (revealed_cards)", () => {
-    // CR 701.20b: opponent's own public reveal (Oracle of Mul Daya) — visible to
-    // all players via revealed_cards, so the pile shows it with the amber border.
-    setOpponentLibraryTop("Lightning Bolt", { revealedCards: [77] });
+  it("uses reveal state only for the public-reveal treatment, not visibility", () => {
+    setOpponentLibraryTop("Lightning Bolt", { revealedCards: [77], displayVisible: true });
     render(<LibraryPile playerId={1} />);
     const button = screen.getByRole("button", { name: /library \(1 card\)/i });
     expect(button.className).toContain("border-amber-500");
-    expect(screen.queryByAltText("Library")).not.toBeInTheDocument();
+    expect(screen.queryByAltText("Card back")).not.toBeInTheDocument();
   });
 
   it("keeps a masked opponent library top hidden", () => {
@@ -231,7 +301,7 @@ describe("LibraryPile play/cast surfacing (#297)", () => {
     render(<LibraryPile playerId={1} />);
     const button = screen.getByRole("button", { name: /library \(1 card\)/i });
     expect(button.className).toContain("border-gray-600");
-    expect(screen.getByAltText("Library")).toBeInTheDocument();
+    expect(screen.getByAltText("Card back")).toBeInTheDocument();
   });
 
   it("does not dispatch when there is no play action", () => {
@@ -338,5 +408,70 @@ describe("LibraryPile play/cast surfacing (#297)", () => {
     // generic "from top of library" phrasing.
     const button = screen.getByRole("button", { name: /play top of library from top of library/i });
     expect(button).not.toBeDisabled();
+  });
+});
+
+describe("LibraryPile flight veil", () => {
+  beforeEach(() => {
+    useAnimationStore.getState().clearQueue();
+  });
+
+  afterEach(() => {
+    cleanup();
+    useAnimationStore.getState().clearQueue();
+  });
+
+  it("shows a back in place of a visible top card that is in flight, keeping the count", () => {
+    setStore({ canPeek: true, actions: [] });
+    useAnimationStore.getState().veilFlight(42);
+
+    render(<LibraryPile playerId={0} />);
+
+    expect(screen.queryByRole("img", { name: "Sol Ring" })).toBeNull();
+    expect(screen.getByAltText("Card back")).toBeInTheDocument();
+    expect(screen.getByText("1")).toBeInTheDocument();
+  });
+
+  it("shows the visible top card again once the flight releases it", () => {
+    setStore({ canPeek: true, actions: [] });
+    useAnimationStore.getState().veilFlight(42);
+    render(<LibraryPile playerId={0} />);
+
+    act(() => useAnimationStore.getState().unveilFlight(42));
+
+    expect(screen.getByRole("img", { name: "Sol Ring" })).toBeInTheDocument();
+  });
+
+  it("keeps a hidden top card anonymous while it is in flight", () => {
+    setStore({ canPeek: false, actions: [] });
+    useAnimationStore.getState().veilFlight(42);
+
+    render(<LibraryPile playerId={0} />);
+
+    expect(screen.getByAltText("Card back")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /library \(1 card\)/i })).not.toHaveAttribute(
+      "data-grouped-ids",
+    );
+  });
+
+  it("ignores a flight veil on a card below the top", () => {
+    setStore({ canPeek: true, actions: [] });
+    useGameStore.setState((state) => ({
+      gameState: state.gameState
+        ? {
+            ...state.gameState,
+            objects: { ...state.gameState.objects, 43: makeObject(43, "Mox Pearl") },
+            players: state.gameState.players.map((player, index) =>
+              index === 0 ? { ...player, library: [42, 43] } : player,
+            ),
+          }
+        : state.gameState,
+    }));
+    useAnimationStore.getState().veilFlight(43);
+
+    render(<LibraryPile playerId={0} />);
+
+    expect(screen.getByText("2")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Sol Ring" })).toBeInTheDocument();
   });
 });

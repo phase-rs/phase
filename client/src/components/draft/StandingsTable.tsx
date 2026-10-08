@@ -61,8 +61,21 @@ export function StandingsTable() {
   const { t } = useTranslation("draft");
   const standings = useMultiplayerDraftStore((s) => s.standings);
   const currentRound = useMultiplayerDraftStore((s) => s.currentRound);
+  const nextPairingRound = useMultiplayerDraftStore((s) => s.nextPairingRound);
+  const phase = useMultiplayerDraftStore((s) => s.phase);
   const localSeat = useMultiplayerDraftStore((s) => s.seatIndex);
   const pairings = useMultiplayerDraftStore((s) => s.pairings);
+
+  // Between rounds the standings are labelled with the round about to be played;
+  // during a match and at the end they name the round on the board. Both numbers
+  // are engine-supplied — `currentRound` and `nextPairingRound` (the published
+  // answer of `DraftSession::next_pairing_round`) — so nothing is computed here.
+  // Keyed on `phase`, not `view.status`: `view` lags a beat behind `phase` at
+  // `roundAdvanced`, and `standings` is only ever written by a `viewUpdated`
+  // that writes `phase` and `currentRound` in the same `set()` — so by the time
+  // this component renders at all, the three are mutually consistent.
+  const round =
+    phase === "pairing" || phase === "roundComplete" ? nextPairingRound : currentRound;
 
   if (standings.length === 0) return null;
 
@@ -78,7 +91,7 @@ export function StandingsTable() {
   return (
     <div className="rounded-[20px] border border-white/10 bg-black/18 p-4 shadow-[0_18px_54px_rgba(0,0,0,0.22)] backdrop-blur-md">
       <h3 className="text-lg font-medium text-white mb-3">
-        {t("standings.title", { round: currentRound + 1 })}
+        {t("standings.title", { round })}
       </h3>
       <table className="w-full text-sm text-white/80">
         <thead>

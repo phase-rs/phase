@@ -1,10 +1,9 @@
 //! `AristocratsKeepablesMulligan` — feature-driven mulligan policy for
 //! aristocrats decks.
 //!
-//! CR 103.5 (`docs/MagicCompRules.txt:295`): deciding to keep after the
-//! mulligan process. When a deck's aristocrats commitment is meaningful,
-//! opening hands combining a sacrifice outlet with cheap creatures and lands
-//! are strongly preferred.
+//! CR 103.5: deciding to keep after the mulligan process. When a deck's
+//! aristocrats commitment is meaningful, opening hands combining a sacrifice
+//! outlet with cheap creatures and lands are strongly preferred.
 //!
 //! Opts out for decks where `features.aristocrats.commitment <= 0.3` — the
 //! baseline `KeepablesByLandCount` policy is the sole voice for those decks.
@@ -17,7 +16,7 @@ use crate::features::DeckFeatures;
 use crate::plan::PlanSnapshot;
 use crate::policies::registry::{PolicyId, PolicyReason};
 
-use super::{MulliganPolicy, MulliganScore, TurnOrder};
+use super::{is_land_source, MulliganPolicy, MulliganScore, TurnOrder};
 
 /// Commitment threshold below which this policy opts out.
 const COMMITMENT_THRESHOLD: f32 = 0.3;
@@ -60,8 +59,10 @@ impl MulliganPolicy for AristocratsKeepablesMulligan {
             let Some(obj) = state.objects.get(&oid) else {
                 continue;
             };
-            if obj.card_types.core_types.contains(&CoreType::Land) {
+            if is_land_source(obj) {
                 land_count += 1;
+            }
+            if obj.card_types.core_types.contains(&CoreType::Land) {
                 continue;
             }
             // Identity lookup — outlet_names carries only structurally-verified

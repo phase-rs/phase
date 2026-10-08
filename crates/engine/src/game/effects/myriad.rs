@@ -70,11 +70,11 @@ pub fn resolve(
     }
 
     if !created.is_empty() {
-        state.delayed_triggers.push(DelayedTrigger {
+        let exile_tokens = DelayedTrigger {
             condition: DelayedTriggerCondition::AtNextPhase {
                 phase: Phase::EndCombat,
             },
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::ChangeZone {
                     origin: Some(Zone::Battlefield),
                     destination: Zone::Exile,
@@ -97,11 +97,13 @@ pub fn resolve(
                     .collect(),
                 ability.source_id,
                 ability.controller,
-            ),
+            )),
             controller: ability.controller,
             source_id: ability.source_id,
             one_shot: true,
-        });
+            provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
+        };
+        crate::game::triggers::install_delayed_trigger(state, exile_tokens, events);
     }
 
     events.push(GameEvent::EffectResolved {

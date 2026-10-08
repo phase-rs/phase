@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-audio-boot-health"
+description = "Allows shell content to read the boot-time audio-device health verdict. Granted to both the local (dev/bootstrap) and remote capabilities: the dev origin classifies as local, and the verdict is read-only."
+commands.allow = ["audio_boot_health"]

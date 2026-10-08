@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import type { GameObject, ObjectId } from "../../../adapter/types.ts";
 import {
   filterCards,
+  filterCardsByName,
   groupCards,
   orderCards,
   type FilterKey,
@@ -29,6 +30,9 @@ export interface UseCardOrganizerArgs {
   sort?: AxisBinding<SortKey>;
   group?: AxisBinding<GroupKey>;
   filter?: AxisBinding<FilterKey>;
+  /** Optional display-name query binding. Like every organizer axis, this is
+   * local presentation state and never changes engine-provided membership. */
+  query?: AxisBinding<string>;
 }
 
 export interface CardOrganizer {
@@ -38,9 +42,13 @@ export interface CardOrganizer {
   setGroup: (group: GroupKey) => void;
   filter: FilterKey;
   setFilter: (filter: FilterKey) => void;
+  query: string;
+  setQuery: (query: string) => void;
   /** `cards` after the hide-filter (insertion order preserved). */
   filtered: ObjectId[];
-  /** `filtered` after the sort. */
+  /** `filtered` after the optional display-name query. */
+  matched: ObjectId[];
+  /** `matched` after the sort. */
   ordered: ObjectId[];
   /** `ordered` bucketed by the group key (a single unnamed group when "none"). */
   groups: { key: string; ids: ObjectId[] }[];
@@ -62,10 +70,11 @@ function useControllableAxis<K>(
 
 /**
  * Single client-side mechanism for organizing a list of card objects for DISPLAY
- * ONLY — shared by the discard/card-choice grid and the player's hand. Composes
- * the pure `filterCards` → `orderCards` → `groupCards` building blocks and owns
- * (or proxies, per axis) the sort/group/filter state. It never mutates input,
- * reorders `player.hand`, or touches the engine: organizing is a view concern.
+ * ONLY — shared by card-choice surfaces and the player's hand. Composes the
+ * pure `filterCards` → `filterCardsByName` → `orderCards` → `groupCards`
+ * building blocks and owns (or proxies, per axis) the sort/group/filter state.
+ * It never mutates input, reorders `player.hand`, or touches the engine:
+ * organizing is a view concern.
  */
 export function useCardOrganizer({
   cards,
@@ -74,23 +83,42 @@ export function useCardOrganizer({
   sort: sortBinding,
   group: groupBinding,
   filter: filterBinding,
+  query: queryBinding,
 }: UseCardOrganizerArgs): CardOrganizer {
   const [sort, setSort] = useControllableAxis<SortKey>(sortBinding, "none");
   const [group, setGroup] = useControllableAxis<GroupKey>(groupBinding, "none");
   const [filter, setFilter] = useControllableAxis<FilterKey>(filterBinding, "none");
+  const [query, setQuery] = useControllableAxis<string>(queryBinding, "");
 
   const filtered = useMemo(
     () => filterCards(cards, objects, filter, playableIds),
     [cards, objects, filter, playableIds],
   );
+  const matched = useMemo(
+    () => filterCardsByName(filtered, objects, query),
+    [filtered, objects, query],
+  );
   const ordered = useMemo(
-    () => orderCards(filtered, objects, sort),
-    [filtered, objects, sort],
+    () => orderCards(matched, objects, sort),
+    [matched, objects, sort],
   );
   const groups = useMemo(
     () => groupCards(ordered, objects, group),
     [ordered, objects, group],
   );
 
-  return { sort, setSort, group, setGroup, filter, setFilter, filtered, ordered, groups };
+  return {
+    sort,
+    setSort,
+    group,
+    setGroup,
+    filter,
+    setFilter,
+    query,
+    setQuery,
+    filtered,
+    matched,
+    ordered,
+    groups,
+  };
 }

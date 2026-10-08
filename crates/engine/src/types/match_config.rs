@@ -44,7 +44,27 @@ pub struct MatchScore {
     pub draws: u8,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Server-authorized causes for ending an unfinished best-of-three match.
+///
+/// This is deliberately separate from [`crate::types::actions::GameAction::Concede`]:
+/// that public action is a current-game concession under CR 104.3a, whereas a
+/// match forfeit is admitted only by an authenticated transport boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MatchForfeitCause {
+    MatchConcede,
+    HostKick,
+    DisconnectedForfeit,
+}
+
+/// Immutable result of a trusted match-level forfeit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatchForfeitResult {
+    pub winner: PlayerId,
+    pub forfeiting_player: PlayerId,
+    pub cause: MatchForfeitCause,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct DeckCardCount {
     pub name: String,
     pub count: u32,

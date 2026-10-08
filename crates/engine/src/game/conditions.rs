@@ -8,14 +8,14 @@ use crate::game::combat::AttackTarget;
 use crate::game::game_object::{AttachTarget, GameObject};
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, LKISnapshot};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::triggers::AttackTargetFilter;
 use crate::types::zones::Zone;
 
 /// CR 122.1: True when `obj` has at least `minimum` (and at most `maximum` if specified)
-/// counters matching `counters`. `CounterMatch::Any` sums all counter types;
+/// counters matching `counters`. `CounterMatch::Any` totals all counter types;
 /// `CounterMatch::OfType(ct)` matches only that counter type.
 /// Used for HasCounters evaluation in StaticCondition and TriggerCondition.
 pub(crate) fn counter_condition_matches(
@@ -24,11 +24,26 @@ pub(crate) fn counter_condition_matches(
     minimum: u32,
     maximum: Option<u32>,
 ) -> bool {
-    let count: u32 = match counters {
-        CounterMatch::Any => obj.counters.values().sum(),
-        CounterMatch::OfType(ct) => obj.counters.get(ct).copied().unwrap_or(0),
-    };
-    count >= minimum && maximum.is_none_or(|max| count <= max)
+    counter_count_within_bounds(counters.count_in(&obj.counters), minimum, maximum)
+}
+
+/// CR 122.1 + CR 608.2h: LKI counterpart to [`counter_condition_matches`]
+/// for a triggered source that no longer has an exact live object. Both
+/// helpers deliberately share the same CounterMatch/count semantics.
+pub(crate) fn counter_condition_matches_lki(
+    lki: &LKISnapshot,
+    counters: &CounterMatch,
+    minimum: u32,
+    maximum: Option<u32>,
+) -> bool {
+    counter_count_within_bounds(counters.count_in(&lki.counters), minimum, maximum)
+}
+
+/// CR 122.1: Compare an exact counter total against a threshold band. The
+/// comparison is done in `u64` so a total above `u32::MAX` is never equated
+/// with an upper bound it actually exceeds.
+pub(crate) fn counter_count_within_bounds(count: u64, minimum: u32, maximum: Option<u32>) -> bool {
+    count >= u64::from(minimum) && maximum.is_none_or(|max| count <= u64::from(max))
 }
 
 /// CR 110.5b + CR 110.5d: True when the source object is on the battlefield AND tapped.
@@ -59,14 +74,15 @@ pub(crate) fn eval_chosen_label_is(state: &GameState, source_id: ObjectId, label
 }
 
 /// CR 716.2a: True when the source Class enchantment is at or above the given level.
+/// CR 716.2d: a source with no stored level reads as level 1 (`GameObject::level`),
+/// so a Class copy is gated by its actual level rather than failing every gate.
 /// Does NOT include a battlefield zone guard — callers that require the source to be
 /// on the battlefield (e.g. `replacement.rs`) must apply the guard before calling.
 pub(crate) fn eval_class_level_ge(state: &GameState, source_id: ObjectId, level: u8) -> bool {
     state
         .objects
         .get(&source_id)
-        .and_then(|obj| obj.class_level)
-        .is_some_and(|current| current >= level)
+        .is_some_and(|obj| obj.level() >= level)
 }
 
 /// CR 113.6b: True when the source object is in the specified zone.
@@ -135,6 +151,7 @@ pub(crate) fn eval_recipient_attacking_owner_target(
         | AttackTargetFilter::Planeswalker
         | AttackTargetFilter::PlayerOrPlaneswalker
         | AttackTargetFilter::PlayerOrPermanents
+        | AttackTargetFilter::Monarch
         | AttackTargetFilter::Battle => false,
     }
 }
@@ -157,6 +174,11 @@ pub(crate) fn eval_is_initiative(state: &GameState, controller: PlayerId) -> boo
 /// CR 702.131a + CR 702.131c: True when the given player has the city's blessing.
 pub(crate) fn eval_has_city_blessing(state: &GameState, controller: PlayerId) -> bool {
     state.city_blessing.contains(&controller)
+}
+
+/// CR 702.195b: True when the given player has the enduring story designation.
+pub(crate) fn eval_has_enduring_story(state: &GameState, controller: PlayerId) -> bool {
+    state.enduring_story.contains(&controller)
 }
 
 /// CR 400.7: True when the source permanent entered the battlefield this turn.
@@ -237,6 +259,7 @@ pub(crate) fn eval_source_attached_to_controlled_creature(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::counter::CounterType;
     use crate::types::game_state::GameState;
     use crate::types::player::PlayerId;
     use crate::types::CardId;
@@ -249,6 +272,47 @@ mod tests {
         };
         assert!(eval_is_initiative(&state, PlayerId(0)));
         assert!(!eval_is_initiative(&state, PlayerId(1)));
+    }
+
+    /// CR 122.1: an upper-bound counter predicate compares the EXACT total. With
+    /// one kind at `u32::MAX` plus one more marker the object has `u32::MAX + 1`
+    /// counters, which exceeds a `u32::MAX` maximum; a saturated or wrapped sum
+    /// would equal (or undershoot) the bound and wrongly answer true.
+    #[test]
+    fn counter_condition_upper_bound_uses_exact_total() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test".to_string(),
+            Zone::Battlefield,
+        );
+        let charge = CounterType::Generic("charge".to_string());
+        let oil = CounterType::Generic("oil".to_string());
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.counters.insert(charge.clone(), u32::MAX);
+        assert!(counter_condition_matches(
+            obj,
+            &CounterMatch::Any,
+            0,
+            Some(u32::MAX)
+        ));
+        obj.counters.insert(oil, 1);
+        assert!(!counter_condition_matches(
+            obj,
+            &CounterMatch::Any,
+            0,
+            Some(u32::MAX)
+        ));
+        let lki = obj.snapshot_public_characteristics();
+        assert!(!counter_condition_matches_lki(
+            &lki,
+            &CounterMatch::Any,
+            0,
+            Some(u32::MAX)
+        ));
+        assert!(counter_condition_matches(obj, &CounterMatch::Any, 1, None));
     }
 
     /// CR 110.5d: eval_source_is_tapped_on_battlefield must return false when the

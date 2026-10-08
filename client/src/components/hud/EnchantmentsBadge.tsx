@@ -22,7 +22,7 @@ const HOVER_CLOSE_DELAY_MS = 80;
 
 /**
  * Trailing-row HUD badge that surfaces player-attached Auras (Curse cycle,
- * Faith's Fetters, Dictate of Kruphix, etc.) without disturbing the plate
+ * Paradox Haze — anything with `Enchant player`) without disturbing the plate
  * layout. Slots into the same row as Monarch/Initiative/Counter badges
  * because, semantically, "this player is enchanted" belongs to the same
  * vocabulary of imposed-state indicators.

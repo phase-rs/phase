@@ -19,8 +19,10 @@
 //! - Controller scoping: `TypedFilter.controller: Option<ControllerRef>` at
 //!   `ability.rs:815-818`.
 //!
-//! `StaticMode::ModifyCost` is deliberately out of scope — cost reducers are a
-//! follow-up feature.
+//! `StaticMode::ModifyCost` is deliberately out of scope here — this axis
+//! measures mana *added* to the pool. Cost reducers (cost *removed* from spells,
+//! CR 601.2f) are the disjoint `features::cost_reduction` axis; a card is never
+//! counted by both.
 
 use engine::game::DeckEntry;
 use engine::types::ability::{

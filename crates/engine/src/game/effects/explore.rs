@@ -1,15 +1,16 @@
 use std::collections::HashSet;
 
 use crate::game::filter;
+use crate::game::priority;
 use crate::game::replacement::{self, ReplacementResult};
-use crate::game::zones;
+use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
@@ -281,7 +282,8 @@ pub(crate) fn resolve_explore_effect(
         .find(|p| p.id == controller)
         .ok_or(EffectError::PlayerNotFound)?;
 
-    if player.library.is_empty() {
+    let library = state.library_of(player.id);
+    if library.is_empty() {
         // CR 701.44a: Explore with empty library — just put a +1/+1 counter.
         add_explore_counter(state, explorer_id, events);
 
@@ -294,7 +296,7 @@ pub(crate) fn resolve_explore_effect(
     }
 
     // Reveal top card
-    let top_card_id = player.library[0];
+    let top_card_id = library[0];
     let revealed_name = state
         .objects
         .get(&top_card_id)
@@ -314,14 +316,25 @@ pub(crate) fn resolve_explore_effect(
         .unwrap_or(false);
 
     if is_land {
-        // CR 701.44a: Land revealed — put the card into the player's hand. No counter.
-        zones::move_to_zone(state, top_card_id, crate::types::zones::Zone::Hand, events);
-
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::from(&ability.effect),
-            source_id: explorer_id,
-            subject: None,
-        });
+        // CR 701.44a + CR 614.1 + CR 616.1: The revealed land's Library→Hand
+        // instruction is a replaceable zone-change event. Keep Explore's
+        // completion event on the typed batch tail so a replacement-ordering
+        // choice settles the move before "whenever [a creature] explores"
+        // triggers or a chained continuation can run.
+        let result = zone_pipeline::move_objects_simultaneously_then(
+            state,
+            vec![ZoneMoveRequest::effect(
+                top_card_id,
+                crate::types::zones::Zone::Hand,
+                ability.source_id,
+            )
+            .performed_by(controller)],
+            Some(BatchCompletion::ExploreLandDeliveryComplete { explorer_id }),
+            events,
+        );
+        if matches!(result, BatchMoveResult::NeedsChoice) {
+            return Ok(());
+        }
     } else {
         // CR 701.44a: Nonland revealed — put a +1/+1 counter on the creature,
         // then player chooses to put the card back on top or into graveyard.
@@ -342,8 +355,14 @@ pub(crate) fn resolve_explore_effect(
             up_to: true,
             kept_destination: Some(crate::types::zones::Zone::Library),
             rest_destination: Some(crate::types::zones::Zone::Graveyard),
+            // CR 701.44a: explore reveals exactly ONE card (the top card of the
+            // library) and sends it to one place — hand, graveyard, or left on
+            // top. A single card has no remainder to split.
+            rest_split_top_count: None,
+            rest_order: crate::types::ability::DigRestOrder::Preserve,
             source_id: Some(ability.source_id),
             enter_tapped: false,
+            enters_attacking: false,
         };
 
         events.push(GameEvent::EffectResolved {
@@ -354,6 +373,22 @@ pub(crate) fn resolve_explore_effect(
     }
 
     Ok(())
+}
+
+/// CR 701.44a + CR 701.44b + CR 614.1 + CR 616.1: A revealed land's proposed
+/// hand delivery has settled. The permanent explored even when a replacement
+/// redirected the land elsewhere, so emit its completion event exactly once;
+/// the replacement-resume boundary then drains any already-parked continuation.
+pub(crate) fn complete_land_delivery(
+    explorer_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::Explore,
+        source_id: explorer_id,
+        subject: None,
+    });
+    BatchMoveResult::Done
 }
 
 /// CR 701.44d: If multiple permanents explore simultaneously, controllers choose
@@ -387,6 +422,15 @@ pub fn handle_choice(
             "Invalid explore choice".to_string(),
         ));
     }
+
+    // CR 701.44d + CR 608.2c + CR 117.3b: Retire the consumed APNAP-ordering
+    // choice before carrying out this explorer's instruction. `Priority` is an
+    // internal neutral sentinel here, not a mid-resolution priority grant; the
+    // resolving ability grants the active player priority only after it finishes.
+    priority::reset_priority(state);
+    state.waiting_for = WaitingFor::Priority {
+        player: state.active_player,
+    };
 
     let remaining: Vec<ObjectId> = remaining
         .iter()
@@ -560,7 +604,7 @@ mod tests {
             other => panic!("expected DigChoice from first explore, got {other:?}"),
         }
         assert!(
-            state.pending_continuation.is_some(),
+            state.active_ability_continuation().is_some(),
             "the second explore must be stashed while the first waits on DigChoice"
         );
 
@@ -857,7 +901,7 @@ mod tests {
             "the explore must not run until the scry choice resolves"
         );
         assert!(
-            state.pending_continuation.is_some(),
+            state.active_ability_continuation().is_some(),
             "the explore link must be stashed while the scry waits for a choice"
         );
 
@@ -1389,7 +1433,7 @@ mod tests {
             state.waiting_for
         );
         assert!(
-            state.pending_continuation.is_some(),
+            state.active_ability_continuation().is_some(),
             "second explore must be stashed while first explore waits for DigChoice"
         );
         assert_eq!(

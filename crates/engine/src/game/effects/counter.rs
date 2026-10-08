@@ -1,6 +1,6 @@
 use crate::game::effects::destroy::{self, DestroyOutcome};
 use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
-use crate::game::targeting;
+use crate::game::targeting::{self, TriggeringSpell};
 use crate::game::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::{
     CounterSourceRider, Duration, Effect, EffectError, EffectKind, ResolvedAbility,
@@ -53,21 +53,11 @@ pub fn resolve(
         _ => None,
     };
 
-    let targets = match &ability.effect {
-        Effect::Counter { target, .. } if matches!(target, TargetFilter::ParentTarget) => {
-            let event_target = targeting::resolve_event_context_target(
-                state,
-                &TargetFilter::TriggeringSource,
-                ability.source_id,
-            );
-            match event_target {
-                Some(target) => vec![target],
-                None => targeting::resolved_targets(ability, target, state),
-            }
-        }
-        Effect::Counter { target, .. } => targeting::resolved_targets(ability, target, state),
-        _ => ability.targets.clone(),
-    };
+    // CR 614.1a: this resolution's own ledger of rider exiles (see the field
+    // doc); a counter that exiles nothing leaves it empty.
+    state.exile_rider_countered_ids.clear();
+
+    let targets = countered_targets(state, ability);
 
     // CR 115.1: `Effect::Counter` is single-target by construction — mass
     // counter is `Effect::CounterAll`. The post-loop rider therefore acts on at
@@ -117,29 +107,31 @@ pub fn resolve(
                 continue;
             }
 
-            // Remove from stack — search by both id (spells) and source_id (abilities).
-            // Use rposition to match the most recently pushed entry.
-            let stack_idx = state
-                .stack
-                .iter()
-                .rposition(|e| e.id == obj_id || e.source_id == obj_id);
+            let stack_idx = countered_stack_index(state, ability, obj_id);
             if let Some(idx) = stack_idx {
-                let is_spell = matches!(state.stack[idx].kind, StackEntryKind::Spell { .. });
+                // CR 701.6a: the removal IS the counter, so it goes through the
+                // single CR 405.2 removal authority, which journals it and drops
+                // both per-entry side tables.
+                let removed = crate::game::stack::remove_nonresolving_stack_entry_at(
+                    state,
+                    idx,
+                    crate::game::lifecycle::DelayedTerminalDisposition::Countered,
+                )
+                .expect("rposition yielded a live stack index")
+                .entry;
+                let is_spell = matches!(removed.kind, StackEntryKind::Spell { .. });
                 // CR 702.34a / CR 702.127a / CR 702.180a: Flashback,
                 // Aftermath, and Harmonize exile when leaving the stack for
                 // any reason, including when countered. Escape (CR 702.138)
                 // has no such clause — countered escape spells go to graveyard.
-                let casting_variant = match &state.stack[idx].kind {
+                let casting_variant = match &removed.kind {
                     StackEntryKind::Spell {
                         casting_variant, ..
                     } => *casting_variant,
                     _ => CastingVariant::Normal,
                 };
                 let exiles_on_counter = casting_variant.replaces_stack_to_graveyard_with_exile();
-                let source_permanent_id = state.stack[idx].source_id;
-                let removed_entry_id = state.stack[idx].id;
-                state.stack.remove(idx);
-                state.stack_paid_facts.remove(&removed_entry_id);
+                let source_permanent_id = removed.source_id;
 
                 // CR 701.6a: removal from the stack IS the counter; emit the
                 // event now (before the consequent zone move) so a pause on a
@@ -156,14 +148,37 @@ pub fn resolve(
                     // exiles on leaving the stack (Flashback, Harmonize), or
                     // the counter ability carries a CR 614.1a "exile it instead
                     // of putting it into its owner's graveyard" rider (Force
-                    // of Negation, No More Lies, Defabricate).
+                    // of Negation, No More Lies, Defabricate) whose printed
+                    // condition applies to THIS spell — Thranduil's Decree
+                    // exiles "a permanent spell" (CR 110.4b) only, so a
+                    // countered instant keeps the graveyard rule. Asked of the concrete object
+                    // ONCE, here, before the move and before the face restore
+                    // below (an Adventure/Omen spell shows its creature face
+                    // after it); the answer is recorded in
+                    // `exile_rider_countered_ids` for the `Exiled` provenance
+                    // stamp of this resolution (issue #8762).
                     // CR 702.34a / CR 702.127a / CR 702.180a: the exile destination
                     // is a static destination rule (not a replacement), so it is
                     // selected here, before the pipeline consult.
-                    let exile_instead_of_graveyard_on_counter = ability
-                        .sub_ability
-                        .as_deref()
-                        .is_some_and(super::cast_from_zone::is_graveyard_exile_rider_subability);
+                    let exile_rider = ability.sub_ability.as_deref().filter(|sub| {
+                        super::cast_from_zone::graveyard_exile_rider_applies_to(state, sub, obj_id)
+                    });
+                    let exile_instead_of_graveyard_on_counter = exile_rider.is_some();
+                    if exile_instead_of_graveyard_on_counter {
+                        state.exile_rider_countered_ids.push(obj_id);
+                    }
+                    // CR 122.1 + CR 614.1a: the counters the applying rider puts
+                    // on the card it exiles (Delay: "exile it with three time
+                    // counters on it", issue #8795) travel with the move, so the
+                    // zone pipeline stamps them through the same counter
+                    // authority every other entry counter uses.
+                    let rider_entry_counters = exile_rider
+                        .map(|sub| {
+                            super::cast_from_zone::graveyard_exile_rider_entry_counters(
+                                state, sub, obj_id,
+                            )
+                        })
+                        .unwrap_or_default();
                     // CR 701.6a + CR 614.1a: choose the countered spell's
                     // destination. Exile precedence (alt-cost keyword exile-on-
                     // stack-exit, or the graveyard-exile sub-ability rider) wins
@@ -193,7 +208,11 @@ pub fn resolve(
                         }
                     };
                     if casting_variant.restores_front_face_after_stack_exit() {
-                        super::super::stack::restore_alternative_spell_normal_face(state, obj_id);
+                        super::super::stack::restore_alternative_spell_normal_face(
+                            state,
+                            obj_id,
+                            casting_variant,
+                        );
                     }
                     // CR 701.6a + CR 614.6: route the stack -> graveyard/exile
                     // move through the zone-change pipeline so `Moved` redirects
@@ -208,6 +227,9 @@ pub fn resolve(
                     // the stack (countered), so bail before `EffectResolved` and
                     // let the replacement-choice resume path deliver it.
                     let mut req = ZoneMoveRequest::effect(obj_id, dest, ability.source_id);
+                    if !rider_entry_counters.is_empty() {
+                        req = req.with_counters(rider_entry_counters);
+                    }
                     if let Some(position) = library_position {
                         // CR 701.6a + CR 614.1a: place at the named library
                         // position (Memory Lapse top / Spell Crumple bottom)
@@ -282,11 +304,97 @@ pub fn resolve(
     Ok(())
 }
 
+/// CR 701.6a + CR 113.7a: the stack entry `resolve` removes for the countered
+/// referent `obj_id`: the entry whose id is `obj_id`. An entry that only has
+/// `obj_id` as its source, such as a spell's own cast trigger, is a different
+/// stack object and is not matched, except when the counter's
+/// `counter_trigger_event` is a `BecomesTarget` event (ward).
+pub(super) fn countered_stack_index(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    obj_id: ObjectId,
+) -> Option<usize> {
+    match counter_trigger_event(state, ability) {
+        // CR 702.21a: see `event_countered_referent`'s `BecomesTarget` arm.
+        Some((GameEvent::BecomesTarget { .. }, _)) => state
+            .stack
+            .iter()
+            .rposition(|e| e.id == obj_id || e.source_id == obj_id),
+        _ => state.stack.iter().rposition(|e| e.id == obj_id),
+    }
+}
+
+/// CR 608.2k: the trigger event a `Counter { TriggeringSource | ParentTarget }`
+/// reads "that spell" / "that ability" from, with the object that event names.
+fn counter_trigger_event<'a>(
+    state: &'a GameState,
+    ability: &ResolvedAbility,
+) -> Option<(&'a GameEvent, ObjectId)> {
+    let Effect::Counter {
+        target: TargetFilter::TriggeringSource | TargetFilter::ParentTarget,
+        ..
+    } = &ability.effect
+    else {
+        return None;
+    };
+    let event = state.current_trigger_event.as_ref()?;
+    Some((event, targeting::extract_source_from_event(event)?))
+}
+
+/// CR 701.6a: the spells or abilities a `Counter` node counters. Shared by
+/// `resolve` and `stack_reach`, so a pending node is read with the resolver's
+/// own binding.
+pub(super) fn countered_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetRef> {
+    let Effect::Counter { target, .. } = &ability.effect else {
+        return ability.targets.clone();
+    };
+    // CR 608.2k: "that spell" / "that ability" is identified through the
+    // trigger event.
+    if let Some((event, object_id)) = counter_trigger_event(state, ability) {
+        return event_countered_referent(state, event, object_id)
+            .map(TargetRef::Object)
+            .into_iter()
+            .collect();
+    }
+    targeting::resolved_targets(ability, target, state)
+}
+
+/// CR 608.2k + CR 701.6a: the referent a trigger's "that spell" / "that
+/// ability" counters, given `object_id`, the object its trigger `event` names.
+/// `None` counters nothing.
+fn event_countered_referent(
+    state: &GameState,
+    event: &GameEvent,
+    object_id: ObjectId,
+) -> Option<ObjectId> {
+    let on_stack = |id: ObjectId| state.stack.iter().any(|e| e.id == id).then_some(id);
+    match event {
+        // CR 601.2i + CR 400.7: the spell as it was cast; once it left the
+        // stack, or was cast again, it is not "that spell".
+        GameEvent::SpellCast { .. } => match targeting::triggering_spell(state) {
+            Some(TriggeringSpell::OnStack(entry)) => Some(entry.id),
+            Some(TriggeringSpell::Departed(_) | TriggeringSpell::Gone) | None => None,
+        },
+        // CR 702.21a: the event names a targeting spell by its id and a
+        // targeting ability by its source, and not which entry targeted;
+        // `countered_stack_index` matches this referent against both.
+        GameEvent::BecomesTarget { .. } => Some(object_id),
+        // CR 113.7: the event names the object that moved.
+        GameEvent::ZoneChanged { .. } => state
+            .stack
+            .iter()
+            .rev()
+            .find(|e| e.source_id == object_id)
+            .map(|e| e.id),
+        _ => on_stack(object_id),
+    }
+}
+
 /// CR 701.6 + CR 405.1: Mass counter — iterate every stack entry and counter
 /// each one that matches the class filter. Mirrors `destroy::resolve_all` in
 /// shape: collect matching IDs, then run the same removal/zone-move logic the
 /// single-target `resolve` uses (re-using `CR 702.34a` Flashback exile-on-
-/// counter and `CR 608.2b` countered-spell-to-graveyard rules).
+/// counter and `CR 701.6a` countered-spell-to-graveyard rules).
 ///
 /// Stack entry matching is delegated to `targeting::stack_entry_matches_filter`
 /// so `CounterAll` shares the same `StackSpell`, `StackAbility`, typed,
@@ -351,27 +459,33 @@ pub fn resolve_all(
 
         // CR 405.2: Look up the stack entry by its own id only. The
         // `matching` set was populated from `entry.id`, so a `source_id`
-        // fallback (used in the single-target resolver to bridge a target's
-        // ObjectId to its parent permanent) would match the wrong entry
+        // fallback would match the wrong entry
         // when several stack entries share a `source_id` (e.g., two
         // activated abilities of the same permanent).
         let stack_idx = state.stack.iter().position(|e| e.id == obj_id);
         let Some(idx) = stack_idx else { continue };
 
-        let is_spell = matches!(state.stack[idx].kind, StackEntryKind::Spell { .. });
+        // CR 701.6a: the removal IS the counter, so it goes through the single
+        // CR 405.2 removal authority, which journals it and drops both
+        // per-entry side tables.
+        let removed = crate::game::stack::remove_nonresolving_stack_entry_at(
+            state,
+            idx,
+            crate::game::lifecycle::DelayedTerminalDisposition::Countered,
+        )
+        .expect("position yielded a live stack index")
+        .entry;
+        let is_spell = matches!(removed.kind, StackEntryKind::Spell { .. });
         // CR 702.34a / CR 702.127a / CR 702.180a: Flashback / Aftermath /
         // Harmonize exile on leaving the stack for any reason, including
         // counter. Escape (CR 702.138) has no such clause.
-        let casting_variant = match &state.stack[idx].kind {
+        let casting_variant = match &removed.kind {
             StackEntryKind::Spell {
                 casting_variant, ..
             } => *casting_variant,
             _ => CastingVariant::Normal,
         };
         let exiles_on_counter = casting_variant.replaces_stack_to_graveyard_with_exile();
-        let removed_entry_id = state.stack[idx].id;
-        state.stack.remove(idx);
-        state.stack_paid_facts.remove(&removed_entry_id);
 
         // CR 701.6a: removal from the stack IS the counter; emit the event
         // before any consequent zone move.
@@ -390,7 +504,11 @@ pub fn resolve_all(
                 Zone::Graveyard
             };
             if casting_variant.restores_front_face_after_stack_exit() {
-                super::super::stack::restore_alternative_spell_normal_face(state, obj_id);
+                super::super::stack::restore_alternative_spell_normal_face(
+                    state,
+                    obj_id,
+                    casting_variant,
+                );
             }
             // CR 701.6a + CR 614.6: route through the pipeline so graveyard
             // redirects (Rest in Peace / Leyline of the Void) fire — same
@@ -430,8 +548,10 @@ pub fn resolve_all(
 /// `CounterSourceRider::LosesAbilities` static.
 ///
 /// The effect targets the countered ability's source permanent and persists
-/// for the rider's `duration` (Tishana: `Duration::UntilHostLeavesPlay`, i.e.
-/// as long as the counter source remains on the battlefield — CR 611.2a).
+/// for the rider's `duration` (Tishana: `Duration::WhileHostOnBattlefield` —
+/// "for as long as this creature remains on the battlefield", a CR 611.2b
+/// state reading that a phase-out of the counter source also ends,
+/// CR 702.26f).
 fn apply_source_static(
     state: &mut GameState,
     counter_source_id: ObjectId,
@@ -828,6 +948,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -934,6 +1055,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -1083,6 +1205,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -1118,7 +1241,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, GameEvent::CreatureDestroyed { object_id } if *object_id == source_permanent)),
+                .any(|e| matches!(e, GameEvent::CreatureDestroyed { object_id, .. } if *object_id == source_permanent)),
             "a destroy event should fire for the source permanent"
         );
     }
@@ -1188,7 +1311,7 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &counter_ability, &mut events).unwrap();
 
-        // CR 608.2b: the spell was countered into its owner's graveyard.
+        // CR 701.6a: the spell was countered into its owner's graveyard.
         assert!(state.stack.is_empty(), "spell should be countered");
         assert!(state.players[1].graveyard.contains(&spell_id));
         // CR 701.8a / CR 110.1: a countered spell is not a permanent — the
@@ -1429,6 +1552,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -1613,6 +1737,7 @@ mod tests {
                     source_name: String::new(),
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 },
             });
         }
@@ -1622,7 +1747,7 @@ mod tests {
             controller: PlayerId(1),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: perm,
-                ability: ResolvedAbility::new(
+                ability: Box::new(ResolvedAbility::new(
                     Effect::Unimplemented {
                         name: "Act".to_string(),
                         description: None,
@@ -1630,7 +1755,7 @@ mod tests {
                     vec![],
                     perm,
                     PlayerId(1),
-                ),
+                )),
             },
         });
         state.stack.push_back(StackEntry {
@@ -1731,6 +1856,7 @@ mod tests {
                     source_name: String::new(),
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 },
             });
         }

@@ -66,10 +66,19 @@
     "discard": "Abandonner",
     "saveAndContinue": "Enregistrer et continuer"
   },
+  "saveConflict": {
+    "title": "Deck modifié ailleurs",
+    "bodyChanged": "« {{name}} » a été modifié ailleurs depuis que cet éditeur l'a ouvert ou enregistré pour la dernière fois, donc rien n'a été enregistré. Chargez la version enregistrée pour la voir (vos modifications non enregistrées seront abandonnées), ou enregistrez votre version quand même.",
+    "bodyDeleted": "« {{name}} » a été supprimé ailleurs depuis que cet éditeur l'a ouvert ou enregistré pour la dernière fois, donc rien n'a été enregistré. Enregistrez votre version quand même.",
+    "loadSaved": "Charger la version enregistrée",
+    "saveMine": "Enregistrer ma version"
+  },
   "card": {
     "moveToSideboard": "Déplacer un {{name}} vers la réserve",
     "moveToMain": "Déplacer un {{name}} vers le deck principal",
     "removeOne": "Retirer un {{name}}",
+    "addOne": "Ajouter un {{name}}",
+    "copyLimit": "{{name}} est à la limite de copies",
     "makeCommander": "Faire de {{name}} le commandant",
     "makeCommanderTitle": "En faire mon commandant",
     "chooseArtFor": "Choisir l'illustration pour {{name}}",
@@ -220,6 +229,10 @@
     "identity": "Identité :",
     "setAsCommander": "Définir comme commandant :",
     "cardCount": "{{count}}/{{expected}} cartes",
+    "cardCountNoMinimum_one": "{{count}} carte",
+    "cardCountNoMinimum_few": "{{count}} cartes",
+    "cardCountNoMinimum_many": "{{count}} cartes",
+    "cardCountNoMinimum_other": "{{count}} cartes",
     "singletonViolations": "Violations du singleton : {{cards}}",
     "colorViolations": "Violations de l'identité de couleur : {{cards}}",
     "signatureSpell": {
@@ -229,6 +242,11 @@
       "remove": "Supprimer le sort signature",
       "mustBeInstantOrSorcery": "Le sort signature doit être un éphémère ou un rituel",
       "outsideColorIdentity": "{{name}} : hors de l'identité de couleur du Briseur de serment"
+    },
+    "companion": {
+      "heading": "Compagnon",
+      "noCompanion": "Aucun compagnon sélectionné",
+      "remove": "Retirer le compagnon"
     }
   },
   "manaCurve": {
@@ -260,7 +278,9 @@
     "dataVersion": "Données : {{version}}",
     "aboutBrackets": "À propos des paliers ↗",
     "estimatedChip": "Estimé : B{{tier}}",
-    "estimatedChipFull": "Palier estimé : B{{tier}} {{label}}"
+    "estimatedChipFull": "Palier estimé : B{{tier}} {{label}}",
+    "manualChip": "B{{tier}}",
+    "manualChipFull": "Palier déclaré : B{{tier}} {{label}}"
   },
   "bracketPicker": {
     "ariaLabel": "Palier du deck",

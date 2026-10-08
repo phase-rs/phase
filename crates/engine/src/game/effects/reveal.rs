@@ -37,8 +37,7 @@ pub fn resolve(
     // SelfRef short-circuit, chain target propagation in
     // `effects::mod.rs::resolve_ability_chain` would inherit the parent's
     // targets and reveal the wrong object).
-    let effective_targets = crate::game::targeting::resolved_targets(ability, &target, state);
-    let object_ids = crate::game::effects::effect_object_targets(&target, &effective_targets);
+    let object_ids = crate::game::effects::resolved_effect_object_ids(state, ability, &target);
 
     if !object_ids.is_empty() {
         let card_names: Vec<String> = object_ids

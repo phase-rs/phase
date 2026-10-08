@@ -18,6 +18,12 @@ const DIE_SIZE = 132;
 // Accent RGB triples (sans `rgb(...)`) so they compose into rgba()/gradients.
 const GOLD = "251,191,36"; // amber-400 — the winner / emphasis accent
 const NEUTRAL = "148,163,184"; // slate-400 — a non-decisive die
+const IGNORED = "100,116,139"; // slate-500 — a dropped/ignored die, still shown so the roll stays auditable
+const COIN_WON = "52,211,153"; // emerald-400 — the flipper won
+const COIN_LOST = "251,113,133"; // rose-400 — the flipper lost
+
+let nextRollKey = 1;
+const rollKeys = new WeakMap<DiceRollPayload, string>();
 
 /** Cached WebGL-availability probe. The dice overlay is the first component in
  *  the app that needs WebGL, so it must degrade gracefully where it's absent. */
@@ -51,11 +57,6 @@ export function DiceRollOverlay() {
   const skipDiceRoll = useUiStore((s) => s.skipDiceRoll);
   const shouldReduceMotion = useReducedMotion();
   const { t } = useTranslation();
-
-  // Clear any active/queued roll and its advance timer when leaving the game.
-  // The store is a module singleton that outlives this mount, so without this an
-  // in-flight roll could pop into the next game.
-  useEffect(() => () => useUiStore.getState().resetDiceRoll(), []);
 
   // Tap-to-skip via keyboard: Escape dismisses the current roll (advancing to
   // the next queued one, or clearing the overlay). Bound only while a roll is
@@ -135,9 +136,11 @@ export function DiceRollOverlay() {
 /** Stable identity for a payload so the FIFO advancing from one roll to the next
  *  remounts `DiceRollContent` instead of reconciling stale settle state. */
 function diceRollKey(payload: DiceRollPayload): string {
-  return payload.kind === "coin"
-    ? `coin-${payload.context}-${payload.playerId}-${payload.won}`
-    : `die-${payload.context}-${payload.rolls.map((r) => `${r.playerId}:${r.value}`).join(",")}`;
+  const existing = rollKeys.get(payload);
+  if (existing) return existing;
+  const key = String(nextRollKey++);
+  rollKeys.set(payload, key);
+  return key;
 }
 
 function DiceRollContent({ payload, animate }: { payload: DiceRollPayload; animate: boolean }) {
@@ -151,12 +154,16 @@ function DiceRollContent({ payload, animate }: { payload: DiceRollPayload; anima
     // No engine-named face: `won` (relative to the flipping player) maps to a
     // heads/tails depiction. We show "heads" on a win — a pure display choice.
     const face = payload.won ? "heads" : "tails";
+    const accent = payload.won ? COIN_WON : COIN_LOST;
+    const outcome = payload.won
+      ? t("diceRoll.wonCoinFlip", { name: playerLabel(payload.playerId) })
+      : t("diceRoll.lostCoinFlip", { name: playerLabel(payload.playerId) });
     return (
-      <div className="relative flex flex-col items-center gap-6 select-none">
-        <span className="text-2xl font-bold tracking-wider uppercase text-slate-200">
-          {playerLabel(payload.playerId)}
+      <div className="relative flex flex-col items-center gap-4 select-none">
+        <span className="text-sm font-semibold uppercase tracking-[0.25em] text-slate-400">
+          {t("diceRoll.coinFlip")}
         </span>
-        <DieFace animate={animate} accent={NEUTRAL}>
+        <DieFace animate={animate} accent={accent} emphasize>
           {(handleSettle) =>
             animate ? (
               <Suspense fallback={<DiePlaceholder label="" />}>
@@ -173,6 +180,25 @@ function DiceRollContent({ payload, animate }: { payload: DiceRollPayload; anima
             )
           }
         </DieFace>
+        <motion.span
+          className="rounded-full border px-5 py-2 text-2xl font-extrabold uppercase tracking-wide"
+          initial={{ opacity: 0, scale: 0.82, y: 8 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          transition={{
+            delay: animate ? 1.35 / Math.max(speedMultiplier, 0.01) : 0,
+            type: "spring",
+            stiffness: 260,
+            damping: 20,
+          }}
+          style={{
+            color: `rgb(${accent})`,
+            borderColor: `rgba(${accent},0.7)`,
+            backgroundColor: `rgba(${accent},0.14)`,
+            boxShadow: `0 0 28px rgba(${accent},0.32)`,
+          }}
+        >
+          {outcome}
+        </motion.span>
       </div>
     );
   }
@@ -244,6 +270,10 @@ function ContestDice({
       ? winnerIsYou
         ? t("diceRoll.youPlayFirst")
         : t("diceRoll.playerPlaysFirst", { name: getOpponentDisplayName(winner) })
+      : null;
+  const yourTurnCaption =
+    payload.viewerTurnNumber && payload.viewerTurnNumber > 1
+      ? t("diceRoll.youTakeTurn", { turn: payload.viewerTurnNumber })
       : null;
 
   return (
@@ -327,6 +357,47 @@ function ContestDice({
           )}
         </AnimatePresence>
       </div>
+      {revealed && payload.turnOrder && payload.turnOrder.length > 0 && (
+        <motion.div
+          className="flex flex-col items-center gap-2"
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.25, duration: 0.35 }}
+        >
+          <span className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
+            {t("diceRoll.turnOrder")}
+          </span>
+          <div className="flex flex-wrap justify-center gap-2">
+            {payload.turnOrder.map((slot) => {
+              return (
+                <span
+                  key={slot.slot_index}
+                  className="rounded-full border px-3 py-1 text-sm font-bold"
+                  style={{
+                    color: slot.is_viewer ? `rgb(${GOLD})` : "#cbd5e1",
+                    borderColor:
+                      slot.is_viewer || slot.is_starting_player
+                        ? `rgba(${GOLD},0.62)`
+                        : "rgba(148,163,184,0.32)",
+                    backgroundColor:
+                      slot.is_viewer || slot.is_starting_player
+                        ? `rgba(${GOLD},0.12)`
+                        : "rgba(15,23,42,0.7)",
+                  }}
+                >
+                  {t("diceRoll.turnOrderItem", {
+                    turn: slot.turn_number,
+                    name: playerLabel(slot.player),
+                  })}
+                </span>
+              );
+            })}
+          </div>
+          {yourTurnCaption && (
+            <span className="text-lg font-extrabold text-amber-300">{yourTurnCaption}</span>
+          )}
+        </motion.div>
+      )}
     </div>
   );
 }
@@ -347,12 +418,18 @@ function InGameDice({
   return (
     <div className="relative flex items-end justify-center gap-10 select-none">
       {payload.rolls.map((roll, i) => (
-        <DieFace key={i} animate={animate} accent={NEUTRAL} value={roll.value}>
+        <DieFace
+          key={i}
+          animate={animate}
+          accent={roll.ignored ? IGNORED : NEUTRAL}
+          ignored={roll.ignored}
+          value={roll.value}
+        >
           {(handleSettle) =>
             animate ? (
               <Suspense fallback={<DiePlaceholder label={String(roll.value)} />}>
                 <Dice3D
-                  sides={payload.sides}
+                  sides={roll.sides ?? payload.sides}
                   result={roll.value}
                   speedMultiplier={speedMultiplier}
                   size={DIE_SIZE}
@@ -372,15 +449,18 @@ function InGameDice({
 /**
  * Wraps a single die/coin and plays a landing flourish the moment it settles: a
  * scale "pop", an expanding accent ring, and a soft radial flash. `emphasize`
- * adds a lingering glow for the contest winner. The die is supplied as a render
- * prop so the wrapper can hand its settle callback to whichever 3D child (Dice3D
- * / Coin3D) it renders; the static fallback settles on mount instead.
+ * adds a lingering glow for the contest winner. `ignored` dims a dropped die
+ * (roll-2-drop-lowest) and strikes its badge while still showing its value.
+ * The die is supplied as a render prop so the wrapper can hand its settle
+ * callback to whichever 3D child (Dice3D / Coin3D) it renders; the static
+ * fallback settles on mount instead.
  */
 function DieFace({
   children,
   animate,
   accent,
   emphasize = false,
+  ignored = false,
   value,
   onSettle,
 }: {
@@ -388,10 +468,13 @@ function DieFace({
   animate: boolean;
   accent: string;
   emphasize?: boolean;
+  /** A dropped die: dimmed with a struck badge, value still visible. */
+  ignored?: boolean;
   /** When set, a numeric result badge pops in below the die as it lands. */
   value?: number;
   onSettle?: () => void;
 }) {
+  const { t } = useTranslation();
   // Static fallbacks never fire a 3D `onSettle`, so they start settled.
   const [settled, setSettled] = useState(!animate);
   const handleSettle = useCallback(() => {
@@ -411,7 +494,10 @@ function DieFace({
       animate={settled ? { scale: [1, 1.14, 1] } : { scale: 1 }}
       transition={{ duration: 0.36, ease: [0.34, 1.56, 0.64, 1] }}
     >
-      <div className="relative rounded-2xl" style={{ width: DIE_SIZE, height: DIE_SIZE }}>
+      <div
+        className={`relative rounded-2xl${ignored ? " opacity-60 saturate-50" : ""}`}
+        style={{ width: DIE_SIZE, height: DIE_SIZE }}
+      >
         {/* Lingering glow for the emphasized (winner) die. */}
         {emphasize && (
           <motion.div
@@ -450,12 +536,16 @@ function DieFace({
       </div>
 
       {/* Result badge: the engine's rolled value, revealed as the die lands so
-          the outcome is legible without reading the cluttered polyhedron face. */}
+          the outcome is legible without reading the cluttered polyhedron face.
+          A dropped (ignored) die keeps its value struck through with an
+          "Ignored" caption so players see what the lowest roll was. */}
       {value != null && (
         <AnimatePresence>
           {settled && (
             <motion.span
-              className="min-w-9 rounded-md px-2 py-0.5 text-center text-xl font-extrabold tabular-nums"
+              className={`min-w-9 rounded-md px-2 py-0.5 text-center text-xl font-extrabold tabular-nums${
+                ignored ? " line-through decoration-2" : ""
+              }`}
               initial={{ opacity: 0, scale: 0.6, y: -4 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0 }}
@@ -470,6 +560,11 @@ function DieFace({
             </motion.span>
           )}
         </AnimatePresence>
+      )}
+      {ignored && settled && (
+        <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+          {t("diceRoll.ignoredDie")}
+        </span>
       )}
     </motion.div>
   );

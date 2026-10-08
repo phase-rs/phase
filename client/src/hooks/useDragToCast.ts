@@ -10,6 +10,13 @@ import { dispatchAction } from "../game/dispatch.ts";
  */
 export const DRAG_PLAY_THRESHOLD = -20;
 
+/**
+ * Hand cards need a larger upward commitment than other draggable cast
+ * surfaces. This leaves room for lateral hand reordering without a small
+ * upward component accidentally becoming a cast.
+ */
+export const HAND_DRAG_PLAY_THRESHOLD = -64;
+
 interface UseDragToCastOptions {
   hasPriority: boolean;
   isInSourceZone?: (info: PanInfo) => boolean;

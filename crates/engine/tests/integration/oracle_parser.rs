@@ -1,11 +1,105 @@
 use engine::parser::oracle::{keyword_display_name, parse_oracle_text};
+use engine::parser::oracle_ir::diagnostic::ClauseGapKind;
 use engine::types::ability::{
-    ChosenSubtypeKind, ContinuousModification, ControllerRef, DamageModification,
-    DamageTargetFilter, DamageTargetPlayerScope, Effect, FilterProp, StaticCondition, TargetFilter,
-    TypeFilter,
+    ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef, DamageModification,
+    DamageTargetFilter, DamageTargetPlayerScope, Effect, FilterProp, PlayerScope, QuantityExpr,
+    QuantityRef, SourceExclusion, StaticCondition, TargetFilter, TypeFilter,
 };
-use engine::types::keywords::Keyword;
+use engine::types::keywords::{HexproofFilter, Keyword};
 use engine::types::statics::StaticMode;
+use engine::types::zones::Zone;
+
+/// CR 701.57c + CR 608.2c: Hit the Mother Lode — Discover 10 followed by a
+/// conditional "create a number of tapped Treasure tokens equal to the
+/// difference". The follow-up clause's bare "the difference" anaphor must bind
+/// to the `Difference` of the leading `QuantityCheck` condition's operands
+/// (`ObjectManaValue { CostPaidObject }` vs `Fixed(10)`), the token must be
+/// `tapped: true`, and NOTHING may remain `Unimplemented`. Reverting the token
+/// anaphor recognition, the shared difference binder, or the spell-seam
+/// invocation flips the token count back to a dead `Variable("difference")`
+/// placeholder (or drops the whole token clause to `Unimplemented`).
+#[test]
+fn hit_the_mother_lode_binds_difference_token_count() {
+    use engine::types::ability::{
+        AbilityCondition, Comparator, Effect, ObjectScope, QuantityExpr, QuantityRef,
+    };
+
+    fn any_unimplemented(def: &engine::types::ability::AbilityDefinition) -> bool {
+        matches!(&*def.effect, Effect::Unimplemented { .. })
+            || def.sub_ability.as_deref().is_some_and(any_unimplemented)
+            || def.else_ability.as_deref().is_some_and(any_unimplemented)
+    }
+
+    let result = parse(
+        "Discover 10. If the discovered card's mana value is less than 10, create a number of tapped Treasure tokens equal to the difference.",
+        "Hit the Mother Lode",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+
+    let top = result
+        .abilities
+        .iter()
+        .find(|a| matches!(&*a.effect, Effect::Discover { .. }))
+        .unwrap_or_else(|| panic!("no Discover ability parsed: {result:#?}"));
+    assert!(
+        !any_unimplemented(top),
+        "Hit the Mother Lode must have no Unimplemented residual: {top:#?}"
+    );
+
+    let token_def = top
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("Discover has no follow-up token sub: {top:#?}"));
+
+    let expected_mv = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectManaValue {
+            scope: ObjectScope::CostPaidObject,
+        },
+    };
+    let expected_difference = QuantityExpr::Difference {
+        left: Box::new(expected_mv.clone()),
+        right: Box::new(QuantityExpr::Fixed { value: 10 }),
+    };
+
+    match &*token_def.effect {
+        Effect::Token {
+            name,
+            tapped,
+            count,
+            ..
+        } => {
+            assert_eq!(name, "Treasure", "token is a Treasure: {token_def:#?}");
+            assert!(*tapped, "Treasure tokens enter tapped: {token_def:#?}");
+            assert_eq!(
+                count, &expected_difference,
+                "token count binds to Difference{{ObjectManaValue(CostPaidObject), Fixed(10)}}: {token_def:#?}"
+            );
+        }
+        other => panic!("expected a Token effect sub, got {other:#?}"),
+    }
+
+    match token_def.condition.as_ref() {
+        Some(AbilityCondition::QuantityCheck {
+            lhs,
+            comparator,
+            rhs,
+        }) => {
+            assert_eq!(
+                lhs, &expected_mv,
+                "condition lhs is the discovered card's mana value"
+            );
+            assert_eq!(*comparator, Comparator::LT, "condition uses less-than");
+            assert_eq!(
+                rhs,
+                &QuantityExpr::Fixed { value: 10 },
+                "condition rhs is 10"
+            );
+        }
+        other => panic!("expected a QuantityCheck condition on the token sub, got {other:#?}"),
+    }
+}
 
 fn parse(
     oracle_text: &str,
@@ -18,6 +112,191 @@ fn parse(
     let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
     let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
     parse_oracle_text(oracle_text, card_name, &keyword_names, &types, &subtypes)
+}
+
+/// CR 118.12 + CR 603.12: the measured resolution-time disjunctive optional-
+/// payment family is exact. Every member must lower a root PayCost(OneOf), and
+/// none may retain the dedicated strict-gap marker.
+#[test]
+fn msh_resolution_optional_payment_family_has_no_strict_gaps() {
+    use engine::types::ability::{
+        AbilityCondition, AbilityCost, AbilityDefinition, TargetFilter, TypeFilter,
+    };
+    use engine::types::mana::{ManaCost, ManaCostShard};
+
+    fn has_strict_gap(ability: &AbilityDefinition) -> bool {
+        matches!(
+            ability.effect.as_ref(),
+            Effect::Unimplemented { name, .. } if name == "reflexive optional payment"
+        ) || ability.sub_ability.as_deref().is_some_and(has_strict_gap)
+            || ability.else_ability.as_deref().is_some_and(has_strict_gap)
+    }
+
+    fn has_type(filter: &TargetFilter, expected: &TypeFilter) -> bool {
+        matches!(filter, TargetFilter::Typed(typed) if typed.type_filters.contains(expected))
+    }
+
+    fn sacrifice_leaf(cost: &AbilityCost, expected: &TypeFilter) -> bool {
+        matches!(cost, AbilityCost::Sacrifice(cost) if has_type(&cost.target, expected))
+    }
+
+    fn discard_leaf(cost: &AbilityCost, expected: &TypeFilter) -> bool {
+        matches!(
+            cost,
+            AbilityCost::Discard { filter: Some(filter), .. } if has_type(filter, expected)
+        )
+    }
+
+    const CARDS: [(&str, &str); 12] = [
+        ("Contract Hero", "When this creature enters, create a Treasure token. (It's an artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")\nWhenever this creature attacks, you may sacrifice an artifact or discard a card. If you do, this creature gets +2/+0 until end of turn."),
+        ("K'un-Lun Warrior", "When this creature enters, you may sacrifice an artifact or discard a card. If you do, draw a card."),
+        ("Anthropede", "Reach\nWhen this creature enters, you may discard a card or pay {2}. When you do, destroy target Room."),
+        ("Treetop Sentries", "Reach\nWhen this creature enters, you may forage. If you do, draw a card. (To forage, exile three cards from your graveyard or sacrifice a Food.)"),
+        ("Nimble Hobbit", "Whenever this creature attacks, you may sacrifice a Food or pay {2}{W}. When you do, tap target creature an opponent controls."),
+        ("Euru, Acorn Scrounger", "When Euru, Acorn Scrounger enters, you may forage. When you do, conjure a card named Chitterspitter onto the battlefield.\nWhenever one or more Squirrels you control deal combat damage to a player, you may sacrifice a token. If you do, put an acorn counter on each permanent you control named Chitterspitter."),
+        ("Reckless Detective", "Whenever this creature attacks, you may sacrifice an artifact or discard a card. If you do, draw a card and this creature gets +2/+0 until end of turn."),
+        ("Isu the Abominable", "You may look at the top card of your library any time.\nYou may play snow lands and cast snow spells from the top of your library.\nWhenever another snow permanent you control enters, you may pay {G}, {W}, or {U}. If you do, put a +1/+1 counter on Isu."),
+        ("Crypt Lurker", "When this creature enters, you may sacrifice a creature or discard a creature card. If you do, draw a card."),
+        ("Bushy Bodyguard", "Offspring {2} (You may pay an additional {2} as you cast this spell. If you do, when this creature enters, create a 1/1 token copy of it.)\nWhen this creature enters, you may forage. If you do, put two +1/+1 counters on it. (To forage, exile three cards from your graveyard or sacrifice a Food.)"),
+        ("Bullseye, Death Dealer", "When Bullseye enters, you may sacrifice an artifact or discard a nonland card. When you do, Bullseye deals 2 damage to any target.\n{3}, {T}, Sacrifice an artifact or discard a nonland card: Bullseye deals 2 damage to any target."),
+        ("Curious Forager", "When this creature enters, you may forage. When you do, return target permanent card from your graveyard to your hand. (To forage, exile three cards from your graveyard or sacrifice a Food.)"),
+    ];
+    for (name, oracle) in CARDS {
+        let parsed = parse(oracle, name, &[], &["Creature"], &[]);
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .chain(
+                    parsed
+                        .triggers
+                        .iter()
+                        .filter_map(|trigger| trigger.execute.as_deref())
+                )
+                .all(|ability| !has_strict_gap(ability)),
+            "{name} retained the dedicated strict gap: {parsed:#?}"
+        );
+        let root = parsed
+            .triggers
+            .iter()
+            .find_map(|trigger| {
+                trigger.execute.as_deref().filter(|ability| {
+                    matches!(
+                        ability.effect.as_ref(),
+                        Effect::PayCost {
+                            cost: AbilityCost::OneOf { .. },
+                            ..
+                        }
+                    )
+                })
+            })
+            .unwrap_or_else(|| panic!("{name} did not lower PayCost(OneOf): {parsed:#?}"));
+        let Effect::PayCost {
+            cost: AbilityCost::OneOf { costs },
+            ..
+        } = root.effect.as_ref()
+        else {
+            unreachable!();
+        };
+        assert!(root.optional, "{name} must preserve its printed may");
+        let when_you_do = matches!(
+            root.sub_ability
+                .as_deref()
+                .and_then(|tail| tail.condition.as_ref()),
+            Some(AbilityCondition::WhenYouDo)
+        );
+        match name {
+            "Contract Hero" | "K'un-Lun Warrior" | "Reckless Detective" => {
+                assert!(sacrifice_leaf(&costs[0], &TypeFilter::Artifact), "{name}");
+                assert!(matches!(
+                    costs[1],
+                    AbilityCost::Discard { filter: None, .. }
+                ));
+                assert!(!when_you_do);
+            }
+            "Anthropede" => {
+                assert!(matches!(
+                    costs[0],
+                    AbilityCost::Discard { filter: None, .. }
+                ));
+                assert_eq!(
+                    costs[1],
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(2)
+                    }
+                );
+                assert!(when_you_do);
+            }
+            "Treetop Sentries"
+            | "Bushy Bodyguard"
+            | "Curious Forager"
+            | "Euru, Acorn Scrounger" => {
+                assert!(matches!(
+                    costs[0],
+                    AbilityCost::Exile {
+                        count: 3,
+                        zone: Some(Zone::Graveyard),
+                        ..
+                    }
+                ));
+                assert!(sacrifice_leaf(
+                    &costs[1],
+                    &TypeFilter::Subtype("Food".into())
+                ));
+                assert_eq!(
+                    when_you_do,
+                    matches!(name, "Curious Forager" | "Euru, Acorn Scrounger")
+                );
+            }
+            "Nimble Hobbit" => {
+                assert!(sacrifice_leaf(
+                    &costs[0],
+                    &TypeFilter::Subtype("Food".into())
+                ));
+                assert!(matches!(
+                    costs[1],
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost { generic: 2, ref shards }
+                    } if shards == &[ManaCostShard::White]
+                ));
+                assert!(when_you_do);
+            }
+            "Isu the Abominable" => {
+                let shards: Vec<_> = costs
+                    .iter()
+                    .map(|cost| match cost {
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost { generic: 0, shards },
+                        } if shards.len() == 1 => shards[0],
+                        other => panic!("Isu branch must be one colored pip: {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(
+                    shards,
+                    vec![
+                        ManaCostShard::Green,
+                        ManaCostShard::White,
+                        ManaCostShard::Blue
+                    ]
+                );
+                assert!(!when_you_do);
+            }
+            "Crypt Lurker" => {
+                assert!(sacrifice_leaf(&costs[0], &TypeFilter::Creature));
+                assert!(discard_leaf(&costs[1], &TypeFilter::Creature));
+                assert!(!when_you_do);
+            }
+            "Bullseye, Death Dealer" => {
+                assert!(sacrifice_leaf(&costs[0], &TypeFilter::Artifact));
+                assert!(discard_leaf(
+                    &costs[1],
+                    &TypeFilter::Non(Box::new(TypeFilter::Land))
+                ));
+                assert!(when_you_do);
+            }
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[test]
@@ -134,8 +413,53 @@ fn snapshot_rancor() {
     insta::assert_json_snapshot!(result);
 }
 
+fn assert_same_is_true_type_recipients(affected: &Option<TargetFilter>) {
+    let Some(TargetFilter::Or { filters }) = affected else {
+        panic!("expected battlefield, stack, and owned-card recipient arms, got {affected:?}");
+    };
+    assert_eq!(filters.len(), 3);
+
+    let TargetFilter::Typed(battlefield) = &filters[0] else {
+        panic!("expected a typed battlefield recipient arm")
+    };
+    assert_eq!(battlefield.controller, Some(ControllerRef::You));
+    assert!(battlefield.type_filters.contains(&TypeFilter::Creature));
+    assert!(battlefield.properties.contains(&FilterProp::InZone {
+        zone: Zone::Battlefield,
+    }));
+
+    let TargetFilter::Typed(stack) = &filters[1] else {
+        panic!("expected a typed stack recipient arm")
+    };
+    assert_eq!(stack.controller, Some(ControllerRef::You));
+    assert!(stack.type_filters.contains(&TypeFilter::Creature));
+    assert!(stack
+        .properties
+        .contains(&FilterProp::InZone { zone: Zone::Stack }));
+
+    let TargetFilter::Typed(cards) = &filters[2] else {
+        panic!("expected a typed owned-card recipient arm")
+    };
+    assert_eq!(cards.controller, None);
+    assert!(cards.type_filters.contains(&TypeFilter::Creature));
+    assert!(cards.properties.contains(&FilterProp::Owned {
+        controller: ControllerRef::You,
+    }));
+    assert!(cards.properties.contains(&FilterProp::RepresentedByCard));
+    assert!(cards.properties.contains(&FilterProp::InAnyZone {
+        zones: vec![
+            Zone::Library,
+            Zone::Hand,
+            Zone::Graveyard,
+            Zone::Stack,
+            Zone::Exile,
+            Zone::Command,
+        ],
+    }));
+}
+
 #[test]
-fn arcane_adaptation_full_oracle_splits_battlefield_static_and_unimplemented_tail() {
+fn arcane_adaptation_full_oracle_models_all_same_is_true_recipients() {
     let result = parse(
         "As Arcane Adaptation enters, choose a creature type.\nCreatures you control are the chosen type in addition to their other types. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.",
         "Arcane Adaptation",
@@ -154,13 +478,7 @@ fn arcane_adaptation_full_oracle_splits_battlefield_static_and_unimplemented_tai
             kind: ChosenSubtypeKind::CreatureType
         }
     )));
-    match &static_def.affected {
-        Some(TargetFilter::Typed(filter)) => {
-            assert_eq!(filter.controller, Some(ControllerRef::You));
-            assert!(filter.type_filters.contains(&TypeFilter::Creature));
-        }
-        other => panic!("expected battlefield creature filter, got {other:?}"),
-    }
+    assert_same_is_true_type_recipients(&static_def.affected);
 
     let unimplemented: Vec<_> = result
         .abilities
@@ -173,24 +491,17 @@ fn arcane_adaptation_full_oracle_splits_battlefield_static_and_unimplemented_tai
             _ => None,
         })
         .collect();
-    assert_eq!(
-        unimplemented,
-        vec![
-            "The same is true for creature spells you control and creature cards you own that aren't on the battlefield."
-        ]
+    assert!(
+        unimplemented.is_empty(),
+        "Arcane Adaptation's continuation is fully modeled: {unimplemented:?}"
     );
 }
 
-// CR 613.1d + CR 205.3m: Maskwood Nexus's full Oracle text shares Arcane
-// Adaptation's two-sentence shape — a battlefield static plus the
-// "the same is true for creature spells / creature cards you own that aren't
-// on the battlefield" tail. The dispatcher in `oracle.rs` must split the
-// battlefield static (Layer 4 `AddAllCreatureTypes` on creatures you
-// control) from the non-battlefield tail, which is parked as
-// `Unimplemented` because layer-applied type changes outside the
-// battlefield aren't modeled.
+// CR 611.3a + CR 613.1d + CR 205.3m: Maskwood Nexus's complete two-sentence
+// static reaches controlled permanents and spells plus owned cards outside the
+// battlefield through one Layer-4 continuous effect.
 #[test]
-fn maskwood_nexus_full_oracle_splits_battlefield_static_and_unimplemented_tail() {
+fn maskwood_nexus_full_oracle_models_all_same_is_true_recipients() {
     let result = parse(
         "Creatures you control are every creature type. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.\n{3}, {T}: Create a 2/2 blue Shapeshifter creature token with changeling.",
         "Maskwood Nexus",
@@ -206,13 +517,7 @@ fn maskwood_nexus_full_oracle_splits_battlefield_static_and_unimplemented_tail()
         .modifications
         .iter()
         .any(|modification| matches!(modification, ContinuousModification::AddAllCreatureTypes)));
-    match &static_def.affected {
-        Some(TargetFilter::Typed(filter)) => {
-            assert_eq!(filter.controller, Some(ControllerRef::You));
-            assert!(filter.type_filters.contains(&TypeFilter::Creature));
-        }
-        other => panic!("expected battlefield creature filter, got {other:?}"),
-    }
+    assert_same_is_true_type_recipients(&static_def.affected);
 
     let unimplemented: Vec<_> = result
         .abilities
@@ -225,11 +530,9 @@ fn maskwood_nexus_full_oracle_splits_battlefield_static_and_unimplemented_tail()
             _ => None,
         })
         .collect();
-    assert_eq!(
-        unimplemented,
-        vec![
-            "The same is true for creature spells you control and creature cards you own that aren't on the battlefield."
-        ]
+    assert!(
+        unimplemented.is_empty(),
+        "Maskwood Nexus's continuation is fully modeled: {unimplemented:?}"
     );
 }
 
@@ -403,6 +706,8 @@ fn sawhorn_nemesis_damage_replacement_scopes_to_source_chosen_player() {
         replacement.damage_target_filter,
         Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
             player: DamageTargetPlayerScope::SourceChosenPlayer,
+            permanent_type: None,
+            source_scope: SourceExclusion::Include,
         })
     );
 }
@@ -815,5 +1120,314 @@ fn brood_birthing_grant_static_unchanged_by_masking() {
         "Brood Birthing's static must remain the functional GrantAbility grant, \
          got: {:#?}",
         result.statics[0]
+    );
+}
+
+/// Issue #6504: Jeweled Amulet's "note the type of mana spent to pay this
+/// activation cost" / "add one mana of this artifact's last noted type" pair
+/// must parse to the typed `Effect::NoteManaSpent` / `ManaProduction::NotedType`
+/// building block, not fall through to `Effect::Unimplemented`.
+#[test]
+fn jeweled_amulet_notes_and_reads_back_mana_type() {
+    use engine::types::ability::{ManaProduction, QuantityExpr};
+
+    let result = parse(
+        "{1}, {T}: Put a charge counter on this artifact. Note the type of mana \
+         spent to pay this activation cost. Activate only if there are no charge \
+         counters on this artifact.\n{T}, Remove a charge counter from this \
+         artifact: Add one mana of this artifact's last noted type.",
+        "Jeweled Amulet",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+
+    assert_eq!(
+        result.abilities.len(),
+        2,
+        "Jeweled Amulet has two top-level activated abilities: {:#?}",
+        result.abilities
+    );
+
+    let note_ability = result
+        .abilities
+        .iter()
+        .find(|a| matches!(&*a.effect, Effect::PutCounter { .. }))
+        .unwrap_or_else(|| panic!("no PutCounter ability parsed: {:#?}", result.abilities));
+    let note_sub = note_ability
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("PutCounter has no note sub-ability: {note_ability:#?}"));
+    assert!(
+        matches!(&*note_sub.effect, Effect::NoteManaSpent),
+        "expected Effect::NoteManaSpent, got {:#?}",
+        note_sub.effect
+    );
+
+    let add_ability = result
+        .abilities
+        .iter()
+        .find(|a| matches!(&*a.effect, Effect::Mana { .. }))
+        .unwrap_or_else(|| panic!("no Mana ability parsed: {:#?}", result.abilities));
+    match &*add_ability.effect {
+        Effect::Mana { produced, .. } => match produced {
+            ManaProduction::NotedType { count } => {
+                assert_eq!(
+                    count,
+                    &QuantityExpr::Fixed { value: 1 },
+                    "expected 'one mana' to parse as count=1"
+                );
+            }
+            other => panic!("expected ManaProduction::NotedType, got {other:#?}"),
+        },
+        other => unreachable!("filtered to Effect::Mana above, got {other:#?}"),
+    }
+}
+
+/// Issue #6504: the note clause is a composed grammar (article + cost-referent
+/// axes independently optional/variable), not a Jeweled-Amulet-shaped sentence
+/// tag — a hypothetical sibling printing the articleless "note type" and the
+/// shorter "this cost" (rather than "this activation cost") must reach
+/// `Effect::NoteManaSpent` with no new parser arm. `Amber Amulet` here is not
+/// a real printed card; it exercises the grammar's structural variants that
+/// `parse_note_mana_spent_clause`'s unit tests cover in isolation, end to end
+/// through the full Oracle-text pipeline.
+#[test]
+fn note_mana_spent_grammar_accepts_a_hypothetical_sibling_wording() {
+    let result = parse(
+        "{1}, {T}: Put a charge counter on this artifact. Note type of mana \
+         spent to pay this cost. Activate only if there are no charge \
+         counters on this artifact.",
+        "Amber Amulet",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+
+    let note_ability = result
+        .abilities
+        .iter()
+        .find(|a| matches!(&*a.effect, Effect::PutCounter { .. }))
+        .unwrap_or_else(|| panic!("no PutCounter ability parsed: {:#?}", result.abilities));
+    let note_sub = note_ability
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("PutCounter has no note sub-ability: {note_ability:#?}"));
+    assert!(
+        matches!(&*note_sub.effect, Effect::NoteManaSpent),
+        "expected Effect::NoteManaSpent for the articleless/shorter-cost \
+         sibling wording, got {:#?}",
+        note_sub.effect
+    );
+}
+
+/// Issue #6504 (coverage-honesty guard): Ice Cauldron prints Jeweled Amulet's
+/// sibling "note the type AND AMOUNT of mana spent..." / "add ... last noted
+/// type and amount of mana" pair, which `parse_note_mana_spent_clause` and
+/// `ManaProduction::NotedType` deliberately do not model (see the doc comment
+/// on `parse_note_mana_spent_clause`). A production-parser assertion — not
+/// just the isolated `parse_note_mana_spent_clause` unit tests — is required
+/// here: it proves the parser actually REACHES both noted-mana clauses
+/// (rather than failing earlier in the sentence for an unrelated reason) and
+/// that each still falls through to `Effect::Unimplemented`, so an upstream
+/// routing/fallback change can't silently start reporting Ice Cauldron as
+/// supported or partially supported. Paired with
+/// `jeweled_amulet_notes_and_reads_back_mana_type`'s positive full-Oracle
+/// assertion that the same grammar area reaches `Effect::NoteManaSpent` for
+/// Jeweled Amulet's singular-type wording.
+#[test]
+fn ice_cauldron_note_type_and_amount_stays_unimplemented() {
+    let result = parse(
+        "{X}, {T}: You may exile a nonland card from your hand. You may cast that \
+         card for as long as it remains exiled. Put a charge counter on this \
+         artifact and note the type and amount of mana spent to pay this \
+         activation cost. Activate only if there are no charge counters on this \
+         artifact.\n{T}, Remove a charge counter from this artifact: Add this \
+         artifact's last noted type and amount of mana. Spend this mana only to \
+         cast the last card exiled with this artifact.",
+        "Ice Cauldron",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+
+    // First ability: exile -> cast -> put counter -> note (type and amount).
+    // The note clause is reached only by walking through three chained
+    // sub-abilities, proving the parser gets all the way to the noted-mana
+    // subject rather than failing earlier for an unrelated reason.
+    let exile_ability = result
+        .abilities
+        .iter()
+        .find(|a| matches!(&*a.effect, Effect::ChangeZone { .. }))
+        .unwrap_or_else(|| panic!("no exile ability parsed: {:#?}", result.abilities));
+    let cast_sub = exile_ability
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("exile has no cast sub-ability: {exile_ability:#?}"));
+    let counter_sub = cast_sub
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("cast has no counter sub-ability: {cast_sub:#?}"));
+    let note_sub = counter_sub
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("counter has no note sub-ability: {counter_sub:#?}"));
+    // The gap is identified by the clause it RECORDS plus the parser's verdict on that
+    // clause, not by the clause's first word. `note` is a known clause head, so the
+    // refusal is `VerbArguments`. This venue is a separate crate, so it asserts the
+    // wire-name half (`ClauseGapKind`, `pub`) and the fragment half through the `pub`
+    // accessor; the phrase half of the verdict is covered in-crate by the
+    // `gap_diagnosis` table, which tests the same function over its input range.
+    const NOTE_CLAUSE: &str = "note the type and amount of mana spent to pay this activation cost";
+    let Effect::Unimplemented { name, .. } = &*note_sub.effect else {
+        panic!(
+            "Ice Cauldron's 'type AND amount' noted-mana subject must stay \
+             Unimplemented, not be swallowed by parse_note_mana_spent_clause's \
+             singular-type grammar; got {:#?}",
+            note_sub.effect
+        );
+    };
+    assert_eq!(
+        ClauseGapKind::from_unimplemented_name(name),
+        Some(ClauseGapKind::VerbArguments),
+        "the recorded name must decode to the verdict this clause earns, got {name}"
+    );
+    assert_eq!(
+        note_sub.effect.unimplemented_description(),
+        Some(NOTE_CLAUSE),
+        "the recorded fragment names the exact clause that gapped"
+    );
+
+    // Second ability: the mana-producing "add ... last noted type and amount
+    // of mana" must not be matched by `ManaProduction::NotedType`'s
+    // singular-type pattern. Same identification: the recorded clause, not its
+    // first word.
+    // The recorded fragment is the clause as printed (self-reference normalized to
+    // `~`), measured from the parser rather than assumed.
+    const ADD_CLAUSE: &str = "Add ~'s last noted type and amount of mana";
+    let mana_ability = result
+        .abilities
+        .iter()
+        .find(|a| a.effect.unimplemented_description() == Some(ADD_CLAUSE))
+        .unwrap_or_else(|| {
+            panic!(
+                "Ice Cauldron's 'last noted type and amount of mana' must stay \
+                 Unimplemented, not be matched by ManaProduction::NotedType's \
+                 singular-type pattern; got {:#?}",
+                result.abilities
+            )
+        });
+    // `unimplemented_description` is `None` for every other effect shape, so matching
+    // `ADD_CLAUSE` above already established both the variant and the recorded
+    // fragment — the selector IS the "names the exact clause that gapped" assertion,
+    // and it is order-independent where a "first Unimplemented" scan was not.
+    let Effect::Unimplemented { name, .. } = &*mana_ability.effect else {
+        unreachable!("only Effect::Unimplemented has an unimplemented_description")
+    };
+    assert_eq!(
+        ClauseGapKind::from_unimplemented_name(name),
+        Some(ClauseGapKind::VerbArguments),
+        "the recorded name must decode to the verdict this clause earns, got {name}"
+    );
+}
+
+/// Havi's historic graveyard threshold must lower as a typed static condition
+/// without disturbing Sage Project's supported `ChangeZone` return.
+#[test]
+fn havi_the_all_father_full_card_parser_snapshot() {
+    let parsed = parse(
+        "Havi has indestructible as long as there are four or more historic cards in your graveyard. (Artifacts, legendaries, and Sagas are historic.)\nSage Project — Whenever Havi or another legendary creature you control dies, return target legendary creature card with lesser mana value from your graveyard to the battlefield tapped.",
+        "Havi, the All-Father",
+        &[],
+        &["Legendary", "Creature"],
+        &["God"],
+    );
+    assert!(
+        parsed.statics.iter().any(|static_def| {
+            matches!(
+                &static_def.condition,
+                Some(StaticCondition::QuantityComparison { .. })
+            )
+        }),
+        "Havi's first line must produce its conditional static: {parsed:#?}"
+    );
+    fn contains_change_zone(def: &engine::types::ability::AbilityDefinition) -> bool {
+        matches!(def.effect.as_ref(), Effect::ChangeZone { .. })
+            || def.sub_ability.as_deref().is_some_and(contains_change_zone)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(contains_change_zone)
+    }
+    assert!(
+        parsed
+            .triggers
+            .iter()
+            .any(|trigger| trigger.execute.as_deref().is_some_and(contains_change_zone)),
+        "Sage Project's supported return must remain a ChangeZone effect: {parsed:#?}"
+    );
+    insta::assert_json_snapshot!("havi_the_all_father_full_card", &parsed);
+}
+
+/// Elenda's full printed text must route both continuous abilities through the
+/// public parser and preserve their distinct starting-life thresholds.
+#[test]
+fn elenda_saint_of_dusk_full_card_parser() {
+    let parsed = parse(
+        "Lifelink, hexproof from instants\nAs long as your life total is greater than your starting life total, Elenda gets +1/+1 and has menace. Elenda gets an additional +5/+5 as long as your life total is at least 10 greater than your starting life total.",
+        "Elenda, Saint of Dusk",
+        &[
+            Keyword::Lifelink,
+            Keyword::HexproofFrom(HexproofFilter::CardType("instants".to_string())),
+        ],
+        &["Legendary", "Creature"],
+        &["Vampire", "Knight"],
+    );
+    assert_eq!(
+        parsed.statics.len(),
+        2,
+        "both printed continuous abilities must parse: {parsed:#?}"
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "the full Elenda card must not leave parse warnings: {parsed:#?}"
+    );
+    assert!(
+        parsed.statics.iter().any(|static_def| {
+            static_def.condition
+                == Some(StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::LifeTotal {
+                            player: PlayerScope::Controller,
+                        },
+                    },
+                    comparator: Comparator::GT,
+                    rhs: QuantityExpr::Ref {
+                        qty: QuantityRef::StartingLifeTotal {
+                            player: PlayerScope::Controller,
+                        },
+                    },
+                })
+        }),
+        "the first static must gate on life above starting: {parsed:#?}"
+    );
+    assert!(
+        parsed.statics.iter().any(|static_def| {
+            static_def.condition
+                == Some(StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::LifeAboveStarting,
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 10 },
+                })
+                && static_def
+                    .modifications
+                    .contains(&ContinuousModification::AddPower { value: 5 })
+                && static_def
+                    .modifications
+                    .contains(&ContinuousModification::AddToughness { value: 5 })
+        }),
+        "the additional +5/+5 must use LifeAboveStarting >= 10: {parsed:#?}"
     );
 }

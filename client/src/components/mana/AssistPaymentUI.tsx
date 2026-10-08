@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
+import { AmountInput, parseAmount } from "./AmountInput.tsx";
 
 /**
  * CR 702.132a: Assist — the chosen helper decides how much of the spell's
@@ -21,15 +22,30 @@ export function AssistPaymentUI() {
 
   const isAssistPayment = waitingFor?.type === "AssistPayment";
   const max = isAssistPayment ? waitingFor.data.max_generic : 0;
-  const [value, setValue] = useState(0);
+  // Prompt identity, not just bounds: a successor prompt with the SAME max would otherwise leave
+  // `raw` holding the previous decision, letting the player submit an amount they chose for a
+  // different prompt. BOTH seats are keyed on, not just `caster` — `chosen` is the seat actually
+  // being asked to pay, so one caster polling two different players in succession changes only
+  // `chosen`, and keying on `caster` alone would not fire.
+  const caster = isAssistPayment ? waitingFor.data.caster : null;
+  const chosen = isAssistPayment ? waitingFor.data.chosen : null;
+  const [raw, setRaw] = useState("0");
 
   useEffect(() => {
-    if (isAssistPayment) setValue(0);
-  }, [isAssistPayment, max]);
+    if (isAssistPayment) setRaw("0");
+  }, [isAssistPayment, max, caster, chosen]);
+
+  // CR 702.132a: "the player you chose may pay for any amount of the generic mana in the
+  // spell's total cost" — the variant's domain is 0..max_generic. This is NOT a
+  // frontend-invented bound: `WaitingFor::AssistPayment` carries no `min` field, and the
+  // engine's own prompt projection (`game::interaction::number_projection`) synthesizes
+  // `min: 0` for this variant. The client mirrors the engine's projection.
+  const amount = parseAmount(raw, 0, max);
 
   const handleCommit = useCallback(() => {
-    dispatch({ type: "CommitAssistPayment", data: { generic: value } });
-  }, [dispatch, value]);
+    if (amount === null) return;
+    dispatch({ type: "CommitAssistPayment", data: { generic: amount } });
+  }, [dispatch, amount]);
 
   if (!isAssistPayment || !canAct) return null;
 
@@ -47,32 +63,39 @@ export function AssistPaymentUI() {
             {t("assist.payment.title")}
           </h3>
 
-          <div className="mb-4 px-2">
-            <label className="flex items-center gap-3 text-sm text-gray-200">
-              <span className="shrink-0 font-mono text-base text-cyan-300">
-                {value}
-              </span>
-              <input
-                type="range"
-                min={0}
-                max={max}
-                value={value}
-                onChange={(e) => setValue(Number(e.target.value))}
-                className="h-2 w-full cursor-pointer appearance-none rounded-full bg-gray-700 accent-cyan-500"
-                aria-label={t("assist.payment.title")}
-              />
-              <span className="shrink-0 text-xs text-gray-500">/ {max}</span>
-            </label>
-          </div>
+          {/* Reusing `assist.payment.title` as the box's accessible name preserves today's
+              accessible name byte-for-byte (the slider already carried it) and adds no key. */}
+          <AmountInput
+            raw={raw}
+            onRawChange={setRaw}
+            min={0}
+            max={max}
+            onSubmit={handleCommit}
+            labels={{
+              input: t("assist.payment.title"),
+              decrease: t("mana.decreaseAmount"),
+              increase: t("mana.increaseAmount"),
+            }}
+          />
 
           <div className="flex justify-center">
             <button
               onClick={handleCommit}
-              className={gameButtonClass({ tone: "emerald", size: "md" })}
+              disabled={amount === null}
+              className={gameButtonClass({
+                tone: "emerald",
+                size: "md",
+                disabled: amount === null,
+              })}
             >
-              {value === 0
-                ? t("assist.payment.decline")
-                : t("assist.payment.commit", { value })}
+              {/* `(amount ?? 0) === 0` collapsed "invalid entry" into "declining to pay", so an
+                  over-max entry labelled the button "Pay nothing" — the OPPOSITE of the pending
+                  intent. Declining is amount === 0 exactly; null is no decision yet. */}
+              {amount === null
+                ? t("mana.confirmAmount")
+                : amount === 0
+                  ? t("assist.payment.decline")
+                  : t("assist.payment.commit", { value: amount })}
             </button>
           </div>
         </div>

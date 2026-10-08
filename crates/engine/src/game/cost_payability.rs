@@ -20,19 +20,19 @@
 //! the enumerations.
 
 use crate::types::ability::{
-    is_variable_remove_counter_cost_count, AbilityCost, Comparator, CounterCostSelection,
-    FilterProp, QuantityExpr, QuantityRef, TapCreaturesAggregateStat, TapCreaturesRequirement,
-    TargetFilter, TypedFilter,
+    is_variable_remove_counter_cost_count, AbilityCost, CardSelectionMode, Comparator,
+    CounterCostSelection, DiscardSelfScope, FilterProp, PlayerFilter, QuantityExpr, QuantityRef,
+    TapCreaturesAggregateStat, TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_X,
 };
 use crate::types::card_type::CoreType;
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use crate::types::GameState;
 
 use super::filter::{matches_target_filter, matches_target_filter_in_owner_zone, FilterContext};
 
-fn is_pitch_bound_cmc_eq_x_prop(prop: &FilterProp) -> bool {
+fn is_x_mana_value_constraint(prop: &FilterProp) -> bool {
     matches!(
         prop,
         FilterProp::Cmc {
@@ -44,22 +44,30 @@ fn is_pitch_bound_cmc_eq_x_prop(prop: &FilterProp) -> bool {
     )
 }
 
-/// True when a cost filter uses the Shoal pattern: "with mana value X" where X
-/// is defined by the card chosen to pay the cost, not by a prior announcement.
-pub(crate) fn target_filter_has_pitch_bound_x(filter: &TargetFilter) -> bool {
+/// True when a cost filter contains a variable mana-value equality.
+pub(crate) fn target_filter_has_x_mana_value_constraint(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed(tf) => tf.properties.iter().any(is_pitch_bound_cmc_eq_x_prop),
+        TargetFilter::Typed(tf) => tf.properties.iter().any(is_x_mana_value_constraint),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(target_filter_has_pitch_bound_x)
+            filters
+                .iter()
+                .any(target_filter_has_x_mana_value_constraint)
         }
         TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
-            target_filter_has_pitch_bound_x(filter)
+            target_filter_has_x_mana_value_constraint(filter)
+        }
+        // A recursive carrier, not a leaf — see
+        // `player_filter_has_x_mana_value_constraint`.
+        TargetFilter::PlayerMatching { player } => {
+            player_filter_has_x_mana_value_constraint(player)
         }
         TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::None
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
@@ -72,13 +80,16 @@ pub(crate) fn target_filter_has_pitch_bound_x(filter: &TargetFilter) -> bool {
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::EventTarget
@@ -89,41 +100,136 @@ pub(crate) fn target_filter_has_pitch_bound_x(filter: &TargetFilter) -> bool {
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
         // CR 201.5a: a granter self-ref carries no pitch-bound X.
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         // CR 608.2c: source-relative object ref carries no pitch-bound X.
         | TargetFilter::OriginalSource
         | TargetFilter::AllPlayers => false,
     }
 }
 
-pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter {
+/// `TargetFilter::PlayerMatching` is a recursive carrier, not a leaf —
+/// its nested `PlayerFilter` graph can hold object populations that themselves
+/// carry an `X` mana-value constraint ("a player who controls a permanent with
+/// mana value X"). Treating it as a leaf let such a constraint survive
+/// pre-announcement, when `X` is not yet chosen.
+///
+/// `ability_scan::scan_player_filter` is the reference traversal. This mirrors
+/// its reach over nested `TargetFilter`s and the `AllExcept` chain, and stops
+/// where the enclosing walker stops — neither descends into `QuantityExpr`.
+fn player_filter_has_x_mana_value_constraint(player: &PlayerFilter) -> bool {
+    match player {
+        PlayerFilter::AllExcept { exclude } => player_filter_has_x_mana_value_constraint(exclude),
+        PlayerFilter::OpponentDealtDamage { source, .. } => source
+            .as_deref()
+            .is_some_and(target_filter_has_x_mana_value_constraint),
+        PlayerFilter::ControlsCount { filter, .. }
+        | PlayerFilter::TrackedSetPossessor { filter, .. } => {
+            target_filter_has_x_mana_value_constraint(filter)
+        }
+        // Player-identity roles, ledger reads, and the quantity-comparison axis
+        // name no object population this walker descends into.
+        PlayerFilter::Controller
+        | PlayerFilter::Opponent
+        | PlayerFilter::DefendingPlayer
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
+        | PlayerFilter::All
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::ZoneChangedThisWay
+        | PlayerFilter::PerformedActionThisWay { .. }
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::GrantingObjectCaster
+        | PlayerFilter::PlayerAttribute { .. }
+        | PlayerFilter::ChosenPlayer { .. } => false,
+    }
+}
+
+/// Relaxation counterpart of [`player_filter_has_x_mana_value_constraint`]:
+/// rebuilds the nested populations with their `X` mana-value constraints
+/// stripped, leaving every other axis untouched.
+fn relax_x_mana_value_constraint_player(player: &PlayerFilter) -> PlayerFilter {
+    match player {
+        PlayerFilter::AllExcept { exclude } => PlayerFilter::AllExcept {
+            exclude: Box::new(relax_x_mana_value_constraint_player(exclude)),
+        },
+        PlayerFilter::OpponentDealtDamage {
+            source,
+            kind,
+            min_sources,
+        } => PlayerFilter::OpponentDealtDamage {
+            source: source
+                .as_deref()
+                .map(|s| Box::new(relax_x_mana_value_constraint(s))),
+            kind: *kind,
+            min_sources: *min_sources,
+        },
+        PlayerFilter::ControlsCount {
+            filter,
+            count,
+            relation,
+            comparator,
+        } => PlayerFilter::ControlsCount {
+            filter: relax_x_mana_value_constraint(filter),
+            count: count.clone(),
+            relation: *relation,
+            comparator: *comparator,
+        },
+        PlayerFilter::TrackedSetPossessor {
+            filter,
+            relation,
+            possession,
+            caused_by,
+        } => PlayerFilter::TrackedSetPossessor {
+            filter: relax_x_mana_value_constraint(filter),
+            relation: *relation,
+            possession: *possession,
+            caused_by: *caused_by,
+        },
+        // No nested object population to relax.
+        other => other.clone(),
+    }
+}
+
+pub(crate) fn relax_x_mana_value_constraint(filter: &TargetFilter) -> TargetFilter {
     match filter {
         TargetFilter::Typed(tf) => TargetFilter::Typed(TypedFilter {
             properties: tf
                 .properties
                 .iter()
-                .filter(|p| !is_pitch_bound_cmc_eq_x_prop(p))
+                .filter(|p| !is_x_mana_value_constraint(p))
                 .cloned()
                 .collect(),
             ..tf.clone()
         }),
         TargetFilter::ExiledCardByIndex { .. } => filter.clone(),
         TargetFilter::Or { filters } => TargetFilter::Or {
-            filters: filters.iter().map(relax_pitch_bound_x_filter).collect(),
+            filters: filters.iter().map(relax_x_mana_value_constraint).collect(),
         },
         TargetFilter::And { filters } => TargetFilter::And {
-            filters: filters.iter().map(relax_pitch_bound_x_filter).collect(),
+            filters: filters.iter().map(relax_x_mana_value_constraint).collect(),
         },
         TargetFilter::Not { filter } => TargetFilter::Not {
-            filter: Box::new(relax_pitch_bound_x_filter(filter)),
+            filter: Box::new(relax_x_mana_value_constraint(filter)),
         },
         TargetFilter::TrackedSetFiltered {
             id,
@@ -131,13 +237,20 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
             caused_by,
         } => TargetFilter::TrackedSetFiltered {
             id: *id,
-            filter: Box::new(relax_pitch_bound_x_filter(filter)),
+            filter: Box::new(relax_x_mana_value_constraint(filter)),
             caused_by: *caused_by,
+        },
+        // Relax the nested populations too, or an `X` constraint
+        // inside "a player who controls ..." survives cost pre-announcement.
+        TargetFilter::PlayerMatching { player } => TargetFilter::PlayerMatching {
+            player: Box::new(relax_x_mana_value_constraint_player(player)),
         },
         TargetFilter::None
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
@@ -150,13 +263,16 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::EventTarget
@@ -167,31 +283,140 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
         // CR 201.5a: no pitch-bound X constraint to relax.
-        | TargetFilter::GrantingObject
+        | TargetFilter::GrantingObject { .. }
         // CR 608.2c: source-relative object ref — nothing to relax.
         | TargetFilter::OriginalSource
         | TargetFilter::AllPlayers => filter.clone(),
     }
 }
 
-/// CR 107.3a + CR 118.9: Until the player chooses the pitched card, relax the
-/// CMC=X constraint for 601.2b eligibility on Shoal-style exile costs.
-pub(crate) fn exile_cost_effective_filter(filter: Option<&TargetFilter>) -> Option<TargetFilter> {
+/// CR 107.3a + CR 601.2b: Before X is announced, relax its equality constraint
+/// when checking which cards can pay a cost.
+pub(crate) fn cost_filter_before_x_announcement(
+    filter: Option<&TargetFilter>,
+) -> Option<TargetFilter> {
     filter.map(|f| {
-        if target_filter_has_pitch_bound_x(f) {
-            relax_pitch_bound_x_filter(f)
+        if target_filter_has_x_mana_value_constraint(f) {
+            relax_x_mana_value_constraint(f)
         } else {
             f.clone()
         }
     })
+}
+
+/// CR 118.3 + CR 601.2h + CR 701.9a: Joint payability of a cost's chosen
+/// hand-discard legs ("discard an Island card and another card"). A per-leg
+/// "enough eligible cards" check lets one physical card satisfy two legs, so
+/// the cost is offered and then dead-ends mid-payment.
+///
+/// The engine pays legs in printed order (CR 601.2h permits any order), and the
+/// player freely chooses which eligible cards each leg discards. The cost is
+/// therefore jointly payable only when EVERY possible sequence of choices leaves
+/// every later leg payable, so this fails closed for an order that lets an early,
+/// less-restrictive leg take a card a later, more-restrictive leg needs
+/// (`[Any, Island]` over hand `[Island, Forest]` is not payable;
+/// `[Island, Any]` is). Only `Fixed` positive-count `Chosen` `FromHand` legs are
+/// modeled; every other leg kind is ignored here and keeps its own per-leg gate.
+pub(crate) fn discard_legs_jointly_payable(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    granting_object: Option<ObjectIncarnationRef>,
+    costs: &[AbilityCost],
+) -> bool {
+    let Some(player_state) = state.players.get(player.0 as usize) else {
+        return true;
+    };
+    let ctx = FilterContext::from_source(state, source).with_granting_object(granting_object);
+    let legs: Vec<(usize, Vec<ObjectId>)> = costs
+        .iter()
+        .filter_map(|cost| match cost {
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value },
+                filter,
+                selection: CardSelectionMode::Chosen,
+                self_scope: DiscardSelfScope::FromHand,
+            } if *value > 0 => {
+                let effective_filter = cost_filter_before_x_announcement(filter.as_ref());
+                let eligible = player_state
+                    .hand
+                    .iter()
+                    .copied()
+                    .filter(|&id| {
+                        id != source
+                            && effective_filter
+                                .as_ref()
+                                .is_none_or(|f| matches_target_filter(state, id, f, &ctx))
+                    })
+                    .collect();
+                Some((*value as usize, eligible))
+            }
+            _ => None,
+        })
+        .collect();
+    discard_legs_payable_for_every_choice(&legs, &[])
+}
+
+/// Every choice of `count` cards for the first leg (from those not already
+/// `used`) must leave the remaining legs payable.
+fn discard_legs_payable_for_every_choice(
+    legs: &[(usize, Vec<ObjectId>)],
+    used: &[ObjectId],
+) -> bool {
+    let Some(((count, eligible), later)) = legs.split_first() else {
+        return true;
+    };
+    let available: Vec<ObjectId> = eligible
+        .iter()
+        .copied()
+        .filter(|id| !used.contains(id))
+        .collect();
+    if available.len() < *count {
+        return false;
+    }
+    let mut picked = Vec::with_capacity(*count);
+    every_combination_leaves_later_payable(&available, *count, 0, &mut picked, later, used)
+}
+
+fn every_combination_leaves_later_payable(
+    available: &[ObjectId],
+    count: usize,
+    from: usize,
+    picked: &mut Vec<ObjectId>,
+    later: &[(usize, Vec<ObjectId>)],
+    used: &[ObjectId],
+) -> bool {
+    if picked.len() == count {
+        let mut now_used = used.to_vec();
+        now_used.extend_from_slice(picked);
+        return discard_legs_payable_for_every_choice(later, &now_used);
+    }
+    for index in from..available.len() {
+        picked.push(available[index]);
+        let ok = every_combination_leaves_later_payable(
+            available,
+            count,
+            index + 1,
+            picked,
+            later,
+            used,
+        );
+        picked.pop();
+        if !ok {
+            return false;
+        }
+    }
+    true
 }
 
 impl AbilityCost {
@@ -208,35 +433,124 @@ impl AbilityCost {
         state: &GameState,
         player: PlayerId,
         source: ObjectId,
+        ability_index: usize,
     ) -> bool {
+        let granter =
+            super::casting::activated_ability_granting_object(state, source, Some(ability_index));
         match self {
+            AbilityCost::Discard {
+                count,
+                filter,
+                self_scope,
+                ..
+            } => {
+                let reserved = state
+                    .pending_cast
+                    .as_ref()
+                    .filter(|pending| pending.ability.controller == player)
+                    .and_then(|pending| {
+                        pending
+                            .deferred_random_discard_cost
+                            .as_ref()
+                            .map(|cost| (pending.object_id, cost.count))
+                    });
+                if reserved.is_none() {
+                    return self.is_payable_for_activation(
+                        state,
+                        player,
+                        source,
+                        Some(ability_index),
+                    );
+                }
+                let (pending_spell, reserved_count) = reserved.expect("checked reservation");
+                let Some(p) = state.players.get(player.0 as usize) else {
+                    return false;
+                };
+                if self_scope.is_source_card() {
+                    return p.hand.contains(&source)
+                        && p.hand
+                            .iter()
+                            .filter(|&&id| id != source && id != pending_spell)
+                            .count()
+                            >= reserved_count;
+                }
+                let resolved =
+                    super::quantity::resolve_quantity(state, count, player, source).max(0) as usize;
+                let effective_filter = cost_filter_before_x_announcement(filter.as_ref());
+                let ctx = FilterContext::from_source(state, source).with_granting_object(granter);
+                p.hand
+                    .iter()
+                    .filter(|&&id| {
+                        id != source
+                            && id != pending_spell
+                            && effective_filter
+                                .as_ref()
+                                .is_none_or(|f| matches_target_filter(state, id, f, &ctx))
+                    })
+                    .count()
+                    >= resolved + reserved_count
+            }
             AbilityCost::Mana { cost } => {
                 let excluded_sources = std::collections::HashSet::from([source]);
                 super::casting::can_pay_ability_mana_cost_after_auto_tap_excluding(
                     state,
                     player,
                     source,
+                    Some(ability_index),
                     cost,
                     &excluded_sources,
                 )
             }
             // Same {T}+TapCreatures source-exclusion logic as `is_payable`'s
             // Composite arm, but Mana sub-costs use the mana-specific check.
+            //
+            // EXCLUSION (fail closed): the mana-ability payment path resolves a
+            // chosen hand-discard through `find_non_self_discard`, which returns
+            // only the FIRST such leg, so a composite holding two or more of them
+            // would pay one discard and silently drop the rest (CR 601.2h forbids
+            // partial payment). Such a mana ability is therefore never offered;
+            // supporting it needs a multi-leg discard prompt in `mana_abilities`.
+            AbilityCost::Composite { costs }
+                if costs
+                    .iter()
+                    .filter(|c| {
+                        matches!(
+                            c,
+                            AbilityCost::Discard {
+                                selection: CardSelectionMode::Chosen,
+                                self_scope: DiscardSelfScope::FromHand,
+                                ..
+                            }
+                        )
+                    })
+                    .count()
+                    >= 2 =>
+            {
+                false
+            }
             AbilityCost::Composite { costs } => {
                 let has_tap = costs.iter().any(|c| matches!(c, AbilityCost::Tap));
                 costs.iter().all(|c| match c {
                     AbilityCost::TapCreatures {
                         requirement,
                         filter,
-                    } if has_tap => {
-                        has_enough_tap_creatures(state, player, source, requirement, filter, true)
+                    } if has_tap => has_enough_tap_creatures(
+                        state,
+                        player,
+                        source,
+                        granter,
+                        requirement,
+                        filter,
+                        true,
+                    ),
+                    other => {
+                        other.is_payable_for_mana_ability(state, player, source, ability_index)
                     }
-                    other => other.is_payable_for_mana_ability(state, player, source),
                 })
             }
             // Every other kind has no mana-pool component — defer to the
             // generic 601.2b gate, which already handles it correctly.
-            other => other.is_payable(state, player, source),
+            other => other.is_payable_for_activation(state, player, source, Some(ability_index)),
         }
     }
 
@@ -249,7 +563,36 @@ impl AbilityCost {
     ///
     /// Mana affordability is NOT checked here; CR 601.2g handles the mana step
     /// separately through the mana-payment flow.
+    ///
+    /// Ability-agnostic entry point: delegates to [`Self::is_payable_for_activation`]
+    /// with no activation index. Callers that KNOW the ability whose cost this is
+    /// (the activation pipeline) must use that method instead so CR 106.6
+    /// tag-scoped mana is judged the same way the real payment step judges it.
     pub fn is_payable(&self, state: &GameState, player: PlayerId, source: ObjectId) -> bool {
+        self.is_payable_for_activation(state, player, source, None)
+    }
+
+    /// CR 118.3 + CR 601.2h + CR 106.6: [`Self::is_payable`] with the activated
+    /// ability's exact index in hand.
+    ///
+    /// Only sub-costs that consult a `PaymentContext` care about this identity
+    /// today: `Waterbend`, whose affordability probe funds a mana cost. The
+    /// index must reach it because `PaymentContext::Activation` derives the
+    /// exact ability tag from the same definition. Otherwise,
+    /// `ManaRestriction::OnlyForTaggedActivation` could hide mana that the real
+    /// payment step may spend, suppressing a legally activatable ability.
+    ///
+    /// Single body for both entry points, so the composite/disjunctive
+    /// traversal is not duplicated across a tagged and an untagged authority.
+    pub fn is_payable_for_activation(
+        &self,
+        state: &GameState,
+        player: PlayerId,
+        source: ObjectId,
+        ability_index: Option<usize>,
+    ) -> bool {
+        let granting_object =
+            super::casting::activated_ability_granting_object(state, source, ability_index);
         match self {
             // CR 601.2g: Mana affordability is checked by the mana payment step,
             // not the 601.2b choice-of-object gate.
@@ -289,6 +632,7 @@ impl AbilityCost {
                         state,
                         player,
                         source,
+                        granting_object,
                         &cost.target,
                     );
                     let (min_count, _) =
@@ -304,6 +648,7 @@ impl AbilityCost {
                         state,
                         player,
                         source,
+                        granting_object,
                         &cost.target,
                     );
                     let total_positive_power: i32 = match stat {
@@ -342,12 +687,14 @@ impl AbilityCost {
                 }
                 let resolved =
                     super::quantity::resolve_quantity(state, count, player, source).max(0) as usize;
-                let ctx = FilterContext::from_source(state, source);
+                let effective_filter = cost_filter_before_x_announcement(filter.as_ref());
+                let ctx =
+                    FilterContext::from_source(state, source).with_granting_object(granting_object);
                 p.hand
                     .iter()
                     .filter(|&&id| {
                         id != source
-                            && filter
+                            && effective_filter
                                 .as_ref()
                                 .is_none_or(|f| matches_target_filter(state, id, f, &ctx))
                     })
@@ -367,6 +714,13 @@ impl AbilityCost {
                 zone,
                 filter,
             } => {
+                // CR 107.3a + CR 601.2b: X in this cost is chosen during
+                // announcement. X=0 is legal, so the pre-announcement
+                // affordability gate must not treat its compact sentinel as a
+                // literal count that can never be met.
+                if *count == EXILE_COST_X {
+                    return true;
+                }
                 if matches!(filter, Some(TargetFilter::SelfRef)) {
                     // CR 118.3 + CR 602.1a: "Exile this <self>" as an
                     // activation cost needs the source available to pay that
@@ -381,11 +735,12 @@ impl AbilityCost {
                     };
                 }
                 let zone = exile_cost_effective_zone(*zone, filter.as_ref());
-                let effective_filter = exile_cost_effective_filter(filter.as_ref());
+                let effective_filter = cost_filter_before_x_announcement(filter.as_ref());
                 eligible_exile_cost_objects(
                     state,
                     player,
                     source,
+                    granting_object,
                     zone,
                     effective_filter.as_ref(),
                     *count,
@@ -432,7 +787,15 @@ impl AbilityCost {
             AbilityCost::TapCreatures {
                 requirement,
                 filter,
-            } => has_enough_tap_creatures(state, player, source, requirement, filter, false),
+            } => has_enough_tap_creatures(
+                state,
+                player,
+                source,
+                granting_object,
+                requirement,
+                filter,
+                false,
+            ),
             // CR 601.2b: RemoveCounter requires counters on the implied target.
             // If `target` is None, the source must have the required counters.
             // Otherwise, at least one matching permanent must carry N counters.
@@ -453,7 +816,8 @@ impl AbilityCost {
                             >= *count
                     }
                     Some(tf) => {
-                        let ctx = FilterContext::from_source(state, source);
+                        let ctx = FilterContext::from_source(state, source)
+                            .with_granting_object(granting_object);
                         let matching_counts = state.battlefield.iter().filter_map(|&id| {
                             state.objects.get(&id).and_then(|o| {
                                 (o.controller == player
@@ -513,6 +877,7 @@ impl AbilityCost {
                     state,
                     player,
                     source,
+                    granting_object,
                     filter.as_ref(),
                 )
                 .len()
@@ -537,14 +902,26 @@ impl AbilityCost {
             // the interactive detour (`find_eligible_unattach_for_cost_targets`).
             AbilityCost::UnattachFrom { filter, count } => {
                 super::casting::find_eligible_unattach_for_cost_targets(
-                    state, player, source, filter, 0,
+                    state,
+                    player,
+                    source,
+                    granting_object,
+                    filter,
+                    0,
                 )
                 .len()
                     >= *count as usize
             }
-            // CR 701.13b: A player can mill fewer than N cards if their library
-            // has fewer than N; the cost is always payable.
-            AbilityCost::Mill { .. } => true,
+            // CR 701.17b: "the player can't pay a cost that includes milling a
+            // number of cards greater than the number of cards in their
+            // library." The same rule's "if instructed to do so, they mill as
+            // many as possible" allowance governs milling as an *effect* and
+            // must not be read onto a cost. `count` is a plain `u32`, so no
+            // quantity resolution is needed.
+            AbilityCost::Mill { count } => state
+                .players
+                .get(player.0 as usize)
+                .is_some_and(|p| state.library_of(p.id).len() >= *count as usize),
             // CR 701.43b: A permanent can be exerted even if it's not tapped
             // or has already been exerted; the cost itself is always payable.
             // CR 701.43c (off-battlefield) is enforced at payment time.
@@ -560,22 +937,20 @@ impl AbilityCost {
             // CR 601.2b: Reveal N matching cards requires them to exist in hand.
             // Filter-less reveal (self-reveal) is always payable — you can always
             // reveal the source spell you're casting.
-            AbilityCost::Reveal { count, filter } => {
-                let Some(p) = state.players.get(player.0 as usize) else {
-                    return false;
-                };
-                match filter {
-                    None => true,
-                    Some(f) => {
-                        let ctx = FilterContext::from_source(state, source);
-                        p.hand
-                            .iter()
-                            .filter(|&&id| matches_target_filter(state, id, f, &ctx))
-                            .count()
-                            >= *count as usize
-                    }
+            AbilityCost::Reveal { count, filter } => match filter {
+                None => true,
+                Some(f) => {
+                    super::casting::find_eligible_reveal_targets(
+                        state,
+                        player,
+                        source,
+                        granting_object,
+                        f,
+                    )
+                    .len()
+                        >= *count as usize
                 }
-            }
+            },
             AbilityCost::Behold {
                 count,
                 filter,
@@ -605,23 +980,61 @@ impl AbilityCost {
                     AbilityCost::TapCreatures {
                         requirement,
                         filter,
-                    } if has_tap => {
-                        has_enough_tap_creatures(state, player, source, requirement, filter, true)
-                    }
-                    other => other.is_payable(state, player, source),
-                })
+                    } if has_tap => has_enough_tap_creatures(
+                        state,
+                        player,
+                        source,
+                        granting_object,
+                        requirement,
+                        filter,
+                        true,
+                    ),
+                    other => other.is_payable_for_activation(state, player, source, ability_index),
+                }) && discard_legs_jointly_payable(state, player, source, granting_object, costs)
             }
             // CR 118.12a: Disjunctive — payable if **any** sub-cost is
             // payable. The interactive choice is surfaced at resolution via
             // `WaitingFor::UnlessPaymentChooseCost`; the activation-time
             // gate only needs at least one branch to be reachable.
-            AbilityCost::OneOf { costs } => {
-                costs.iter().any(|c| c.is_payable(state, player, source))
-            }
-            // CR 601.2b: Waterbend composes a mana cost with a tap-creature option.
-            // Affordability is checked via the standard auto-tap pre-check.
+            AbilityCost::OneOf { costs } => costs
+                .iter()
+                .any(|c| c.is_payable_for_activation(state, player, source, ability_index)),
+            // CR 601.2b + CR 701.67a: Waterbend composes a mana cost with a
+            // tap-creature-or-artifact-to-help option (the whole point of the
+            // keyword). The plain auto-tap pre-check (`can_pay_cost_after_auto_tap`)
+            // only considers real mana-producing sources (lands, mana rocks) and
+            // has no notion of Waterbend's own tap-to-help mechanic, so it wrongly
+            // rejected activation whenever the player lacked N generic mana from
+            // real mana sources even with plenty of untapped eligible creatures to
+            // tap (issue #4966) — silently suppressing the ability (and its
+            // effect) before the player ever got a chance to pay via tapping.
+            // `can_feasibly_pay_activation_mana_cost_with_tap_payment_mode` is
+            // the ACTIVATION-context sibling of the helper the spell-cast
+            // "additional cost: you may waterbend N" path uses; it falls back
+            // to the plain auto-tap check first, so payment from a mana
+            // pool/sources alone is unaffected. The activation context matters
+            // for CR 106.6 restricted mana: this gate is probing an activated
+            // ability's cost, so activation-only mana
+            // (`ManaRestriction::OnlyForActivation`) must count toward
+            // affordability and spell-only mana must not — a spell context
+            // here would disagree with the actual payment step
+            // (`PaymentContext::Activation`) in both directions. The
+            // activation's own exact index is threaded through for the same
+            // reason: the real payment step resolves its tag and color rider
+            // from that same definition (`casting.rs`), so CR 106.6 tag-scoped mana
+            // (`ManaRestriction::OnlyForTaggedActivation`, Quinjet's power-up
+            // mana) must be visible to this gate too — otherwise a Waterbend
+            // cost fundable only by that mana is suppressed before the player
+            // is offered the ability.
             AbilityCost::Waterbend { cost } => {
-                super::casting::can_pay_cost_after_auto_tap(state, player, source, cost)
+                super::casting::can_feasibly_pay_activation_mana_cost_with_tap_payment_mode(
+                    state,
+                    player,
+                    source,
+                    cost,
+                    crate::types::game_state::ConvokeMode::Waterbend,
+                    ability_index,
+                )
             }
             // CR 702.49: Ninjutsu requires at least one returnable creature for
             // the variant. Mana affordability is deferred to payment (per CR 601.2g).
@@ -653,6 +1066,10 @@ impl AbilityCost {
             // affordability is decided by the separate mana-payment step, not this
             // choice-of-object gate.
             AbilityCost::KeywordCostOfCastSpell { .. } => true,
+            // CR 702.21a + CR 122.1: Ward's player-counter cost is never paid
+            // as an activation cost (only at resolution, via the unless-pay
+            // round trip), and it has no affordability limit — always payable.
+            AbilityCost::GetPlayerCounters { .. } => true,
         }
     }
 }
@@ -667,11 +1084,12 @@ fn has_enough_tap_creatures(
     state: &GameState,
     player: PlayerId,
     source: ObjectId,
+    granting_object: Option<ObjectIncarnationRef>,
     requirement: &TapCreaturesRequirement,
     filter: &TargetFilter,
     exclude_source: bool,
 ) -> bool {
-    let ctx = FilterContext::from_source(state, source);
+    let ctx = FilterContext::from_source(state, source).with_granting_object(granting_object);
     let eligible = state.battlefield.iter().copied().filter(|&id| {
         if exclude_source && id == source {
             return false;
@@ -681,7 +1099,17 @@ fn has_enough_tap_creatures(
         })
     });
     match requirement {
-        TapCreaturesRequirement::Count { count } => eligible.count() >= *count as usize,
+        // CR 107.3a + CR 601.2b: X in a "Tap X untapped [type] you control" cost
+        // is chosen during announcement, and X=0 is always legal (mirrors the
+        // `AbilityCost::Exile` `EXILE_COST_X` early-return above and Sacrifice's
+        // `sacrifice_cost_bounds` floor) — the pre-announcement affordability
+        // gate must not treat the `u32::MAX` X-sentinel as a literal count that
+        // can never be satisfied.
+        TapCreaturesRequirement::Count { count } => {
+            let eligible_count = eligible.count();
+            let (min_count, _) = super::casting::sacrifice_cost_bounds(*count, eligible_count);
+            eligible_count >= min_count
+        }
         TapCreaturesRequirement::Aggregate {
             stat: TapCreaturesAggregateStat::TotalPower,
             comparator,
@@ -702,16 +1130,18 @@ fn has_enough_tap_creatures(
 /// keeps the existing parser convention: permanent-implying filters mean
 /// battlefield, otherwise hand.
 pub(super) fn exile_cost_effective_zone(zone: Option<Zone>, filter: Option<&TargetFilter>) -> Zone {
-    zone.unwrap_or_else(|| {
-        if filter.is_some_and(filter_implies_battlefield_permanent) {
+    zone.unwrap_or_else(|| match filter {
+        // CR 201.5a + CR 113.6: a zone-less cost naming its granter exiles the
+        // granter, whose granting ability functions only on the battlefield.
+        Some(TargetFilter::GrantingObject { .. }) => Zone::Battlefield,
+        Some(f) if crate::game::filter::filter_implies_battlefield_permanent(f) => {
             Zone::Battlefield
-        } else {
-            Zone::Hand
         }
+        _ => Zone::Hand,
     })
 }
 
-/// CR 117.1 + CR 118.3: Objects in `zone` controlled/owned by `player` that
+/// CR 117.1 + CR 118.3: Objects in `zone` (`player`'s own for hand/graveyard/library) that
 /// can be exiled to pay a non-self `AbilityCost::Exile`, excluding `source`.
 ///
 /// `Zone::Library` is deterministic top-of-library payment, not a choice. Only
@@ -721,6 +1151,7 @@ pub(super) fn eligible_exile_cost_objects(
     state: &GameState,
     player: PlayerId,
     source: ObjectId,
+    granting_object: Option<ObjectIncarnationRef>,
     zone: Zone,
     filter: Option<&TargetFilter>,
     count: u32,
@@ -730,13 +1161,13 @@ pub(super) fn eligible_exile_cost_objects(
     };
     let ids: Box<dyn Iterator<Item = ObjectId> + '_> = match zone {
         Zone::Hand => Box::new(p.hand.iter().copied()),
-        Zone::Graveyard => Box::new(p.graveyard.iter().copied()),
+        Zone::Graveyard => Box::new(state.graveyard_of(p.id).iter().copied()),
         Zone::Library => {
             if filter.is_some() {
                 return Vec::new();
             }
-            return p
-                .library
+            return state
+                .library_of(p.id)
                 .iter()
                 .copied()
                 .filter(|id| *id != source)
@@ -744,14 +1175,15 @@ pub(super) fn eligible_exile_cost_objects(
                 .collect();
         }
         // Battlefield exile/etc. — fall back to iterating the object set by zone.
+        // CR 701.13a + CR 109.5: exiling needs no control; the cost's "you" is the payer.
         _ => {
-            let ctx = FilterContext::from_source(state, source);
+            let ctx = FilterContext::from_source_with_controller(source, player)
+                .with_granting_object(granting_object);
             return state
                 .objects
                 .values()
                 .filter(|o| {
                     o.zone == zone
-                        && o.controller == player
                         && o.id != source
                         && filter.is_none_or(|f| matches_target_filter(state, o.id, f, &ctx))
                 })
@@ -759,9 +1191,9 @@ pub(super) fn eligible_exile_cost_objects(
                 .collect();
         }
     };
-    let effective_filter = exile_cost_effective_filter(filter);
+    let effective_filter = cost_filter_before_x_announcement(filter);
     let filter_ref = effective_filter.as_ref();
-    let ctx = FilterContext::from_source(state, source);
+    let ctx = FilterContext::from_source(state, source).with_granting_object(granting_object);
     ids.filter(|&id| {
         id != source
             && filter_ref.is_none_or(|f| matches_target_filter_in_owner_zone(state, id, f, &ctx))
@@ -786,7 +1218,7 @@ pub(crate) fn eligible_exile_with_aggregate_objects(
 ) -> Vec<ObjectId> {
     let ctx = FilterContext::from_source_with_controller(source, player);
     let zone_ids: Vec<ObjectId> = match (zone, state.players.get(player.0 as usize)) {
-        (Zone::Graveyard, Some(p)) => p.graveyard.iter().copied().collect(),
+        (Zone::Graveyard, Some(p)) => state.graveyard_of(p.id).iter().copied().collect(),
         (Zone::Hand, Some(p)) => p.hand.iter().copied().collect(),
         // Other zones (battlefield/exile) — scan the object table by zone.
         _ => state
@@ -835,7 +1267,7 @@ pub(crate) fn eligible_craft_materials(
         })
         .collect();
     if let Some(p) = state.players.get(player.0 as usize) {
-        out.extend(p.graveyard.iter().copied().filter(|&id| {
+        out.extend(state.graveyard_of(p.id).iter().copied().filter(|&id| {
             id != source && matches_target_filter_in_owner_zone(state, id, materials, &ctx)
         }));
     }
@@ -843,39 +1275,6 @@ pub(crate) fn eligible_craft_materials(
 }
 
 /// Count counters of the given kind on an object.
-/// CR 117.1 + CR 400.6: Decide whether a `TargetFilter` for an `AbilityCost::Exile`
-/// without an explicit `zone` implies the battlefield. True when the filter has
-/// any `CoreType` typed predicate that names a permanent type (Creature, Artifact,
-/// Enchantment, Planeswalker, Land, Battle, Tribal). False for plain "card",
-/// "spell", or zone-explicit filters — those keep the legacy hand default.
-///
-/// Used by Food Chain's "Exile a creature you control: ..." (`zone: None`,
-/// `filter: Typed{Creature, You}`) and the broader exile-permanent-cost class.
-fn filter_implies_battlefield_permanent(filter: &TargetFilter) -> bool {
-    use crate::types::ability::TypeFilter;
-    fn type_implies_battlefield(t: &TypeFilter) -> bool {
-        match t {
-            TypeFilter::Creature
-            | TypeFilter::Artifact
-            | TypeFilter::Enchantment
-            | TypeFilter::Planeswalker
-            | TypeFilter::Land
-            | TypeFilter::Battle
-            | TypeFilter::Permanent => true,
-            TypeFilter::Non(inner) => type_implies_battlefield(inner),
-            TypeFilter::AnyOf(inners) => inners.iter().any(type_implies_battlefield),
-            _ => false,
-        }
-    }
-    match filter {
-        TargetFilter::Typed(tf) => tf.type_filters.iter().any(type_implies_battlefield),
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().any(filter_implies_battlefield_permanent)
-        }
-        _ => false,
-    }
-}
-
 /// CR 122.1 + CR 118.3: Count counters on `id` matching `kind`. `Any` sums
 /// across every counter type currently on the object (Loch Mare's untyped
 /// "remove a counter" cost — CR 118.3: the ability is payable iff the object
@@ -890,7 +1289,11 @@ fn counter_on_object(
         return 0;
     };
     match kind {
-        crate::types::counter::CounterMatch::Any => obj.counters.values().copied().sum(),
+        // CR 122.1: exact total clamped to u32. The count feeds only "can remove
+        // at least N" availability checks, so clamping preserves every such answer.
+        crate::types::counter::CounterMatch::Any => {
+            u32::try_from(kind.count_in(&obj.counters)).unwrap_or(u32::MAX)
+        }
         crate::types::counter::CounterMatch::OfType(t) => obj.counters.get(t).copied().unwrap_or(0),
     }
 }
@@ -916,12 +1319,192 @@ mod tests {
     use super::*;
     use crate::game::scenario::GameScenario;
     use crate::types::ability::{
-        ControllerRef, FilterProp, QuantityExpr, SacrificeCost, TargetFilter, TypeFilter,
-        TypedFilter,
+        ControllerRef, DamageKindFilter, FilterProp, PlayerRelation, PossessionAxis, QuantityExpr,
+        SacrificeCost, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::mana::ManaCost;
 
     const P0: PlayerId = PlayerId(0);
+
+    /// CR 109.2 + CR 118.3: the zone a zone-less exile cost reads from is
+    /// decided by whether its filter describes a permanent. A description
+    /// that only SOMETIMES names a permanent does not: "creature or instant"
+    /// (`AnyOf` / `Or`) and "nonland" (`Non`) keep the hand default, while
+    /// "artifact or creature" and "creature" mean the battlefield. Pinned at
+    /// this seam (issue #8795 review): with existential aggregation over a
+    /// disjunction, or `Non` read through to its inner type, the first three
+    /// rows answered `Battlefield`.
+    #[test]
+    fn exile_cost_zone_default_treats_only_an_unambiguous_permanent_description_as_battlefield() {
+        fn typed(types: Vec<TypeFilter>) -> TargetFilter {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: types,
+                ..Default::default()
+            })
+        }
+        let rows: [(&str, TargetFilter, Zone); 7] = [
+            (
+                "the granter",
+                TargetFilter::GrantingObject { bound: None },
+                Zone::Battlefield,
+            ),
+            (
+                "creature or instant (AnyOf)",
+                typed(vec![TypeFilter::AnyOf(vec![
+                    TypeFilter::Creature,
+                    TypeFilter::Instant,
+                ])]),
+                Zone::Hand,
+            ),
+            (
+                "creature or instant (Or)",
+                TargetFilter::Or {
+                    filters: vec![
+                        typed(vec![TypeFilter::Creature]),
+                        typed(vec![TypeFilter::Instant]),
+                    ],
+                },
+                Zone::Hand,
+            ),
+            (
+                "nonland card",
+                typed(vec![
+                    TypeFilter::Card,
+                    TypeFilter::Non(Box::new(TypeFilter::Land)),
+                ]),
+                Zone::Hand,
+            ),
+            (
+                "artifact or creature (AnyOf)",
+                typed(vec![TypeFilter::AnyOf(vec![
+                    TypeFilter::Artifact,
+                    TypeFilter::Creature,
+                ])]),
+                Zone::Battlefield,
+            ),
+            (
+                "artifact creature (conjunctive terms)",
+                typed(vec![TypeFilter::Artifact, TypeFilter::Creature]),
+                Zone::Battlefield,
+            ),
+            (
+                "creature",
+                typed(vec![TypeFilter::Creature]),
+                Zone::Battlefield,
+            ),
+        ];
+        for (label, filter, expected) in rows {
+            assert_eq!(
+                exile_cost_effective_zone(None, Some(&filter)),
+                expected,
+                "{label}"
+            );
+        }
+        assert_eq!(
+            exile_cost_effective_zone(
+                Some(Zone::Graveyard),
+                Some(&typed(vec![TypeFilter::Creature]))
+            ),
+            Zone::Graveyard,
+            "an explicit zone is authoritative"
+        );
+    }
+
+    /// `TargetFilter::PlayerMatching` is a recursive carrier. Each of
+    /// the three nested-object-population payloads must be reached by BOTH the
+    /// detector and the relaxer, or an `X` mana-value constraint survives cost
+    /// pre-announcement (when `X` is not yet chosen) inside a player predicate.
+    ///
+    /// Discriminating by construction: every row is `PlayerMatching` wrapping a
+    /// nested filter that carries `Cmc == X`. Treating the wrapper as a leaf —
+    /// the previous behaviour — returns `false` for detection and returns the
+    /// filter unchanged from relaxation, failing both halves of each row.
+    #[test]
+    fn player_matching_x_mana_value_reaches_every_nested_population() {
+        fn cmc_x() -> TargetFilter {
+            TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                }],
+                ..Default::default()
+            })
+        }
+        fn wrap(player: PlayerFilter) -> TargetFilter {
+            TargetFilter::PlayerMatching {
+                player: Box::new(player),
+            }
+        }
+
+        let controls_count = wrap(PlayerFilter::ControlsCount {
+            filter: cmc_x(),
+            count: Box::new(QuantityExpr::Fixed { value: 1 }),
+            relation: PlayerRelation::All,
+            comparator: Comparator::GE,
+        });
+        let dealt_damage = wrap(PlayerFilter::OpponentDealtDamage {
+            source: Some(Box::new(cmc_x())),
+            kind: DamageKindFilter::Any,
+            min_sources: 1,
+        });
+        let tracked_set = wrap(PlayerFilter::TrackedSetPossessor {
+            filter: cmc_x(),
+            relation: PlayerRelation::All,
+            possession: PossessionAxis::Controller,
+            caused_by: None,
+        });
+        // The `AllExcept` chain must not hide a nested population either.
+        let nested_all_except = wrap(PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::ControlsCount {
+                filter: cmc_x(),
+                count: Box::new(QuantityExpr::Fixed { value: 1 }),
+                relation: PlayerRelation::All,
+                comparator: Comparator::GE,
+            }),
+        });
+
+        for (label, filter) in [
+            ("ControlsCount.filter", &controls_count),
+            ("OpponentDealtDamage.source", &dealt_damage),
+            ("TrackedSetPossessor.filter", &tracked_set),
+            ("AllExcept -> ControlsCount.filter", &nested_all_except),
+        ] {
+            assert!(
+                target_filter_has_x_mana_value_constraint(filter),
+                "{label}: the nested `Cmc == X` must be detected through the \
+                 PlayerMatching wrapper"
+            );
+            let relaxed = relax_x_mana_value_constraint(filter);
+            assert!(
+                !target_filter_has_x_mana_value_constraint(&relaxed),
+                "{label}: relaxation must strip the nested `Cmc == X`, got \
+                 {relaxed:?}"
+            );
+            assert_ne!(
+                &relaxed, filter,
+                "{label}: relaxation must actually rebuild the nested payload"
+            );
+        }
+
+        // Negative: a player predicate with no `X` constraint is untouched, so
+        // the rows above cannot pass by relaxing everything unconditionally.
+        let no_x = wrap(PlayerFilter::ControlsCount {
+            filter: TargetFilter::Typed(TypedFilter::default()),
+            count: Box::new(QuantityExpr::Fixed { value: 1 }),
+            relation: PlayerRelation::All,
+            comparator: Comparator::GE,
+        });
+        assert!(!target_filter_has_x_mana_value_constraint(&no_x));
+        assert_eq!(
+            relax_x_mana_value_constraint(&no_x),
+            no_x,
+            "a predicate with no X constraint must round-trip unchanged"
+        );
+    }
 
     fn new_state() -> GameState {
         GameScenario::new().state
@@ -1103,6 +1686,146 @@ mod tests {
         assert!(AbilityCost::Blight { count: 3 }.is_payable(&scenario.state, P0, ObjectId(0)));
     }
 
+    fn chosen_hand_discard(filter: Option<TargetFilter>) -> AbilityCost {
+        AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter,
+            selection: CardSelectionMode::Chosen,
+            self_scope: DiscardSelfScope::FromHand,
+        }
+    }
+
+    fn island_filter() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::default().subtype("Island".to_string()))
+    }
+
+    /// Hand of (name, is_island) cards for `P0`, plus the source card id.
+    fn joint_discard_state(hand: &[bool]) -> (GameState, ObjectId) {
+        let mut scenario = GameScenario::new();
+        let source = scenario.add_card_to_hand(P0, "Source Spell");
+        for (i, &is_island) in hand.iter().enumerate() {
+            let id = scenario.add_card_to_hand(P0, &format!("Hand Card {i}"));
+            if is_island {
+                scenario
+                    .state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .card_types
+                    .subtypes
+                    .push("Island".to_string());
+            }
+        }
+        (scenario.state, source)
+    }
+
+    /// CR 118.3 + CR 601.2h: one physical card cannot satisfy two discard legs.
+    #[test]
+    fn joint_discard_legs_need_distinct_cards() {
+        let legs = [
+            chosen_hand_discard(Some(island_filter())),
+            chosen_hand_discard(None),
+        ];
+        // Reach guard: an Island plus any other card pays both legs.
+        let (state, source) = joint_discard_state(&[true, false]);
+        assert!(discard_legs_jointly_payable(
+            &state, P0, source, None, &legs
+        ));
+        // Hostile: the lone Island would have to serve both legs.
+        let (state, source) = joint_discard_state(&[true]);
+        assert!(!discard_legs_jointly_payable(
+            &state, P0, source, None, &legs
+        ));
+        // Hostile: no Island at all.
+        let (state, source) = joint_discard_state(&[false, false]);
+        assert!(!discard_legs_jointly_payable(
+            &state, P0, source, None, &legs
+        ));
+        // The source spell never counts as a card to discard.
+        let (state, source) = joint_discard_state(&[]);
+        assert!(!discard_legs_jointly_payable(
+            &state, P0, source, None, &legs
+        ));
+    }
+
+    /// Payment is in printed order with free choice, so a less-restrictive leg
+    /// before a more-restrictive one fails closed (B3).
+    #[test]
+    fn joint_discard_legs_fail_closed_for_unsafe_order() {
+        let (state, source) = joint_discard_state(&[true, false]);
+        let typed_first = [
+            chosen_hand_discard(Some(island_filter())),
+            chosen_hand_discard(None),
+        ];
+        let any_first = [
+            chosen_hand_discard(None),
+            chosen_hand_discard(Some(island_filter())),
+        ];
+        assert!(discard_legs_jointly_payable(
+            &state,
+            P0,
+            source,
+            None,
+            &typed_first
+        ));
+        assert!(!discard_legs_jointly_payable(
+            &state, P0, source, None, &any_first
+        ));
+        // With two Islands every choice sequence works in either order.
+        let (state, source) = joint_discard_state(&[true, true]);
+        assert!(discard_legs_jointly_payable(
+            &state, P0, source, None, &any_first
+        ));
+    }
+
+    /// Legs the helper does not model (and a lone leg) keep their per-leg gate.
+    #[test]
+    fn joint_discard_helper_ignores_unmodeled_legs() {
+        let (state, source) = joint_discard_state(&[false]);
+        let random = AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            selection: CardSelectionMode::Random,
+            self_scope: DiscardSelfScope::FromHand,
+        };
+        let legs = [random, chosen_hand_discard(None)];
+        assert!(discard_legs_jointly_payable(
+            &state, P0, source, None, &legs
+        ));
+        assert!(discard_legs_jointly_payable(
+            &state,
+            P0,
+            source,
+            None,
+            &[chosen_hand_discard(None)]
+        ));
+    }
+
+    /// Mana-ability exclusion (fail closed): the mana-ability payment path pays
+    /// only the first chosen hand-discard leg, so a composite with two such legs
+    /// is never offered, even when the hand could cover both.
+    ///
+    /// Reverting the exclusion arm flips the two-leg assertion to `true`.
+    #[test]
+    fn mana_ability_composite_with_two_discard_legs_is_not_offered() {
+        // Hand of three cards: every per-leg and joint check would pass.
+        let (state, source) = joint_discard_state(&[true, false, false]);
+        let two_legs = AbilityCost::Composite {
+            costs: vec![
+                chosen_hand_discard(Some(island_filter())),
+                chosen_hand_discard(None),
+            ],
+        };
+        let one_leg = AbilityCost::Composite {
+            costs: vec![chosen_hand_discard(Some(island_filter()))],
+        };
+        // Positive reach guard: a single chosen-discard leg is still offered.
+        assert!(one_leg.is_payable_for_mana_ability(&state, P0, source, 0));
+        assert!(!two_legs.is_payable_for_mana_ability(&state, P0, source, 0));
+        // The ordinary gate is unaffected by the mana-ability exclusion.
+        assert!(two_legs.is_payable(&state, P0, source));
+    }
+
     #[test]
     fn discard_requires_cards_in_hand() {
         let mut state = new_state();
@@ -1172,6 +1895,28 @@ mod tests {
     }
 
     #[test]
+    fn variable_exile_cost_is_payable_at_x_zero() {
+        let mut scenario = GameScenario::new();
+        let source = scenario.add_creature(P0, "Harvest Pyre", 0, 1).id();
+        let cost = AbilityCost::Exile {
+            count: EXILE_COST_X,
+            zone: Some(Zone::Graveyard),
+            filter: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant))),
+        };
+
+        assert!(
+            cost.is_payable(&scenario.state, P0, source),
+            "X exile costs are payable at X=0 before any eligible card is selected"
+        );
+
+        scenario.add_spell_to_graveyard(P0, "Lightning Bolt", true);
+        assert!(
+            cost.is_payable(&scenario.state, P0, source),
+            "X exile costs stay payable when eligible cards can set X above zero"
+        );
+    }
+
+    #[test]
     fn loyalty_positive_is_always_payable() {
         let state = new_state();
         assert!(AbilityCost::Loyalty { amount: 1 }.is_payable(&state, P0, ObjectId(0)));
@@ -1211,10 +1956,45 @@ mod tests {
         assert!(!unpayable.is_payable(&state, P0, ObjectId(0)));
     }
 
+    /// CR 701.17b: a Mill cost is payable iff the library holds at least
+    /// `count` cards. The predicate is swept across its whole input range
+    /// against one fixed 4-card library so the boundary is pinned from both
+    /// sides: below it, at it, and above it. The previous behaviour returned
+    /// `true` unconditionally and is falsified by every `count > 4` row.
+    ///
+    /// The empty-library row is the case the old comment got backwards — it
+    /// claimed a short library still pays "as many as possible", which is the
+    /// rule for milling as an *effect*, not as a cost.
     #[test]
-    fn mill_exert_always_payable() {
+    fn mill_payable_iff_library_holds_count() {
+        let mut scenario = GameScenario::new();
+        scenario.with_library_top(P0, &["Top A", "Top B", "Top C", "Top D"]);
+        let state = &scenario.state;
+
+        for count in 0..=4 {
+            assert!(
+                AbilityCost::Mill { count }.is_payable(state, P0, ObjectId(0)),
+                "mill {count} must be payable from a 4-card library"
+            );
+        }
+        for count in 5..=8 {
+            assert!(
+                !AbilityCost::Mill { count }.is_payable(state, P0, ObjectId(0)),
+                "mill {count} exceeds a 4-card library and must be unpayable"
+            );
+        }
+
+        // Empty library: only the degenerate zero-card mill remains payable.
+        let empty = new_state();
+        assert!(AbilityCost::Mill { count: 0 }.is_payable(&empty, P0, ObjectId(0)));
+        assert!(!AbilityCost::Mill { count: 1 }.is_payable(&empty, P0, ObjectId(0)));
+    }
+
+    /// CR 701.43b: exert is payable regardless of the source's tapped state,
+    /// so an empty library (which now blocks a Mill cost) leaves it untouched.
+    #[test]
+    fn exert_always_payable() {
         let state = new_state();
-        assert!(AbilityCost::Mill { count: 5 }.is_payable(&state, P0, ObjectId(0)));
         assert!(AbilityCost::Exert.is_payable(&state, P0, ObjectId(0)));
     }
 
@@ -1382,6 +2162,7 @@ mod tests {
             &state,
             caster,
             shoal,
+            None,
             Zone::Hand,
             filter.as_ref(),
             1,
@@ -1441,6 +2222,7 @@ mod tests {
             &scenario.state,
             P0,
             uro,
+            None,
             Zone::Graveyard,
             Some(&TargetFilter::Typed(
                 TypedFilter::card()
@@ -1459,5 +2241,133 @@ mod tests {
             "the escape card itself must not be eligible exile material"
         );
         assert_eq!(eligible.len(), 5, "exactly five other cards are eligible");
+    }
+
+    /// CR 106.6 + CR 601.2g (issue #4966 follow-up): the Waterbend affordability
+    /// probe must judge tag-scoped mana with the ACTIVATION'S OWN tag.
+    ///
+    /// `ManaRestriction::OnlyForTaggedActivation(PowerUp)` (Quinjet's power-up
+    /// mana) is spendable at the real payment step, which receives
+    /// `ability_def.ability_tag`. If the early gate probes without that tag,
+    /// the mana is invisible and a legally activatable Waterbend ability is
+    /// suppressed before it is ever offered — the same class of false
+    /// unactivatable verdict issue #4966 reported.
+    ///
+    /// The scenario deliberately leaves too few untapped permanents to fund
+    /// the {4} by tap-to-help alone (one source creature pays at most {1}), so
+    /// the restricted mana is the ONLY funding route and the assertions
+    /// discriminate purely on the tag.
+    #[test]
+    fn waterbend_payability_sees_tag_scoped_activation_mana() {
+        use crate::types::ability::AbilityTag;
+        use crate::types::mana::{ManaRestriction, ManaType, ManaUnit};
+
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_creature(P0, "Waterbender Ascension", 0, 0)
+            .as_enchantment()
+            .from_oracle_text(
+                "Power-up — Waterbend {4}: Target creature can't be blocked this turn.\n{4}: Draw a card.",
+            )
+            .id();
+        let abilities = std::sync::Arc::make_mut(
+            &mut scenario
+                .state
+                .objects
+                .get_mut(&source)
+                .expect("Waterbender source exists")
+                .abilities,
+        );
+        abilities[0].ability_tag = Some(AbilityTag::PowerUp);
+        abilities[1].ability_tag = Some(AbilityTag::Equip);
+        // Four colorless mana usable ONLY for a Power-up-tagged activation.
+        for _ in 0..4 {
+            scenario.state.add_mana_to_pool(
+                P0,
+                ManaUnit::new(
+                    ManaType::Colorless,
+                    ObjectId(9_999),
+                    false,
+                    vec![ManaRestriction::OnlyForTaggedActivation(
+                        AbilityTag::PowerUp,
+                    )],
+                ),
+            );
+        }
+        let cost = AbilityCost::Waterbend {
+            cost: ManaCost::generic(4),
+        };
+
+        assert!(
+            cost.is_payable_for_activation(&scenario.state, P0, source, Some(0)),
+            "power-up-restricted mana must fund a Power-up-tagged Waterbend activation"
+        );
+        assert!(
+            !cost.is_payable_for_activation(&scenario.state, P0, source, Some(1)),
+            "a DIFFERENT tag must not unlock power-up-restricted mana (CR 106.6)"
+        );
+        assert!(
+            !cost.is_payable_for_activation(&scenario.state, P0, source, None),
+            "an untagged activation must not spend power-up-restricted mana"
+        );
+        assert!(
+            !cost.is_payable(&scenario.state, P0, source),
+            "the tag-agnostic entry point stays conservative"
+        );
+    }
+}
+
+#[cfg(test)]
+mod dandan_read_sweep_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{TypeFilter, TypedFilter};
+    use crate::types::card_type::CoreType;
+    use crate::types::format::FormatConfig;
+    use crate::types::identifiers::CardId;
+
+    const P1: PlayerId = PlayerId(1);
+
+    /// CR 118.3 + CR 400.1: every exile-cost enumerator reads the shared pile
+    /// for the non-canonical seat.
+    #[test]
+    fn exile_cost_enumerators_read_the_shared_pile() {
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            P1,
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let dead = create_object(&mut state, CardId(2), P1, "Dead".into(), Zone::Graveyard);
+        state
+            .objects
+            .get_mut(&dead)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let top = create_object(&mut state, CardId(3), P1, "Top".into(), Zone::Library);
+        create_object(&mut state, CardId(4), P1, "Next".into(), Zone::Library);
+        let any_card = TargetFilter::Typed(TypedFilter::new(TypeFilter::Card));
+        let creature = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
+
+        assert_eq!(
+            eligible_exile_cost_objects(&state, P1, source, None, Zone::Graveyard, None, 1),
+            vec![dead]
+        );
+        assert_eq!(
+            eligible_exile_cost_objects(&state, P1, source, None, Zone::Library, None, 1),
+            vec![top]
+        );
+        assert_eq!(
+            eligible_exile_with_aggregate_objects(&state, P1, source, &any_card, Zone::Graveyard),
+            vec![dead]
+        );
+        assert_eq!(
+            eligible_craft_materials(&state, P1, source, &creature),
+            vec![dead]
+        );
     }
 }

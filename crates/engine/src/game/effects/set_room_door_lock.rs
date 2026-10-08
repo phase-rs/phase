@@ -118,10 +118,13 @@ mod tests {
     /// presence of `back_face` is read by `existing_doors`.
     fn room_back_face() -> BackFaceData {
         BackFaceData {
+            is_swap_snapshot: false,
+            trigger_printed_origins: Vec::new(),
             name: "Right Door".to_string(),
             power: None,
             toughness: None,
             loyalty: None,
+            printed_loyalty: None,
             defense: None,
             card_types: CardType::default(),
             mana_cost: ManaCost::default(),
@@ -138,6 +141,7 @@ mod tests {
             casting_restrictions: Vec::new(),
             casting_options: Vec::new(),
             layout_kind: Some(crate::types::card::LayoutKind::Split),
+            parse_warnings: vec![],
         }
     }
 

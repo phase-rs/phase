@@ -18,7 +18,8 @@ fn cradle_has_mana_action(
         actions.iter().any(|a| {
             matches!(
                 a,
-                GameAction::TapLandForMana { object_id } if *object_id == cradle
+                GameAction::TapLandForMana { selection }
+                    if selection.source.object_id == cradle
             ) || matches!(
                 a,
                 GameAction::ActivateAbility { source_id, .. } if *source_id == cradle

@@ -1,0 +1,28 @@
+{{- if .Values.cloudflare.authenticatedOriginPulls.enabled }}
+{{- $fullname := include "phase-server.fullname" . }}
+{{- $ca := required "cloudflare.authenticatedOriginPulls.caPem is required" .Values.cloudflare.authenticatedOriginPulls.caPem }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $fullname }}-cf-origin-pull-ca
+  labels:
+    {{- include "phase-server.labels" . | nindent 4 }}
+type: Opaque
+data:
+  tls.ca: {{ $ca | b64enc }}
+---
+# Only Cloudflare holds a client certificate signed by this CA, so direct
+# connections to the origin for this SNI fail the TLS handshake.
+apiVersion: traefik.io/v1alpha1
+kind: TLSOption
+metadata:
+  name: {{ $fullname }}-cf-origin-pull
+  labels:
+    {{- include "phase-server.labels" . | nindent 4 }}
+spec:
+  minVersion: VersionTLS12
+  clientAuth:
+    secretNames:
+      - {{ $fullname }}-cf-origin-pull-ca
+    clientAuthType: RequireAndVerifyClientCert
+{{- end }}

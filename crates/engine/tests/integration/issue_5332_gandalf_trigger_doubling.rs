@@ -113,6 +113,7 @@ fn gandalf_parsed_static_doubles_legendary_reentry_triggers() {
             supertypes: vec![Supertype::Legendary],
             subtypes: Vec::new(),
             keywords: Vec::new(),
+            trigger_source_context: None,
             power: None,
             toughness: None,
             base_power: None,
@@ -134,6 +135,7 @@ fn gandalf_parsed_static_doubles_legendary_reentry_triggers() {
             attached_to: None,
             entered_incarnation: None,
             turn_zone_change_index: 0,
+            recorded_turn_number: 0,
             is_suspected: false,
         }),
     };

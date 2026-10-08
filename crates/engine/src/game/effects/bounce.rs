@@ -67,16 +67,37 @@ fn filter_uses_scoped_player(filter: &TargetFilter) -> bool {
     }
 }
 
+/// Finds a spell's casting variant while it is on the stack or resolving.
+///
+/// Resolving spells leave `GameState::stack` before their chained instructions
+/// run, so the resolution carrier is also an authoritative source.
 fn stack_spell_casting_variant(
     state: &GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) -> Option<CastingVariant> {
-    state.stack.iter().find_map(|entry| match &entry.kind {
-        StackEntryKind::Spell {
-            casting_variant, ..
-        } if entry.id == obj_id => Some(*casting_variant),
-        _ => None,
-    })
+    state
+        .stack
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            StackEntryKind::Spell {
+                casting_variant, ..
+            } if entry.id == obj_id => Some(*casting_variant),
+            _ => None,
+        })
+        .or_else(|| {
+            // CR 608.2m + CR 608.2n: resolving spells are popped from the live
+            // stack before their effect chain runs, but their casting variant stays
+            // authoritative in the resolution carrier until the chain completes.
+            state
+                .resolving_stack_entry
+                .as_ref()
+                .and_then(|entry| match &entry.kind {
+                    StackEntryKind::Spell {
+                        casting_variant, ..
+                    } if entry.id == obj_id => Some(*casting_variant),
+                    _ => None,
+                })
+        })
 }
 
 /// CR 400.6: Zone change — return target object to the destination zone
@@ -231,14 +252,17 @@ pub fn resolve(
                     enters_attacking: false,
                     owner_library: false,
                     track_exiled_by_source: false,
+                    face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                     // CR 708.2a: bounce returns cards face up; no face-down entry.
                     face_down_profile: None,
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     count_param: 0,
                     library_position: None,
+                    mass_library_order: None,
                     is_cost_payment: false,
                     enters_modified_if: None,
+                    duration: None,
                 };
                 return Ok(());
             }
@@ -275,7 +299,7 @@ pub fn resolve(
             .players
             .iter()
             .find(|p| p.id == selecting_player)
-            .map(|p| p.graveyard.iter().copied().collect::<Vec<_>>())
+            .map(|p| state.graveyard_of(p.id).iter().copied().collect::<Vec<_>>())
             .unwrap_or_default()
             .into_iter()
             .filter(|id| {
@@ -325,14 +349,17 @@ pub fn resolve(
                     enters_attacking: false,
                     owner_library: false,
                     track_exiled_by_source: false,
+                    face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                     // CR 708.2a: bounce returns cards face up; no face-down entry.
                     face_down_profile: None,
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     count_param: 0,
                     library_position: None,
+                    mass_library_order: None,
                     is_cost_payment: false,
                     enters_modified_if: None,
+                    duration: None,
                 };
                 return Ok(());
             }
@@ -440,7 +467,7 @@ pub fn resolve_all(
             properties: vec![],
         })
     } else {
-        crate::game::effects::resolved_object_filter(ability, &target_filter)
+        crate::game::effects::resolved_object_filter(state, ability, &target_filter)
     };
     let scoped_ability;
     let ability = if filter_uses_scoped_player(&effective_filter) && ability.scoped_player.is_none()
@@ -465,20 +492,49 @@ pub fn resolve_all(
     // CR 107.3a + CR 601.2b: Filter evaluation runs in the ability's
     // resolution context (controller, target slots already filled).
     let ctx = crate::game::filter::FilterContext::from_ability(ability);
-    let matching: Vec<_> = state
-        .battlefield
-        .iter()
-        .filter(|id| {
-            crate::game::filter::matches_target_filter(state, **id, &effective_filter, &ctx)
-        })
-        .copied()
-        .collect();
+    let matching: Vec<_> = if ability.reads_chosen_group.is_some() {
+        ability
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(id)
+                    if state.battlefield.contains(id)
+                        && ability.target_pin_is_current(*id, state)
+                        && ability.selected_target_pin_is_current(*id, state)
+                        && crate::game::filter::matches_target_filter(
+                            state,
+                            *id,
+                            &effective_filter,
+                            &ctx,
+                        ) =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .collect()
+    } else {
+        state
+            .battlefield
+            .iter()
+            .filter(|id| {
+                crate::game::filter::matches_target_filter(state, **id, &effective_filter, &ctx)
+            })
+            .copied()
+            .collect()
+    };
 
     if let Some(count_expr) = count_expr {
         let count = crate::game::quantity::resolve_quantity_with_targets(state, count_expr, ability)
             .max(0) as usize;
         if count == 0 {
             state.last_effect_count = Some(0);
+            if let Some(result_id) = ability.declares_return_result {
+                let occurrence = state.active_return_result_occurrence.ok_or_else(|| {
+                    EffectError::MissingParam("return result occurrence".to_string())
+                })?;
+                super::publish_return_result(state, occurrence, result_id, Vec::new())?;
+            }
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -504,14 +560,17 @@ pub fn resolve_all(
                 enters_attacking: false,
                 owner_library: false,
                 track_exiled_by_source: false,
+                face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                 // CR 708.2a: bounce returns cards face up; no face-down entry.
                 face_down_profile: None,
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 count_param: 0,
                 library_position: None,
+                mass_library_order: None,
                 is_cost_payment: false,
                 enters_modified_if: None,
+                duration: None,
             };
             return Ok(());
         }
@@ -533,7 +592,7 @@ pub fn resolve_all(
     //
     // CR 616.1: two simultaneous destination-redirects on one bounced permanent
     // surface an ordering choice. `move_objects_simultaneously` parks it and the
-    // undelivered tail in `state.pending_batch_deliveries`; the
+    // undelivered tail in the active `BatchDelivery` frame; the
     // replacement-choice resume path drains it. A single applicable redirect
     // never prompts (the realistic path), so the common mass bounce never
     // pauses. `state.last_effect_count` is set up front from the matched pool so
@@ -543,8 +602,21 @@ pub fn resolve_all(
         .iter()
         .map(|&obj_id| ZoneMoveRequest::effect(obj_id, destination, ability.source_id))
         .collect();
+    let completion = if let Some(result_id) = ability.declares_return_result {
+        Some(
+            crate::types::game_state::BatchCompletion::RecordInstructionZoneResult {
+                occurrence_id: state.active_return_result_occurrence.ok_or_else(|| {
+                    EffectError::MissingParam("return result occurrence".to_string())
+                })?,
+                result_id,
+                settled_records: None,
+            },
+        )
+    } else {
+        None
+    };
     if let BatchMoveResult::NeedsChoice =
-        zone_pipeline::move_objects_simultaneously(state, reqs, events)
+        zone_pipeline::move_objects_simultaneously_then(state, reqs, completion, events)
     {
         // CR 616.1: a redirect ordering choice paused mid-batch; the prompt is
         // parked and the tail stashed. Bail before `EffectResolved` so it is not
@@ -804,6 +876,7 @@ mod tests {
                 source_name: "Ability Source".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -1703,5 +1776,87 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::EffectResolved { .. })));
+    }
+}
+
+#[cfg(test)]
+mod dandan_read_sweep_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::TypeFilter;
+    use crate::types::format::FormatConfig;
+    use crate::types::identifiers::{CardId, ObjectId};
+
+    /// CR 608.2d + CR 400.1: "their graveyard" is the one shared pile, so the
+    /// chosen player picks among every card in it, whoever owns it.
+    #[test]
+    fn chosen_non_canonical_player_returns_a_card_from_the_shared_pile_graveyard() {
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 42);
+        let own = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Own".into(),
+            Zone::Graveyard,
+        );
+        let theirs = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Theirs".into(),
+            Zone::Graveyard,
+        );
+        let chosen = ControllerRef::ChosenPlayer { index: 0 };
+        let mut ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Card)
+                        .controller(chosen.clone())
+                        .properties(vec![
+                            FilterProp::Owned { controller: chosen },
+                            FilterProp::InZone {
+                                zone: Zone::Graveyard,
+                            },
+                        ]),
+                ),
+                destination: None,
+                selection: BounceSelection::AtResolution,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.chosen_players = vec![PlayerId(1)];
+
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        match &state.waiting_for {
+            crate::types::game_state::WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                assert_eq!(*player, PlayerId(1));
+                let mut offered = cards.clone();
+                offered.sort();
+                assert_eq!(offered, vec![own, theirs]);
+            }
+            other => panic!("expected EffectZoneChoice over the pile, got {other:?}"),
+        }
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(1),
+            crate::types::actions::GameAction::SelectCards {
+                cards: vec![theirs],
+            },
+        )
+        .unwrap();
+
+        assert!(state.players[1].hand.contains(&theirs));
+        assert_eq!(
+            state
+                .graveyard_of(PlayerId(0))
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![own]
+        );
     }
 }

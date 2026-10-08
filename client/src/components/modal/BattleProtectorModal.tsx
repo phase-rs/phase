@@ -13,7 +13,7 @@ import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
 type BattleProtectorChoice = Extract<WaitingFor, { type: "BattleProtectorChoice" }>;
 
 /**
- * CR 310.10 + CR 704.5w + CR 704.5x: Protector choice for a battle that
+ * CR 310.11 + CR 704.5w + CR 704.5x: Protector choice for a battle that
  * isn't being attacked. The battle's controller picks a legal opponent as
  * the new protector; the engine emits this modal only when `candidates.len()
  * > 1` (singleton is auto-applied engine-side).

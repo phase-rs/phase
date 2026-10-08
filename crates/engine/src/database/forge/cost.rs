@@ -1,4 +1,4 @@
-use crate::types::ability::{AbilityCost, QuantityExpr, TargetFilter};
+use crate::types::ability::{AbilityCost, QuantityExpr, SacrificeCost, TargetFilter};
 use crate::types::mana::{ManaCost, ManaCostShard};
 
 use super::filter::translate_filter;

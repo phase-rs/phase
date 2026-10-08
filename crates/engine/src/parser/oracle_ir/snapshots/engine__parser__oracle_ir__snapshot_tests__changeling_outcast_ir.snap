@@ -22,22 +22,13 @@ expression: "&ir"
         "fragment": "Changeling (This card is every creature type.)"
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "Unimplemented",
-            "name": "unknown",
+        "Unsupported": {
+          "unsupported": {
+            "category": "Unknown",
+            "fragment": "Changeling",
             "description": "Changeling"
           },
-          "cost": null,
-          "sub_ability": null,
-          "duration": null,
-          "description": "Changeling",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "min_x_value": 0
         }
       }
     },
@@ -59,18 +50,22 @@ expression: "&ir"
         "fragment": "~ can't block and can't be blocked."
       },
       "node": {
-        "PreLoweredStatic": {
-          "mode": "CantBlock",
-          "affected": {
-            "type": "SelfRef"
+        "Static": {
+          "definition": {
+            "mode": "CantBlock",
+            "affected": {
+              "type": "SelfRef"
+            },
+            "modifications": [],
+            "condition": null,
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "~ can't block and can't be blocked."
           },
-          "modifications": [],
-          "condition": null,
-          "affected_zone": null,
-          "effect_zone": null,
-          "active_zones": [],
-          "characteristic_defining": false,
-          "description": "~ can't block and can't be blocked."
+          "source_text": "~ can't block and can't be blocked.",
+          "body_ir": null
         }
       }
     },
@@ -92,18 +87,22 @@ expression: "&ir"
         "fragment": "~ can't block and can't be blocked."
       },
       "node": {
-        "PreLoweredStatic": {
-          "mode": "CantBeBlocked",
-          "affected": {
-            "type": "SelfRef"
+        "Static": {
+          "definition": {
+            "mode": "CantBeBlocked",
+            "affected": {
+              "type": "SelfRef"
+            },
+            "modifications": [],
+            "condition": null,
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "~ can't block and can't be blocked."
           },
-          "modifications": [],
-          "condition": null,
-          "affected_zone": null,
-          "effect_zone": null,
-          "active_zones": [],
-          "characteristic_defining": false,
-          "description": "~ can't block and can't be blocked."
+          "source_text": "~ can't block and can't be blocked.",
+          "body_ir": null
         }
       }
     }

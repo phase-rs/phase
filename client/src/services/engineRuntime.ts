@@ -1,5 +1,9 @@
 import type {
+  DeckCopyLimit,
+  FormatConfig,
   GameFormat,
+  MatchType,
+  SideboardPolicy,
   TokenCharacteristics,
   TokenImageRef,
   TokenPtProvenance,
@@ -16,26 +20,53 @@ let engineModulePromise: Promise<EngineModule> | null = null;
 let wasmInitPromise: Promise<void> | null = null;
 let cardDbPromise: Promise<number> | null = null;
 
+/**
+ * A browser's module map retains failed dynamic imports for the document
+ * lifetime. Retrying this requires a page reload, unlike WASM initialization
+ * and card-data loading failures.
+ */
+export class EngineModuleReloadRequiredError extends Error {
+  readonly cause: unknown;
+
+  constructor(cause: unknown) {
+    super("The engine module failed to load; reload the page to retry.");
+    this.name = "EngineModuleReloadRequiredError";
+    this.cause = cause;
+  }
+}
+
 async function loadEngineModule(): Promise<EngineModule> {
   if (!engineModulePromise) {
-    engineModulePromise = import("@wasm/engine");
+    engineModulePromise = import("@wasm/engine").catch((cause: unknown) => {
+      throw new EngineModuleReloadRequiredError(cause);
+    });
   }
   return engineModulePromise;
 }
 
 export async function ensureWasmInit(): Promise<void> {
   if (!wasmInitPromise) {
-    wasmInitPromise = (async () => {
+    const pending = (async () => {
       const engine = await loadEngineModule();
-      await engine.default();
+      if (__ENGINE_WASM_URL__) {
+        await engine.default({ module_or_path: __ENGINE_WASM_URL__ });
+      } else {
+        await engine.default();
+      }
     })();
+    wasmInitPromise = pending;
+    void pending.catch((error: unknown) => {
+      if (!(error instanceof EngineModuleReloadRequiredError) && wasmInitPromise === pending) {
+        wasmInitPromise = null;
+      }
+    });
   }
   return wasmInitPromise;
 }
 
 export async function ensureCardDatabase(): Promise<number> {
   if (!cardDbPromise) {
-    cardDbPromise = (async () => {
+    const pending = (async () => {
       await ensureWasmInit();
       const engine = await loadEngineModule();
       const resp = await fetch(__CARD_DATA_URL__);
@@ -43,8 +74,18 @@ export async function ensureCardDatabase(): Promise<number> {
         throw new Error(`Failed to load card-data.json (${resp.status})`);
       }
       const text = await resp.text();
-      return engine.load_card_database(text);
+      const loaded = await engine.load_card_database(text);
+      if (loaded <= 0) {
+        throw new Error("Failed to load card-data.json (no cards loaded)");
+      }
+      return loaded;
     })();
+    cardDbPromise = pending;
+    void pending.catch((error: unknown) => {
+      if (!(error instanceof EngineModuleReloadRequiredError) && cardDbPromise === pending) {
+        cardDbPromise = null;
+      }
+    });
   }
   return cardDbPromise;
 }
@@ -217,31 +258,72 @@ export async function isCardCommanderEligibleForFormat(
   return engine.isCardCommanderEligibleForFormat(name, format);
 }
 
+/** The engine's longest match structure for `format`; Bo3 must never be offered above it. */
+export async function bestOfThreeCeilingForFormat(format: GameFormat): Promise<MatchType> {
+  await ensureWasmInit();
+  const engine = await loadEngineModule();
+  return engine.bestOfThreeCeilingForFormat(format) as MatchType;
+}
+
 /**
  * CR 702.124: Of `candidates`, which can legally pair with `firstCommander` as a
  * co-commander? The engine is the single authority for the partner family
  * (Partner, Partner with [Name], Friends Forever, Character Select, Doctor's
  * Companion, Choose a Background) — the frontend never re-derives these rules.
+ *
+ * `draftSetCodes` is every set whose draft boosters this deck's draft CONTAINED,
+ * or an empty array for constructed play. CR 903.13f(3) extends the partner
+ * ability at deckbuilding "if the draft contained draft boosters from Commander
+ * Masters" — a property of the DRAFT, not of a card. A LIST because that rule
+ * asks about containment: a mixed draft that opened Commander Masters boosters
+ * among others contained them, and the grant is in force. The client passes the
+ * set codes through and the engine decides what they grant; which sets grant
+ * what is engine knowledge and must never be mirrored here.
  */
 export async function commanderPartnerCandidates(
   firstCommander: string,
   candidates: string[],
+  draftSetCodes: readonly string[],
 ): Promise<string[]> {
   await ensureCardDatabase();
   const engine = await loadEngineModule();
-  return engine.commanderPartnerCandidates(firstCommander, candidates) as string[];
+  return engine.commanderPartnerCandidates(
+    firstCommander,
+    candidates,
+    [...draftSetCodes],
+  ) as string[];
+}
+
+export type SignatureSpellSelectionPolicy =
+  | { type: "None" }
+  | { type: "Required"; data: { candidates: string[] } };
+
+/** Returns the engine-authored Oathbreaker signature-spell selection policy. */
+export async function signatureSpellSelectionPolicy(
+  request: unknown,
+): Promise<SignatureSpellSelectionPolicy> {
+  await ensureCardDatabase();
+  const engine = await loadEngineModule();
+  return engine.signatureSpellSelectionPolicy(request) as SignatureSpellSelectionPolicy;
+}
+
+/** Returns the engine-approved Commander-family companion candidates. */
+export async function companionCandidates(request: unknown): Promise<string[]> {
+  await ensureCardDatabase();
+  const engine = await loadEngineModule();
+  return engine.companionCandidates(request) as string[];
 }
 
 /**
- * CR 100.2a / CR 903.5b: A card's per-card deck-construction copy-limit override
- * as a discriminated union, or `null` when the default four-of / singleton limit
- * applies. `Unlimited` is a unit variant with no `data` field — switch on `type`,
- * never destructure `data` unconditionally. The engine is the single authority;
- * the frontend never re-parses Oracle text.
+ * Engine-owned deck-construction unions, re-exported so deck-builder callers
+ * keep a single import site. `DeckCopyLimit` is a card's / format's copy
+ * ceiling (CR 100.2a / CR 903.5b) and `SideboardPolicy` a format's sideboard
+ * rule (CR 100.4a). Both are discriminated unions whose unit variants carry no
+ * `data` field — always switch on `type`, never destructure `data`
+ * unconditionally. The engine is the single authority; the frontend never
+ * re-parses Oracle text or hardcodes a cap.
  */
-export type DeckCopyLimit =
-  | { type: "Unlimited" }
-  | { type: "UpTo"; data: number };
+export type { DeckCopyLimit, SideboardPolicy } from "../adapter/types";
 
 /**
  * Query the engine for a card's deck-construction copy-limit override. Returns
@@ -255,28 +337,39 @@ export async function deckCopyLimit(name: string): Promise<DeckCopyLimit | null>
 }
 
 /**
- * CR 100.4a: Per-format sideboard policy as a discriminated union.
+ * CR 100.2a / CR 903.5b: How many copies of a card a deck built under
+ * `formatConfig` may hold across main deck, sideboard, and command zone
+ * combined (CR 100.4a).
  *
- * `Forbidden` and `Unlimited` are unit variants and do not carry a `data`
- * field — always exhaustive-switch on `type`, never destructure `data`
- * unconditionally.
+ * Unlike `deckCopyLimit` (which reports only a card's printed override), this
+ * is the resolved ceiling — the engine has already applied the basic-land
+ * exemption, the printed override, and the format default. Compare a combined
+ * count against it directly; never re-derive four-of / singleton client-side.
+ *
+ * Pass the registry's `default_config`, not a bare format string: only the
+ * config carries a custom format's declared copy limit.
  */
-export type SideboardPolicy =
-  | { type: "Forbidden" }
-  | { type: "Limited"; data: number }
-  | { type: "Unlimited" };
+export async function maxDeckCopies(
+  name: string,
+  formatConfig: FormatConfig,
+): Promise<DeckCopyLimit> {
+  await ensureCardDatabase();
+  const engine = await loadEngineModule();
+  return engine.maxDeckCopies(name, formatConfig) as DeckCopyLimit;
+}
 
 /**
- * Query the engine for the sideboard policy of a given format. The engine is
- * the single authority for these rules — the frontend never hardcodes 15
- * or any other cap.
+ * Query the engine for the sideboard policy of a resolved `FormatConfig`. The
+ * engine is the single authority for these rules — the frontend never hardcodes
+ * 15 or any other cap. Pass the registry's `default_config`, not a bare format
+ * string: only the config carries a custom format's declared policy.
  */
 export async function sideboardPolicyForFormat(
-  format: GameFormat,
+  formatConfig: FormatConfig,
 ): Promise<SideboardPolicy> {
   await ensureWasmInit();
   const engine = await loadEngineModule();
-  return engine.sideboardPolicyForFormat(format) as SideboardPolicy;
+  return engine.sideboardPolicyForFormat(formatConfig) as SideboardPolicy;
 }
 
 /**
@@ -302,6 +395,7 @@ export type TokenCategory =
   | "Vehicle"
   | "Enchantment"
   | "Land"
+  | "Planeswalker"
   | "Artifact";
 
 export type PresetFidelity = "Full" | "PartialMissingAbilities";

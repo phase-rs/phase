@@ -100,6 +100,57 @@ fn advance_to_declare_blockers(runner: &mut GameRunner) {
     panic!("never reached the DeclareBlockers prompt");
 }
 
+/// CR 614.12a: Cavern of Souls' "As this land enters, choose a creature type"
+/// replacement pauses on a direct `NamedChoice`. Once that choice is answered,
+/// its resident general post-replacement dispatch must retire before priority
+/// resumes; leaving it paused strands an exhausted frame beneath later work.
+#[test]
+fn cavern_of_souls_direct_choice_retires_its_post_replacement_dispatch() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let cavern = scenario.add_real_card(P0, "Cavern of Souls", Zone::Hand, db);
+    let mut runner = scenario.build();
+
+    let card_id = runner.state().objects[&cavern].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: cavern,
+            card_id,
+        })
+        .expect("Cavern of Souls can be played from hand");
+
+    let WaitingFor::NamedChoice { options, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "Cavern of Souls must ask for its creature type, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let choice = options
+        .first()
+        .expect("Cavern of Souls must offer at least one creature type")
+        .clone();
+    runner
+        .act(GameAction::ChooseOption { choice })
+        .expect("answering Cavern of Souls' creature-type choice succeeds");
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the answered direct prompt must return to priority"
+    );
+    assert!(
+        runner.state().resolution_stack.is_empty(),
+        "the paused post-replacement dispatch must retire after the direct choice"
+    );
+    assert!(
+        runner.state().active_post_replacement_drains().is_none(),
+        "no general post-replacement authority may outlive Cavern's answered choice"
+    );
+}
+
 /// CR 615.1 + CR 615.5 + CR 121.2: Swans of Bryn Argoll prevents damage dealt to
 /// it, and the prevention's *additional effect* (CR 615.5 — "which may refer to
 /// the amount of damage that was prevented") draws that many cards for **the

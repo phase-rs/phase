@@ -35,9 +35,9 @@
 
 use engine::game::scenario::{GameRunner, GameScenario};
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{Effect, ZoneOwner};
+use engine::types::ability::{Effect, PerPlayerScope, ZoneOwner};
 use engine::types::actions::GameAction;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, WaitingFor, ZoneOpponentChooserPurpose};
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -131,7 +131,7 @@ fn scan_minus_two_chain(parsed: &engine::parser::oracle::ParsedAbilities) -> (bo
     while let Some(def) = node {
         match &*def.effect {
             Effect::ChooseFromZone {
-                zone_owner: ZoneOwner::EachOpponent,
+                zone_owner: ZoneOwner::Each(PerPlayerScope::OtherPlayers),
                 ..
             } => found_each_opponent = true,
             Effect::Unimplemented { .. } => found_unimplemented = true,
@@ -220,7 +220,7 @@ fn non_target_form_still_parses_to_each_opponent_exile_chain() {
     let mut found_chain = false;
     while let Some(def) = node {
         if let Effect::ChooseFromZone {
-            zone_owner: ZoneOwner::EachOpponent,
+            zone_owner: ZoneOwner::Each(PerPlayerScope::OtherPlayers),
             up_to: true,
             ..
         } = &*def.effect
@@ -289,12 +289,32 @@ fn non_target_form_exiles_one_creature_per_other_player() {
         })
         .expect("casting must be accepted");
 
-    // APNAP from P0 means P1 is prompted first, then P2 — the controller (P0) is
-    // NEVER an iterated chooser.
+    // CR 101.4c: the controller makes both picks, so the controller orders
+    // them — and the controller (P0) is NEVER an iterated candidate. Choose P2
+    // first (not APNAP).
+    advance_to_choice_or_empty(&mut runner);
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseFromZoneOpponentChooser {
+            player,
+            candidates,
+            purpose: ZoneOpponentChooserPurpose::PerPlayerChoiceOrder,
+            ..
+        } => {
+            assert_eq!(*player, P0);
+            assert_eq!(
+                candidates,
+                &vec![P1, P2],
+                "the controller is never a candidate"
+            );
+        }
+        other => panic!("expected the controller's order prompt, got {other:?}"),
+    }
+    runner
+        .act(GameAction::ChooseZoneOpponentChooser { opponent: P2 })
+        .expect("ordering P2 first is legal");
+    answer_pick(&mut runner, P0, p2_chosen);
     advance_to_choice_or_empty(&mut runner);
     answer_pick(&mut runner, P0, p1_chosen);
-    advance_to_choice_or_empty(&mut runner);
-    answer_pick(&mut runner, P0, p2_chosen);
     runner.advance_until_stack_empty();
 
     assert_eq!(

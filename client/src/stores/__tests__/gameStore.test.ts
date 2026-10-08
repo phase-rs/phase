@@ -1,16 +1,96 @@
 import { act } from "react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameEvent, GameState } from "../../adapter/types";
+import type { ActionRejection, EngineAdapter, GameEvent, PersistedGameState } from "../../adapter/types";
+import { actionRejectionError, persistedGameStateView } from "../../adapter/types";
+import { saveAuthoritativeGame, saveAuthoritativeGameStrict } from "../../services/gamePersistence";
+import { useAppNotificationStore } from "../../stores/appToastStore";
 import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory";
 import {
   buildGameState,
   buildStackEntry,
 } from "../../test/factories/gameStateFactory";
-import { useGameStore } from "../gameStore";
+import type { GameMode } from "../gameStore";
+import {
+  canExportAuthoritativeState,
+  hasRemoteHumans,
+  isAuthorityRemote,
+  useGameStore,
+} from "../gameStore";
+
+vi.mock("../../services/gamePersistence", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../services/gamePersistence")>(),
+  saveAuthoritativeGame: vi.fn().mockResolvedValue(undefined),
+  saveAuthoritativeGameStrict: vi.fn().mockResolvedValue(undefined),
+}));
+
+describe("game mode classification", () => {
+  // The two questions the old `isMultiplayerMode` answered with one bit:
+  //   authority — does the authoritative engine state live off this client?
+  //   company   — do humans on OTHER clients share this game?
+  // `native-ai` (desktop solo vs the phase-server sidecar) is the mode where
+  // they disagree, which is exactly what the merged predicate could not say.
+  const EXPECTED: Record<GameMode, { authority: boolean; company: boolean }> = {
+    "ai": { authority: false, company: false },
+    "local": { authority: false, company: false },
+    "native-ai": { authority: true, company: false },
+    "online": { authority: true, company: true },
+    "p2p-host": { authority: true, company: true },
+    "p2p-join": { authority: true, company: true },
+    "draft-match": { authority: true, company: true },
+    "spectate": { authority: true, company: true },
+  };
+
+  it.each(Object.keys(EXPECTED) as GameMode[])(
+    "classifies %s on both axes",
+    (mode) => {
+      expect(isAuthorityRemote(mode)).toBe(EXPECTED[mode].authority);
+      expect(hasRemoteHumans(mode)).toBe(EXPECTED[mode].company);
+    },
+  );
+
+  it("answers the two questions differently for native-ai", () => {
+    // Non-vacuity: these two assertions are contradictory for ANY single
+    // merged predicate. `isMultiplayerMode` — and equally the rejected
+    // `isMultiplayerMode(mode) || mode === "native-ai"` shape — returns one
+    // value for this input and therefore fails one of them whichever way it
+    // answers. Only a genuine split can satisfy both.
+    expect(isAuthorityRemote("native-ai")).toBe(true);
+    expect(hasRemoteHumans("native-ai")).toBe(false);
+  });
+
+  it("treats hot-seat local as solo despite having two humans", () => {
+    // The row a careless "solo means one human" reading gets wrong: two
+    // humans share one client and one state, so there is no peer to desync.
+    expect(hasRemoteHumans("local")).toBe(false);
+    expect(isAuthorityRemote("local")).toBe(false);
+  });
+
+  it.each(["ai", "local", "native-ai", "p2p-host"] as GameMode[])(
+    "allows authoritative bug reports when %s owns the state",
+    (mode) => {
+      expect(canExportAuthoritativeState(mode)).toBe(true);
+    },
+  );
+
+  it.each(["online", "p2p-join", "draft-match", "spectate"] as GameMode[])(
+    "blocks authoritative bug reports when %s only has a redacted view",
+    (mode) => {
+      expect(canExportAuthoritativeState(mode)).toBe(false);
+    },
+  );
+
+  it("answers false to both for the pre-game null mode", () => {
+    expect(isAuthorityRemote(null)).toBe(false);
+    expect(hasRemoteHumans(null)).toBe(false);
+  });
+});
 
 describe("gameStore", () => {
   beforeEach(() => {
+    vi.mocked(saveAuthoritativeGame).mockClear();
+    vi.mocked(saveAuthoritativeGameStrict).mockReset();
+    vi.mocked(saveAuthoritativeGameStrict).mockResolvedValue(undefined);
     act(() => {
       useGameStore.setState({
         gameState: null,
@@ -19,6 +99,7 @@ describe("gameStore", () => {
         waitingFor: null,
         stateHistory: [],
       });
+      useAppNotificationStore.setState({ notification: null, expiresAt: 0 });
     });
   });
 
@@ -44,6 +125,61 @@ describe("gameStore", () => {
     expect(adapter.initialize).toHaveBeenCalled();
   });
 
+  it("commits a strict initial game only after persistence settles and detaches on failure", async () => {
+    const state = buildGameState();
+    const adapter = buildEngineAdapterMock(state);
+    let settleWrite!: (error?: Error) => void;
+    vi.mocked(saveAuthoritativeGameStrict).mockImplementation(() => new Promise((resolve, reject) => {
+      settleWrite = (error) => error ? reject(error) : resolve();
+    }));
+    let settled = false;
+    const pending = useGameStore.getState().initGame("strict", adapter, undefined, undefined, undefined, undefined, undefined, "strict");
+    void pending.then(() => { settled = true; });
+    await vi.waitFor(() => expect(saveAuthoritativeGameStrict).toHaveBeenCalledOnce());
+    expect(saveAuthoritativeGameStrict).toHaveBeenCalledWith("strict", adapter, state);
+    expect(useGameStore.getState().gameState).toBeNull();
+    expect(settled).toBe(false);
+    expect(saveAuthoritativeGame).not.toHaveBeenCalled();
+    settleWrite();
+    await act(async () => { await pending; });
+    expect(useGameStore.getState().gameState).toEqual(state);
+    expect(settled).toBe(true);
+
+    act(() => useGameStore.setState({ gameState: null, adapter: null }));
+    const original = new Error("IndexedDB initial write failed");
+    const failed = useGameStore.getState().initGame("failed", adapter, undefined, undefined, undefined, undefined, undefined, "strict");
+    await vi.waitFor(() => expect(saveAuthoritativeGameStrict).toHaveBeenCalledTimes(2));
+    settleWrite(original);
+    await expect(failed).rejects.toBe(original);
+    expect(useGameStore.getState().gameState).toBeNull();
+    expect(useGameStore.getState().adapter).toBeNull();
+    expect(saveAuthoritativeGame).not.toHaveBeenCalled();
+  });
+
+  it("keeps ordinary initial games on the best-effort save path", async () => {
+    const state = buildGameState();
+    const adapter = buildEngineAdapterMock(state);
+    await act(async () => { await useGameStore.getState().initGame("ordinary", adapter); });
+    expect(useGameStore.getState().gameState).toEqual(state);
+    expect(saveAuthoritativeGame).toHaveBeenCalledWith("ordinary", adapter, state);
+    expect(saveAuthoritativeGameStrict).not.toHaveBeenCalled();
+  });
+
+  it("binds the adapter before initializeGame can publish an initial remote snapshot", async () => {
+    const state = buildGameState();
+    let adapterDuringInitialization: EngineAdapter | null = null;
+    const adapter = buildEngineAdapterMock(state, {
+      initializeGame: vi.fn(async () => {
+        adapterDuringInitialization = useGameStore.getState().adapter;
+        return { events: [] };
+      }),
+    });
+
+    await act(() => useGameStore.getState().initGame("test-id", adapter));
+
+    expect(adapterDuringInitialization).toBe(adapter);
+  });
+
   it("dispatch calls adapter.submitAction and updates state", async () => {
     const state1 = buildGameState({ turn_number: 1 });
     const state2 = buildGameState({ turn_number: 2 });
@@ -64,18 +200,103 @@ describe("gameStore", () => {
     expect(adapter.submitAction).toHaveBeenCalledWith({ type: "PassPriority" }, 0);
   });
 
-  it("dispatch pushes to stateHistory for undoable actions", async () => {
+  it("surfaces a direct structured rejection at the first rendered related object", async () => {
+    const state = buildGameState();
+    const adapter = buildEngineAdapterMock(state);
+    await act(() => useGameStore.getState().initGame("test-id", adapter));
+    const first = document.createElement("div");
+    first.dataset.objectId = "200";
+    first.getBoundingClientRect = () => ({
+      x: -20, y: 10, top: 10, right: 20, bottom: 50, left: -20, width: 40, height: 40,
+      toJSON: () => ({}),
+    });
+    const second = document.createElement("div");
+    second.dataset.objectId = "201";
+    document.body.append(first, second);
+    const rejection: ActionRejection = {
+      code: "invalid_action",
+      disposition: "invalid",
+      message: "Engine error: ObjectId(200) must be blocked by 2 or more creatures",
+      related_object_ids: [200, 201],
+    };
+    adapter.submitAction.mockRejectedValue(actionRejectionError(rejection));
+
+    await expect(useGameStore.getState().dispatch({ type: "PassPriority" })).rejects.toMatchObject({
+      rejection,
+    });
+
+    expect(useAppNotificationStore.getState().notification).toEqual({
+      title: "Action failed",
+      description: rejection.message,
+      anchor: { x: 192, y: 62, placement: "below" },
+    });
+    first.remove();
+    second.remove();
+  });
+
+  it("silently drops a stale structured rejection from the direct dispatcher", async () => {
+    const state = buildGameState();
+    const adapter = buildEngineAdapterMock(state);
+    await act(() => useGameStore.getState().initGame("test-id", adapter));
+    adapter.submitAction.mockRejectedValue(actionRejectionError({
+      code: "stale_action",
+      disposition: "stale",
+      message: "This action is no longer current",
+      related_object_ids: [200],
+    }));
+
+    await expect(useGameStore.getState().dispatch({ type: "PassPriority" })).resolves.toEqual([]);
+    expect(useAppNotificationStore.getState().notification).toBeNull();
+  });
+
+  it("dispatch pushes the trusted pre-action envelope to stateHistory", async () => {
     const state1 = buildGameState({ turn_number: 1 });
     const state2 = buildGameState({ turn_number: 2 });
-    const adapter = buildEngineAdapterMock(state1);
+    // Rendered screen states are viewer projections the restore ingress
+    // rejects — the checkpoint must be the engine-authored envelope captured
+    // BEFORE the action submits, never the store's own gameState.
+    const envelope = { state: state1, precast_shortcut_runtime: null };
+    const exportPersistenceState = vi.fn().mockResolvedValue(JSON.stringify(envelope));
+    const adapter = buildEngineAdapterMock(state1, { exportPersistenceState });
 
     await act(() => useGameStore.getState().initGame("test-id", adapter));
     adapter.getState.mockResolvedValue(state2);
 
     await act(() => useGameStore.getState().dispatch({ type: "PassPriority" }));
 
+    expect(exportPersistenceState).toHaveBeenCalledOnce();
+    expect(exportPersistenceState.mock.invocationCallOrder[0]).toBeLessThan(
+      adapter.submitAction.mock.invocationCallOrder[0],
+    );
     expect(useGameStore.getState().stateHistory).toHaveLength(1);
-    expect(useGameStore.getState().stateHistory[0]).toEqual(state1);
+    expect(useGameStore.getState().stateHistory[0]).toEqual(envelope);
+  });
+
+  it("dispatch drops the checkpoint when the session turns over mid-flight", async () => {
+    const state1 = buildGameState({ turn_number: 1 });
+    const state2 = buildGameState({ turn_number: 2 });
+    let resolveExport!: (json: string) => void;
+    const exportPromise = new Promise<string>((resolve) => {
+      resolveExport = resolve;
+    });
+    const adapter = buildEngineAdapterMock(state1, {
+      exportPersistenceState: vi.fn().mockReturnValue(exportPromise),
+    });
+
+    await act(() => useGameStore.getState().initGame("test-id", adapter));
+    adapter.getState.mockResolvedValue(state2);
+
+    const inFlight = useGameStore.getState().dispatch({ type: "PassPriority" });
+    // Session turns over mid-capture: replacement adapter and generation.
+    const replacement = buildEngineAdapterMock(state2);
+    act(() => useGameStore.setState({ adapter: replacement, gameSessionGeneration: 999 }));
+
+    await act(async () => {
+      resolveExport(JSON.stringify({ state: state1, precast_shortcut_runtime: null }));
+      await inFlight;
+    });
+
+    expect(useGameStore.getState().stateHistory).toHaveLength(0);
   });
 
   it("dispatch does not push to stateHistory when the stack is non-empty", async () => {
@@ -95,7 +316,8 @@ describe("gameStore", () => {
     });
     const state1 = buildGameState({ turn_number: 1, stack: [triggerOnStack] });
     const state2 = buildGameState({ turn_number: 2 });
-    const adapter = buildEngineAdapterMock(state1);
+    const exportPersistenceState = vi.fn().mockResolvedValue("{}");
+    const adapter = buildEngineAdapterMock(state1, { exportPersistenceState });
 
     await act(() => useGameStore.getState().initGame("test-id", adapter));
     adapter.getState.mockResolvedValue(state2);
@@ -103,12 +325,14 @@ describe("gameStore", () => {
     await act(() => useGameStore.getState().dispatch({ type: "PassPriority" }));
 
     expect(useGameStore.getState().stateHistory).toHaveLength(0);
+    expect(exportPersistenceState).not.toHaveBeenCalled();
   });
 
   it("dispatch does not push to stateHistory for revealed-info actions", async () => {
     const state1 = buildGameState();
     const state2 = buildGameState({ turn_number: 2 });
-    const adapter = buildEngineAdapterMock(state1);
+    const exportPersistenceState = vi.fn().mockResolvedValue("{}");
+    const adapter = buildEngineAdapterMock(state1, { exportPersistenceState });
 
     await act(() => useGameStore.getState().initGame("test-id", adapter));
     adapter.getState.mockResolvedValue(state2);
@@ -119,19 +343,23 @@ describe("gameStore", () => {
     );
 
     expect(useGameStore.getState().stateHistory).toHaveLength(0);
+    expect(exportPersistenceState).not.toHaveBeenCalled();
   });
 
   it("undo restores previous state from stateHistory", async () => {
     const state1 = buildGameState({ turn_number: 1 });
     const state2 = buildGameState({ turn_number: 2 });
-    const adapter = buildEngineAdapterMock(state1);
+    const envelope = { state: state1, precast_shortcut_runtime: null };
+    const adapter = buildEngineAdapterMock(state1, {
+      exportPersistenceState: vi.fn().mockResolvedValue(JSON.stringify(envelope)),
+    });
     // Model a real engine: `restoreState` actually rewinds it, so the read that
     // follows returns the restored state. `undo` commits the snapshot's own
     // post-restore state (post-restore, the engine is the source of truth and
     // both halves of the pair must come from it), so a mock whose reads ignored
     // `restoreState` would be lying about the engine.
-    adapter.restoreState.mockImplementation((restored: GameState) => {
-      adapter.getState.mockResolvedValue(restored);
+    adapter.restoreState.mockImplementation((restored: PersistedGameState) => {
+      adapter.getState.mockResolvedValue(persistedGameStateView(restored));
     });
 
     await act(() => useGameStore.getState().initGame("test-id", adapter));
@@ -146,13 +374,16 @@ describe("gameStore", () => {
     expect(store.gameState?.turn_number).toBe(1);
     expect(store.stateHistory).toHaveLength(0);
     expect(store.events).toEqual([]);
-    expect(adapter.restoreState).toHaveBeenCalledWith(state1);
+    expect(adapter.restoreState).toHaveBeenCalledWith(envelope);
   });
 
   it("undo calls adapter.restoreState with previous state", async () => {
     const state1 = buildGameState({ turn_number: 1 });
     const state2 = buildGameState({ turn_number: 2 });
-    const adapter = buildEngineAdapterMock(state1);
+    const envelope = { state: state1, precast_shortcut_runtime: null };
+    const adapter = buildEngineAdapterMock(state1, {
+      exportPersistenceState: vi.fn().mockResolvedValue(JSON.stringify(envelope)),
+    });
 
     await act(() => useGameStore.getState().initGame("test-id", adapter));
     adapter.getState.mockResolvedValue(state2);
@@ -162,7 +393,7 @@ describe("gameStore", () => {
     act(() => useGameStore.getState().undo());
 
     expect(adapter.restoreState).toHaveBeenCalledOnce();
-    expect(adapter.restoreState).toHaveBeenCalledWith(state1);
+    expect(adapter.restoreState).toHaveBeenCalledWith(envelope);
   });
 
   it("undo with no adapter does nothing", () => {
@@ -191,7 +422,11 @@ describe("gameStore", () => {
     const states = Array.from({ length: 7 }, (_, i) =>
       buildGameState({ turn_number: i }),
     );
-    const adapter = buildEngineAdapterMock(states[0]);
+    const adapter = buildEngineAdapterMock(states[0], {
+      exportPersistenceState: vi.fn().mockResolvedValue(
+        JSON.stringify({ state: states[0], precast_shortcut_runtime: null }),
+      ),
+    });
 
     await act(() => useGameStore.getState().initGame("test-id", adapter));
 
@@ -211,7 +446,8 @@ describe("gameStore", () => {
     // suppressed — rewinding a single client's view would desync.
     const state1 = buildGameState({ turn_number: 1 });
     const state2 = buildGameState({ turn_number: 2 });
-    const adapter = buildEngineAdapterMock(state1);
+    const exportPersistenceState = vi.fn().mockResolvedValue("{}");
+    const adapter = buildEngineAdapterMock(state1, { exportPersistenceState });
 
     await act(() => useGameStore.getState().initGame("test-id", adapter));
     act(() => useGameStore.getState().setGameMode("online"));
@@ -220,6 +456,7 @@ describe("gameStore", () => {
     await act(() => useGameStore.getState().dispatch({ type: "PassPriority" }));
 
     expect(useGameStore.getState().stateHistory).toHaveLength(0);
+    expect(exportPersistenceState).not.toHaveBeenCalled();
   });
 
   it("undo is a no-op in multiplayer even if stateHistory is non-empty", async () => {
@@ -236,6 +473,25 @@ describe("gameStore", () => {
     await act(() => useGameStore.getState().undo());
 
     // History untouched; restoreState never invoked.
+    expect(useGameStore.getState().stateHistory).toHaveLength(1);
+    expect(adapter.restoreState).not.toHaveBeenCalled();
+  });
+
+  it("undo is a no-op for native-ai, whose authority is the sidecar", async () => {
+    // Regression guard for the predicate split: `native-ai` is solo but
+    // wire-authoritative, so the rename must NOT have leaked client-side
+    // rewind into it. `WebSocketAdapter.restoreState` throws on this
+    // transport, so a leak here would surface as a thrown adapter call.
+    const state1 = buildGameState({ turn_number: 1 });
+    const adapter = buildEngineAdapterMock(state1);
+
+    await act(() => useGameStore.getState().initGame("test-id", adapter));
+    act(() => {
+      useGameStore.setState({ stateHistory: [state1], gameMode: "native-ai" });
+    });
+
+    await act(() => useGameStore.getState().undo());
+
     expect(useGameStore.getState().stateHistory).toHaveLength(1);
     expect(adapter.restoreState).not.toHaveBeenCalled();
   });

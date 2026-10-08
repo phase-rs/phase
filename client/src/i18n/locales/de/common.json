@@ -5,15 +5,49 @@
     "close": "Schließen",
     "closeNamed": "{{name}} schließen"
   },
+  "debug": {
+    "copyDisplaySnapshot": "Anzeigeschnappschuss kopieren (nicht wiederherstellbar)",
+    "exportAuthoritative": "Autoritativen Spielzustand exportieren",
+    "exportAuthoritativeTitle": "Lädt den engine-eigenen Zustand herunter, mit dem dieses Spiel diagnostiziert und wiederhergestellt wird"
+  },
+  "quantityRef": {
+    "highestNumber": "die höchste Zahl",
+    "lowestNumber": "die niedrigste Zahl",
+    "chosenNumber": "die gewählte Zahl"
+  },
+  "scryOutcome": {
+    "title": "Spähen abgeschlossen",
+    "you": "Du",
+    "result": "{{player}} — {{top}} oben · {{bottom}} unten"
+  },
   "modal": {
     "defaultEyebrow": "Workspace-Werkzeug"
   },
   "pausedBanner": {
-    "message": "Spiel pausiert — {{reason}}"
+    "message": "Spiel pausiert — {{reason}}",
+    "resume": "Spiel fortsetzen"
   },
   "fullscreen": {
     "enter": "Vollbild starten",
     "exit": "Vollbild beenden"
+  },
+  "nativeEngineProgress": {
+    "title": "Nativer Engine wird aktualisiert",
+    "resolving": "Passender lokaler Server wird gesucht…",
+    "downloadingBinary": "Aktualisierter Server wird heruntergeladen…",
+    "verifying": "Server wird überprüft…",
+    "downloadingData": "Spieldaten werden heruntergeladen…",
+    "spawning": "Lokaler Server wird gestartet…",
+    "ready": "Native Engine bereit",
+    "failed": "Native Engine konnte nicht vorbereitet werden"
+  },
+  "engineBadge": {
+    "native": "Native Engine",
+    "nativeTooltip": "Dieses Spiel läuft mit der nativen Engine der Desktop-App.",
+    "inBrowser": "Browser-Engine",
+    "inBrowserTooltip": "Native Engine nicht verfügbar — dieses Spiel läuft im Browser.",
+    "versionMismatchTooltip": "Versionskonflikt der nativen Engine — dieses Spiel läuft im Browser.",
+    "notAttemptedTooltip": "Dieses Spiel läuft im Browser — die native Engine wurde dafür nicht verwendet."
   },
   "buildBadge": {
     "downloading": "wird heruntergeladen… {{progress}}%",
@@ -22,16 +56,22 @@
     "updatePending": "Aktualisierung nach dem Spiel ausstehend",
     "cards": "Karten {{age}} ({{commit}})",
     "cardDataTitle": "Kartendaten erzeugt am {{date}} aus {{commit}}",
+    "desktopAppVersion": "Desktop-App v{{version}}",
     "checkForUpdates": "Nach Updates suchen",
     "updaterDebugInfo": "Updater-Debug-Informationen",
     "updaterIssue": "Updater-Problem: {{error}}",
     "updateIssue": "Update-Problem",
     "updated": "aktualisiert"
   },
+  "offlineBadge": {
+    "label": "Offline",
+    "servicesPaused": "Online-Aktualisierungen und Dienste sind pausiert.",
+    "forced": "Offline arbeiten ist aktiviert.",
+    "connection": "Keine Netzwerkverbindung."
+  },
   "comboDetector": {
-    "label": "Combo-Detektor",
+    "label": "Combo-Detektor (experimentell)",
     "title": "Unendliche Schleifen erkennen: Pflichtschleifen automatisch beenden und ∞-Ressourcen anzeigen (standardmäßig aus)",
-    "on": "An",
     "off": "Aus",
     "interactive": "Interaktiv"
   },
@@ -49,16 +89,23 @@
     "clickModeButton": "Klickmodus-Schaltfläche",
     "shown": "Sichtbar",
     "hidden": "Ausgeblendet",
-    "resume": "Fortsetzen",
+    "openGameLog": "Spielprotokoll öffnen",
+    "closeGameLog": "Spielprotokoll schließen",
     "settings": "Einstellungen",
     "boardLayoutSplit": "Geteilt",
     "boardLayoutLegacy": "Legacy",
     "switchToSplitView": "Zur geteilten Tischansicht wechseln",
     "switchToLegacyView": "Zur fokussierten Legacy-Ansicht wechseln",
+    "multiplayerSplitLayoutNudge": {
+      "message": "Mit der geteilten Tischansicht siehst du alle Gegner gleichzeitig.",
+      "trySplit": "Geteilte Ansicht ausprobieren",
+      "dismiss": "Jetzt nicht"
+    },
     "helpShortcuts": "Hilfe & Tastenkürzel",
     "showAiHand": "KI-Hand anzeigen",
     "hideAiHand": "KI-Hand verbergen",
     "requestTakeback": "Rücknahme beantragen",
+    "undoLastAction": "Letzte Aktion rückgängig",
     "concede": "Aufgeben",
     "backToDraft": "Zurück zum Draft",
     "mainMenu": "Hauptmenü",
@@ -66,6 +113,8 @@
     "cardDataTitle": "Kartendaten: {{date}}"
   },
   "volume": {
+    "deviceBlocked": "Audio nicht verfügbar — der System-Audioserver antwortet nicht. App neu starten, um es erneut zu versuchen.",
+    "mediaUnavailable": "Audio nicht verfügbar — auf diesem System fehlen die Medienkomponenten für die Tonwiedergabe. Installiere die GStreamer-Plugin-Pakete deiner Distribution und starte die App neu.",
     "mute": "Stummschalten",
     "unmute": "Stummschaltung aufheben",
     "volume": "Lautstärke"
@@ -127,6 +176,8 @@
       "copied": "Spielzustand in die Zwischenablage kopiert.",
       "copyFailed": "Spielzustand konnte nicht kopiert werden.",
       "exported": "{{filename}} exportiert.",
+      "exportedTo": "Nach {{path}} exportiert.",
+      "exportRequested": "Export angefordert: {{filename}}.",
       "exportFailed": "Spielzustand konnte nicht exportiert werden.",
       "replayExported": "Wiederholung gespeichert als {{filename}}.",
       "replayExportUnavailable": "Für diese Partie ist keine Wiederholungsaufzeichnung verfügbar.",
@@ -246,13 +297,28 @@
     "youPlayFirst": "Du beginnst",
     "playerPlaysFirst": "{{name}} beginnt",
     "heads": "Kopf",
-    "tails": "Zahl"
+    "tails": "Zahl",
+    "coinFlip": "Münzwurf",
+    "wonCoinFlip": "{{name}} hat den Münzwurf gewonnen",
+    "lostCoinFlip": "{{name}} hat den Münzwurf verloren",
+    "turnOrder": "Zugreihenfolge",
+    "turnOrderItem": "Zug {{turn}}: {{name}}",
+    "youTakeTurn": "Du bist in Zug {{turn}} dran",
+    "ignoredDie": "Ignoriert"
   },
   "chrome": {
     "back": "Zurück",
     "settings": "Einstellungen",
     "languageSettings": "Sprache ({{lang}}) — Einstellungen öffnen",
-    "languageTitle": "Sprache: {{lang}}"
+    "languageTitle": "Sprache: {{lang}}",
+    "statusBanner": {
+      "dismiss": "Diese Meldung schließen",
+      "severity": {
+        "info": "Hinweis",
+        "warning": "Achtung",
+        "critical": "Wichtig"
+      }
+    }
   },
   "errorBoundary": {
     "heading": "Etwas ist schiefgelaufen",
@@ -264,5 +330,119 @@
     "skipTarget": "Ziel überspringen",
     "genericAction": "Aktion",
     "unknownEngineError": "Unbekannter Engine-Fehler"
+  },
+  "troubleshooting": {
+    "title": "Fehlerbehebung",
+    "intro": "Prüfe PeerJS und TURN mit zwei temporären Verbindungen und kleinen Testnachrichten. Die Prüfung dauert bis zu 35 Sekunden und verändert dein Spiel nicht.",
+    "run": "Prüfung starten",
+    "rerun": "Erneut prüfen",
+    "running": "Prüfung läuft…",
+    "export": "Bericht herunterladen",
+    "privacy": "Der JSON-Bericht enthält nur technische Beobachtungen. Spielinhalte, Spieler-IDs, Raumcodes, Zugangsdaten und Konsolenprotokolle sind ausgeschlossen. Der aktuelle Verlauf bleibt bis zu einer Stunde in diesem Tab erhalten, auch nach dem Neuladen.",
+    "history": "Letzte Ereignisse: {{count}}. Frühere Ereignisse belegen keine aktuelle Störung.",
+    "observed": "Beobachtet um {{time}}",
+    "saved": "Bericht gespeichert.",
+    "requested": "Download angefordert. Prüfe deine Downloads.",
+    "failed": "Der Bericht konnte nicht gespeichert werden. Versuche es erneut.",
+    "cancelled": "Speichern abgebrochen.",
+    "runnerFailed": "Die Prüfung konnte nicht abgeschlossen werden. Versuche es erneut.",
+    "checks": {
+      "connectivity": "Netzwerkverbindung",
+      "visibility": "Sichtbarkeit der Seite",
+      "support": "Browserunterstützung",
+      "engine": "Lokale Engine-Instanzen",
+      "peer": "Spielerverbindung",
+      "route": "Verbindungsweg",
+      "directory": "Lobby-Dienst",
+      "mode": "Spiel-Engine",
+      "credentials": "Frische TURN-Zugangsdaten",
+      "signaling": "PeerJS-Signalisierung",
+      "relay": "TURN-Nachrichtenrundlauf"
+    },
+    "reasons": {
+      "online": "Der Browser meldet eine Verbindung. Das bestätigt keinen Internetzugang.",
+      "offline": "Der Browser meldet keine Verbindung. Prüfe deine Netzwerkverbindung.",
+      "visible": "Die Seite ist sichtbar.",
+      "hidden": "Kehre zu diesem Tab zurück; Hintergrund-Tabs können verlangsamt werden.",
+      "supported": "WebAssembly und WebRTC sind verfügbar.",
+      "unsupported": "WebAssembly oder WebRTC ist nicht verfügbar. Einige Prüfungen sind nicht möglich.",
+      "noEngine": "Keine lokale Engine-Instanz registriert. Der Engine-Zustand wurde nicht geprüft.",
+      "engineReady": "Eine lokale Engine-Instanz hat geantwortet. Sie führt möglicherweise nicht dein Spiel aus.",
+      "engineWaiting": "Eine lokale Engine-Instanz ist nicht bereit. Warte und prüfe erneut.",
+      "probeFailed": "Die Prüfung ist fehlgeschlagen. Speichere bei Wiederholung den Bericht vor dem Verlassen.",
+      "probeTimeout": "Die Engine hat nicht rechtzeitig geantwortet. Warte und versuche es erneut; speichere bei Wiederholung den Bericht.",
+      "noPeer": "Kein aktiver Peer registriert. Der Peer-Zustand wurde nicht geprüft.",
+      "peerConnected": "Die Spielerverbindung ist offen. Ausstehende Arbeit wird im Bericht erfasst.",
+      "peerWaiting": "Die Spielerverbindung wird noch aufgebaut oder ist getrennt. Warte und prüfe erneut.",
+      "peerDisconnectedDuringCheck": "Die Spielerverbindung wurde während dieser Prüfungen getrennt. Speichere diesen Bericht vor einem erneuten Versuch.",
+      "relayConnectionFailed": "Die Relay-Verbindung ist beim Aufbau oder bei der Übertragung fehlgeschlagen. Die folgende Kategorie zeigt den von PeerJS gemeldeten Fehler.",
+      "peerFailed": "Die Verbindung meldete einen Fehler. Speichere diesen Bericht bei wiederholten Problemen.",
+      "relayed": "Diese Verbindung nutzt ein Relay. Das ist normal und kein Fehler.",
+      "statsUnavailable": "Details zum Verbindungsweg sind nicht verfügbar. Das belegt keinen Fehler.",
+      "directoryReached": "Das Verzeichnis lieferte eine erfolgreiche HTTP-Antwort. Dies prüft nur die Erreichbarkeit, nicht den Spielzustand.",
+      "directoryFailed": "Die Verzeichnisprüfung war nicht erfolgreich. Prüfe deine Verbindung und versuche es erneut.",
+      "modeNotChecked": "WebSocket- und native Spiel-Engines werden hier nicht geprüft, auch wenn lokale Engine-Instanzen erscheinen.",
+      "direct": "Die beobachtete Verbindung ist direkt und verwendet kein Relay.",
+      "draftModeNotChecked": "Diese Prüfungen überprüfen nicht die Engine einer Draft-Partie; sie kann lokal oder remote laufen.",
+      "networkUnsupported": "Dieser Browser kann den PeerJS-Relay-Test nicht ausführen. Versuche einen aktuellen Browser mit WebRTC-Unterstützung.",
+      "credentialsReady": "Frische TURN-Zugangsdaten wurden abgerufen. Der Relay-Zugriff wird unten separat geprüft.",
+      "credentialsFailed": "Frische TURN-Zugangsdaten konnten nicht abgerufen werden oder enthielten kein nutzbares Relay. Versuche es erneut und lade bei anhaltenden Problemen den Bericht für den Support herunter. VPN, Filter oder Dienstausfall sind mögliche Ursachen.",
+      "credentialsTimeout": "Der TURN-Zugangsdienst hat nicht rechtzeitig geantwortet. Prüfe dein Netzwerk, versuche es erneut und lade bei anhaltenden Problemen den Bericht herunter.",
+      "prerequisiteFailed": "Der Relay-Test konnte wegen fehlgeschlagener Zugangsdaten oder Signalisierung nicht starten. Das belegt keinen TURN-Transportfehler.",
+      "signalingReady": "Beide temporären Peers wurden bei PeerJS registriert. Der Relay-Test prüft auch die Weiterleitung von Angeboten und Antworten.",
+      "signalingFailed": "Die PeerJS-Signalisierung ist fehlgeschlagen. Netzwerkfilter, VPN oder Dienstprobleme sind mögliche Ursachen. Versuche ein anderes Netzwerk und lade bei Wiederholung den Bericht herunter.",
+      "signalingTimeout": "PeerJS hat nicht beide temporären Peers rechtzeitig registriert. Prüfe Netzwerk- oder VPN-Beschränkungen, versuche ein anderes Netzwerk und speichere bei Wiederholung den Bericht.",
+      "relayReady": "Die erwartete Nachricht kam über ausgewählte Relay-Kandidaten zurück. Dieser Browser kann TURN jetzt nutzen.",
+      "relayEvidenceUnavailable": "Das Relay-Ergebnis ließ sich mit den Statistiken der ausgewählten Kandidaten nicht bestätigen. Lade den Bericht herunter; das beweist keinen TURN-Ausfall.",
+      "relayNoCandidates": "Vor dem Fehler oder Zeitablauf wurden keine Relay-Kandidaten beobachtet. TURN ist möglicherweise blockiert oder nicht verfügbar. Versuche ein anderes Netzwerk und teile den Bericht mit dem Support.",
+      "relayNoEcho": "Relay-Kandidaten wurden beobachtet, aber die erwartete Nachricht kam nicht zurück. Versuche ein anderes Netzwerk und lade bei Wiederholung den Bericht herunter."
+    },
+    "statuses": {
+      "pass": "Bestanden",
+      "warning": "Hinweis",
+      "unavailable": "Nicht geprüft",
+      "error": "Fehler"
+    },
+    "pastEngine": "Eine lokale Engine war zuvor nicht bereit. Speichere bei Wiederholung den Bericht vor dem Verlassen.",
+    "pastDisconnect": "Zuvor wurde eine unerwartete Spielerverbindungstrennung erfasst. Speichere bei Wiederholung den Bericht vor dem Verlassen.",
+    "limitations": "Dieser Test auf demselben Gerät prüft den aktuellen Relay-Pfad dieses Browsers. Er prüft weder andere Spieler noch dauerhafte Spielstabilität oder jeden UDP/TCP-Transport einzeln.",
+    "pastSetup": "Ein früheres Problem beim Verbindungsaufbau wurde aufgezeichnet. Die Phase steht im Bericht; das belegt keinen aktuellen Ausfall.",
+    "pastRoute": "Früher ausgewählte Route: lokal {{local}}, entfernt {{remote}}.",
+    "unknownRoute": "nicht verfügbar",
+    "duration": "Dauer: {{duration, number}} ms",
+    "routeEvidence": "Ausgewählte Kandidaten: lokal {{local}}, entfernt {{remote}}. Kandidatenprotokoll: {{protocol}} (nicht der Transport zwischen Client und TURN).",
+    "iceErrors": "ICE-Fehlercodes: {{codes}}",
+    "credentialDetail": "Zugangsergebnis: {{reason}}",
+    "httpStatus": "HTTP-Status: {{status}}",
+    "connectionId": "Diagnoseverbindung: {{id}}",
+    "relayProtocol": "Transport vom Client zu TURN: {{protocol}}",
+    "peerError": "PeerJS-Fehlerkategorie: {{code}}",
+    "credentialFailures": {
+      "http": "Der Dienst lieferte einen HTTP-Fehler",
+      "network": "Netzwerkanfrage fehlgeschlagen",
+      "invalid": "Ungültige Zugangsdatenantwort",
+      "no-turn": "Kein TURN-Relay bereitgestellt",
+      "aborted": "Anfrage abgebrochen"
+    }
+  },
+  "savedDeckLibraryBusy": {
+    "description": "Ein anderer Phase-Tab ist gerade beschäftigt. Schließe andere Phase-Tabs und versuche es erneut.",
+    "title": {
+      "save": "Deck konnte nicht gespeichert werden",
+      "clone": "Deck konnte nicht geklont werden",
+      "import": "Deck konnte nicht importiert werden",
+      "delete": "Deck konnte nicht gelöscht werden",
+      "organize": "Deck-Organisation konnte nicht aktualisiert werden",
+      "updateFeeds": "Deck-Feeds konnten nicht aktualisiert werden",
+      "restore": "Sicherung konnte nicht wiederhergestellt werden",
+      "applyCloud": "Cloud-Decks konnten nicht übernommen werden",
+      "autosaveDraft": "Draft-Deck konnte nicht automatisch gespeichert werden"
+    }
+  },
+  "savedDeckLibraryStorageFailure": {
+    "description": "Phase konnte nicht auf den Browser-Speicher zugreifen. Versuche es gleich noch einmal."
+  },
+  "savedDeckChanged": {
+    "description": "Dieses Deck hat sich geändert, bevor deine Aktion ausgeführt wurde, daher wurde nichts geändert. Prüfe das Deck und versuche es erneut."
   }
 }

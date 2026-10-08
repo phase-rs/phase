@@ -1,6 +1,4 @@
-use crate::types::ability::{
-    CardPlayMode, Duration, Effect, ResolvedAbility, TargetFilter, TargetRef,
-};
+use crate::types::ability::{CardPlayMode, Effect, ResolvedAbility, TargetFilter, TargetRef};
 use crate::types::game_state::{DelayedTrigger, GameState};
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::Phase;
@@ -20,15 +18,22 @@ use crate::types::player::PlayerId;
 /// Action: push a `DelayedTrigger` keyed on
 /// `AtNextPhaseForPlayer { Phase::Upkeep, controller }` whose body is an
 /// optional `Effect::CastFromZone` that targets the exiled card itself
-/// (`TargetRef::Object(exiled_id)`), uses `without_paying_mana_cost: true`,
-/// and carries `Duration::UntilEndOfTurn` so the granted recast permission
-/// is pruned at end of turn if the controller declines or fails to cast
-/// (CR 514.2 + CR 611.2a).
+/// (`TargetRef::Object(exiled_id)`) and casts it without paying its mana
+/// cost AS the trigger resolves (`CastFromZoneDriver::DuringResolution`,
+/// CR 608.2g) — the same shape as Suspend's last-counter cast
+/// (CR 702.62a). Accept puts the spell on the stack immediately (with the
+/// CR 608.2g timing bypass, so rebounding sorceries are castable at
+/// upkeep); decline leaves the card in exile with no lingering permission.
 ///
 /// Returns `true` so the caller can override the spell's post-resolution
 /// destination from graveyard to exile (CR 608.2n displaced by the Rebound
 /// reminder text). Never fails — gating is performed by the caller.
-pub fn arm_rebound(state: &mut GameState, exiled_id: ObjectId, controller: PlayerId) -> bool {
+pub fn arm_rebound(
+    state: &mut GameState,
+    exiled_id: ObjectId,
+    controller: PlayerId,
+    events: &mut Vec<crate::types::events::GameEvent>,
+) -> bool {
     // CR 702.88a: at the beginning of your next upkeep, you may cast this
     // card from exile without paying its mana cost.
     let mut inner = ResolvedAbility::new(
@@ -39,13 +44,18 @@ pub fn arm_rebound(state: &mut GameState, exiled_id: ObjectId, controller: Playe
             cast_transformed: false,
             alt_ability_cost: None,
             constraint: None,
-            // CR 514.2: the granted "cast from exile without paying" permission
-            // expires at end of turn if the controller declines or fails to
-            // cast, so a leftover Rebound permission cannot leak into a later
-            // turn.
-            duration: Some(Duration::UntilEndOfTurn),
-            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            // CR 608.2g: the recast offer names no duration, so the "you may
+            // cast this card from exile" instruction executes AS the trigger
+            // resolves — no lingering permission is ever granted (`duration:
+            // None`), and declining leaves the card in exile. Mirrors
+            // Suspend's last-counter cast (CR 702.62a, issue #1520); the
+            // lingering `UntilEndOfTurn` permission this carried before let
+            // the recast happen at any later priority window (issue #6461).
+            duration: None,
+            driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
             mana_spend_permission: None,
+            additional_cost: None,
+            cast_cost_modifier: None,
         },
         vec![TargetRef::Object(exiled_id)],
         exiled_id,
@@ -54,14 +64,18 @@ pub fn arm_rebound(state: &mut GameState, exiled_id: ObjectId, controller: Playe
     // CR 702.88a: "you may cast" is an optional effect.
     inner.optional = true;
 
-    state.delayed_triggers.push(DelayedTrigger {
+    let rebound_cast = DelayedTrigger {
         // CR 603.7b: fires once at the controller's next upkeep.
         condition: crate::types::ability::DelayedTriggerCondition::AtNextPhaseForPlayer {
             phase: Phase::Upkeep,
             player: controller,
             gate: crate::types::ability::TurnGate::None,
+            // Already-concrete `player` (constructed directly, never passed
+            // through the placeholder-resolving `resolve()` path), so
+            // `binding` is unread here; `Controller` is the accurate label.
+            binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
         },
-        ability: inner,
+        ability: Box::new(inner),
         // CR 603.7d: controller of the delayed trigger is the player who
         // controlled the resolving Rebound spell.
         controller,
@@ -71,7 +85,9 @@ pub fn arm_rebound(state: &mut GameState, exiled_id: ObjectId, controller: Playe
         source_id: exiled_id,
         // CR 603.7b: one-shot — removed after it fires.
         one_shot: true,
-    });
+        provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
+    };
+    crate::game::triggers::install_delayed_trigger(state, rebound_cast, events);
     true
 }
 
@@ -86,7 +102,8 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let exiled = ObjectId(100);
         let controller = PlayerId(0);
-        assert!(arm_rebound(&mut state, exiled, controller));
+        let mut events = Vec::new();
+        assert!(arm_rebound(&mut state, exiled, controller, &mut events));
         assert_eq!(state.delayed_triggers.len(), 1);
         let trig = &state.delayed_triggers[0];
         // CR 603.7b: keyed on the controller's next upkeep.
@@ -111,8 +128,19 @@ mod tests {
     #[test]
     fn two_rebound_arms_push_independent_triggers() {
         let mut state = GameState::new_two_player(42);
-        assert!(arm_rebound(&mut state, ObjectId(100), PlayerId(0)));
-        assert!(arm_rebound(&mut state, ObjectId(101), PlayerId(0)));
+        let mut events = Vec::new();
+        assert!(arm_rebound(
+            &mut state,
+            ObjectId(100),
+            PlayerId(0),
+            &mut events
+        ));
+        assert!(arm_rebound(
+            &mut state,
+            ObjectId(101),
+            PlayerId(0),
+            &mut events
+        ));
         // CR 603.7a: each resolution creates a separate delayed trigger.
         assert_eq!(state.delayed_triggers.len(), 2);
         assert_eq!(state.delayed_triggers[0].source_id, ObjectId(100));
@@ -120,41 +148,48 @@ mod tests {
     }
 
     #[test]
-    fn armed_cast_effect_carries_until_end_of_turn_duration() {
+    fn armed_cast_effect_casts_during_resolution_without_lingering_duration() {
         let mut state = GameState::new_two_player(42);
         let exiled = ObjectId(200);
         let controller = PlayerId(1);
-        arm_rebound(&mut state, exiled, controller);
+        let mut events = Vec::new();
+        arm_rebound(&mut state, exiled, controller, &mut events);
         let trig = &state.delayed_triggers[0];
-        // CR 514.2: the granted permission must carry UntilEndOfTurn so it
-        // is pruned at cleanup if the controller declines the optional cast.
+        // CR 702.88a + CR 608.2g: the offer names no duration, so the body
+        // casts as the trigger resolves (`DuringResolution`) with no
+        // lingering permission to expire (`duration: None`).
         match &trig.ability.effect {
             Effect::CastFromZone {
                 without_paying_mana_cost,
                 duration,
                 target,
+                driver,
                 ..
             } => {
                 assert!(*without_paying_mana_cost);
-                assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+                assert_eq!(*duration, None);
                 assert_eq!(*target, TargetFilter::SelfRef);
+                assert!(driver.is_during_resolution());
             }
             other => panic!("expected CastFromZone body, got {other:?}"),
         }
     }
 
-    // CR 702.88a propagation: the durational permission is plumbed through
-    // `cast_from_zone::resolve` so that the granted `ExileWithAltCost`
-    // permission inherits `duration: Some(UntilEndOfTurn)`. Exercise the
-    // plumbing here to lock the contract that armed triggers grant a
-    // pruneable permission rather than a standing one.
+    // CR 702.88a + CR 608.2g: resolving the armed trigger body casts the
+    // exiled card DURING resolution — the spell lands on the stack
+    // immediately and no lingering (cleanup-less) permission is granted.
+    // The body under test is built by the real `arm_rebound` producer, not
+    // a hand-duplicated effect, so this locks the producer→router contract.
     #[test]
-    fn cast_from_zone_propagates_rebound_duration_to_granted_permission() {
+    fn armed_body_resolves_to_during_resolution_cast_with_no_lingering_permission() {
         use crate::game::effects::cast_from_zone;
         use crate::game::zones::create_object;
+        use crate::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr};
+        use crate::types::card_type::CoreType;
         use crate::types::events::GameEvent;
         use crate::types::identifiers::CardId;
         use crate::types::zones::Zone;
+        use std::sync::Arc;
 
         let mut state = GameState::new_two_player(42);
         let owner = PlayerId(0);
@@ -165,42 +200,44 @@ mod tests {
             "Rebound Card".to_string(),
             Zone::Exile,
         );
-
-        // CR 702.88a: simulate the arming flow's body — the same effect that
-        // `arm_rebound` constructs and resolves via the delayed trigger.
-        let ability = ResolvedAbility::new(
-            Effect::CastFromZone {
-                target: TargetFilter::SelfRef,
-                without_paying_mana_cost: true,
-                mode: CardPlayMode::Cast,
-                cast_transformed: false,
-                alt_ability_cost: None,
-                constraint: None,
-                duration: Some(Duration::UntilEndOfTurn),
-                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
-                mana_spend_permission: None,
-            },
-            vec![TargetRef::Object(exiled)],
-            exiled,
-            owner,
-        );
+        // A real targetless sorcery spell ability so the during-resolution
+        // cast has a face to put on the stack.
+        {
+            let obj = state.objects.get_mut(&exiled).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.base_card_types = obj.card_types.clone();
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        }
 
         let mut events: Vec<GameEvent> = Vec::new();
-        cast_from_zone::resolve(&mut state, &ability, &mut events).unwrap();
+        arm_rebound(&mut state, exiled, owner, &mut events);
+        let body = state.delayed_triggers[0].ability.clone();
+        cast_from_zone::resolve(&mut state, &body, &mut events)
+            .expect("armed Rebound body must resolve");
 
-        let obj = state.objects.get(&exiled).unwrap();
-        let armed_perm = obj
-            .casting_permissions
-            .iter()
-            .find_map(|p| match p {
-                CastingPermission::ExileWithAltCost {
-                    duration: Some(d), ..
-                } => Some(d.clone()),
-                _ => None,
-            })
-            .expect("CastFromZone must propagate duration onto the granted permission");
-        // CR 514.2: the permission inherits the Rebound recast's UntilEndOfTurn
-        // so the layer prune helpers expire it at the same turn's cleanup.
-        assert_eq!(armed_perm, Duration::UntilEndOfTurn);
+        assert_eq!(
+            state.objects[&exiled].zone,
+            Zone::Stack,
+            "CR 608.2g: the recast happens as the trigger resolves"
+        );
+        assert_eq!(state.stack.len(), 1);
+        assert!(
+            !state.objects[&exiled].casting_permissions.iter().any(|p| {
+                matches!(
+                    p,
+                    CastingPermission::ExileWithAltCost {
+                        resolution_cleanup: None,
+                        ..
+                    }
+                )
+            }),
+            "no lingering exile-cast permission may be granted"
+        );
     }
 }

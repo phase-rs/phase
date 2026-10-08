@@ -1,0 +1,34 @@
+# Schema-adequacy artifact: the archived P8 pad probe — an ORDINARY probe again, because
+# probe-pin generates no pad runs (the line-number invariant is a validation-time lint).
+version = 1
+
+[target]
+mode         = "runtime-read"
+package      = "phase-engine"
+test         = "integration"
+filter       = "loop_shortcut_seat_pin_census"
+filter_match = "substring"
+
+[output]
+file   = "crates/engine/tests/integration/loop_shortcut_seat_pin_census.rs"
+marker = "PROBE-PIN"
+
+[[probe]]
+id = "P0_control"
+  [probe.expect]
+  outcome = "pass"
+
+[[probe]]
+id = "P8_line_offset_control"
+claim = "every pinned assertion survives a 200-line offset in all five scanned files"
+  [[probe.mutation]]
+  kind   = "prepend"
+  files  = ["crates/engine/src/game/engine.rs",
+            "crates/engine/src/game/interaction.rs",
+            "crates/engine/src/game/visibility.rs",
+            "crates/engine/src/analysis/decision_template.rs",
+            "crates/server-core/src/game_action_payload_guard.rs"]
+  text   = "// pad\n"
+  repeat = 200
+  [probe.expect]
+  outcome = "pass"

@@ -14,6 +14,69 @@ pub struct GameLogEntry {
     pub phase: Phase,
     pub category: LogCategory,
     pub segments: Vec<LogSegment>,
+    #[serde(default)]
+    pub presentation: LogPresentation,
+}
+
+/// Engine-authored display metadata for a log entry. Consumers may choose a
+/// denser presentation, but must not infer importance or tone from text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogPresentation {
+    #[serde(default)]
+    pub importance: LogImportance,
+    #[serde(default)]
+    pub tone: LogTone,
+    #[serde(default)]
+    pub boundary: LogBoundary,
+    #[serde(default)]
+    pub visibility: LogVisibility,
+}
+
+impl Default for LogPresentation {
+    fn default() -> Self {
+        Self {
+            importance: LogImportance::Detail,
+            tone: LogTone::Neutral,
+            boundary: LogBoundary::None,
+            visibility: LogVisibility::Public,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum LogImportance {
+    Essential,
+    Context,
+    #[default]
+    Detail,
+    Diagnostic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum LogTone {
+    #[default]
+    Neutral,
+    Positive,
+    Negative,
+    Informational,
+    Diagnostic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum LogBoundary {
+    #[default]
+    None,
+    Turn,
+    Phase,
+}
+
+/// Whether an entry is safe in the normal game log. The client must require an
+/// explicit diagnostic opt-in before showing hidden information.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum LogVisibility {
+    #[default]
+    Public,
+    HiddenInformation,
 }
 
 /// A typed segment of a log entry, enabling rich UI rendering.

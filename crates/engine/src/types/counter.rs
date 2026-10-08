@@ -6,7 +6,7 @@ use std::collections::HashMap;
 /// Counter types serialize as flat strings so they can be used as JSON map keys
 /// in `HashMap<CounterType, u32>`. Without this, `Generic("quest")` would serialize
 /// as `{"Generic":"quest"}` which serde_json rejects as a map key.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CounterType {
     Plus1Plus1,
     Minus1Minus1,
@@ -212,22 +212,21 @@ impl<'de> serde::Deserialize<'de> for CounterType {
 pub(crate) mod counter_map_serde {
     use super::*;
     use serde::de::{self, MapAccess, Visitor};
-    use serde::ser::SerializeMap;
     use serde::{Deserializer, Serializer};
     use std::fmt;
 
-    pub(crate) fn serialize<S>(
-        map: &HashMap<CounterType, u32>,
+    pub(crate) fn serialize<S, H>(
+        map: &HashMap<CounterType, u32, H>,
         serializer: S,
     ) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let mut ser_map = serializer.serialize_map(Some(map.len()))?;
-        for (counter_type, count) in map {
-            ser_map.serialize_entry(counter_type.as_str().as_ref(), count)?;
-        }
-        ser_map.end()
+        crate::types::deterministic_serde::serialize_sorted_map_entries(
+            map.iter(),
+            std::convert::identity,
+            serializer,
+        )
     }
 
     pub(crate) fn deserialize<'de, D>(
@@ -296,6 +295,19 @@ impl CounterMatch {
         match self {
             CounterMatch::Any => true,
             CounterMatch::OfType(expected) => expected == counter_type,
+        }
+    }
+
+    /// CR 122.1: The exact number of markers this matcher counts on an object
+    /// or LKI snapshot. `Any` totals every kind through [`counter_total`], so an
+    /// upper-bound comparison ("N or fewer counters") is answered against the
+    /// real total rather than a wrapped or capped one.
+    pub fn count_in(&self, counters: &HashMap<CounterType, u32>) -> u64 {
+        match self {
+            CounterMatch::Any => counter_total(counters),
+            CounterMatch::OfType(counter_type) => {
+                u64::from(counters.get(counter_type).copied().unwrap_or(0))
+            }
         }
     }
 }
@@ -409,6 +421,14 @@ pub fn has_positive_counters(counters: &HashMap<CounterType, u32>) -> bool {
     counters.values().any(|&count| count > 0)
 }
 
+/// CR 122.1: The exact number of markers of every kind on an object or LKI
+/// snapshot. Each kind holds at most `u32::MAX`, so the sum over the kinds on
+/// one object cannot overflow a `u64`; callers that need a narrower count
+/// clamp at their own boundary.
+pub fn counter_total(counters: &HashMap<CounterType, u32>) -> u64 {
+    counters.values().map(|&count| u64::from(count)).sum()
+}
+
 /// Counter entries currently present on an object or LKI snapshot (count > 0 only).
 pub fn positive_counter_entries(
     counters: &HashMap<CounterType, u32>,
@@ -434,10 +454,59 @@ pub fn prune_zero_counters(counters: &mut HashMap<CounterType, u32>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        has_positive_counters, parse_counter_type, positive_counter_entries,
-        positive_counter_types, prune_zero_counters, try_parse_counter_type, CounterType,
+        counter_map_serde, counter_total, has_positive_counters, parse_counter_type,
+        positive_counter_entries, positive_counter_types, prune_zero_counters,
+        try_parse_counter_type, CounterMatch, CounterType,
     };
+    use crate::types::deterministic_serde::test_support::ReverseBuildHasher;
+    use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
+
+    #[derive(Serialize)]
+    struct AdversarialCounterMapFixture<'a> {
+        #[serde(serialize_with = "counter_map_serde::serialize")]
+        counters: &'a HashMap<CounterType, u32, ReverseBuildHasher>,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    struct CounterMapFixture {
+        #[serde(with = "counter_map_serde")]
+        counters: HashMap<CounterType, u32>,
+    }
+
+    #[test]
+    fn counter_map_serializer_sorts_typed_keys_without_changing_its_object_shape() {
+        let counters = HashMap::with_hasher(ReverseBuildHasher);
+        let mut counters = counters;
+        counters.insert(CounterType::Loyalty, 3);
+        counters.insert(CounterType::Minus1Minus1, 2);
+        counters.insert(CounterType::Plus1Plus1, 1);
+
+        assert_eq!(
+            counters.keys().cloned().collect::<Vec<_>>(),
+            vec![
+                CounterType::Loyalty,
+                CounterType::Minus1Minus1,
+                CounterType::Plus1Plus1,
+            ],
+            "hostile hasher must expose descending native iteration"
+        );
+        assert_eq!(
+            serde_json::to_string(&AdversarialCounterMapFixture {
+                counters: &counters
+            })
+            .expect("counter fixture should serialize"),
+            r#"{"counters":{"P1P1":1,"M1M1":2,"loyalty":3}}"#
+        );
+
+        let restored: CounterMapFixture =
+            serde_json::from_str(r#"{"counters":{"loyalty":3,"M1M1":2,"P1P1":1}}"#)
+                .expect("current counter object shape should deserialize");
+        assert_eq!(
+            serde_json::to_string(&restored).expect("restored counter map should serialize"),
+            r#"{"counters":{"P1P1":1,"M1M1":2,"loyalty":3}}"#
+        );
+    }
 
     #[test]
     fn parses_legacy_power_toughness_counter_deltas() {
@@ -480,12 +549,6 @@ mod tests {
 
     #[test]
     fn sums_legacy_duplicate_counter_keys_on_deserialize() {
-        #[derive(serde::Deserialize)]
-        struct CounterMapFixture {
-            #[serde(with = "super::counter_map_serde")]
-            counters: HashMap<CounterType, u32>,
-        }
-
         let fixture: CounterMapFixture =
             serde_json::from_str(r#"{"counters":{"P1P1":2,"p1p1":3,"M1M1":1,"m1m1":4}}"#).unwrap();
 
@@ -634,5 +697,21 @@ mod tests {
         prune_zero_counters(&mut counters);
         assert!(!counters.contains_key(&CounterType::Plus1Plus1));
         assert_eq!(counters.get(&CounterType::Stun), Some(&1));
+    }
+
+    #[test]
+    fn counter_total_is_exact_past_u32_max() {
+        let mut counters = HashMap::new();
+        counters.insert(CounterType::Generic("charge".to_string()), u32::MAX);
+        counters.insert(CounterType::Generic("oil".to_string()), 1);
+        assert_eq!(counter_total(&counters), u64::from(u32::MAX) + 1);
+        assert_eq!(
+            CounterMatch::Any.count_in(&counters),
+            u64::from(u32::MAX) + 1
+        );
+        assert_eq!(
+            CounterMatch::OfType(CounterType::Generic("oil".to_string())).count_in(&counters),
+            1
+        );
     }
 }

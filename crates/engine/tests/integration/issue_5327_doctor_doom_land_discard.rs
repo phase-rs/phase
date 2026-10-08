@@ -18,11 +18,11 @@ use engine::types::triggers::TriggerMode;
 const DOCTOR_DOOM_ORACLE: &str = "Whenever you discard one or more land cards, each opponent loses 2 life.\n\
 At the beginning of combat on your turn, target Villain you control gains menace until end of turn. It connives.";
 
-fn doctor_doom_discard_trigger(
-    triggers: &[engine::types::ability::TriggerDefinition],
-) -> &engine::types::ability::TriggerDefinition {
+fn doctor_doom_discard_trigger<'a>(
+    triggers: impl IntoIterator<Item = &'a engine::types::ability::TriggerDefinition>,
+) -> &'a engine::types::ability::TriggerDefinition {
     triggers
-        .iter()
+        .into_iter()
         .find(|t| t.mode == TriggerMode::DiscardedAll)
         .expect("Doctor Doom land-discard trigger")
 }
@@ -84,7 +84,8 @@ fn opponent_life_delta_after_discard(discard_land: bool) -> i32 {
             .find(|o| o.name.contains("Doctor Doom"))
             .expect("doom")
             .trigger_definitions
-            .as_slice(),
+            .iter_unchecked()
+            .map(engine::types::ability::TriggerEntry::definition),
     );
     assert!(
         trigger.valid_card.is_some(),
@@ -137,7 +138,7 @@ fn doctor_doom_discard_trigger_parses_land_card_filter() {
             "Villain".to_string(),
         ],
     );
-    let trigger = doctor_doom_discard_trigger(&parsed.triggers);
+    let trigger = doctor_doom_discard_trigger(parsed.triggers.iter());
     assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
     assert!(trigger.batched);
     let engine::types::ability::TargetFilter::Typed(tf) =

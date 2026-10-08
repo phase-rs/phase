@@ -66,10 +66,19 @@
     "discard": "Odrzuć",
     "saveAndContinue": "Zapisz i kontynuuj"
   },
+  "saveConflict": {
+    "title": "Talia zmieniona w innym miejscu",
+    "bodyChanged": "Talia „{{name}}” została zmieniona w innym miejscu od czasu, gdy ten edytor ją otworzył lub ostatnio zapisał, więc nic nie zostało zapisane. Wczytaj zapisaną wersję, aby ją zobaczyć (niezapisane zmiany zostaną odrzucone), albo zapisz swoją wersję mimo to.",
+    "bodyDeleted": "Talia „{{name}}” została usunięta w innym miejscu od czasu, gdy ten edytor ją otworzył lub ostatnio zapisał, więc nic nie zostało zapisane. Zapisz swoją wersję mimo to.",
+    "loadSaved": "Wczytaj zapisaną wersję",
+    "saveMine": "Zapisz moją wersję"
+  },
   "card": {
     "moveToSideboard": "Przenieś jedną kartę {{name}} do zaplecza",
     "moveToMain": "Przenieś jedną kartę {{name}} do talii głównej",
     "removeOne": "Usuń jedną kartę {{name}}",
+    "addOne": "Dodaj jedną kartę {{name}}",
+    "copyLimit": "{{name}} osiągnęła limit kopii",
     "makeCommander": "Ustaw {{name}} jako dowódcę",
     "makeCommanderTitle": "Ustaw jako mojego dowódcę",
     "chooseArtFor": "Wybierz grafikę dla {{name}}",
@@ -220,6 +229,10 @@
     "identity": "Tożsamość:",
     "setAsCommander": "Ustaw jako dowódcę:",
     "cardCount": "{{count}}/{{expected}} kart",
+    "cardCountNoMinimum_one": "{{count}} karta",
+    "cardCountNoMinimum_few": "{{count}} karty",
+    "cardCountNoMinimum_many": "{{count}} kart",
+    "cardCountNoMinimum_other": "{{count}} karty",
     "singletonViolations": "Naruszenia zasady singletona: {{cards}}",
     "colorViolations": "Naruszenia tożsamości kolorów: {{cards}}",
     "signatureSpell": {
@@ -229,6 +242,11 @@
       "remove": "Usuń czar sygnaturowy",
       "mustBeInstantOrSorcery": "Czar sygnaturowy musi być błyskawicznym lub czarem",
       "outsideColorIdentity": "{{name}}: poza tożsamością kolorów Przysięgołamacza"
+    },
+    "companion": {
+      "heading": "Towarzysz",
+      "noCompanion": "Nie wybrano towarzysza",
+      "remove": "Usuń towarzysza"
     }
   },
   "manaCurve": {
@@ -260,7 +278,9 @@
     "dataVersion": "Dane: {{version}}",
     "aboutBrackets": "O poziomach ↗",
     "estimatedChip": "Szacowany: B{{tier}}",
-    "estimatedChipFull": "Szacowany poziom: B{{tier}} {{label}}"
+    "estimatedChipFull": "Szacowany poziom: B{{tier}} {{label}}",
+    "manualChip": "B{{tier}}",
+    "manualChipFull": "Zadeklarowany poziom: B{{tier}} {{label}}"
   },
   "bracketPicker": {
     "ariaLabel": "Poziom talii",

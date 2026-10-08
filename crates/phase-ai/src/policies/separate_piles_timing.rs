@@ -216,10 +216,7 @@ mod tests {
                 targets: Vec::new(),
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Spell),
         }
     }
 

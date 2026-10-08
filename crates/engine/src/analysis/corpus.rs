@@ -1300,6 +1300,19 @@ pub(crate) fn resolve_to_priority(probe: &mut LoopProbe, prefer_target: Option<T
                     break;
                 }
             }
+            WaitingFor::ResolutionOptionalPaymentChoice { costs, .. } => {
+                let Some(option) = costs.first() else { break };
+                if probe
+                    .act(GameAction::ChooseResolutionOptionalPaymentBranch {
+                        choice: crate::types::ResolutionOptionalPaymentChoice::Pay {
+                            index: option.index,
+                        },
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
             // CR 608.2d: a resolution-time "choose one of A or B" (e.g. a "tap or
             // untap" ability, parsed to `Effect::ChooseOneOf`). Pick the branch
             // whose effect is `SetTapState { Untap }`; fall back to the last branch
@@ -1805,7 +1818,7 @@ pub(crate) fn drive_offline_pentad_prism_seeded(
 /// opponent (CR 120.3a). Proliferate runs BEFORE the ping so the count is ≥ seed at
 /// every intra-cycle frame (seed 1 → 2 → 1), keeping Ballista a live ≥1/1 (never a
 /// 0/0 that would die to CR 704.5f). Board identical modulo the monotone +1/+1
-/// (projected out, resource.rs:2481), +1 damage/cycle ⇒ `detect_loop` certifies
+/// (projected out by `resource::project_object_for_loop`), +1 damage/cycle ⇒ `detect_loop` certifies
 /// `WinKind::LethalDamage`, naming `DamageDealt(P1)`.
 ///
 /// `seed_counters == 0` is the X=0 dead-loop CONTROL: Ballista enters a 0/0 with no

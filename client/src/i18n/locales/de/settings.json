@@ -5,11 +5,19 @@
   },
   "tabs": {
     "gameplay": "Spielablauf",
+    "ai": "KI-Gegner",
+    "experimental": "Experimentell",
     "visual": "Grafik",
     "combat": "Tempo",
     "audio": "Audio",
     "multiplayer": "Mehrspieler",
     "data": "Daten"
+  },
+  "experimental": {
+    "title": "Experimentell",
+    "tournaments": "Turniere",
+    "showTournaments": "Turniere in der Navigation anzeigen",
+    "showTournamentsDescription": "Turniere befinden sich noch in Entwicklung und können sich ohne Ankündigung ändern."
   },
   "gameplay": {
     "collapseLands": "Lands einklappen",
@@ -22,9 +30,20 @@
     "title": "Spielablauf",
     "language": "Sprache",
     "cardSize": "Kartengröße",
-    "logDefault": "Protokoll-Standard",
+    "commandZone": "Kommandozone",
+    "autoPass": "Auto-Pass",
+    "skipLowUsePriorityWindows": "Prioritätsfenster mit geringer Nutzung überspringen (experimentell)",
+    "skipLowUsePriorityWindowsDescription": "Überspringe automatisch deine eigenen Prioritätsfenster bei leerem Stapel während des Versorgungssegments, Ziehsegments und Endsegments. Phasenstopps und Volle Kontrolle halten weiterhin an.",
+    "logDockSide": "Position des Spielprotokolls",
     "spellPayment": "Zauberspruch-Bezahlung",
     "manualManaPayment": "Manuelle Manabezahlung für Zaubersprüche",
+    "spellPaymentOptions": {
+      "auto": "Automatisch",
+      "autoExceptSacrificialMana": "Vor dem Opfern fragen",
+      "manual": "Manuell"
+    },
+    "nativeEngine": "Native Engine für lokale Spiele und gehostete Mehrspielerpartien verwenden",
+    "nativeEngineDescription": "Verwende die heruntergeladene Engine für lokale KI-Spiele und Spiele, die du über eine Lobby hostest. Gäste verbinden sich weiterhin über die Peer-to-Peer-Verbindung der Lobby. Fällt auf die integrierte Engine zurück, wenn sie nicht verfügbar ist.",
     "boardBackground": "Spielfeldhintergrund",
     "boardBackgroundGroups": {
       "automatic": "Automatisch",
@@ -49,20 +68,22 @@
       "medium": "Mittel",
       "large": "Groß"
     },
-    "logDefaultOptions": {
-      "open": "Offen",
-      "closed": "Geschlossen"
+    "logDockSideOptions": {
+      "left": "Links",
+      "right": "Rechts"
     }
   },
   "visual": {
     "title": "Grafik",
     "vfxQuality": "VFX-Qualität",
+    "cardAnimationStyle": "Kartenanimationen",
     "keywordStrip": "Schlüsselwortleiste",
     "showKeywords": "Schlüsselwörter auf Schlachtfeldkarten anzeigen",
     "opponentHoverPreview": "Gegner-Hover-Vorschau",
     "showOpponentBoard": "Spielfeld des Gegners beim Hovern über das HUD anzeigen",
     "multiplayerBoardLayout": "Mehrspieler-Boardlayout",
     "multiplayerBoardLayoutOptions": {
+      "auto": "Automatisch",
       "focused": "Fokussierter Gegner",
       "split": "Geteilter Tisch"
     },
@@ -81,6 +102,17 @@
       "side": "Die Vorschau dockt am Bildschirmrand an, sodass sie das Spielfeld nie verdeckt.",
       "shift": "Die Vorschau erscheint nur, solange du die Umschalttaste gedrückt hältst, wie bei Tabletop Simulator."
     },
+    "draftCardPreview": "Karten-Hover-Vorschau beim Draft",
+    "draftCardPreviewOff": "Aus",
+    "draftCardPreviewHint": "Gilt nur beim Draften und beim Erstellen deines Draftdecks.",
+    "draftDoubleClickConfirmPick": "Draft-Auswahl per Doppelklick bestätigen",
+    "draftDoubleClickConfirmPickOptions": {
+      "disabled": "Deaktiviert",
+      "enabled": "Aktiviert"
+    },
+    "cardPreviewFooter": "Vorschauinformationen",
+    "showCardPreviewFooter": "Informationen unter Kartenvorschauen anzeigen",
+    "cardPreviewFooterHint": "Enthält Kartenname, verfügbare aktivierte Fähigkeiten und Tastaturhinweise. Alt öffnet weiterhin die Parsedetails, wenn dies ausgeblendet ist.",
     "cardArtPreferences": "Karten-Artwork-Einstellungen",
     "clearArtOverrides_one": "Alle Artwork-Überschreibungen aufheben ({{count}})",
     "clearArtOverrides_other": "Alle Artwork-Überschreibungen aufheben ({{count}})",
@@ -91,7 +123,13 @@
       "full": "Voll",
       "reduced": "Reduziert",
       "minimal": "Minimal"
-    }
+    },
+    "cardAnimationStyleOptions": {
+      "webgl": "Neu",
+      "classic": "Klassisch"
+    },
+    "cardAnimationPreviewHintHover": "Zum Ansehen darüberfahren",
+    "cardAnimationPreviewHintTap": "Zum Ansehen tippen"
   },
   "flexLayout": {
     "title": "Flexibles Layout",
@@ -107,9 +145,18 @@
       "right": "Rechtsbündig"
     },
     "presets": {
-      "default": { "label": "Layout 1", "description": "Das ausgewogene Standardlayout." },
-      "layout2": { "label": "Layout 2", "description": "Ein größeres Spielfeld mit eingeklappten Händen." },
-      "layout3": { "label": "Layout 3", "description": "Ein höheres unteres Drittel." }
+      "default": {
+        "label": "Layout 1",
+        "description": "Das ausgewogene Standardlayout."
+      },
+      "layout2": {
+        "label": "Layout 2",
+        "description": "Ein größeres Spielfeld mit eingeklappten Händen."
+      },
+      "layout3": {
+        "label": "Layout 3",
+        "description": "Ein höheres unteres Drittel."
+      }
     },
     "zones": {
       "playerHud": "Dein HUD",
@@ -153,13 +200,15 @@
     "signedInAs": "Angemeldet als {{name}}",
     "syncNow": "Jetzt synchronisieren",
     "statusSyncing": "Wird synchronisiert…",
+    "statusPaused": "Die Cloud-Synchronisierung ist pausiert, während du offline bist.",
     "statusError": "Synchronisierung fehlgeschlagen",
     "lastSynced": "Zuletzt synchronisiert {{time}}",
     "never": "nie",
     "conflictTitle": "Beide Versionen haben Änderungen",
-    "conflictBody": "Dieses Gerät und dein Cloud-Konto enthalten beide Daten, und wir können nicht feststellen, welche aktuell sind. Wähle, welche Kopie behalten werden soll – die andere wird ersetzt.",
+    "conflictBody": "Dieses Gerät und dein Cloud-Konto enthalten beide Daten, und wir können nicht feststellen, welche aktuell sind. Wähle eine Kopie oder behalte beide Decksammlungen.",
     "keepCloud": "Cloud verwenden",
     "keepLocal": "Dieses Gerät behalten",
+    "keepBothDecks": "Beide Decksammlungen behalten",
     "savesNote": "Spielstände und Caches bleiben auf diesem Gerät.",
     "diffDecks": "Decks: {{added}} hinzugefügt, {{modified}} geändert, {{removed}} entfernt",
     "diffPrefs": "Einstellungen unterscheiden sich",
@@ -188,6 +237,172 @@
     "telemetry": "Anonyme Absturz- und Nutzungsberichte senden",
     "telemetryDescription": "Hilft, Abstürze zu beheben und die Kartenunterstützung zu priorisieren. Kein Konto, keine persönlichen Daten – nur Fehler- und Spielzusammenfassungszählungen."
   },
+  "visualPacks": {
+    "title": "Offline-visueller Katalog",
+    "description": "Wählen Sie aus, welche vertrauenswürdigen Kartenbilder auf diesem Gerät gespeichert werden sollen, oder installieren Sie den vollständigen aktuellen Katalog.",
+    "offlineUnavailable": "Netzwerkdownloads sind offline nicht verfügbar. Stellen Sie die Verbindung wieder her, um den Katalog zu aktualisieren oder Bilder zu installieren, zu synchronisieren, zu reparieren oder fortzusetzen.",
+    "availability": {
+      "loading": "Unterstützung für visuelle Offline-Kataloge wird geprüft …",
+      "browser": "Offline-Bilddownloads sind in diesem Build nicht konfiguriert.",
+      "browserFuture": "Dieser Build enthält nicht die vertrauenswürdige Katalogsignaturrichtlinie, die zum Überprüfen von Bilddownloads erforderlich ist.",
+      "unsupported": "Diese Desktop-App ist zu alt, um visuelle Offline-Kataloge zu verwalten. Aktualisieren Sie die App, um fortzufahren.",
+      "empty": "Es wurde noch kein vertrauenswürdiger visueller Katalog heruntergeladen.",
+      "invalid": "Dem lokalen visuellen Katalog konnte nicht vertraut werden. Aktualisieren Sie ihn, bevor Sie fortfahren."
+    },
+    "selector": {
+      "title": "Katalogauswahl",
+      "core": "Kernvisualisierungen",
+      "printing": "Set-Drucke",
+      "complete": "Kompletter aktueller Katalog",
+      "curated": "Ein Bild pro Karte",
+      "deck_library": "Deckbibliothek",
+      "curatedNote": "Ein Bild pro Karte, ausgewählt durch Ihre Karten-Artwork-Einstellungen im Reiter „Grafik“. Ändern Sie sie dort, folgt diese Auswahl.",
+      "curatedDefaultNote": "Ein Bild pro Karte. Sie haben keine Artwork-Regeln festgelegt, daher wird das Standardbild jeder Karte geladen — fügen Sie unter „Karten-Artwork-Einstellungen“ im Reiter „Grafik“ Regeln hinzu, um andere Drucke zu wählen.",
+      "deckLibraryNote": "Ein Bild pro Karte, die in der gemeinsamen Deckbibliothek verwendet wird, einschließlich KI-Commander-Decks. Die Auswahl folgt den Karten-Artwork-Einstellungen. Nach der Installation lädt die App im laufenden Betrieb Ergänzungen und entfernt nicht mehr benötigte Bilder; das Entfernen dieses Pakets beendet diese Synchronisierung.",
+      "driftNone": "Ihre installierten Bilder entsprechen bereits diesen Einstellungen.",
+      "driftSummary": "Ihre installierten Bilder sind veraltet: {{add}} hinzuzufügen, {{remove}} zu entfernen, {{refresh}} zu erneuern.",
+      "setCode": "Code festlegen",
+      "setPlaceholder": "z. B. fin",
+      "language": "Bildsprache",
+      "currentRoot": "Aktueller Katalogstamm: {{root}}",
+      "invalidSet": "Geben Sie einen gültigen Code mit drei bis sechs Zeichen ein."
+    },
+    "actions": {
+      "estimate": "Geschätzter Download",
+      "estimating": "Scryfall-Katalog wird durchsucht…",
+      "estimateCurated": "Größe neu berechnen",
+      "estimatingCurated": "Größe wird ermittelt…",
+      "install": "Auswahl installieren",
+      "sync": "Bilder synchronisieren",
+      "cancel": "Vorgang abbrechen",
+      "resume": "Betrieb wieder aufnehmen",
+      "retry": "Versuchen Sie es erneut",
+      "refresh": "Scryfall-Katalog prüfen",
+      "refreshing": "Scryfall-Katalog wird geprüft…",
+      "verifyMetadata": "Metadaten überprüfen",
+      "verifyFull": "Überprüfen Sie alle Dateien",
+      "repair": "Auswahl reparieren",
+      "removeSelected": "Ausgewählte entfernen",
+      "removeComplete": "Kompletten Katalog entfernen",
+      "removeAll": "Entfernen Sie alle Offline-Visuals"
+    },
+    "estimate": {
+      "title": "Scryfall-Snapshot-Analyse",
+      "progressTitle": "Fortschritt des Katalog-Scans",
+      "curatedTitle": "Geschätzter Download",
+      "headroomWarning": "Das ist größer als der freie Speicher, den dieser Browser meldet. Sie können trotzdem installieren — geht der Platz aus, lässt sich der Download fortsetzen und behält alles bereits Gespeicherte.",
+      "evictionWarning": "Dieser Browser hat keinen dauerhaften Speicher gewährt und kann diese Bilder löschen, wenn der Gerätespeicher knapp wird.",
+      "progress": "{{downloaded}} MB von {{total}} MB gelesen · {{records}} Karten durchsucht · {{images}} Bilder gefunden"
+    },
+    "metrics": {
+      "assetRecords": "Bilddatensätze",
+      "estimatedImageBytes": "Geschätzte Downloadgröße",
+      "availableBytes": "Verfügbarer freier Speicher",
+      "uniqueObjects": "Herunterzuladende Bilder",
+      "logicalImageBytes": "Logische Bildbytes",
+      "uniqueImageBytes": "Eindeutige Bildbytes",
+      "shardCount": "Scherben",
+      "shardBytes": "Shard-Bytes"
+    },
+    "operation": {
+      "title": "Aktueller Betrieb",
+      "states": {
+        "downloading": "Herunterladen",
+        "cancel_requested": "Stornierung beantragt",
+        "finalizing": "Finalisierung",
+        "failed": "Fehlgeschlagen – bereit zur Fortsetzung",
+        "terminated": "Gestoppt – dieser Vorgang kann nicht fortgesetzt werden",
+        "completed": "Abgeschlossen",
+        "cancelled": "Abgesagt"
+      },
+      "id": "Betrieb",
+      "root": "Katalogstamm",
+      "packs": "Pakete: {{current}} von {{total}}",
+      "objects": "Bilder: {{current}} von {{total}}",
+      "objectsUnknown": "Heruntergeladene Bilder: {{current}}",
+      "scanNote": "Die Gesamtzahl wächst beim Durchsuchen des Scryfall-Snapshots. Bereits geladene Bilder bleiben lokal und werden beim Fortsetzen übersprungen.",
+      "estimateNote": "Die Gesamtzahl stand beim Start dieses Downloads fest. Bereits geladene Bilder bleiben lokal und werden beim Fortsetzen übersprungen.",
+      "finalizing": "Die Installation des Katalogs wird abgeschlossen"
+    },
+    "status": {
+      "title": "Status des installierten Katalogs",
+      "root": "Katalogstamm",
+      "epoch": "Epoche",
+      "revision": "Installierte Revision",
+      "selectorCount": "Selektoren",
+      "shardCount": "Scherben",
+      "installed": "Installierte Pakete",
+      "noneInstalled": "Es sind keine visuellen Pakete installiert.",
+      "upgradeAvailable": "Upgrade verfügbar",
+      "receiptRoot": "Installiert aus Snapshot: {{root}}",
+      "membershipDigest": "Zusammenstellungs-Fingerabdruck: {{digest}}",
+      "storageUsage": "Von dieser Website belegter Speicher",
+      "persistence": "Schutz vor Löschung",
+      "persistenceState": {
+        "persisted": "Gewährt – dieser Browser behält diese Bilder",
+        "best_effort": "Nicht gewährt – dieser Browser kann diese Bilder löschen, wenn der Speicher knapp wird",
+        "unsupported": "Dieser Browser macht dazu keine Angabe"
+      }
+    },
+    "verification": {
+      "revision": "Verifizierte installierte Revision {{revision}}.",
+      "healthy": "Es wurden keine Verifizierungsprobleme gefunden.",
+      "issues": {
+        "missing_root_witness": "Fehlender Katalog-Root-Zeuge",
+        "invalid_root_witness": "Ungültiger Katalog-Root-Zeuge",
+        "receipt_metadata": "Die Empfangsmetadaten weichen vom vertrauenswürdigen Katalog ab",
+        "missing_shard": "Fehlender Katalog-Shard",
+        "invalid_shard": "Ungültiger Katalog-Shard",
+        "missing_object": "Fehlendes Bildobjekt",
+        "invalid_object_metadata": "Ungültige Bildobjekt-Metadaten",
+        "corrupt_object": "Beschädigtes Bildobjekt",
+        "dependency_drift": "Installierte Abhängigkeitsdatensätze unterscheiden sich vom vertrauenswürdigen Katalog",
+        "projection_drift": "Installierte Suchdatensätze weichen vom vertrauenswürdigen Katalog ab"
+      }
+    },
+    "removal": {
+      "committed": "Entfernung wurde bei Revision {{revision}} durchgeführt.",
+      "inProgress": "Offline-Visualisierungen werden entfernt…"
+    },
+    "cleanup": {
+      "malformed_entry": "Ein fehlerhafter Cache-Eintrag konnte nicht wiederhergestellt werden",
+      "unsafe_entry": "Ein unsicherer Cache-Eintrag blieb unberührt",
+      "remove_failed": "Eine Cache-Datei konnte nicht entfernt werden",
+      "catalog_state": "Der historische Katalogstatus konnte nicht wiederhergestellt werden"
+    },
+    "packs": {
+      "core": "Kernvisualisierungen",
+      "complete": "Kompletter aktueller Katalog",
+      "curated": "Ein Bild pro Karte",
+      "deckLibrary": "Deckbibliothek",
+      "printing": "{{set}}-Drucke",
+      "locale": "{{set}}-Drucke ({{language}})"
+    },
+    "errors": {
+      "unsupported_shell": "Diese App-Version unterstützt keine visuellen Offline-Kataloge.",
+      "unauthorized": "In diesem Fenster dürfen keine Offline-Visualkataloge verwaltet werden.",
+      "unavailable": "Die Offline-Verwaltung des visuellen Katalogs ist vorübergehend nicht verfügbar.",
+      "invalid_input": "Die angeforderte Katalogauswahl ist ungültig.",
+      "conflict": "Diese Auswahl ist veraltet: Der Katalog oder Ihre Artwork-Einstellungen haben sich seitdem geändert. Berechnen Sie sie erneut und versuchen Sie es noch einmal.",
+      "cancelled": "Der Vorgang wurde abgebrochen.",
+      "network": "Die Katalognetzwerkanforderung ist fehlgeschlagen.",
+      "storage": "Der Katalog konnte nicht in den Gerätespeicher geschrieben werden.",
+      "insufficient_storage": "Nicht genügend freier Speicherplatz: Dieser Download benötigt mindestens {{required}}, aber nur {{available}} sind frei.",
+      "trust": "Der Katalogantwort konnte nicht vertraut werden.",
+      "emit": "Die App konnte den Katalogfortschritt nicht melden.",
+      "internal": "Der Katalogvorgang konnte nicht abgeschlossen werden."
+    },
+    "confirm": {
+      "cascadeTitle": "Abhängige Pakete entfernen?",
+      "cascadeMessage": "Andere installierte Pakete hängen von {{selection}} ab. Die eingefrorene Auswahl und ihre abhängigen Elemente entfernen?",
+      "cascadeAction": "Abhängige Pakete entfernen",
+      "completeTitle": "Diesen kompletten Katalog entfernen?",
+      "completeMessage": "Jedes installierte Paket aus dem Katalogstamm {{selection}} entfernen?",
+      "allTitle": "Alle Offline-Visuals entfernen?",
+      "allMessage": "Alle installierten Visual Packs von diesem Gerät entfernen?",
+      "removeAction": "Entfernen"
+    }
+  },
   "resetAll": {
     "confirm": "Alle Einstellungen auf die Standardwerte zurücksetzen? Dies löscht jede Einstellung in diesem Dialog.",
     "button": "Alle Einstellungen zurücksetzen",
@@ -215,6 +430,45 @@
       "banners": "Anzeige des Banners zu Zugbeginn."
     }
   },
+  "offlinePreparation": {
+    "title": "Offline-Vorbereitung",
+    "description": "Bereite dieses Gerät auf lokales Offline-Spiel vor, bevor Offline arbeiten aktiviert wird.",
+    "prepare": "Für Offline vorbereiten",
+    "preparing": "Wird vorbereitet…",
+    "workOffline": "Offline arbeiten",
+    "checklistLabel": "Offline-Bereitschaftsliste",
+    "visualWarning": "Installierte Bildpakete benötigen Aufmerksamkeit. Öffne Bildpakete zur Reparatur; lokales Spiel bleibt verfügbar.",
+    "cardArtMissing": "Es sind keine Kartenbilder installiert. Karten werden offline ohne Artwork dargestellt – installiere unten unter Bildpakete ein Paket.",
+    "cardArtInstalled": "Zwischengespeicherte Kartenbilder: {{packs}}",
+    "incompleteTitle": "Offline-Vorbereitung ist unvollständig",
+    "incompleteMessage": "Fehlt: {{capabilities}}. Offline arbeiten trotzdem aktivieren?",
+    "confirmOffline": "Offline arbeiten aktivieren",
+    "states": {
+      "needs-preparation": "Bereite dieses Gerät vor dem Offline-Arbeiten vor.",
+      "preparing": "Lokale Spielfunktionen werden vorbereitet…",
+      "ready": "Dieses Gerät ist für lokales Offline-Spiel bereit.",
+      "failed": "Einige erforderliche Funktionen sind nicht bereit.",
+      "reconnect-required": "Stelle die Verbindung wieder her, bevor du Offline-Spiel vorbereitest.",
+      "reload-or-relaunch-required": "Lade die App neu oder starte den Desktop neu und bereite erneut vor."
+    },
+    "capabilities": {
+      "appShell": "App-Shell",
+      "browserEngine": "Browser-Engine und Kartendatenbank",
+      "scryfallSearch": "Kartensuchdaten",
+      "preconCatalog": "Vorgefertigte Decks",
+      "bundledAiCatalog": "KI-Deckkatalog",
+      "deckLibrary": "Installierte Deckbibliothek",
+      "coreVisuals": "Kartenrückseite und Manasymbole",
+      "nativeEngine": "Native Engine"
+    },
+    "capabilityStates": {
+      "ready": "Bereit",
+      "not-ready": "Nicht bereit",
+      "reload-required": "Neuladen erforderlich",
+      "not-applicable": "Nicht anwendbar",
+      "not-installed": "Nicht installiert"
+    }
+  },
   "artChain": {
     "emptyState": "Standard-Scryfall-Artwork wird verwendet. Füge unten Regeln hinzu, um anzupassen.",
     "moveUp": "Nach oben verschieben",
@@ -232,6 +486,60 @@
       "oldest": "Ältester Druck",
       "preferBorderless": "Randlos bevorzugen",
       "preferExtended": "Erweitertes Artwork bevorzugen"
+    }
+  },
+  "llm": {
+    "title": "LLM-Gegner",
+    "intro": "Optional. Wenn du Phase mit einem LLM-Anbieter verbindest, kann ein KI-Platz — oder die Bots eines Drafts — von diesem Modell statt von der eingebauten KI gespielt werden. Nichts davon wird genutzt, bevor du einen Anbieter aktivierst und einem Platz zuweist; bei jedem Fehler übernimmt mitten im Spiel wieder die eingebaute KI.",
+    "empty": "Keine Anbieter konfiguriert. Die eingebaute KI steuert jeden Platz.",
+    "addProvider": "Anbieter hinzufügen",
+    "unnamed": "Unbenannter Anbieter",
+    "name": "Name",
+    "namePlaceholder": "Diesem Anbieter einen Namen geben (z. B. „Claude“)",
+    "enable": "Diesen Anbieter aktivieren",
+    "remove": "Diesen Anbieter entfernen",
+    "provider": "Anbieter",
+    "model": "Modell",
+    "modelId": "Modell-ID",
+    "customModel": "Eigenes …",
+    "modelPlaceholder": "Modell-ID (z. B. gpt-5, claude-sonnet-5)",
+    "endpoint": "Endpunkt",
+    "endpointPlaceholder": "https://dein-server/v1",
+    "apiKey": "API-Schlüssel",
+    "apiKeyPlaceholder": "API-Schlüssel einfügen",
+    "apiKeyOptional": "Bei lokalen Servern optional",
+    "apiKeyMissing": "Gib deinen API-Schlüssel erneut ein. Schlüssel bleiben nach einem Neuladen nicht erhalten, und dieser Anbieter wird erst danach für KI-Plätze oder Draft-Bots verwendet.",
+    "apiKeyStorage": "Nur für diese Browsersitzung im Arbeitsspeicher. API-Schlüssel werden nie auf die Festplatte geschrieben und sind vom Backup-Export und der Cloud-Synchronisierung ausgenommen — nach einem Neuladen gibst du ihn erneut ein. Ein API-Schlüssel verlangt außerdem einen https://-Endpunkt, sofern der Server nicht auf localhost läuft.",
+    "apiKeyGet": "Schlüssel holen",
+    "test": "Verbindung testen",
+    "testing": "Test läuft …",
+    "testOk": "Verbunden.",
+    "defaultPrompt": {
+      "connected": "Verbunden. Als Standard-Gegner verwenden?",
+      "ready": "Diesen Anbieter als Standard-Gegner verwenden?",
+      "action": "Als Standard verwenden",
+      "badge": "Standard-Gegner"
+    },
+    "defaultOpponent": {
+      "label": "Standard-Gegner",
+      "hint": "KI-Gegner nutzen diesen Anbieter, sofern du beim Einrichten einer Partie für einen Platz keinen anderen wählst. Das gilt auch für den Gegner in Draft-Partien.",
+      "engine": "Integrierte Engine-KI"
+    },
+    "draftToggle": {
+      "label": "Für Draft-Bots verwenden",
+      "hint": "Bot-Plätze in einem Draft wählen mit dem Modell, samt Set-Kontext des Formats.",
+      "profile": "Anbieter für den Draft"
+    },
+    "testHint": "Sendet eine echte Anfrage und prüft die Antwort genauso wie ein Spielzug es täte.",
+    "errors": {
+      "engineUnavailable": "Die Engine konnte nicht geladen werden.",
+      "requestNotBuilt": "Dieser Anbieter ist noch nicht vollständig eingerichtet.",
+      "undecodable": "Der Endpunkt hat geantwortet, aber nicht mit etwas, das das Spiel verwenden kann.",
+      "emptyBody": "Der Endpunkt hat eine leere Antwort zurückgegeben.",
+      "cancelled": "Der Test wurde abgebrochen.",
+      "timedOut": "Der Endpunkt hat nicht rechtzeitig geantwortet.",
+      "unreachable": "Der Endpunkt war nicht erreichbar. Prüfe die URL und ob der Anbieter Browser-Anfragen zulässt.",
+      "oversized": "Der Endpunkt hat weit mehr Daten zurückgegeben, als eine Chat-Antwort umfasst."
     }
   }
 }

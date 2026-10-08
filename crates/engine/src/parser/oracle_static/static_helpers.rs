@@ -4,6 +4,7 @@
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use crate::types::ability::PlayerScope;
 use nom::character::complete::multispace0;
 
 /// CR 113.6 + CR 201.2: Recognize the "sources with the chosen name" / "cards with
@@ -11,7 +12,7 @@ use nom::character::complete::multispace0;
 /// Shared by the chosen-name name-picker classes — the `CantBeActivated`
 /// prohibition (Pithing Needle / Phyrexian Revoker / Sorcerous Spyglass) and the
 /// directional activated-ability cost modifier (Skyseer's Chariot). Returns
-/// `None` for any other subject so callers fall back to `parse_type_phrase`.
+/// `None` for any other subject so callers fall back to `parse_type_phrase_folding`.
 pub(crate) fn parse_chosen_name_source_filter(subject_lower: &str) -> Option<TargetFilter> {
     let trimmed = subject_lower.trim();
     value(
@@ -39,7 +40,7 @@ pub(crate) fn parse_chosen_name_source_filter(subject_lower: &str) -> Option<Tar
 /// `"cost"`. Handles compound subjects such as Goblin Anarchomancer's
 /// "Each spell you cast that's red or green" via `parse_that_clause_suffix`.
 /// CR 205.4a: A bare supertype spell subject ("Legendary spells you cast cost
-/// {1} less", Kethis, the Hidden Hand) — `parse_type_phrase` doesn't consume a
+/// {1} less", Kethis, the Hidden Hand) — `parse_type_phrase_folding` doesn't consume a
 /// lone supertype word (it requires a following type noun), so the restriction
 /// would otherwise drop and reduce the cost of EVERY spell. Emit a `HasSupertype`
 /// card filter instead.
@@ -51,6 +52,41 @@ fn parse_bare_supertype_spell_filter(base: &str) -> Option<TargetFilter> {
     Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
         FilterProp::HasSupertype { value: supertype },
     ])))
+}
+
+/// CR 105.2 + CR 700.6 + CR 205.4a + CR 601.2f: Resolve a BARE-word spell-subject
+/// filter for a cost modifier — a color or color-CATEGORY ("white", "colorless",
+/// "monocolored", "multicolored"), "historic", or a supertype ("legendary").
+/// `parse_type_phrase_folding` declines all of these because they carry no trailing type
+/// noun (it needs "white creature", not a lone "white"), so without this the
+/// whole restriction dropped and the cost modifier (mis)applied to EVERY spell.
+///
+/// The color word routes through the single [`nom_filter::parse_color_property`]
+/// authority, so the color-CATEGORY axis resolves identically to the noun-bearing
+/// path: colorless → `ColorCount { EQ, 0 }`, monocolored → `{ EQ, 1 }`,
+/// multicolored → `{ GE, 2 }`, a named color → `HasColor`. The prior fallback
+/// hand-rolled only the five named colors via `parse_named_color`, so it dropped
+/// the category axis (Herald of Kozilek, Ugin, Urza's Filter, It That Heralds the
+/// End) and "historic" (Jhoira's Familiar) — all of which then cheapened every spell.
+fn parse_bare_spell_subject_filter(base: &str) -> Option<TargetFilter> {
+    let lower = base.trim().to_ascii_lowercase();
+    // CR 105.2: color / color-category, via the single color-property authority.
+    if let Ok((_, prop)) = all_consuming(nom_filter::parse_color_property).parse(lower.as_str()) {
+        return Some(TargetFilter::Typed(
+            TypedFilter::card().properties(vec![prop]),
+        ));
+    }
+    // CR 700.6: "historic" = legendary supertype, artifact card type, or Saga subtype.
+    if all_consuming(tag::<_, _, OracleError<'_>>("historic"))
+        .parse(lower.as_str())
+        .is_ok()
+    {
+        return Some(TargetFilter::Typed(
+            TypedFilter::card().properties(vec![FilterProp::Historic]),
+        ));
+    }
+    // CR 205.4a: a lone supertype word ("legendary", "snow", ...).
+    parse_bare_supertype_spell_filter(&lower)
 }
 
 /// CR 202.3: Nom parse of a trailing "with/of mana value N or greater/less"
@@ -137,7 +173,7 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
     // <color> spells" (the Prophecy Familiar cycle: Nightscape / Stormscape /
     // Sunscape / Thornscape / Thunderscape Familiar). The single-subject path
     // below maps a lone bare color via `parse_named_color`, and
-    // `parse_type_phrase` decomposes compounds whose operands carry a type noun
+    // `parse_type_phrase_folding` decomposes compounds whose operands carry a type noun
     // ("Angel spells and Human spells", "red creature spells and green creature
     // spells"). A two-BARE-color compound falls through both and yields
     // `None` — which silently drops the color restriction and reduces EVERY
@@ -185,7 +221,7 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
     let typed_filter = if base_part.is_empty() {
         None
     } else {
-        let (filter, remainder) = parse_type_phrase(base_part);
+        let (filter, remainder) = parse_type_phrase_folding(base_part);
         let remainder = remainder.trim();
         match &filter {
             TargetFilter::Typed(tf)
@@ -197,17 +233,14 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
             TargetFilter::Or { filters } if !filters.is_empty() && remainder.is_empty() => {
                 Some(filter)
             }
-            // Bare color words ("white", "red") and bare supertype words
-            // ("legendary") are not consumed by parse_type_phrase, which requires
-            // a trailing type noun ("white creature", "legendary permanent").
+            // Bare color/color-category words ("white", "colorless",
+            // "multicolored"), "historic", and bare supertype words ("legendary")
+            // are not consumed by parse_type_phrase_folding, which requires a trailing type
+            // noun ("white creature", "legendary permanent"). Route them through
+            // the single bare-subject authority so the color-category axis is not
+            // dropped (CR 105.2 + CR 700.6 + CR 205.4a).
             _ if remainder.is_empty() || remainder.eq_ignore_ascii_case(base_part) => {
-                parse_named_color(base_part)
-                    .map(|color| {
-                        TargetFilter::Typed(
-                            TypedFilter::card().properties(vec![FilterProp::HasColor { color }]),
-                        )
-                    })
-                    .or_else(|| parse_bare_supertype_spell_filter(base_part))
+                parse_bare_spell_subject_filter(base_part)
             }
             _ => None,
         }
@@ -242,7 +275,7 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
 /// Thornscape / Thunderscape Familiar) is the exemplar class. Requires two or
 /// more colors and full consumption, so a lone bare color ("Red spells …") and
 /// a noun-bearing operand ("red creature spells and …") both decline here and
-/// fall through to the single-subject path and `parse_type_phrase` respectively.
+/// fall through to the single-subject path and `parse_type_phrase_folding` respectively.
 fn parse_cost_mod_compound_color_subject(base: &str) -> Option<TargetFilter> {
     // Operand: a bare color name, optionally followed by the spell noun. The
     // trailing " spell[s]" is present on every operand except the last (the
@@ -316,9 +349,38 @@ fn strip_cost_mod_cast_scope_suffix(input: &str) -> &str {
     stripped.trim()
 }
 
+/// CR 604.1: Parse a LEADING "during your turn, " / "during turns other than
+/// yours, " turn-scope clause into its `StaticCondition`. Shares the negated-turn
+/// vocabulary the CDA / dispatch / type-change static parsers already recognize
+/// (`nom_tag_tp("during turns other than yours, ")`), and the affirmative form
+/// mirrors the trailing suffix arm below. `peel_leading_cost_modifier_condition`
+/// consumes this before self-spell and first-qualified dispatch, so every
+/// cost-modifier branch retains the scope.
+///
+/// Also the single authority for two terminal arms that generalize this window
+/// rather than re-deriving it: `oracle_classifier::is_static_pattern` (routing —
+/// does this line reach the static parser at all) and
+/// `oracle_static::dispatch::parse_static_line_inner` (composition — attach the
+/// matching `StaticCondition` to any enforceable continuous static the
+/// dispatcher would otherwise refuse). CR 604.1 + CR 611.3a + CR 102.1.
+pub(crate) fn parse_leading_turn_scope(text: &str) -> OracleResult<'_, StaticCondition> {
+    alt((
+        value(
+            StaticCondition::Not {
+                condition: Box::new(StaticCondition::DuringYourTurn),
+            },
+            tag("during turns other than yours, "),
+        ),
+        value(StaticCondition::DuringYourTurn, tag("during your turn, ")),
+    ))
+    .parse(text)
+}
+
 /// CR 604.1 + CR 601.2f: Strip an inline "during your turn" timing clause from
 /// a cost-modification subject before type parsing. Paladin Class: "Spells your
-/// opponents cast during your turn cost {1} more to cast."
+/// opponents cast during your turn cost {1} more to cast." The LEADING clause
+/// (affirmative + negated) is handled once for every branch before dispatch by
+/// `peel_leading_cost_modifier_condition`.
 fn strip_cost_mod_during_your_turn_scope(text: &str) -> (&str, Option<StaticCondition>) {
     if let Ok((_, prefix)) = terminated(
         take_until(" during your turn"),
@@ -339,7 +401,7 @@ fn strip_cost_mod_during_your_turn_scope(text: &str) -> (&str, Option<StaticCond
     (text, None)
 }
 
-fn strip_cost_mod_spell_noun_suffix(input: &str) -> &str {
+pub(super) fn strip_cost_mod_spell_noun_suffix(input: &str) -> &str {
     let (_, stripped) = all_consuming(alt((
         value("", terminated(tag::<_, _, OracleError<'_>>("spells"), eof)),
         value("", terminated(tag("spell"), eof)),
@@ -430,6 +492,7 @@ pub(crate) fn try_parse_impose_additional_cost(
             // semantics — fall back to an untyped card filter.
             Some(ControllerRef::TargetOpponent) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetController) => TargetFilter::Typed(TypedFilter::card()),
+            Some(ControllerRef::EventTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetOwner) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::DefendingPlayer) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::SourceChosenPlayer) => TargetFilter::Typed(TypedFilter::card()),
@@ -441,6 +504,7 @@ pub(crate) fn try_parse_impose_additional_cost(
             // CR 102.1: active-player scope is not emitted for cost statics;
             // fall back to an untyped card filter (same as TriggeringPlayer).
             Some(ControllerRef::ActivePlayer) => TargetFilter::Typed(TypedFilter::card()),
+            Some(ControllerRef::SpecificPlayer { .. }) => TargetFilter::Typed(TypedFilter::card()),
             None => TargetFilter::Typed(TypedFilter::card()),
         }
     };
@@ -511,7 +575,7 @@ pub(crate) fn try_parse_cost_modification(
         None
     };
 
-    let first_qualified_spell = match parse_first_qualified_spell_filter(lower) {
+    let nth_qualified_spell = match parse_nth_qualified_spell_filter(lower) {
         // CR 601.2f: A recognized "the first … spell <timing> costs …" subject
         // whose qualifier/timing can't be lowered to a filter + once-per-turn
         // gate (e.g. "the first kicked spell you cast each turn costs {1} less").
@@ -519,11 +583,15 @@ pub(crate) fn try_parse_cost_modification(
         // cost-modifier path would emit a filterless, conditionless reducer that
         // drops both the printed "first … each turn" restriction and the
         // qualifier, reducing every spell the controller casts.
-        FirstQualifiedSpell::UnsupportedQualifier => return None,
-        FirstQualifiedSpell::NotApplicable => None,
-        FirstQualifiedSpell::Supported(filter, timing) => Some((filter, timing)),
+        NthQualifiedSpell::UnsupportedQualifier => return None,
+        NthQualifiedSpell::NotApplicable => None,
+        NthQualifiedSpell::Supported {
+            filter,
+            timing,
+            ordinal,
+        } => Some((filter, timing, ordinal)),
     };
-    let first_qualified_spell_filter = first_qualified_spell.as_ref().map(|(filter, _)| filter);
+    let nth_qualified_spell_filter = nth_qualified_spell.as_ref().map(|(filter, _, _)| filter);
     let target_cost_filter = parse_cost_modifier_target_filter(lower);
 
     // Extract "from [zone(s)]" clause between player scope and "cost".
@@ -568,7 +636,7 @@ pub(crate) fn try_parse_cost_modification(
     let mut during_your_turn_scope = None;
     let spell_filter = if is_self_spell {
         parse_self_spell_target_cost_filter(lower)
-    } else if let Some(filter) = first_qualified_spell_filter.cloned() {
+    } else if let Some(filter) = nth_qualified_spell_filter.cloned() {
         Some(filter)
     // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     } else if let Some(cost_idx) = lower.find(" cost") {
@@ -603,7 +671,7 @@ pub(crate) fn try_parse_cost_modification(
         // qualifier (Cloud Key, Umori, Stenn, Herald's Horn: "Spells you cast of
         // the chosen type cost {1} less"). A "you cast" infix sits between the
         // type word and this qualifier, so the trim chain below can't reach the
-        // type word and `parse_type_phrase` never extracts the chosen-type
+        // type word and `parse_type_phrase_folding` never extracts the chosen-type
         // discriminator. Strip it here and re-attach IsChosenCardType /
         // IsChosenCreatureType after the base type is parsed — mirrors the
         // "with the chosen name" handling above.
@@ -744,7 +812,7 @@ pub(crate) fn try_parse_cost_modification(
                 }
             })
             .or_else(|| {
-                let (count_filter, _) = parse_type_phrase(count_text);
+                let (count_filter, _) = parse_type_phrase_folding(count_text);
                 Some(QuantityRef::ObjectCount {
                     filter: count_filter,
                 })
@@ -785,6 +853,16 @@ pub(crate) fn try_parse_cost_modification(
         amount,
         spell_filter: spell_filter.clone(),
         dynamic_count: dynamic_count.clone(),
+        // CR 118.7b/c/d: "This effect reduces only the amount of colored mana you
+        // pay" overrides the default spillover of an unmatched colored reduction
+        // unit into generic mana (Morophon's {4}{R}{W}{W} → {4}{W} ruling). The
+        // rider is its own sentence appended after the reduction sentence, so it
+        // is scanned across the whole line rather than anchored.
+        reach: if line_reduces_colored_mana_only(lower) {
+            CostReductionReach::ColoredManaOnly
+        } else {
+            CostReductionReach::SpillsToGeneric
+        },
     };
 
     // Build the affected filter for the static definition.
@@ -811,6 +889,7 @@ pub(crate) fn try_parse_cost_modification(
             // semantics — fall back to an untyped card filter.
             Some(ControllerRef::TargetOpponent) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetController) => TargetFilter::Typed(TypedFilter::card()),
+            Some(ControllerRef::EventTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetOwner) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::DefendingPlayer) => TargetFilter::Typed(TypedFilter::card()),
             // CR 613.1: chosen-player scope is not emitted for cost statics.
@@ -826,6 +905,7 @@ pub(crate) fn try_parse_cost_modification(
             // CR 102.1: active-player scope is not emitted for cost statics;
             // fall back to an untyped card filter (same as TriggeringPlayer).
             Some(ControllerRef::ActivePlayer) => TargetFilter::Typed(TypedFilter::card()),
+            Some(ControllerRef::SpecificPlayer { .. }) => TargetFilter::Typed(TypedFilter::card()),
             None => TargetFilter::Typed(TypedFilter::card()),
         }
     };
@@ -843,14 +923,19 @@ pub(crate) fn try_parse_cost_modification(
     if is_self_spell {
         definition.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
     }
-    if let Some((filter, timing)) = first_qualified_spell.as_ref() {
-        definition.condition = Some(first_qualified_spell_condition(filter, timing));
-    } else if let Some(during_your_turn_scope) = during_your_turn_scope {
-        definition.condition = Some(during_your_turn_scope);
-    }
-    if definition.condition.is_none() {
-        definition.condition = leading_condition;
-    }
+    let branch_condition = if let Some((filter, timing, ordinal)) = nth_qualified_spell.as_ref() {
+        Some(nth_qualified_spell_condition(filter, timing, *ordinal))
+    } else {
+        during_your_turn_scope
+    };
+    definition.condition = match (leading_condition, branch_condition) {
+        (Some(leading), Some(branch)) => Some(StaticCondition::And {
+            conditions: vec![leading, branch],
+        }),
+        (Some(leading), None) => Some(leading),
+        (None, Some(branch)) => Some(branch),
+        (None, None) => None,
+    };
 
     // Extract trailing "if [condition]" / "as long as [condition]" clause from
     // cost modification lines.
@@ -914,21 +999,6 @@ pub(crate) fn try_parse_cost_modification(
         }
     }
 
-    // CR 102.1 + CR 601.2f: Leading "During your turn," timing restriction —
-    // the cost modification functions only on the static controller's turn
-    // (Tithe Taker: "During your turn, spells your opponents cast cost {1} more
-    // to cast ..."). The trailing/`if` scans above miss this because it is a
-    // comma-separated timing prefix, not an "if"/"as long as" clause. The cost
-    // resolver gates on `StaticCondition::DuringYourTurn`, which is evaluated
-    // against the source permanent's controller (CR 102.1: active player).
-    if definition.condition.is_none()
-        && tag::<_, _, OracleError<'_>>("during your turn, ")
-            .parse(lower)
-            .is_ok()
-    {
-        definition.condition = Some(StaticCondition::DuringYourTurn);
-    }
-
     // CR 601.2f + CR 702.34a: Caller-proven casting variant (e.g. Flashback from
     // the compound-line parser) gates self-spell cost modifiers — never inferred
     // from generic "cast this way" wording alone.
@@ -948,6 +1018,18 @@ fn peel_leading_cost_modifier_condition<'a>(
     pair: TextPair<'a>,
 ) -> (TextPair<'a>, Option<StaticCondition>) {
     let trimmed = pair.trim_start();
+    if let Ok((remainder, condition)) = parse_leading_turn_scope(trimmed.lower) {
+        let consumed = trimmed.lower.len() - remainder.len();
+        let cost_clause = trimmed.slice(consumed, trimmed.lower.len()).trim_start();
+        if nom_primitives::scan_contains(cost_clause.lower, "less to cast")
+            || nom_primitives::scan_contains(cost_clause.lower, "more to cast")
+            || nom_primitives::scan_contains(cost_clause.lower, "less to activate")
+            || nom_primitives::scan_contains(cost_clause.lower, "more to activate")
+        {
+            return (cost_clause, Some(condition));
+        }
+    }
+
     let Ok((after_if, _)) = tag::<_, _, OracleError<'_>>("if ").parse(trimmed.lower) else {
         return (pair, None);
     };
@@ -975,15 +1057,35 @@ fn peel_leading_cost_modifier_condition<'a>(
     }
 }
 
+/// Structural pre-check for the "it targets [stack object] that targets […]"
+/// cost-reduction condition (CR 601.2f + CR 115.9b).
+///
+/// This gate must never be NARROWER than the grammar it guards
+/// (`parse_it_targets_that_targets_spell_filter`): a phrase the gate rejects
+/// silently skips the whole nested-target branch, leaving `spell_filter` unset
+/// and the cost reduction UNCONDITIONAL. So the ability alternative delegates
+/// the kind spelling to `nom_target::parse_ability_kind` — the same single
+/// authority the filter builder uses — rather than keeping yet another private
+/// list. CR 113.3b / CR 113.3c: "a triggered ability that targets …" is an
+/// ability phrase just as much as the bare noun is.
+///
+/// The gate stays a separate cheap pre-check rather than becoming
+/// `parse_it_targets_that_targets_spell_filter(..).is_some()`, because the
+/// branch it guards deliberately FAILS CLOSED (returns `None` for the whole
+/// static line) when the shape matches but the details do not parse.
 fn is_nested_stack_target_condition(cond_text: &str) -> bool {
     preceded(
         tag::<_, _, OracleError<'_>>("it targets "),
         preceded(
             opt(alt((tag("a "), tag("an "), tag("one or more ")))),
             alt((
-                tag("spell or ability that targets "),
-                tag("spell that targets "),
-                tag("ability that targets "),
+                value((), tag("spell or ability that targets ")),
+                value((), tag("spell that targets ")),
+                // CR 113.3b / CR 113.3c: the ability noun may carry a kind
+                // qualifier ("a triggered ability that targets …"). Shared axis
+                // authority, tried ahead of the bare noun.
+                value((), (nom_target::parse_ability_kind, tag(" that targets "))),
+                value((), tag("ability that targets ")),
             )),
         ),
     )
@@ -1110,19 +1212,42 @@ fn parse_it_targets_that_targets_spell_filter(cond_text: &str) -> Option<TargetF
             TargetFilter::StackSpell,
             tag::<_, _, OracleError<'_>>("a spell"),
         ),
+        // CR 113.3b / CR 113.3c + CR 601.2f: the ability-kind spelling narrows
+        // which stack abilities satisfy the cost-reduction condition. Article +
+        // the shared axis authority — never a private spelling list. (No printed
+        // card reaches the narrowing arms today; Not of This World uses
+        // "a spell or ability", handled above. Delegating closes the axis
+        // prospectively at zero corpus risk.)
+        map(
+            preceded(
+                alt((
+                    tag::<_, _, OracleError<'_>>("an "),
+                    tag::<_, _, OracleError<'_>>("a "),
+                )),
+                nom_target::parse_ability_kind,
+            ),
+            |kind| TargetFilter::StackAbility {
+                controller: None,
+                tag: None,
+                kind,
+            },
+        ),
+        // CR 113.3b / CR 113.3c: bare "an ability" names NO kind, so both kinds
+        // are legal and `kind: None` is the correct reading — this is the same
+        // category as the "a spell or ability" arm above, not a dropped axis.
+        // It is a LOCAL literal on purpose: `parse_ability_kind` must not grow a
+        // bare-"ability" arm, because it also feeds the disjunction driver where
+        // a kindless leg would over-match (see its doc comment).
+        // Ordered AFTER the delegation. The two are prefix-disjoint
+        // ("an ability" cannot be confused with "an activated ability"), so this
+        // is for determinism and for keeping the alt readable longest-first.
         value(
             TargetFilter::StackAbility {
                 controller: None,
                 tag: None,
                 kind: None,
             },
-            alt((
-                tag::<_, _, OracleError<'_>>("an activated or triggered ability"),
-                tag("a triggered or activated ability"),
-                tag("a triggered ability"),
-                tag("an activated ability"),
-                tag("an ability"),
-            )),
+            tag::<_, _, OracleError<'_>>("an ability"),
         ),
     ))
     .parse(i)
@@ -1505,13 +1630,133 @@ pub(crate) fn apply_raw_parenthetical_cant_cast_gate(
 /// CR 611.3a: Attach an optional parsed static gate to a prohibition static.
 /// When `gate_condition_text` is present but `parse_static_condition` declines,
 /// return `None` so the caller does not enforce the restriction unconditionally.
+///
+/// CR 118.12a: a condition this static's ENFORCEMENT POINT can never satisfy
+/// declines the same way — `parse_static_condition` accepts a bare
+/// `"you pay {N}"` as `UnlessPay`, and the prohibition modes this helper serves
+/// have no payment prompt (see [`accept_enforceable_condition`]).
 pub(crate) fn attach_parsed_static_gate(
     def: StaticDefinition,
     gate_condition_text: Option<&str>,
 ) -> Option<StaticDefinition> {
     match gate_condition_text {
         None => Some(def),
-        Some(text) => Some(def.condition(parse_static_condition(text)?)),
+        Some(text) => {
+            let condition = parse_static_condition(text)?;
+            let condition = accept_enforceable_condition(&def.mode, condition)?;
+            Some(def.condition(condition))
+        }
+    }
+}
+
+/// CR 502.3 + CR 303.4m + CR 109.5: identify the named untap step and the
+/// antecedent for a later "that player" anaphor. `None` means the step is
+/// recognized but the parser declines to rebind its anaphor.
+fn parse_untap_step_antecedent(input: &str) -> OracleResult<'_, Option<PlayerScope>> {
+    alt((
+        value(
+            Some(PlayerScope::RecipientController),
+            (
+                tag("its controller"),
+                nom_condition::parse_apostrophe_s,
+                tag(" untap step"),
+            ),
+        ),
+        value(
+            Some(PlayerScope::RecipientController),
+            (
+                tag("their controllers"),
+                nom_condition::parse_apostrophe,
+                tag(" untap steps"),
+            ),
+        ),
+        // CR 109.5: "your" has an antecedent, but no printed card pairs this
+        // untap-step phrase with "that player". Keep that shape unsupported.
+        value(None, tag("your untap step")),
+    ))
+    .parse(input)
+}
+
+/// CR 502.3 + CR 303.4m: the named untap step supplies the controller of the
+/// enchanted creature as an antecedent. Rebinding is a parser act: the inner
+/// condition parser sees only `ScopedPlayer`, not the owning clause. This is
+/// the static-side sibling of `oracle_trigger::rebind_attack_anaphor_to_defending_player`.
+/// `QuantityComparison` operands and nested filter scopes are deliberately
+/// outside this rewrite; no printed untap-step gate needs them.
+fn rebind_scoped_designation_anaphor(condition: &mut StaticCondition, antecedent: &PlayerScope) {
+    match condition {
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
+            for condition in conditions {
+                rebind_scoped_designation_anaphor(condition, antecedent);
+            }
+        }
+        StaticCondition::Not { condition } => {
+            rebind_scoped_designation_anaphor(condition, antecedent)
+        }
+        StaticCondition::IsMonarch { player } => {
+            if matches!(player, PlayerScope::ScopedPlayer) {
+                *player = antecedent.clone();
+            }
+        }
+        // Only boolean structure carries nested static conditions. Quantities
+        // and filters are separate scopes, so this clause does not rebind them.
+        StaticCondition::DevotionGE { .. }
+        | StaticCondition::IsPresent { .. }
+        | StaticCondition::ChosenColorIs { .. }
+        | StaticCondition::ChosenLabelIs { .. }
+        | StaticCondition::QuantityComparison { .. }
+        | StaticCondition::HasMaxSpeed
+        | StaticCondition::SpeedGE { .. }
+        | StaticCondition::DayNightIs { .. }
+        | StaticCondition::HasCounters { .. }
+        | StaticCondition::CastVariantPaid { .. }
+        | StaticCondition::RecipientHasCounters { .. }
+        | StaticCondition::ClassLevelGE { .. }
+        | StaticCondition::DefendingPlayerControls { .. }
+        | StaticCondition::SourceAttackingAlone
+        | StaticCondition::SourceIsAttacking
+        | StaticCondition::SourceIsBlocking
+        | StaticCondition::SourceIsBlocked
+        | StaticCondition::IsInitiative
+        | StaticCondition::NoMonarch
+        | StaticCondition::HasCityBlessing
+        | StaticCondition::HasEnduringStory
+        | StaticCondition::CompletedADungeon
+        | StaticCondition::WasStartingPlayer { .. }
+        | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::UnlessPay { .. }
+        | StaticCondition::Unrecognized { .. }
+        | StaticCondition::DuringYourTurn
+        | StaticCondition::DuringOpponentsTurn
+        | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
+        | StaticCondition::SourceEnteredThisTurn
+        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::WasCast { .. }
+        | StaticCondition::IsRingBearer
+        | StaticCondition::RingLevelAtLeast { .. }
+        | StaticCondition::ControlsCommander { .. }
+        | StaticCondition::SourceIsTapped
+        | StaticCondition::IsTapped { .. }
+        | StaticCondition::SourceIsFaceUp
+        | StaticCondition::SourceIsSaddled
+        | StaticCondition::SourceControllerEquals { .. }
+        | StaticCondition::SourceIsEquipped
+        | StaticCondition::SourceIsEnchanted
+        | StaticCondition::SourceIsMonstrous
+        | StaticCondition::SourceIsHarnessed
+        | StaticCondition::SourceAttachedToCreature
+        | StaticCondition::SourceMatchesFilter { .. }
+        | StaticCondition::TopOfLibraryMatches { .. }
+        | StaticCondition::RecipientMatchesFilter { .. }
+        | StaticCondition::RecipientAttackingOwnerTarget { .. }
+        | StaticCondition::SourceIsPaired
+        | StaticCondition::SourceInZone { .. }
+        | StaticCondition::EnchantedIsFaceDown
+        | StaticCondition::AdditionalCostPaid
+        | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::None => {}
     }
 }
 
@@ -1519,35 +1764,388 @@ pub(crate) fn attach_parsed_static_gate(
 /// Handles patterns like:
 /// - "doesn't untap during your untap step as long as [condition]"
 /// - "doesn't untap during your untap step if [condition]"
+/// - "doesn't untap during your untap step unless [condition]" ("unless" is a
+///   negative-polarity conditional: the restriction applies precisely when the
+///   trailing condition is false, so the "unless" body is negated — Bombur,
+///   Gentle Dreamer: "doesn't untap ... unless you have an enduring story" only
+///   withholds the untap while the story is absent. CR 611.3a: because this is
+///   a continuous effect generated by a static ability, it isn't "locked in" —
+///   the condition is re-evaluated dynamically at every untap step rather than
+///   fixed once at parse time).
 pub(crate) fn extract_cant_untap_condition(lower: &str) -> Option<StaticCondition> {
-    // Find the end of the "untap step" phrase
-    let untap_phrases = [
-        "its controller's untap step",
-        "its controller\u{2019}s untap step",
-        "their controllers' untap steps",
-        "their controllers\u{2019} untap steps",
-        "your untap step",
-    ];
-    let mut after_untap = None;
-    for phrase in &untap_phrases {
-        if let Some(pos) = lower.find(phrase) {
-            let end = pos + phrase.len();
-            after_untap = Some(lower[end..].trim().trim_end_matches('.'));
-            break;
-        }
-    }
-    let remaining = after_untap?;
+    let (_before, antecedent, after_untap) =
+        nom_primitives::scan_preceded(lower, parse_untap_step_antecedent)?;
+    let remaining = after_untap.trim().trim_end_matches('.');
     if remaining.is_empty() {
         return None;
+    }
+    // "unless" is negative polarity: delegate to the shared unless-condition
+    // combinator so the UnlessPay raw-passthrough rule (avoid double-negating an
+    // already-negative "unless you pay [cost]" cost condition) is applied
+    // identically to every other "unless" gate in the parser. Whatever comes
+    // back is then run through the one untap-step enforceability gate below,
+    // exactly like the positive "as long as …"/"if …" tail.
+    if let Some(unless_text) = nom_tag_lower(remaining, remaining, "unless ") {
+        return Some(match nom_condition::parse_unless_condition(unless_text) {
+            Ok((rest, mut condition)) if rest.trim().is_empty() => {
+                if let Some(antecedent) = &antecedent {
+                    rebind_scoped_designation_anaphor(&mut condition, antecedent);
+                }
+                gate_cant_untap_condition(condition, unless_text)
+            }
+            _ => unparsed_gate_condition(unless_text, ConditionGatePolarity::Negative),
+        });
     }
     // Strip "as long as" or "if" prefix
     let condition_text = nom_tag_lower(remaining, remaining, "as long as ")
         .or_else(|| nom_tag_lower(remaining, remaining, "if "))?;
-    parse_static_condition(condition_text).or_else(|| {
-        Some(StaticCondition::Unrecognized {
-            text: condition_text.to_string(),
-        })
+    Some(match parse_static_condition(condition_text) {
+        Some(mut condition) => {
+            if let Some(antecedent) = &antecedent {
+                rebind_scoped_designation_anaphor(&mut condition, antecedent);
+            }
+            gate_cant_untap_condition(condition, condition_text)
+        }
+        None => unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive),
     })
+}
+
+/// CR 604.1 + CR 611.3a: the polarity a static's gate condition is STORED with,
+/// and therefore the shape its UNPARSED-clause fallback must take.
+///
+/// `active_static_definitions` reads a static's `condition` as "static ACTIVE
+/// when TRUE", so a positive `"as long as X"` / `"if X"` tail stores `X` while a
+/// negative `"unless X"` tail stores `Not(X)`. When the clause parser produced
+/// NOTHING at all, the fallback has to match that storage sense or the gap
+/// marker would flip the static's sense relative to what the same route already
+/// did before any gate existed. A typed axis rather than a raw bool so the two
+/// readings stay self-documenting at every call site.
+///
+/// This axis governs [`unparsed_gate_condition`] ONLY. It deliberately does NOT
+/// reach [`unenforceable_gate_marker`], the remedy for a clause that DID parse
+/// but cannot be enforced at the static's enforcement point: that marker is
+/// unconditionally inert, because a gate the engine cannot evaluate must never
+/// switch a static ON. See [`unenforceable_gate_marker`] for the full argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConditionGatePolarity {
+    /// `"… as long as X"` / `"… if X"`.
+    Positive,
+    /// `"… unless X"`.
+    Negative,
+}
+
+/// CR 611.3a: the honest, ALWAYS-INERT marker for a gate clause the engine
+/// parsed but whose enforcement point can never evaluate
+/// ([`StaticCondition::is_unenforceable_on`]).
+///
+/// `Not(Unrecognized { text })` is the single shape, for both grammatical
+/// polarities, and it is chosen for two properties that must hold together:
+///
+/// 1. **Inert at runtime.** `game::layers::evaluate_condition` reads
+///    `Unrecognized` as `true`, so the wrapping `Not` pins the gate to `false`
+///    forever and `active_static_definitions` never switches the static on.
+/// 2. **Visible to coverage.** `StaticCondition::contains_unrecognized` walks
+///    through `Not` (see its doc), so every coverage-honesty gate still reports
+///    the clause as an unsupported gap. Declining the static outright would
+///    satisfy (1) and silently lose (2).
+///
+/// WHY POLARITY IS NOT AN INPUT HERE. It used to be, and that was a defect:
+/// the positive branch returned a BARE `Unrecognized`, so a `"… as long as
+/// <unenforceable clause>"` static became permanently ON. That is fail-OPEN in
+/// the one direction the gate exists to prevent. Two independent arguments
+/// close it:
+///
+/// - **Don't invent behavior.** The gate fires precisely because the engine
+///   cannot decide the clause. Applying the static anyway asserts a P/T bonus,
+///   keyword grant, evasion, or untap lock that the printed card confers only
+///   conditionally. `"Enchanted creature gets +2/+2 as long as you pay {1}"`
+///   became an unconditional +2/+2 — a rules-wrong buff, not a conservative
+///   approximation. Leaving it off is the only outcome that adds nothing the
+///   card does not unconditionally grant.
+/// - **Truth conservation.** Every leaf `is_unenforceable_on` rejects already
+///   evaluates `false` at this enforcement point: `game::layers` hard-codes
+///   `UnlessPay` (CR 118.12a) and `CastingAsVariant` (CR 702.34a) to `false`,
+///   `AdditionalCostPaid` (CR 601.2f) is `false` with no in-flight cast, and
+///   `evaluate_condition` rejects a scoped-player designation anchor (CR 725.1)
+///   at its entry boundary. A marker that reads `true` therefore INVERTS the
+///   very truth value that justified rejecting the leaf, turning a
+///   coverage-honesty deferral into a rules-behavior change. The inert marker
+///   preserves it.
+///
+/// The failure mode this closes is worst on grant-shaped modes
+/// (`StaticMode::Continuous`, and the keyword companions it feeds), where a
+/// permanently-true gate manufactures a buff out of nothing. It is real but
+/// less alarming on restriction-shaped modes (`CantUntap`, `CantBeBlocked`,
+/// `CantAttack`, `BlockRestriction`), where it manufactures an unconditional
+/// restriction instead. Both are wrong; the marker is uniform so no future
+/// route has to re-litigate which shape it is.
+///
+/// This reverses the `Positive` half of the fallback that PR #8012 shipped —
+/// deliberately, and with its pinned test updated rather than deleted. #8012's
+/// load-bearing property was that EVERY unenforceable leaf, at any nesting
+/// depth, is replaced by a coverage-visible marker; that property is unchanged
+/// and still asserted. Only the marker's runtime truth value moved, and it moved
+/// toward the value the rejected leaf already had.
+///
+/// NOTE for the layer cache: `Unrecognized` is opaque to
+/// `static_condition_uses_object_population`,
+/// `static_condition_characteristic_reads`, and
+/// `entered_object_perturbs_static_condition`, so a gated static is
+/// re-evaluated more eagerly than a fully-typed one. That was already true of
+/// the negative branch; over-invalidation cannot produce a wrong board state,
+/// only redundant work.
+pub(crate) fn unenforceable_gate_marker(gap_text: &str) -> StaticCondition {
+    StaticCondition::Not {
+        condition: Box::new(StaticCondition::Unrecognized {
+            text: gap_text.to_string(),
+        }),
+    }
+}
+
+/// Engine limitation, not CR-mandated: the honest "we could not parse this gate
+/// clause at all" condition, in the polarity the branch STORES its condition in.
+///
+/// Distinct from [`unenforceable_gate_marker`], and the distinction is the whole
+/// point: this fallback is for a clause the parser could not decompose, where
+/// the engine has learned NOTHING about the gate and the only defensible
+/// behavior is the one the route already had before any gate existed. That
+/// behavior is polarity-shaped, so this function is too:
+///
+/// - `Negative` yields `Not(Unrecognized)` → `false` forever → the static is
+///   permanently INERT. The `"unless X"` escape clause we could not model might
+///   always hold, so leaving the restriction off never invents a restriction the
+///   card doesn't have.
+/// - `Positive` yields a bare `Unrecognized` → `true` forever → the static is
+///   permanently ON, matching what the `"as long as"` / `"if"` branches have
+///   always done for an unparsed tail.
+///
+/// The asymmetry is inherited, not designed, and it is preserved ONLY here.
+/// Each branch reproduces exactly what its call site did before, so adding the
+/// enforceability gate to a route did not move any card's runtime behavior on
+/// the unparsed path. Narrowing the positive branch to inert would silently
+/// disable statics that apply today across the whole unparsed-tail corpus —
+/// a far broader change than the enforcement-point defect, and one that needs
+/// its own parse-diff evidence.
+///
+/// It is NOT a no-op for the layer CACHE. Three classifiers in `game::layers` —
+/// `static_condition_uses_object_population`,
+/// `static_condition_characteristic_reads`, and
+/// `entered_object_perturbs_static_condition` — group the typed leaves with the
+/// cheap, inert conditions (`false` / `EMPTY` / `false`) but must treat
+/// `Unrecognized` as opaque (`true` / `ALL` / `true`). A gated card therefore
+/// stops being cached as population-independent and gets re-evaluated more
+/// eagerly. That direction is the safe one (over-invalidation cannot produce a
+/// wrong board state, only redundant work).
+///
+/// The load-bearing property either way is that
+/// `StaticCondition::contains_unrecognized` — which every coverage-honesty gate
+/// consults — sees the gap instead of a fully-typed condition.
+pub(crate) fn unparsed_gate_condition(
+    gap_text: &str,
+    polarity: ConditionGatePolarity,
+) -> StaticCondition {
+    match polarity {
+        ConditionGatePolarity::Positive => StaticCondition::Unrecognized {
+            text: gap_text.to_string(),
+        },
+        // Same SHAPE as the enforcement-point remedy, reached for a different
+        // reason. Built from that one constructor so the two can never drift
+        // into differently-nested markers that coverage tooling has to special-
+        // case; `contains_unrecognized` and `evaluate_condition` see one shape.
+        ConditionGatePolarity::Negative => unenforceable_gate_marker(gap_text),
+    }
+}
+
+/// Engine limitation, not CR-mandated (these are runtime binding gaps, not rules
+/// restrictions): the SINGLE authority for whether a parsed condition may gate a
+/// static of the given `mode`.
+///
+/// The acceptance boundary is a property of the mode's ENFORCEMENT POINT, not of
+/// the condition alone — the same CR 118.12a `UnlessPay` leaf is exactly right
+/// on `CantAttack` (Ghostly Prison: `WaitingFor::CombatTaxPayment` prompts for
+/// it at declaration) and unsatisfiable on `CantBeBlocked` (Awesome Presence) or
+/// `BlockRestriction` (Hipparion), where no prompt exists. Two classes of leaf
+/// are therefore rejected, each against the mode that would carry it:
+///
+/// 1. [`StaticCondition::requires_unavailable_continuation`] — a leaf whose
+///    truth is established by a payment round-trip (CR 118.12a `UnlessPay`) or
+///    by an in-flight cast (CR 601.2f `AdditionalCostPaid` / `CastingAsVariant`)
+///    that THIS mode's enforcement point never runs
+///    ([`StaticMode::provides_continuation`]). The layer pipeline just returns
+///    the hard-coded `false`, so no player can ever satisfy the gate.
+/// 2. [`StaticCondition::has_unanswerable_designation_anchor`] — a designation
+///    subject the mode cannot bind ([`StaticMode::binds_designation_scope`]).
+///    CR 502.3's untap step supplies a recipient anchor, so the controller of
+///    the affected permanent can be answered there; other unsupported scopes
+///    retain the honest gap marker.
+///
+/// Everything else — including the combat-scoped leaves, which are computed
+/// correctly and are legitimately `false` outside combat — is enforceable and
+/// passes through unchanged. Bombur, Gentle Dreamer's controller-scoped
+/// `Not(HasEnduringStory)` is in that supported set.
+///
+/// Call sites are listed on [`attach_gated_condition`], which is how nearly all
+/// of them reach this.
+///
+/// The remedy is [`unenforceable_gate_marker`] — inert at runtime, visible to
+/// coverage — and it takes NO polarity. A clause that reached this function
+/// parsed successfully; the engine knows exactly which enforcement point cannot
+/// run it and that the leaf itself already evaluates `false` there, so the
+/// marker must not read `true` in either grammatical direction. That is a
+/// deliberate departure from [`unparsed_gate_condition`], whose input carries no
+/// such information; see [`unenforceable_gate_marker`] for the argument.
+pub(crate) fn gate_static_condition(
+    mode: &StaticMode,
+    condition: StaticCondition,
+    gap_text: &str,
+) -> StaticCondition {
+    if condition.is_unenforceable_on(mode) {
+        return unenforceable_gate_marker(gap_text);
+    }
+    condition
+}
+
+/// CR 611.3a: the fail-CLOSED sibling of [`gate_static_condition`], for sites
+/// whose honesty policy is to DECLINE the whole static rather than keep it
+/// behind a gap marker.
+///
+/// Same acceptance predicate ([`StaticCondition::is_unenforceable_on`]),
+/// different remedy. These sites already return `None` when
+/// `parse_static_condition` declines, and they keep that shape for the
+/// unenforceable case too, so the two failure modes stay indistinguishable at
+/// the call site. `evasion::parse_forced_attack_defender_static` is the existing
+/// precedent: gate first, decline if a gap resulted.
+///
+/// [`gate_static_condition`]'s marker is now inert in both grammatical
+/// directions ([`unenforceable_gate_marker`]), so substituting it here would no
+/// longer enforce the restriction unconditionally — the hazard that originally
+/// forced these sites apart is closed. The split survives because the two
+/// remedies still differ in what they REPORT: this one drops the static (and
+/// with it the clause), the marker keeps it visible to
+/// `contains_unrecognized`. Prefer the marker for any new site; use this one
+/// only where the surrounding parser genuinely has no definition to hang a
+/// condition on.
+///
+/// Call sites (all fail-closed prohibition/permission gates):
+///
+/// - [`attach_parsed_static_gate`] (this module) — the shared trailing-gate
+///   attach for prohibition statics.
+/// - `oracle_static::dispatch`'s `"can't play lands … as long as X"` arm.
+/// - `oracle_static::dispatch`'s `"can block an additional creature … as long
+///   as X"` arm.
+pub(crate) fn accept_enforceable_condition(
+    mode: &StaticMode,
+    condition: StaticCondition,
+) -> Option<StaticCondition> {
+    (!condition.is_unenforceable_on(mode)).then_some(condition)
+}
+
+/// Attach `condition` to `def`, deferring it to the honest gap marker when
+/// `def.mode`'s enforcement point cannot satisfy it
+/// ([`gate_static_condition`]).
+///
+/// Reading the mode off the definition is what makes this the practical single
+/// entry point: a call site cannot pass a mode that disagrees with the
+/// definition it is building. Every site that attaches a parsed `"unless"` /
+/// `"as long as"` / `"if"` gate to a `StaticDefinition` routes through here or
+/// through [`gate_static_condition`] directly:
+///
+/// Sites that call [`gate_static_condition`] DIRECTLY, because they hold a bare
+/// condition rather than a definition:
+///
+/// - `extract_cant_untap_condition` (this module) — the `"doesn't untap …"`
+///   tail, both polarities, via the [`gate_cant_untap_condition`] specialization.
+/// - `oracle_static::grammar::parse_enchanted_equipped_predicate`'s
+///   `" as long as "` split for `CantUntap`.
+/// - `oracle_static::evasion::try_split_and_doesnt_untap`'s inherited `CantUntap`
+///   companion gate (the companion is assembled before its condition is known).
+/// - `oracle_static::evasion::parse_forced_attack_defender_static`, which gates
+///   first and then DECLINES the whole static if a gap resulted.
+///
+/// Sites that go through this function:
+///
+/// - `oracle_static::evasion::parse_subject_rule_static` — both its
+///   `cant_be_blocked_mode` tail conditions and its `" unless you control … "`
+///   split (which reaches `RuleStaticPredicate::CantUntap` BEFORE the dedicated
+///   untap arm, and every other rule-static predicate besides).
+/// - `oracle_static::evasion::parse_subject_combat_rule_static` — the trailing
+///   `"unless"` gate on `CantBlock` / `BlockRestriction` / `CantBeBlockedBy`
+///   (Hipparion).
+/// - `oracle_static::evasion::parse_combat_tax_static` — the dedicated
+///   combat-tax form (Archangel of Tithes, War Cadence). Always ACCEPTED today,
+///   because that parser only yields the three taxed modes; routed through the
+///   gate anyway so this list is exhaustive by construction rather than by
+///   assertion.
+/// - `oracle_static::dispatch`'s `"~ can't block"`, `"~ can't attack"` (both via
+///   [`parse_trailing_gate_condition`]) and `"activated abilities can't be
+///   activated"` arms.
+/// - `oracle_static::dispatch`'s `"<subject> can't be blocked …"` FALLBACK arm —
+///   the second authority that catches lines `parse_subject_rule_static`
+///   declined (flavor-word subject prefixes, untyped gates). It builds the same
+///   `CantBeBlocked` mode as the evasion route, so it clears the same bar.
+/// - `oracle_static::grammar::parse_enchanted_equipped_predicate`'s three
+///   `"can't be blocked …"` branches, whose gated condition is also what the
+///   granted-keyword companion inherits (Awesome Presence).
+/// - `oracle_static::grammar::parse_enchanted_equipped_predicate`'s conditional
+///   `"gets +N/+M as long as X"` / `"has <keyword> as long as X"` grant branch,
+///   and the whole-predicate `Continuous` default beneath it that carries the
+///   trailing `"unless"` rider (Heroic Defiance).
+pub(crate) fn attach_gated_condition(
+    def: &mut StaticDefinition,
+    condition: StaticCondition,
+    gap_text: &str,
+) {
+    // No `def.mode.clone()`: `StaticMode` carries `TargetFilter`/`PlayerFilter`
+    // trees, and the assignment's RHS is evaluated (ending the immutable borrow
+    // of `def.mode`) before the `def.condition` place is written.
+    def.condition = Some(gate_static_condition(&def.mode, condition, gap_text));
+}
+
+/// CR 604.1 + CR 611.3a: parse a static line's trailing gate clause — `"unless
+/// X"`, `"as long as X"`, or `"if X"` — in the one precedence order every
+/// trailing-gate site must share.
+///
+/// The three shared clause parsers are otherwise indistinguishable at the call
+/// site, and `"as long as"` must be tried before `"if"` to match
+/// `split_trailing_gate_condition`'s precedence; ordering them once here means
+/// no call site has to re-derive it.
+///
+/// Callers hand the result straight to [`attach_gated_condition`], which no
+/// longer needs to know WHICH branch fired: the enforcement-point remedy
+/// ([`unenforceable_gate_marker`]) is inert in both directions. Only the
+/// unparsed-clause fallback still cares, and its call sites know their own
+/// grammar locally — see [`ConditionGatePolarity`].
+///
+/// `affected` is the host static's affected set, threaded unchanged to all three
+/// clause parsers so the gate's anaphoric "it" binds to the source only for a
+/// SelfRef static (CR 611.3a). Centralizing the precedence must not centralize
+/// away that binding: a gate parsed without the host's affected set would resolve
+/// "it" against the wrong object, so the parameter travels with the text.
+/// Call sites pass `def.affected.as_ref()` — the same definition the resulting
+/// condition is attached to by [`attach_gated_condition`].
+pub(crate) fn parse_trailing_gate_condition(
+    tp: &TextPair<'_>,
+    affected: Option<&TargetFilter>,
+) -> Option<StaticCondition> {
+    super::shared::parse_unless_static_condition(tp, affected).or_else(|| {
+        super::shared::parse_as_long_as_static_condition(tp, affected)
+            .or_else(|| super::shared::parse_if_static_condition(tp, affected))
+    })
+}
+
+/// [`gate_static_condition`] specialized to `StaticMode::CantUntap` (CR 502.3).
+///
+/// CR 502.3 makes untapping a TURN-BASED ACTION: the active player determines
+/// which permanents untap, then untaps them. That gives the untap loop
+/// (`game::turns`) a game state, the source, and the affected permanent as
+/// recipient — and nothing else, so it runs NEITHER continuation and binds no
+/// scoped-player anchor. It is the strictest enforcement point in the engine and
+/// the one the untap-tail parsers hand bare conditions to.
+pub(crate) fn gate_cant_untap_condition(
+    condition: StaticCondition,
+    gap_text: &str,
+) -> StaticCondition {
+    gate_static_condition(&StaticMode::CantUntap, condition, gap_text)
 }
 
 /// CR 611.3: Peel a `"all <X> … and all <Y> …"` phrase into per-conjunct strings

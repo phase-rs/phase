@@ -94,6 +94,8 @@ Rules:
 
 4. **`cargo ai-gate` is blind to latency, and `cargo ai-perf-gate` is blind to un-instrumented calls.** `ai-gate` measures win-rate only. `ai-perf-gate` (`crates/phase-ai/src/bin/ai_perf_gate.rs`) field-wise sums engine `PerfCounterSnapshot` fields (`crates/engine/src/game/perf_counters.rs`) against `crates/phase-ai/baselines/perf-baseline.json` — but it only sees paths that bump a counter. `max_x_value` / `feasible_mana_capacity` bump none, so BOTH gates missed the regression above; a manual wall-clock A/B caught it. Therefore, if your policy adds a board-wide/affordability engine call that is not already counter-instrumented, EITHER add a `PerfCounterSnapshot` field for it (and refresh the perf baseline) so `ai-perf-gate` can see it, OR run and attach a wall-clock A/B on a large late-game board showing no material regression. A 0-flip `ai-gate` is necessary but NOT sufficient.
 
+5. **Wall-clock / deadline guards are inert under `ai-gate` — a 0-diff is *expected*, not a no-op signal.** If any code you add gates on `self.deadline.expired()`, measurement mode nulls the deadline (`Deadline::none()`), so the guard is a dead branch during `ai-gate` and the run is byte-identical by construction. Never refresh baselines to absorb a divergence from a deadline-only change — a divergence there is a bug (a guard fired on a live path), not a baseline event. See `ai-duel`'s **Measurement And Gates** section for the mechanism and the `with_deadline`-on-a-non-measurement-config test requirement.
+
 ---
 
 ## 3. AST type table — where things live

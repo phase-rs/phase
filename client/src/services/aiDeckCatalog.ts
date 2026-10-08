@@ -11,7 +11,7 @@ import {
 import type { DeckArchetype } from "./engineRuntime";
 import { expandParsedDeck, type ParsedDeck } from "./deckParser";
 import type { CommanderBracket } from "../types/bracket";
-import { BRACKET_TIER_NUMERIC, isCommanderFamilyFormat } from "../types/bracket";
+import { effectiveBracket, isCommanderFamilyFormat } from "../types/bracket";
 
 export type AiDeckSource = DeckCatalogSource;
 
@@ -43,13 +43,15 @@ export interface UseAiDeckCatalogResult extends AiDeckCatalogResult {
 /**
  * Resolve a candidate's bracket tier for the AI random-pool filter.
  *
- * Prefers an explicit human-declared tag (a curated precon entry, a bundled
- * cEDH deck, or a user-saved bracket) when one exists. Otherwise falls back to
- * the engine's computed bracket estimate — the same `estimate_bracket_for_deck`
- * path the deck-builder audit panel and MyDecks chips use — so the filter has
- * data for the decks that carry no manual tag (feed decks, untagged precons,
- * most saved decks), which would otherwise all surface as `null` and be
- * excluded by every bracket selection.
+ * Applies `effectiveBracket`: prefers an explicit human-declared tag (a
+ * curated precon entry, a bundled cEDH deck, or a user-saved bracket) when
+ * one exists, and otherwise falls back to the engine's computed bracket
+ * estimate — the same `estimate_bracket_for_deck` path the deck-builder
+ * audit panel and MyDecks chips use — so the filter has data for the decks
+ * that carry no manual tag (feed decks, untagged precons, most saved
+ * decks), which would otherwise all surface as `null` and be excluded by
+ * every bracket selection. The estimate is a floor (B2–B4; B1/B5 are
+ * manual-only), so a manual tag above it is expected, not a conflict.
  *
  * Pre-game metadata only: the value filters the candidate pool and never
  * reaches the Rust game loop. The estimate is meaningful only for the
@@ -67,7 +69,7 @@ async function resolveBracket(
   if (request.commander.length === 0) return null;
   try {
     const estimate = await getSharedAdapter().estimateBracket(request);
-    return estimate ? BRACKET_TIER_NUMERIC[estimate.tier] : null;
+    return effectiveBracket(staticBracket, estimate?.tier ?? null);
   } catch {
     // Adapters without local estimation (Tauri/WebSocket/P2P/server-draft)
     // throw BRACKET_ESTIMATION_UNSUPPORTED. Treat as untagged — the filter
@@ -137,10 +139,16 @@ export async function buildLegalAiDeckCatalog(
     knownFormat: candidate.knownFormat,
   }));
 
-  const legal = await Promise.all(
-    rawCandidates.map((candidate) => legalCandidate(candidate, options)),
-  );
-  return { candidates: legal.filter((candidate): candidate is AiDeckCandidate => candidate !== null) };
+  // The shared engine worker owns a full card database. Issuing the complete
+  // catalog at once fills its message queue with cloned deck lists before the
+  // worker can service any of them, which can exhaust WebKit's process budget
+  // while the setup page opens. Keep only one compatibility request in flight.
+  const candidates: AiDeckCandidate[] = [];
+  for (const candidate of rawCandidates) {
+    const legalCandidateResult = await legalCandidate(candidate, options);
+    if (legalCandidateResult !== null) candidates.push(legalCandidateResult);
+  }
+  return { candidates };
 }
 
 export function useAiDeckCatalog({

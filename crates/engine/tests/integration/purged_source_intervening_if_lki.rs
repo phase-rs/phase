@@ -227,7 +227,7 @@ fn premise_delta_bloodflies_trigger_carries_a_controller_relative_intervening_if
     let condition = obj
         .trigger_definitions
         .iter_unchecked()
-        .find_map(|t| t.condition.as_ref())
+        .find_map(|t| t.definition.condition.as_ref())
         .expect("the attack trigger must carry an intervening-if condition (CR 603.4)");
 
     let TriggerCondition::ControlsType { filter } = condition else {

@@ -687,3 +687,108 @@ export function emitAttackBurst(system: ParticleSystem, x: number, y: number, co
     },
   });
 }
+
+// ─── Effect: Meld Forge (two meld cards hammered into one) ───
+
+export const FORGE_WHITE_HOT: RGB = { r: 255, g: 244, b: 214 };
+export const FORGE_YELLOW: RGB = { r: 255, g: 196, b: 72 };
+export const FORGE_ORANGE: RGB = { r: 255, g: 120, b: 28 };
+export const FORGE_RED: RGB = { r: 196, g: 38, b: 12 };
+
+/** Color of forged steel at a heat level in [0, 1]: dull red → orange → yellow → white-hot. */
+export function forgeHeatColor(heat: number): RGB {
+  const h = Math.min(1, Math.max(0, heat));
+  if (h < 1 / 3) return lerpColor(FORGE_RED, FORGE_ORANGE, h * 3);
+  if (h < 2 / 3) return lerpColor(FORGE_ORANGE, FORGE_YELLOW, (h - 1 / 3) * 3);
+  return lerpColor(FORGE_YELLOW, FORGE_WHITE_HOT, (h - 2 / 3) * 3);
+}
+
+/** Anvil sparks: a fast upward fan that arcs back down under gravity. */
+function anvilSparks(x: number, y: number, count: number, strength: number): Partial<Particle>[] {
+  const particles: Partial<Particle>[] = [];
+  for (let i = 0; i < count; i++) {
+    // Mostly upward (−π … 0 is the upper half-plane in screen space), with a few strays.
+    const angle = randRange(-Math.PI * 0.95, -Math.PI * 0.05);
+    const speed = randRange(180, 420) * (0.7 + strength * 0.5);
+    const color = forgeHeatColor(randRange(0.45, 1));
+    particles.push({
+      x: x + randRange(-12, 12),
+      y: y + randRange(-6, 6),
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      life: randRange(0.45, 0.95),
+      size: randRange(1.5, 3.5),
+      endSize: 0.4,
+      r: color.r, g: color.g, b: color.b,
+      alpha: 1, drag: 1.2, gravity: 620, glow: 9,
+    });
+  }
+  return particles;
+}
+
+/**
+ * One hammer strike on the anvil. `strength` in [0, 1] scales the spark count
+ * and flash; the final strike of a forge sequence uses 1.
+ */
+export function emitForgeStrike(system: ParticleSystem, x: number, y: number, strength: number) {
+  const now = performance.now();
+  const s = Math.min(1, Math.max(0, strength));
+
+  system.emit([
+    ...anvilSparks(x, y, 26 + Math.round(s * 30), s),
+    ...coreSparkles(x, y, 6 + Math.round(s * 6), [40, 120], { glow: 22, sizeRange: [4, 11] }),
+    ...emberDebris(x, y, FORGE_ORANGE, 6 + Math.round(s * 8)),
+  ]);
+
+  system.addEffect({
+    startTime: now,
+    duration: 520,
+    update() {},
+    draw(t, ctx) {
+      const flash = (1 - easeOutCubic(t)) * (0.55 + s * 0.4);
+      system.drawGlowCircle(ctx, x, y, 14 + easeOutCubic(t) * (40 + s * 40), FORGE_WHITE_HOT, flash * 0.8, 32);
+      system.drawGlowCircle(ctx, x, y, 8 + easeOutCubic(t) * 24, FORGE_YELLOW, flash * 0.6, 18);
+      const ringT = Math.min(t * 1.4, 1);
+      system.drawGlowRing(
+        ctx, x, y, 10 + easeOutQuart(ringT) * (70 + s * 60),
+        FORGE_ORANGE, (1 - ringT) * 0.85, 3.5 - ringT * 2.5, 14,
+      );
+    },
+  });
+}
+
+/**
+ * Sustained forge heat under the melding cards: a glow that climbs from dull
+ * red to white-hot over `durationMs`, shedding rising embers as it heats.
+ */
+export function emitForgeHeat(system: ParticleSystem, x: number, y: number, durationMs: number) {
+  let lastEmberAt = 0;
+  system.addEffect({
+    startTime: performance.now(),
+    duration: durationMs,
+    update(t, sys) {
+      const elapsed = t * durationMs;
+      if (elapsed - lastEmberAt < 70) return;
+      lastEmberAt = elapsed;
+      const color = forgeHeatColor(t);
+      sys.emit(
+        Array.from({ length: 2 + Math.round(t * 3) }, () => ({
+          x: x + randRange(-40, 40),
+          y: y + randRange(-20, 30),
+          vx: randRange(-18, 18),
+          vy: -randRange(40, 110),
+          life: randRange(0.6, 1.2),
+          size: randRange(1.2, 2.6),
+          endSize: 0,
+          r: color.r, g: color.g, b: color.b,
+          alpha: 0.85, drag: 0.6, glow: 7,
+        })),
+      );
+    },
+    draw(t, ctx) {
+      const pulse = 0.85 + Math.sin(t * Math.PI * 7) * 0.15;
+      const color = forgeHeatColor(t);
+      system.drawGlowCircle(ctx, x, y, (46 + t * 44) * pulse, color, (0.25 + t * 0.4) * pulse, 42);
+    },
+  });
+}

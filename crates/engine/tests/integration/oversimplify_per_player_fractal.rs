@@ -14,7 +14,7 @@
 //!      third-person `puts ` verb AND the `"a number of <type> counters on it
 //!      equal to <quantity>"` body (delegating to the shared
 //!      `parse_dynamic_counter_suffix_body`).
-//!   2. Parser — `parse_type_phrase_with_ctx` lowers
+//!   2. Parser — `parse_type_phrase_folding_with_ctx` lowers
 //!      `"creatures they controlled that were exiled this way"` into a
 //!      composite `And{Typed{Creature,ScopedPlayer}, ExiledBySource}` filter.
 //!   3. Engine — `QuantityRef::Aggregate{Power|Toughness}` falls back to the
@@ -120,18 +120,23 @@ fn oversimplify_per_player_fractal_counters_match_exiled_power() {
     let (counter_type, count_expr) = &enter_with_counters[0];
     assert_eq!(*counter_type, CounterType::Plus1Plus1);
     let expected_count = QuantityExpr::Ref {
-        qty: QuantityRef::Aggregate {
-            function: AggregateFunction::Sum,
-            property: ObjectProperty::Power,
-            filter: TargetFilter::And {
-                filters: vec![
-                    TargetFilter::Typed(
-                        TypedFilter::creature().controller(ControllerRef::ScopedPlayer),
-                    ),
-                    TargetFilter::ExiledBySource,
-                ],
-            },
-        },
+        qty: QuantityRef::PropertyAggregate(
+            engine::types::ability::PropertyAggregate::new(
+                AggregateFunction::Sum,
+                ObjectProperty::Power,
+                engine::types::ability::CardTypeSetSource::Objects {
+                    filter: TargetFilter::And {
+                        filters: vec![
+                            TargetFilter::Typed(
+                                TypedFilter::creature().controller(ControllerRef::ScopedPlayer),
+                            ),
+                            TargetFilter::ExiledBySource,
+                        ],
+                    },
+                },
+            )
+            .expect("statically valid property aggregate"),
+        ),
     };
     assert_eq!(
         count_expr, &expected_count,

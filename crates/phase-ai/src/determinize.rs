@@ -24,7 +24,10 @@
 //! cast-from-hand enumeration) see exactly the real cards, so the K sampled
 //! worlds share an identical AI-legal-action set. Only cards the AI cannot
 //! legitimately know are swapped, which is precisely the set no AI candidate can
-//! reference by identity (see the pin-invariant in `search.rs`).
+//! reference by identity (see the pin-invariant in `search.rs`). A shared
+//! library is the exception: it is resampled whole for the opponent, so
+//! `card_name_choice_candidates` keys it by the registered pool, never by live
+//! identities.
 //!
 //! # Identity-swap caveat (residual fields not rewritten by the primitive)
 //!
@@ -46,6 +49,15 @@
 //! | `perpetual_mods` / `intensity` | Persist across hidden zones by explicit engine design (`game_object.rs`); zeroing them would fight that invariant. Rare (digital-only Alchemy), not read by hidden-zone candidate gen/eval in v1. |
 //! | `counters` / `stickers` | Not carried by hidden-zone cards in normal play; candidate gen/eval read them only for battlefield permanents. |
 //! | `casting_permissions` | Governs whether a specific object may be cast; no AI candidate references a resampled unknown card by identity (pin-invariant), so a stale permission cannot enable an illegal cheat candidate. |
+//!
+//! # Shipping status (2026-07-18)
+//!
+//! All difficulty tier presets ship `determinization_samples = 0`
+//! (perfect-information search) as a deliberate strength decision while players
+//! win ~80% of games vs the AI. This module remains the config-reachable
+//! sampling primitive for experiments and measurement runs — reached by setting
+//! `SearchConfig::determinization_samples > 0` directly — and is exercised by the
+//! `search.rs` ensemble tests, which set K manually.
 
 use std::collections::HashSet;
 
@@ -136,35 +148,44 @@ fn pinned_known_ids(state: &GameState, ai_player: PlayerId) -> HashSet<ObjectId>
     if state.private_look_player == Some(ai_player) {
         ids.extend(state.private_look_ids.iter().copied());
     }
+    ids.extend(
+        state
+            .objects
+            .keys()
+            .copied()
+            .filter(|&id| state.viewer_knows_card_identity(ai_player, id)),
+    );
     ids
 }
 
 /// Ordered unknown hidden-zone slots for `opponent`: its `hand` (in order) then
-/// its `library` (in order), skipping cards `ai_player` legitimately knows
-/// (`known`), tokens, and cards not owned by `opponent` (a borrowed card's
-/// identity is already public). Both zones are ordered `im::Vector`s, so the
-/// slot order is deterministic (#4878 discipline).
+/// its library (in order), skipping cards `ai_player` legitimately knows
+/// (`known`) and tokens. Hand cards not owned by `opponent` are skipped too (a
+/// borrowed card's identity is already public). Both zones are ordered
+/// `im::Vector`s, so the slot order is deterministic (#4878 discipline).
 fn unknown_slots(
     state: &GameState,
     opponent: PlayerId,
     known: &HashSet<ObjectId>,
 ) -> Vec<ObjectId> {
-    let player = &state.players[opponent.0 as usize];
-    player
+    let hand = state.players[opponent.0 as usize]
         .hand
         .iter()
-        .chain(player.library.iter())
         .copied()
         .filter(|id| {
-            if known.contains(id) {
-                return false;
-            }
-            state
-                .objects
-                .get(id)
-                .is_some_and(|obj| !obj.is_token && obj.owner == opponent)
-        })
-        .collect()
+            !known.contains(id)
+                && state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| !obj.is_token && obj.owner == opponent)
+        });
+    // CR 400.2 + CR 401.2: a library's contents are hidden whoever owns each card, so a
+    // shared pile is selected by storage, not by owner.
+    let library =
+        state.library_of(opponent).iter().copied().filter(|id| {
+            !known.contains(id) && state.objects.get(id).is_some_and(|obj| !obj.is_token)
+        });
+    hand.chain(library).collect()
 }
 
 /// SplitMix64 finalizer — mixes the per-sample index into the ensemble seed so
@@ -193,6 +214,11 @@ mod tests {
     use std::sync::Arc;
 
     use engine::game::deck_loading::DeckEntry;
+    use engine::game::effects::resolve_ability_chain;
+    use engine::types::ability::{
+        CardSelectionMode, DigSource, Effect, QuantityExpr, ResolvedAbility, TargetFilter,
+        TargetRef,
+    };
 
     fn face(name: &str) -> CardFace {
         CardFace {
@@ -350,6 +376,95 @@ mod tests {
         assert_ne!(name_of(&sim_opp, pinned), "RevealedCard");
     }
 
+    /// Durable look knowledge pins the observed opponent card, while another
+    /// hidden card still resamples. A subsequent library shuffle clears the
+    /// durable fact, so the prior peek no longer pins that library card.
+    #[test]
+    fn pins_durable_knowledge_and_expires_library_peeks_after_shuffle() {
+        let mut state = GameState::new_two_player(42);
+        set_deck(
+            &mut state,
+            PlayerId(1),
+            vec![
+                deck_entry("Known Hand", 1),
+                deck_entry("Known Library", 1),
+                deck_entry("Sampled", 3),
+            ],
+        );
+        let source = add(&mut state, PlayerId(0), "Observer", Zone::Battlefield);
+        let known_hand = add(&mut state, PlayerId(1), "Known Hand", Zone::Hand);
+        let known_library = add(&mut state, PlayerId(1), "Known Library", Zone::Library);
+
+        let private_hand_look = ResolvedAbility::new(
+            Effect::RevealHand {
+                target: TargetFilter::Player,
+                card_filter: TargetFilter::None,
+                count: None,
+                selection: CardSelectionMode::Chosen,
+                choice_optional: false,
+                reveal: false,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        resolve_ability_chain(&mut state, &private_hand_look, &mut vec![], 0)
+            .expect("private hand look resolves");
+
+        let private_library_look = ResolvedAbility::new(
+            Effect::Dig {
+                player: TargetFilter::Player,
+                count: QuantityExpr::Fixed { value: 1 },
+                destination: None,
+                keep_count: Some(0),
+                keep_count_expr: None,
+                up_to: false,
+                filter: TargetFilter::Any,
+                rest_destination: None,
+                rest_split_top_count: None,
+                rest_order: engine::types::ability::DigRestOrder::Preserve,
+                reveal: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                source: DigSource::Library,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        resolve_ability_chain(&mut state, &private_library_look, &mut vec![], 0)
+            .expect("private library look resolves");
+        state.private_look_ids.clear();
+        state.private_look_player = None;
+        let unknown_hand = add(&mut state, PlayerId(1), "Unknown Hand", Zone::Hand);
+
+        let known = pinned_known_ids(&state, PlayerId(0));
+        assert!(known.contains(&known_hand));
+        assert!(known.contains(&known_library));
+        let sim = determinize_opponents(&state, PlayerId(0), &mut rng(11));
+        assert_eq!(name_of(&sim, known_hand), "Known Hand");
+        assert_eq!(
+            name_of(&sim, unknown_hand),
+            "Sampled",
+            "an unobserved hand card must still resample"
+        );
+
+        let shuffle = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::Player,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        resolve_ability_chain(&mut state, &shuffle, &mut vec![], 0).expect("shuffle resolves");
+
+        assert!(
+            !pinned_known_ids(&state, PlayerId(0)).contains(&known_library),
+            "a library reorder must expire the AI's durable peek knowledge"
+        );
+    }
+
     /// A3b (CR 400.2 / CR 701.20a) — the F4 fix is load-bearing. A continuous
     /// reveal static on a NON-DERIVED input state must still pin the revealed
     /// card: the determinizer calls the engine-owned `sync_continuous_reveals`
@@ -491,6 +606,59 @@ mod tests {
             sim.objects[&hidden].counters.get(&charge),
             Some(&3),
             "determinizer must not defensively reset residual counters (F2)"
+        );
+    }
+
+    /// Under the shared pile the opponent's hidden library is the whole pile
+    /// whoever owns each card; the hand filter keeps its owner test.
+    #[test]
+    fn unknown_slots_select_the_shared_pile_by_storage() {
+        use engine::types::format::FormatConfig;
+
+        for opponent in [PlayerId(1), PlayerId(0)] {
+            let mut state = GameState::new(FormatConfig::dandan(), 2, 1);
+            let mine = add(&mut state, opponent, "Island", Zone::Library);
+            let theirs = add(
+                &mut state,
+                PlayerId(1 - opponent.0),
+                "Brainstorm",
+                Zone::Library,
+            );
+            let token = add(&mut state, opponent, "Token", Zone::Library);
+            state.objects.get_mut(&token).unwrap().is_token = true;
+            let known_card = add(&mut state, opponent, "Opt", Zone::Library);
+            let hand = add(&mut state, opponent, "Predict", Zone::Hand);
+            let borrowed = add(
+                &mut state,
+                PlayerId(1 - opponent.0),
+                "Memory Lapse",
+                Zone::Hand,
+            );
+            let lender = &mut state.players[usize::from(1 - opponent.0)].hand;
+            lender.retain(|id| *id != borrowed);
+            state.players[opponent.0 as usize].hand.push_back(borrowed);
+            let known = HashSet::from([known_card]);
+
+            assert_eq!(
+                unknown_slots(&state, opponent, &known),
+                vec![hand, mine, theirs],
+                "{opponent:?}: hand then the whole pile, minus tokens and known cards"
+            );
+            assert!(
+                state.players[opponent.0 as usize].hand.contains(&borrowed),
+                "reach: the borrowed card sits in the opponent's hand"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_slots_in_a_per_seat_format_stay_per_seat() {
+        let mut state = GameState::new_two_player(1);
+        let mine = add(&mut state, PlayerId(1), "Island", Zone::Library);
+        add(&mut state, PlayerId(0), "Brainstorm", Zone::Library);
+        assert_eq!(
+            unknown_slots(&state, PlayerId(1), &HashSet::new()),
+            vec![mine]
         );
     }
 }

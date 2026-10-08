@@ -6,10 +6,14 @@ use nom::combinator::{opt, peek, value, verify};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
+use super::oracle_nom::condition::parse_reflexive_entry_this_way_rider;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::scan_contains;
-use super::oracle_util::parse_mana_symbols;
-use crate::parser::oracle_effect::{split_leading_conditional, try_parse_named_choice};
+use super::oracle_util::{first_sentence, parse_mana_symbols};
+use crate::parser::oracle_effect::{
+    excise_selection_qualifier, split_leading_conditional, try_parse_named_choice,
+    try_parse_named_choice_conjunction,
+};
 
 pub(crate) fn is_cant_win_lose_compound(lower: &str) -> bool {
     scan_contains(lower, "can't win the game") && scan_contains(lower, "can't lose the game")
@@ -29,11 +33,18 @@ pub(crate) fn is_instead_replacement_line(text: &str) -> bool {
     })
 }
 
+/// CR 603.1: `When`/`Whenever`/`At` are the printed templating for triggered
+/// abilities. CR 701.27e adds one more head that is a triggered ability without
+/// using those words — `As ⟨this permanent⟩ transforms into ⟨name⟩, …` — and
+/// `parse_as_transforms_into_keyword` is narrow enough (it peeks the whole
+/// event head) that no CR 614.1c `As … enters …` replacement, `As long as …`
+/// static, or `As an additional cost …` line can reach this arm.
 pub(crate) fn has_trigger_prefix(lower: &str) -> bool {
     alt((
-        tag::<_, _, OracleError<'_>>("when "),
-        tag("whenever "),
-        tag("at "),
+        value((), tag::<_, _, OracleError<'_>>("when ")),
+        value((), tag("whenever ")),
+        value((), tag("at ")),
+        super::oracle_trigger::parse_as_transforms_into_keyword,
     ))
     .parse(lower)
     .is_ok()
@@ -114,7 +125,7 @@ pub(crate) fn is_spells_alternative_cost_pattern(lower: &str) -> bool {
 /// "You may collect evidence N rather than pay the mana cost for [filter]
 /// spells you cast." Conspiracy Unraveler class. Separate from
 /// `is_spells_alternative_cost_pattern` because the verb is "collect evidence",
-/// not "pay". Verified: CR 118.9 (docs/MagicCompRules.txt:1014).
+/// not "pay". Verified: CR 118.9.
 pub(crate) fn is_collect_evidence_alt_cost_pattern(lower: &str) -> bool {
     lower_starts_with(lower, "you may collect evidence ")
         && scan_contains(lower, "rather than pay")
@@ -125,7 +136,7 @@ pub(crate) fn is_collect_evidence_alt_cost_pattern(lower: &str) -> bool {
 /// CR 107.4f: K'rrik-class payment substitution — "For each {C} in a cost,
 /// you may pay 2 life rather than pay that mana." Routes to
 /// `parse_pay_life_as_colored_mana`.
-/// Verified: CR 107.4f (docs/MagicCompRules.txt:507).
+/// Verified: CR 107.4f.
 pub(crate) fn is_pay_life_as_colored_mana_pattern(lower: &str) -> bool {
     lower_starts_with(lower, "for each {")
         && scan_contains(lower, "in a cost")
@@ -139,7 +150,7 @@ pub(crate) fn is_pay_life_as_colored_mana_pattern(lower: &str) -> bool {
 /// optional leading "as long as " gate (New Perspectives); the lowering
 /// (`parse_alternative_keyword_cost`) splits and types the condition, strict-failing
 /// when the gate is unrecognized.
-/// Verified: CR 702.29a (docs/MagicCompRules.txt:4202), CR 702.122a (docs/MagicCompRules.txt:4870).
+/// Verified: CR 702.29a, CR 702.122a.
 pub(crate) fn is_alternative_keyword_cost_pattern(lower: &str) -> bool {
     (lower_starts_with(lower, "you may ")
         || (lower_starts_with(lower, "as long as ") && scan_contains(lower, "you may ")))
@@ -187,6 +198,57 @@ pub(crate) fn is_damage_prevention_pattern(lower: &str) -> bool {
 }
 
 pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
+    // CR 114.1: An emblem-granting instant/sorcery ("You get an emblem with
+    // \"…\"") whose quoted body contains static text (Gideon of the Trials'
+    // can't-lose/win locks) matches `is_static_pattern` on the unmasked view, so
+    // the spell IR loop would otherwise consume the whole line through the static
+    // classifier — splitting the quoted body mid-sentence. Defer it to the
+    // effect-chain parser, whose `try_parse_emblem_creation` seam produces a
+    // single `Effect::CreateEmblem`. Reuses the emblem-head prefix combinator.
+    if super::oracle_effect::sequence::is_emblem_creation_head(lower) {
+        return true;
+    }
+
+    // CR 702.8a + CR 601.3d: "[~|this spell] has flash[ as long as <condition>]"
+    // is a self-referential Flash CASTING PERMISSION
+    // (`SpellCastingOption::AsThoughHadFlash`, built by
+    // `oracle_casting::parse_self_has_flash_option`), not a continuous keyword
+    // static — even though it also matches the generic "has " arm of
+    // `STATIC_CONTAINS_PATTERNS`. Left unclassified, Priority 7 would lower it
+    // to `StaticDefinition { affected: SelfRef, modifications:
+    // [AddKeyword(Flash)] }`, which can never actually apply: CR 611.3b makes
+    // a static's continuous effect apply while its source is on the
+    // battlefield OR in "the appropriate zone", but this engine's
+    // `for_each_static_effect_source` (an implementation choice, not itself a
+    // numbered rule) only indexes continuous-effect SOURCES from the
+    // battlefield and command zone, so a Hand-zone spell's own self-
+    // referential static is never visited. That produces a "supported but
+    // inert" card — the parser reports a non-empty static while the printed
+    // permission never grants instant-speed casting. Deferring here routes
+    // the line past
+    // Priority 7 to Priority 8e (`parse_spell_casting_option_line`), the only
+    // path that actually authorizes the cast.
+    if is_self_conditional_flash_grant(lower) {
+        return true;
+    }
+
+    // CR 611.2 + CR 109.5: "…sacrifices the rest. Each of those creatures can't
+    // attack you … for as long as it has a vow counter on it" (Promise of
+    // Loyalty) matches the generic "can't attack" arm of
+    // `STATIC_CONTAINS_PATTERNS`, so Priority 7 claims the whole two-sentence
+    // line and emits a degenerate whole-line
+    // `StaticDefinition { mode: CantAttack, affected: SelfRef, modifications: [] }`
+    // whose description is both sentences verbatim.
+    // The instruction is a resolving SPELL's one-shot chain, not a static on a
+    // permanent. Defer it to the effect-chain parser, whose keeper-dispose
+    // recognizer owns the sentence. The predicate is that recognizer's own head
+    // combinator INCLUDING its supported-combination gate — the parser is the
+    // detector — so a line the recognizer would refuse (Covetous Elegy, Divine
+    // Reckoning) keeps its current routing.
+    if super::oracle_effect::is_keeper_dispose_head(lower) {
+        return true;
+    }
+
     if is_self_spell_cost_modification(lower) {
         return false;
     }
@@ -204,6 +266,18 @@ pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
         || scan_contains(lower, "until end of turn")
         || scan_contains(lower, "until your next turn")
         || scan_contains(lower, "this turn")
+}
+
+/// CR 702.8a + CR 601.3d: "[~|this spell] has flash" prefix — see the call
+/// site in `should_defer_spell_to_effect` for why this must be deferred past
+/// the static classifier. `this spell` is deliberately excluded from the `~`
+/// self-reference normalization (`SELF_REF_PARSE_ONLY_PHRASES` in
+/// `oracle_util.rs`), so both spellings are matched directly here — the same
+/// `alt((tag("~"), tag("this spell")))` idiom `oracle_casting.rs` already uses
+/// for sibling self-referential casting predicates
+/// (`parse_cant_spend_mana_restriction`, `parse_negative_self_casting_restriction`).
+fn is_self_conditional_flash_grant(lower: &str) -> bool {
+    nom_primitives::parse_self_spell_has_flash_prefix(lower).is_ok()
 }
 
 fn is_spell_resolution_next_untap_restriction(lower: &str) -> bool {
@@ -284,8 +358,8 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "has ",
     "can't be blocked",
     // CR 301.5 + CR 303.4 + CR 701.3a: positive attachment restriction on an
-    // Aura/Equipment ("~ can be attached only to {filter}") — Strata Scythe,
-    // Brass Knuckles, Konda's Banner. Routes to parse_static_line so it lowers
+    // Aura/Equipment ("~ can be attached only to {filter}") — O-Naginata,
+    // Gate Smasher, Konda's Banner. Routes to parse_static_line so it lowers
     // to StaticMode::AttachmentRestriction instead of an effect.
     "can be attached only to",
     "can't attack",
@@ -378,6 +452,12 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     // the "can't" effect takes precedence over the triggered ability directing it.
     "triggered abilities ",
     "can't cause you to sacrifice or exile",
+    // CR 701.9a + CR 701.21a + CR 609.3: Sigarda, Host of Herons / Tajuru
+    // Preserver / Tamiyo, Collector of Tales-class player-level protection —
+    // the "can't" effect takes precedence over the spell/ability directing
+    // the sacrifice/discard.
+    "can't cause you to sacrifice permanents",
+    "can't cause you to discard cards",
     // CR 701.23 + CR 101.2: Mindlock Orb-class search prohibition — the "can't"
     // effect takes precedence over any effect directing a search.
     "can't search libraries",
@@ -485,11 +565,19 @@ pub(crate) fn is_static_pattern(lower: &str) -> bool {
         return false;
     }
 
+    if super::oracle_static::is_control_players_during_own_library_search(lower) {
+        return true;
+    }
+
     if super::oracle_static::is_tiered_enters_with_additional_counters_static(lower) {
         return true;
     }
 
     if super::oracle_static::is_extra_blockers_static_candidate(lower) {
+        return true;
+    }
+
+    if super::oracle_static::is_unspent_mana_loss_causes_life_loss_static(lower) {
         return true;
     }
 
@@ -515,7 +603,59 @@ pub(crate) fn is_static_pattern(lower: &str) -> bool {
         return true;
     }
 
-    is_static_compound_pattern(lower)
+    if is_static_compound_pattern(lower) {
+        return true;
+    }
+
+    // CR 604.1 + CR 102.1 + CR 611.3a: a printed leading turn window
+    // ("During your turn, …" / "During turns other than yours, …") scopes WHEN
+    // a static ability's statement is true — it does not change WHAT the
+    // statement is. So the routing gate must judge the statement, not the
+    // window. Peel it with the single authority
+    // `oracle_static::parse_leading_turn_scope` — the same combinator
+    // `dispatch::parse_static_line_inner`'s terminal arm uses to build the
+    // matching `StaticCondition` — and re-classify the remainder.
+    //
+    // TERMINAL by construction: every check above has already run against the
+    // FULL line, so this arm can only ADD a `true` verdict, never remove one.
+    // Returning the recursion's verdict any earlier would skip
+    // `is_static_compound_pattern` on the full line and could subtract one.
+    //
+    // That monotonicity is a property of THIS PREDICATE, and it is NOT on its
+    // own a safety argument for the consumers. Flipping a routing verdict
+    // `false -> true` is behavior-preserving only where the caller falls through
+    // on a failed static parse, and not every caller does:
+    //
+    //   * FALL-THROUGH (safe structurally): `oracle_class.rs`'s two sites are
+    //     `if let Some(def) = parse_static_line(..)`; `oracle_dispatch.rs` only
+    //     relabels an already-unsupported category — which is the whole of
+    //     Elvish Refueler's `unknown` -> `static_structure` move.
+    //   * NEGATIVE consumer (present, not hypothetical):
+    //     `oracle::is_spell_resolution_instruction_line` turns a `true` here
+    //     into `return false`, and ITS caller turns that into a `break` in the
+    //     multi-line spell-body accumulation loop. There a grown `true` set
+    //     NARROWS a spell body — the opposite direction from every other site.
+    //   * NON-FALL-THROUGH branches inside Priority 7: the strive-cost and
+    //     copy-verb/replacement routes `continue` out of the
+    //     `if is_static_pattern(..)` block without ever calling the static
+    //     parser, so reaching that block at all is itself observable.
+    //
+    // Those three are closed EMPIRICALLY, not structurally: the whole-corpus
+    // parse diff at the commit that added this arm changes exactly two cards,
+    // neither a spell-body or strive-cost reroute. That diff is the only
+    // instrument that can catch this class of regression — re-run it when
+    // widening this predicate again or adding a consumer that does not fall
+    // through.
+    //
+    // Input here is already lowercase, so the combinator is called directly
+    // rather than through `nom_on_lower` (no original-case remainder is needed
+    // at the classification layer). Recursion terminates because the tag
+    // consumes a non-empty literal.
+    if let Ok((remainder, _)) = super::oracle_static::parse_leading_turn_scope(lower) {
+        return is_static_pattern(remainder);
+    }
+
+    false
 }
 
 fn is_static_compound_pattern(lower: &str) -> bool {
@@ -589,7 +729,16 @@ fn is_static_compound_pattern(lower: &str) -> bool {
             // the ExileCastPermission line routes to the static parser instead
             // of the Priority-8 replacement gate. Narrowly widens the exile
             // anchor to accept the ownership infix.
-            || scan_contains(lower, "from among cards you own exiled with"))
+            || scan_contains(lower, "from among cards you own exiled with")
+            // CR 601.2a + CR 400.7: the graveyard-side mirror of the exile
+            // anchors above — "cast a creature spell from among cards in your
+            // graveyard that were put there from anywhere other than the
+            // battlefield this turn" (Banon, the Returners' Leader; Kagha,
+            // Shadow Archdruid). The bare "from your graveyard" anchor on the
+            // first line of this disjunction does not match the pool form, so
+            // without this the line never reaches `parse_static_line` and the
+            // whole permission lowers to an `Unimplemented` gap.
+            || scan_contains(lower, "from among cards in your graveyard"))
     {
         return true;
     }
@@ -712,6 +861,8 @@ const REPLACEMENT_CONTAINS_PATTERNS: &[&str] = &[
     "enters the battlefield tapped",
     "enters tapped",
     "enters untapped",
+    "enter the battlefield untapped",
+    "enters the battlefield untapped",
     "enters prepared",
     "enter as a copy of",
     "enter tapped as a copy of",
@@ -730,12 +881,96 @@ const REPLACEMENT_CONTAINS_PATTERNS: &[&str] = &[
     "enters under the control of",
 ];
 
+/// CR 608.2c + CR 614.1c: return the HEAD instruction of `lower` — the text with
+/// every reflexive battlefield-entry "… this way" rider sentence removed.
+///
+/// A CR 608.2c rider is a back-reference to an instruction earlier in the same
+/// ability. It routinely contributes the exact tokens CR 614.1c classification
+/// keys on ("enters", "counter", "enters tapped", "enters under the control of"),
+/// but those tokens belong to the back-reference, never to a replacement head.
+/// The whole rider sentence is dropped, consequent included: the consequent's
+/// tokens are the rider's, not the head's.
+///
+/// CONSUMPTION: `parse_reflexive_entry_this_way_rider` is a PREFIX recognizer and
+/// is deliberately NOT wrapped in `all_consuming` here. Its remainder is the
+/// rider's own consequent (", it enters with two additional +1/+1 counters on
+/// it."), so requiring full consumption would reject every real rider — the class
+/// exists only because it has a consequent. Fail-closed behavior comes from the
+/// recognizer's narrowness instead (an article-or-pronoun subject + a
+/// battlefield-entry verb + `" this way"` is not a shape any CR 614.1c head can
+/// take), pinned in both directions by
+/// `a_rider_prefix_drops_its_whole_sentence_by_contract`.
+///
+/// Segmentation uses `oracle_nom::primitives::split_sentence_units`, the total
+/// wrapper over `parse_period_sentence` — the SAME combinator that feeds
+/// `is_replacement_pattern` at its only sentence-scoped call site (`oracle.rs` via
+/// `parse_replacement_sentence_sequence_ir`). A second, `split('.')`-based sentence
+/// model would diverge from it in three ways that all matter here: `split` keeps
+/// the leading space, drops the terminal '.', and emits an empty tail element — and
+/// the residual is then fed to PREFIX-ANCHORED arms below
+/// (`lower_starts_with(lower, "as ")`) that a leading space silently kills, and to
+/// SUFFIX-anchored arms (`ends_with(" enter tapped")`) that need the period.
+///
+/// `None` means the text unit is ONLY riders and therefore has no replacement head
+/// at all. That case is reachable at sentence scope: Pharika's Spawn's second
+/// sentence ("When it enters this way, each opponent sacrifices a non-Gorgon
+/// creature of their choice.") is entirely a rider.
+///
+/// `pub(crate)` because head-scoping is a property of CR 608.2c grammar, not of one
+/// predicate: `oracle.rs` scopes the spell-line static gate and the Priority 5-pre
+/// enters-with interceptor with this same function, so all three classification
+/// gates share one model of "what is the head instruction".
+pub(crate) fn strip_entry_this_way_riders(lower: &str) -> Option<std::borrow::Cow<'_, str>> {
+    let is_rider = |unit: &str| parse_reflexive_entry_this_way_rider(unit).is_ok();
+
+    let units = nom_primitives::split_sentence_units(lower);
+    let kept: Vec<&str> = units.iter().copied().filter(|u| !is_rider(u)).collect();
+    if kept.len() == units.len() {
+        // Hot path: no rider anywhere, hand back the original with no allocation.
+        return Some(std::borrow::Cow::Borrowed(lower));
+    }
+
+    // Residual normalization: a single separating space and no leading/trailing
+    // whitespace, so prefix- and suffix-anchored arms still see an anchored string.
+    let joined = kept.join(" ").trim().to_string();
+    if joined.is_empty() {
+        None
+    } else {
+        Some(std::borrow::Cow::Owned(joined))
+    }
+}
+
+/// CR 614.1c + CR 608.2c: classify the HEAD instruction, not the whole text unit.
+///
+/// A reflexive battlefield-entry "… this way" rider (CR 608.2c) contributes
+/// "enters"/"counter"/"enters tapped"/"enters under the control of" tokens that
+/// belong to a back-reference, never to a replacement head. Scoping here — rather
+/// than at one inner predicate — is required because SIX predicates below are
+/// equally rider-contaminable: the `REPLACEMENT_CONTAINS_PATTERNS` scan alone
+/// carries "enters the battlefield tapped", "enters tapped", "enters untapped" and
+/// "enters under the control of". A text unit that is ONLY a rider has no head and
+/// is not a replacement.
+///
+/// This subsumes and replaces the former
+/// `has_trigger_prefix(lower) && scan_contains(lower, "enters this way,")` early
+/// return, which was dead at five of this function's six call sites (they all sit
+/// behind a `has_trigger_prefix` gate) and, at the one live sentence-scoped site,
+/// returned `false` for exactly the inputs the blank-residual rule now returns
+/// `false` for. Regression context it carried: Winter Soldier, Reborn Avenger,
+/// whose TRIGGER routing is decided one gate earlier by the Priority 5-pre
+/// enters-with interceptor in `oracle.rs` — that gate is head-scoped by
+/// `strip_entry_this_way_riders` too, so both classification gates now model the
+/// rider class identically instead of one of them re-deriving it from a literal.
 pub(crate) fn is_replacement_pattern(lower: &str) -> bool {
-    // CR 608.2c: reflexive "enters this way" riders on triggered abilities
-    // (Winter Soldier, Reborn Avenger) contain "enters" + "counter" but are
-    // not CR 614.1c ETB replacements.
-    if has_trigger_prefix(lower) && scan_contains(lower, "enters this way,") {
-        return false;
+    match strip_entry_this_way_riders(lower) {
+        None => false,
+        Some(head) => is_replacement_pattern_head_scoped(&head),
+    }
+}
+
+fn is_replacement_pattern_head_scoped(lower: &str) -> bool {
+    if super::oracle_replacement::is_search_found_replacement_pattern(lower) {
+        return true;
     }
 
     if is_counter_prohibition_replacement_pattern(lower) {
@@ -771,6 +1006,11 @@ fn is_replacement_compound_pattern(lower: &str) -> bool {
     if is_as_enters_choose_pattern(lower) {
         return true;
     }
+    // CR 701.3a + CR 614.1: "As ~ becomes attached [to X], choose …" — the
+    // attach-time analogue of `is_as_enters_choose_pattern` (Psychic Paper).
+    if is_as_becomes_attached_choose_pattern(lower) {
+        return true;
+    }
     // CR 614.1c + CR 614.12: "As a [filter] enters, it becomes a [P/T] [type]
     // creature in addition to its other types" — a replacement from another
     // source affecting a subset of entrants (Displaced Dinosaurs). Routes to
@@ -788,17 +1028,8 @@ fn is_replacement_compound_pattern(lower: &str) -> bool {
     if is_as_enters_becomes_choice_pattern(lower) {
         return true;
     }
-    // CR 614.1c: "enters with [counters]" replacement effects. The plural-subject
-    // forms ("Other creatures you control enter with …", "… creatures escape
-    // with …") use the bare-verb "enter"/"escape" rather than "enters"/"escapes",
-    // so accept both at word boundaries. Gated on "counter" so the bare verb
-    // alone never reclassifies a non-counter line.
-    if (scan_contains(lower, "enters")
-        || scan_contains(lower, "escapes")
-        || scan_contains(lower, "enter with")
-        || scan_contains(lower, "escape with"))
-        && scan_contains(lower, "counter")
-    {
+    // CR 614.1c: "enters with [counters]" replacement effects.
+    if has_enters_with_counter_tokens(lower) {
         return true;
     }
     if scan_contains(lower, "tapped for mana") && scan_contains(lower, "instead") {
@@ -837,13 +1068,30 @@ fn is_replacement_compound_pattern(lower: &str) -> bool {
 /// carries a fixed `count`), so this recognizer must NOT intercept them. Only
 /// the per-each *scaled* count, which the static mode cannot represent, routes
 /// to the dynamic-capable replacement (`PutCounter { count: QuantityExpr }`).
+/// The line is head-scoped by `strip_entry_this_way_riders` for the same CR 608.2c
+/// reason `is_replacement_pattern` is: a rider's "enters … counter … for each"
+/// tokens describe the back-reference, not a replacement head.
 pub(crate) fn is_enters_with_counter_replacement_line(lower: &str) -> bool {
+    strip_entry_this_way_riders(lower).is_some_and(|head| {
+        has_enters_with_counter_tokens(&head) && scan_contains(&head, "for each")
+    })
+}
+
+/// CR 614.1c: token signature of an "enters/escapes with counters" replacement.
+///
+/// The plural-subject forms ("Other creatures you control enter with …",
+/// "… creatures escape with …") use the bare verb "enter"/"escape" rather than
+/// "enters"/"escapes", so accept both at word boundaries. Gated on "counter" so
+/// the bare verb alone never reclassifies a non-counter line.
+///
+/// Shared by `is_replacement_pattern_head_scoped` and
+/// `is_enters_with_counter_replacement_line` so the two cannot drift.
+fn has_enters_with_counter_tokens(lower: &str) -> bool {
     (scan_contains(lower, "enters")
         || scan_contains(lower, "escapes")
         || scan_contains(lower, "enter with")
         || scan_contains(lower, "escape with"))
         && scan_contains(lower, "counter")
-        && scan_contains(lower, "for each")
 }
 
 /// CR 614.1c + CR 614.12: nom recognizer for the non-self "As a [filter] enters,
@@ -951,14 +1199,76 @@ fn is_as_enters_choose_pattern(lower: &str) -> bool {
         tag::<_, _, OracleError<'_>>("enters").parse(i)
     })
     .is_some();
+    // Named-attribute choices only ("choose a creature type", "choose a color").
+    // Object choices ("choose a creature" — Metamorphic Alteration, Dauntless
+    // Bodyguard, Scheming Fence) are NOT replacement-classified here: claiming
+    // them as Moved without a proven CopyChosen consumer changes unsupported
+    // card shape for the whole class. Metamorphic's ChoosePermanent is injected
+    // only by `LinkedChoiceKind::CopyChosenHost` after the companion static
+    // parses.
     let has_choose = nom_primitives::scan_at_word_boundaries(lower, |i| {
         verify(tag::<_, _, OracleError<'_>>("choose "), |_: &&str| {
+            // CR 608.2d (override) + CR 614.1c: the classifier must agree with
+            // `parse_as_enters_choose`, which EXCISES an "at random" qualifier
+            // before handing the phrase to the object table. Without the second
+            // disjunct the two disagree, and the disagreement is not uniform: the
+            // object table mixes PREFIX-`tag` arms (which tolerate a trailing
+            // qualifier — "a basic land type at random" still prefix-matches)
+            // with `all_consuming` arms (which cannot — a numeric or creature-type
+            // ENUMERATION declines on the trailing qualifier). So the classifier
+            // silently recognized the qualifier-bearing form of one half of the
+            // table and not the other, and every `all_consuming` object arm was
+            // invisible here whenever a selection qualifier was printed.
+            //
+            // The first disjunct is evaluated unchanged, so every line WITHOUT a
+            // qualifier takes a bit-identical path and this is purely additive.
+            // `excise_selection_qualifier` is the SINGLE excision authority,
+            // shared with `parse_as_enters_choose`. The classifier and the
+            // builder must derive the SAME object phrase — a local copy of this
+            // arithmetic here is the very drift the second disjunct exists to
+            // close.
+            //
+            // The builder additionally retries on the choice's OWN SENTENCE,
+            // so the classifier must accept the sentence-bounded rungs too:
+            // a two-sentence line (Haktos's "choose 2, 3, or 4 at random.
+            // Haktos has protection…") is otherwise rejected here before the
+            // builder that would parse it ever runs. Both rungs go through
+            // the shared `first_sentence`, so the two layers can never name
+            // different phrases again.
             try_parse_named_choice(i).is_some()
+                || try_parse_named_choice(first_sentence(i).trim()).is_some()
+                || excise_selection_qualifier(i).is_some_and(|excised| {
+                    try_parse_named_choice(&excised).is_some()
+                        || try_parse_named_choice(first_sentence(&excised).trim()).is_some()
+                })
         })
         .parse(i)
     })
     .is_some();
     has_as && has_enters && has_choose
+}
+
+/// CR 701.3a + CR 614.1: the attach-time analogue of `is_as_enters_choose_pattern`
+/// (Psychic Paper: "As this Equipment becomes attached to a creature, choose a
+/// creature card name and a creature type."). Accepts both a single choice and
+/// a conjunction ("choose X and Y") sharing one "choose".
+fn is_as_becomes_attached_choose_pattern(lower: &str) -> bool {
+    let has_as = nom_primitives::scan_at_word_boundaries(lower, |i| {
+        tag::<_, _, OracleError<'_>>("as ").parse(i)
+    })
+    .is_some();
+    let has_becomes_attached = nom_primitives::scan_at_word_boundaries(lower, |i| {
+        tag::<_, _, OracleError<'_>>("becomes attached").parse(i)
+    })
+    .is_some();
+    let has_choose = nom_primitives::scan_at_word_boundaries(lower, |i| {
+        verify(tag::<_, _, OracleError<'_>>("choose "), |_: &&str| {
+            try_parse_named_choice(i).is_some() || try_parse_named_choice_conjunction(i).is_some()
+        })
+        .parse(i)
+    })
+    .is_some();
+    has_as && has_becomes_attached && has_choose
 }
 
 /// CR 603.2 vs CR 614.1c: "Whenever <subject> enters with a counter on it, <consequence>"
@@ -1056,6 +1366,85 @@ mod tests {
         assert!(is_static_pattern("creatures you control can't block"));
     }
 
+    /// V8 — ROUTING GATE: the classifier accepts a windowed static line that no
+    /// earlier check in `is_static_pattern` claims, and does so as a pure
+    /// WIDENING. On the Class route (`oracle_class.rs`), `is_static_pattern` is
+    /// the ONLY gate to `parse_static_line` (no ungated leftover-static
+    /// fallback exists there, unlike the normal route's own attempt — the one
+    /// guarded by `oracle.rs`'s "Leftover permanent text can still be a valid
+    /// static even when classifier heuristics miss it" comment, which calls
+    /// `parse_static_line_with_graveyard_keyword_continuation` ungated), so
+    /// this terminal peel is what makes a windowed line reachable at all for a
+    /// card like Gourmand's Talent.
+    #[test]
+    fn leading_turn_window_is_peeled_before_static_classification() {
+        // Today (before this change) `false` — no STATIC_CONTAINS/PREFIX/compound
+        // pattern matches the FULL line, because "are zombies in addition to
+        // their other types" carries no recognized marker on its own once the
+        // leading window is counted as part of the text being scanned.
+        assert!(
+            is_static_pattern(
+                "during your turn, creatures you control are zombies in addition to their other types."
+            ),
+            "the windowed line must classify as static once the window is peeled"
+        );
+
+        // PAIRED NEGATIVE + MONOTONICITY GUARD: the peel did not invent the
+        // verdict — the un-windowed remainder is independently `true` on its
+        // own (it hits `STATIC_CONTAINS_PATTERNS`'s "in addition" style
+        // markers), and the peel alone (no statement after it) or an unrelated
+        // spell-shaped line are still `false`.
+        assert!(is_static_pattern(
+            "creatures you control are zombies in addition to their other types."
+        ));
+        assert!(!is_static_pattern("during your turn, "));
+        assert!(!is_static_pattern("target creature gets +1/+1."));
+
+        // Two classification authorities: the full-line compound test must
+        // still run FIRST, so an existing rider-contamination fixture's verdict
+        // is unaffected by this new terminal arm.
+        const NON_COUNTER_RIDER_LINE: &str = "return target creature card from your \
+             graveyard to the battlefield. if a hero enters this way, it enters with \
+             your choice of flying or vigilance.";
+        assert!(
+            is_static_pattern(NON_COUNTER_RIDER_LINE),
+            "the rider-contamination fixture's verdict must be unchanged: {NON_COUNTER_RIDER_LINE:?}"
+        );
+    }
+
+    #[test]
+    fn self_conditional_flash_grant_matches_tilde_and_this_spell() {
+        assert!(is_self_conditional_flash_grant(
+            "~ has flash as long as you've committed a crime this turn."
+        ));
+        assert!(is_self_conditional_flash_grant(
+            "this spell has flash as long as there are five or more mana values \
+             among cards in your graveyard."
+        ));
+        assert!(is_self_conditional_flash_grant("~ has flash."));
+    }
+
+    #[test]
+    fn self_conditional_flash_grant_word_boundary_excludes_flashback() {
+        // Regression: "flash" is a literal prefix of "flashback", so a naive
+        // `tag(" has flash")` would wrongly claim a real keyword-grant line
+        // like "~ has flashback {2}{U}" and defer it away from the static
+        // classifier that actually knows how to parse it.
+        assert!(!is_self_conditional_flash_grant("~ has flashback {2}{u}."));
+        assert!(!is_self_conditional_flash_grant(
+            "this spell has flashback {2}{u}."
+        ));
+    }
+
+    #[test]
+    fn should_defer_spell_to_effect_defers_self_conditional_flash_but_not_flashback() {
+        assert!(should_defer_spell_to_effect(
+            "this spell has flash as long as there are five or more mana values \
+             among cards in your graveyard."
+        ));
+        assert!(!should_defer_spell_to_effect("~ has flashback {2}{u}."));
+    }
+
     #[test]
     fn split_flashback_trailing_self_spell_cost_reduction_splits_visions_line() {
         let line = "Flashback {8}{R}{R}. This spell costs {X} less to cast this way, where X is the greatest mana value of a commander you own on the battlefield or in the command zone.";
@@ -1129,5 +1518,455 @@ mod tests {
         let lower = "each other vehicle and creature you control enters with an additional +1/+1 counter on it if its mana value is 4 or less. otherwise, it enters with three additional +1/+1 counters on it.";
         assert!(is_static_pattern(lower));
         assert!(is_replacement_pattern(lower));
+    }
+
+    // -------------------------------------------------------------------
+    // CR 608.2c + CR 614.1c: reflexive battlefield-entry rider head-scoping
+    // -------------------------------------------------------------------
+
+    /// Heroic Return, printed line index 1 (verbatim, lowercased).
+    const HEROIC_RETURN_REANIMATION_LINE: &str =
+        "return target creature card from your graveyard to the battlefield. \
+         if a hero enters this way, it enters with two additional +1/+1 counters on it.";
+    /// Recommission, printed line index 0 (verbatim, lowercased).
+    const RECOMMISSION_REANIMATION_LINE: &str =
+        "return target artifact or creature card with mana value 3 or less from your \
+         graveyard to the battlefield. if a creature enters this way, it enters with \
+         an additional +1/+1 counter on it.";
+    /// Pharika's Spawn, escape line — sentence 1 IS a genuine CR 614.1c head.
+    const PHARIKA_SENTENCE_1: &str = "this creature escapes with two +1/+1 counters on it.";
+    /// Pharika's Spawn — sentence 2 is entirely a rider (the blank-residual case,
+    /// and the one input the deleted `has_trigger_prefix` guard actually fired on).
+    const PHARIKA_SENTENCE_2: &str =
+        "when it enters this way, each opponent sacrifices a non-gorgon creature of their choice.";
+    /// Silver Surfer, Cosmic Voyager — rider sentence; TRUE today only via the
+    /// `REPLACEMENT_CONTAINS_PATTERNS` "enters tapped" literal.
+    const SILVER_SURFER_RIDER_SENTENCE: &str = "if a land enters this way, it enters tapped.";
+    /// Winter Soldier, Reborn Avenger — rider sentence; TRUE today via enters+counter.
+    const WINTER_SOLDIER_RIDER_SENTENCE: &str =
+        "if a hero enters this way, it enters with an additional +1/+1 counter on it.";
+
+    /// V1: the two misparsing spell lines stop being classified as replacements,
+    /// while a genuine replacement head at the same (sentence) scope does not —
+    /// so a blanket-`false` regression cannot pass this test.
+    #[test]
+    fn reflexive_entry_rider_does_not_make_a_line_a_replacement() {
+        assert!(!is_replacement_pattern(HEROIC_RETURN_REANIMATION_LINE));
+        assert!(!is_replacement_pattern(RECOMMISSION_REANIMATION_LINE));
+
+        // Non-vacuous positive: the head IS a replacement.
+        assert!(is_replacement_pattern(PHARIKA_SENTENCE_1));
+
+        // Rider-only text units have no head at all (blank-residual rule). These
+        // reproduce, at the one scope where it was live, the verdict of the
+        // deleted `has_trigger_prefix && "enters this way,"` guard.
+        assert!(!is_replacement_pattern(PHARIKA_SENTENCE_2));
+        assert!(!is_replacement_pattern(SILVER_SURFER_RIDER_SENTENCE));
+        assert!(!is_replacement_pattern(WINTER_SOLDIER_RIDER_SENTENCE));
+    }
+
+    /// V1: the trigger-prefixed full LINES the deleted guard covered keep their
+    /// `false` verdict, so no line-scope routing moved for that pair.
+    #[test]
+    fn trigger_prefixed_entry_rider_lines_stay_non_replacement() {
+        assert!(!is_replacement_pattern(
+            "whenever this creature attacks, return target creature card from your \
+             graveyard to the battlefield. if a hero enters this way, it enters with \
+             an additional +1/+1 counter on it."
+        ));
+        assert!(!is_replacement_pattern(
+            "when this creature enters, search your library for a land card, put it onto \
+             the battlefield, then shuffle. if a land enters this way, it enters tapped."
+        ));
+    }
+
+    /// V0c: residual normalization. A dropped rider must leave the surviving head
+    /// anchored (no leading space), or prefix-anchored arms below silently die.
+    #[test]
+    fn stripping_a_rider_leaves_the_head_anchored() {
+        let line = "as this creature is turned face up, draw a card. \
+                    if a creature enters this way, it enters tapped.";
+        let head = strip_entry_this_way_riders(line).expect("head survives");
+        assert!(
+            lower_starts_with(&head, "as "),
+            "residual must stay prefix-anchored, got {head:?}"
+        );
+        // The line is still a replacement via the "as … is turned face up" arm.
+        assert!(is_replacement_pattern(line));
+
+        // Zero-allocation hot path: a rider-free line is handed back borrowed.
+        assert!(matches!(
+            strip_entry_this_way_riders(PHARIKA_SENTENCE_1),
+            Some(std::borrow::Cow::Borrowed(_))
+        ));
+        // A text unit that is ONLY a rider has no head.
+        assert!(strip_entry_this_way_riders(PHARIKA_SENTENCE_2).is_none());
+    }
+
+    /// V1b: Priority-7 routing keeps its class while becoming head-scoped.
+    #[test]
+    fn enters_with_counter_replacement_line_is_head_scoped() {
+        // Gev, Scaled Scorch (verbatim): tokens come from the HEAD, so
+        // over-stripping fails here.
+        const GEV_DISTRIBUTIVE_LINE: &str =
+            "other creatures you control enter with an additional +1/+1 counter on them \
+             for each opponent who lost life this turn.";
+        assert!(is_enters_with_counter_replacement_line(
+            GEV_DISTRIBUTIVE_LINE
+        ));
+
+        // Every token comes from the rider sentence — fails on revert to the
+        // whole-line form.
+        const RIDER_ONLY_FOR_EACH_LINE: &str =
+            "return target creature card from your graveyard to the battlefield. \
+             if a hero enters this way, it enters with an additional +1/+1 counter on it \
+             for each card in your graveyard.";
+        assert!(!is_enters_with_counter_replacement_line(
+            RIDER_ONLY_FOR_EACH_LINE
+        ));
+
+        // The " for each " gate is preserved on the residual: an enters+counter
+        // head without it must stay out of the Priority-7 reroute.
+        assert!(!is_enters_with_counter_replacement_line(PHARIKA_SENTENCE_1));
+    }
+
+    /// The head-scoper covers the WHOLE rider class the combinator recognizes,
+    /// not the single present-tense/comma-terminated voice the two retired
+    /// literals modelled. Both `oracle.rs` gates (spell-line static, Priority
+    /// 5-pre enters-with) consume this function, so each voice below is a voice
+    /// those gates now scope off too.
+    #[test]
+    fn head_scoping_covers_every_rider_voice_the_literal_missed() {
+        // Passive voice: the retired literals scanned for "enters this way," and
+        // this text does not contain it, so both let the rider's tokens through.
+        const PASSIVE: &str = "return target creature card from your graveyard to the \
+             battlefield. if a creature is put onto the battlefield this way, it enters \
+             with an additional +1/+1 counter on it.";
+        assert!(
+            !scan_contains(PASSIVE, "enters this way,"),
+            "premise: the retired literal does not match the passive voice"
+        );
+        let head = strip_entry_this_way_riders(PASSIVE).expect("head survives");
+        assert!(
+            !scan_contains(&head, "enters with"),
+            "the passive rider must be scoped off the head, got {head:?}"
+        );
+
+        // Comma-less voice: the rider's clause ends at the period, not a comma —
+        // the SUBJECT is still clause-initial, which is the position
+        // `parse_entry_this_way_clause` recognizes.
+        const COMMA_LESS: &str = "return target creature card from your graveyard to the \
+             battlefield. a hero enters this way.";
+        assert!(
+            !scan_contains(COMMA_LESS, "enters this way,"),
+            "premise: the retired literal does not match the comma-less voice"
+        );
+        let head = strip_entry_this_way_riders(COMMA_LESS).expect("head survives");
+        assert!(
+            !scan_contains(&head, "enters this way"),
+            "the comma-less rider must be scoped off the head, got {head:?}"
+        );
+
+        // Active "you put …" voice.
+        const ACTIVE: &str = "search your library for a land card and put it onto the \
+             battlefield. if you put a land onto the battlefield this way, it enters with \
+             a +1/+1 counter on it.";
+        assert!(
+            !scan_contains(ACTIVE, "enters this way,"),
+            "premise: the retired literal does not match the active voice"
+        );
+        let head = strip_entry_this_way_riders(ACTIVE).expect("head survives");
+        assert!(
+            !scan_contains(&head, "enters with"),
+            "the active-voice rider must be scoped off the head, got {head:?}"
+        );
+
+        // Non-vacuous: a genuine CR 614.1c head keeps its tokens in every case.
+        for genuine in [
+            "this creature enters with two +1/+1 counters on it.",
+            "other creatures you control enter with an additional +1/+1 counter on them.",
+        ] {
+            let head = strip_entry_this_way_riders(genuine).expect("head survives");
+            assert!(
+                scan_contains(&head, "enters with") || scan_contains(&head, "enter with"),
+                "a genuine head must keep its tokens, got {head:?}"
+            );
+        }
+    }
+
+    /// LOW-finding sibling gate: `is_static_pattern` is rider-contaminable through
+    /// exactly the same `enters with ` token, one branch EARLIER on the spell path
+    /// than `is_replacement_pattern`. `oracle.rs` head-scopes it with this same
+    /// function; this pins the verdict flip the head-scoping produces.
+    #[test]
+    fn static_classification_is_rider_contaminable_without_head_scoping() {
+        // A non-counter rider consequent: `is_static_compound_pattern` fires on
+        // `"enters with " && !"counter"`, which the rider alone supplies.
+        const NON_COUNTER_RIDER_LINE: &str = "return target creature card from your \
+             graveyard to the battlefield. if a hero enters this way, it enters with \
+             your choice of flying or vigilance.";
+        assert!(
+            is_static_pattern(NON_COUNTER_RIDER_LINE),
+            "premise: the un-scoped line classifies as a static — this is the gate \
+             that dropped the head instruction"
+        );
+        let head = strip_entry_this_way_riders(NON_COUNTER_RIDER_LINE).expect("head survives");
+        assert!(
+            !is_static_pattern(&head),
+            "the head instruction alone is not a static, got {head:?}"
+        );
+
+        // Non-vacuous: a real static keeps its verdict through head-scoping.
+        const REAL_STATIC: &str = "creatures you control can't block.";
+        assert!(is_static_pattern(REAL_STATIC));
+        assert!(
+            strip_entry_this_way_riders(REAL_STATIC).is_some_and(|head| is_static_pattern(&head))
+        );
+    }
+
+    /// POSITION BOUNDARY: `parse_entry_this_way_clause` recognizes a rider only
+    /// CLAUSE-INITIALLY, so a trailing-position entry rider is deliberately left
+    /// unscoped. This test states that limit rather than implying coverage the
+    /// combinator does not have.
+    ///
+    /// The limit is safe because the trailing voice is UNPRINTED: a Scryfall regex
+    /// sweep for a sentence-final battlefield-entry back-reference
+    /// (`o:/(enters|enter|is put onto the battlefield|are put onto the battlefield) this way\./`)
+    /// returns zero cards. The shape that DOES print sentence-finally is the
+    /// second assertion below — a genuine CR 614.1c head whose trailing back-reference
+    /// is a NON-entry zone change — and that one must keep its tokens.
+    #[test]
+    fn head_scoping_leaves_the_unprinted_trailing_rider_voice_alone() {
+        // Trailing-position entry rider: synthetic, unprinted, and out of scope.
+        const TRAILING_RIDER: &str = "return target creature card from your graveyard to the \
+             battlefield. it enters with an additional +1/+1 counter on it if a hero \
+             enters this way.";
+        let head = strip_entry_this_way_riders(TRAILING_RIDER).expect("head survives");
+        assert!(
+            scan_contains(&head, "enters with"),
+            "documented limit: a trailing-position rider is NOT scoped off the head, \
+             got {head:?}"
+        );
+
+        // Arsenal Thresher (verbatim second sentence): a real CR 614.1c head with a
+        // trailing NON-entry back-reference. `ThisWayVerbScope::BattlefieldEntry`
+        // withholds "revealed", so this head keeps its tokens — the property a
+        // position-scanning recognizer would put at risk.
+        const ARSENAL_THRESHER_HEAD: &str =
+            "this creature enters with a +1/+1 counter on it for each card revealed this way.";
+        let head = strip_entry_this_way_riders(ARSENAL_THRESHER_HEAD).expect("head survives");
+        assert!(
+            scan_contains(&head, "enters with"),
+            "a printed CR 614.1c head with a trailing non-entry back-reference must \
+             keep its tokens, got {head:?}"
+        );
+    }
+
+    /// CONSUMPTION CONTRACT: `parse_reflexive_entry_this_way_rider` is a PREFIX
+    /// recognizer, and this consumer discards the WHOLE sentence on a prefix match.
+    /// That is the intended contract, not an oversight: the text after the comma is
+    /// the back-reference's own consequent, so its "enters"/"counter"/"tapped"
+    /// tokens are the rider's and never a CR 614.1c head's. Wrapping the recognizer
+    /// in `all_consuming` here would reject every real rider, since the class exists
+    /// only because it HAS a consequent.
+    ///
+    /// Fail-closed behavior comes from the recognizer's narrowness instead, pinned
+    /// in both directions below.
+    #[test]
+    fn a_rider_prefix_drops_its_whole_sentence_by_contract() {
+        // Prefix match → whole sentence gone, consequent included.
+        const RIDER_WITH_CONSEQUENT: &str = "return target creature card from your graveyard \
+             to the battlefield. if a hero enters this way, it enters tapped and enters \
+             under the control of an opponent.";
+        let head = strip_entry_this_way_riders(RIDER_WITH_CONSEQUENT).expect("head survives");
+        assert!(
+            !scan_contains(&head, "enters tapped")
+                && !scan_contains(&head, "enters under the control of"),
+            "the consequent's tokens belong to the rider and must go with it, got {head:?}"
+        );
+        assert!(
+            scan_contains(&head, "return target creature card"),
+            "the head instruction must survive, got {head:?}"
+        );
+
+        // The other direction: a sentence that merely CONTAINS an entry verb does
+        // not open with a back-reference, so nothing is dropped. The recognizer's
+        // narrowness — not full consumption — is what keeps this fail-closed.
+        for retained in [
+            "this creature enters with two +1/+1 counters on it.",
+            "when this creature enters, draw a card.",
+            "if a creature card was exiled this way, you may cast it.",
+        ] {
+            assert!(
+                matches!(
+                    strip_entry_this_way_riders(retained),
+                    Some(std::borrow::Cow::Borrowed(_))
+                ),
+                "a non-rider sentence must be handed back untouched: {retained}"
+            );
+        }
+    }
+}
+
+/// The as-enters choice CLASSIFIER must agree with the as-enters choice BUILDER
+/// about what an "at random" qualifier does.
+///
+/// `is_as_enters_choose_pattern` gates the whole replacement tier. Its
+/// `has_choose` conjunct probes the object table, which MIXES two arm kinds:
+///
+///   * PREFIX-`tag` arms ("a basic land type", "a color", "a card type") — these
+///     tolerate a trailing qualifier, because a prefix match ignores the tail.
+///   * `all_consuming` arms (the numeric enumeration, the creature-type
+///     enumeration) — these CANNOT, because the trailing qualifier is unconsumed.
+///
+/// So before the excision landed, the classifier recognized the qualifier-bearing
+/// form of one half of the table and silently refused the other half — and a
+/// refused line never reaches `parse_replacement_line` at all, so the builder's
+/// own excision could never run. These tests pin the fix as a CLASS (two
+/// different `all_consuming` arms, one of which is not Haktos' shape at all),
+/// not as one card.
+#[cfg(test)]
+mod as_enters_choose_qualifier_classification_tests {
+    use super::is_as_enters_choose_pattern;
+
+    /// THE CLASS. Both members are `all_consuming` object arms carrying a
+    /// trailing selection qualifier, and both were refused before the fix.
+    /// A Haktos-shaped special case would pass the first and fail the second.
+    #[test]
+    fn every_all_consuming_object_arm_is_classified_through_a_trailing_qualifier() {
+        // Numeric enumeration (Haktos the Unscarred).
+        assert!(
+            is_as_enters_choose_pattern("as ~ enters, choose 2, 3, or 4 at random."),
+            "a numeric enumeration with a trailing qualifier must classify"
+        );
+        // Creature-type enumeration — a DIFFERENT `all_consuming` arm, and no
+        // printed card drives it, so this is the class check rather than a card
+        // check. If the fix were special-cased to digits this fails.
+        assert!(
+            is_as_enters_choose_pattern("as ~ enters, choose human, merfolk, or goblin at random."),
+            "a creature-type enumeration with a trailing qualifier must classify \
+             too — the fix is the qualifier axis, not the numeric arm"
+        );
+    }
+
+    /// THE REVIEWER'S CASE, full two-sentence lines: Haktos's choice sentence
+    /// followed by its protection continuation on the SAME line. The object
+    /// table's `all_consuming` numeric arm declines the protection tail, and
+    /// the qualifier excision preserves it — only the sentence-bounded rungs
+    /// restore agreement with the builder, which parses the choice's own
+    /// sentence. Without them the classifier rejects a line the builder
+    /// accepts, and the line never reaches `parse_replacement_line` at all.
+    #[test]
+    fn haktos_full_two_sentence_line_classifies() {
+        assert!(
+            is_as_enters_choose_pattern(
+                "as ~ enters, choose 2, 3, or 4 at random. ~ has protection from each mana value other than the chosen number."
+            ),
+            "the full two-sentence Haktos line must classify — the classifier retries on the choice's own sentence"
+        );
+        // Qualifier-free two-sentence shape: no printed card drives it, but
+        // the builder's sentence retry is unconditional, so the classifier's
+        // unexcised first-sentence rung must agree too. Same justification as
+        // the creature-type case above — the axis is sentences, not Haktos.
+        assert!(
+            is_as_enters_choose_pattern(
+                "as ~ enters, choose 2, 3, or 4. ~ has protection from each mana value other than the chosen number."
+            ),
+            "a qualifier-free two-sentence enumeration must classify on its first sentence"
+        );
+    }
+
+    /// The prefix-`tag` half of the table, which already worked, must keep
+    /// working — the excision is additive, not a replacement.
+    #[test]
+    fn prefix_matching_object_arms_still_classify_with_and_without_a_qualifier() {
+        for line in [
+            "as ~ enters, choose a basic land type at random.",
+            "as ~ enters, choose a basic land type.",
+            "as ~ enters, choose a creature type.",
+            "as ~ enters, choose a color.",
+        ] {
+            assert!(is_as_enters_choose_pattern(line), "{line}");
+        }
+    }
+
+    /// NEGATIVE, pinned rather than assumed: an as-enters line with NO qualifier
+    /// classifies exactly as it does at base. The first disjunct is evaluated
+    /// unchanged, so these take a bit-identical path.
+    #[test]
+    fn a_line_without_a_qualifier_is_unchanged() {
+        // Enumerations with no qualifier were already classified at base.
+        assert!(is_as_enters_choose_pattern(
+            "as ~ enters, choose 2, 3, or 4."
+        ));
+        // A non-contiguous enumeration reaches the labeled fallback at base and
+        // still does — the range lowering must not start claiming it.
+        assert!(is_as_enters_choose_pattern(
+            "as ~ enters, choose 1, 3, or 5."
+        ));
+    }
+
+    /// NEGATIVE, and the one the function's own comment calls out: OBJECT
+    /// choices are deliberately NOT replacement-classified here, because
+    /// claiming them as `Moved` without a proven `CopyChosen` consumer reshapes
+    /// the whole class. Asserted, not assumed — and asserted WITH a qualifier
+    /// too, so the excision cannot smuggle them in through the new disjunct.
+    #[test]
+    fn object_choices_are_still_excluded_with_or_without_a_qualifier() {
+        for line in [
+            // Metamorphic Alteration
+            "as ~ enters, choose a creature.",
+            "as ~ enters, choose a creature at random.",
+            // Dauntless Bodyguard
+            "as ~ enters, choose another creature you control.",
+            "as ~ enters, choose another creature you control at random.",
+            // Scheming Fence
+            "as ~ enters, you may choose a nonland permanent.",
+            "as ~ enters, you may choose a nonland permanent at random.",
+        ] {
+            assert!(
+                !is_as_enters_choose_pattern(line),
+                "object choices must stay out of the replacement tier: {line}"
+            );
+        }
+    }
+
+    /// HOSTILE FIXTURE — the qualifier belongs to a LATER SENTENCE and must not
+    /// be excised from this choice's object phrase.
+    ///
+    /// FIRST PRODUCTION BRANCH REACHED: the sentence-bounding `first_sentence`
+    /// inside `excise_selection_qualifier`, before `scan_at_random` ever runs.
+    /// The line still classifies (its object
+    /// is a plain prefix arm), so this pins the BOUNDING, and the builder-side
+    /// test pins that the exported mode stays `Chosen`.
+    #[test]
+    fn a_later_sentences_qualifier_is_not_excised_from_this_object() {
+        let line = "as ~ enters, choose a color. discard a card at random.";
+        assert!(is_as_enters_choose_pattern(line));
+        // The excision helper must decline: the object's own sentence carries no
+        // qualifier, so there is nothing to remove.
+        assert_eq!(
+            super::excise_selection_qualifier("choose a color. discard a card at random."),
+            None,
+            "the qualifier is in a later sentence and is out of this clause's scope"
+        );
+    }
+
+    /// The excision itself, asserted directly so a reviewer can see the exact
+    /// string the classifier probes — and that every non-qualifier byte,
+    /// including a following sentence, survives.
+    #[test]
+    fn the_excision_removes_only_the_qualifier() {
+        assert_eq!(
+            super::excise_selection_qualifier("choose 2, 3, or 4 at random."),
+            Some("choose 2, 3, or 4.".to_string())
+        );
+        assert_eq!(
+            super::excise_selection_qualifier(
+                "choose a basic land type at random. ~ has landwalk of the chosen type."
+            ),
+            Some("choose a basic land type. ~ has landwalk of the chosen type.".to_string())
+        );
+        assert_eq!(super::excise_selection_qualifier("choose a color."), None);
     }
 }

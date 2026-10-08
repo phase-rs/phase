@@ -46,7 +46,18 @@ export const EVENT_SCHEMAS: Record<string, { blobs: string[]; doubles: string[] 
   engine_panic: { blobs: ["reason", "panic", "game_mode"], doubles: ["fatal", "turn"] },
   stuck_decision: { blobs: ["waiting_for_kind", "game_mode", "phase"], doubles: [] },
   js_error: { blobs: ["name", "message", "top_frame", "source", "route"], doubles: [] },
-  chunk_reload: { blobs: ["reason", "chunk"], doubles: ["deferred"] },
+  p2p_disconnect: {
+    blobs: ["reason", "connection_state", "ice_state", "visibility", "last_message_type", "last_connection_state", "last_ice_state", "last_channel_state", "channel_error"],
+    doubles: ["pong_age_ms", "receive_age_ms", "pending_sends", "pending_decodes", "buffered_bytes", "channel_open", "transport_captured_at", "last_buffered_bytes", "transport_age_ms"],
+  },
+  wasm_not_initialized: { blobs: ["operation"], doubles: ["initializing", "disposed", "observed_at"] },
+  // `probe_*` columns are appended (never inserted — AE columns are
+  // positional) and populated only on `reason: "loop-abort"` events: the
+  // client refetches the failing chunk and reports what it actually got.
+  chunk_reload: {
+    blobs: ["reason", "chunk", "probe_cache", "probe_ray"],
+    doubles: ["deferred", "probe_status", "probe_sw"],
+  },
   game_end: {
     blobs: [
       "result",
@@ -54,6 +65,11 @@ export const EVENT_SCHEMAS: Record<string, { blobs: string[]; doubles: string[] 
       "game_mode",
       "unimplemented_oracle_ids",
       "pending_trigger_abandons",
+      // `engine_mode` and `native_fallback_reason` appended 2026-07: selected
+      // local AI engine and native-engine fallback code; "" from clients
+      // predating the fields.
+      "engine_mode",
+      "native_fallback_reason",
     ],
     doubles: ["turn_count"],
   },
@@ -62,8 +78,29 @@ export const EVENT_SCHEMAS: Record<string, { blobs: string[]; doubles: string[] 
     doubles: ["turn", "supported", "total"],
   },
   session_start: { blobs: ["route"], doubles: [] },
-  game_start: { blobs: ["game_mode"], doubles: ["player_count", "ai_count"] },
+  // `format` appended 2026-07: the engine `GameFormat` variant name (e.g.
+  // "Commander", "HistoricBrawl"); "" from clients predating the field.
+  // `engine_mode` and `native_fallback_reason` appended 2026-07: selected
+  // local AI engine and native-engine fallback code; "" from clients
+  // predating the fields.
+  game_start: {
+    blobs: ["game_mode", "format", "engine_mode", "native_fallback_reason"],
+    doubles: ["player_count", "ai_count"],
+  },
   route_view: { blobs: ["route"], doubles: [] },
+  // Server-directory probe results, written by the lobby DO from
+  // `POST /servers/metrics` (see `directory.ts`), not by a client telemetry
+  // batch. Columns are appended, never inserted — AE columns are positional
+  // and permanent.
+  //
+  // Two consequences worth stating rather than discovering. Declaring the
+  // schema here also makes `server_probe` an acceptable event on
+  // `POST /telemetry`; that is intentional and harmless, because AE is a
+  // write-only dashboard sink that no counter and no score ever reads — the
+  // score is folded from the DO's own storage, and a forged AE point cannot
+  // reach it. And `rtt_ms` is `0` for every outcome that carries no latency,
+  // which per this file's `toDouble` convention means "unknown", never "0 ms".
+  server_probe: { blobs: ["url", "outcome", "game_code"], doubles: ["rtt_ms"] },
 };
 
 /** A validated, column-resolved event ready to become an AE data point. */

@@ -57,7 +57,10 @@ pub fn apply_destroy_after_replacement(
                     return false;
                 }
             }
-            events.push(GameEvent::CreatureDestroyed { object_id });
+            events.push(GameEvent::CreatureDestroyed {
+                object_id,
+                source_id: source,
+            });
             true
         }
         ProposedEvent::ZoneChange { .. } => {
@@ -195,29 +198,9 @@ pub fn resolve(
             ..
         }
     );
-    let self_ref_target = matches!(
-        &ability.effect,
-        Effect::Destroy {
-            target: TargetFilter::SelfRef,
-            ..
-        }
-    );
-    if self_ref_target && ability.targets.is_empty() {
-        match destroy_single_object(
-            state,
-            ability.source_id,
-            ability.source_id,
-            cant_regenerate,
-            events,
-        ) {
-            DestroyOutcome::Completed | DestroyOutcome::Skipped => {}
-            DestroyOutcome::NeedsChoice => return Ok(()),
-        }
-    }
-    for target in &ability.targets {
+    for target in destroyed_targets(state, ability) {
         if let TargetRef::Object(obj_id) = target {
-            match destroy_single_object(state, *obj_id, ability.source_id, cant_regenerate, events)
-            {
+            match destroy_single_object(state, obj_id, ability.source_id, cant_regenerate, events) {
                 DestroyOutcome::Completed | DestroyOutcome::Skipped => {}
                 DestroyOutcome::NeedsChoice => return Ok(()),
             }
@@ -231,6 +214,50 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 701.8a: the objects a single-target `Destroy` node destroys. Shared by
+/// `resolve` and `stack_reach`, so a pending node is read with the resolver's
+/// own binding.
+pub(super) fn destroyed_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetRef> {
+    let target_filter = match &ability.effect {
+        Effect::Destroy { target, .. } => Some(target),
+        _ => None,
+    };
+    if matches!(target_filter, Some(TargetFilter::SelfRef)) && ability.targets.is_empty() {
+        return vec![TargetRef::Object(ability.source_id)];
+    }
+    // CR 400.7 + CR 603.7c: a delayed destroy's pinned referent that became a
+    // new object is dropped. The SelfRef fallback above still reads the RAW
+    // `ability.targets`, so dropping every element here cannot re-bind the
+    // destroy to the source.
+    //
+    // CR 603.2 + CR 608.2k: an untargeted object anaphor on a triggered ability
+    // ("whenever ... is dealt damage, destroy IT") names an object carried by the
+    // trigger EVENT, not a target the controller chose, so `ability.targets` is
+    // empty and reading it alone destroys nothing. Resolve those referents
+    // through the shared `resolved_targets` authority, which handles every pure
+    // event-context filter uniformly via `is_pure_event_context_filter`.
+    //
+    // Deliberately the SHARED predicate rather than a handler-local
+    // `matches!(.., TriggeringSource | ..)` list: three such lists already exist
+    // (`effect.rs` covers only `TriggeringSource`; `change_zone.rs` and
+    // `attach.rs` cover `TriggeringSource | AttachedTo`) and they have diverged,
+    // because an omitted member is not a compile error — it degrades silently
+    // into "this effect does nothing". Routing through the single authority means
+    // a future event-context variant is picked up here for free.
+    //
+    // Gated on `ability.targets.is_empty()` so a genuinely targeted destroy still
+    // affects exactly the chosen targets (CR 608.2b).
+    match target_filter {
+        Some(filter)
+            if ability.targets.is_empty()
+                && crate::game::targeting::is_pure_event_context_filter(filter) =>
+        {
+            crate::game::targeting::resolved_targets(ability, filter, state)
+        }
+        _ => ability.live_object_targets(state),
+    }
 }
 
 /// Does this destroy filter carry the "other" qualifier? A spell that creates
@@ -280,7 +307,7 @@ pub fn resolve_all(
             properties: vec![],
         })
     } else {
-        crate::game::effects::resolved_object_filter(ability, &target_filter)
+        crate::game::effects::resolved_object_filter(state, ability, &target_filter)
     };
 
     // CR 701.7 (create) + CR 701.8 (destroy), per the Martial Coup / White Sun's
@@ -825,6 +852,7 @@ mod tests {
             .any(|obj| obj.is_token && obj.name == "Destroy Rider Token"));
     }
 
+    /// CR 701.8a: the destruction names the object whose instruction destroyed it.
     #[test]
     fn destroy_emits_creature_destroyed_event() {
         let mut state = GameState::new_two_player(42);
@@ -848,9 +876,11 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert!(events.iter().any(
-            |e| matches!(e, GameEvent::CreatureDestroyed { object_id } if *object_id == obj_id)
-        ));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::CreatureDestroyed { object_id, source_id }
+                if *object_id == obj_id && *source_id == Some(ObjectId(100))
+        )));
     }
 
     #[test]
@@ -1030,6 +1060,8 @@ mod tests {
             player,
             candidate_count,
             candidates,
+            kind,
+            ..
         } = &state.waiting_for
         else {
             panic!(
@@ -1040,6 +1072,13 @@ mod tests {
         };
         assert_eq!(*player, PlayerId(0));
         assert_eq!(*candidate_count, 2);
+        // CR 616.1e: two distinct competing replacements — an ordering decision,
+        // not an optional accept/decline. The frontend keys its presentation off
+        // this discriminator, so pin it here.
+        assert_eq!(
+            *kind,
+            crate::types::game_state::ReplacementChoiceKind::Order
+        );
         let descriptions: Vec<&str> = candidates.iter().map(|c| c.description.as_str()).collect();
         assert_eq!(
             descriptions.as_slice(),

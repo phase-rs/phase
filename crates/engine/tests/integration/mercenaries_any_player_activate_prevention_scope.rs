@@ -97,9 +97,20 @@ fn opponent_activated_shield_scopes_to_activator_not_source_controller() {
 
     // The installed prevention shield must scope its recipient to the ACTIVATOR
     // (P1). Pre-fix, `target: Any` yields `damage_target_filter = None`.
-    let shields: Vec<&DamageTargetFilter> = runner.state().objects[&merc]
-        .replacement_definitions
-        .iter_unchecked()
+    //
+    // STORAGE REPOINTED for issue #8485, not weakened. Mercenaries' clause is
+    // SOURCE-scoped and untargeted, so `prevent_damage::resolve` now routes it to
+    // `state.pending_damage_replacements` through
+    // `effects::install_floating_damage_replacement` instead of hosting it on the
+    // Mercenaries permanent. CR 113.7a: "Once activated or triggered, an ability
+    // exists on the stack independently of its source. Destruction or removal of
+    // the source after that time won't affect the ability." Both behavioral
+    // assertions below are unchanged and still run through the production
+    // replacement pipeline.
+    let shields: Vec<&DamageTargetFilter> = runner
+        .state()
+        .pending_damage_replacements
+        .iter()
         .filter_map(|r| r.damage_target_filter.as_ref())
         .collect();
     assert_eq!(
@@ -113,6 +124,36 @@ fn opponent_activated_shield_scopes_to_activator_not_source_controller() {
             player: DamageTargetPlayerScope::Specific(P1),
         },
         "the shield must scope to the activator (P1), not Mercenaries' controller (P0)"
+    );
+    assert!(
+        runner.state().objects[&merc]
+            .replacement_definitions
+            .as_slice()
+            .is_empty(),
+        "CR 113.7a: the shield must not ride on the Mercenaries permanent"
+    );
+
+    // CR 113.8 + CR 109.5: the install authority latches the ability's CONTROLLER,
+    // and for an activated ability that is "the player who activated the ability"
+    // (CR 109.5) — here P1, even though P0 controls the Mercenaries permanent. This
+    // fixture predates issue #8485 and is not about the latch, which is exactly why
+    // it is worth asserting here: it is an INDEPENDENT confirmation, from a
+    // pre-existing multi-controller setup, that the pending scan's
+    // `source_controller` reading is the activator and not the source permanent's
+    // live controller.
+    assert_eq!(
+        runner.state().pending_damage_replacements[0].source_controller,
+        Some(P1),
+        "CR 113.8 + CR 109.5: the latched controller is the ACTIVATOR (P1), not the \
+         Mercenaries permanent's controller (P0)"
+    );
+    // CR 113.7a: the host identity travels with the shield on `source_object`, so a
+    // host-relative filter (Mercenaries' own "this creature" source reference) can
+    // still resolve under the `ObjectId(0)` sentinel host.
+    assert_eq!(
+        runner.state().pending_damage_replacements[0].source_object,
+        Some(merc),
+        "the shield carries the Mercenaries permanent as its host anchor"
     );
 
     // Behavioral proof through the production replacement pipeline. Feed P0's

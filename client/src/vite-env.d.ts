@@ -3,12 +3,41 @@
 
 declare const __APP_VERSION__: string;
 declare const __BUILD_HASH__: string;
+declare const __ENGINE_FINGERPRINT__: string | undefined;
+declare const __ENGINE_WASM_URL__: string | undefined;
+declare const __OFFICIAL_MULTIPLAYER_SERVER_URL__: string;
 declare const __DEFAULT_MULTIPLAYER_SERVER_URL__: string;
+declare const __TURN_CREDENTIALS_URL__: string;
+
+/**
+ * Per-deployment configuration, set by `/config.js` before the app bundle runs.
+ *
+ * Everything here is optional and untrusted: the file is written by whoever
+ * deployed the bundle (the helm chart renders it from values), so readers
+ * validate rather than assume. In official builds the file is an empty
+ * placeholder and the build-time defines are used unchanged.
+ */
+interface PhaseRuntimeConfig {
+  /** `ws://`/`wss://` address new profiles default to. Ignored if malformed. */
+  multiplayerServerUrl?: string;
+  /**
+   * `http://`/`https://` site a release web build's "Try Preview" badge opens.
+   * Ignored if malformed. The desktop shell always opens the build-time site.
+   */
+  previewSiteUrl?: string;
+}
+
+interface Window {
+  __PHASE_CONFIG__?: PhaseRuntimeConfig;
+}
+
 declare const __CARD_DATA_URL__: string;
 declare const __CARD_DATA_LOCALE_URL_TEMPLATE__: string;
+declare const __SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE__: string;
 declare const __CARD_NAMES_URL__: string;
 declare const __CHANGELOG_URL__: string;
 declare const __CHANGELOG_META_URL__: string;
+declare const __STATUS_URL__: string;
 declare const __COVERAGE_DATA_URL__: string;
 declare const __COVERAGE_SUMMARY_URL__: string;
 declare const __CARD_DATA_META_URL__: string;
@@ -21,6 +50,7 @@ declare const __SCRYFALL_PRINTINGS_URL__: string;
 declare const __SCRYFALL_SETS_URL__: string;
 declare const __GIT_REPO_URL__: string;
 declare const __PREVIEW_SITE_URL__: string;
+declare const __RELEASE_SITE_URL__: string;
 declare const __IS_RELEASE_BUILD__: boolean;
 declare const __SUPABASE_URL__: string;
 declare const __SUPABASE_ANON_KEY__: string;

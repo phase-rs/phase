@@ -7,6 +7,8 @@ import { useSetList, type SetMeta } from "../../hooks/useSetList";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import { scryfallLegalityKey } from "../../services/scryfall";
 import { SelectField } from "../ui/SelectField";
+import { copyText } from "../../services/copyText";
+import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 
 // Supported handlers are now derived from the coverage export, not a hardcoded list.
 // See `extractHandlerUsage` below — a handler is listed iff the parser produces it
@@ -1290,7 +1292,12 @@ function annotateOracleLine(line: string, indexed: IndexedItem[]): TextSegment[]
 function CardParseDetail({ card, onBack }: { card: CardCoverageResult; onBack?: () => void }) {
   const { t } = useTranslation("game");
   const [hoveredId, setHoveredId] = useState<string | null>(null);
-  const { src: cardImageSrc, isLoading: cardImageLoading } = useCardImage(card.card_name, { size: "normal" });
+  const {
+    src: cardImageSrc,
+    isLoading: cardImageLoading,
+    rungs: cardImageRungs,
+    advanceFailedSource,
+  } = useCardImage(card.card_name, { size: "normal" });
 
   const onHover = useCallback((id: string | null) => setHoveredId(id), []);
 
@@ -1343,14 +1350,24 @@ function CardParseDetail({ card, onBack }: { card: CardCoverageResult; onBack?: 
       <div className="mb-5 flex flex-col gap-4 sm:flex-row sm:gap-5">
         {/* Card image */}
         <div className="mx-auto w-[160px] shrink-0 sm:mx-0 sm:w-[200px]">
-          {cardImageLoading || !cardImageSrc ? (
+          {cardImageLoading ? (
             <div className="aspect-[488/680] w-full animate-pulse rounded-lg bg-white/5" />
+          ) : !cardImageSrc ? (
+            <div
+              className="flex aspect-[488/680] w-full items-center justify-center rounded-lg bg-white/5 px-2 text-center text-xs text-white/50"
+              role="img"
+              aria-label={card.card_name}
+            >
+              {card.card_name}
+            </div>
           ) : (
             <img
               src={cardImageSrc}
+              {...getCardImageSrcSetProps(cardImageSrc, cardImageRungs)}
               alt={card.card_name}
               className="w-full rounded-lg shadow-[0_8px_32px_rgba(0,0,0,0.5)]"
               draggable={false}
+              onError={() => advanceFailedSource?.(cardImageSrc)}
             />
           )}
         </div>
@@ -1644,7 +1661,8 @@ function CopyButton({ text, label, className = "" }: { text: string; label: stri
   const [copied, setCopied] = useState(false);
 
   const handleCopy = useCallback(() => {
-    navigator.clipboard.writeText(text).then(() => {
+    void copyText(text).then((ok) => {
+      if (!ok) return;
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     });

@@ -30,7 +30,10 @@
 //! `Duration::Permanent` transient), the accept case panics again.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
-use engine::types::ability::{ContinuousModification, Effect, TargetRef};
+use engine::types::ability::{
+    ContinuousModification, Effect, FilterProp, StaticDefinition, TargetFilter, TargetRef,
+    TypeFilter, TypedFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::mana::{ManaColor, ManaType, ManaUnit};
@@ -118,6 +121,71 @@ fn build_scenario() -> (
     (runner, vizier, bear)
 }
 
+/// A lord whose ONLY ability is a board-wide static. Copying it is what hands
+/// the Embalm token a static ability that its copiable base — a 0/0 Clone with
+/// no static of its own — does not carry.
+const LORD_ORACLE: &str = "Other creatures you control get +1/+1.";
+
+/// Same shape as [`build_scenario`], except the creature the token will copy is
+/// a lord and a third, vanilla creature is present to receive the anthem.
+/// Returns `(runner, vizier, lord, vanilla)`.
+fn build_lord_scenario() -> (
+    GameRunner,
+    engine::types::identifiers::ObjectId,
+    engine::types::identifiers::ObjectId,
+    engine::types::identifiers::ObjectId,
+) {
+    build_lord_scenario_with(None)
+}
+
+/// [`build_lord_scenario`], plus an extra static definition on the lord's PRINTED
+/// base — so it is part of the lord's copiable values (CR 707.2) and rides along
+/// onto the Embalm token when the token copies the lord.
+fn build_lord_scenario_with(
+    extra_lord_static: Option<StaticDefinition>,
+) -> (
+    GameRunner,
+    engine::types::identifiers::ObjectId,
+    engine::types::identifiers::ObjectId,
+    engine::types::identifiers::ObjectId,
+) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let vizier = scenario
+        .add_creature_to_graveyard(P0, "Vizier of Many Faces", 0, 0)
+        .with_mana_cost(engine::types::mana::ManaCost::Cost {
+            generic: 3,
+            shards: vec![engine::types::mana::ManaCostShard::Blue],
+        })
+        .from_oracle_text_with_keywords(&["Embalm"], VIZIER_ORACLE)
+        .id();
+
+    // 1/1 lord and a 2/2 vanilla: the two anthem instances (original + copy)
+    // are each worth +1/+1, so the vanilla's toughness alone distinguishes
+    // "one anthem applied" (3/3) from "both applied" (4/4).
+    let mut lord_builder = scenario.add_creature(P0, "Bear Umbra Lord", 1, 1);
+    lord_builder.from_oracle_text(LORD_ORACLE);
+    if let Some(static_def) = extra_lord_static {
+        lord_builder.with_static_definition(static_def);
+    }
+    let lord = lord_builder.id();
+    let vanilla = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+
+    let mut runner = scenario.build();
+    add_mana(
+        &mut runner,
+        &[
+            ManaType::Blue,
+            ManaType::Blue,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+        ],
+    );
+    (runner, vizier, lord, vanilla)
+}
+
 /// Activate the Embalm ability and drain any mana-payment prompt so the token
 /// is created and parked on its first entry-choice prompt.
 fn activate_embalm(runner: &mut GameRunner, vizier: engine::types::identifiers::ObjectId) {
@@ -149,6 +217,61 @@ fn activate_embalm(runner: &mut GameRunner, vizier: engine::types::identifiers::
     panic!("Embalm activation never reached an entry choice");
 }
 
+/// Drive a token parked on its entry choices all the way onto the battlefield as
+/// a copy of `copy_target`: accept the enter-as-copy replacement, name the target,
+/// then let the stack settle. Returns the token's `ObjectId`.
+fn resolve_embalm_copy_of(
+    runner: &mut GameRunner,
+    copy_target: engine::types::identifiers::ObjectId,
+) -> engine::types::identifiers::ObjectId {
+    // Bounded, not `loop`: the `Priority` arm acts on every trip, so an engine
+    // change that stops surfacing `CopyTargetChoice` would spin here forever and
+    // hang CI instead of failing. Same bound as `activate_embalm`.
+    let mut chosen = None;
+    for _ in 0..64 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice { .. } => {
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("accept enter-as-copy replacement");
+            }
+            WaitingFor::CopyTargetChoice {
+                source_id,
+                valid_targets,
+                ..
+            } => {
+                assert!(
+                    valid_targets.contains(&copy_target),
+                    "the intended copy target must be legal, got {valid_targets:?}"
+                );
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(copy_target)),
+                    })
+                    .expect("choose copy target");
+                chosen = Some(source_id);
+                break;
+            }
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("unexpected waiting_for during entry: {other:?}"),
+        }
+    }
+    let token = chosen.expect("the Embalm token never reached its copy-target choice");
+
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            _ => break,
+        }
+    }
+    token
+}
+
 #[test]
 fn embalm_copy_of_bear_survives_and_carries_stamped_exceptions() {
     let (mut runner, vizier, _bear) = build_scenario();
@@ -156,7 +279,11 @@ fn embalm_copy_of_bear_survives_and_carries_stamped_exceptions() {
 
     // Accept the enter-as-copy replacement, then pick the Bear to copy. This is
     // the exact sequence that panicked before the fix.
-    let token = 'drive: loop {
+    // Bounded, not `loop`, for the same reason as `resolve_embalm_copy_of`: the
+    // `Priority` arm acts on every trip, so an engine change that stops surfacing
+    // `CopyTargetChoice` would spin here forever and hang CI instead of failing.
+    let mut chosen = None;
+    for _ in 0..64 {
         match runner.state().waiting_for.clone() {
             WaitingFor::ReplacementChoice { .. } => {
                 runner
@@ -176,14 +303,16 @@ fn embalm_copy_of_bear_survives_and_carries_stamped_exceptions() {
                         target: Some(TargetRef::Object(target)),
                     })
                     .expect("choose copy target (Bear)");
-                break 'drive source_id;
+                chosen = Some(source_id);
+                break;
             }
             WaitingFor::Priority { .. } => {
                 runner.act(GameAction::PassPriority).expect("pass priority");
             }
             other => panic!("unexpected waiting_for during entry: {other:?}"),
         }
-    };
+    }
+    let token = chosen.expect("the Embalm token never reached its copy-target choice");
 
     // Drain any residual priority so SBAs run.
     for _ in 0..16 {
@@ -271,7 +400,9 @@ fn embalm_copy_declined_enters_as_zero_zero_and_dies() {
     // Decline the enter-as-copy replacement (index 1 = decline on an optional
     // replacement). The token stays a copy of Vizier (0/0) with the Embalm
     // exceptions already stamped at creation, then dies to CR 704.5f.
-    let token = loop {
+    // Bounded for the same CI-hang reason as the drive loop above.
+    let mut declined = None;
+    for _ in 0..64 {
         match runner.state().waiting_for.clone() {
             WaitingFor::ReplacementChoice { candidates, .. } => {
                 // Positive reach-guard: the enter-as-copy replacement really
@@ -292,14 +423,16 @@ fn embalm_copy_declined_enters_as_zero_zero_and_dies() {
                 runner
                     .act(GameAction::ChooseReplacement { index: 1 })
                     .expect("decline enter-as-copy replacement");
-                break entering;
+                declined = Some(entering);
+                break;
             }
             WaitingFor::Priority { .. } => {
                 runner.act(GameAction::PassPriority).expect("pass priority");
             }
             other => panic!("unexpected waiting_for before decline: {other:?}"),
         }
-    };
+    }
+    let token = declined.expect("the Embalm token never reached its enter-as-copy choice");
 
     // Drain to let SBAs run.
     for _ in 0..16 {
@@ -323,5 +456,170 @@ fn embalm_copy_declined_enters_as_zero_zero_and_dies() {
     assert!(
         !on_battlefield,
         "a declined 0/0 Embalm copy of Vizier must die to SBA, not remain on the battlefield"
+    );
+}
+
+/// CR 613.2a + CR 613.2c: layer 1a applies copy effects, and after all of layer 1
+/// has been applied the object's characteristics ARE its copiable values. A static
+/// ability a permanent has ONLY because of a copy effect is therefore part of the
+/// board that layers 2–7 of that SAME pass must be derived from — it does not wait
+/// for the next evaluation.
+///
+/// The generator index that decides which permanents are scanned for statics is
+/// built at the top of the pass, from the just-reset BASE definitions. An Embalm
+/// token's base is Vizier's (a 0/0 Clone with no static at all), so before the fix
+/// the copied anthem was invisible to the very pass that applied the copy, and it
+/// stayed invisible on every later pass too — each one resets to that same base
+/// first. The engine therefore ran a copy of a lord as a permanent with no ability.
+///
+/// REVERT-PROBE (discriminating, RUN): drop `copy_added_generator ||` from the
+/// post-layer-1 `StaticSourceIndex::rebuild_from_state` guard in `evaluate_layers`
+/// ⇒ the vanilla creature holds at 3/3 (only the ORIGINAL lord's anthem applies)
+/// and this test fails on both P/T assertions, while the two tests above stay
+/// green (neither copies a permanent that carries a static ability).
+#[test]
+fn a_copy_granted_static_ability_applies_in_the_pass_that_applied_the_copy() {
+    let (mut runner, vizier, lord, vanilla) = build_lord_scenario();
+    activate_embalm(&mut runner, vizier);
+    let token = resolve_embalm_copy_of(&mut runner, lord);
+
+    // POSITIVE reach-guards: the copy really happened AND it really is the copy
+    // that put a static ability on the token, so the P/T assertions below cannot
+    // pass for the wrong reason (a token that copied nothing has no anthem to
+    // contribute, and a token whose base already carried the anthem would not
+    // exercise the layer-1 binding at all).
+    let token_obj = runner
+        .state()
+        .objects
+        .get(&token)
+        .expect("the Embalm token must be on the battlefield");
+    assert_eq!(
+        token_obj.name, "Bear Umbra Lord",
+        "the token must be a copy of the chosen lord"
+    );
+    assert!(
+        !token_obj.static_definitions.is_empty(),
+        "the copy must have given the token the lord's static ability"
+    );
+    assert!(
+        token_obj.base_static_definitions.is_empty(),
+        "the token's own copiable base must carry no static, or its anthem would not \
+         depend on the layer-1 copy effect and this test would stop exercising the \
+         binding it is written for"
+    );
+
+    // Two anthems now apply to the vanilla creature: the original lord's and the
+    // token's copied one. Before the fix only the original was gathered.
+    assert_eq!(
+        (
+            runner.state().objects[&vanilla].power,
+            runner.state().objects[&vanilla].toughness
+        ),
+        (Some(4), Some(4)),
+        "the vanilla 2/2 must get +1/+1 from BOTH the original lord and its copy"
+    );
+    assert_eq!(
+        (
+            runner.state().objects[&lord].power,
+            runner.state().objects[&lord].toughness
+        ),
+        (Some(2), Some(2)),
+        "the original 1/1 lord must get +1/+1 from the token's copied anthem \
+         (\"other creatures\", so its own anthem does not pump it)"
+    );
+    // The third recipient class, and the only one where the two anthem instances
+    // must disagree about the SAME object: the token is excluded from the anthem
+    // it copied (`FilterProp::Another`) and pumped by the original lord's, so a
+    // bug that swapped which instance excludes which recipient would move this
+    // total while leaving the two above plausible.
+    assert_eq!(
+        (
+            runner.state().objects[&token].power,
+            runner.state().objects[&token].toughness
+        ),
+        (Some(2), Some(2)),
+        "the 1/1 token must get +1/+1 from the ORIGINAL lord's anthem only — its \
+         own copied anthem says \"other creatures\" and cannot pump itself"
+    );
+}
+
+/// CR 613.2a + CR 613.2c: sublayer 1a must reach a FIXED POINT before layer 2.
+/// Applying a copy effect can hand its recipient a static ability that ITSELF
+/// generates a layer-1 continuous effect (CR 707.2c), and CR 613.2c says the
+/// characteristics standing after layer 1 finishes ARE the object's copiable
+/// values — so that second-generation copy effect belongs to the same layer 1,
+/// not to the next pass.
+///
+/// Board: SYNTHETIC, and deliberately so. No printed card carries a board-wide
+/// `SetName` static — on real cards `SetName` shows up as a copy EXCEPTION,
+/// paired with `CopyValues` inside `additional_modifications` (Vizier's own
+/// Embalm line is one). What is being tested here is the building block, not a
+/// card: `SetName` is the only `Layer::Copy` modification with an observable that
+/// no later layer can also write, which is what makes the assertion below
+/// attribute the change to sublayer 1a and nothing else. The mechanism it stands
+/// in for — a copy handing its recipient a static that is itself a layer-1 effect
+/// — is real and is what CR 707.2c is about.
+///
+/// So: the lord's printed base carries "each OTHER creature is named Faceless
+/// Reflection" (`FilterProp::Another` excludes the source from its own effect).
+/// The Embalm token copies the lord (CR 707.2), which makes the TOKEN a second
+/// source of that same static — and the token's instance, unlike the lord's,
+/// does cover the lord. So `lord.name` flips if and only if sublayer 1a ran a
+/// second generation: the lord's own instance can never rename the lord, and no
+/// later layer applies `SetName` (it is a `Layer::Copy` modification).
+///
+/// REVERT-PROBE (discriminating, RUN): cap `apply_copy_sublayer_to_fixed_point`
+/// at a single generation (return right after the first apply) ⇒ the vanilla is
+/// still renamed by generation 1 (the lord's own instance) but the lord keeps its
+/// printed name, and this test fails on the `lord.name` assertion alone.
+#[test]
+fn a_copy_granted_layer_one_static_applies_inside_the_same_layer_one_pass() {
+    const RENAMED: &str = "Faceless Reflection";
+    let renamer = StaticDefinition::continuous()
+        .affected(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature).properties(vec![FilterProp::Another]),
+        ))
+        .modifications(vec![ContinuousModification::SetName {
+            name: RENAMED.to_string(),
+        }]);
+    let (mut runner, vizier, lord, vanilla) = build_lord_scenario_with(Some(renamer));
+    activate_embalm(&mut runner, vizier);
+    let token = resolve_embalm_copy_of(&mut runner, lord);
+
+    // POSITIVE reach-guards: the copy really delivered a LAYER-1 static onto the
+    // token, and the token's own copiable base carries none — so the rename
+    // asserted below cannot come from anywhere but the copy effect.
+    let token_obj = runner
+        .state()
+        .objects
+        .get(&token)
+        .expect("the Embalm token must be on the battlefield");
+    assert!(
+        token_obj.base_static_definitions.is_empty(),
+        "the token's own copiable base must carry no static, or the second \
+         generation this test probes would not depend on the copy at all"
+    );
+    assert!(
+        token_obj.static_definitions.as_slice().iter().any(|sd| sd
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetName { .. }))),
+        "the copy must have handed the token the lord's copy-LAYER static, or the \
+         second generation could not exist: {:?}",
+        token_obj.static_definitions.as_slice()
+    );
+
+    // Generation 1 evidence: the lord's own instance renames every OTHER creature.
+    assert_eq!(
+        runner.state().objects[&vanilla].name,
+        RENAMED,
+        "the lord's own layer-1 static must rename the vanilla creature"
+    );
+    // Generation 2 evidence: only the token's copied instance can rename the lord.
+    assert_eq!(
+        runner.state().objects[&lord].name,
+        RENAMED,
+        "the copy-granted layer-1 static must be applied inside the SAME layer-1 \
+         pass that applied the copy"
     );
 }
