@@ -67,7 +67,10 @@ fn player_context_target(
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
 ) -> Option<PlayerRecipient> {
-    if matches!(target_filter, TargetFilter::DeclaredPlayer { .. }) {
+    if matches!(
+        target_filter,
+        TargetFilter::DeclaredPlayer { .. } | TargetFilter::SpecificPlayer { .. }
+    ) {
         // CR 608.2b: a declared player with no legal referent is dealt nothing.
         return Some(
             match super::resolve_player_for_context_ref(state, ability, target_filter) {

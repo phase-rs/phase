@@ -328,6 +328,10 @@ pub fn resolve(
         *token_count = QuantityExpr::Fixed { value: count };
     }
 
+    // CR 603.7a + CR 608.2c: the payload fires as its own root, where the creating
+    // chain's declared players no longer exist; capture them while that chain does.
+    bind_outer_declared_groups(state, ability, &mut effect_def);
+
     // CR 603.7c: Build the delayed trigger's resolved ability from the full
     // definition, preserving sub_ability chains. A bare `effect_def.effect`
     // clone dropped continuation clauses — e.g. Dalkovan Encampment's
@@ -692,6 +696,56 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 603.7a + CR 608.2c: replace every declared-player reference in the payload whose group
+/// no clause of the payload declares by the player the creating chain announced
+/// (`resolve_live_declared_player`). A group that player no longer reaches (illegal as the
+/// chain began to resolve, or left the game) stays unbound and names no one at fire.
+fn bind_outer_declared_groups(
+    state: &GameState,
+    creator: &ResolvedAbility,
+    payload: &mut AbilityDefinition,
+) {
+    use crate::types::ability::ChosenGroupId;
+    fn walk(def: &mut AbilityDefinition, f: &mut dyn FnMut(&mut AbilityDefinition)) {
+        f(def);
+        if let Effect::CreateDelayedTrigger { effect, .. } = &mut *def.effect {
+            walk(effect, f);
+        }
+        for next in def
+            .sub_ability
+            .iter_mut()
+            .chain(def.else_ability.iter_mut())
+        {
+            walk(next, f);
+        }
+        for mode in &mut def.mode_abilities {
+            walk(mode, f);
+        }
+    }
+    let mut declared: Vec<ChosenGroupId> = Vec::new();
+    walk(payload, &mut |def| {
+        declared.extend(def.declares_chosen_group)
+    });
+    let mut resolve = |group: ChosenGroupId| {
+        if declared.contains(&group) {
+            return None;
+        }
+        crate::game::targeting::resolve_live_declared_player(state, creator, group)
+    };
+    walk(payload, &mut |def| {
+        let effect = &mut *def.effect;
+        crate::parser::oracle_effect::each_target_filter_mut(effect, &mut |filter| {
+            crate::game::filter::rebind_declared_groups(filter, &mut resolve);
+        });
+        if let Some(filter) = super::mass_population_target_mut(effect) {
+            crate::game::filter::rebind_declared_groups(filter, &mut resolve);
+        }
+        crate::parser::oracle_effect::each_quantity_expr_mut(effect, &mut |expr| {
+            crate::game::filter::rebind_declared_groups_in_quantity(expr, &mut resolve);
+        });
+    });
 }
 
 /// CR 603.7c + CR 608.2k + CR 400.7: Resolve one event-subject anaphor against
@@ -6269,6 +6323,122 @@ mod tests {
             *draw_count(&otherwise_sub.effect),
             event_context_amount(),
             "the else branch's later instruction stays live"
+        );
+    }
+
+    /// CR 603.7a + CR 608.2c: the install binds every outer declared group the payload reads
+    /// (sub, else, mode and nested payload alike), leaves a payload-local declaration alone,
+    /// and leaves a group whose player left the game unbound.
+    #[test]
+    fn bind_outer_declared_groups_covers_every_payload_branch() {
+        use crate::types::ability::ChosenGroupId;
+        let outer = ChosenGroupId(ChosenGroupId::DECLARED_PLAYER_BASE);
+        let local = ChosenGroupId(ChosenGroupId::DECLARED_PLAYER_BASE + 1);
+        let reads = |group| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::DeclaredPlayer { group },
+                },
+            )
+        };
+        let creator = || {
+            let mut creator = ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: TargetFilter::Player,
+                },
+                vec![TargetRef::Player(PlayerId(1))],
+                ObjectId(5),
+                PlayerId(0),
+            );
+            creator.declares_chosen_group = Some(outer);
+            // The creating chain also announces `local`, so only the payload's own
+            // declaration keeps its reads from binding to that player.
+            let mut second = ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: TargetFilter::Player,
+                },
+                vec![TargetRef::Player(PlayerId(2))],
+                ObjectId(5),
+                PlayerId(0),
+            );
+            second.declares_chosen_group = Some(local);
+            creator.sub_ability = Some(Box::new(second));
+            creator
+        };
+        let payload = || {
+            let mut root = reads(outer);
+            root.sub_ability = Some(Box::new(reads(outer)));
+            root.else_ability = Some(Box::new(reads(outer)));
+            root.mode_abilities.push(reads(outer));
+            let mut nested = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CreateDelayedTrigger {
+                    condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                    effect: Box::new({
+                        let mut inner = reads(outer);
+                        inner.sub_ability = Some(Box::new(reads(outer)));
+                        inner
+                    }),
+                    uses_tracked_set: false,
+                },
+            );
+            let mut declaring = reads(local);
+            declaring.declares_chosen_group = Some(local);
+            nested.sub_ability = Some(Box::new(declaring));
+            root.sub_ability.as_mut().unwrap().sub_ability = Some(Box::new(nested));
+            root
+        };
+        let targets = |def: &AbilityDefinition| -> Vec<TargetFilter> {
+            fn walk(def: &AbilityDefinition, out: &mut Vec<TargetFilter>) {
+                if let Effect::Draw { target, .. } = &*def.effect {
+                    out.push(target.clone());
+                }
+                if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+                    walk(effect, out);
+                }
+                for next in def
+                    .sub_ability
+                    .iter()
+                    .chain(def.else_ability.iter())
+                    .map(|b| &**b)
+                    .chain(def.mode_abilities.iter())
+                {
+                    walk(next, out);
+                }
+            }
+            let mut out = Vec::new();
+            walk(def, &mut out);
+            out
+        };
+        let state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+
+        let mut bound = payload();
+        bind_outer_declared_groups(&state, &creator(), &mut bound);
+        let (specific, declared): (Vec<_>, Vec<_>) = targets(&bound)
+            .into_iter()
+            .partition(|t| matches!(t, TargetFilter::SpecificPlayer { id } if *id == PlayerId(1)));
+        assert_eq!(
+            declared,
+            vec![TargetFilter::DeclaredPlayer { group: local }],
+            "only the payload-local declaration stays a group reference"
+        );
+        assert_eq!(
+            specific.len(),
+            6,
+            "root, sub, else, mode, nested root and nested sub reads are bound"
+        );
+
+        let mut gone = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        crate::game::elimination::eliminate_player(&mut gone, PlayerId(1), &mut Vec::new());
+        let mut unbound = payload();
+        bind_outer_declared_groups(&gone, &creator(), &mut unbound);
+        assert!(
+            targets(&unbound)
+                .iter()
+                .all(|t| matches!(t, TargetFilter::DeclaredPlayer { .. })),
+            "a player who left the game binds nothing"
         );
     }
 }

@@ -5764,8 +5764,9 @@ fn referent_exists_without_gated_action(
             parent_target_is_declared
         }
         // CR 601.2c + CR 602.2b + CR 603.3d: a declared player is announced as the
-        // spell or ability is put on the stack, whether or not the gated action happens.
-        TargetFilter::DeclaredPlayer { .. } => true,
+        // spell or ability is put on the stack, whether or not the gated action happens;
+        // `SpecificPlayer` is that announcement captured when a delayed payload was installed.
+        TargetFilter::DeclaredPlayer { .. } | TargetFilter::SpecificPlayer { .. } => true,
         TargetFilter::Not { filter } => {
             referent_exists_without_gated_action(filter, parent_target_is_declared)
         }
@@ -5780,7 +5781,6 @@ fn referent_exists_without_gated_action(
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
         | TargetFilter::SpecificObject { .. }
-        | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
         | TargetFilter::PlayerMatching { .. }
         | TargetFilter::Neighbor { .. }
@@ -12018,6 +12018,9 @@ pub(crate) fn resolve_player_for_context_ref(
     match target_filter {
         TargetFilter::DeclaredPlayer { group } => {
             crate::game::targeting::resolve_live_declared_player(state, ability, *group)
+        }
+        TargetFilter::SpecificPlayer { .. } => {
+            crate::game::targeting::resolve_effect_player_ref(state, ability, target_filter)
         }
         _ if declared_player_slot_is_empty(state, ability, target_filter) => None,
         _ => Some(resolve_context_player(state, ability, target_filter)),
@@ -21572,6 +21575,12 @@ mod tests {
             serde_json::from_str(r#"{"type":"Typed","type_filters":["Creature"],"controller":"Opponent","properties":[]}"#).unwrap(),
             TargetFilter::ParentTarget,
             TargetFilter::ParentTargetSlot { index: 0 },
+            TargetFilter::DeclaredPlayer {
+                group: crate::types::ability::ChosenGroupId(
+                    crate::types::ability::ChosenGroupId::DECLARED_PLAYER_BASE,
+                ),
+            },
+            TargetFilter::SpecificPlayer { id: PlayerId(1) },
         ] {
             assert!(referent_exists_without_gated_action(&accepted, true), "{accepted:?}");
         }

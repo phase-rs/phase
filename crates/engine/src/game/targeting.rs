@@ -2047,6 +2047,7 @@ pub fn resolve_effect_player_ref(
         TargetFilter::DeclaredPlayer { group } => {
             resolve_live_declared_player(state, ability, *group)
         }
+        TargetFilter::SpecificPlayer { id } => super::players::is_alive(state, *id).then_some(*id),
         TargetFilter::Player => ability.targets.iter().find_map(|target| match target {
             TargetRef::Player(player) => Some(*player),
             _ => None,
@@ -7799,5 +7800,36 @@ mod tests {
             "a legacy record cannot prove which incarnation it bound, so it must \
              not act on the object now at that id; got {result:?}"
         );
+    }
+
+    /// CR 800.4a + CR 608.2b: a `SpecificPlayer` that a delayed install bound in place of a
+    /// declared group names that player while they are in the game and no one afterwards, at
+    /// every authority that reads a declared group.
+    #[test]
+    fn a_bound_specific_player_names_no_one_once_eliminated() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        let ability = ResolvedAbility::new(
+            crate::types::ability::Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SpecificPlayer { id: PlayerId(1) },
+            },
+            vec![],
+            ObjectId(7),
+            PlayerId(0),
+        );
+        let bound = TargetFilter::SpecificPlayer { id: PlayerId(1) };
+        let read = |state: &GameState| {
+            (
+                resolve_effect_player_ref(state, &ability, &bound),
+                crate::game::ability_utils::collect_player_targets(state, &ability, &bound),
+                crate::game::effects::resolve_player_for_context_ref(state, &ability, &bound),
+            )
+        };
+        assert_eq!(
+            read(&state),
+            (Some(PlayerId(1)), vec![PlayerId(1)], Some(PlayerId(1)))
+        );
+        crate::game::elimination::eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
+        assert_eq!(read(&state), (None, vec![], None));
     }
 }

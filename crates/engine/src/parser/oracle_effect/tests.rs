@@ -81289,13 +81289,16 @@ mod carried_player_reference_tests {
 }
 
 mod bare_player_pronoun_declaration_tests {
+    use super::bare_pronoun_after_object_creation_tests::effect_nodes;
     use super::*;
 
-    fn names_declared_player(text: &str) -> bool {
-        let ability = parse_effect_chain(text, AbilityKind::Spell);
-        serde_json::to_string(&ability)
-            .unwrap()
-            .contains("DeclaredPlayer")
+    /// The parsed chain plus its `Draw` nodes.
+    fn draws_of(text: &str) -> (serde_json::Value, Vec<serde_json::Value>) {
+        let json = serde_json::to_value(parse_effect_chain(text, AbilityKind::Spell)).unwrap();
+        let mut nodes = Vec::new();
+        effect_nodes(&json, "Draw", &mut nodes);
+        let draws = nodes.into_iter().cloned().collect::<Vec<_>>();
+        (json, draws)
     }
 
     /// CR 115.1a + CR 608.2c: a bare "they"/"that player" after a clause that declares an object
@@ -81303,14 +81306,38 @@ mod bare_player_pronoun_declaration_tests {
     #[test]
     fn a_property_carrying_object_clause_declares_no_player() {
         for object_clause in ["Exile target token you control.", "Exile target token."] {
-            for follow in ["They draw a card.", "That player draws a card."] {
+            for (follow, reference) in [
+                ("They draw a card.", "ParentTarget"),
+                ("That player draws a card.", "ParentTargetController"),
+            ] {
                 let text = format!("{object_clause} {follow}");
-                assert!(!names_declared_player(&text), "{text}");
+                let (json, draws) = draws_of(&text);
+                assert_eq!(draws.len(), 1, "reach guard: the Draw node: {text}: {json}");
+                assert_eq!(
+                    draws[0]["target"],
+                    serde_json::json!({ "type": reference }),
+                    "{text}: {json}"
+                );
+                assert!(
+                    json.get("declares_chosen_group").is_none(),
+                    "{text}: {json}"
+                );
             }
         }
         for follow in ["They draw a card.", "That player draws a card."] {
             let text = format!("Target player gains 2 life. {follow}");
-            assert!(names_declared_player(&text), "reach: {text}");
+            let (json, draws) = draws_of(&text);
+            assert_eq!(draws.len(), 1, "reach guard: the Draw node: {text}: {json}");
+            let group = &json["declares_chosen_group"];
+            assert!(
+                group.is_number(),
+                "reach: the declaring node: {text}: {json}"
+            );
+            assert_eq!(
+                draws[0]["target"],
+                serde_json::json!({ "type": "DeclaredPlayer", "group": group }),
+                "{text}: {json}"
+            );
         }
     }
 }
@@ -81318,7 +81345,7 @@ mod bare_player_pronoun_declaration_tests {
 mod bare_pronoun_after_object_creation_tests {
     use super::*;
 
-    fn effect_nodes<'a>(
+    pub(super) fn effect_nodes<'a>(
         value: &'a serde_json::Value,
         ty: &str,
         out: &mut Vec<&'a serde_json::Value>,
@@ -81373,24 +81400,55 @@ mod bare_pronoun_after_object_creation_tests {
     /// object-creating clause between the declaration and the reader does not stop them.
     #[test]
     fn player_only_readers_cross_a_token_clause_to_the_declared_player() {
-        for text in [
-            "Target opponent loses 2 life. Create a Treasure token. Destroy target creature that player controls.",
-            "Target opponent loses 2 life. Create a Treasure token. That player discards a card.",
+        for (text, reader, controller_scoped) in [
+            (
+                "Target opponent loses 2 life. Create a Treasure token. Destroy target creature that player controls.",
+                "Destroy",
+                true,
+            ),
+            (
+                "Target opponent loses 2 life. Create a Treasure token. That player discards a card.",
+                "Discard",
+                false,
+            ),
         ] {
             let json = chain_json(text);
             let mut tokens = Vec::new();
             effect_nodes(&json, "Token", &mut tokens);
             assert_eq!(tokens.len(), 1, "reach guard: the Token node: {text}: {json}");
-            assert!(json.to_string().contains("DeclaredPlayer"), "{text}: {json}");
+            let mut readers = Vec::new();
+            effect_nodes(&json, reader, &mut readers);
+            assert_eq!(readers.len(), 1, "reach guard: the {reader} node: {text}: {json}");
+            let group = &json[0]["declares_chosen_group"];
+            assert!(group.is_number(), "reach: the declaring node: {text}: {json}");
+            let reference = if controller_scoped {
+                &readers[0]["target"]["controller"]
+            } else {
+                &readers[0]["target"]
+            };
+            let expected = if controller_scoped {
+                serde_json::json!({ "DeclaredPlayer": { "group": group } })
+            } else {
+                serde_json::json!({ "type": "DeclaredPlayer", "group": group })
+            };
+            assert_eq!(*reference, expected, "{text}: {json}");
         }
     }
 
     /// With no declaration, the same token clause leaves nothing for "that player" to bind.
     #[test]
     fn player_only_readers_bind_no_player_across_a_token_clause_without_a_declaration() {
-        for text in [
-            "Destroy target creature. Create a Treasure token. That player discards a card.",
-            "Create a Treasure token. Destroy target creature that player controls.",
+        for (text, reader, expected) in [
+            (
+                "Destroy target creature. Create a Treasure token. That player discards a card.",
+                "Discard",
+                serde_json::json!({ "type": "ParentTargetController" }),
+            ),
+            (
+                "Create a Treasure token. Destroy target creature that player controls.",
+                "Destroy",
+                serde_json::json!("You"),
+            ),
         ] {
             let json = chain_json(text);
             let mut tokens = Vec::new();
@@ -81400,8 +81458,22 @@ mod bare_pronoun_after_object_creation_tests {
                 1,
                 "reach guard: the Token node: {text}: {json}"
             );
+            let mut readers = Vec::new();
+            effect_nodes(&json, reader, &mut readers);
+            assert_eq!(
+                readers.len(),
+                1,
+                "reach guard: the {reader} node: {text}: {json}"
+            );
+            let target = &readers[0]["target"];
+            let reference = if reader == "Destroy" {
+                &target["controller"]
+            } else {
+                target
+            };
+            assert_eq!(*reference, expected, "{text}: {json}");
             assert!(
-                !json.to_string().contains("DeclaredPlayer"),
+                !json.to_string().contains("declares_chosen_group"),
                 "{text}: {json}"
             );
         }

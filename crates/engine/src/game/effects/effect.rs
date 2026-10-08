@@ -692,16 +692,19 @@ fn register_transient_effect(
             );
         }
         // Pass-through: the caller already pinned a specific player.
+        // CR 800.4a: a player who left the game holds no objects.
         Some(TargetFilter::SpecificPlayer { id }) => {
-            install_transient(
-                state,
-                end_permission,
-                ability,
-                duration.clone(),
-                TargetFilter::SpecificPlayer { id: *id },
-                modifications.clone(),
-                static_def.condition.clone(),
-            );
+            if crate::game::players::is_alive(state, *id) {
+                install_transient(
+                    state,
+                    end_permission,
+                    ability,
+                    duration.clone(),
+                    TargetFilter::SpecificPlayer { id: *id },
+                    modifications.clone(),
+                    static_def.condition.clone(),
+                );
+            }
         }
         // CR 104.3: "There are several ways to lose the game." + CR 119.7: "If an
         // effect says that a player can't gain life, that player can't make their
