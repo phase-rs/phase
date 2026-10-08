@@ -1649,7 +1649,7 @@ fn firespout(
     (alive(&runner, ground), alive(&runner, flyer))
 }
 
-/// R1. CR 612.2 + CR 107.4: a color-word change never reaches "{R} was spent to cast this spell".
+/// CR 612.2 + CR 107.4: a color-word change never reaches "{R} was spent to cast this spell".
 #[test]
 fn firespout_symbol_riders_survive_color_word_changes() {
     let db = db!();
@@ -1716,7 +1716,7 @@ fn seed_spark_tokens(
         .collect()
 }
 
-/// R2. One card holding a color-word token leaf and a symbol rider: only the word changes.
+/// One card holding a color-word token leaf and a symbol rider: only the word changes.
 #[test]
 fn seed_spark_rewrites_the_token_word_but_keeps_the_symbol_rider() {
     let db = db!();
@@ -1799,7 +1799,7 @@ fn batwing_brume(
     (runner.life(P0), runner.life(P1))
 }
 
-/// R3. Two symbol riders on one card, each under a word change of its own color.
+/// Two symbol riders on one card, each under a word change of its own color.
 #[test]
 fn batwing_brume_symbol_riders_survive_color_word_changes() {
     let db = db!();
@@ -1844,7 +1844,7 @@ fn gruul_scrapper_hasty(
     runner.state().objects[&spell].has_keyword(&Keyword::Haste)
 }
 
-/// R4. The permanent-trigger side: the same rule through `TriggerCondition::ManaColorSpent`.
+/// The permanent-trigger side: the same rule through `TriggerCondition::ManaColorSpent`.
 #[test]
 fn gruul_scrapper_symbol_rider_survives_color_word_changes() {
     let db = db!();
@@ -1890,7 +1890,7 @@ fn slaying_fire_damage(
     before - runner.life(P1)
 }
 
-/// R5. The word-form spell rider is rewritten, which also proves the change reaches the stack object.
+/// The word-form spell rider is rewritten, which also proves the change reaches the stack object.
 #[test]
 fn slaying_fire_word_rider_is_rewritten_by_a_color_word_change() {
     let db = db!();
@@ -1961,7 +1961,7 @@ fn etb_draws(
     runner.state().players[0].hand.len()
 }
 
-/// R6. The `ColorWord` producer is rewritten, its `ManaSymbol` sibling is not.
+/// The `ColorWord` producer is rewritten, its `ManaSymbol` sibling is not.
 #[test]
 fn trigger_side_word_form_is_rewritten_and_symbol_form_is_not() {
     let db = db!();
@@ -2002,7 +2002,7 @@ fn spent_color_conditions<'v>(value: &'v serde_json::Value, out: &mut Vec<&'v se
     }
 }
 
-/// R8. Over the card database, a condition's provenance agrees with how its card writes the color, and no word change touches a symbol.
+/// Over the card database, a condition's provenance agrees with how its card writes the color, and no word change touches a symbol.
 #[test]
 fn spent_color_provenance_matches_oracle_text_and_symbols_never_rewrite() {
     let db = db!();

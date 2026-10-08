@@ -9941,8 +9941,9 @@ fn try_extract_adamant_condition(
 /// hybrid-ETB phrasing `"if {C}{C}... was spent to cast it"` where the required
 /// mana is expressed as a run of identical colored mana symbols rather than as
 /// words. Evaluates like Adamant (`ManaColorSpent`) but carries
-/// `SpentColor::ManaSymbol` where Adamant carries `ColorWord` (CR 612.2). Per CR 400.7d, a permanent's ability can reference "what mana
-/// was spent to pay [its casting] costs."
+/// `SpentColor::ManaSymbol` where Adamant carries `ColorWord` (CR 612.2). Per
+/// CR 400.7d, a permanent's ability can reference "what mana was spent to pay
+/// [its casting] costs."
 ///
 /// Accepts runs of one or more pure-color symbols (`{W}`, `{U}`, `{B}`,
 /// `{R}`, `{G}`), including mixed-color runs that require each listed color to
