@@ -435,7 +435,8 @@ function clusterVerifyPrompt(mechanic, cards) {
     `2. ./scripts/check-parser-combinators.sh "$(git merge-base upstream/main HEAD)" (Gate A) — ` +
     `pass the upstream/main merge-base explicitly. The script's DEFAULT base is the stale fork ` +
     `origin/main, which diffs the whole tree and false-flags pre-existing nom-combinator debt in ` +
-    `files this change never touched. Scoped to the correct base it only checks THIS change's lines; ` +
+    `files this change never touched. The explicit base scopes the diff checks to THIS change's lines; ` +
+    `whole-file gates still run. ` +
     `treat any non-zero exit as a verification failure.\n` +
     `3. If \`tilt get uiresource clippy >/dev/null 2>&1\` succeeds: ` +
     `./scripts/tilt-wait.sh --timeout 240 clippy test-engine test-ai wasm card-data ; else ` +
@@ -474,16 +475,31 @@ function clusterPrPrompt(mechanic, cards, { impl, verify, partial }) {
   return (
     `Commit the working-tree change for the "${mechanic}" mechanic, push the ` +
     `branch to your fork, and open a PR to phase-rs/phase with base main.\nRun:\n` +
-    `FIRST discard build-regenerated data artifacts — they are NOT part of any card fix, a ` +
-    `partial/local mtgjson env regenerates them DESTRUCTIVELY, and they produce large drift diffs ` +
-    `that conflict with main and are not CI-checked: ` +
-    `git checkout -- crates/engine/data/known-tokens.toml data/engine-inventory.json crates/engine/data/oracle-subtypes.json 2>/dev/null\n` +
-    `(pass ONLY those three explicit paths — NEVER append a bare '.' pathspec, which would discard the ENTIRE working tree including the card fix; the trailing 2>/dev/null only suppresses git's "did not match" noise).\n` +
-    `Confirm none are staged (\`git diff --cached --name-only | grep -cE 'known-tokens|engine-inventory|oracle-subtypes'\` must print 0) before committing. Then:\n` +
-    `git add -A && git commit -m ${JSON.stringify(title)} && git push -u origin HEAD\n` +
+    `Before staging, inspect \`git status --short\`, \`git diff\`, and \`git diff --cached\`, ` +
+    `including any unrelated already-staged files. Reconcile the initial Files changed list below ` +
+    `with the final owned, reviewed changes, including all review-fix, cross-check, and verification ` +
+    `rounds: fix agents return no filesChanged schema, so the initial list may be stale. Account for ` +
+    `added, modified, deleted, and renamed paths. Stop and return opened=false if ownership is ` +
+    `ambiguous, a path includes unowned edits, or any final owned change lacks a clean review. ` +
+    `Leave unowned files AND index entries untouched; do not discard or unstage them.\n` +
+    `Do not stage build-generated noise in crates/engine/data/known-tokens.toml or ` +
+    `crates/engine/data/oracle-subtypes.json. Leave that working-tree dirt unstaged. ` +
+    `data/engine-inventory.json is ignored and needs neither staging nor cleanup.\n` +
+    `Replace <OWNED_PATHS> in BOTH commands below with the same explicit final reviewed filenames. ` +
+    `Use one repo-relative literal Git pathspec per file, single-quoted for the shell, for example ` +
+    `':(literal)crates/engine/src/parser/oracle.rs'; escape any embedded apostrophe by closing ` +
+    `the quote, backslash-escaping the apostrophe, and reopening the quote. Do not use ` +
+    `JSON.stringify as shell quoting, directory or glob pathspecs, or broad staging.\n` +
+    `git add -- <OWNED_PATHS>\n` +
+    `Inspect \`git diff --cached --name-status\` and the cached diff for those exact owned paths; ` +
+    `confirm their contents match the final reviewed scope and unrelated staged entries are unchanged.\n` +
+    `git commit --only -m ${JSON.stringify(title)} -- <OWNED_PATHS>\n` +
+    `Confirm \`git show --name-status --format= HEAD\` contains exactly the final owned paths, ` +
+    `then git push -u origin HEAD\n` +
     `Then: gh pr create --base main --title ${JSON.stringify(title)} --body <BODY> ` +
     `(do NOT pass --label; the upstream auto-labeler handles it).\n\n` +
-    `Use exactly this PR body:\n\n${body}\n\nReturn opened=true and the prUrl.`
+    `Use this PR body, reconciling its Files changed section to the final owned paths actually ` +
+    `committed; leave the other sections as supplied:\n\n${body}\n\nReturn opened=true and the prUrl.`
   )
 }
 
