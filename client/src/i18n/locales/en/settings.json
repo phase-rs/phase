@@ -5,6 +5,7 @@
   },
   "tabs": {
     "gameplay": "Gameplay",
+    "ai": "AI Opponents",
     "experimental": "Experimental",
     "visual": "Visual",
     "combat": "Pacing",
@@ -75,6 +76,7 @@
   "visual": {
     "title": "Visual",
     "vfxQuality": "VFX Quality",
+    "cardAnimationStyle": "Card Animations",
     "keywordStrip": "Keyword Strip",
     "showKeywords": "Show keywords on battlefield cards",
     "opponentHoverPreview": "Opponent Hover Preview",
@@ -121,7 +123,13 @@
       "full": "Full",
       "reduced": "Reduced",
       "minimal": "Minimal"
-    }
+    },
+    "cardAnimationStyleOptions": {
+      "webgl": "New",
+      "classic": "Classic"
+    },
+    "cardAnimationPreviewHintHover": "Hover to preview",
+    "cardAnimationPreviewHintTap": "Tap to preview"
   },
   "flexLayout": {
     "title": "Flex Layout",
@@ -137,9 +145,18 @@
       "right": "Align right"
     },
     "presets": {
-      "default": { "label": "Layout 1", "description": "The standard balanced layout." },
-      "layout2": { "label": "Layout 2", "description": "A larger battlefield with tucked-away hands." },
-      "layout3": { "label": "Layout 3", "description": "A taller lower third." }
+      "default": {
+        "label": "Layout 1",
+        "description": "The standard balanced layout."
+      },
+      "layout2": {
+        "label": "Layout 2",
+        "description": "A larger battlefield with tucked-away hands."
+      },
+      "layout3": {
+        "label": "Layout 3",
+        "description": "A taller lower third."
+      }
     },
     "zones": {
       "playerHud": "Your HUD",
@@ -316,8 +333,8 @@
       "shardCount": "Shards",
       "installed": "Installed packs",
       "noneInstalled": "No visual packs are installed.",
-      "upgradeAvailable": "Upgrade available"
-      ,"receiptRoot": "Installed from snapshot: {{root}}",
+      "upgradeAvailable": "Upgrade available",
+      "receiptRoot": "Installed from snapshot: {{root}}",
       "membershipDigest": "Membership fingerprint: {{digest}}",
       "storageUsage": "Storage used by this site",
       "persistence": "Eviction protection",
@@ -469,6 +486,60 @@
       "oldest": "Oldest Printing",
       "preferBorderless": "Prefer Borderless",
       "preferExtended": "Prefer Extended Art"
+    }
+  },
+  "llm": {
+    "title": "LLM opponents",
+    "intro": "Optional. Point Phase at an LLM provider and you can hand an AI seat — or the bots in a draft pod — to that model instead of the built-in engine AI. Nothing here is used until you enable a provider and assign it to a seat, and any failure falls back to the engine AI mid-game.",
+    "empty": "No providers configured. The built-in engine AI drives every seat.",
+    "addProvider": "Add provider",
+    "unnamed": "Unnamed provider",
+    "name": "Name",
+    "namePlaceholder": "Name this provider (e.g. “Claude”)",
+    "enable": "Enable this provider",
+    "remove": "Remove this provider",
+    "provider": "Provider",
+    "model": "Model",
+    "modelId": "Model id",
+    "customModel": "Custom…",
+    "modelPlaceholder": "Model id (e.g. gpt-5, claude-sonnet-5)",
+    "endpoint": "Endpoint",
+    "endpointPlaceholder": "https://your-server/v1",
+    "apiKey": "API key",
+    "apiKeyPlaceholder": "Paste your API key",
+    "apiKeyOptional": "Optional for local servers",
+    "apiKeyMissing": "Enter your API key again. Keys are not saved across reloads, and this provider is not used for AI seats or draft bots until you do.",
+    "apiKeyStorage": "Kept in memory for this browser session only. API keys are never written to disk and are excluded from backup export and cloud sync, so you will re-enter yours after a reload. An API key also requires an https:// endpoint unless the server is on localhost.",
+    "apiKeyGet": "Get a key",
+    "test": "Test connection",
+    "testing": "Testing…",
+    "testOk": "Connected.",
+    "defaultPrompt": {
+      "connected": "Connected. Use this as your default opponent?",
+      "ready": "Use this provider as your default opponent?",
+      "action": "Use as default",
+      "badge": "Default opponent"
+    },
+    "defaultOpponent": {
+      "label": "Default opponent",
+      "hint": "AI opponents use this provider unless you pick a different one for a seat when setting up a match. This includes the opponent in draft matches.",
+      "engine": "Built-in engine AI"
+    },
+    "draftToggle": {
+      "label": "Use for draft bots",
+      "hint": "Bot seats in a draft pod pick with the model, using the format’s set context.",
+      "profile": "Draft provider"
+    },
+    "testHint": "Sends one real request and checks the reply the same way a game turn would.",
+    "errors": {
+      "engineUnavailable": "The engine could not be loaded.",
+      "requestNotBuilt": "This provider is not fully configured.",
+      "undecodable": "The endpoint replied, but not with something the game can use.",
+      "emptyBody": "The endpoint returned an empty response.",
+      "cancelled": "The test was cancelled.",
+      "timedOut": "The endpoint did not respond in time.",
+      "unreachable": "Could not reach the endpoint. Check the URL, and that the provider allows browser requests.",
+      "oversized": "The endpoint returned far more data than a chat completion."
     }
   }
 }

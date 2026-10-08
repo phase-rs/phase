@@ -333,6 +333,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             }
             GameEvent::ManaAdded { player_id, .. }
             | GameEvent::ManaPoolEmptied { player_id, .. }
+            | GameEvent::ManaBurn { player_id, .. }
             | GameEvent::ManaRecolored { player_id, .. } => {
                 mark_public_state_player_dirty(state, *player_id);
                 mark_mana_display_dirty(state);
@@ -363,6 +364,17 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             // display surface as mutate, but it is a distinct game event.
             GameEvent::Augmented { merged_id, .. } => {
                 mark_object_dirty_with_mana(state, *merged_id);
+                mark_battlefield_display_dirty(state);
+            }
+            // CR 701.42a: the melded permanent now presents its combined back
+            // face, and its partner card became its second component.
+            GameEvent::Melded {
+                object_id,
+                partner_id,
+                ..
+            } => {
+                mark_object_dirty_with_mana(state, *object_id);
+                mark_object_dirty_with_mana(state, *partner_id);
                 mark_battlefield_display_dirty(state);
             }
             GameEvent::CounterAdded { object_id, .. }
@@ -432,7 +444,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
                 mark_public_state_object_dirty(state, *object_id);
                 mark_public_state_player_dirty(state, *player_id);
             }
-            GameEvent::CreatureDestroyed { object_id } => {
+            GameEvent::CreatureDestroyed { object_id, .. } => {
                 // Paired `ZoneChanged` to graveyard handles battlefield display.
                 mark_public_state_object_dirty(state, *object_id);
             }
@@ -541,6 +553,9 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::CaseSolved { .. }
             | GameEvent::ClassLevelGained { .. }
             | GameEvent::DieRolled { .. }
+            // CR 706.6: an ignored roll carries no public-state delta either —
+            // it is rendered from the structured event log, not derived state.
+            | GameEvent::DieRollIgnored { .. }
             | GameEvent::CoinFlipped { .. }
             // CR 103.1: starting-player contest carries no public-state delta;
             // it is rendered from the structured event log, not derived state.
@@ -638,6 +653,8 @@ mod tests {
                 valid_block_targets: Default::default(),
                 block_requirements: Default::default(),
                 blocker_constraints: Default::default(),
+                must_be_blocked_targets: Default::default(),
+                block_capacities: Default::default(),
             }),
             Some(Phase::DeclareBlockers),
         );
@@ -811,6 +828,7 @@ mod tests {
                         .controller(crate::types::ability::ControllerRef::You),
                 ),
                 target: TargetFilter::TriggeringSource,
+                selection: crate::types::ability::AttachSelection::Targeted,
             },
             vec![],
             ObjectId(19),
@@ -835,6 +853,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],

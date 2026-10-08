@@ -124,7 +124,7 @@ fn hidden_is_face_down_exiled_linked_to_source(
         runner.state().exile_links.iter().any(|link| {
             link.exiled_id == hidden
                 && link.source_id == mosswort
-                && link.kind == ExileLinkKind::HideawayLookable
+                && matches!(link.kind, ExileLinkKind::HideawayLookable { .. })
         }),
         "hidden card must be linked to Mosswort Bridge via HideawayLookable"
     );

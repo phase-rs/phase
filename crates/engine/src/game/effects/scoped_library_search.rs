@@ -120,33 +120,49 @@ fn is_plain_parent_target_delivery(delivery: &ResolvedAbility) -> bool {
     // `ZoneMoveRequest`, where neither provenance field changes the delivery;
     // rejecting them would make an otherwise identical triggered search fall
     // back to sequential resolution while the spell form batches correctly.
+    //
+    // `description` is deliberately absent from this list for the same reason.
+    // It is display text for whatever prompt a link raises, never behavior the
+    // `ZoneMoveRequest` would have to preserve — and since CR 608.2c chain
+    // links inherit the head's printed text
+    // (`ResolvedAbility::backfill_chain_description`), every delivery now
+    // carries one, so its presence discriminates nothing.
     delivery.targets.is_empty()
-        && delivery.sub_ability.is_none()
-        && delivery.else_ability.is_none()
-        && delivery.duration.is_none()
-        && delivery.condition.is_none()
-        && !delivery.optional_targeting
-        && !delivery.optional
-        && delivery.optional_for.is_none()
         && delivery.multi_target.is_none()
-        && delivery.target_constraints.is_empty()
-        && matches!(delivery.target_choice_timing, TargetChoiceTiming::Stack)
-        && delivery.target_selection_mode.is_chosen()
-        && delivery.target_chooser.is_none()
-        && delivery.description.is_none()
-        && delivery.repeat_for.is_none()
-        && delivery.min_x_value == 0
-        && !delivery.cant_be_copied
-        && !delivery.forward_result
-        && delivery.unless_pay.is_none()
-        && delivery.distribution.is_none()
         && delivery.player_scope.is_none()
         && delivery.starting_with.is_none()
-        && delivery.repeat_until.is_none()
-        && delivery.replacement_applied.is_empty()
-        && delivery.sub_link == SubAbilityLink::ContinuationStep
-        && delivery.modal.is_none()
-        && delivery.mode_abilities.is_empty()
+        && has_no_resolution_riders(delivery)
+}
+
+/// CR 608.2c: true when `ability` carries no resolution-time rider (sub, else,
+/// condition, choice, repeat, payment, mode, applied replacement or illegal-target
+/// disposition) that a shortcut resolving only its own effect would drop.
+/// Target, scope and ordering fields are the caller's own checks.
+pub(crate) fn has_no_resolution_riders(ability: &ResolvedAbility) -> bool {
+    ability.sub_ability.is_none()
+        && ability.else_ability.is_none()
+        && ability.duration.is_none()
+        && ability.condition.is_none()
+        && !ability.optional_targeting
+        && !ability.optional
+        && ability.optional_for.is_none()
+        && ability.optional_player.is_none()
+        && ability.target_constraints.is_empty()
+        && matches!(ability.target_choice_timing, TargetChoiceTiming::Stack)
+        && ability.target_selection_mode.is_chosen()
+        && ability.target_chooser.is_none()
+        && ability.repeat_for.is_none()
+        && ability.min_x_value == 0
+        && !ability.cant_be_copied
+        && ability.illegal_targets_disposition.is_does_not_resolve()
+        && !ability.forward_result
+        && ability.unless_pay.is_none()
+        && ability.distribution.is_none()
+        && ability.repeat_until.is_none()
+        && ability.replacement_applied.is_empty()
+        && ability.sub_link == SubAbilityLink::ContinuationStep
+        && ability.modal.is_none()
+        && ability.mode_abilities.is_empty()
 }
 
 /// CR 101.4 + CR 701.23i: Start an APNAP series of private self-library search
@@ -458,6 +474,7 @@ fn advance_acceptance(
     state.pending_scoped_library_search = Some(pending);
     state.waiting_for = WaitingFor::OptionalEffectChoice {
         player,
+        decision_subject_id: None,
         source_id,
         description,
         may_trigger_key: None,
@@ -557,9 +574,7 @@ fn prepare_scoped_group(
             state
                 .player_actions_this_way
                 .insert((player, PlayerActionKind::SearchedLibrary));
-            state
-                .player_actions_this_turn
-                .push((player, PlayerActionKind::SearchedLibrary));
+            super::record_player_action_this_turn(state, player, PlayerActionKind::SearchedLibrary);
         }
         if let Some(search) = prepared.active_search {
             let looked_at = search
@@ -992,6 +1007,7 @@ mod tests {
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         });
 
         apply_as_current(
@@ -1002,6 +1018,38 @@ mod tests {
 
         assert!(state.pending_scoped_library_search.is_some());
         assert!(state.active_optional_effect_frame().is_none());
+    }
+
+    /// The scoped (multi-player) search protocol records each
+    /// searcher's `SearchedLibrary` action exactly once — this is the
+    /// scoped-protocol counterpart to `player_actions_this_way_accumulates_
+    /// across_player_scope_iterations`, which exercises the sequential
+    /// per-player path instead.
+    #[test]
+    fn nonoptional_scoped_search_records_each_searcher_once() {
+        let (mut state, mut scoped_search, _) = three_player_scoped_search(true);
+        scoped_search.player_scope = Some(PlayerFilter::All);
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &scoped_search, &mut events, 0)
+            .expect("nonoptional all-player scoped search resolves");
+
+        assert!(
+            state.pending_scoped_library_search.is_some(),
+            "the scoped protocol, not the sequential path, must have run"
+        );
+
+        let action = crate::types::events::PlayerActionKind::SearchedLibrary;
+        for player in [PlayerId(0), PlayerId(1), PlayerId(2)] {
+            assert_eq!(
+                state
+                    .player_actions_this_turn
+                    .iter()
+                    .filter(|entry| **entry == (player, action))
+                    .count(),
+                1,
+                "{player:?} must be recorded exactly once"
+            );
+        }
     }
 
     /// The batch shortcut is deliberately limited to the two delivery shapes
@@ -1871,5 +1919,48 @@ mod tests {
         assert!(!acceptance_authorities
             .iter()
             .any(|(player, _)| *player == PlayerId(0)));
+    }
+
+    #[test]
+    fn has_no_resolution_riders_accepts_a_bare_effect_and_refuses_each_rider() {
+        let bare = || {
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+        assert!(has_no_resolution_riders(&bare()), "reach: a bare effect");
+        type Mutation = fn(&mut ResolvedAbility);
+        let riders: [(&str, Mutation); 8] = [
+            ("sub_ability", |a| a.sub_ability = Some(Box::new(a.clone()))),
+            ("else_ability", |a| {
+                a.else_ability = Some(Box::new(a.clone()))
+            }),
+            ("optional", |a| a.optional = true),
+            ("optional_player", |a| {
+                a.optional_player = Some(TargetFilter::Controller)
+            }),
+            ("min_x_value", |a| a.min_x_value = 1),
+            ("forward_result", |a| a.forward_result = true),
+            ("illegal_targets_disposition", |a| {
+                a.illegal_targets_disposition =
+                    crate::types::ability::IllegalTargetsDisposition::StillResolves
+            }),
+            ("replacement_applied", |a| {
+                a.replacement_applied.insert(
+                    crate::types::proposed_event::AppliedReplacementKey::Floating { index: 0 },
+                );
+            }),
+        ];
+        for (label, mutate) in riders {
+            let mut ability = bare();
+            mutate(&mut ability);
+            assert!(!has_no_resolution_riders(&ability), "{label}");
+        }
     }
 }

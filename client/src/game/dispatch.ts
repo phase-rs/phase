@@ -19,6 +19,7 @@ import i18n from "../i18n";
 import { useAnimationStore } from "../stores/animationStore";
 import { useAppNotificationStore } from "../stores/appToastStore";
 import {
+  captureTrustedCheckpoint,
   isAuthorityRemote,
   useGameStore,
   saveAuthoritativeGame,
@@ -69,6 +70,8 @@ interface PendingLocalAction {
   waitingFor: WaitingFor | null;
   proposal?: AiActionProposal;
   proposalOutcome?: (outcome: "applied" | "stale") => void;
+  /** Loop-issued (auto-pass) rather than player-initiated: no undo checkpoint. */
+  automated: boolean;
   resolve: () => void;
   reject: (err: unknown) => void;
 }
@@ -126,6 +129,12 @@ let inFlightLocalAction: {
   session: BoundGameSession | null;
   waitingFor: WaitingFor | null;
 } | null = null;
+
+/** The post-event state the normalizer reads spell announcements from, when a
+ *  card-flight layer will present them. */
+function announcementStateFor(state: GameState): GameState | null {
+  return useAnimationStore.getState().cardVfxReady ? state : null;
+}
 
 function isCurrentDispatchGeneration(generation: number): boolean {
   return generation === dispatchGeneration;
@@ -248,6 +257,8 @@ function queuedLocalActionStillApplies(next: PendingLocalAction): boolean {
     next.action.type === "SetPhaseStops"
     || next.action.type === "SetPriorityPassingMode"
     || next.action.type === "CancelAutoPass"
+    || next.action.type === "SetMayTriggerAutoChoice"
+    || next.action.type === "SetReplacementAutoChoice"
   ) {
     return true;
   }
@@ -327,6 +338,7 @@ async function processAction(
   session: BoundGameSession | null,
   proposal?: AiActionProposal,
   proposalOutcome?: (outcome: "applied" | "stale") => void,
+  automated = false,
 ): Promise<void> {
   if (!isDispatchContextCurrent(generation, session)) return;
   const { adapter, gameState } = useGameStore.getState();
@@ -339,17 +351,32 @@ async function processAction(
   const snapshot = useAnimationStore.getState().captureSnapshot();
   currentSnapshot = snapshot;
 
-  // 2. Save undo history if applicable. Three conditions must hold:
+  // 2. Save undo history if applicable. Five conditions must hold:
   //    a) Action is unrevealed-information (UNDOABLE_ACTIONS).
   //    b) Single-player — rewinding one client desyncs multiplayer.
   //    c) Stack is currently empty. Checkpoints exist only at stack-empty
   //       boundaries so undo always lands before the activation/trigger
   //       sequence that put things on the stack, never mid-resolution.
-  const { gameMode } = useGameStore.getState();
+  //    d) Actor is not an AI seat — machine passes would fill the ring with
+  //       states the AI loop instantly re-applies, so undo would land nowhere.
+  //    e) Not loop-automated (auto-pass) — same re-application one beat later.
+  const { gameMode, aiSeatIds } = useGameStore.getState();
   const shouldSaveHistory =
     UNDOABLE_ACTIONS.has(action.type) &&
     !isAuthorityRemote(gameMode) &&
-    gameState.stack.length === 0;
+    gameState.stack.length === 0 &&
+    !aiSeatIds.includes(actor) &&
+    !automated;
+
+  // Fire the trusted-envelope capture WITHOUT awaiting it: both engine
+  // transports execute requests strictly in call order (worker message FIFO;
+  // fallback promise chain), so an export issued here runs before the submit
+  // below and observes the pre-action state — while the action itself pays
+  // no added latency. Awaited at commit time, after animations. A failed
+  // capture degrades to no checkpoint for this action rather than failing it.
+  const checkpointPromise = shouldSaveHistory
+    ? captureTrustedCheckpoint(adapter).catch(() => null)
+    : null;
 
   // 3. Call WASM — get events without updating state yet.
   // `actor` is the authenticated seat ID of whoever initiated this dispatch
@@ -513,13 +540,23 @@ async function processAction(
   );
   if (resolvedCount > 0) recordStackResolutions(resolvedCount);
 
-  // 4. Checkpoint: save pre-action state on turn boundaries for debug restore
+  // 4. Checkpoint: save trusted post-action state on turn boundaries for
+  // debug restore. Rendered screen states are viewer projections the restore
+  // ingress rejects, so turn checkpoints capture the engine-authored envelope
+  // like undo checkpoints do. Post-action: the TurnStarted event fired during
+  // this action, so "saved at turn start" is the state where the new turn
+  // began. Best-effort: a failed capture skips this boundary.
   const turnEvent = events.find((e) => e.type === "TurnStarted");
   if (turnEvent) {
-    const prev = useGameStore.getState();
-    const updated = [...prev.turnCheckpoints, gameState].slice(-MAX_UNDO_HISTORY);
-    useGameStore.setState({ turnCheckpoints: updated });
-    if (prev.gameId) saveCheckpoints(prev.gameId, updated);
+    const turnCheckpoint = await captureTrustedCheckpoint(adapter).catch(() => null);
+    // Re-check after the await: a session boundary mid-capture must not let
+    // a stale checkpoint land in (or persist under) the replacement game.
+    if (turnCheckpoint && isDispatchContextCurrent(generation, session)) {
+      const prev = useGameStore.getState();
+      const updated = [...prev.turnCheckpoints, turnCheckpoint].slice(-MAX_UNDO_HISTORY);
+      useGameStore.setState({ turnCheckpoints: updated });
+      if (prev.gameId) saveCheckpoints(prev.gameId, updated);
+    }
   }
 
   // 5. Flash turn banner directly (bypasses animation queue for reliability)
@@ -547,7 +584,7 @@ async function processAction(
 
   // 6. Normalize events into animation steps
   const pacingMultipliers = usePreferencesStore.getState().pacingMultipliers;
-  const steps = normalizeEvents(events, { pacingMultipliers });
+  const steps = normalizeEvents(events, { pacingMultipliers, announcementState: announcementStateFor(newState) });
 
   // 7. Play animations (unless instant — multiplier === 0). Fold in stack
   //    pressure so per-resolution timing collapses under depth OR recent churn —
@@ -559,7 +596,7 @@ async function processAction(
 
   if (steps.length > 0 && multiplier > 0) {
     useAnimationStore.getState().setAnimationNewState(newState);
-    useAnimationStore.getState().enqueueSteps(steps);
+    useAnimationStore.getState().enqueueSteps(steps, snapshotResult.seq);
 
     // Schedule SFX synced with each step's visual timing
     scheduleSfxForSteps(steps, multiplier);
@@ -589,9 +626,13 @@ async function processAction(
   // (a `gameStore.dispatch` from a modal, a remote update, an AI-loop advance),
   // THIS older pair is dropped rather than clobbering it.
   if (!isDispatchContextCurrent(generation, session)) return;
+  const checkpoint = checkpointPromise ? await checkpointPromise : null;
+  // Re-check after the await: a session boundary mid-animation must not let
+  // a stale checkpoint resurrect history into the replacement game.
+  if (!isDispatchContextCurrent(generation, session)) return;
   const store = useGameStore.getState();
-  const stateHistory = shouldSaveHistory
-    ? [...store.stateHistory, gameState].slice(-MAX_UNDO_HISTORY)
+  const stateHistory = checkpoint
+    ? [...store.stateHistory, checkpoint].slice(-MAX_UNDO_HISTORY)
     : undefined;
   store.commitEngineSnapshot(snapshotResult, {
     events,
@@ -638,6 +679,7 @@ async function processQueue(generation: number): Promise<void> {
             next.session,
             next.proposal,
             next.proposalOutcome,
+            next.automated,
           );
         } finally {
           if (isCurrentDispatchGeneration(generation)) inFlightLocalAction = null;
@@ -707,6 +749,10 @@ async function processQueue(generation: number): Promise<void> {
  * The engine itself enforces `actor === authorized_submitter(state)`, so a
  * misrouted action fails cleanly rather than silently applying as the
  * wrong player.
+ *
+ * `automated` marks loop-issued passes (auto-pass) rather than
+ * player-initiated actions; they skip undo checkpoints (the loop would
+ * re-apply the restored state one beat later) but are otherwise identical.
  */
 async function dispatchActionInternal(
   action: GameAction,
@@ -714,6 +760,7 @@ async function dispatchActionInternal(
   session: BoundGameSession | null,
   proposal?: AiActionProposal,
   proposalOutcome?: (outcome: "applied" | "stale") => void,
+  automated = false,
 ): Promise<void> {
   if (!isBoundGameSessionCurrent(session)) return;
   const { gameMode } = useGameStore.getState();
@@ -759,6 +806,7 @@ async function dispatchActionInternal(
         waitingFor: currentWaitingFor,
         proposal,
         proposalOutcome,
+        automated,
         resolve,
         reject,
       });
@@ -774,7 +822,7 @@ async function dispatchActionInternal(
     waitingFor: currentWaitingFor,
   };
   try {
-    await processAction(submittedAction, actor, generation, session, proposal, proposalOutcome);
+    await processAction(submittedAction, actor, generation, session, proposal, proposalOutcome, automated);
   } catch (e) {
     if (!isDispatchContextCurrent(generation, session)) return;
     debugLog(`dispatch error for ${submittedAction.type}: ${e instanceof Error ? e.message : String(e)}`);
@@ -789,8 +837,9 @@ async function dispatchActionInternal(
 export function dispatchAction(
   action: GameAction,
   actor: number = getPlayerId(),
+  opts?: { automated?: boolean },
 ): Promise<void> {
-  return dispatchActionInternal(action, actor, null);
+  return dispatchActionInternal(action, actor, null, undefined, undefined, opts?.automated ?? false);
 }
 
 /** Dispatch an engine-issued AI proposal without ever reconstructing its action. */
@@ -907,14 +956,14 @@ async function processRemoteUpdateInner(
 
   // 3. Normalize events into animation steps
   const pacingMultipliers = usePreferencesStore.getState().pacingMultipliers;
-  const steps = normalizeEvents(events, { pacingMultipliers });
+  const steps = normalizeEvents(events, { pacingMultipliers, announcementState: announcementStateFor(state) });
 
   // 4. Play animations (unless instant — multiplier === 0)
   const multiplier = usePreferencesStore.getState().animationSpeedMultiplier;
 
   if (steps.length > 0 && multiplier > 0) {
     useAnimationStore.getState().setAnimationNewState(state);
-    useAnimationStore.getState().enqueueSteps(steps);
+    useAnimationStore.getState().enqueueSteps(steps, snapshot.seq);
     scheduleSfxForSteps(steps, multiplier);
 
     const totalDuration = steps.reduce(

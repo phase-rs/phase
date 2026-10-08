@@ -7,6 +7,7 @@ import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import type {
   OutsideGameChoiceEntry,
   OutsideGameSelection,
+  PackOrigin,
   WaitingFor,
 } from "../../adapter/types.ts";
 import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
@@ -17,7 +18,7 @@ type OutsideGameChoice = Extract<WaitingFor, { type: "OutsideGameChoice" }>;
 /** One booster-pack candidate, narrowed from the generic outside-game entry. */
 interface BoosterEntry {
   packSlot: number;
-  setCode: string;
+  origin: PackOrigin;
   name: string;
   oracleId?: string;
 }
@@ -38,7 +39,7 @@ export function boosterPackEntries(
     if (choice.source.type !== "BoosterPack") return null;
     entries.push({
       packSlot: choice.source.data.pack_slot,
-      setCode: choice.source.data.set_code,
+      origin: choice.source.data.origin,
       name: choice.source.data.card.name,
       oracleId: choice.source.data.card.scryfall_oracle_id ?? undefined,
     });
@@ -66,8 +67,8 @@ export function BoosterPackModal({
   const dispatch = useGameDispatch();
   const [selected, setSelected] = useState<Set<number>>(new Set());
 
-  // Every card in one pack shares its set, so the header names it once.
-  const setCode = entries[0]?.setCode ?? "";
+  // Every card in one pack shares its origin, so the header names it once.
+  const origin = entries[0]?.origin;
 
   const selections: OutsideGameSelection[] = useMemo(
     () =>
@@ -105,7 +106,11 @@ export function BoosterPackModal({
 
   return (
     <ChoiceOverlay
-      title={t("boosterPack.title", { setCode })}
+      title={
+        origin?.type === "Set"
+          ? t("boosterPack.title", { setCode: origin.data })
+          : t("boosterPack.cubeTitle")
+      }
       subtitle={
         data.up_to
           ? t("boosterPack.subtitleUpTo", { count: data.count })

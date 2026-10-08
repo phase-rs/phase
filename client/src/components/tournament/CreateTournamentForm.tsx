@@ -6,11 +6,9 @@ import type {
   GameFormat,
   MatchArity,
   MatchType,
-  ScoringPolicy,
 } from "../../adapter/types";
 import type { CreateTournamentRequest } from "../../services/tournamentClient";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
-import { defaultScoringForArity } from "../../pages/tournamentPageState";
 
 interface CreateTournamentFormProps {
   onSubmit: (req: CreateTournamentRequest) => void;
@@ -20,14 +18,18 @@ interface CreateTournamentFormProps {
 }
 
 /**
- * Parses a numeric field, keeping the previous value when the field is not a
- * number. Deliberately does not clamp or validate a range — `MatchArity::new`
- * (`crates/lobby-broker/src/tournament.rs:96-113`) and `ScoringPolicy::new`
- * are the broker's, and duplicating their bounds here would be a second,
- * drifting copy of a rule the server already owns.
+ * Parses a numeric field, keeping `fallback` when the field is blank or not a
+ * number. Uses `Number` rather than `parseInt` so the COMPLETE value is read:
+ * a `type="number"` input accepts exponent notation (`1e2`) and fractions, both
+ * of which `parseInt` would silently truncate (`1e2` -> `1`) before the value
+ * reaches the broker. Deliberately does not clamp or validate a range —
+ * `MatchArity::new` (`crates/lobby-broker/src/tournament.rs:96-113`) and
+ * `ScoringPolicy::new` are the broker's, and duplicating their bounds here would
+ * be a second, drifting copy of a rule the server already owns.
  */
 function parsedOr(raw: string, fallback: number): number {
-  const parsed = Number.parseInt(raw, 10);
+  if (raw.trim() === "") return fallback;
+  const parsed = Number(raw);
   return Number.isNaN(parsed) ? fallback : parsed;
 }
 
@@ -70,25 +72,24 @@ export function CreateTournamentForm({
    * this is dropped rather than sent alongside an explicit round count.
    */
   const [plusRoundsInput, setPlusRoundsInput] = useState("");
-  const [scoring, setScoring] = useState<ScoringPolicy>(() =>
-    defaultScoringForArity(initialArity),
-  );
   /**
-   * Latches the moment the organizer edits any scoring field. Until then the
-   * prefill follows the arity (2 -> 3/1/0, 4 -> 7/1/0); afterwards the
-   * organizer's values are authoritative and survive an arity change.
+   * The match-point axis, as an "Automatic" toggle over an explicit override.
+   *
+   * `automaticScoring` (default on) submits `scoring: null`: as of lobby
+   * protocol v6 the broker owns the default (`ScoringPolicy::default_for_arity`)
+   * and sends the resolved value back on `TournamentSummary.scoring`. This form
+   * computes no default at all — that duplicate is what the wire field exists to
+   * delete.
+   *
+   * The three override fields are STRING-backed and parsed at submit, exactly
+   * like the rounds field above — deliberately NOT numeric `value` +
+   * `parsedOr(current)` state, whose "an emptied field reverts to its current
+   * value" behaviour made a draw of 1 impossible to clear and retype as 2.
    */
-  const [scoringTouched, setScoringTouched] = useState(false);
-
-  function changeArity(next: MatchArity) {
-    setArity(next);
-    if (!scoringTouched) setScoring(defaultScoringForArity(next));
-  }
-
-  function changeScoring(patch: Partial<ScoringPolicy>) {
-    setScoringTouched(true);
-    setScoring((current) => ({ ...current, ...patch }));
-  }
+  const [automaticScoring, setAutomaticScoring] = useState(true);
+  const [winInput, setWinInput] = useState("");
+  const [drawInput, setDrawInput] = useState("");
+  const [lossInput, setLossInput] = useState("");
 
   return (
     <form
@@ -111,7 +112,17 @@ export function CreateTournamentForm({
         onSubmit({
           name,
           arity,
-          scoring,
+          // `null` when Automatic: the broker applies its arity default and
+          // returns the resolved policy on the summary. An explicit override is
+          // parsed from the string inputs (empty -> 0) and submitted verbatim,
+          // unvalidated, exactly like every other field.
+          scoring: automaticScoring
+            ? null
+            : {
+                win_points: parsedOr(winInput, 0),
+                draw_points: parsedOr(drawInput, 0),
+                loss_points: parsedOr(lossInput, 0),
+              },
           bracket,
           totalRounds,
           plusRounds,
@@ -152,7 +163,7 @@ export function CreateTournamentForm({
           type="number"
           value={arity}
           aria-describedby={arityHintId}
-          onChange={(event) => changeArity(parsedOr(event.target.value, arity))}
+          onChange={(event) => setArity(parsedOr(event.target.value, arity))}
           className="rounded-[6px] border border-white/10 bg-black/30 px-3 py-2 text-sm text-gray-100"
         />
         <p id={arityHintId} className="text-xs text-gray-500">
@@ -256,6 +267,19 @@ export function CreateTournamentForm({
 
       <fieldset className="flex flex-col gap-2">
         <legend className="text-xs text-gray-400">{t("create.scoringLabel")}</legend>
+        {/* The "Automatic" affordance, mirroring the rounds field above: checked
+            (default) submits `scoring: null` and the broker applies its arity
+            default; unchecking reveals the three inputs as an explicit override.
+            Reuses the existing `create.totalRoundsAuto` label rather than
+            minting a new catalog key across all locales. */}
+        <label className="flex items-center gap-2 text-xs text-gray-500">
+          <input
+            type="checkbox"
+            checked={automaticScoring}
+            onChange={(event) => setAutomaticScoring(event.target.checked)}
+          />
+          {t("create.totalRoundsAuto")}
+        </label>
         <div className="flex gap-3">
           <div className="flex flex-1 flex-col gap-1">
             <label htmlFor={winId} className="text-xs text-gray-500">
@@ -264,13 +288,11 @@ export function CreateTournamentForm({
             <input
               id={winId}
               type="number"
-              value={scoring.win_points}
-              onChange={(event) =>
-                changeScoring({
-                  win_points: parsedOr(event.target.value, scoring.win_points),
-                })
-              }
-              className="rounded-[6px] border border-white/10 bg-black/30 px-3 py-2 text-sm text-gray-100"
+              disabled={automaticScoring}
+              value={winInput}
+              placeholder={t("create.totalRoundsAuto")}
+              onChange={(event) => setWinInput(event.target.value)}
+              className="rounded-[6px] border border-white/10 bg-black/30 px-3 py-2 text-sm text-gray-100 disabled:opacity-50"
             />
           </div>
           <div className="flex flex-1 flex-col gap-1">
@@ -280,13 +302,11 @@ export function CreateTournamentForm({
             <input
               id={drawId}
               type="number"
-              value={scoring.draw_points}
-              onChange={(event) =>
-                changeScoring({
-                  draw_points: parsedOr(event.target.value, scoring.draw_points),
-                })
-              }
-              className="rounded-[6px] border border-white/10 bg-black/30 px-3 py-2 text-sm text-gray-100"
+              disabled={automaticScoring}
+              value={drawInput}
+              placeholder={t("create.totalRoundsAuto")}
+              onChange={(event) => setDrawInput(event.target.value)}
+              className="rounded-[6px] border border-white/10 bg-black/30 px-3 py-2 text-sm text-gray-100 disabled:opacity-50"
             />
           </div>
           <div className="flex flex-1 flex-col gap-1">
@@ -296,13 +316,11 @@ export function CreateTournamentForm({
             <input
               id={lossId}
               type="number"
-              value={scoring.loss_points}
-              onChange={(event) =>
-                changeScoring({
-                  loss_points: parsedOr(event.target.value, scoring.loss_points),
-                })
-              }
-              className="rounded-[6px] border border-white/10 bg-black/30 px-3 py-2 text-sm text-gray-100"
+              disabled={automaticScoring}
+              value={lossInput}
+              placeholder={t("create.totalRoundsAuto")}
+              onChange={(event) => setLossInput(event.target.value)}
+              className="rounded-[6px] border border-white/10 bg-black/30 px-3 py-2 text-sm text-gray-100 disabled:opacity-50"
             />
           </div>
         </div>

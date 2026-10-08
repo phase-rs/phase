@@ -117,6 +117,8 @@
     "coverageThresholdHint": "Excluir decks abaixo deste limite de suporte do motor",
     "bracket": "Bracket",
     "bracketHint": "A IA aleatória escolhe destes brackets. Decks sem tag são excluídos ao filtrar.",
+    "bracketPoolEmpty": "Nenhum deck corresponde aos brackets selecionados. A IA aleatória escolherá entre todos os decks válidos.",
+    "cedhPoolEmpty": "Nenhum deck de bracket 5 disponível. Não é possível atribuir decks à IA aleatória.",
     "opponentLabel": "Oponente {{number}}",
     "deck": "Deck",
     "difficulty": "Dificuldade",
@@ -131,7 +133,9 @@
       "feed": "Feed",
       "user": "Usuário",
       "precon": "Precon"
-    }
+    },
+    "brain": "Controlado por",
+    "brainEngine": "IA do motor"
   },
   "feedManager": {
     "title": "Gerenciar Feeds",

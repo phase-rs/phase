@@ -3432,7 +3432,7 @@ mod tests {
     use crate::projection::ProjectionKey;
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        Effect, PreventionAmount, PreventionScope, ResolvedAbility, TargetFilter,
+        Effect, EffectScope, PreventionAmount, PreventionScope, ResolvedAbility, TargetFilter,
     };
     use engine::types::game_state::WaitingFor;
     use engine::types::identifiers::CardId;
@@ -3471,6 +3471,7 @@ mod tests {
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Controller,
+                recipient_scope: EffectScope::Single,
                 scope: PreventionScope::CombatDamage,
                 damage_source_filter: None,
                 prevention_duration: None,
@@ -7993,7 +7994,12 @@ mod tests {
         // The declaration the engine would actually accept — proves the proposal is
         // legal rather than silently rewritten to the empty witness.
         assert_eq!(
-            engine::game::combat::complete_blocker_proposal(&state, PlayerId(1), &assignments),
+            engine::game::combat::complete_blocker_proposal(
+                &state,
+                PlayerId(1),
+                &assignments,
+                engine::game::combat::CombatTaxPosture::Refuse,
+            ),
             engine::types::actions::GameAction::DeclareBlockers {
                 assignments: assignments.clone()
             },
@@ -8101,7 +8107,12 @@ mod tests {
              lethal — the blockers all die, but the player takes 0. Got {assignments:?}"
         );
         assert_eq!(
-            engine::game::combat::complete_blocker_proposal(&state, PlayerId(1), &assignments),
+            engine::game::combat::complete_blocker_proposal(
+                &state,
+                PlayerId(1),
+                &assignments,
+                engine::game::combat::CombatTaxPosture::Refuse,
+            ),
             engine::types::actions::GameAction::DeclareBlockers {
                 assignments: assignments.clone()
             },
@@ -8144,7 +8155,12 @@ mod tests {
              even though no blocker survives to deal damage. Got {assignments:?}"
         );
         assert_eq!(
-            engine::game::combat::complete_blocker_proposal(&state, PlayerId(1), &assignments),
+            engine::game::combat::complete_blocker_proposal(
+                &state,
+                PlayerId(1),
+                &assignments,
+                engine::game::combat::CombatTaxPosture::Refuse,
+            ),
             engine::types::actions::GameAction::DeclareBlockers {
                 assignments: assignments.clone()
             },
@@ -8373,7 +8389,12 @@ mod tests {
         );
         // Still a legal declaration against the CR 702.111b menace floor.
         assert_eq!(
-            engine::game::combat::complete_blocker_proposal(&state, PlayerId(1), &assignments),
+            engine::game::combat::complete_blocker_proposal(
+                &state,
+                PlayerId(1),
+                &assignments,
+                engine::game::combat::CombatTaxPosture::Refuse,
+            ),
             engine::types::actions::GameAction::DeclareBlockers {
                 assignments: assignments.clone()
             },

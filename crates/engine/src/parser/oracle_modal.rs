@@ -23,7 +23,9 @@ use super::oracle_cost::parse_oracle_cost;
 #[cfg(test)]
 use super::oracle_effect::lower_ability_ir;
 use super::oracle_effect::{
-    conditions::{split_leading_conditional, strip_leading_general_conditional},
+    conditions::{
+        split_leading_conditional, strip_routed_leading_general_conditional, LeadingConditionRoute,
+    },
     parse_ability_ir_with_context, try_parse_named_choice,
 };
 use super::oracle_ir::context::ParseContext;
@@ -46,6 +48,7 @@ use super::oracle_static::{parse_pt_mod, parse_static_line_ir};
 #[cfg(test)]
 use super::oracle_trigger::parse_trigger_lines;
 use super::oracle_trigger::parse_trigger_lines_at_index_ir;
+use super::oracle_trigger::unhoisted_modal_guard_body;
 use super::oracle_util::{parse_mana_symbols, strip_reminder_text, TextPair};
 use crate::parser::oracle_ir::ast::{
     parsed_clause, ModalHeaderAst, ModalOptionality, ModeAst, OracleBlockAst, ReflexiveModalParent,
@@ -149,6 +152,17 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
             // `WhenYouDo` sub carries the modal, instead of firing the modes
             // unconditionally on the trigger.
             let (trigger_line, reflexive_parent) = classify_reflexive_modal_parent(trigger_line);
+            // CR 603.4: the modal splitter accepts a header that opens with the
+            // trigger's intervening-if ("Whenever X, if Y, choose one —"), so the
+            // guard lands in `header.raw` and the plain-modal lowering, which
+            // replaces the trigger body, would never see it. Return it to the
+            // trigger line so the trigger parser hoists it or fails the trigger
+            // closed. A reflexive parent keeps it in the header for
+            // `reflexive_modal_connector`.
+            let trigger_line = match (&reflexive_parent, split_leading_conditional(&header.raw)) {
+                (None, Some((guard, _))) => format!("{trigger_line}, {guard}"),
+                _ => trigger_line,
+            };
             return Some((
                 OracleBlockAst::TriggeredModal {
                     trigger_line,
@@ -1020,12 +1034,24 @@ fn reflexive_modal_connector(
     header: &ModalHeaderAst,
     ctx: &mut ParseContext,
 ) -> Result<AbilityCondition, Box<Effect>> {
-    let (guard, _) = strip_leading_general_conditional(&header.raw, ctx);
-    if let Some(guard) = guard {
-        return Ok(AbilityCondition::when_you_do_with_guard(guard));
+    match strip_routed_leading_general_conditional(&header.raw, ctx) {
+        // CR 115.1 + CR 608.2c: a target P/T threshold guard's
+        // `TargetMatchesFilter { subject_slot: None }` reads the gated node's own
+        // first object target, and a mode may announce its own target, so the
+        // guard cannot bind the antecedent "that creature" here; refuse it.
+        (Some((_, LeadingConditionRoute::TargetPtThreshold)), _) => {
+            return Err(Box::new(Effect::unimplemented(
+                "modal_reflexive_condition",
+                &header.raw,
+            )));
+        }
+        (Some((guard, LeadingConditionRoute::General)), _) => {
+            return Ok(AbilityCondition::when_you_do_with_guard(guard));
+        }
+        (None, _) => {}
     }
 
-    // `strip_leading_general_conditional` returns `None` both for a header
+    // `strip_routed_leading_general_conditional` returns `None` both for a header
     // with no guard and for an unmodeled leading conditional. Only the first
     // may become a bare `WhenYouDo`: lowering the second that way would make
     // an unsupported intervening-if condition silently permissive.
@@ -1203,7 +1229,11 @@ pub(crate) fn lower_oracle_block_ir(
             modes,
             reflexive_parent,
         } => {
-            let mut trigger_ctx = ctx.clone();
+            let mut trigger_ctx = ctx.clone_for_independent_body();
+            // CR 603.1: `parse_trigger_lines_at_index_ir` parses a NEW printed
+            // trigger line, which establishes its own event authority. Any outer
+            // `trigger_zone_change` would be unrelated, so this enters an
+            // INDEPENDENT body by name rather than relying on a clone's default.
             trigger_ctx.host_self_reference = host_self_reference;
             let mut triggers = parse_trigger_lines_at_index_ir(
                 &trigger_line,
@@ -1213,11 +1243,27 @@ pub(crate) fn lower_oracle_block_ir(
             );
             ctx.diagnostics.extend(trigger_ctx.diagnostics);
             for trigger in &mut triggers {
+                // CR 603.4: a trailing "if <guard>" left on the trigger line that
+                // did not hoist would be silently dropped when the modal payload
+                // replaces the body; fail the trigger closed instead.
+                if let Some(gap_body) = unhoisted_modal_guard_body(trigger) {
+                    trigger.body = Some(gap_body);
+                    continue;
+                }
                 // `body_context` is captured before normal trigger-body parsing.
                 // Clone it per sibling: each mode receives all trigger-established
                 // facts, but no mode can leak chain-local state into another.
                 let mut mode_ctx = trigger.body_context.clone();
                 mode_ctx.diagnostics.clear();
+                // CR 608.2c vs CR 603.12: a NON-reflexive modal mode body is
+                // ordinary text of the same resolving triggered ability, so the
+                // plain clone above correctly keeps the trigger's proven
+                // zone-change authority. A REFLEXIVE modal parent ("… When you
+                // do, choose one —") is a CR 603.12 body with its own event
+                // authority, so it must enter an independent body by name.
+                if reflexive_parent.is_some() {
+                    mode_ctx = mode_ctx.clone_for_independent_body();
+                }
                 if let Some(scope) = modal_relative_player_scope_for_trigger(trigger) {
                     mode_ctx.relative_player_scope = Some(scope);
                 }
@@ -1253,6 +1299,7 @@ pub(crate) fn lower_oracle_block_ir(
                     ),
                     choice: build_modal_choice(&header, &modes),
                     modes: parse_modal_mode_irs(&modes, AbilityKind::Spell, &mut mode_ctx),
+                    optionality: header.optionality,
                 };
                 ctx.diagnostics.extend(mode_ctx.diagnostics);
                 // CR 603.12: the printed instruction the mode list rides on is
@@ -1428,6 +1475,10 @@ fn parse_modal_mode_irs(
         .iter()
         .map(|mode| {
             let mut mode_ctx = base_ctx.clone();
+            // CR 608.2c: each mode body continues whatever body `base_ctx`
+            // describes, so the plain clone inherits exactly the authority
+            // `base_ctx` holds — a reset base stays reset, and no mode can
+            // invent authority its parent lacked.
             mode_ctx.subject = mode_anaphor_subject(mode_ctx.subject.take());
             mode_ctx.diagnostics.clear();
             let mut ability = parse_ability_ir_with_context(&mode.body, kind, &mut mode_ctx);
@@ -1463,7 +1514,10 @@ fn anchor_mode_irs(
     .parse(lower.as_str())
     .is_ok()
     {
-        let mut mode_ctx = base_ctx.clone();
+        let mut mode_ctx = base_ctx.clone_for_independent_body();
+        // CR 603.1: an anchor mode whose body is a printed trigger line spawns a
+        // DISTINCT triggered ability, which establishes its own event authority,
+        // so this enters an INDEPENDENT body by name.
         mode_ctx.diagnostics.clear();
         let triggers = parse_trigger_lines_at_index_ir(body, card_name, None, &mut mode_ctx);
         base_ctx.diagnostics.extend(mode_ctx.diagnostics);
@@ -1786,6 +1840,7 @@ fn lower_as_enters_anchor_word_modal(
             bypass_beneficiary: None,
             protection_does_not_remove: None,
             room_door: None,
+            granting_object: None,
         };
         result.statics.push(placeholder);
     }
@@ -2114,12 +2169,38 @@ pub(crate) fn lower_mode_abilities_with_scope(
 /// The `relative_player_scope` from the trigger condition (e.g.
 /// `TriggeringPlayer` for DamageDone triggers) is propagated into every mode
 /// body so "that player" anaphora resolve to the correct player.
-pub(crate) fn try_parse_inline_modal_ir(effect_body: &str, ctx: &ParseContext) -> Option<ModalIr> {
-    let em_dash_pos = effect_body.find('\u{2014}')?;
-    let header_text = effect_body[..em_dash_pos].trim();
-    let modes_text = effect_body[em_dash_pos + '\u{2014}'.len_utf8()..].trim();
-
-    let header = parse_modal_header_ast(header_text)?;
+/// Split the mode list of an INLINE modal body (header and modes on one line)
+/// into `ModeAst`s, or `None` when it does not carry two or more modes.
+///
+/// CR 700.2: "A spell or ability is modal if it has two or more options in a
+/// bulleted list preceded by instructions for a player to choose a number of
+/// those options." Two inline shapes reach this seam:
+///
+///   * **bullet-delimited** — `• Mode one. • Mode two.` This is the printed form
+///     CR 700.2 describes. It arrives inline (rather than as its own lines,
+///     which `collect_mode_asts` handles) whenever a preprocessor has already
+///     joined the bullet lines into a single body — as the Saga chapter
+///     preprocessor does for a `"{rN} — Choose one —"` chapter (CR 714.2b).
+///   * **`"; or "`-delimited** — `mode one; or mode two`.
+///
+/// Bullets are tried first because a bulleted body is the printed modal form,
+/// and `"; or "` can legitimately occur *inside* a single bullet's text.
+///
+/// Bullet bodies are lowered through `parse_mode_ast`, the same building block
+/// the line-based path uses, so an inline `• Defense! — …` mode gets identical
+/// label/cost/pawprint treatment to its own-line counterpart rather than a
+/// second, divergent label parser.
+fn split_inline_mode_asts(modes_text: &str) -> Option<Vec<ModeAst>> {
+    // allow-noncombinator: structural delimiter split for modal modes
+    let bulleted: Vec<ModeAst> = modes_text
+        .split(['\u{2022}', '\u{00b7}'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|body| parse_mode_ast(body, body, None))
+        .collect();
+    if bulleted.len() >= 2 {
+        return Some(bulleted);
+    }
 
     let raw_modes: Vec<&str> = modes_text
         .split("; or ") // allow-noncombinator: structural delimiter split for modal modes
@@ -2130,23 +2211,91 @@ pub(crate) fn try_parse_inline_modal_ir(effect_body: &str, ctx: &ParseContext) -
         return None;
     }
 
-    let modes: Vec<ModeAst> = raw_modes
-        .iter()
-        .map(|body| {
-            let body = body.trim_end_matches('.');
-            ModeAst {
-                raw: body.to_string(),
-                source_text: body.to_string(),
-                source_line: None,
-                label: None,
-                body: body.to_string(),
-                mode_cost: None,
-                mode_pawprint: None,
-            }
-        })
-        .collect();
+    Some(
+        raw_modes
+            .iter()
+            .map(|body| {
+                let body = body.trim_end_matches('.');
+                ModeAst {
+                    raw: body.to_string(),
+                    source_text: body.to_string(),
+                    source_line: None,
+                    label: None,
+                    body: body.to_string(),
+                    mode_cost: None,
+                    mode_pawprint: None,
+                }
+            })
+            .collect(),
+    )
+}
+
+/// Split an inline modal body into its header AST and mode ASTs.
+///
+/// Shared by the IR path (`try_parse_inline_modal_ir`, used by triggers) and the
+/// `AbilityDefinition` path (`try_parse_inline_modal_ability`, used by Saga
+/// chapters) so both agree on what counts as an inline modal.
+fn split_inline_modal_parts(effect_body: &str) -> Option<(ModalHeaderAst, Vec<ModeAst>)> {
+    let em_dash_pos = effect_body.find('\u{2014}')?;
+    let header_text = effect_body[..em_dash_pos].trim();
+    let modes_text = effect_body[em_dash_pos + '\u{2014}'.len_utf8()..].trim();
+
+    let header = parse_modal_header_ast(header_text)?;
+    let modes = split_inline_mode_asts(modes_text)?;
+    Some((header, modes))
+}
+
+/// Parse an inline modal body directly into an `AbilityDefinition`.
+///
+/// CR 700.2b: the controller of a modal *triggered* ability chooses the mode(s)
+/// as it is put on the stack. A Saga chapter ability is a triggered ability
+/// (CR 714.2b), so a chapter whose body is `"Choose one — • … • …"` must become
+/// a real modal ability rather than a sequential chain of every bullet.
+///
+/// Lowers through the same chokepoints as the trigger modal path
+/// (`oracle_trigger`'s `TriggerBody::Modal` arm): the marker chain through
+/// `lower_effect_chain_ir` + `finalize_effect_chain`, each mode through
+/// `lower_ability_ir`. Callers that already hold a `ParseContext` and want the
+/// IR should use [`try_parse_inline_modal_ir`] instead; this wrapper exists for
+/// definition-level callers that have no IR pipeline of their own.
+///
+/// `ctx` is the caller's body context, threaded to the marker and every mode
+/// exactly as the trigger modal path threads its live trigger-body context, so
+/// a trigger-only clause in a mode lowers with its event referent.
+pub(crate) fn try_parse_inline_modal_ability(
+    effect_body: &str,
+    ctx: &ParseContext,
+) -> Option<AbilityDefinition> {
+    let modal = try_parse_inline_modal_ir(effect_body, ctx)?;
+    let mut ability = crate::parser::oracle_effect::lower_effect_chain_ir(&modal.marker);
+    crate::parser::oracle_effect::finalize_effect_chain(&mut ability);
+    // CR 603.3c + CR 700.2b: "you may choose one —" lets the controller choose
+    // no mode, a choice made as the ability is put on the stack. The engine
+    // models that decline as `optional` on the ability that resolves, as the
+    // block-level modal lowering does; `ModalChoice.min_choices` stays 1.
+    if matches!(modal.optionality, ModalOptionality::MayDecline) {
+        ability.optional = true;
+    }
+    Some(
+        ability.with_modal(
+            modal.choice,
+            modal
+                .modes
+                .iter()
+                .map(|mode| crate::parser::oracle_effect::lower_ability_ir(&mode.ability))
+                .collect(),
+        ),
+    )
+}
+
+pub(crate) fn try_parse_inline_modal_ir(effect_body: &str, ctx: &ParseContext) -> Option<ModalIr> {
+    let (header, modes) = split_inline_modal_parts(effect_body)?;
 
     let mut mode_ctx = ctx.clone();
+    // CR 700.2 + CR 608.2c: an INLINE modal ("choose one — …; or …") is ordinary
+    // text of the body the caller is already parsing, so the plain clone keeps
+    // the caller's zone-change authority. `oracle_trigger` calls this with the
+    // live trigger body context.
     Some(ModalIr {
         marker: EffectChainIr::single_clause(
             effect_body,
@@ -2158,6 +2307,7 @@ pub(crate) fn try_parse_inline_modal_ir(effect_body: &str, ctx: &ParseContext) -
         ),
         choice: build_modal_choice(&header, &modes),
         modes: parse_modal_mode_irs(&modes, AbilityKind::Spell, &mut mode_ctx),
+        optionality: header.optionality,
     })
 }
 
@@ -2674,6 +2824,97 @@ mod tests {
                 Effect::Unimplemented { .. }
             )
         }));
+    }
+
+    /// CR 700.2: "An ability is modal if it has two or more options in a
+    /// bulleted list preceded by instructions for a player to choose." The
+    /// bulleted list *is* the printed modal form, so an inline body whose modes
+    /// arrive as bullets must split on the bullets — not only on `"; or "`.
+    #[test]
+    fn inline_modal_splits_bullet_delimited_modes() {
+        let modes = split_inline_mode_asts(
+            "• Target creature gets +2/+2 until end of turn. • You gain 2 life.",
+        )
+        .expect("two bullets are two modes");
+
+        assert_eq!(modes.len(), 2);
+        assert_eq!(
+            modes[0].body,
+            "Target creature gets +2/+2 until end of turn."
+        );
+        assert_eq!(modes[1].body, "You gain 2 life.");
+    }
+
+    /// Bulleted modes route through `parse_mode_ast`, the same building block
+    /// the own-line path uses, so a named bullet (`• Defense! — …`) yields the
+    /// same label/body split inline as it does on its own line.
+    #[test]
+    fn inline_modal_bullet_modes_split_label_from_body() {
+        let modes = split_inline_mode_asts(
+            "• Combine Powers! — Draw a card. • Defense! — You gain 3 life.",
+        )
+        .expect("two named bullets are two modes");
+
+        assert_eq!(modes.len(), 2);
+        assert_eq!(modes[0].label.as_deref(), Some("Combine Powers!"));
+        assert_eq!(modes[0].body, "Draw a card.");
+        assert_eq!(modes[1].label.as_deref(), Some("Defense!"));
+        assert_eq!(modes[1].body, "You gain 3 life.");
+    }
+
+    /// Anti-widening control. Bullet splitting must not lower the bar for what
+    /// counts as a modal: CR 700.2 requires *two or more* options, so a single
+    /// bullet stays a plain effect chain, and a body with no bullets and no
+    /// `"; or "` is still not modal.
+    #[test]
+    fn inline_modal_declines_bodies_with_fewer_than_two_modes() {
+        assert!(split_inline_mode_asts("• Draw a card.").is_none());
+        assert!(split_inline_mode_asts("Draw a card. You gain 2 life.").is_none());
+        assert!(
+            try_parse_inline_modal_ir("Choose one — • Draw a card.", &ParseContext::default())
+                .is_none()
+        );
+        // No "choose" header, so the em-dash is a flavor title, not a modal head.
+        assert!(try_parse_inline_modal_ir(
+            "Fight! — • Draw a card. • You gain 2 life.",
+            &ParseContext::default()
+        )
+        .is_none());
+    }
+
+    /// CR 603.3c + CR 700.2b: an inline trigger modal ("you may choose one — A;
+    /// or B") lets the controller choose no mode. The trigger parser reads "you
+    /// may" as trigger optionality before the modal body is parsed, so this pins
+    /// that the inline modal path keeps it. The plain "choose one" trigger is the
+    /// control.
+    #[test]
+    fn inline_modal_trigger_you_may_choose_one_is_optional() {
+        for (text, optional) in [
+            (
+                "When this creature enters, you may choose one \u{2014} Draw a card; or You gain 2 life.",
+                true,
+            ),
+            (
+                "When this creature enters, choose one \u{2014} Draw a card; or You gain 2 life.",
+                false,
+            ),
+        ] {
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                text,
+                "Test Creature",
+                &[],
+                &["Creature".into()],
+                &[],
+            );
+            let trigger = parsed
+                .triggers
+                .first()
+                .unwrap_or_else(|| panic!("{text}: must parse to a trigger"));
+            let execute = trigger.execute.as_deref().expect("trigger has an ability");
+            assert!(execute.modal.is_some(), "{text}: must be modal");
+            assert_eq!(trigger.optional, optional, "{text}: trigger.optional");
+            assert_eq!(execute.optional, optional, "{text}: execute.optional");
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::stickers::{
-    apply_selected_sticker, available_sticker_candidates, name_sticker_position_choices,
-    StickerCandidate,
+    apply_selected_sticker, available_sticker_candidates, may_put_sticker_on,
+    name_sticker_position_choices, StickerCandidate,
 };
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, Effect, EffectError, EffectKind, QuantityExpr, ResolvedAbility,
@@ -82,6 +82,36 @@ fn resolve_put_sticker(
     request: PutStickerRequest<'_>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 608.2c: each PutSticker instruction starts with no "that sticker";
+    // a put that places nothing leaves no antecedent. Preserved across this
+    // instruction's own prompt (answered at depth 1).
+    state.placed_sticker_this_resolution = None;
+
+    // CR 608.2c: the object is selected positionally on the RAW target list
+    // (a filtered list would renumber `ParentTargetSlot`); an empty
+    // `ParentTarget` selects nothing, as it always has.
+    let selected = super::effect_object_targets(request.target, &ability.targets)
+        .first()
+        .copied();
+    if let Some(object) = selected.and_then(|id| state.objects.get(&id)) {
+        // CR 400.7 + CR 603.6: a zone-change trigger whose referent left and
+        // returned finds a new object and does nothing to it. Checked once,
+        // here, because the `up_to` / `count > 1` fan-out rebuilds abilities
+        // without their keyed pins.
+        let current = ability.target_pin_is_current(object.id, state);
+        // CR 123.3b: no sticker, and no sticker choice, for an object the
+        // placing player doesn't own.
+        let owned = may_put_sticker_on(object, ability.controller);
+        if !current || !owned {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::PutSticker,
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(());
+        }
+    }
+
     let (count_expr, up_to) = request.count.peel_up_to();
     let count = resolve_quantity_with_targets(state, count_expr, ability).max(0) as u32;
 
@@ -132,8 +162,7 @@ fn resolve_put_sticker(
         return super::resolve_ability_chain(state, &resolved, events, 1);
     }
 
-    let targets = super::effect_object_targets(request.target, &ability.targets);
-    let Some(target_id) = targets.first().copied() else {
+    let Some(target_id) = selected else {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::PutSticker,
             source_id: ability.source_id,

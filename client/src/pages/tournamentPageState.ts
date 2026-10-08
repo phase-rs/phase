@@ -34,9 +34,10 @@ import type {
   PairingOutcome,
   PlayerSummary,
   PodOutcome,
-  ScoringPolicy,
   Tiebreaks,
+  TournamentAction,
   TournamentPairingView,
+  TournamentSummary,
   TournamentView,
 } from "../adapter/types";
 import type {
@@ -143,8 +144,20 @@ export function outcomeLabelKey(
 }
 
 /**
- * Whether the broker will accept a `ReportMatchResult` for this pairing at
- * all — a *total* contract, not a validity judgement about a submission's
+ * The BELOW-FLOOR FALLBACK for {@link isPairingReportable}: whether the broker
+ * will accept a `ReportMatchResult` for this pairing, decided from the pairing
+ * outcome ALONE. As of lobby protocol v6 the broker carries the answer on
+ * `TournamentPairingView.report_gate`, and {@link isPairingReportable} consumes
+ * that; this function is what it degrades to against a pre-v6 broker that emits
+ * no `report_gate`. Kept, not deleted, for exactly that reason.
+ *
+ * It is deliberately status-BLIND — it cannot see whether the tournament is
+ * still running — so it answers `true` for an already-`Reported` pairing on a
+ * `Completed` event, the one case `report_gate`'s `TournamentNotRunning` arm
+ * exists to refuse. That is an accepted limitation of the fallback, never the
+ * preferred path: a v6 broker's `report_gate` is always consulted first.
+ *
+ * A *total* contract, not a validity judgement about a submission's
  * contents (which is `validate_match_result`'s alone, and is never
  * duplicated here).
  *
@@ -186,6 +199,50 @@ export function isReportable(outcome: PairingOutcome | null): boolean {
   if ("Reported" in outcome) return true; // tournament.rs:1752 — re-reporting is legal
   const unreachable: never = outcome;
   return unreachable;
+}
+
+/**
+ * Whether the broker would accept a `ReportMatchResult` for this pairing —
+ * consuming the broker's own {@link TournamentPairingView.report_gate} when it
+ * is present (lobby protocol v6), and falling back to the status-blind
+ * {@link isReportable} only against a pre-v6 broker that emits none.
+ *
+ * This is the authority the Report affordance is gated on, and consuming
+ * `report_gate` is what fixes the pre-existing bug where the Report button
+ * lingered on a `Completed` event's already-`Reported` pairings: the broker's
+ * `report_gate` checks `TournamentStatus::is_terminal` first and answers
+ * `TournamentNotRunning`, a distinction the outcome-only fallback cannot draw.
+ *
+ * As with {@link isReportable}, this answers "can this pairing be reported by
+ * anyone", NOT "may this viewer report it" — authorization stays the caller's
+ * three orthogonal conjuncts ({@link viewerRoles}, {@link isActiveEntrant},
+ * {@link myPairing}).
+ */
+export function isPairingReportable(pairing: TournamentPairingView): boolean {
+  if (pairing.report_gate !== undefined) return pairing.report_gate === "Open";
+  return isReportable(pairing.outcome);
+}
+
+/**
+ * Whether a tournament-scoped gated action is one the broker would currently
+ * admit, read from the broker's own {@link TournamentSummary.open_actions}
+ * (lobby protocol v6) and composed by the caller with its own organizer
+ * credential — this answers "would the broker admit this action from a
+ * correctly credentialed actor", never "may this viewer take it".
+ *
+ * Absence is treated as OPEN, not closed: a pre-v6 broker emits no
+ * `open_actions`, and degrading to the credential-only gate preserves the
+ * prior behaviour (the button shows, and the broker refuses server-side if it
+ * must) rather than hiding an organizer's controls against an older server. A
+ * v6 broker that omits an action from the set closes it here — which is what
+ * withdraws `EndTournament` during `Registration`, and every action once the
+ * event is terminal.
+ */
+export function isActionOpen(
+  summary: TournamentSummary,
+  action: TournamentAction,
+): boolean {
+  return summary.open_actions?.includes(action) ?? true;
 }
 
 /**
@@ -414,27 +471,6 @@ export type ArityLabel =
 export function arityLabel(arity: MatchArity): ArityLabel {
   if (arity === 2) return { key: "arity.headToHead" };
   return { key: "arity.pod", seats: arity };
-}
-
-/**
- * The scoring policy to **prefill** a creation form with, for a given arity.
- *
- * Prefill only, and — as of lobby protocol v6 — a KNOWN DUPLICATE of a value
- * the engine now owns and exposes. `LobbyClientMessage::CreateTournament`'s
- * `scoring` is now `Option<ScoringPolicy>` with `#[serde(default)]` (the broker
- * applies `ScoringPolicy::default_for_arity` when it is omitted), and the
- * resolved value comes back on `TournamentSummary::scoring`. Per this repo's
- * display-layer rule, that duplicate must not drive game state: it survives
- * here only to seed the *form control* before the organizer edits it, and
- * should be removed — submit `scoring: null` and read the resolved value back
- * off the wire — in the tournament client-consumption follow-up. Mirrors
- * `ScoringPolicy::default_for_arity` (`crates/lobby-broker/src/tournament.rs`).
- *
- * Arity-dependent by design: a fixed 3/1/0 would silently give every pod
- * organizer MTR head-to-head scoring instead of MSTR pod scoring.
- */
-export function defaultScoringForArity(arity: MatchArity): ScoringPolicy {
-  return { win_points: 2 * arity - 1, draw_points: 1, loss_points: 0 };
 }
 
 /**

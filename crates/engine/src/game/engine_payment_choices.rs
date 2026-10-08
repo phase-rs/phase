@@ -96,6 +96,7 @@ pub(super) fn handle_resolution_optional_payment_choice(
         .find(|option| option.index == index && option.cost == advertised_cost.cost)
         .ok_or_else(|| EngineError::InvalidAction("payment branch is no longer payable".into()))?;
 
+    let granting_object = frame.ability.context.granting_object;
     let Effect::PayCost { cost, .. } = &mut frame.ability.effect else {
         return Err(EngineError::InvalidAction(
             "optional payment root is not PayCost".into(),
@@ -113,6 +114,7 @@ pub(super) fn handle_resolution_optional_payment_choice(
             state,
             live_player,
             advertised_source,
+            granting_object,
             &cost.target,
         );
         state.waiting_for = WaitingFor::PayCost {
@@ -163,6 +165,7 @@ fn handle_optional_effect_choice_inner(
                 trigger_event: pending_event,
                 trigger_events: pending_events,
                 trigger_match_count: pending_count,
+                return_result_occurrence,
             } = frame;
             let choice = if accept {
                 AutoMayChoice::Accept
@@ -187,8 +190,16 @@ fn handle_optional_effect_choice_inner(
             // resolution would have observed.
             let previous_trigger_match_count = state.current_trigger_match_count;
             state.current_trigger_match_count = pending_count;
+            // CR 608.2c: this choice resumes the same resolving instruction,
+            // including its named-result frame. A nested resolution may have
+            // its own selector; restore that exact prior value afterwards.
+            let previous_return_occurrence = std::mem::replace(
+                &mut state.active_return_result_occurrence,
+                return_result_occurrence,
+            );
             let result =
                 effects::resolve_optional_effect_decision(state, *ability, choice, events, 1);
+            state.active_return_result_occurrence = previous_return_occurrence;
             state.current_trigger_event = previous_trigger_event;
             state.current_trigger_events = previous_trigger_events;
             state.current_trigger_match_count = previous_trigger_match_count;
@@ -359,6 +370,7 @@ fn handle_opponent_may_choice_inner(
     let WaitingFor::OpponentMayChoice {
         player: promptee,
         remaining,
+        decision_subject_id,
         source_id,
         description,
     } = waiting_for
@@ -390,6 +402,7 @@ fn handle_opponent_may_choice_inner(
                 if let Some((&next, rest)) = remaining.split_first() {
                     state.waiting_for = WaitingFor::OpponentMayChoice {
                         player: next,
+                        decision_subject_id,
                         source_id,
                         description,
                         remaining: rest.to_vec(),
@@ -498,6 +511,7 @@ fn handle_opponent_may_choice_inner(
                     let rest = remaining[1..].to_vec();
                     state.waiting_for = WaitingFor::OpponentMayChoice {
                         player: next,
+                        decision_subject_id,
                         source_id,
                         description,
                         remaining: rest,
@@ -533,6 +547,7 @@ fn handle_opponent_may_choice_inner(
         let rest = remaining[1..].to_vec();
         state.waiting_for = WaitingFor::OpponentMayChoice {
             player: next,
+            decision_subject_id,
             source_id,
             description,
             remaining: rest,
@@ -778,7 +793,7 @@ fn pay_top_library_exile_cost(
         .players
         .iter()
         .find(|p| p.id == player)
-        .map(|p| p.library.len())
+        .map(|p| state.library_of(p.id).len())
         .ok_or_else(|| EngineError::InvalidAction("Player not found".to_string()))?;
     if library_len < count as usize {
         return Ok(false);
@@ -789,7 +804,8 @@ fn pay_top_library_exile_cost(
         .iter()
         .find(|p| p.id == player)
         .map(|p| {
-            p.library
+            state
+                .library_of(p.id)
                 .iter()
                 .copied()
                 .take(count as usize)
@@ -1275,6 +1291,7 @@ pub(super) fn handle_unless_payment(
                     state,
                     player,
                     pending_effect.source_id,
+                    pending_effect.context.granting_object,
                     filter.as_ref(),
                 );
                 // CR 702.24a: partial payments aren't allowed — if the controller
@@ -1282,6 +1299,14 @@ pub(super) fn handle_unless_payment(
                 // the effect happens.
                 if (hand_cards.len() as u32) < count {
                     payment_failed = true;
+                } else if count == 0 {
+                    // Deliberately class-wide for every Discard unless-cost: a
+                    // resolved count of zero (a whole-hand discard with an empty
+                    // hand, per the Perplex 2005-10-01 ruling) needs no resource
+                    // to discard (cf. CR 118.3), so the cost is
+                    // paid with nothing to discard. Falls through to the paid
+                    // path; prompting `WardDiscardChoice` with no cards would
+                    // soft-lock the payer.
                 } else if selection.is_random() {
                     // CR 701.9b: a RANDOM discard offers the payer no choice —
                     // the game picks. Pay it inline through the shared
@@ -1446,15 +1471,37 @@ pub(super) fn handle_unless_payment(
                 let source = pending_effect.source_id;
                 let ctx =
                     crate::game::filter::FilterContext::from_source_with_controller(source, player);
+                // The zone population is scanned ACROSS ALL PLAYERS — the
+                // parsed `filter` is the single authority for narrowing it
+                // (e.g. "your graveyard" stamps `tf.controller = Some(You)`;
+                // "an opponent's graveyard" stamps `FilterProp::Owned{Opponent}`;
+                // a bare/possessive-less zone phrase, like an unrestricted
+                // "a graveyard", carries no ownership restriction at all — see
+                // `parse_zone_suffix` in `oracle_target.rs`). Pre-restricting
+                // this scan to the payer's own zone (as a prior version did)
+                // silently narrowed an unrestricted source zone to the payer's
+                // own, even though the printed text named no such restriction.
                 let zone_objects: Vec<ObjectId> = match from_zone {
-                    Some(Zone::Graveyard) => state
-                        .players
+                    Some(zone) => state
+                        .objects
                         .iter()
-                        .find(|p| p.id == player)
-                        .map(|p| p.graveyard.iter().copied().collect())
-                        .unwrap_or_default(),
-                    _ => state.battlefield.iter().copied().collect(),
+                        .filter(|(_, obj)| obj.zone == *zone)
+                        .map(|(id, _)| *id)
+                        .collect(),
+                    None => state.battlefield.iter().copied().collect(),
                 };
+                // CR 118.12: eligibility is governed ENTIRELY by the parsed
+                // `filter` (which already encodes whatever ownership/control
+                // restriction the printed text actually specifies — "you
+                // control" via `tf.controller`, a possessive source zone via
+                // `FilterProp::Owned`, or nothing at all for an unrestricted
+                // noun like Drake Familiar's "an enchantment"). Do NOT impose
+                // an additional blanket `obj.controller == player` restriction
+                // here — that duplicated (and for zone-qualified costs,
+                // silently replaced) the filter's own scoping and made an
+                // unrestricted return-cost impossible to pay with an
+                // opponent-controlled object, even though the Oracle text
+                // named no such restriction.
                 let filter_ref = filter.as_ref();
                 let eligible: Vec<ObjectId> = zone_objects
                     .iter()
@@ -1463,8 +1510,7 @@ pub(super) fn handle_unless_payment(
                             .objects
                             .get(id)
                             .map(|obj| {
-                                obj.controller == player
-                                    && !obj.is_emblem
+                                !obj.is_emblem
                                     && filter_ref.is_none_or(|f| {
                                         crate::game::filter::matches_target_filter(
                                             state, **id, f, &ctx,
@@ -1588,7 +1634,7 @@ pub(super) fn handle_unless_payment(
                     .players
                     .iter()
                     .find(|p| p.id == player)
-                    .map(|p| p.library.len())
+                    .map(|p| state.library_of(p.id).len())
                     .ok_or_else(|| {
                         EngineError::InvalidAction("Player not found".to_string())
                     })?;
@@ -2251,6 +2297,7 @@ pub(super) fn handle_ward_discard_choice(
             state,
             player,
             pending_effect.source_id,
+            pending_effect.context.granting_object,
             filter.as_ref(),
         );
         state.waiting_for = WaitingFor::WardDiscardChoice {
@@ -2478,7 +2525,7 @@ pub(super) fn resume_ward_sacrifice_payment(
 /// The exhaustive `match` on `CostMoveDrainBoundary` is kept as an ELIGIBILITY
 /// ASSERTION, not a verdict producer. It holds `PriorityBoundary` at
 /// `unreachable!` — `drain_pending_cost_move_resume` admits only
-/// `DelveManaPayment`/`ManaAbilityPayment` at that boundary and dispatches both
+/// a Delve-commit `Cast`/`ManaAbilityPayment` at that boundary and dispatches both
 /// ahead of this root — and it turns any future widening of the boundary enum or
 /// of that eligibility table into a compile error at the one site whose rules
 /// reasoning would have to be re-derived.
@@ -2847,11 +2894,7 @@ fn set_active_priority(state: &mut GameState) {
 }
 
 fn action_result(events: &mut Vec<GameEvent>, waiting_for: WaitingFor) -> ActionResult {
-    ActionResult {
-        events: std::mem::take(events),
-        waiting_for,
-        log_entries: vec![],
-    }
+    ActionResult::applied(std::mem::take(events), waiting_for)
 }
 
 #[cfg(test)]
@@ -2865,6 +2908,7 @@ mod tests {
         ManaContribution, ManaProduction, QuantityExpr, ResolvedAbility, SacrificeCost,
         SubAbilityLink, TriggerDefinition, TypedFilter,
     };
+    use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin};
     use crate::types::identifiers::{CardId, ObjectId};
@@ -2876,6 +2920,91 @@ mod tests {
             amount: QuantityExpr::Fixed { value },
             player: TargetFilter::Controller,
         }
+    }
+
+    fn opponent_may_state(effect: Effect, remaining: Vec<PlayerId>) -> GameState {
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        let mut ability = ResolvedAbility::new(effect, vec![], ObjectId(100), PlayerId(0));
+        ability.optional = true;
+        ability.optional_for = Some(crate::types::ability::OpponentMayScope::AnyPlayer);
+        state.push_optional_effect_frame(OptionalEffectFrame {
+            ability: Box::new(ability),
+            trigger_event: None,
+            trigger_events: Vec::new(),
+            trigger_match_count: None,
+            return_result_occurrence: None,
+        });
+        state.waiting_for = WaitingFor::OpponentMayChoice {
+            player: PlayerId(0),
+            decision_subject_id: Some(ObjectId(44)),
+            source_id: ObjectId(100),
+            description: Some("optional test effect".to_string()),
+            remaining,
+        };
+        state
+    }
+
+    #[test]
+    fn opponent_may_reprompts_preserve_latched_subject_until_terminal_resolution() {
+        let mut state = opponent_may_state(gain_life(1), vec![PlayerId(1), PlayerId(2)]);
+
+        for (actor, next) in [(PlayerId(0), PlayerId(1)), (PlayerId(1), PlayerId(2))] {
+            crate::game::engine::apply(
+                &mut state,
+                actor,
+                GameAction::DecideOptionalEffect { accept: false },
+            )
+            .expect("decline advances to the next APNAP participant");
+            assert!(matches!(
+                state.waiting_for,
+                WaitingFor::OpponentMayChoice {
+                    player,
+                    decision_subject_id: Some(ObjectId(44)),
+                    ..
+                } if player == next
+            ));
+            assert!(
+                state.active_optional_effect_frame().is_some(),
+                "the parked resolution authority remains until the terminal answer"
+            );
+        }
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(2),
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .expect("terminal decline resolves the parked frame");
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.active_optional_effect_frame().is_none());
+    }
+
+    #[test]
+    fn opponent_may_infeasible_accept_reprompt_preserves_latched_subject() {
+        let effect = Effect::Sacrifice {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
+        };
+        let mut state = opponent_may_state(effect, vec![PlayerId(1)]);
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .expect("an accepted choice with no legal object advances to the next player");
+
+        assert!(matches!(
+            &state.waiting_for,
+            WaitingFor::OpponentMayChoice {
+                player: PlayerId(1),
+                decision_subject_id: Some(ObjectId(44)),
+                remaining,
+                ..
+            } if remaining.is_empty()
+        ));
+        assert!(state.active_optional_effect_frame().is_some());
     }
 
     #[test]
@@ -2894,10 +3023,12 @@ mod tests {
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id: ObjectId(100),
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -2926,10 +3057,12 @@ mod tests {
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id: ObjectId(100),
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -2964,10 +3097,12 @@ mod tests {
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id: ObjectId(100),
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -2999,10 +3134,12 @@ mod tests {
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id: ObjectId(100),
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -3032,10 +3169,12 @@ mod tests {
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id: ObjectId(100),
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -3064,10 +3203,12 @@ mod tests {
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id: ObjectId(100),
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -3096,10 +3237,12 @@ mod tests {
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id,
+            decision_subject_id: None,
             description: None,
             may_trigger_key: Some(key.clone()),
             same_card_may_trigger_choice_available: false,
@@ -3111,6 +3254,7 @@ mod tests {
             WaitingFor::OptionalEffectChoice {
                 player: PlayerId(0),
                 source_id,
+                decision_subject_id: None,
                 description: None,
                 may_trigger_key: Some(key.clone()),
                 same_card_may_trigger_choice_available: false,
@@ -3136,6 +3280,7 @@ mod tests {
             WaitingFor::OptionalEffectChoice {
                 player: PlayerId(0),
                 source_id: ObjectId(100),
+                decision_subject_id: None,
                 description: None,
                 may_trigger_key: None,
                 same_card_may_trigger_choice_available: false,
@@ -4783,6 +4928,91 @@ mod tests {
             ),
             "the prompt must advance to the second round with the payable pick recorded, got {:?}",
             state.waiting_for
+        );
+    }
+}
+
+#[cfg(test)]
+mod dandan_read_sweep_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{QuantityExpr, ResolvedAbility, TargetFilter};
+    use crate::types::format::FormatConfig;
+    use crate::types::identifiers::CardId;
+
+    const P1: PlayerId = PlayerId(1);
+
+    fn pile_game(cards: u64) -> GameState {
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 7);
+        for i in 0..cards {
+            create_object(
+                &mut state,
+                CardId(100 + i),
+                P1,
+                format!("Pile {i}"),
+                Zone::Library,
+            );
+        }
+        state
+    }
+
+    /// CR 118.3 + CR 400.1: a cumulative-upkeep style "exile the top card of
+    /// your library" cost is paid from the shared pile by the non-canonical seat.
+    #[test]
+    fn top_library_exile_cost_pays_from_the_shared_pile() {
+        let mut state = pile_game(2);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            P1,
+            "Cost Source".into(),
+            Zone::Battlefield,
+        );
+        let top = state.library_of(P1)[0];
+
+        let paid = pay_top_library_exile_cost(&mut state, P1, 1, source, &mut Vec::new())
+            .expect("cost resolves");
+
+        assert!(paid, "the pile pays the cost");
+        assert_eq!(state.objects[&top].zone, Zone::Exile);
+        assert_eq!(state.library_of(P1).len(), 1);
+    }
+
+    /// CR 701.17b + CR 118.12: an unless-mill payment counts and mills the pile.
+    #[test]
+    fn unless_mill_payment_mills_the_shared_pile() {
+        let mut state = pile_game(3);
+        let top_two: Vec<_> = state.library_of(P1).iter().take(2).copied().collect();
+        let pending = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(999),
+            P1,
+        );
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: P1,
+            cost: AbilityCost::Mill { count: 2 },
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+        };
+
+        let waiting = state.waiting_for.clone();
+        handle_unless_payment(&mut state, waiting, true, &mut Vec::new())
+            .expect("payment resolves");
+
+        assert_eq!(
+            state.graveyard_of(P1).iter().copied().collect::<Vec<_>>(),
+            top_two
+        );
+        assert_eq!(state.library_of(P1).len(), 1);
+        assert_eq!(
+            state.players[1].life, 20,
+            "the payment suppressed the effect"
         );
     }
 }

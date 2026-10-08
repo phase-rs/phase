@@ -6,6 +6,8 @@ import {
   evaluateDeckCompatibility,
   type DeckCompatibilityResult,
 } from "../../../services/deckCompatibility";
+import { resolveCommander } from "../../../services/deckParser";
+import { SAVED_DECK_REWRITTEN_EVENT, STORAGE_KEY_PREFIX } from "../../../constants/storage";
 
 const eligible = new Set<string>();
 const partnerCandidates = vi.fn(async () => [] as string[]);
@@ -40,6 +42,11 @@ vi.mock("../../../services/deckCompatibility", () => ({
 vi.mock("../../../adapter/wasm-adapter", () => ({
   getSharedAdapter: () => ({}),
 }));
+
+vi.mock("../../../services/deckParser", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../services/deckParser")>();
+  return { ...actual, resolveCommander: vi.fn(actual.resolveCommander) };
+});
 
 import { useDeckBuilder } from "../useDeckBuilder";
 
@@ -223,5 +230,46 @@ describe("useDeckBuilder — CR 903.3 designation accounting", () => {
     await waitFor(() => {
       expect(result.current.colorDistribution).toEqual(distribution);
     });
+  });
+});
+
+describe("useDeckBuilder — Load's rewrite-listener cleanup on rejection", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("removes the rewrite listener it added even when resolveCommander rejects", async () => {
+    localStorage.clear();
+    localStorage.setItem(`${STORAGE_KEY_PREFIX}D`, JSON.stringify({ main: [], sideboard: [] }));
+    vi.mocked(resolveCommander).mockRejectedValueOnce(new Error("boom"));
+
+    const addSpy = vi.spyOn(window, "addEventListener");
+    const removeSpy = vi.spyOn(window, "removeEventListener");
+
+    const { result, unmount } = renderHook(() =>
+      useDeckBuilder({
+        format: "Commander" as GameFormat,
+        onFormatChange: vi.fn(),
+        searchFilters: {} as never,
+      }),
+    );
+
+    await act(async () => {
+      await expect(result.current.handleLoad("D")).rejects.toThrow("boom");
+    });
+    unmount();
+
+    const rewriteAdds = addSpy.mock.calls.filter(([type]) => type === SAVED_DECK_REWRITTEN_EVENT).length;
+    const rewriteRemoves = removeSpy.mock.calls.filter(
+      ([type]) => type === SAVED_DECK_REWRITTEN_EVENT,
+    ).length;
+
+    addSpy.mockRestore();
+    removeSpy.mockRestore();
+
+    // The load-scoped listener registered around `resolveCommander` in `handleLoad` must be
+    // removed on the rejection path, not just the success path.
+    expect(rewriteAdds).toBeGreaterThan(0);
+    expect(rewriteRemoves).toBe(rewriteAdds);
   });
 });

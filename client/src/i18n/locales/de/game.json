@@ -1,4 +1,5 @@
 {
+  "playerLatency": {"host":"Host","waiting":"Warten","value":"{{ms}} ms","description":"Hin- und Rücklaufzeit zum Host. Eine fehlende Antwort trennt das Spiel nicht."},
   "abilityBlock": {
     "badge": "Blockiert",
     "cantBeActivated": "Diese Fähigkeit kann nicht aktiviert werden",
@@ -9,6 +10,9 @@
   "manaSourceSelection": {
     "title": "Manaquelle wählen",
     "description": "Diese Manafähigkeit erfordert das Opfern einer bleibenden Karte.",
+    "baseOutput_one": "Grundmenge: {{count}} Mana",
+    "baseOutput_other": "Grundmenge: {{count}} Mana",
+    "baseOutputVariable": "Grundmenge wird bei Aktivierung bestimmt",
     "sacrifice": "Opfern",
     "back": "Zurück zur Manabezahlung",
     "unknownSource": "Manaquelle"
@@ -17,10 +21,10 @@
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
     "respondTitle": "Loop Shortcut Proposed",
-    "respondSubtitle": "An opponent proposes taking a loop shortcut. Accept it, or break out to keep playing manually.",
+    "respondSubtitle": "An opponent proposes taking a loop shortcut. Accept it, or name the place where the sequence stops.",
     "confirm": "Take the shortcut",
     "accept": "Accept",
-    "shorten": "Break out",
+    "shorten": "Shorten it",
     "decline": "Decline the shortcut",
     "untilLethal": "Repeat until the game ends.",
     "fixedCount_one": "Repeat at most once.",
@@ -104,11 +108,16 @@
   },
   "debugCreate": {
     "copies": "Kopien",
+    "asToken": "Als Spielstein erstellen",
     "tokenPower": "Power",
     "tokenToughness": "Toughness",
     "tokenPowerPlaceholder": "Power",
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
+  },
+  "debugMove": {
+    "runEtbEffects": "ETB-Effekte ausführen",
+    "simulate": "Simulieren (ETB-Effekte, Trigger + SBAs)"
   },
   "debugLibrary": {
     "openActions": "Debug-Aktionen für {{name}} öffnen"
@@ -305,13 +314,19 @@
     "eligibleCount": "{{count}} legal",
     "attackingCount": "Ang {{count}}",
     "selectedCount": "Ausg {{count}}",
+    "directBlockTargetCount": "Blockziele {{count}}",
+    "blockingWith": "Blockt mit {{name}}",
+    "blockedBy": "Blockiert von {{names}}",
+    "unblocked": "Ungeblockt",
     "pickAll": "Alle",
     "pickNone": "Keine",
     "underAttack_one": "Von {{count}} Kreatur angegriffen",
     "underAttack_other": "Von {{count}} Kreaturen angegriffen",
     "target": "Ziel",
+    "token": "Spielstein",
+    "tokenTooltip": "Spielstein-Kopie einer echten Karte",
     "copy": "Kopie",
-    "copyTooltip": "Spielstein-Kopie einer echten Karte",
+    "copyTooltip": "Nicht-Spielstein-Permanent, das eine andere Karte kopiert",
     "cantBeBlocked": "Kann nicht geblockt werden",
     "ringBearer": "Ring",
     "ringBearerTooltip": "Ringträger",
@@ -760,6 +775,8 @@
     "mustAttackSatisfiedBadge": "Attacking ✓",
     "mustBlockBadge": "Must block",
     "mustBlockExactBadge": "Muss {{attacker}} blocken",
+    "mustBeBlockedBadge": "Muss blockiert werden",
+    "bandBadge": "Bande {{n}}",
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
@@ -794,6 +811,7 @@
     "titleTargets": "Ziele: {{targets}}",
     "titlePaid": "Bezahlt: {{paid}}",
     "titleContext": "Kontext: {{context}}",
+    "revealedCards": "Aufgedeckt: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} Mana",
     "paidColorsSpent": "{{count}} Farben",
@@ -1116,6 +1134,8 @@
       "usePowder": "{{name}} verwenden",
       "powderDescription": "Schicke jede Karte auf der Hand ins Exil, ziehe die gleiche Anzahl — kein Mulligan",
       "powderTooltip": "Schicke jede Karte auf deiner Hand ins Exil und ziehe die gleiche Anzahl. Kein Mulligan — Anzahl und unter die Bibliothek zu legende Karten bleiben unberührt.",
+      "freeReveal": "Aufdecken und neu ziehen (gratis)",
+      "freeRevealDescription": "Decke deine Hand auf, mische sie zurück und ziehe 7 — gratis, keine Karten unter die Bibliothek, kein Mulligan",
       "eyebrowMulligan": "Mulligan {{count}} · London",
       "eyebrowOpening": "Starthand · London-Mulligan",
       "reviewTitle": "Überprüfe deine Starthand",
@@ -1368,6 +1388,7 @@
       "target": "Ziel",
       "return": "Zurückgeben",
       "discard": "Abwerfen",
+      "reveal": "Vorzeigen",
       "evidence": "Beweise",
       "manifest": "Manifestieren",
       "untap": "Enttappen",
@@ -1418,7 +1439,16 @@
       "subtitleUpTo_other": "Wähle bis zu {{count}} Karten, um sie {{destination}} zu legen",
       "destinationTop": "oben auf deine Bibliothek",
       "destinationBattlefield": "auf das Schlachtfeld",
-      "destinationHand": "auf deine Hand"
+      "destinationHand": "auf deine Hand",
+      "titleSplit": "Die übrigen Karten aufteilen",
+      "subtitleSplit_one": "Ordne die Karten an: {{count}} kommt oben auf deine Bibliothek, die übrigen {{remaining}} kommen nach unten",
+      "subtitleSplit_other": "Ordne die Karten an: {{count}} kommen oben auf deine Bibliothek, die übrigen {{remaining}} kommen nach unten",
+      "badgeTop": "Oben {{order}}",
+      "badgeBottom": "Unten",
+      "hintSplit": "Zum Umsortieren ziehen · grüne Karten kommen nach oben (ganz links zuoberst), graue nach unten",
+      "moveEarlier": "{{card}} nach vorne verschieben",
+      "moveLater": "{{card}} nach hinten verschieben",
+      "hintSplitOrderOnly": "Ziehen oder die Pfeiltasten nutzen, um innerhalb jedes Stapels umzusortieren · welche Karten nach oben kommen, hat ein anderer Spieler gewählt"
     },
     "surveil": {
       "title": "Überwachen",
@@ -1667,6 +1697,14 @@
       "labelExile": "Exil",
       "labelBehold": "Erblicken"
     },
+    "empowerJace": {
+      "title": "Jace stärken",
+      "subtitle": "Wähle einen Jace-Spielstein, den du kontrollierst, für +{{count}} Loyalität"
+    },
+    "spellCopyOrder": {
+      "title": "Kopien ordnen",
+      "subtitle": "Wähle den Zauberspruch, dessen Kopie als Nächstes auf den Stapel kommt"
+    },
     "collectEvidence": {
       "title": "Beweise sammeln",
       "subtitle": "Schicke Karten aus deinem Friedhof mit einem Gesamtmanawert von {{minimum}} oder mehr ins Exil"
@@ -1785,6 +1823,14 @@
       "subtitle_one": "Put {{count}} revealed card on the bottom of your library",
       "subtitle_other": "Put {{count}} revealed cards on the bottom of your library, in any order",
       "hint": "Drag to reorder · position 1 ends up on top of this pile"
+    },
+    "revealUntilBottom": {
+      "title": "Die restlichen Karten unter die Bibliothek legen",
+      "subtitle_one": "{{count}} aufgedeckte Karte unter deine Bibliothek legen",
+      "subtitle_other": "Lege {{count}} aufgedeckte Karten in beliebiger Reihenfolge unter deine Bibliothek",
+      "hint": "Ziehen zum Neuordnen · Position 1 landet oben auf diesem Stapel",
+      "moveLeft": "Nach links verschieben",
+      "moveRight": "Nach rechts verschieben"
     }
   },
   "specializeColor": {
@@ -1896,6 +1942,10 @@
     "prowlNormalLabel": "Normal wirken",
     "prowlAltLabel": "Mit Prowl wirken",
     "prowlSubtitle": "Wirke {{name}} normal oder zahle seine Prowl-Kosten (verfügbar, weil eine passende Kreatur einem Spieler in diesem Zug Kampfschaden zugefügt hat).",
+    "surgeEyebrow": "Surge",
+    "surgeNormalLabel": "Normal wirken",
+    "surgeAltLabel": "Mit Surge wirken",
+    "surgeSubtitle": "Wirke {{name}} normal oder zahle seine Surge-Kosten (verfügbar, weil du oder ein Teamkamerad in diesem Zug einen anderen Zauberspruch gewirkt habt).",
     "overloadEyebrow": "Überladen",
     "overloadNormalLabel": "Normal wirken",
     "overloadAltLabel": "Mit Überladen wirken",
@@ -1919,6 +1969,8 @@
     "additionalExile": "+ Eine Karte ins Exil schicken",
     "additionalSacrifice": "+ Eine bleibende Karte opfern",
     "additionalPayLife": "+ Leben bezahlen",
+    "additionalPayLifeAmount": "+ {{amount}} Leben bezahlen",
+    "additionalCollectEvidence": "+ Beweise sammeln {{amount}}",
     "additionalDiscard": "+ Eine Karte abwerfen",
     "additionalTapCreatures": "+ Kreaturen tappen",
     "additionalGeneric": "+ {{type}}"
@@ -1963,7 +2015,11 @@
   },
   "zoneOpponentChooser": {
     "title": "Gegner wählen",
-    "subtitle": "Wähle, welcher Gegner die Wahl trifft."
+    "subtitle": "Wähle, welcher Gegner die Wahl trifft.",
+    "orderTitle": "Nächsten Spieler wählen",
+    "orderSubtitle": "Wähle, für wen du als Nächstes auswählst.",
+    "substituteTitle": "Spieler wählen",
+    "substituteSubtitle": "Wähle, wer diese Wahl trifft."
   },
   "pileOpponent": {
     "title": "Choose Opponent",
@@ -1997,10 +2053,15 @@
     "subtitleCascade": "Kaskade hat {{name}} ins Exil geschickt (Manawert unter {{sourceMv}}). Wirke es, ohne seine Manakosten zu bezahlen, oder lehne ab und mische alle {{total}} ins Exil geschickten Karten unter deine Bibliothek.",
     "subtitleDiscover": "Entdecken hat {{name}} ins Exil geschickt. Wirke es, ohne seine Manakosten zu bezahlen, oder nimm es auf deine Hand und mische die anderen {{missCount}} ins Exil geschickten Karten unter deine Bibliothek.",
     "subtitleRipple": "Ripple hat {{name}} aufgedeckt. Wirke es, ohne seine Manakosten zu bezahlen, oder lehne ab und lege alle {{total}} aufgedeckten Karten in zufälliger Reihenfolge unter deine Bibliothek.",
-    "subtitleGraveyardPaid": "Wirke {{name}} aus einem Friedhof, indem du seine Manakosten bezahlst — Mana jeder Art darf ausgegeben werden. Oder lehne ab und lass es im Friedhof.",
+    "subtitleGraveyardPaid": "Wirke {{name}} aus einem Friedhof, indem du seine Manakosten{{extra}} bezahlst{{concession}}. Oder lehne ab und lass es im Friedhof.",
     "castNamed": "{{name}} wirken",
     "castSuffix": "(ohne seine Manakosten zu bezahlen)",
-    "castPaidSuffix": "(bezahle seine Manakosten — Mana jeder Art darf ausgegeben werden)",
+    "castPaidSuffix": "(bezahle seine Manakosten{{extra}}{{concession}})",
+    "paidExtraFragment": " plus {{extra}}",
+    "paidAnyTypeSubtitleFragment": " — Mana jeder Art darf ausgegeben werden",
+    "paidAnyColorSubtitleFragment": " — Mana jeder Farbe darf ausgegeben werden",
+    "paidAnyTypeSuffixFragment": " — Mana jeder Art darf ausgegeben werden",
+    "paidAnyColorSuffixFragment": " — Mana jeder Farbe darf ausgegeben werden",
     "putIntoHand": "Auf die Hand nehmen",
     "decline": "Ablehnen",
     "discoverDeclineSuffix": "(den Rest unter die Bibliothek legen)",
@@ -2041,6 +2102,7 @@
     "variantForetell": "Aus Vorhersagen wirken",
     "variantOverload": "Mit Überladen wirken",
     "variantBestow": "Mit Verleihen wirken",
+    "variantBlitz": "Mit Blitz wirken",
     "variantFreerunning": "Mit Freerunning wirken",
     "variantFuse": "Mit Verschmelzen wirken",
     "variantMutate": "Mit Mutate wirken",
@@ -2050,7 +2112,14 @@
     "variantMoreThanMeetsTheEye": "Cast Converted",
     "variantPrototype": "Mit Prototyp wirken",
     "variantFaceDown": "Verdeckt wirken",
-    "variantFallback": "Mit {{type}} wirken"
+    "variantFallback": "Mit {{type}} wirken",
+    "viaSource": "über {{name}}",
+    "extraCostAdditional": "+ {{cost}}",
+    "extraCostAlternative": "statt seiner Manakosten: {{cost}}",
+    "entersWithCounter": "kommt mit einer {{counter}}-Marke ins Spiel",
+    "slotPerType": "nutzt den {{type}}-Platz",
+    "slotChooseType": "wähle einen Permanenttyp",
+    "slotOncePerTurn": "einmal in diesem Zug"
   },
   "categoryChoice": {
     "title": "Bleibende Karten zum Behalten wählen",
@@ -2112,6 +2181,7 @@
     "exportClientSnapshot": "Client-Snapshot exportieren",
     "exported": "Exportiert",
     "exportFailed": "Export fehlgeschlagen",
+    "exportRequested": "Export unbestätigt",
     "copyDiagnostic": "Diagnose kopieren",
     "copied": "Kopiert!",
     "reportOnGithub": "Auf GitHub melden",
@@ -2207,7 +2277,9 @@
     "accept": "Ja",
     "decline": "Nein",
     "sourceFallback": "Effekt",
-    "entryLabel": "{{source}} – {{decision}}"
+    "entryLabel": "{{source}} – {{decision}}",
+    "optionalTriggers": "Optionale ausgelöste Fähigkeiten ({{count, number}})",
+    "replacementChoices": "Ersetzungsentscheidungen ({{count, number}})"
   },
   "optionalEffect": {
     "sourceFallback": "Effekt",
@@ -2215,7 +2287,13 @@
     "yes": "Ja",
     "no": "Nein",
     "dontAskAgain": "Dieses Spiel nicht mehr fragen",
-    "dontAskAgainForSameCard": "Auf jede Kopie dieser Karte anwenden"
+    "dontAskAgainForSameCard": "Diese Entscheidung für jede Kopie dieser Karte in diesem Spiel verwenden"
+  },
+  "keywordDetail": {
+    "selfManaCost": "seine Manakosten",
+    "selfManaValue": "sein Manawert",
+    "manaCostReduced": "seine Manakosten, verringert um {{reduction}}",
+    "spliceOnto": "auf {{subtype}} {{cost}}"
   },
   "resolutionOptionalPayment": {
     "title": "Optionale Zahlung wählen",
@@ -2234,7 +2312,8 @@
       "zoneExile": "dem Exil",
       "zoneHand": "deiner Hand",
       "discard": "Wirf {{count}} {{cards}} ab",
-      "exile": "Schicke {{count}} {{cards}} aus {{zone}} ins Exil"
+      "exile": "Schicke {{count}} {{cards}} aus {{zone}} ins Exil",
+      "reveal": "Zeige {{count}} {{cards}} aus {{zone}} vor"
     }
   },
   "topOrBottom": {
@@ -2280,6 +2359,8 @@
     "confirm": "Bestätigen"
   },
   "replacement": {
+    "remember": "Diese Wahl für dieses Spiel merken",
+    "savedChoice": "Ersatzeffekt: {{choice}}",
     "eyebrow": "Auflösungsreihenfolge",
     "title": "Ersatzeffekte",
     "orderSubtitle": "Diese Effekte ändern alle, wie dieses Ereignis abläuft. Ziehe, um die Reihenfolge festzulegen — der zuletzt angewendete Effekt ist der wirksame (CR 616.1).",
@@ -2349,6 +2430,25 @@
     "moveDown": "Nach unten verschieben",
     "triggerFallback": "Trigger {{number}}"
   },
+  "costReductionOrder": {
+    "eyebrow": "Reihenfolge der Kostenreduzierungen",
+    "title": "Ordne deine Kostenreduzierungen",
+    "subtitle": "Je nach Reihenfolge, in der du diese Reduzierungen anwendest, werden andere Gesamtkosten festgelegt (CR 601.2f). Das oberste dieser Liste wird zuerst angewendet.",
+    "appliedFirst": "Wird zuerst angewendet",
+    "appliedLast": "Wird zuletzt angewendet",
+    "lockedCost": "Festgelegte Gesamtkosten",
+    "lockedCostUnknown": "Entspricht einer der Summen unten",
+    "outcomesHeading": "Mögliche Gesamtkosten",
+    "reachColoredOnly": "Reduziert nur farbiges Mana",
+    "reachSpills": "Kann generisches Mana reduzieren",
+    "multiplier": "×{{count}}",
+    "confirmOrder": "Reihenfolge bestätigen",
+    "cancel": "Abbrechen",
+    "moveUp": "Nach oben verschieben",
+    "moveDown": "Nach unten verschieben",
+    "reductionFallback": "Reduzierung {{number}}",
+    "floor": "Kann die Kosten nicht unter {{count}} Mana senken"
+  },
   "unhandledWaitingFor": {
     "title": "Aktion erforderlich, aber UI fehlt",
     "body": "Das Spiel wartet auf eine Aktion von dir, aber diese Version von phase.rs hat dafür noch keine UI. Dies ist ein Fehler — bitte melde ihn, damit wir ihn beheben können. Nutze die Schaltfläche unten, um das Spiel zu verlassen.",
@@ -2376,10 +2476,12 @@
   "outsideGame": {
     "fromExile": "Aus dem Exil",
     "fromSideboard": "Aus dem Sideboard",
-    "fromBoosterPack": "Aus einem {{setCode}}-Booster"
+    "fromBoosterPack": "Aus einem {{setCode}}-Booster",
+    "fromCubeBoosterPack": "Aus einem Cube-Booster"
   },
   "boosterPack": {
     "title": "{{setCode}}-Booster",
+    "cubeTitle": "Cube-Booster",
     "subtitleExact_one": "Wähle {{count}} Karte zum Behalten – der Rest wird aus dem Spiel entfernt",
     "subtitleExact_other": "Wähle {{count}} Karten zum Behalten – der Rest wird aus dem Spiel entfernt",
     "subtitleUpTo_one": "Wähle bis zu {{count}} Karte zum Behalten – der Rest wird aus dem Spiel entfernt",
@@ -2515,6 +2617,7 @@
       "mulligan": "mulligan decision",
       "discarding": "discarding",
       "orderingTriggers": "ordering triggers",
+      "orderingCostReductions": "ordering cost reductions",
       "respondingToStack": "responding to the stack",
       "priorityCombat": "combat",
       "priorityMain": "main phase",
@@ -2530,6 +2633,7 @@
       "mulligan": "Mulligan",
       "discarding": "Discarding",
       "orderingTriggers": "Ordering triggers",
+      "orderingCostReductions": "Ordering cost reductions",
       "respondingToStack": "Responding",
       "priorityCombat": "Combat",
       "priorityMain": "Main phase",

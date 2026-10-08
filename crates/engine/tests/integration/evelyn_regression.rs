@@ -14,7 +14,7 @@ use engine::types::GameAction;
 
 const P0: PlayerId = PlayerId(0);
 
-const EVELYN_ORACLE: &str = "Flash\nWhenever Evelyn or another Vampire you control enters, exile the top card of each player's library with a collection counter on it.\nOnce each turn, you may play a card from exile with a collection counter on it if it was exiled by an ability you controlled, and mana of any type can be spent to cast that spell.";
+const EVELYN_ORACLE: &str = "Flash\nWhenever Evelyn or another Vampire you control enters, exile the top card of each player's library with a collection counter on it.\nOnce each turn, you may play a card from exile with a collection counter on it if it was exiled by an ability you controlled, and you may spend mana as though it were mana of any color to cast it.";
 
 fn make_library_land(
     state: &mut engine::types::game_state::GameState,

@@ -590,7 +590,11 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
             push(TriggerEventKey::ManaProduced);
             push(TriggerEventKey::TapsForMana);
         }
-        GameEvent::ManaPoolEmptied { .. } | GameEvent::ManaRecolored { .. } => {}
+        // No trigger key: no card triggers on mana burn. The life loss it
+        // causes is itself a `LifeChanged` event, which carries its own keys.
+        GameEvent::ManaPoolEmptied { .. }
+        | GameEvent::ManaBurn { .. }
+        | GameEvent::ManaRecolored { .. } => {}
         GameEvent::PermanentTapped { .. } => push(TriggerEventKey::Taps),
         GameEvent::PlayerLost { .. } => push(TriggerEventKey::PlayerLost),
         // CR 800.4: Administrative control transfers on elimination do NOT
@@ -692,6 +696,9 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::DieRolled { .. } | GameEvent::CoinFlipped { .. } => {
             push(TriggerEventKey::DieOrCoin);
         }
+        // CR 706.6: an ignored (dropped) die is display-only, never a rules
+        // roll — "whenever you roll a die" must not see it, so no key.
+        GameEvent::DieRollIgnored { .. } => {}
         GameEvent::RingTemptsYou { .. } => push(TriggerEventKey::PlayerActionPerformed),
         GameEvent::RoomEntered { .. } | GameEvent::DungeonCompleted { .. } => {
             push(TriggerEventKey::DungeonOrClassOrCase);
@@ -721,6 +728,9 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         // Unstable Host/Augment combine is a distinct mechanic and has no
         // dedicated trigger mode today.
         GameEvent::Augmented { .. } => {}
+        // CR 701.42a: no printed card triggers on melding; the melded
+        // permanent's entry is indexed through its `ZoneChanged` event.
+        GameEvent::Melded { .. } => {}
         GameEvent::Firebend { .. }
         | GameEvent::Airbend { .. }
         | GameEvent::Earthbend { .. }
@@ -955,6 +965,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ChangeTargets
         | EffectKind::Incubate
         | EffectKind::Amass
+        | EffectKind::EmpowerJace
         | EffectKind::Bolster
         | EffectKind::Manifest
         | EffectKind::Cloak

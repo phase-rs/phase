@@ -113,7 +113,7 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
       // escapes as an unhandled rejection: a P2P guest sitting in auto-pass now
       // rejects on `action_rejected` / `action_failed` / host disconnect AND on
       // the guest adapter's submission timeout (`SUBMISSION_TIMEOUT_MS`).
-      void dispatchAction({ type: "PassPriority" }).catch(() => undefined);
+      void dispatchAction({ type: "PassPriority" }, getPlayerId(), { automated: true }).catch(() => undefined);
     }, beat);
   }
 
@@ -131,6 +131,10 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
         return {
           playerId,
           difficulty: config.aiSeats?.[i]?.difficulty ?? fallbackDifficulty,
+          // `i` is this seat's index in `preferencesStore.aiSeats`, which is the
+          // same index `llmStore.seatBindings` is keyed by. Passing it keeps one
+          // seat-numbering authority across both stores.
+          llmSeatIndex: i,
         };
       });
       opponentController = createAIController({ seats });

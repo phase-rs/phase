@@ -17,6 +17,12 @@ vi.mock("../cloudSync/sessionKey", () => ({
 
 import { importLegacyStorage, markRemoteLoadOk } from "../legacyMigration";
 import { STORAGE_KEY_PREFIX } from "../../constants/storage";
+import { setSavedDeckTxnLockWaitForTests, withSavedDeckLibrary } from "../savedDeckTransaction";
+import {
+  installFifoWebLocks,
+  resetSavedDeckLibraryForTests,
+  uninstallWebLocks,
+} from "../../test/helpers/webLocks";
 
 const backup = {
   version: 1 as const,
@@ -83,6 +89,37 @@ describe("importLegacyStorage", () => {
 
     expect(invokeMock).toHaveBeenCalledTimes(1);
     expect(invokeMock).toHaveBeenCalledWith("take_legacy_storage");
+  });
+
+  it("skipped by a busy library, leaves the backup's decks out of storage and does not confirm", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "take_legacy_storage") {
+        return Promise.resolve(JSON.stringify({ backup, supabaseSession: null }));
+      }
+      return Promise.resolve(undefined);
+    });
+
+    installFifoWebLocks();
+    await resetSavedDeckLibraryForTests();
+    setSavedDeckTxnLockWaitForTests(20);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const holder = withSavedDeckLibrary(() => held);
+    await vi.waitFor(async () => {
+      expect((await navigator.locks.query()).held).toHaveLength(1);
+    });
+
+    await importLegacyStorage();
+
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Migrated")).toBeNull();
+    expect(invokeMock).not.toHaveBeenCalledWith("confirm_legacy_import");
+
+    setSavedDeckTxnLockWaitForTests(Number.POSITIVE_INFINITY);
+    release();
+    await holder;
+    uninstallWebLocks();
   });
 });
 

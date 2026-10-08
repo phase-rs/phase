@@ -23,6 +23,13 @@ interface ZoneOpponentChooserModalContentProps {
  * itself is presented to that opponent (Plargg and Nassari's release notes:
  * "you choose which opponent gets to choose one of the exiled nonland cards").
  *
+ * CR 101.4c: with purpose `PerPlayerChoiceOrder`, the single chooser of a
+ * "for each player/opponent, choose …" iteration picks whose selection to make
+ * next. Candidates may include the chooser themself, labelled "You".
+ *
+ * CR 800.4g: with purpose `SubstituteChooser`, the player who would make a
+ * pending pick has left the game, and this player elects who makes it.
+ *
  * Candidates render in the ENGINE-SUPPLIED order: candidate ordering is game
  * ordering and belongs to the engine, so the client must not re-sort it.
  */
@@ -31,18 +38,42 @@ export function ZoneOpponentChooserModalContent({
   dispatch,
 }: ZoneOpponentChooserModalContentProps) {
   const { t } = useTranslation("game");
-  const candidates = waitingFor.data.candidates;
+  const { candidates, player, purpose } = waitingFor.data;
+  const [title, subtitle] =
+    purpose === "PerPlayerChoiceOrder"
+      ? [
+          t("zoneOpponentChooser.orderTitle", "Choose Next Player"),
+          t(
+            "zoneOpponentChooser.orderSubtitle",
+            "Choose whose selection to make next.",
+          ),
+        ]
+      : purpose === "SubstituteChooser"
+        ? [
+            t("zoneOpponentChooser.substituteTitle", "Choose Player"),
+            t(
+              "zoneOpponentChooser.substituteSubtitle",
+              "Choose who makes this choice.",
+            ),
+          ]
+        : [
+            t("zoneOpponentChooser.title", "Choose Opponent"),
+            t(
+              "zoneOpponentChooser.subtitle",
+              "Choose which opponent makes the choice.",
+            ),
+          ];
 
   return (
     <ChoiceModal
-      title={t("zoneOpponentChooser.title", "Choose Opponent")}
-      subtitle={t(
-        "zoneOpponentChooser.subtitle",
-        "Choose which opponent makes the choice.",
-      )}
-      options={candidates.map((opponent) => ({
-        id: String(opponent),
-        label: getOpponentDisplayName(opponent),
+      title={title}
+      subtitle={subtitle}
+      options={candidates.map((candidate) => ({
+        id: String(candidate),
+        label:
+          candidate === player
+            ? t("player.you", "You")
+            : getOpponentDisplayName(candidate),
       }))}
       onChoose={(id) => {
         dispatch({

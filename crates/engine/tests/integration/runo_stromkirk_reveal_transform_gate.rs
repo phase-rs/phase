@@ -182,6 +182,7 @@ fn krothuss_back_face() -> BackFaceData {
 fn back_face_template(name: &str) -> BackFaceData {
     BackFaceData {
         is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: name.to_string(),
         power: None,
         toughness: None,

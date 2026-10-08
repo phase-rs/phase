@@ -130,6 +130,7 @@ mod tests {
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![],
             free_first_mulligan,
+            declared: Vec::new(),
         };
         state
     }
@@ -308,6 +309,7 @@ mod tests {
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
 
         match evaluate(&state, 3) {
@@ -343,6 +345,7 @@ mod tests {
                 },
             ],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
         add_zero_cost_action(&mut state);
 

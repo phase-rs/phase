@@ -1,4 +1,5 @@
 {
+  "playerLatency": {"host":"Anfitrión","waiting":"Esperando","value":"{{ms}} ms","description":"Latencia de ida y vuelta al anfitrión. La falta de respuesta no desconecta la partida."},
   "abilityBlock": {
     "badge": "Bloqueada",
     "cantBeActivated": "Esta habilidad no puede activarse",
@@ -9,6 +10,9 @@
   "manaSourceSelection": {
     "title": "Elige una fuente de maná",
     "description": "Esta habilidad de maná requiere sacrificar un permanente.",
+    "baseOutput_one": "Producción base: {{count}} maná",
+    "baseOutput_other": "Producción base: {{count}} manás",
+    "baseOutputVariable": "La cantidad base se determina al activar",
     "sacrifice": "Sacrificar",
     "back": "Volver al pago de maná",
     "unknownSource": "Fuente de maná"
@@ -17,10 +21,10 @@
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
     "respondTitle": "Loop Shortcut Proposed",
-    "respondSubtitle": "An opponent proposes taking a loop shortcut. Accept it, or break out to keep playing manually.",
+    "respondSubtitle": "An opponent proposes taking a loop shortcut. Accept it, or name the place where the sequence stops.",
     "confirm": "Take the shortcut",
     "accept": "Accept",
-    "shorten": "Break out",
+    "shorten": "Shorten it",
     "decline": "Decline the shortcut",
     "untilLethal": "Repeat until the game ends.",
     "fixedCount_one": "Repeat at most once.",
@@ -104,11 +108,16 @@
   },
   "debugCreate": {
     "copies": "Copias",
+    "asToken": "Crear como ficha",
     "tokenPower": "Power",
     "tokenToughness": "Toughness",
     "tokenPowerPlaceholder": "Power",
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
+  },
+  "debugMove": {
+    "runEtbEffects": "Ejecutar efectos ETB",
+    "simulate": "Simular (efectos ETB, disparos + SBA)"
   },
   "debugLibrary": {
     "openActions": "Abrir acciones de depuración para {{name}}"
@@ -305,13 +314,19 @@
     "eligibleCount": "{{count}} legales",
     "attackingCount": "atq {{count}}",
     "selectedCount": "sel {{count}}",
+    "directBlockTargetCount": "objetivos de bloqueo {{count}}",
+    "blockingWith": "Bloqueando con {{name}}",
+    "blockedBy": "Bloqueado por {{names}}",
+    "unblocked": "Sin bloquear",
     "pickAll": "Todas",
     "pickNone": "Ninguna",
     "underAttack_one": "Atacado por {{count}} criatura",
     "underAttack_other": "Atacado por {{count}} criaturas",
     "target": "Objetivo",
+    "token": "Ficha",
+    "tokenTooltip": "Ficha que es una copia de una carta real",
     "copy": "Copia",
-    "copyTooltip": "Ficha copia de una carta real",
+    "copyTooltip": "Permanente que no es ficha y copia otra carta",
     "cantBeBlocked": "No puede ser bloqueada",
     "ringBearer": "Anillo",
     "ringBearerTooltip": "Portador del Anillo",
@@ -760,6 +775,8 @@
     "mustAttackSatisfiedBadge": "Attacking ✓",
     "mustBlockBadge": "Must block",
     "mustBlockExactBadge": "Debe bloquear a {{attacker}}",
+    "mustBeBlockedBadge": "Debe ser bloqueado",
+    "bandBadge": "Bandada {{n}}",
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
@@ -794,6 +811,7 @@
     "titleTargets": "Objetivos: {{targets}}",
     "titlePaid": "Pagado: {{paid}}",
     "titleContext": "Contexto: {{context}}",
+    "revealedCards": "Revelada: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} de maná",
     "paidColorsSpent": "{{count}} colores",
@@ -1116,6 +1134,8 @@
       "usePowder": "Usar {{name}}",
       "powderDescription": "Exilia todas las cartas de la mano, roba el mismo número — no es un mulligan",
       "powderTooltip": "Exilia todas las cartas de tu mano y roba el mismo número. No es un mulligan — el recuento y los fondos no se ven afectados.",
+      "freeReveal": "Revelar y robar de nuevo (gratis)",
+      "freeRevealDescription": "Revela tu mano, barájala y roba 7 — gratis, sin cartas al fondo, no es un mulligan",
       "eyebrowMulligan": "Mulligan {{count}} · Londres",
       "eyebrowOpening": "Mano inicial · Mulligan de Londres",
       "reviewTitle": "Revisa tu mano inicial",
@@ -1368,6 +1388,7 @@
       "target": "Objetivo",
       "return": "Devolver",
       "discard": "Descartar",
+      "reveal": "Mostrar",
       "evidence": "Prueba",
       "manifest": "Manifestar",
       "untap": "Enderezar",
@@ -1418,7 +1439,16 @@
       "subtitleUpTo_other": "Selecciona hasta {{count}} cartas para poner {{destination}}",
       "destinationTop": "en la parte superior de tu biblioteca",
       "destinationBattlefield": "en el campo de batalla",
-      "destinationHand": "en tu mano"
+      "destinationHand": "en tu mano",
+      "titleSplit": "Reparte las cartas restantes",
+      "subtitleSplit_one": "Ordena las cartas: {{count}} va a la parte superior de tu biblioteca; las otras {{remaining}} van al fondo",
+      "subtitleSplit_other": "Ordena las cartas: {{count}} van a la parte superior de tu biblioteca; las otras {{remaining}} van al fondo",
+      "badgeTop": "Arriba {{order}}",
+      "badgeBottom": "Fondo",
+      "hintSplit": "Arrastra para reordenar · las verdes van arriba (la primera es la superior), las grises al fondo",
+      "moveEarlier": "Mover {{card}} antes",
+      "moveLater": "Mover {{card}} después",
+      "hintSplitOrderOnly": "Arrastra o usa las flechas para reordenar dentro de cada montón · otro jugador eligió qué cartas van arriba"
     },
     "surveil": {
       "title": "Vigilar",
@@ -1667,6 +1697,14 @@
       "labelExile": "Exiliar",
       "labelBehold": "Contemplar"
     },
+    "empowerJace": {
+      "title": "Potenciar a Jace",
+      "subtitle": "Elige una ficha de Jace que controles para que obtenga +{{count}} de lealtad"
+    },
+    "spellCopyOrder": {
+      "title": "Ordenar las copias",
+      "subtitle": "Elige el hechizo cuya copia se pone a continuación en la pila"
+    },
     "collectEvidence": {
       "title": "Recabar pruebas",
       "subtitle": "Exilia cartas de tu cementerio con un valor de maná total de {{minimum}} o mayor"
@@ -1785,6 +1823,14 @@
       "subtitle_one": "Put {{count}} revealed card on the bottom of your library",
       "subtitle_other": "Put {{count}} revealed cards on the bottom of your library, in any order",
       "hint": "Drag to reorder · position 1 ends up on top of this pile"
+    },
+    "revealUntilBottom": {
+      "title": "Pon el resto en el fondo",
+      "subtitle_one": "Pon {{count}} carta mostrada en el fondo de tu biblioteca",
+      "subtitle_other": "Pon {{count}} cartas mostradas en el fondo de tu biblioteca en cualquier orden",
+      "hint": "Arrastra para reordenar · la posición 1 queda arriba de este montón",
+      "moveLeft": "Mover a la izquierda",
+      "moveRight": "Mover a la derecha"
     }
   },
   "specializeColor": {
@@ -1896,6 +1942,10 @@
     "prowlNormalLabel": "Lanzar normalmente",
     "prowlAltLabel": "Lanzar con Prowl",
     "prowlSubtitle": "Lanza {{name}} normalmente, o paga su coste de Prowl (disponible porque una criatura correspondiente hizo daño de combate a un jugador este turno).",
+    "surgeEyebrow": "Surge",
+    "surgeNormalLabel": "Lanzar normalmente",
+    "surgeAltLabel": "Lanzar con Surge",
+    "surgeSubtitle": "Lanza {{name}} normalmente, o paga su coste de Surge (disponible porque tú o un compañero de equipo lanzasteis otro hechizo este turno).",
     "overloadEyebrow": "Sobrecargar",
     "overloadNormalLabel": "Lanzar normalmente",
     "overloadAltLabel": "Lanzar con Sobrecargar",
@@ -1919,6 +1969,8 @@
     "additionalExile": "+ Exiliar una carta",
     "additionalSacrifice": "+ Sacrificar un permanente",
     "additionalPayLife": "+ Pagar vidas",
+    "additionalPayLifeAmount": "+ Pagar {{amount}} vidas",
+    "additionalCollectEvidence": "+ Reunir pruebas {{amount}}",
     "additionalDiscard": "+ Descartar una carta",
     "additionalTapCreatures": "+ Girar criaturas",
     "additionalGeneric": "+ {{type}}"
@@ -1963,7 +2015,11 @@
   },
   "zoneOpponentChooser": {
     "title": "Elegir oponente",
-    "subtitle": "Elige qué oponente hace la elección."
+    "subtitle": "Elige qué oponente hace la elección.",
+    "orderTitle": "Elegir siguiente jugador",
+    "orderSubtitle": "Elige para quién harás la siguiente selección.",
+    "substituteTitle": "Elegir jugador",
+    "substituteSubtitle": "Elige quién hace esta elección."
   },
   "pileOpponent": {
     "title": "Choose Opponent",
@@ -1997,10 +2053,15 @@
     "subtitleCascade": "Cascada exilió {{name}} (valor de maná inferior a {{sourceMv}}). Lánzala sin pagar su coste de maná, o rechaza y baraja las {{total}} cartas exiliadas hacia el fondo de tu biblioteca.",
     "subtitleDiscover": "Descubrir exilió {{name}}. Lánzala sin pagar su coste de maná, o ponla en tu mano y baraja las otras {{missCount}} cartas exiliadas hacia el fondo de tu biblioteca.",
     "subtitleRipple": "Ripple reveló {{name}}. Lánzala sin pagar su coste de maná, o rehúsa y pon las {{total}} cartas reveladas en el fondo de tu biblioteca en orden aleatorio.",
-    "subtitleGraveyardPaid": "Lanza {{name}} desde un cementerio pagando su coste de maná; puede gastarse maná de cualquier tipo. O rehúsa y déjala en el cementerio.",
+    "subtitleGraveyardPaid": "Lanza {{name}} desde un cementerio pagando su coste de maná{{extra}}{{concession}}. O rehúsa y déjala en el cementerio.",
     "castNamed": "Lanzar {{name}}",
     "castSuffix": "(sin pagar su coste de maná)",
-    "castPaidSuffix": "(paga su coste de maná; puede gastarse maná de cualquier tipo)",
+    "castPaidSuffix": "(paga su coste de maná{{extra}}{{concession}})",
+    "paidExtraFragment": " más {{extra}}",
+    "paidAnyTypeSubtitleFragment": "; puede gastarse maná de cualquier tipo",
+    "paidAnyColorSubtitleFragment": "; puede gastarse maná de cualquier color",
+    "paidAnyTypeSuffixFragment": "; puede gastarse maná de cualquier tipo",
+    "paidAnyColorSuffixFragment": "; puede gastarse maná de cualquier color",
     "putIntoHand": "Poner en la mano",
     "decline": "Rechazar",
     "discoverDeclineSuffix": "(pon el resto en el fondo)",
@@ -2041,6 +2102,7 @@
     "variantForetell": "Lanzar desde Predecir",
     "variantOverload": "Lanzar con Sobrecargar",
     "variantBestow": "Lanzar con Otorgar",
+    "variantBlitz": "Lanzar con Blitz",
     "variantFreerunning": "Lanzar con Freerunning",
     "variantFuse": "Lanzar con Fusión",
     "variantMutate": "Lanzar con Mutate",
@@ -2050,7 +2112,14 @@
     "variantMoreThanMeetsTheEye": "Cast Converted",
     "variantPrototype": "Lanzar con Prototipo",
     "variantFaceDown": "Lanzar boca abajo",
-    "variantFallback": "Lanzar con {{type}}"
+    "variantFallback": "Lanzar con {{type}}",
+    "viaSource": "mediante {{name}}",
+    "extraCostAdditional": "+ {{cost}}",
+    "extraCostAlternative": "en lugar de su coste de maná: {{cost}}",
+    "entersWithCounter": "entra con un contador de {{counter}}",
+    "slotPerType": "usa su espacio de {{type}}",
+    "slotChooseType": "elige un tipo de permanente",
+    "slotOncePerTurn": "una vez este turno"
   },
   "categoryChoice": {
     "title": "Elegir permanentes a conservar",
@@ -2112,6 +2181,7 @@
     "exportClientSnapshot": "Exportar instantánea del cliente",
     "exported": "Exportado",
     "exportFailed": "Error al exportar",
+    "exportRequested": "Exportación sin confirmar",
     "copyDiagnostic": "Copiar diagnóstico",
     "copied": "¡Copiado!",
     "reportOnGithub": "Informar en GitHub",
@@ -2207,7 +2277,9 @@
     "accept": "Sí",
     "decline": "No",
     "sourceFallback": "Efecto",
-    "entryLabel": "{{source}} — {{decision}}"
+    "entryLabel": "{{source}} — {{decision}}",
+    "optionalTriggers": "Habilidades disparadas opcionales ({{count, number}})",
+    "replacementChoices": "Decisiones de reemplazo ({{count, number}})"
   },
   "optionalEffect": {
     "sourceFallback": "Efecto",
@@ -2215,7 +2287,13 @@
     "yes": "Sí",
     "no": "No",
     "dontAskAgain": "No volver a preguntar en esta partida",
-    "dontAskAgainForSameCard": "Aplicar a cada copia de esta carta"
+    "dontAskAgainForSameCard": "Usar esta elección para cada copia de esta carta en esta partida"
+  },
+  "keywordDetail": {
+    "selfManaCost": "su coste de maná",
+    "selfManaValue": "su valor de maná",
+    "manaCostReduced": "su coste de maná reducido en {{reduction}}",
+    "spliceOnto": "a {{subtype}} {{cost}}"
   },
   "resolutionOptionalPayment": {
     "title": "Elige un pago opcional",
@@ -2234,7 +2312,8 @@
       "zoneExile": "el exilio",
       "zoneHand": "tu mano",
       "discard": "Descarta {{count}} {{cards}}",
-      "exile": "Exilia {{count}} {{cards}} de {{zone}}"
+      "exile": "Exilia {{count}} {{cards}} de {{zone}}",
+      "reveal": "Muestra {{count}} {{cards}} de {{zone}}"
     }
   },
   "topOrBottom": {
@@ -2280,6 +2359,8 @@
     "confirm": "Confirmar"
   },
   "replacement": {
+    "remember": "Recordar esta elección durante esta partida",
+    "savedChoice": "Reemplazo: {{choice}}",
     "eyebrow": "Orden de resolución",
     "title": "Efectos de reemplazo",
     "orderSubtitle": "Todos estos efectos cambian cómo ocurre este evento. Arrastra para establecer el orden en que se aplican: el último aplicado es el que surte efecto (CR 616.1).",
@@ -2349,6 +2430,25 @@
     "moveDown": "Bajar",
     "triggerFallback": "Disparo {{number}}"
   },
+  "costReductionOrder": {
+    "eyebrow": "Orden de reducción de costes",
+    "title": "Ordena tus reducciones de coste",
+    "subtitle": "Estas reducciones fijan un coste total distinto según el orden en que las apliques (CR 601.2f). La parte superior de esta lista se aplica primero.",
+    "appliedFirst": "Se aplica la primera",
+    "appliedLast": "Se aplica la última",
+    "lockedCost": "Coste total fijado",
+    "lockedCostUnknown": "Igual que uno de los totales de abajo",
+    "outcomesHeading": "Totales que puedes fijar",
+    "reachColoredOnly": "Solo reduce maná de color",
+    "reachSpills": "Puede reducir maná genérico",
+    "multiplier": "×{{count}}",
+    "confirmOrder": "Confirmar orden",
+    "cancel": "Cancelar",
+    "moveUp": "Subir",
+    "moveDown": "Bajar",
+    "reductionFallback": "Reducción {{number}}",
+    "floor": "No puede reducir el coste por debajo de {{count}} de maná"
+  },
   "unhandledWaitingFor": {
     "title": "Se requiere una acción, pero falta la interfaz",
     "body": "La partida está esperando una acción tuya, pero esta versión de phase.rs aún no tiene una interfaz para ello. Esto es un error — por favor, infórmalo para que podamos corregirlo. Usa el botón de abajo para salir de la partida.",
@@ -2376,10 +2476,12 @@
   "outsideGame": {
     "fromExile": "Desde el exilio",
     "fromSideboard": "Desde el banquillo",
-    "fromBoosterPack": "De un sobre de {{setCode}}"
+    "fromBoosterPack": "De un sobre de {{setCode}}",
+    "fromCubeBoosterPack": "De un sobre del cube"
   },
   "boosterPack": {
     "title": "Sobre de {{setCode}}",
+    "cubeTitle": "Sobre del cube",
     "subtitleExact_one": "Elige {{count}} carta para quedártela; el resto se retira de la partida",
     "subtitleExact_other": "Elige {{count}} cartas para quedártelas; el resto se retira de la partida",
     "subtitleUpTo_one": "Elige hasta {{count}} carta para quedártela; el resto se retira de la partida",
@@ -2515,6 +2617,7 @@
       "mulligan": "mulligan decision",
       "discarding": "discarding",
       "orderingTriggers": "ordering triggers",
+      "orderingCostReductions": "ordering cost reductions",
       "respondingToStack": "responding to the stack",
       "priorityCombat": "combat",
       "priorityMain": "main phase",
@@ -2530,6 +2633,7 @@
       "mulligan": "Mulligan",
       "discarding": "Discarding",
       "orderingTriggers": "Ordering triggers",
+      "orderingCostReductions": "Ordering cost reductions",
       "respondingToStack": "Responding",
       "priorityCombat": "Combat",
       "priorityMain": "Main phase",

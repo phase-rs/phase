@@ -204,6 +204,7 @@ fn extract_life_cost_root(
                 life_cost,
                 mana_reduction,
                 pending_cast,
+                ..
             },
             GameAction::DecideOptionalCost { pay: true },
         ) if *player == semantic_owner => Some(ArmedLifeCostRoot::DefilerPayment(Box::new(
@@ -412,6 +413,7 @@ pub(crate) fn begin_defiler_payment_attempt(
                 life_cost: waiting_life_cost,
                 mana_reduction: waiting_reduction,
                 pending_cast: waiting_pending,
+                ..
             },
         ) if witness.player == player
             && witness.offered_life_cost == life_cost
@@ -850,6 +852,7 @@ mod tests {
                     shards: vec![ManaCostShard::Green],
                     generic: 0,
                 },
+                reach: crate::types::statics::CostReductionReach::ColoredManaOnly,
             }));
 
         crate::game::apply_as_current(

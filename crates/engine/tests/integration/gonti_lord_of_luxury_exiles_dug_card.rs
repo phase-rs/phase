@@ -43,12 +43,15 @@
 //! face down has no characteristics and can't be examined. CR 702.75a: Hideaway
 //! is the structural analog this lowering mirrors.
 
-use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::casting::spell_objects_available_to_cast;
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::visibility::filter_state_for_viewer;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 use engine::types::ObjectId;
 
@@ -86,6 +89,70 @@ fn gonti_exiles_the_dug_card_not_himself() {
     };
 
     let mut runner = scenario.build();
+    let dig = cast_gonti_and_dig(&mut runner, gonti);
+
+    // DISCRIMINATOR (#1146), part 1: the keep_count:1 fix surfaces a DigChoice.
+    // Pre-fix the keep_count:0 pure-peek short-circuited and this never fired.
+    let (_, looked_at, dug_card) = dig.expect(
+        "Gonti's ETB must surface a DigChoice so the controller selects the card to exile; \
+         pre-fix the keep_count:0 peek short-circuited and no choice was offered",
+    );
+
+    // The dig looked at exactly the top four cards (CR 701.20e) — not the deeper
+    // card — proving the keep_count:1 dig is bounded to the four looked-at cards.
+    assert_eq!(looked_at.len(), 4, "Gonti looks at the top FOUR cards");
+    assert!(
+        !looked_at.contains(&lib_deep),
+        "the deeper (5th) card must not be looked at"
+    );
+
+    let state = runner.state();
+
+    // DISCRIMINATOR (#1146), part 2 — the regression direction: Gonti is NOT
+    // exiled. Pre-fix the sibling ChangeZone{ParentTarget} exiled the trigger
+    // source (Gonti) because no object target had been selected.
+    assert_eq!(
+        state.objects[&gonti].zone,
+        Zone::Battlefield,
+        "Gonti must remain on the battlefield — the dug card is exiled, not Gonti"
+    );
+    assert!(
+        !state.objects[&gonti].face_down,
+        "Gonti must not be turned face down"
+    );
+
+    // The player-chosen dug card is the exiled, face-down object (CR 406.3).
+    assert_eq!(
+        state.objects[&dug_card].zone,
+        Zone::Exile,
+        "the chosen dug card must be in exile"
+    );
+    assert!(
+        state.objects[&dug_card].face_down,
+        "the exiled dug card must be face down (CR 406.3)"
+    );
+
+    // The other three looked-at cards were not exiled (they go to the bottom of
+    // the library in a random order).
+    for &id in &looked_at {
+        if id == dug_card {
+            continue;
+        }
+        assert_ne!(
+            state.objects[&id].zone,
+            Zone::Exile,
+            "only the chosen card is exiled; the other looked-at cards are not"
+        );
+    }
+    let _ = (lib1, lib2, lib3, lib4);
+}
+
+/// Casts Gonti targeting P1 and answers its ETB `DigChoice` with the first card; returns the
+/// choosing player, the looked-at cards and the dug card, or `None` if no `DigChoice` surfaced.
+fn cast_gonti_and_dig(
+    runner: &mut GameRunner,
+    gonti: ObjectId,
+) -> Option<(PlayerId, Vec<ObjectId>, ObjectId)> {
     let card_id = runner.state().objects[&gonti].card_id;
 
     // Cast Gonti (free — auto-pays from an empty pool). Resolving it puts Gonti
@@ -102,9 +169,7 @@ fn gonti_exiles_the_dug_card_not_himself() {
     // Drive the pipeline by hand: pass priority to resolve the spell + the ETB
     // trigger, accept the optional "you may play" rider, and answer the
     // DigChoice the fix introduces.
-    let mut saw_dig_choice = false;
-    let mut dug_card: Option<ObjectId> = None;
-    let mut looked_at: Vec<ObjectId> = Vec::new();
+    let mut dig = None;
 
     for _ in 0..96 {
         match runner.state().waiting_for.clone() {
@@ -146,11 +211,9 @@ fn gonti_exiles_the_dug_card_not_himself() {
                     .act(GameAction::DecideOptionalEffect { accept: true })
                     .expect("DecideOptionalEffect accepted");
             }
-            WaitingFor::DigChoice { cards, .. } => {
-                saw_dig_choice = true;
-                looked_at = cards.clone();
+            WaitingFor::DigChoice { player, cards, .. } => {
                 let chosen = cards[0];
-                dug_card = Some(chosen);
+                dig = Some((player, cards.clone(), chosen));
                 runner
                     .act(GameAction::SelectCards {
                         cards: vec![chosen],
@@ -158,7 +221,7 @@ fn gonti_exiles_the_dug_card_not_himself() {
                     .expect("SelectCards (dig keep) accepted");
             }
             WaitingFor::Priority { .. } => {
-                if runner.state().stack.is_empty() && saw_dig_choice {
+                if runner.state().stack.is_empty() && dig.is_some() {
                     break;
                 }
                 runner
@@ -168,61 +231,62 @@ fn gonti_exiles_the_dug_card_not_himself() {
             other => panic!("unexpected prompt while driving Gonti ETB: {other:?}"),
         }
     }
+    dig
+}
 
-    // DISCRIMINATOR (#1146), part 1: the keep_count:1 fix surfaces a DigChoice.
-    // Pre-fix the keep_count:0 pure-peek short-circuited and this never fired.
-    assert!(
-        saw_dig_choice,
-        "Gonti's ETB must surface a DigChoice so the controller selects the card to exile; \
-         pre-fix the keep_count:0 peek short-circuited and no choice was offered"
-    );
+const WORD_OF_SEIZING: &str = "Split second (As long as this spell is on the stack, players can't cast spells or activate abilities that aren't mana abilities.)\nUntap target permanent and gain control of it until end of turn. It gains haste until end of turn.";
 
-    // The dig looked at exactly the top four cards (CR 701.20e) — not the deeper
-    // card — proving the keep_count:1 dig is bounded to the four looked-at cards.
-    assert_eq!(looked_at.len(), 4, "Gonti looks at the top FOUR cards");
-    assert!(
-        !looked_at.contains(&lib_deep),
-        "the deeper (5th) card must not be looked at"
-    );
-
-    let dug_card = dug_card.expect("a card was dug");
-    let state = runner.state();
-
-    // DISCRIMINATOR (#1146), part 2 — the regression direction: Gonti is NOT
-    // exiled. Pre-fix the sibling ChangeZone{ParentTarget} exiled the trigger
-    // source (Gonti) because no object target had been selected.
-    assert_eq!(
-        state.objects[&gonti].zone,
-        Zone::Battlefield,
-        "Gonti must remain on the battlefield — the dug card is exiled, not Gonti"
-    );
-    assert!(
-        !state.objects[&gonti].face_down,
-        "Gonti must not be turned face down"
-    );
-
-    // The player-chosen dug card is the exiled, face-down object (CR 406.3).
-    assert_eq!(
-        state.objects[&dug_card].zone,
-        Zone::Exile,
-        "the chosen dug card must be in exile"
-    );
-    assert!(
-        state.objects[&dug_card].face_down,
-        "the exiled dug card must be face down (CR 406.3)"
-    );
-
-    // The other three looked-at cards were not exiled (they go to the bottom of
-    // the library in a random order).
-    for &id in &looked_at {
-        if id == dug_card {
-            continue;
+/// CR 406.3 + CR 613.1b: the player who looked at Gonti's dug card keeps the look after a third
+/// player gains control of Gonti; that player and the card's owner may not look.
+#[test]
+fn gonti_dug_card_look_stays_with_the_player_who_looked() {
+    const P2: PlayerId = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in [P0, P1, P2] {
+        for i in 0..6 {
+            scenario.add_card_to_library_top(player, &format!("Filler {i}"));
         }
-        assert_ne!(
-            state.objects[&id].zone,
-            Zone::Exile,
-            "only the chosen card is exiled; the other looked-at cards are not"
-        );
     }
-    let _ = (lib1, lib2, lib3, lib4);
+    let gonti = scenario
+        .add_creature_to_hand(P0, "Gonti, Lord of Luxury", 2, 3)
+        .from_oracle_text_with_keywords(&["Deathtouch"], GONTI_ORACLE)
+        .as_legendary()
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let seize = scenario
+        .add_spell_to_hand(P2, "Word of Seizing", true)
+        .from_oracle_text_with_keywords(&["Split second"], WORD_OF_SEIZING)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    let (looker, _, dug) = cast_gonti_and_dig(&mut runner, gonti).expect("Gonti's ETB digs");
+    let state = runner.state();
+    assert_eq!(looker, P0);
+    assert_eq!(state.objects[&dug].owner, P1);
+    assert_eq!(state.objects[&dug].zone, Zone::Exile);
+    assert!(state.objects[&dug].face_down);
+    let name = state.objects[&dug].name.clone();
+
+    for _ in 0..8 {
+        if runner.state().priority_player == P2 {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("passing priority");
+    }
+    runner.cast(seize).target_objects(&[gonti]).resolve();
+    let state = runner.state();
+    let seen_as = |viewer: PlayerId| {
+        filter_state_for_viewer(state, viewer).objects[&dug]
+            .name
+            .clone()
+    };
+    assert_eq!(state.objects[&gonti].controller, P2);
+    assert_eq!(state.objects[&dug].zone, Zone::Exile);
+    assert_eq!(seen_as(P2), "Hidden Card");
+    assert_eq!(seen_as(P1), "Hidden Card");
+    assert_eq!(seen_as(P0), name);
+    assert!(spell_objects_available_to_cast(state, P0).contains(&dug));
 }

@@ -458,11 +458,12 @@ pub(crate) fn parse_collection_counter_play_permission_static(
 ) -> Option<StaticDefinition> {
     let ((), _) = nom_on_lower(tp.original, tp.lower, |input| {
         let (input, _) = tag("once each turn, you may play a card from exile with a collection counter on it if it was exiled by an ability you controlled").parse(input)?;
-        let (input, _) = alt((
-            tag(", and mana of any type can be spent to cast that spell"),
-            tag(", and you may spend mana as though it were mana of any color to cast it"),
-        ))
-        .parse(input)?;
+        // CR 609.4b: the collection-counter grant carries Evelyn's printed
+        // any-color concession. A broader "mana of any type" spelling is
+        // declined (an honest gap) rather than silently narrowed.
+        let (input, _) =
+            tag(", and you may spend mana as though it were mana of any color to cast it")
+                .parse(input)?;
         let (input, _) = opt(tag(".")).parse(input)?;
         let (input, _) = eof.parse(input)?;
         Ok((input, ()))
@@ -1897,9 +1898,8 @@ pub(crate) fn parse_pronoun_becomes_type_static(
     // permanent retains its Planeswalker type while it is also a creature).
     let trailing_condition = condition_tp.map(|cond_tp| {
         let cond_text = cond_tp.original.trim().trim_end_matches('.');
-        parse_static_condition(cond_text).unwrap_or(StaticCondition::Unrecognized {
-            text: cond_text.to_string(),
-        })
+        parse_static_condition(cond_text)
+            .unwrap_or_else(|| unparsed_gate_condition(cond_text, ConditionGatePolarity::Positive))
     });
     let condition = match (turn_condition, trailing_condition) {
         // CR 611.3a: when both a leading turn restriction and a trailing
@@ -2059,10 +2059,8 @@ pub(crate) fn parse_each_noncreature_subject_is_creature_with_pt_mv(
         .description(description.to_string());
     if let Some(cond_tp) = condition_tp {
         let cond_text = cond_tp.original.trim().trim_end_matches('.');
-        let condition =
-            parse_static_condition(cond_text).unwrap_or(StaticCondition::Unrecognized {
-                text: cond_text.to_string(),
-            });
+        let condition = parse_static_condition(cond_text)
+            .unwrap_or_else(|| unparsed_gate_condition(cond_text, ConditionGatePolarity::Positive));
         def = def.condition(condition);
     }
     Some(def)

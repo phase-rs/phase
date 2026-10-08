@@ -8,7 +8,7 @@ use crate::types::player::PlayerId;
 
 use super::ability_utils::{
     assign_selected_slots_in_chain, assign_targets_in_chain, choose_target_for_ability,
-    distribution_targets, flatten_targets_in_chain, validate_selected_targets_for_ability,
+    declared_targets_in_chain, distribution_targets, validate_selected_targets_for_ability,
     TargetSelectionAdvance,
 };
 use super::casting_targets::extract_distribution_total;
@@ -31,7 +31,7 @@ pub(super) fn finalize_trigger_target_selection(
     ability: Box<ResolvedAbility>,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
-    let assigned_targets = flatten_targets_in_chain(&ability);
+    let assigned_targets = declared_targets_in_chain(&ability);
     let crime_candidate =
         casting::targets_commit_crime(state, &assigned_targets, trigger.controller);
     casting::emit_targeting_events(
@@ -66,12 +66,13 @@ pub(super) fn finalize_trigger_target_selection(
                     // keep `pending_trigger_entry` set until division completes.
                     if !triggers::mutate_pending_trigger_entry(state, &trigger.ability) {
                         // Unexpected dangling cursor: the entry is gone before the
-                        // division prompt could open. Recover per CR 608.2b / CR
-                        // 800.4a (a stack object that has left the stack does not
-                        // resolve) — record the diagnostic, abandon, hand back
-                        // priority. Matches the DistributeAmong-return convention
-                        // below; the next priority pass re-normalizes (CR 117.3b
-                        // would give the active player).
+                        // division prompt could open. Recover per CR 608.1
+                        // (resolution selects the spell or ability on top of the
+                        // stack, so an entry absent from it is never selected to
+                        // begin resolving) — record the diagnostic, abandon, hand
+                        // back priority. Matches the DistributeAmong-return
+                        // convention below; the next priority pass re-normalizes
+                        // (CR 117.3b would give the active player).
                         triggers::abandon_ceased_pending_trigger(state, &trigger.ability);
                         priority::clear_priority_passes(state);
                         return WaitingFor::Priority { player: controller };
@@ -95,11 +96,12 @@ pub(super) fn finalize_trigger_target_selection(
     // `pending_trigger_entry` so the resolver may now fire this entry.
     if !triggers::finalize_pending_trigger_entry(state, &trigger.ability) {
         // Unexpected dangling cursor: the entry is no longer on the stack.
-        // Recover per CR 608.2b / CR 800.4a (a stack object that has left the
-        // stack does not resolve) — record the diagnostic, abandon the dead
-        // trigger, and hand control back rather than panic. Returns Priority for
-        // the controller (matching the DistributeAmong convention above); the
-        // next priority pass re-normalizes (CR 117.3b would give active player).
+        // Recover per CR 608.1 (resolution selects the spell or ability on top of
+        // the stack, so an entry absent from it is never selected to begin
+        // resolving) — record the diagnostic, abandon the dead trigger, and hand
+        // control back rather than panic. Returns Priority for the controller
+        // (matching the DistributeAmong convention above); the next priority pass
+        // re-normalizes (CR 117.3b would give active player).
         triggers::abandon_ceased_pending_trigger(state, &trigger.ability);
         priority::clear_priority_passes(state);
         return WaitingFor::Priority { player: controller };

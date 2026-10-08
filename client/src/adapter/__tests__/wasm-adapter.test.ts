@@ -3,7 +3,12 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { WasmAdapter, getHostAdapter, getSharedAdapter } from "../wasm-adapter";
+import {
+  WasmAdapter,
+  createHostSessionOwner,
+  getHostAdapter,
+  getSharedAdapter,
+} from "../wasm-adapter";
 import { EngineWorkerClient } from "../engine-worker-client";
 import type {
   InteractionPreview,
@@ -13,15 +18,27 @@ import type {
   AiActionProposal,
   AiDecisionDiagnosticReceipt,
   EngineAdapter,
+  GameEvent,
   SubmitResult,
 } from "../types";
 import { AdapterError, AdapterErrorCode } from "../types";
+import { PLAYER_ID } from "../../constants/game";
 import { buildGameState, gameStateFactory } from "../../test/factories/gameStateFactory";
 
 const ensureWasmInit = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const resumeRestoredGameState = vi.hoisted(() => vi.fn());
 const resumeMultiplayerHostState = vi.hoisted(() => vi.fn());
 const previewInteractionJs = vi.hoisted(() => vi.fn());
+const initializeMultiplayerHostGameJs = vi.hoisted(() =>
+  vi.fn().mockReturnValue({ events: [], log_entries: [] }),
+);
+const getGameStateJs = vi.hoisted(() => vi.fn());
+const getLegalActionsJs = vi.hoisted(() => vi.fn());
+const getLegalActionsForViewerJs = vi.hoisted(() => vi.fn());
+const getViewerTransitionSnapshotJs = vi.hoisted(() => vi.fn());
+const setMultiplayerModeJs = vi.hoisted(() => vi.fn());
+const clearGameStateJs = vi.hoisted(() => vi.fn());
+const canonicalCardNamesJs = vi.hoisted(() => vi.fn());
 
 vi.mock("../../services/cardData", () => ({
   ensureWasmInit,
@@ -32,6 +49,14 @@ vi.mock("@wasm/engine", () => ({
   resume_restored_game_state: resumeRestoredGameState,
   resume_multiplayer_host_state: resumeMultiplayerHostState,
   preview_interaction_js: previewInteractionJs,
+  initialize_multiplayer_host_game: initializeMultiplayerHostGameJs,
+  get_game_state: getGameStateJs,
+  get_legal_actions_js: getLegalActionsJs,
+  get_legal_actions_for_viewer_js: getLegalActionsForViewerJs,
+  get_viewer_transition_snapshot_js: getViewerTransitionSnapshotJs,
+  set_multiplayer_mode: setMultiplayerModeJs,
+  clear_game_state: clearGameStateJs,
+  canonicalCardNames: canonicalCardNamesJs,
 }));
 
 // Mock EngineWorkerClient to avoid actual Worker creation in tests
@@ -52,6 +77,7 @@ const mockWorkerClient = {
   getCardFaceData: vi.fn().mockResolvedValue({ name: "Lightning Bolt" }),
   getCardParseDetails: vi.fn().mockResolvedValue([{ category: "ability" }]),
   getCardRulings: vi.fn().mockResolvedValue([{ date: "2020-01-01", text: "Test" }]),
+  canonicalCardNames: vi.fn().mockResolvedValue([]),
   initializeGame: vi
     .fn()
     .mockResolvedValue({ events: [{ type: "GameStarted" }], log_entries: [] }),
@@ -75,6 +101,8 @@ const mockWorkerClient = {
     phase: "Untap",
   })),
   getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
+  getSnapshot: vi.fn(),
+  getViewerTransitionSnapshot: vi.fn(),
   exportState: vi.fn().mockResolvedValue("{}"),
   restoreState: vi.fn().mockResolvedValue(undefined),
   resumeRestoredGameState: vi.fn(),
@@ -121,6 +149,9 @@ describe("WasmAdapter", () => {
       status: "stale",
       reason: "test",
     });
+    getGameStateJs.mockReturnValue(buildGameState());
+    getLegalActionsJs.mockReturnValue({ actions: [], autoPassRecommended: false });
+    getLegalActionsForViewerJs.mockReturnValue({ actions: [], autoPassRecommended: false });
     const restored = {
       presentation: {
         outcome: "noop" as const,
@@ -637,6 +668,20 @@ describe("WasmAdapter", () => {
       expect(mockWorkerClient.getCardParseDetails).toHaveBeenCalledWith("Lightning Bolt");
       expect(mockWorkerClient.getCardRulings).toHaveBeenCalledWith("Lightning Bolt");
     });
+
+    it("canonicalCardNames ensures the DB is loaded then delegates to the worker", async () => {
+      mockWorkerClient.canonicalCardNames.mockResolvedValueOnce(["Revival // Revenge", null]);
+
+      await expect(
+        adapter.canonicalCardNames(["Revival/Revenge", "Not A Card"]),
+      ).resolves.toEqual(["Revival // Revenge", null]);
+
+      expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.canonicalCardNames).toHaveBeenCalledWith([
+        "Revival/Revenge",
+        "Not A Card",
+      ]);
+    });
   });
 
   describe("submitAction", () => {
@@ -650,6 +695,7 @@ describe("WasmAdapter", () => {
           zone: "Hand" as const,
           run_etb: false,
           nonlegendary: false,
+          creation_kind: "Card" as const,
           count,
         },
       },
@@ -888,6 +934,7 @@ describe("WasmAdapter", () => {
       expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
       expect(mockWorkerClient.resumeMultiplayerHostState).toHaveBeenCalledWith(
         JSON.stringify(mockState),
+        PLAYER_ID,
       );
       expect(mockWorkerClient.loadCardDbFromUrl.mock.invocationCallOrder[0])
         .toBeLessThan(
@@ -922,6 +969,61 @@ describe("WasmAdapter", () => {
         "resume failed",
       );
       expect(resumeMultiplayerHostState).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("local-seat legal actions", () => {
+    const seatList = { actions: [], autoPassRecommended: false, seat: PLAYER_ID };
+
+    it("asks the worker for the local seat's own list on every read", async () => {
+      await adapter.initialize();
+      mockWorkerClient.getSnapshot.mockResolvedValue({
+        state: buildGameState(),
+        legalResult: seatList,
+      });
+
+      await adapter.getLegalActions();
+      await adapter.getSnapshot();
+      await adapter.resumeRestoredGameState();
+      await adapter.resumeMultiplayerHostState(buildGameState());
+
+      expect(mockWorkerClient.getLegalActions).toHaveBeenCalledWith(PLAYER_ID);
+      expect(mockWorkerClient.getSnapshot).toHaveBeenCalledWith(PLAYER_ID);
+      expect(mockWorkerClient.resumeRestoredGameState).toHaveBeenCalledWith(PLAYER_ID);
+      expect(mockWorkerClient.resumeMultiplayerHostState).toHaveBeenCalledWith(
+        expect.any(String),
+        PLAYER_ID,
+      );
+    });
+
+    it("main-thread fallback reads the viewer-scoped export, never the seat-agnostic one", async () => {
+      mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+      getLegalActionsForViewerJs.mockReturnValue(seatList);
+      resumeRestoredGameState.mockReturnValue({
+        outcome: "noop",
+        automatedResolutionCount: 0,
+        omittedEventCount: 0,
+        logEntries: [],
+      });
+      resumeMultiplayerHostState.mockReturnValue({
+        outcome: "noop",
+        automatedResolutionCount: 0,
+        omittedEventCount: 0,
+        logEntries: [],
+      });
+      await adapter.initialize();
+
+      const lists = [
+        await adapter.getLegalActions(),
+        (await adapter.getSnapshot()).legalResult,
+        (await adapter.resumeRestoredGameState()).snapshot.legalResult,
+        (await adapter.resumeMultiplayerHostState(buildGameState())).snapshot.legalResult,
+      ];
+
+      expect(lists).toEqual(Array(4).fill(seatList));
+      expect(getLegalActionsForViewerJs).toHaveBeenCalledTimes(4);
+      expect(getLegalActionsForViewerJs).toHaveBeenCalledWith(PLAYER_ID);
+      expect(getLegalActionsJs).not.toHaveBeenCalled();
     });
   });
 
@@ -1054,6 +1156,56 @@ describe("releaseHostSession", () => {
       .toBeLessThan(mockWorkerClient.resetGame.mock.invocationCallOrder[0]);
   });
 
+  it("clears the claimed shared main-thread fallback through its runtime queue", async () => {
+    const shared = getSharedAdapter();
+    const owner = createHostSessionOwner();
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+    await shared.initialize();
+    await shared.initializeMultiplayerHostGame(undefined, undefined, undefined, undefined, undefined, owner);
+
+    await shared.releaseHostSession(true, owner);
+
+    expect(setMultiplayerModeJs).toHaveBeenCalledWith(false);
+    expect(clearGameStateJs).toHaveBeenCalledOnce();
+    expect(getSharedAdapter()).toBe(shared);
+  });
+
+  it("records ownership when restoring a main-thread fallback host", async () => {
+    const host = new WasmAdapter();
+    const owner = createHostSessionOwner();
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+    resumeMultiplayerHostState.mockReturnValueOnce({
+      presentation: {
+        outcome: "noop",
+        automatedResolutionCount: 0,
+        omittedEventCount: 0,
+        logEntries: [],
+      },
+      snapshot: {
+        state: buildGameState(),
+        legalResult: { actions: [], autoPassRecommended: false },
+      },
+    });
+    await host.initialize();
+    await host.resumeMultiplayerHostState(buildGameState(), owner);
+
+    await host.releaseHostSession(true, owner);
+
+    expect(setMultiplayerModeJs).toHaveBeenCalledWith(false);
+    expect(clearGameStateJs).toHaveBeenCalledOnce();
+  });
+
+  it("leaves an unclaimed main-thread fallback untouched", async () => {
+    const shared = getSharedAdapter();
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+    await shared.initialize();
+
+    await shared.releaseHostSession(false);
+
+    expect(setMultiplayerModeJs).not.toHaveBeenCalled();
+    expect(clearGameStateJs).not.toHaveBeenCalled();
+  });
+
   it("leaves the shared engine completely untouched when the host never claimed it", async () => {
     const shared = getSharedAdapter();
     await shared.initialize();
@@ -1076,6 +1228,42 @@ describe("releaseHostSession", () => {
     // A private release must never post the shared engine's flag clear.
     expect(mockWorkerClient.setMultiplayerMode).not.toHaveBeenCalled();
   });
+
+  it("clears a claimed private main-thread fallback before disposing it", async () => {
+    const host = new WasmAdapter();
+    const owner = createHostSessionOwner();
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+    await host.initialize();
+    await host.initializeMultiplayerHostGame(undefined, undefined, undefined, undefined, undefined, owner);
+
+    await host.releaseHostSession(true, owner);
+
+    expect(setMultiplayerModeJs).toHaveBeenCalledWith(false);
+    expect(clearGameStateJs).toHaveBeenCalledOnce();
+    expect(mockWorkerClient.dispose).toHaveBeenCalledOnce();
+    await expect(host.getState()).rejects.toThrow(AdapterError);
+  });
+
+  it("does not let a stale fallback release clear a newer host generation", async () => {
+    const shared = getSharedAdapter();
+    const firstOwner = createHostSessionOwner();
+    const secondOwner = createHostSessionOwner();
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+    await shared.initialize();
+    await shared.initializeMultiplayerHostGame(undefined, undefined, undefined, undefined, undefined, firstOwner);
+    await shared.initializeMultiplayerHostGame(undefined, undefined, undefined, undefined, undefined, secondOwner);
+
+    await shared.releaseHostSession(true, firstOwner);
+    await shared.resetGameState();
+
+    expect(setMultiplayerModeJs).not.toHaveBeenCalled();
+    expect(clearGameStateJs).not.toHaveBeenCalled();
+
+    await shared.releaseHostSession(true, secondOwner);
+
+    expect(setMultiplayerModeJs).toHaveBeenCalledWith(false);
+    expect(clearGameStateJs).toHaveBeenCalledOnce();
+  });
 });
 
 const request = {
@@ -1097,6 +1285,79 @@ const answer = {
     allocation: [{ choiceId: "int-1.k0", amount: 3 }, { choiceId: "int-1.k1", amount: 1 }],
   },
 } as unknown as InteractionPreview;
+
+const viewerTransitionEvents: GameEvent[] = [{ type: "GameStarted" }];
+
+describe("WasmAdapter.getViewerTransitionSnapshot", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("forwards the engine-owned snapshot through the worker boundary", async () => {
+    const rawState = buildGameState({ turn_number: 4, phase: "PreCombatMain" });
+    const snapshot = {
+      state: { state: rawState, derived: {} },
+      actions: [],
+      autoPassRecommended: false,
+      events: viewerTransitionEvents,
+    };
+    mockWorkerClient.getViewerTransitionSnapshot.mockResolvedValue(snapshot);
+    const adapter = new WasmAdapter();
+    await adapter.initialize();
+
+    const result = await adapter.getViewerTransitionSnapshot(1, viewerTransitionEvents);
+
+    expect(mockWorkerClient.getViewerTransitionSnapshot).toHaveBeenCalledExactlyOnceWith(
+      1,
+      viewerTransitionEvents,
+    );
+    expect(result.events).toEqual(viewerTransitionEvents);
+    expect(result.state).toMatchObject(rawState);
+    expect(result.state.derived).toEqual({});
+  });
+
+  it("uses the same typed boundary on the main-thread fallback", async () => {
+    const rawState = buildGameState({ turn_number: 5, phase: "PostCombatMain" });
+    getViewerTransitionSnapshotJs.mockReturnValue({
+      state: { state: rawState, derived: {} },
+      actions: [],
+      autoPassRecommended: false,
+      events: viewerTransitionEvents,
+    });
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+    const adapter = new WasmAdapter();
+    await adapter.initialize();
+
+    const result = await adapter.getViewerTransitionSnapshot(1, viewerTransitionEvents);
+
+    expect(getViewerTransitionSnapshotJs).toHaveBeenCalledExactlyOnceWith(
+      1,
+      viewerTransitionEvents,
+    );
+    expect(mockWorkerClient.getViewerTransitionSnapshot).not.toHaveBeenCalled();
+    expect(result.events).toEqual(viewerTransitionEvents);
+    expect(result.state).toMatchObject(rawState);
+  });
+});
+
+describe("WasmAdapter.canonicalCardNames", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("canonicalCardNames uses the main-thread fallback", async () => {
+    canonicalCardNamesJs.mockReturnValue(["Revival // Revenge"]);
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+    const adapter = new WasmAdapter();
+    await adapter.initialize();
+
+    const result = await adapter.canonicalCardNames(["Revival/Revenge"]);
+
+    expect(canonicalCardNamesJs).toHaveBeenCalledExactlyOnceWith(["Revival/Revenge"]);
+    expect(mockWorkerClient.canonicalCardNames).not.toHaveBeenCalled();
+    expect(result).toEqual(["Revival // Revenge"]);
+  });
+});
 
 describe("WasmAdapter.previewInteraction", () => {
   beforeEach(() => {
@@ -1325,7 +1586,7 @@ describe("worker message lockstep", () => {
 // posts to the ones `engine-worker.ts` reads off `msg`. The row above compares only the `type`
 // literal. This one runs the REAL client method against a stubbed `Worker` and compares the keys
 // it actually posts against the reads that case performs, taken from the worker module as text.
-// It executes the client body only; the worker's own body still has no test.
+// It executes the client body only.
 
 /** The distinct `msg.<field>` names one dispatch case reads. */
 function caseFieldReads(workerSource: string, type: string): string[] {

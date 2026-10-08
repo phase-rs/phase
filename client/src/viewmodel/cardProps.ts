@@ -41,6 +41,8 @@ export interface CardViewProps {
   attachmentIds: ObjectId[];
   keywords: Keyword[];
   colorIdentity: ManaColor[];
+  /** Displayed as an oversized melded card — see `isMeldedPermanent`. */
+  isMelded: boolean;
 }
 
 export type PTColor = "white" | "green" | "red";
@@ -50,6 +52,15 @@ export interface PTDisplay {
   toughness: number;
   powerColor: PTColor;
   toughnessColor: PTColor;
+}
+
+/**
+ * CR 701.42a + CR 712.4a: a melded permanent is one object represented by both
+ * cards of a meld pair, whose back faces combine into one oversized card face.
+ * Keyed on the engine's `merge_kind`, never inferred from names or components.
+ */
+export function isMeldedPermanent(obj: Pick<GameObject, "merge_kind">): boolean {
+  return obj.merge_kind === "Meld";
 }
 
 export function publicName(obj: GameObject): string {
@@ -88,6 +99,7 @@ export function toCardProps(obj: GameObject): CardViewProps {
     attachmentIds: obj.attachments,
     keywords: obj.keywords,
     colorIdentity: obj.color,
+    isMelded: isMeldedPermanent(obj),
   };
 }
 

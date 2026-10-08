@@ -202,6 +202,7 @@ fn throne_draw_activation_uses_only_its_chosen_color_in_auto_and_manual_payment(
         ManaCost::generic(3),
     );
     pending.activation_ability_index = Some(draw);
+    engine::game::casting::stamp_announced_activation_record(&state, P0, &mut pending);
     state.pending_cast = Some(Box::new(pending));
     state.objects.get_mut(&throne).unwrap().tapped = true;
     state.waiting_for = WaitingFor::ManaPayment {

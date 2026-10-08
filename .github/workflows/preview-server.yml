@@ -62,6 +62,13 @@ concurrency:
   group: preview-server-${{ inputs.fingerprint }}
   cancel-in-progress: false
 
+env:
+  # The deploy caller needs card-data, so this window exists for
+  # workflow_dispatch, which has no such edge. Four poll intervals: enough that
+  # no single origin miss decides the verdict.
+  DATA_WAIT_SECONDS: 120
+  DATA_POLL_SECONDS: 30
+
 jobs:
   gate:
     name: Skip published fingerprint
@@ -94,6 +101,10 @@ jobs:
               exit 1
             fi
           done
+          if [[ "$CARD_DATA_SHA256" != "$CARD_DATA_HASH16"* || "$DRAFT_POOLS_SHA256" != "$DRAFT_POOLS_HASH16"* ]]; then
+            echo "::error::Each data hash16 must be the first 16 characters of its SHA-256: the manifest names each data file by that prefix."
+            exit 1
+          fi
           if ! [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::Expected a 40-character lowercase commit SHA, got: $COMMIT"
             exit 1
@@ -140,14 +151,22 @@ jobs:
             runner: ubuntu-latest
             triple: x86_64-unknown-linux-musl
             extension: ""
+            cargo_cmd: build
+          - os: linux-arm64
+            runner: ubuntu-latest
+            triple: aarch64-unknown-linux-musl
+            extension: ""
+            cargo_cmd: zigbuild
           - os: macos
             runner: macos-latest
             triple: aarch64-apple-darwin
             extension: ""
+            cargo_cmd: build
           - os: windows
             runner: windows-latest
             triple: x86_64-pc-windows-msvc
             extension: .exe
+            cargo_cmd: build
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -164,11 +183,21 @@ jobs:
           sudo apt-get install -y musl-tools
           rustup target add x86_64-unknown-linux-musl
 
+      - name: Install zig cross toolchain and target
+        if: matrix.cargo_cmd == 'zigbuild'
+        # --break-system-packages: ubuntu-latest is 24.04, whose default
+        # Python is PEP 668 externally-managed since GitHub reverted its
+        # pip workaround (actions/runner-images#10897, 2025-05-09). Same
+        # flag the Dockerfile already passes for this identical install.
+        run: |
+          pip install --break-system-packages --require-hashes -r scripts/requirements-zigbuild.txt
+          rustup target add ${{ matrix.triple }}
+
       - name: Build phase-server
         # -p scopes feature unification to phase-server's own dependency set;
         # an unscoped workspace build unifies feed-scraper's default-features
         # reqwest (native-tls -> openssl-sys) into the musl target and fails.
-        run: cargo build -p phase-server --profile server-release --bin phase-server --target ${{ matrix.triple }}
+        run: cargo ${{ matrix.cargo_cmd }} -p phase-server --profile server-release --bin phase-server --target ${{ matrix.triple }}
 
       - name: Prepare preview server binary (Unix)
         if: matrix.os != 'windows'
@@ -196,7 +225,7 @@ jobs:
     needs: [gate, build]
     if: needs.gate.outputs.already_published != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 46
     concurrency:
       group: preview-server-manifest
       cancel-in-progress: false
@@ -204,9 +233,9 @@ jobs:
       FINGERPRINT: ${{ inputs.fingerprint }}
       COMMIT: ${{ inputs.commit }}
       CARD_DATA_SHA256: ${{ inputs.card_data_sha256 }}
-      CARD_DATA_HASH16: ${{ inputs.card_data_hash16 }}
+      CARD_DATA_URL: https://data.phase-rs.dev/staging/card-data-${{ inputs.card_data_hash16 }}.json
       DRAFT_POOLS_SHA256: ${{ inputs.draft_pools_sha256 }}
-      DRAFT_POOLS_HASH16: ${{ inputs.draft_pools_hash16 }}
+      DRAFT_POOLS_URL: https://data.phase-rs.dev/staging/draft-pools-${{ inputs.draft_pools_hash16 }}.json
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY: ${{ secrets.SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY }}
@@ -240,6 +269,26 @@ jobs:
               ;;
           esac
 
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        if: steps.publication-gate.outputs.already_published != 'true'
+        with:
+          # This job publishes `commit`, so it reads the scripts and the
+          # platform contract from it rather than from the workflow ref.
+          # Known split: the YAML around them still comes from the workflow ref,
+          # so a deploy one commit behind pairs an older contract with a newer
+          # binaries list. The sign step's diff refuses that pair, publishing
+          # nothing rather than a partial set, and the next deploy heals it.
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+
+      - name: Wait for the data files the manifest names
+        if: steps.publication-gate.outputs.already_published != 'true'
+        # The deploy caller needs the job that uploads these, so there the check
+        # confirms what the graph already ordered. A manual dispatch has no such
+        # edge: the script times its own DATA_WAIT_SECONDS window from here, and
+        # if it expires nothing is signed or published.
+        run: bash scripts/wait-for-preview-data.sh "$CARD_DATA_URL" "$DRAFT_POOLS_URL"
+
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         if: steps.publication-gate.outputs.already_published != 'true'
         with:
@@ -251,6 +300,13 @@ jobs:
         with:
           name: preview-server-x86_64-unknown-linux-musl
           path: artifacts/x86_64-unknown-linux-musl
+
+      - name: Download Linux arm64 binary
+        if: steps.publication-gate.outputs.already_published != 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: preview-server-aarch64-unknown-linux-musl
+          path: artifacts/aarch64-unknown-linux-musl
 
       - name: Download macOS binary
         if: steps.publication-gate.outputs.already_published != 'true'
@@ -288,6 +344,7 @@ jobs:
 
           binaries=(
             artifacts/x86_64-unknown-linux-musl/phase-server-x86_64-unknown-linux-musl
+            artifacts/aarch64-unknown-linux-musl/phase-server-aarch64-unknown-linux-musl
             artifacts/aarch64-apple-darwin/phase-server-aarch64-apple-darwin
             artifacts/x86_64-pc-windows-msvc/phase-server-x86_64-pc-windows-msvc.exe
           )
@@ -297,10 +354,30 @@ jobs:
           done
 
           prefix="desktop/preview-server/$FINGERPRINT"
+          # Each binary is downloaded into a directory named for its target
+          # triple, which is the key the manifest publishes it under.
+          platform_of() { basename "$(dirname "$1")"; }
+
+          # Every desktop that asks for a preview has a row in the contract, so a
+          # listed triple with no binary above publishes no URL for it and that
+          # desktop silently never sees a preview. Held here, before the first
+          # upload: a mismatch publishes nothing rather than half a manifest.
+          listed_triples=$(awk '{sub(/#.*/, ""); if (NF) print $3}' packaging/desktop-platforms.txt | sort -u)
+          published_triples=$(for binary in "${binaries[@]}"; do platform_of "$binary"; done | sort)
+          printf 'desktop-platforms.txt triples: %s\nthis job publishes:            %s\n' \
+            "${listed_triples//$'\n'/ }" "${published_triples//$'\n'/ }"
+          if [ -z "$listed_triples" ] \
+            || ! diff <(printf '%s\n' "$listed_triples") <(printf '%s\n' "$published_triples"); then
+            echo "::error::packaging/desktop-platforms.txt (<) is not the set of platforms this job publishes (>); a listed triple with no binary here gets no preview URL, and one published without a row goes to no desktop."
+            exit 1
+          fi
+
+          declare -A sha256_of
           for binary in "${binaries[@]}"; do
             name=$(basename "$binary")
             npx wrangler r2 object put "phase-rs-data/$prefix/$name" --file "$binary" --remote --content-type application/octet-stream --cache-control "public, max-age=31536000, immutable"
             npx wrangler r2 object put "phase-rs-data/$prefix/$name.minisig" --file "$binary.minisig" --remote --content-type application/octet-stream --cache-control "public, max-age=31536000, immutable"
+            sha256_of["$(platform_of "$binary")"]=$(sha256sum "$binary" | cut -d' ' -f1)
           done
 
           existing_manifest=$(mktemp)
@@ -322,16 +399,20 @@ jobs:
 
           manifest=preview-server.json
           generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          # sha256 is over UNCOMPRESSED bytes; R2 serves these objects with Content-Encoding: br unconditionally — consumers MUST brotli-decode before hashing.
+          # data[].sha256 is over UNCOMPRESSED bytes: R2 serves those JSON files with Content-Encoding: br unconditionally, so consumers MUST brotli-decode before hashing. binaries[].sha256 is over the bytes as served — binaries are uploaded with no content encoding.
           jq -n \
             --slurpfile existing "$existing_manifest" \
             --arg fingerprint "$FINGERPRINT" \
             --arg commit "$COMMIT" \
             --arg generated_at "$generated_at" \
             --arg card_data_sha256 "$CARD_DATA_SHA256" \
-            --arg card_data_hash16 "$CARD_DATA_HASH16" \
+            --arg card_data_url "$CARD_DATA_URL" \
             --arg draft_pools_sha256 "$DRAFT_POOLS_SHA256" \
-            --arg draft_pools_hash16 "$DRAFT_POOLS_HASH16" \
+            --arg draft_pools_url "$DRAFT_POOLS_URL" \
+            --arg x86_64_unknown_linux_musl_sha256 "${sha256_of[x86_64-unknown-linux-musl]}" \
+            --arg aarch64_unknown_linux_musl_sha256 "${sha256_of[aarch64-unknown-linux-musl]}" \
+            --arg aarch64_apple_darwin_sha256 "${sha256_of[aarch64-apple-darwin]}" \
+            --arg x86_64_pc_windows_msvc_sha256 "${sha256_of[x86_64-pc-windows-msvc]}" \
             '($existing[0] // {}) as $old
              | ($old.current // null) as $old_current
              | (if $old_current != null and ($old.fingerprints[$old_current] != null)
@@ -351,27 +432,35 @@ jobs:
                        binaries: {
                          "x86_64-unknown-linux-musl": {
                            url: ("https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-x86_64-unknown-linux-musl"),
-                           sig_url: ("https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-x86_64-unknown-linux-musl.minisig")
+                           sig_url: ("https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-x86_64-unknown-linux-musl.minisig"),
+                           sha256: $x86_64_unknown_linux_musl_sha256
+                         },
+                         "aarch64-unknown-linux-musl": {
+                           url: ("https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-aarch64-unknown-linux-musl"),
+                           sig_url: ("https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-aarch64-unknown-linux-musl.minisig"),
+                           sha256: $aarch64_unknown_linux_musl_sha256
                          },
                          "aarch64-apple-darwin": {
                            url: ("https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-aarch64-apple-darwin"),
-                           sig_url: ("https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-aarch64-apple-darwin.minisig")
+                           sig_url: ("https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-aarch64-apple-darwin.minisig"),
+                           sha256: $aarch64_apple_darwin_sha256
                          },
                          "x86_64-pc-windows-msvc": {
                            url: ("https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-x86_64-pc-windows-msvc.exe"),
-                           sig_url: ("https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-x86_64-pc-windows-msvc.exe.minisig")
+                           sig_url: ("https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-x86_64-pc-windows-msvc.exe.minisig"),
+                           sha256: $x86_64_pc_windows_msvc_sha256
                          }
                        },
                        data: [
                          {
                            name: "card-data.json",
                            sha256: $card_data_sha256,
-                           url: ("https://data.phase-rs.dev/staging/card-data-" + $card_data_hash16 + ".json")
+                           url: $card_data_url
                          },
                          {
                            name: "draft-pools.json",
                            sha256: $draft_pools_sha256,
-                           url: ("https://data.phase-rs.dev/staging/draft-pools-" + $draft_pools_hash16 + ".json")
+                           url: $draft_pools_url
                          }
                        ]
                      }
@@ -379,6 +468,55 @@ jobs:
                    + if $previous == null then {} else {($previous): $old.fingerprints[$previous]} end
                  )
                }' > "$manifest"
+
+          # Read every binary back from the URL this manifest names and hold it
+          # against the file that was uploaded. The URLs are taken from the
+          # manifest rather than derived again here: a check with its own copy of
+          # the path agrees with itself while the manifest names something else.
+          # Nothing is published until this passes -- the manifest PUT is below.
+          if ! diff <(for binary in "${binaries[@]}"; do platform_of "$binary"; done | sort) \
+                    <(jq -r '.fingerprints[.current].binaries | keys[]' "$manifest" | sort); then
+            echo "::error::The manifest's binary keys are not the set of binaries this job uploaded; a key with nothing beneath it 404s on the desktop."
+            exit 1
+          fi
+
+          fetched=$(mktemp)
+          verify_published() {
+            local url=$1 expected=$2 actual
+            # Retry discipline as release.yml's post-upload check(), bounded so
+            # a hung CDN fails this step rather than the job timeout: --max-time
+            # caps each attempt, --retry-max-time the retry loop, so one object
+            # costs at most 180s. A fresh per-fingerprint key has no cached
+            # predecessor to serve stale, and binaries upload with no content
+            # encoding, so the bytes that arrive are the bytes to hash.
+            if ! curl -sS --fail -o "$fetched" \
+              --connect-timeout 5 --max-time 120 --retry 3 --retry-all-errors \
+              --retry-max-time 60 "$url"; then
+              echo "::error::Published preview object could not be read back: $url"
+              exit 1
+            fi
+            actual=$(sha256sum "$fetched" | cut -d' ' -f1)
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::$url is sha256 $actual, but the file uploaded for it is $expected"
+              exit 1
+            fi
+          }
+
+          for binary in "${binaries[@]}"; do
+            platform=$(platform_of "$binary")
+            entry=$(jq -er --arg platform "$platform" \
+              '.fingerprints[.current].binaries[$platform]
+               // error("manifest names no binary for \($platform)")
+               | "\(.url)\t\(.sig_url)\t\(.sha256)"' "$manifest")
+            IFS=$'\t' read -r url sig_url manifest_sha256 <<<"$entry"
+            if [ "$manifest_sha256" != "${sha256_of[$platform]}" ]; then
+              echo "::error::Manifest sha256 for $platform is $manifest_sha256, but the file uploaded for it is ${sha256_of[$platform]}"
+              exit 1
+            fi
+            verify_published "$url" "$manifest_sha256"
+            verify_published "$sig_url" "$(sha256sum "$binary.minisig" | cut -d' ' -f1)"
+          done
+
           sign "$manifest"
 
           # Signature first; the JSON manifest PUT is the atomic publish point.

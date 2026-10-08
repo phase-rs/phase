@@ -205,3 +205,231 @@ fn dash_hopes_paying_life_leaves_target_spell_on_stack() {
         Some(Zone::Stack)
     );
 }
+
+// --- Perplex: "unless its controller discards their hand" (CR 118.12a + CR 701.9a) ---
+
+const PERPLEX: &str = "Counter target spell unless its controller discards their hand.";
+const DISCARD_OR_PAY: &str =
+    "Counter target spell unless its controller discards a card or pays {2}.";
+
+/// P0 casts a counterspell (verbatim `oracle`) at a spell controlled by P1.
+/// P0 holds `p0_hand` extra cards and P1 holds `p1_hand` cards; P1 also gets
+/// `p1_lands` untapped Islands. Returns the runner (waiting at P1's unless
+/// prompt) and the targeted spell.
+fn cast_counter_at_p1_spell(
+    oracle: &str,
+    p0_hand: usize,
+    p1_hand: usize,
+    p1_lands: usize,
+) -> (
+    engine::game::scenario::GameRunner,
+    engine::types::identifiers::ObjectId,
+) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut counter = scenario.add_spell_to_hand_from_oracle(P0, "Perplex", true, oracle);
+    counter.with_mana_cost(ManaCost::Cost {
+        generic: 1,
+        shards: vec![ManaCostShard::Blue, ManaCostShard::Black],
+    });
+    let counter_id = counter.id();
+    scenario.add_basic_land(P0, ManaColor::Blue);
+    scenario.add_basic_land(P0, ManaColor::Black);
+    scenario.add_basic_land(P0, ManaColor::Blue);
+    for i in 0..p0_hand {
+        scenario.add_card_to_hand(P0, &format!("P0 Filler {i}"));
+    }
+    for i in 0..p1_hand {
+        scenario.add_card_to_hand(P1, &format!("P1 Filler {i}"));
+    }
+    for _ in 0..p1_lands {
+        scenario.add_basic_land(P1, ManaColor::Blue);
+    }
+    let mut runner = scenario.build();
+    let target = put_instant_on_stack(&mut runner, P1);
+    runner.cast(counter_id).target_objects(&[target]).resolve();
+    (runner, target)
+}
+
+fn hand_len(
+    runner: &engine::game::scenario::GameRunner,
+    player: engine::types::player::PlayerId,
+) -> usize {
+    runner.state().players[player.0 as usize].hand.len()
+}
+
+fn graveyard_len(
+    runner: &engine::game::scenario::GameRunner,
+    player: engine::types::player::PlayerId,
+) -> usize {
+    runner.state().players[player.0 as usize].graveyard.len()
+}
+
+/// Discard whatever `WardDiscardChoice` rounds are pending, one card each.
+fn drain_discard_rounds(runner: &mut engine::game::scenario::GameRunner) -> usize {
+    let mut rounds = 0;
+    while let WaitingFor::WardDiscardChoice { cards, .. } = runner.state().waiting_for.clone() {
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![cards[0]],
+            })
+            .expect("discard selection accepted");
+        rounds += 1;
+        assert!(rounds < 20, "discard loop must terminate");
+    }
+    rounds
+}
+
+#[test]
+fn perplex_pay_discards_target_controllers_entire_hand() {
+    // P0 (caster) has 1 extra card, P1 (payer) has 3: the count must be P1's.
+    let (mut runner, target) = cast_counter_at_p1_spell(PERPLEX, 1, 3, 0);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::UnlessPayment { player: P1, .. }
+        ),
+        "P1 must be prompted, got {:?}",
+        runner.state().waiting_for
+    );
+    let p0_hand_before = hand_len(&runner, P0);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("P1 pays by discarding");
+    assert_eq!(
+        drain_discard_rounds(&mut runner),
+        3,
+        "one round per card in P1's hand"
+    );
+    assert_eq!(hand_len(&runner, P1), 0);
+    assert_eq!(graveyard_len(&runner, P1), 3);
+    assert_eq!(
+        hand_len(&runner, P0),
+        p0_hand_before,
+        "caster's hand is untouched"
+    );
+    assert_eq!(
+        runner.state().objects.get(&target).map(|o| o.zone),
+        Some(Zone::Stack),
+        "paid cost: target spell is not countered"
+    );
+}
+
+#[test]
+fn perplex_pay_with_single_card_hand_takes_one_round() {
+    let (mut runner, target) = cast_counter_at_p1_spell(PERPLEX, 0, 1, 0);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("P1 pays");
+    assert_eq!(drain_discard_rounds(&mut runner), 1);
+    assert_eq!(hand_len(&runner, P1), 0);
+    assert_eq!(
+        runner.state().objects.get(&target).map(|o| o.zone),
+        Some(Zone::Stack)
+    );
+}
+
+/// CR 118.3 + card ruling 2005-10-01: with no cards in hand the controller can
+/// still choose to discard their hand and prevent the counter.
+#[test]
+fn perplex_pay_with_empty_hand_terminates_as_paid() {
+    let (mut runner, target) = cast_counter_at_p1_spell(PERPLEX, 1, 0, 0);
+    // Reach-guard: the prompt was raised (the Discard arm is what runs next).
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::UnlessPayment { player: P1, .. }
+    ));
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("empty-hand payer may still pay");
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::WardDiscardChoice { .. }
+        ),
+        "must not soft-lock on an empty discard prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().objects.get(&target).map(|o| o.zone),
+        Some(Zone::Stack),
+        "empty-hand payment still prevents the counter"
+    );
+}
+
+#[test]
+fn perplex_decline_counters_the_spell_and_keeps_hand() {
+    for p1_hand in [0usize, 2] {
+        let (mut runner, target) = cast_counter_at_p1_spell(PERPLEX, 0, p1_hand, 0);
+        runner
+            .act(GameAction::PayUnlessCost { pay: false })
+            .expect("P1 declines");
+        assert_eq!(
+            runner.state().objects.get(&target).map(|o| o.zone),
+            Some(Zone::Graveyard),
+            "declining counters the spell (hand {p1_hand})"
+        );
+        assert_eq!(hand_len(&runner, P1), p1_hand);
+    }
+}
+
+#[test]
+fn perplex_has_no_coverage_gaps() {
+    let gaps = card_face_gaps(&card_face("Perplex", PERPLEX));
+    assert!(
+        gaps.is_empty(),
+        "Perplex must be fully supported, got {gaps:?}"
+    );
+}
+
+/// CR 118.12a: "discards a card or pays {2}" is a real disjunction, no longer
+/// the bare `Counter unless {2}` the unanchored "pays " scan produced.
+#[test]
+fn counter_unless_discard_or_pays_disjunction_end_to_end() {
+    // Pay via the discard sub-cost.
+    let (mut runner, target) = cast_counter_at_p1_spell(DISCARD_OR_PAY, 0, 2, 2);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::UnlessPaymentChooseCost { player: P1, .. }
+        ),
+        "expected sub-cost choice, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseUnlessCostBranch {
+            choice: engine::types::actions::UnlessCostBranch::Pay { index: 0 },
+        })
+        .expect("choose discard branch");
+    assert_eq!(drain_discard_rounds(&mut runner), 1);
+    assert_eq!(hand_len(&runner, P1), 1);
+    assert_eq!(
+        runner.state().objects.get(&target).map(|o| o.zone),
+        Some(Zone::Stack)
+    );
+
+    // Pay via the mana sub-cost.
+    let (mut runner, target) = cast_counter_at_p1_spell(DISCARD_OR_PAY, 0, 2, 2);
+    runner
+        .act(GameAction::ChooseUnlessCostBranch {
+            choice: engine::types::actions::UnlessCostBranch::Pay { index: 1 },
+        })
+        .expect("choose mana branch");
+    assert_eq!(hand_len(&runner, P1), 2, "mana payment discards nothing");
+    assert_eq!(
+        runner.state().objects.get(&target).map(|o| o.zone),
+        Some(Zone::Stack)
+    );
+
+    // Decline.
+    let (mut runner, target) = cast_counter_at_p1_spell(DISCARD_OR_PAY, 0, 2, 2);
+    runner
+        .act(GameAction::ChooseUnlessCostBranch {
+            choice: engine::types::actions::UnlessCostBranch::Decline,
+        })
+        .expect("decline");
+    assert_eq!(
+        runner.state().objects.get(&target).map(|o| o.zone),
+        Some(Zone::Graveyard)
+    );
+}

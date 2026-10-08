@@ -1,4 +1,4 @@
-use crate::parser::oracle_nom::error::{OracleError, OracleResult};
+use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::space1;
@@ -22,7 +22,7 @@ use super::super::oracle_target::{
     parse_type_phrase_folding_with_ctx,
 };
 use super::super::oracle_util::{parse_count_expr, parse_number};
-use super::lower::parse_for_each_multiplier_prefix;
+use super::lower::{parse_for_each_multiplier_prefix, strip_optional_target_prefix};
 use super::{resolve_it_pronoun, ParseContext};
 #[cfg(debug_assertions)]
 use crate::parser::oracle_ir::ast::assert_no_compound_remainder;
@@ -329,12 +329,27 @@ fn resolve_counter_placement_target<'a>(
     if let Some(bound) = counter_anaphor_created_token_binding(on_rest, ctx) {
         return (bound, parsed_remainder, None);
     }
-    // CR 115.1d: "up to N" (and "each of up to N") modifies the target count,
-    // not the counter count. Strip it and emit a MultiTargetSpec.
-    let (target_text, multi) = if let Some(((), after_up_to)) =
+    // CR 107.1c + CR 115.1 + CR 115.6: "[each of ]any number of [other|another] target …"
+    // and "[each of ]up to N [other|another] target …" announce a target set whose size the
+    // controller picks as the spell or ability is put on the stack (CR 601.2c; CR 602.2b for
+    // activated abilities; CR 603.3d for triggered abilities), zero included. The
+    // quantifier modifies the target count, not the counter count, and
+    // `strip_optional_target_prefix` is its single authority. The article-less
+    // "up to N <noun>" forms it declines fall through to the arm below.
+    let (target_text, multi) = if let Some((spec, after_quantifier)) =
         nom_on_lower(on_rest, on_rest, |i| {
-            value((), alt((tag("each of up to "), tag("up to ")))).parse(i)
+            let (i, _) = opt(tag::<_, _, OracleError<'_>>("each of ")).parse(i)?;
+            match strip_optional_target_prefix(i) {
+                (rest, Some(spec)) => Ok((rest, spec)),
+                (_, None) => Err(oracle_err(i)),
+            }
         }) {
+        let on_offset = lower.len() - after_quantifier.len();
+        (&text[on_offset..], Some(spec))
+    } else if let Some(((), after_up_to)) = nom_on_lower(on_rest, on_rest, |i| {
+        // Article-less "up to N <noun>" (e.g. "each of up to two Soldiers you control").
+        value((), alt((tag("each of up to "), tag("up to ")))).parse(i)
+    }) {
         if let Ok((after_qty, max)) = super::parse_multi_target_count_expr(after_up_to) {
             let on_offset = lower.len() - after_qty.len();
             (&text[on_offset..], Some(MultiTargetSpec::up_to(max)))
@@ -1322,7 +1337,9 @@ pub(super) fn try_parse_move_counters<'a>(
 
     // Compute byte offset into original `text` for parse_target.
     let offset_in_text = text.len() - after_on.len();
-    let (target, remainder) = parse_target(&text[offset_in_text..]);
+    let (parsed_target, remainder) = parse_target(&text[offset_in_text..]);
+    let target =
+        counter_anaphor_created_token_binding(after_on.trim(), ctx).unwrap_or(parsed_target);
 
     Some((
         Effect::MoveCounters {
@@ -3797,6 +3814,62 @@ mod tests {
         assert!(rem.is_empty());
     }
 
+    /// CR 608.2c + CR 111.1 + CR 122.8: after a token-creation instruction in
+    /// the same chain, "that token" names the just-created token destination
+    /// while the departed object's counters are still sourced through LKI.
+    #[test]
+    fn move_counters_that_token_binds_last_created_after_token_context() {
+        let lower = "put this creature's counters on that token";
+        let mut ctx = default_ctx();
+        ctx.token_created_in_chain = true;
+        let result = try_parse_move_counters(lower, lower, &mut ctx);
+        let Some((
+            Effect::MoveCounters {
+                source,
+                counter_type,
+                count,
+                mode,
+                target,
+                ..
+            },
+            rem,
+        )) = result
+        else {
+            panic!("expected MoveCounters, got {result:?}");
+        };
+        assert_eq!(source, TargetFilter::SelfRef);
+        assert_eq!(counter_type, None);
+        assert_eq!(count, None);
+        assert_eq!(mode, CounterTransferMode::Put);
+        assert_eq!(target, TargetFilter::LastCreated);
+        assert!(rem.is_empty());
+    }
+
+    /// CR 608.2c: the created-token anaphor helper is gated by same-chain token
+    /// provenance; without that antecedent, "that token" keeps the legacy parent
+    /// binding rather than reading stale `last_created_token_ids`.
+    #[test]
+    fn move_counters_that_token_without_token_context_stays_parent_target() {
+        let lower = "put this creature's counters on that token";
+        let result = try_parse_move_counters(lower, lower, &mut default_ctx());
+        let Some((
+            Effect::MoveCounters {
+                source,
+                mode,
+                target,
+                ..
+            },
+            rem,
+        )) = result
+        else {
+            panic!("expected MoveCounters, got {result:?}");
+        };
+        assert_eq!(source, TargetFilter::SelfRef);
+        assert_eq!(mode, CounterTransferMode::Put);
+        assert_eq!(target, TargetFilter::ParentTarget);
+        assert!(rem.is_empty());
+    }
+
     /// CR 122.8 + CR 400.7: "put those counters on [target]" — anaphoric
     /// counter-copy from a dies/leaves trigger. Source = SelfRef; the runtime
     /// resolver in `effects::counters::resolve_move` performs LKI fallback so
@@ -4230,7 +4303,8 @@ mod tests {
     /// counter "it" that follows a TYPED target with NO token creator (Turtle Van:
     /// "Put a +1/+1 counter on target creature, then double the number of +1/+1
     /// counters on it") STILL binds the parent target (`ParentTarget`). The
-    /// `mod.rs:14753` `LastCreated` guard fires only when the parse bound
+    /// counter-target `LastCreated` guard in `oracle_effect::replace_target_with_parent`
+    /// fires only when the parse bound
     /// `LastCreated` (a token creator was present), so this non-token anaphor is
     /// untouched — it must NOT become `LastCreated` or `SelfRef`. Brackets the
     /// guard's revert-to-red (which proves the NEW token behavior).

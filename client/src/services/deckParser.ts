@@ -189,17 +189,19 @@ function parseDeckEntryLine(line: string): LineParseResult | null {
     };
   }
 
-  // Collector number is the first token after the set parens. Tolerate (and
-  // discard) any trailing annotation the foil/finish strip above didn't catch
-  // — e.g. an unrecognized finish code or a language tag — mirroring the
-  // trailing-group allowance in MTGA_LINE_PATTERN so a detected MTGA line is
-  // never demoted to the simple matcher (which would swallow the set/number
-  // into the card name).
+  // The collector number is the token after the set parens, and may not start
+  // with "(": a card name can end in a parenthesized word ("Hazmat Suit
+  // (Used)"), and without that exclusion the lazy name group stops there and
+  // hands the word over as the set code. Tolerate (and discard) any trailing
+  // annotation the foil/finish strip above didn't catch — e.g. an unrecognized
+  // finish code or a language tag — so the set/number is still extracted rather
+  // than the line falling through to the simple matcher, which would swallow
+  // them into the card name.
   // The set code may be lowercase (Scryfall-style, e.g. `(2xm) 123`); several
   // exporters emit it that way. `setCode.toLowerCase()` below already normalizes
   // case, so widening the char class only keeps the line from being demoted to
   // the simple matcher (which would swallow the set/number into the card name).
-  const mtgaMatch = remainder.match(/^(\d+)x?\s+(.+?)\s+\(([A-Za-z0-9]*)\)\s+(\S+)(?:\s+.*)?$/);
+  const mtgaMatch = remainder.match(/^(\d+)x?\s+(.+?)\s+\(([A-Za-z0-9]*)\)\s+([^\s(]\S*)(?:\s+.*)?$/);
   if (mtgaMatch) {
     const setCode = mtgaMatch[3];
     const collectorNumber = mtgaMatch[4];
@@ -238,15 +240,10 @@ function normalizeCardName(name: string): string {
       : trimmed;
   }
 
-  // Single-slash exporter forms upgrade to canonical. Split on each "/" so both
-  // two-part ("Revival/Revenge") and multi-part
-  // ("Who / What / When / Where / Why") split cards collapse to " // " joins.
-  if (!trimmed.includes("/")) return trimmed;
-  return trimmed
-    .split("/")
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .join(" // ");
+  // A bare "/" is left verbatim: it can be part of a printed name
+  // ("Summon: Choco/Mog"), and the engine resolves a single-slash split-card
+  // name ("Revival/Revenge") to its front face itself.
+  return trimmed;
 }
 
 function normalizeEntries(entries: DeckEntry[]): DeckEntry[] {

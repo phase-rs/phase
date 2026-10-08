@@ -581,6 +581,7 @@ mod tests {
                     "Elf".to_string(),
                 )))),
                 dynamic_count: None,
+                reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
             }));
 
         let plain_elf = creature_face("Plain Elf", vec!["Elf"]);

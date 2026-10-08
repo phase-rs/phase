@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 960
 expression: "&lowered"
 ---
 {
@@ -16,6 +15,9 @@ expression: "&lowered"
           ],
           "controller": "You",
           "properties": []
+        },
+        "selection": {
+          "at_resolution": {}
         }
       },
       "cost": {

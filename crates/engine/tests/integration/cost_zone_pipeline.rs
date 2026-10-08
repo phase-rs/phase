@@ -25,8 +25,8 @@ use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{
     BatchCompletion, CastPaymentMode, CollectEvidenceResume, ExileLinkKind, GameState,
     ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode, ManaAbilityResume, ManaChoice,
-    PayCostKind, PendingCast, PendingCostMoveResume, PendingReplacement, PersistedGameState,
-    StackEntryKind, WaitingFor, ZoneDeliveryExileTracking,
+    PayCostKind, PendingCast, PendingCostMoveCompletion, PendingCostMoveResume, PendingReplacement,
+    PersistedGameState, StackEntryKind, WaitingFor, ZoneDeliveryExileTracking,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
@@ -37,6 +37,7 @@ use engine::types::replacements::ReplacementEvent;
 use engine::types::resolution::ResolutionStateWire;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::{EtbTapState, Zone};
+use serde_json::Value;
 use std::sync::Arc;
 
 fn redirect_moved_to(destination: Zone, redirected_to: Zone) -> ReplacementDefinition {
@@ -154,6 +155,7 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: true,
             enter_tapped: false,
@@ -279,6 +281,7 @@ fn dig_zero_kept_deferred_rest_pile_publishes_an_empty_tracked_set() {
             up_to: true,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: true,
             enter_tapped: false,
@@ -403,6 +406,7 @@ fn dig_mass_put_all_nonbattlefield_redirect_publishes_only_delivered_set() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: true,
             enter_tapped: false,
@@ -563,6 +567,7 @@ fn uninterrupted_dig_rest_and_mass_put_all_complete_synchronously() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
@@ -621,6 +626,7 @@ fn uninterrupted_dig_rest_and_mass_put_all_complete_synchronously() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
@@ -708,6 +714,7 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: true,
             enter_tapped: false,
@@ -989,6 +996,7 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
         candidates: vec![],
         kind: Default::default(),
         last_applied_decides: false,
+        remember_identity: None,
     };
 }
 
@@ -2190,6 +2198,174 @@ fn self_sacrifice_mana_cost_waits_for_replacement_before_producing_mana() {
             .count(),
         1,
         "the resumed self-sacrifice cost produces mana exactly once"
+    );
+}
+
+/// Give `player` a creature whose only ability sacrifices itself for {G}. With
+/// `competing_redirects`, two replacements race for the sacrifice, so auto-tapping
+/// it pauses mid-payment for a replacement choice.
+fn add_self_sacrifice_mana_source(
+    scenario: &mut GameScenario,
+    player: engine::types::player::PlayerId,
+    competing_redirects: bool,
+) -> ObjectId {
+    let mut source = scenario.add_creature(player, "Self-Sacrifice Mana Source", 0, 1);
+    source.with_ability_definition(
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Green],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::SelfRef,
+            1,
+        ))),
+    );
+    if competing_redirects {
+        source
+            .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Exile))
+            .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Hand));
+    }
+    source.id()
+}
+
+/// P0's only mana source is the self-sacrificing creature; P1 has an untapped
+/// Archangel of Tithes-style {1} attack tax (verified Oracle text,
+/// client/public/card-data.json 2026-05-10).
+fn self_sacrifice_mana_vs_attack_tax(competing_redirects: bool) -> (GameState, ObjectId) {
+    use engine::parser::oracle_static::parse_static_line;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    add_self_sacrifice_mana_source(&mut scenario, P0, competing_redirects);
+    let attacker = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let attack_tax = parse_static_line(
+        "As long as this creature is untapped, creatures can't attack you or planeswalkers you \
+         control unless their controller pays {1} for each of those creatures.",
+    )
+    .expect("the attack-tax static should parse");
+    scenario
+        .add_creature(P1, "Tithe Collector", 3, 5)
+        .with_static_definition(attack_tax);
+    let runner = scenario.build();
+    (runner.state().clone(), attacker)
+}
+
+/// CR 508.1j + CR 605.3b + CR 616.1: a combat tax pays through a payment with no
+/// resumable root, so a mana source whose own cost would pause for a replacement
+/// choice cannot fund it. The AI's affordability probe must say so, or it
+/// completes a taxed attack whose accepted prompt the reducer then rejects.
+#[test]
+fn paused_mana_source_cannot_fund_a_combat_tax() {
+    use engine::game::combat::{
+        attack_tax_is_affordable, complete_attacker_proposal, AttackTarget, CombatTaxPosture,
+    };
+
+    // Reach-guard: with no competing replacement the sacrifice never pauses,
+    // and auto-tap does fund the {1} tax from this very source.
+    let (unpaused, attacker) = self_sacrifice_mana_vs_attack_tax(false);
+    let attacks = vec![(attacker, AttackTarget::Player(P1))];
+    assert!(
+        attack_tax_is_affordable(&unpaused, &attacks),
+        "premise: auto-tap reaches the self-sacrificing source when nothing pauses"
+    );
+    let GameAction::DeclareAttackers {
+        attacks: funded, ..
+    } = complete_attacker_proposal(&unpaused, &attacks, &[], CombatTaxPosture::Accept)
+    else {
+        panic!("expected DeclareAttackers");
+    };
+    assert_eq!(
+        funded, attacks,
+        "premise: the taxed proposal is legal and survives Accept when it can be funded"
+    );
+
+    let (paused, attacker) = self_sacrifice_mana_vs_attack_tax(true);
+    let attacks = vec![(attacker, AttackTarget::Player(P1))];
+    assert!(
+        !attack_tax_is_affordable(&paused, &attacks),
+        "a payment that would pause for a replacement choice cannot fund a combat tax"
+    );
+    let GameAction::DeclareAttackers {
+        attacks: completed, ..
+    } = complete_attacker_proposal(&paused, &attacks, &[], CombatTaxPosture::Accept)
+    else {
+        panic!("expected DeclareAttackers");
+    };
+    assert!(
+        completed.is_empty(),
+        "Accept must fall back to the tax-free witness, got {completed:?}"
+    );
+}
+
+/// Well of Lost Dreams ("Whenever you gain life, you may pay {X}, where X is less
+/// than or equal to the amount of life you gained. If you do, draw X cards.")
+/// with the self-sacrificing mana source as P0's only mana. Returns the
+/// `PayAmountChoice` maximum the engine offers after P0 gains 3 life and accepts.
+fn well_of_lost_dreams_x_max(competing_redirects: bool) -> u32 {
+    use engine::game::scenario_db::GameScenarioDbExt;
+
+    let db = crate::support::shared_card_db().expect("the committed card fixture loads");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Well of Lost Dreams", Zone::Battlefield, db);
+    for _ in 0..5 {
+        scenario.add_real_card(P0, "Plains", Zone::Library, db);
+        scenario.add_real_card(P1, "Plains", Zone::Library, db);
+    }
+    add_self_sacrifice_mana_source(&mut scenario, P0, competing_redirects);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    let mut events = Vec::new();
+    engine::game::effects::life::apply_life_gain(runner.state_mut(), P0, 3, &mut events)
+        .expect("life gain must resolve without deferring");
+    engine::game::triggers::process_triggers(runner.state_mut(), &events);
+
+    for _ in 0..16 {
+        match &runner.state().waiting_for {
+            WaitingFor::PayAmountChoice { max, .. } => return *max,
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accepting 'you may pay {X}' must succeed");
+            }
+            _ => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing toward the trigger's choice must succeed");
+            }
+        }
+    }
+    panic!(
+        "never reached PayAmountChoice; final waiting_for = {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// CR 107.3a + CR 605.3b + CR 616.1: a resolution-time "pay {X}" is paid through
+/// `pay_unless_cost`, which has no resume root, so its offered range must not
+/// count a mana source whose own cost would pause for a replacement choice.
+/// Offering X=1 there would accept an amount the payment then cannot make.
+#[test]
+fn paused_mana_source_does_not_widen_a_resolution_x_range() {
+    assert_eq!(
+        well_of_lost_dreams_x_max(false),
+        1,
+        "premise: with nothing pausing, the self-sacrificing source funds X=1"
+    );
+    assert_eq!(
+        well_of_lost_dreams_x_max(true),
+        0,
+        "a source that would pause mid-payment cannot fund any X"
     );
 }
 
@@ -4169,7 +4345,7 @@ fn effect_pay_cost_rider_waits_for_scry_post_effect_before_typed_root_settles() 
     let rider_life = resumed
         .events
         .iter()
-        .position(|event| matches!(event, GameEvent::LifeChanged { player_id, amount } if *player_id == P0 && *amount == 1))
+        .position(|event| matches!(event, GameEvent::LifeChanged { player_id, amount, .. } if *player_id == P0 && *amount == 1))
         .expect("the trailing PayCost rider resolves once");
     assert!(
         mana_added < rider_life,
@@ -4629,8 +4805,18 @@ fn effect_pay_cost_composite_mana_life_suffix_serializes_and_rides_once() {
         life_before,
         "neither the later life cost nor the rider may run before the typed mana root settles"
     );
+    assert!(
+        runner.state().payment_transaction.is_some(),
+        "the canonical state keeps the staged payment descriptor"
+    );
+    assert!(
+        runner.state().pending_cost_move_resume.is_none(),
+        "the canonical state remains pre-payment while the composite is paused"
+    );
+    let shadow = engine::game::staged_payment_shadow_for_test(runner.state());
+    assert!(shadow.payment_transaction.is_none());
     assert!(matches!(
-        runner.state().pending_cost_move_resume.as_ref(),
+        shadow.pending_cost_move_resume.as_ref(),
         Some(PendingCostMoveResume::ManaAbilityPayment { pending, .. }) if matches!(
             &pending.resume,
             ManaAbilityResume::EffectPayCost { cost: paused_cost, .. }
@@ -4661,6 +4847,15 @@ fn effect_pay_cost_composite_mana_life_suffix_serializes_and_rides_once() {
             .count(),
         1,
         "the source's paid tap prefix is never replayed"
+    );
+    assert_eq!(
+        resumed
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::LifeChanged { amount: 1, .. }))
+            .count(),
+        1,
+        "the rider resumes exactly once after the unpaid suffix"
     );
     assert!(runner.state().pending_cost_move_resume.is_none());
 }
@@ -4747,6 +4942,7 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
         candidates: vec![],
         kind: Default::default(),
         last_applied_decides: false,
+        remember_identity: None,
     };
 
     let json = serde_json::to_string(runner.state())
@@ -8625,12 +8821,16 @@ fn nested_composite_effect_cost_serializes_all_suffixes_and_rider_once() {
     let mut initial_events = Vec::new();
     resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
         .expect("the nested cost reaches the source's replacement pause");
+    assert!(runner.state().payment_transaction.is_some());
+    assert!(runner.state().pending_cost_move_resume.is_none());
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::ReplacementChoice { .. }
     ));
     assert!(matches!(
-        runner.state().pending_cost_move_resume.as_ref(),
+        engine::game::staged_payment_shadow_for_test(runner.state())
+            .pending_cost_move_resume
+            .as_ref(),
         Some(PendingCostMoveResume::ManaAbilityPayment { pending, .. }) if matches!(
             &pending.resume,
             ManaAbilityResume::EffectPayCost { cost: paused_cost, .. }
@@ -10202,28 +10402,58 @@ fn optional_post_effect_settles_before_resuming_the_parked_mana_root() {
     );
 }
 
-#[test]
-fn delve_mana_payment_honors_moved_redirect_without_linking_redirected_fuel() {
+struct DelveWitness {
+    before_cast: serde_json::Value,
+    zone_change_commands_before: usize,
+    runner: GameRunner,
+    spell: ObjectId,
+    fuel: [ObjectId; 3],
+    redirects: [ObjectId; 2],
+}
+
+/// Delve spell at its mana-payment window with graveyard `[A, F, C]` and two
+/// competing exile redirects (inert until installed). `F` is a creature card
+/// that optionally carries a dies trigger.
+fn delve_witness(fuel_dies_trigger: bool) -> DelveWitness {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let spell = scenario
-        .add_spell_to_hand(P0, "Delve Redirect Payment Witness", true)
-        .with_mana_cost(ManaCost::generic(1))
+        .add_spell_to_hand(P0, "Delve Witness", true)
+        .with_mana_cost(ManaCost::generic(3))
         .with_keyword(Keyword::Delve)
         .id();
-    let fuel = scenario
-        .add_spell_to_graveyard(P0, "Redirected Delve Fuel", true)
+    let a = scenario
+        .add_spell_to_graveyard(P0, "Delve Fuel A", true)
         .id();
-    for name in ["First Delve Exile Redirect", "Second Delve Exile Redirect"] {
-        scenario
-            .add_creature(P0, name, 0, 0)
-            .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Exile, Zone::Hand));
+    let mut f = scenario.add_creature_to_graveyard(P0, "Delve Fuel F", 1, 1);
+    if fuel_dies_trigger {
+        f.with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::ChangesZone)
+                .valid_card(TargetFilter::SelfRef)
+                .origin(Zone::Battlefield)
+                .destination(Zone::Graveyard)
+                .trigger_zones(vec![Zone::Battlefield])
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                )),
+        );
     }
+    let f = f.id();
+    let c = scenario
+        .add_spell_to_graveyard(P0, "Delve Fuel C", true)
+        .id();
+    let redirects = ["First Delve Exile Redirect", "Second Delve Exile Redirect"]
+        .map(|name| scenario.add_creature(P0, name, 0, 0).as_enchantment().id());
 
     let mut runner = scenario.build();
+    let before_cast = serde_json::to_value(runner.state()).unwrap();
+    let zone_change_commands_before = zone_change_commands(runner.state());
     let card_id = runner.state().objects[&spell].card_id;
-    let announced = runner
+    runner
         .act(GameAction::CastSpell {
             object_id: spell,
             card_id,
@@ -10231,79 +10461,698 @@ fn delve_mana_payment_honors_moved_redirect_without_linking_redirected_fuel() {
             payment_mode: CastPaymentMode::Manual,
         })
         .expect("delve spell reaches its mana-payment window");
-    assert!(matches!(
-        announced.waiting_for,
-        WaitingFor::ManaPayment {
-            player: P0,
-            convoke_mode: Some(engine::types::game_state::ConvokeMode::Delve),
-        }
-    ));
+    DelveWitness {
+        before_cast,
+        zone_change_commands_before,
+        runner,
+        spell,
+        fuel: [a, f, c],
+        redirects,
+    }
+}
 
-    let paused = runner
-        .act(GameAction::TapForConvoke {
-            object_id: fuel,
-            mana_type: engine::types::mana::ManaType::Colorless,
+fn zone_change_commands(state: &GameState) -> usize {
+    state
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.command,
+                Some(engine::types::resolved_commands::ResolvedRulesCommand::ZoneChange(_))
+            )
         })
-        .expect("delve fuel must consult competing Moved redirects");
-    assert!(matches!(
-        paused.waiting_for,
-        WaitingFor::ReplacementChoice { .. }
-    ));
+        .count()
+}
 
-    let resumed = runner
-        .act(GameAction::ChooseReplacement { index: 0 })
-        .expect("redirected delve fuel restores the mana-payment root");
-    assert_eq!(runner.state().objects[&fuel].zone, Zone::Hand);
-    assert!(
-        !runner
+/// JSON-pointer paths at which `a` and `b` differ; unequal-length arrays report the array path.
+fn state_diff_paths(a: &serde_json::Value, b: &serde_json::Value) -> Vec<String> {
+    fn walk(path: &str, a: &Value, b: &Value, out: &mut Vec<String>) {
+        match (a, b) {
+            (Value::Object(x), Value::Object(y)) => {
+                for key in x.keys().chain(y.keys().filter(|k| !x.contains_key(*k))) {
+                    let child = format!("{path}/{key}");
+                    match (x.get(key), y.get(key)) {
+                        (Some(l), Some(r)) => walk(&child, l, r, out),
+                        _ => out.push(child),
+                    }
+                }
+            }
+            (Value::Array(x), Value::Array(y)) if x.len() == y.len() => {
+                for (i, (l, r)) in x.iter().zip(y).enumerate() {
+                    walk(&format!("{path}/{i}"), l, r, out);
+                }
+            }
+            _ if a != b => out.push(path.to_string()),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk("", a, b, &mut out);
+    out
+}
+
+impl DelveWitness {
+    fn delve(&mut self, fuel: ObjectId) -> WaitingFor {
+        self.runner
+            .act(GameAction::TapForConvoke {
+                object_id: fuel,
+                mana_type: ManaType::Colorless,
+            })
+            .expect("delve fuel is selectable")
+            .waiting_for
+    }
+
+    /// Pays the generic mana the selected fuel leaves over.
+    fn fund_remaining_generic(&mut self, count: usize) {
+        for _ in 0..count {
+            self.runner.state_mut().players[0]
+                .mana_pool
+                .add(engine::types::mana::ManaUnit::new(
+                    ManaType::Colorless,
+                    ObjectId(0),
+                    false,
+                    vec![],
+                ));
+        }
+    }
+
+    fn pass(&mut self) -> WaitingFor {
+        self.runner
+            .act(GameAction::PassPriority)
+            .expect("the delve payment commits")
+            .waiting_for
+    }
+
+    fn set_exile_redirect(&mut self, redirected_to: Option<Zone>) {
+        for id in self.redirects {
+            let object = self.runner.state_mut().objects.get_mut(&id).unwrap();
+            let definitions: Vec<_> = redirected_to
+                .map(|zone| redirect_moved_to(Zone::Exile, zone))
+                .into_iter()
+                .collect();
+            object.replacement_definitions = definitions.clone().into();
+            object.base_replacement_definitions = Arc::new(definitions);
+        }
+    }
+
+    /// Installs an identity exile redirect whose post-effect prompts for a choice.
+    fn set_post_effect_redirect(&mut self) {
+        let object = self
+            .runner
+            .state_mut()
+            .objects
+            .get_mut(&self.redirects[0])
+            .unwrap();
+        let definitions = vec![prompt_after_moved_to_exile()];
+        object.replacement_definitions = definitions.clone().into();
+        object.base_replacement_definitions = Arc::new(definitions);
+    }
+
+    fn zone(&self, object: ObjectId) -> Zone {
+        self.runner.state().objects[&object].zone
+    }
+
+    fn graveyard(&self) -> Vec<ObjectId> {
+        self.runner.state().players[0]
+            .graveyard
+            .iter()
+            .copied()
+            .collect()
+    }
+
+    fn markers(&self) -> Vec<ObjectId> {
+        self.runner.state().players[0]
+            .mana_pool
+            .mana
+            .iter()
+            .filter(|unit| unit.is_convoke_payment())
+            .map(|unit| unit.source_id)
+            .collect()
+    }
+
+    fn exile_links_to_spell(&self) -> Vec<ObjectId> {
+        self.runner
             .state()
             .exile_links
             .iter()
-            .any(|link| link.exiled_id == fuel && link.source_id == spell),
-        "fuel redirected away from exile must not be linked as exiled with the spell"
-    );
-    assert!(matches!(
-        resumed.waiting_for,
-        WaitingFor::ManaPayment {
-            player: P0,
-            convoke_mode: Some(engine::types::game_state::ConvokeMode::Delve),
-        }
-    ));
+            .filter(|link| link.source_id == self.spell)
+            .map(|link| link.exiled_id)
+            .collect()
+    }
 
-    let completed = runner
-        .act(GameAction::PassPriority)
-        .expect("redirected delve fuel still pays its generic cost component");
+    fn assert_committed_onto_stack(&self) {
+        assert_eq!(self.zone(self.spell), Zone::Stack);
+        assert!(self.runner.state().pending_cost_move_resume.is_none());
+        assert!(self.markers().is_empty());
+    }
+
+    /// Cancels the cast and requires the whole state to equal its pre-cast value
+    /// except cast/cancel residue that carries no gameplay history.
+    fn cancel_restores_the_pre_cast_state(&mut self) {
+        self.runner
+            .act(GameAction::CancelCast)
+            .expect("cancel a delve cast");
+        let after = serde_json::to_value(self.runner.state()).unwrap();
+        let diff = state_diff_paths(&self.before_cast, &after);
+        assert!(diff.iter().any(|path| path == "/cancelled_casts"));
+        assert_eq!(
+            zone_change_commands(self.runner.state()),
+            self.zone_change_commands_before,
+            "the cancel journals no zone-change command"
+        );
+        for path in &diff {
+            let leaf = path.rsplit('/').next().unwrap();
+            let allowed =
+                // The cancel's own record.
+                path == "/cancelled_casts"
+                // Append-only cast/cancel commands (stack push and removal, mana insert).
+                || path.starts_with("/resolved_rules_journal/")
+                // Monotone mana-unit id counter, never rewound.
+                || path == "/next_pip_id"
+                // Layer-pass caches derived from printed characteristics.
+                || (std::iter::once(&self.spell)
+                    .chain(&self.redirects)
+                    .any(|id| path.starts_with(&format!("/objects/{}/", id.0)))
+                    && [
+                        "base_characteristics_initialized",
+                        "layer_base_power",
+                        "layer_base_toughness",
+                    ]
+                    .contains(&leaf))
+                // Redirects the test installs after the snapshot.
+                || self.redirects.iter().any(|id| {
+                    path.starts_with(&format!("/objects/{}/", id.0))
+                        && (path.contains("/replacement_definitions")
+                            || path.contains("/base_replacement_definitions"))
+                });
+            assert!(allowed, "unexplained cancel residue at {path}");
+        }
+    }
+}
+
+/// CR 601.2h + CR 733.1: selecting delve cards moves nothing, so a cancelled
+/// cast leaves the game exactly as it was before the cast: no zone-change row,
+/// no battlefield entry, no death, no descend mark, no journal entry.
+#[test]
+fn cancel_after_delve_selection_restores_the_whole_state() {
+    let mut witness = delve_witness(true);
+    witness.set_exile_redirect(Some(Zone::Battlefield));
+    let [a, f, c] = witness.fuel;
+    let rows = witness.runner.state().zone_changes_this_turn.len();
+    for fuel in [a, f, c] {
+        assert!(matches!(
+            witness.delve(fuel),
+            WaitingFor::ManaPayment { .. }
+        ));
+        assert_eq!(witness.zone(fuel), Zone::Graveyard);
+    }
+    assert_eq!(witness.graveyard(), [a, f, c]);
+    assert_eq!(witness.markers().len(), 3);
+    assert_eq!(witness.runner.state().zone_changes_this_turn.len(), rows);
+
+    witness.cancel_restores_the_pre_cast_state();
+
+    assert_eq!(witness.graveyard(), [a, f, c]);
+    assert!(witness.markers().is_empty());
+    assert!(witness.exile_links_to_spell().is_empty());
+    assert_eq!(witness.runner.state().players[0].life, 20);
+}
+
+/// CR 601.2h + CR 614.1: the exile is a cost move, so a `Moved` redirect applies
+/// when the total cost is paid; the redirected card still pays its generic mana.
+fn commit_with_redirect(redirected_to: Zone) -> DelveWitness {
+    let mut witness = delve_witness(false);
+    let [_, f, _] = witness.fuel;
+    witness.set_exile_redirect(Some(redirected_to));
+    assert!(matches!(witness.delve(f), WaitingFor::ManaPayment { .. }));
+    assert_eq!(witness.zone(f), Zone::Graveyard);
+    witness.fund_remaining_generic(2);
     assert!(matches!(
-        completed.waiting_for,
-        WaitingFor::Priority { player: P0 }
+        witness.pass(),
+        WaitingFor::ReplacementChoice { .. }
     ));
-    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    let resumed = witness
+        .runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("competing Moved redirects resolve")
+        .waiting_for;
+    assert!(matches!(resumed, WaitingFor::Priority { player: P0 }));
+    witness.assert_committed_onto_stack();
+    witness
 }
 
 #[test]
-fn delve_murktide_link_tracks_only_fuel_delivered_to_exile() {
+fn commit_honors_moved_redirect_to_hand_without_linking_redirected_fuel() {
+    let witness = commit_with_redirect(Zone::Hand);
+    let [_, f, _] = witness.fuel;
+    assert_eq!(witness.zone(f), Zone::Hand);
+    assert!(witness.exile_links_to_spell().is_empty());
+}
+
+#[test]
+fn commit_honors_moved_redirect_to_library_battlefield_and_graveyard() {
+    for zone in [Zone::Library, Zone::Battlefield, Zone::Graveyard] {
+        let witness = commit_with_redirect(zone);
+        let [_, f, _] = witness.fuel;
+        assert_eq!(witness.zone(f), zone, "fuel redirected to {zone:?}");
+        assert!(witness.exile_links_to_spell().is_empty());
+    }
+}
+
+/// CR 616.1: a prevented exile leaves the fuel in the graveyard.
+#[test]
+fn commit_with_prevented_exile_keeps_fuel_in_graveyard_and_casts() {
+    let mut witness = delve_witness(false);
+    let [_, f, _] = witness.fuel;
+    witness.set_exile_redirect(Some(Zone::Hand));
+    witness.delve(f);
+    witness.fund_remaining_generic(2);
+    assert!(matches!(
+        witness.pass(),
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    stage_prevented_cost_move(witness.runner.state_mut(), witness.redirects[0]);
+    witness
+        .runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("prevented delve fuel resumes the commit");
+
+    assert_eq!(witness.zone(f), Zone::Graveyard);
+    witness.assert_committed_onto_stack();
+}
+
+/// CR 616.1: while the commit's replacement choice is open, the only legal
+/// actions answer it and a cancel is refused without touching the state.
+#[test]
+fn cancel_is_refused_while_the_commit_replacement_choice_is_open() {
+    let mut witness = delve_witness(false);
+    let [_, f, _] = witness.fuel;
+    witness.set_exile_redirect(Some(Zone::Hand));
+    witness.delve(f);
+    witness.fund_remaining_generic(2);
+    assert!(matches!(
+        witness.pass(),
+        WaitingFor::ReplacementChoice { .. }
+    ));
+
+    let before = serde_json::to_value(witness.runner.state()).unwrap();
+    witness
+        .runner
+        .act(GameAction::CancelCast)
+        .expect_err("a cancel is refused while the replacement choice is open");
+    let after = serde_json::to_value(witness.runner.state()).unwrap();
+    assert!(state_diff_paths(&before, &after).is_empty());
+    let (actions, _, _) = legal_actions_full(witness.runner.state());
+    assert!(!actions.is_empty());
+    assert!(actions
+        .iter()
+        .all(|action| matches!(action, GameAction::ChooseReplacement { .. })));
+}
+
+/// CR 601.2h: a delivered exile whose replacement raises its own
+/// post-effect prompt surfaces that prompt at commit; answering it resumes the
+/// parked commit in the same action, with the spell on the stack.
+#[test]
+fn commit_with_post_effect_prompt_answers_then_casts() {
+    let mut witness = delve_witness(false);
+    let [_, f, _] = witness.fuel;
+    witness.set_post_effect_redirect();
+    witness.delve(f);
+    witness.fund_remaining_generic(2);
+
+    let prompted = witness.pass();
+    assert!(
+        matches!(prompted, WaitingFor::NamedChoice { .. }),
+        "{prompted:?}"
+    );
+    assert_eq!(witness.zone(f), Zone::Exile);
+    assert_eq!(witness.zone(witness.spell), Zone::Hand);
+    assert!(witness.runner.state().pending_cost_move_resume.is_some());
+
+    let resumed = witness
+        .runner
+        .act(GameAction::ChooseOption {
+            choice: "first".to_string(),
+        })
+        .expect("the post-effect prompt resumes the commit")
+        .waiting_for;
+    assert!(matches!(resumed, WaitingFor::Priority { player: P0 }));
+    witness.assert_committed_onto_stack();
+}
+
+/// CR 601.2h: each fuel's post-effect prompt surfaces in turn; the parked
+/// remainder stays in the graveyard until its own move runs.
+#[test]
+fn commit_with_post_effect_prompt_resumes_remaining_fuel() {
+    let mut witness = delve_witness(false);
+    let [_, f, c] = witness.fuel;
+    witness.set_post_effect_redirect();
+    witness.delve(f);
+    witness.delve(c);
+    witness.fund_remaining_generic(1);
+
+    assert!(matches!(witness.pass(), WaitingFor::NamedChoice { .. }));
+    assert_eq!(witness.zone(c), Zone::Graveyard);
+    let second = witness
+        .runner
+        .act(GameAction::ChooseOption {
+            choice: "first".to_string(),
+        })
+        .expect("the first fuel's prompt resumes the commit")
+        .waiting_for;
+    assert!(
+        matches!(second, WaitingFor::NamedChoice { .. }),
+        "{second:?}"
+    );
+    assert_eq!(witness.zone(c), Zone::Exile);
+    let done = witness
+        .runner
+        .act(GameAction::ChooseOption {
+            choice: "first".to_string(),
+        })
+        .expect("the second fuel's prompt resumes the commit")
+        .waiting_for;
+    assert!(matches!(done, WaitingFor::Priority { player: P0 }));
+    witness.assert_committed_onto_stack();
+}
+
+/// Two inert enchantments that become competing graveyard-to-Exile redirects
+/// (to Hand) once installed, so the commit's first exile parks for a choice.
+fn add_competing_exile_redirects(scenario: &mut GameScenario) -> [ObjectId; 2] {
+    ["Competing Redirect One", "Competing Redirect Two"]
+        .map(|name| scenario.add_creature(P0, name, 0, 0).as_enchantment().id())
+}
+
+fn install_exile_to_hand_redirects(runner: &mut GameRunner, redirects: [ObjectId; 2]) {
+    for id in redirects {
+        let object = runner.state_mut().objects.get_mut(&id).unwrap();
+        let definitions = vec![redirect_moved_to(Zone::Exile, Zone::Hand)];
+        object.replacement_definitions = definitions.clone().into();
+        object.base_replacement_definitions = Arc::new(definitions);
+    }
+}
+
+fn add_generic_mana(runner: &mut GameRunner, count: usize) {
+    for _ in 0..count {
+        runner.state_mut().players[0]
+            .mana_pool
+            .add(engine::types::mana::ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+    }
+}
+
+/// CR 601.2h + CR 616.1: a deferred "sacrifice an artifact" cost is paid by the
+/// same commit that parks on the delve exile; the resume must not pay it again.
+#[test]
+fn commit_with_deferred_sacrifice_resumes_after_replacement_choice() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let spell = scenario
-        .add_spell_to_hand(P0, "Murktide Regent", true)
-        .with_mana_cost(ManaCost::generic(2))
+        .add_spell_to_hand(P0, "Delve Sacrifice Spell", true)
+        .with_mana_cost(ManaCost::generic(3))
+        .with_keyword(Keyword::Delve)
+        .with_additional_cost(engine::types::ability::AdditionalCost::Required(
+            AbilityCost::Sacrifice(SacrificeCost::count(
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                1,
+            )),
+        ))
+        .id();
+    let fuel = scenario.add_spell_to_graveyard(P0, "Delve Fuel", true).id();
+    let artifact = scenario
+        .add_creature(P0, "Sacrificed Artifact", 0, 1)
+        .as_artifact()
+        .id();
+    for _ in 0..3 {
+        scenario.add_basic_land(P0, ManaColor::Blue);
+    }
+    let redirects = add_competing_exile_redirects(&mut scenario);
+    let mut runner = scenario.build();
+    install_exile_to_hand_redirects(&mut runner, redirects);
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("the spell asks for its sacrifice");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![artifact],
+        })
+        .expect("the sacrifice is deferred to the commit");
+    runner
+        .act(GameAction::TapForConvoke {
+            object_id: fuel,
+            mana_type: ManaType::Colorless,
+        })
+        .expect("delve fuel is selectable");
+    add_generic_mana(&mut runner, 2);
+
+    let parked = runner
+        .act(GameAction::PassPriority)
+        .expect("the commit sacrifices, then parks on the delve exile")
+        .waiting_for;
+    assert!(
+        matches!(parked, WaitingFor::ReplacementChoice { .. }),
+        "{parked:?}"
+    );
+    assert_eq!(runner.state().objects[&artifact].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
+
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the parked commit resumes without paying the sacrifice again")
+        .waiting_for;
+    assert!(matches!(resumed, WaitingFor::Priority { player: P0 }));
+    let state = runner.state();
+    assert_eq!(state.objects[&spell].zone, Zone::Stack);
+    assert_eq!(state.objects[&fuel].zone, Zone::Hand);
+    assert_eq!(state.objects[&artifact].zone, Zone::Graveyard);
+    assert!(state.pending_cost_move_resume.is_none());
+    assert!(state.pending_cast.is_none());
+}
+
+/// CR 107.4f + CR 702.150a: the life paid for a Phyrexian shard survives a commit
+/// that parks on the delve exile and resumes.
+#[test]
+fn commit_with_phyrexian_shard_keeps_life_paid_across_replacement_choice() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Delve Phyrexian Spell", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::PhyrexianGreen],
+            generic: 2,
+        })
         .with_keyword(Keyword::Delve)
         .id();
-    let delivered_fuel = scenario
-        .add_spell_to_graveyard(P0, "Delivered Delve Fuel", true)
-        .id();
-    let redirected_fuel = scenario
-        .add_spell_to_graveyard(P0, "Redirected Murktide Fuel", true)
-        .id();
-    let first_redirect = scenario
-        .add_creature(P0, "First Murktide Exile Redirect", 0, 0)
-        .as_enchantment()
-        .id();
-    let second_redirect = scenario
-        .add_creature(P0, "Second Murktide Exile Redirect", 0, 0)
-        .as_enchantment()
-        .id();
+    let fuel = scenario.add_spell_to_graveyard(P0, "Delve Fuel", true).id();
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let redirects = add_competing_exile_redirects(&mut scenario);
+    let mut runner = scenario.build();
+    install_exile_to_hand_redirects(&mut runner, redirects);
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("the spell reaches mana payment");
+    runner
+        .act(GameAction::TapForConvoke {
+            object_id: fuel,
+            mana_type: ManaType::Colorless,
+        })
+        .expect("delve fuel is selectable");
+    add_generic_mana(&mut runner, 1);
+    let asked = runner
+        .act(GameAction::PassPriority)
+        .expect("the Phyrexian shard asks how it is paid")
+        .waiting_for;
+    assert!(
+        matches!(asked, WaitingFor::PhyrexianPayment { .. }),
+        "{asked:?}"
+    );
+    let parked = runner
+        .act(GameAction::SubmitPhyrexianChoices {
+            choices: vec![engine::types::game_state::ShardChoice::PayLife],
+        })
+        .expect("the commit pays life, then parks on the delve exile")
+        .waiting_for;
+    assert!(
+        matches!(parked, WaitingFor::ReplacementChoice { .. }),
+        "{parked:?}"
+    );
 
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the parked commit resumes")
+        .waiting_for;
+    assert!(matches!(resumed, WaitingFor::Priority { player: P0 }));
+    let state = runner.state();
+    assert_eq!(state.objects[&spell].zone, Zone::Stack);
+    assert_eq!(state.objects[&spell].phyrexian_life_paid, 1);
+    assert_eq!(state.players[0].life, 18);
+}
+
+/// CR 608.2g + CR 601.2h + CR 702.66a: a free-cast delve spell whose tax is paid by
+/// delve parks on the fuel's exile choice; resuming installs the cast's one
+/// graveyard redirect and does not re-offer the free-cast window.
+#[test]
+fn free_cast_with_tax_delve_commit_installs_single_exile_rider_across_replacement_choice() {
+    let invoke_text = "You may cast up to two instant and/or sorcery spells with total mana \
+         value 6 or less from your graveyard and/or hand without paying their mana costs. \
+         If those spells would be put into your graveyard, exile them instead. Exile Invoke Calamity.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_artifact_from_oracle(P0, "Heavy Orb", "Spells cost {1} more to cast.");
+    let invoke = scenario
+        .add_spell_to_hand_from_oracle(P0, "Invoke Calamity", true, invoke_text)
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    let delve_text = "Delve (Each card you exile from your graveyard while casting this spell pays for {1}.)\nDestroy target creature.";
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murderous Cut", true, delve_text)
+        .from_oracle_text_with_keywords(&["Delve"], delve_text)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 4,
+        })
+        .id();
+    scenario.add_creature(P1, "Cut Target", 2, 2);
+    let fuel = scenario
+        .add_creature_to_graveyard(P0, "Delve Fuel", 1, 1)
+        .with_replacement_definition(
+            redirect_self_moved_to(Zone::Exile, Zone::Hand).active_zones(vec![Zone::Graveyard]),
+        )
+        .with_replacement_definition(
+            redirect_self_moved_to(Zone::Exile, Zone::Library).active_zones(vec![Zone::Graveyard]),
+        )
+        .id();
+    let mut runner = scenario.build();
+    add_generic_mana(&mut runner, 2);
+    let card_id = runner.state().objects[&invoke].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: invoke,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Invoke Calamity is cast");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("opponent passes");
+    let window = runner
+        .act(GameAction::PassPriority)
+        .expect("Invoke Calamity resolves")
+        .waiting_for;
+    assert!(
+        matches!(
+            window,
+            WaitingFor::CastOffer {
+                kind: engine::types::game_state::CastOfferKind::FreeCastWindow { .. },
+                ..
+            }
+        ),
+        "{window:?}"
+    );
+    let payment = runner
+        .act(GameAction::FreeCastWindowChoice {
+            selection: Some(spell),
+        })
+        .expect("the free cast is chosen")
+        .waiting_for;
+    assert!(
+        matches!(
+            payment,
+            WaitingFor::ManaPayment {
+                convoke_mode: Some(_),
+                ..
+            }
+        ),
+        "{payment:?}"
+    );
+    runner
+        .act(GameAction::TapForConvoke {
+            object_id: fuel,
+            mana_type: ManaType::Colorless,
+        })
+        .expect("delve fuel is selectable");
+    let parked = runner
+        .act(GameAction::PassPriority)
+        .expect("the commit parks on the fuel's exile")
+        .waiting_for;
+    assert!(
+        matches!(parked, WaitingFor::ReplacementChoice { .. }),
+        "{parked:?}"
+    );
+
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the parked commit resumes")
+        .waiting_for;
+
+    assert!(
+        matches!(resumed, WaitingFor::Priority { player: P0 }),
+        "{resumed:?}"
+    );
+    let state = runner.state();
+    assert_eq!(state.objects[&spell].zone, Zone::Stack);
+    assert_eq!(state.objects[&fuel].zone, Zone::Hand);
+    let redirects = state.objects[&spell]
+        .replacement_definitions
+        .iter_unchecked()
+        .filter(|d| {
+            d.event == ReplacementEvent::Moved && d.destination_zone == Some(Zone::Graveyard)
+        })
+        .count();
+    assert_eq!(redirects, 1, "one graveyard redirect per free cast");
+}
+
+/// CR 601.2h + CR 616.1: completing a post-payment distribution pays the delve
+/// exile, which parks for competing `Moved` redirects; the choice resumes the commit.
+#[test]
+fn post_distribution_delve_exile_parks_for_a_replacement_choice() {
+    const ORACLE: &str =
+        "Delve (Each card you exile from your graveyard while casting this spell pays for {1}.)\n\
+~ deals X damage divided as you choose among any number of targets.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Delve Volley", false, ORACLE)
+        .from_oracle_text_with_keywords(&["Delve"], ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Red],
+            generic: 1,
+        })
+        .id();
+    let fuel = scenario.add_spell_to_graveyard(P0, "Delve Fuel", true).id();
+    for name in ["First Delve Exile Redirect", "Second Delve Exile Redirect"] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Exile, Zone::Hand));
+    }
+    scenario.with_mana_pool(
+        P0,
+        vec![engine::types::mana::ManaUnit::new(
+            ManaType::Red,
+            ObjectId(0),
+            false,
+            vec![],
+        )],
+    );
     let mut runner = scenario.build();
     let card_id = runner.state().objects[&spell].card_id;
     runner
@@ -10313,73 +11162,144 @@ fn delve_murktide_link_tracks_only_fuel_delivered_to_exile() {
             targets: vec![],
             payment_mode: CastPaymentMode::Manual,
         })
-        .expect("Murktide-shaped delve spell reaches mana payment");
+        .expect("delve spell reaches mana payment");
+    runner
+        .act(GameAction::ChooseX { value: 0 })
+        .expect("announce X = 0");
     runner
         .act(GameAction::TapForConvoke {
-            object_id: delivered_fuel,
-            mana_type: engine::types::mana::ManaType::Colorless,
+            object_id: fuel,
+            mana_type: ManaType::Colorless,
         })
-        .expect("first delve fuel is delivered to exile");
+        .expect("fuel is selectable");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("payment reaches the post-payment distribution");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::DistributeAmong { .. }
+    ));
+    assert_eq!(runner.state().objects[&fuel].zone, Zone::Graveyard);
 
-    for redirect in [first_redirect, second_redirect] {
+    let parked = runner
+        .act(GameAction::DistributeAmong {
+            distribution: vec![],
+        })
+        .expect("completing the distribution pays the delve exile")
+        .waiting_for;
+    assert!(matches!(parked, WaitingFor::ReplacementChoice { .. }));
+    assert!(matches!(
+        runner.state().pending_cost_move_resume,
+        Some(PendingCostMoveResume::Cast {
+            completion: PendingCostMoveCompletion::FinalizeDelvedCast { .. },
+            ..
+        })
+    ));
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the redirect resolves and the commit resumes");
+
+    assert_eq!(runner.state().objects[&fuel].zone, Zone::Hand);
+    assert!(runner.state().pending_cost_move_resume.is_none());
+    assert!(runner
+        .state()
+        .exile_links
+        .iter()
+        .all(|l| l.exiled_id != fuel));
+}
+
+/// CR 406.6: only a fuel that actually arrived in exile is linked to the spell.
+#[test]
+fn commit_links_only_fuel_delivered_to_exile() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Murktide Regent", true)
+        .with_mana_cost(ManaCost::generic(2))
+        .with_keyword(Keyword::Delve)
+        .id();
+    let delivered = scenario
+        .add_spell_to_graveyard(P0, "Delivered Delve Fuel", true)
+        .id();
+    let redirected = scenario
+        .add_spell_to_graveyard(P0, "Redirected Murktide Fuel", true)
+        .with_replacement_definition(
+            redirect_self_moved_to(Zone::Exile, Zone::Hand).active_zones(vec![Zone::Graveyard]),
+        )
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("delve spell reaches mana payment");
+    for fuel in [delivered, redirected] {
         runner
-            .state_mut()
-            .objects
-            .get_mut(&redirect)
-            .expect("redirect source remains on the battlefield")
-            .replacement_definitions = vec![redirect_moved_to(Zone::Exile, Zone::Hand)].into();
+            .act(GameAction::TapForConvoke {
+                object_id: fuel,
+                mana_type: ManaType::Colorless,
+            })
+            .expect("fuel is selectable");
     }
 
-    let paused = runner
-        .act(GameAction::TapForConvoke {
-            object_id: redirected_fuel,
-            mana_type: engine::types::mana::ManaType::Colorless,
-        })
-        .expect("second delve fuel must consult competing Moved redirects");
-    assert!(matches!(
-        paused.waiting_for,
-        WaitingFor::ReplacementChoice { .. }
-    ));
+    let completed = runner
+        .act(GameAction::PassPriority)
+        .expect("both fuel pay the generic mana")
+        .waiting_for;
 
-    let resumed = runner
-        .act(GameAction::ChooseReplacement { index: 0 })
-        .expect("redirected fuel resumes the Murktide-shaped mana payment");
-    assert!(matches!(
-        resumed.waiting_for,
-        WaitingFor::ManaPayment {
-            player: P0,
-            convoke_mode: Some(engine::types::game_state::ConvokeMode::Delve),
-        }
-    ));
-    assert_eq!(runner.state().objects[&delivered_fuel].zone, Zone::Exile);
-    assert_eq!(runner.state().objects[&redirected_fuel].zone, Zone::Hand);
-    let tracked_ids: Vec<_> = runner
+    assert!(matches!(completed, WaitingFor::Priority { player: P0 }));
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    assert_eq!(runner.state().objects[&delivered].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&redirected].zone, Zone::Hand);
+    let linked: Vec<ObjectId> = runner
         .state()
         .exile_links
         .iter()
         .filter(|link| link.source_id == spell)
         .map(|link| link.exiled_id)
         .collect();
-    assert_eq!(tracked_ids, vec![delivered_fuel]);
+    assert_eq!(linked, [delivered]);
     assert_eq!(
-        runner
-            .state()
-            .cards_exiled_with_source_this_turn
-            .get(&spell)
-            .cloned()
-            .unwrap_or_default(),
-        vec![delivered_fuel],
-        "Murktide's tracked set contains precisely its delivered exile"
+        runner.state().cards_exiled_with_source_this_turn[&spell],
+        [delivered]
     );
+}
 
-    let completed = runner
-        .act(GameAction::PassPriority)
-        .expect("both delve components pay the generic mana after redirect");
+/// CR 616.1: a replacement choice on the first fuel parks the rest of the
+/// commit; the parked remainder resumes and surfaces the next fuel's choice.
+#[test]
+fn commit_resumes_remaining_fuel_after_replacement_choice() {
+    let mut witness = delve_witness(false);
+    let [a, f, c] = witness.fuel;
+    witness.set_exile_redirect(Some(Zone::Hand));
+    witness.delve(f);
+    witness.delve(c);
+    witness.fund_remaining_generic(1);
     assert!(matches!(
-        completed.waiting_for,
-        WaitingFor::Priority { player: P0 }
+        witness.pass(),
+        WaitingFor::ReplacementChoice { .. }
     ));
-    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    assert_eq!(witness.zone(c), Zone::Graveyard);
+    let second = witness
+        .runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the first fuel's redirect resolves")
+        .waiting_for;
+    assert!(matches!(second, WaitingFor::ReplacementChoice { .. }));
+    assert_eq!(witness.zone(f), Zone::Hand);
+    witness
+        .runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the parked remainder's redirect resolves");
+
+    assert_eq!(witness.zone(c), Zone::Hand);
+    assert_eq!(witness.zone(a), Zone::Graveyard);
+    assert!(witness.exile_links_to_spell().is_empty());
+    witness.assert_committed_onto_stack();
 }
 
 /// W-L1 (red first): Cascade's bottom placement must be a replaceable
@@ -10728,6 +11648,8 @@ fn cast_from_zone_exile_redirect_pauses_before_lingering_permission_tail() {
             duration: None,
             driver: CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
+            additional_cost: None,
+            cast_cost_modifier: None,
         },
         vec![TargetRef::Object(card)],
         source,
@@ -10814,6 +11736,8 @@ fn cast_from_zone_exile_delivery_stays_synchronous_and_grants_permission() {
             duration: None,
             driver: CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
+            additional_cost: None,
+            cast_cost_modifier: None,
         },
         vec![TargetRef::Object(card), TargetRef::Object(second_card)],
         source,
@@ -11895,6 +12819,7 @@ fn dig_kept_nonbattlefield_redirect_pauses_before_tail() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Graveyard),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: true,
             enter_tapped: false,
@@ -12044,6 +12969,7 @@ fn r2_effect_zone_moves_stay_synchronous_without_redirects() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Graveyard),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: true,
             enter_tapped: false,
@@ -12871,6 +13797,7 @@ fn choose_and_sacrifice_rest_replacement_preserves_terminal_sweep() {
             sacrifice_filter: TargetFilter::Typed(TypedFilter::creature()),
             total_power_cap: None,
             keeper_constraint: None,
+            keeper_counter: None,
         },
         vec![],
         source,
@@ -13201,6 +14128,7 @@ fn effect_zone_put_at_library_position_mixed_sources_preserves_legacy_library_or
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: engine::types::ability::ExileConcealment::Public,
             face_down_profile: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
@@ -14793,4 +15721,164 @@ fn accepted_opponent_may_mana_body_pauses_on_the_nonactivator_and_resumes_the_fr
         observer_o,
         life_before,
     );
+}
+
+/// Fuel zones and the watcher's +1/+1 counter count after a Delve commit of the
+/// fuel named in `selected` (letters of `abcd`, in that order). `b` and `d` park
+/// on two competing graveyard-to-Exile redirects (index 0 sends them to Hand);
+/// `a` and `c` are delivered to Exile. The watcher is a Murktide-class
+/// "leaves your graveyard" trigger.
+fn delve_commit_with_parking_fuel(selected: &str) -> ([Zone; 4], u32) {
+    let watcher_text = "Flying\nWhenever an instant or sorcery card leaves your graveyard, put a +1/+1 counter on this creature.";
+    let delve_text = "Delve (Each card you exile from your graveyard while casting this spell pays for {1}.)\nDraw three cards.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for n in 0..5 {
+        scenario.add_spell_to_library_top(P0, &format!("Library Card {n}"), true);
+    }
+    let watcher = scenario
+        .add_creature_from_oracle(P0, "Graveyard Watcher", 3, 3, watcher_text)
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Delve Spell", false, delve_text)
+        .from_oracle_text_with_keywords(&["Delve"], delve_text)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: selected.len() as u32,
+        })
+        .id();
+    let mut fuel = Vec::new();
+    for (name, parks) in [("a", false), ("b", true), ("c", false), ("d", true)] {
+        let mut card = scenario.add_spell_to_graveyard(P0, &format!("Fuel {name}"), true);
+        if parks {
+            card.with_replacement_definition(
+                redirect_self_moved_to(Zone::Exile, Zone::Hand).active_zones(vec![Zone::Graveyard]),
+            )
+            .with_replacement_definition(
+                redirect_self_moved_to(Zone::Exile, Zone::Library)
+                    .active_zones(vec![Zone::Graveyard]),
+            );
+        }
+        fuel.push(card.id());
+    }
+    scenario.with_mana_pool(
+        P0,
+        vec![engine::types::mana::ManaUnit::new(
+            ManaType::Blue,
+            ObjectId(0),
+            false,
+            vec![],
+        )],
+    );
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("delve spell reaches mana payment");
+    for (letter, &id) in ['a', 'b', 'c', 'd'].iter().zip(&fuel) {
+        if selected.contains(*letter) {
+            runner
+                .act(GameAction::TapForConvoke {
+                    object_id: id,
+                    mana_type: ManaType::Colorless,
+                })
+                .expect("fuel is selectable");
+        }
+    }
+    let mut waiting_for = runner
+        .act(GameAction::PassPriority)
+        .expect("the commit starts exiling")
+        .waiting_for;
+    let mut choices = 0;
+    while matches!(waiting_for, WaitingFor::ReplacementChoice { .. }) {
+        choices += 1;
+        waiting_for = runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("the parked fuel's replacement resolves")
+            .waiting_for;
+    }
+    assert_eq!(
+        choices,
+        selected.chars().filter(|c| "bd".contains(*c)).count(),
+        "one replacement choice per parking fuel"
+    );
+    assert!(matches!(waiting_for, WaitingFor::Priority { player: P0 }));
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    for _ in 0..12 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("resolve the watcher triggers and the spell");
+    }
+    let state = runner.state();
+    let counters = state.objects[&watcher]
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or(0);
+    (
+        [fuel[0], fuel[1], fuel[2], fuel[3]].map(|id| state.objects[&id].zone),
+        counters,
+    )
+}
+
+/// CR 603.2 + CR 601.2h: a fuel delivered before a later fuel parks still
+/// leaves the graveyard as part of the cast, so its trigger is not lost.
+#[test]
+fn commit_parking_on_second_fuel_keeps_first_fuels_leaves_graveyard_trigger() {
+    let (zones, counters) = delve_commit_with_parking_fuel("ab");
+    assert_eq!(
+        zones,
+        [Zone::Exile, Zone::Hand, Zone::Graveyard, Zone::Graveyard]
+    );
+    assert_eq!(counters, 2);
+}
+
+/// Sibling of the above: the parking fuel comes first, so the span the park
+/// covers is empty and the delivered second fuel triggers normally.
+#[test]
+fn commit_parking_on_first_fuel_keeps_second_fuels_leaves_graveyard_trigger() {
+    let (zones, counters) = delve_commit_with_parking_fuel("bc");
+    assert_eq!(
+        zones,
+        [Zone::Graveyard, Zone::Hand, Zone::Exile, Zone::Graveyard]
+    );
+    assert_eq!(counters, 2);
+}
+
+/// CR 603.2 + CR 616.1: a commit that parks on its second fuel after resuming
+/// from the first keeps the triggers of both parked fuel.
+#[test]
+fn commit_two_parking_fuel_keeps_both_fuels_leaves_graveyard_trigger() {
+    let (zones, counters) = delve_commit_with_parking_fuel("bd");
+    assert_eq!(
+        zones,
+        [Zone::Graveyard, Zone::Hand, Zone::Graveyard, Zone::Hand]
+    );
+    assert_eq!(counters, 2);
+}
+
+#[test]
+fn commit_four_fuel_with_two_parks_triggers_for_every_fuel() {
+    let (zones, counters) = delve_commit_with_parking_fuel("abcd");
+    assert_eq!(zones, [Zone::Exile, Zone::Hand, Zone::Exile, Zone::Hand]);
+    assert_eq!(counters, 4);
+}
+
+/// Control: one park among three fuel, so the resume never parks again.
+#[test]
+fn commit_with_one_parking_fuel_among_three_triggers_for_every_fuel() {
+    let (zones, counters) = delve_commit_with_parking_fuel("abc");
+    assert_eq!(
+        zones,
+        [Zone::Exile, Zone::Hand, Zone::Exile, Zone::Graveyard]
+    );
+    assert_eq!(counters, 3);
 }

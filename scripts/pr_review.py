@@ -66,6 +66,7 @@ DASHBOARD_DEFAULT_TERMINAL_LIMIT = 200
 SUCCESS_STATES = {"accepted", "merged"}
 BLOCK_STATES = {"blocked", "changes_requested"}
 HOLD_STATES = {"held", "held_ci"}
+NON_MATERIAL_EVENT_TYPES = frozenset({"observation", "quality_entry", "tracker_row"})
 # GitHub authorAssociation values that identify a repository member. The
 # redundant-review guard treats a comment/review from any of these as "the ball
 # is in the contributor's court" — see the pr-review-loop SKILL.md guard doc.
@@ -674,9 +675,13 @@ def effective_signals_by_event(events: list[dict[str, Any]]) -> dict[str, list[s
 
 
 def latest_events_by_pr_head(events: list[dict[str, Any]]) -> dict[tuple[int, str], dict[str, Any]]:
+    """Keep the latest disposition per head without letting observations erase it."""
     latest: dict[tuple[int, str], dict[str, Any]] = {}
     for event in events:
-        if event.get("event_type") == "review_correction":
+        if (
+            event.get("event_type") == "review_correction"
+            or event.get("event_type") in NON_MATERIAL_EVENT_TYPES
+        ):
             continue
         pr = event.get("pr")
         head_sha = event.get("head_sha")
@@ -732,9 +737,8 @@ def latest_looks_by_pr(events: list[dict[str, Any]]) -> dict[int, dict[str, Any]
 
 
 def latest_material_actions_by_pr(events: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
-    ignored_types = {"observation", "quality_entry", "tracker_row"}
     return latest_events_by_pr_matching(
-        events, lambda event: event.get("event_type") not in ignored_types
+        events, lambda event: event.get("event_type") not in NON_MATERIAL_EVENT_TYPES
     )
 
 
@@ -2165,7 +2169,7 @@ def architecture_scope_profile(
         "the `quality` label, prior praise, and frontend permission do not waive "
         "this gate. Open a fresh PR from current `main` only after one of those "
         "authorizations exists, and rerun `/engine-implementer`, the final "
-        "`review-impl`, and Gate A against its committed head."
+        "`review-engine-impl`, and Gate A against its committed head."
     )
     return {
         "mode": mode,
@@ -3029,7 +3033,7 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
                 "**Closed without implementation-diff review.** Required current-head "
                 f"admission artifacts failed for `{head}`: {failures}. Open a fresh "
                 "PR from current `main`, rerun `/engine-implementer`, complete and "
-                "address a final `review-impl`, then rerun Gate A against that exact "
+                "address a final `review-engine-impl`, then rerun Gate A against that exact "
                 "committed head. Merely including the required headings or PASS text "
                 "is not validation; their content and SHA must match the current head."
             )
@@ -3770,7 +3774,7 @@ def candidate_sort_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
     pr_number = candidate.get("pr") or 0
     order = CANDIDATE_ACTION_ORDER.get(action, 99)
     if action == "review":
-        return (order, created, pr_number)
+        return (order, created, "", pr_number)
     if action in {
         "close_stale_changes_for_handler",
         "dequeue_stale_for_handler",
@@ -3779,7 +3783,7 @@ def candidate_sort_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
         "warn_stale_changes_for_handler",
     }:
         return (order, updated, created, pr_number)
-    return (order, pr_number)
+    return (order, "", "", pr_number)
 
 
 def dashboard_event_view(

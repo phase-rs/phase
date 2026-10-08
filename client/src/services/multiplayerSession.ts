@@ -29,12 +29,19 @@ export function isWsSessionValid(session: WsSessionData): boolean {
   return Date.now() - (session.timestamp ?? 0) < WS_SESSION_TTL_MS;
 }
 
-export function loadWsSession(): WsSessionData | null {
-  try {
-    const raw = localStorage.getItem(WS_SESSION_STORAGE_KEY);
-    if (!raw) return null;
+// The latest session the store refused; null once a write lands.
+let pageSession: WsSessionData | null = null;
 
-    const session = JSON.parse(raw) as WsSessionData;
+export function loadWsSession(): WsSessionData | null {
+  let raw: string | null = null;
+  try {
+    raw = localStorage.getItem(WS_SESSION_STORAGE_KEY);
+  } catch {
+    // Kept out of the parse `try`, whose catch would drop the page copy.
+  }
+  try {
+    const session = pageSession ?? (raw ? (JSON.parse(raw) as WsSessionData) : null);
+    if (!session) return null;
     if (
       !isWsSessionValid(session)
       || !session.fullKey
@@ -55,12 +62,15 @@ export function loadWsSession(): WsSessionData | null {
 export function saveWsSession(session: WsSessionData): void {
   try {
     localStorage.setItem(WS_SESSION_STORAGE_KEY, JSON.stringify(session));
+    pageSession = null;
   } catch {
-    // A blocked/quota-limited store disables reconnect persistence, not hosting.
+    // A blocked/quota-limited store keeps the session for this page only.
+    pageSession = session;
   }
 }
 
 export function clearWsSession(): void {
+  pageSession = null;
   try {
     localStorage.removeItem(WS_SESSION_STORAGE_KEY);
   } catch {

@@ -24,6 +24,37 @@ export type DraftKind = Exclude<CoreDraftKind, "Quick">;
  *  landing tile that writes the URL and the pod page that reads it cannot drift. */
 export const COMMANDER_DRAFT_ENTRY = "commander";
 
+/** `?kind=` value on `/draft-pod` that deep-links pod setup into a Winston draft.
+ *  Same contract as `COMMANDER_DRAFT_ENTRY`: the landing tile writes it, the pod page
+ *  reads it, and neither spells the slug itself. */
+export const WINSTON_DRAFT_ENTRY = "winston";
+
+/** Every `?kind=` slug and the kind it deep-links.
+ *
+ *  One map rather than one boolean per slug at the reading site: the pod page's entry
+ *  effect then folds this instead of growing a parallel `<kind>Requested` const and a
+ *  parallel `useEffect` per kind. `satisfies` keeps the values inside `DraftKind`
+ *  without widening the key type, so `draftKindForEntry` stays exhaustive over the
+ *  slugs actually published here. Not every kind has a slug — the kinds reachable
+ *  from the plain `/draft-pod` radios need none. */
+export const DRAFT_KIND_ENTRIES = {
+  [COMMANDER_DRAFT_ENTRY]: "CommanderDraft",
+  [WINSTON_DRAFT_ENTRY]: "Winston",
+} as const satisfies Record<string, DraftKind>;
+
+/** The kind a `?kind=` slug deep-links, or `null` for an absent or unknown slug.
+ *  An unknown slug is deliberately not an error: a stale bookmark falls back to the
+ *  plain pod setup rather than failing the route. */
+export function draftKindForEntry(slug: string | null): DraftKind | null {
+  if (slug === null) return null;
+  // Widened to a string index for the lookup only. The map itself keeps its literal
+  // key type, so `DRAFT_KIND_ENTRIES.commander` is still a checked property access
+  // everywhere else; this local alias is what lets an UNTRUSTED URL string be looked
+  // up without an `as` cast on the slug.
+  const entries: Readonly<Record<string, DraftKind>> = DRAFT_KIND_ENTRIES;
+  return entries[slug] ?? null;
+}
+
 /** Human-readable label for every `DraftKind`, resolved from the `draft` namespace.
  *
  *  Single authority, colocated with the union it is keyed on. Two surfaces render a
@@ -41,5 +72,6 @@ export function draftKindLabels(t: TFunction<"draft">): Record<DraftKind, string
     Traditional: t("podSetup.kindTraditional"),
     Sealed: t("podSetup.kindSealed"),
     CommanderDraft: t("podSetup.kindCommanderDraft"),
+    Winston: t("podSetup.kindWinston"),
   };
 }

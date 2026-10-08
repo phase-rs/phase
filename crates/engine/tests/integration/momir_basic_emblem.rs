@@ -6,7 +6,9 @@
 //! (`momir_emblem_creates_creature_token_with_matching_mv`) would fail if the
 //! `CreateTokenCopyFromPool` resolver or the emblem grant were reverted.
 
-use engine::game::deck_loading::momir_emblem_ability;
+use engine::game::deck_loading::{
+    load_and_hydrate_decks, momir_emblem_ability, DeckPayload, MOMIR_SNOW_BASICS,
+};
 use engine::game::scenario::GameRunner;
 use engine::types::ability::{
     CardSelectionMode, Comparator, Effect, PtValue, QuantityExpr, ResolvedAbility, TargetFilter,
@@ -14,11 +16,12 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
-use engine::types::card_type::{CardType, CoreType};
+use engine::types::card_type::{CardType, CoreType, Supertype};
 use engine::types::format::{DeckSizeRule, FormatConfig};
 use engine::types::game_state::{GameState, PayCostKind, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+use engine::types::match_config::{DeckCardCount, MatchType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -772,5 +775,108 @@ fn momir_emblem_copying_tribute_creature_runs_entry_chain_and_enters() {
     assert!(
         !rendered.contains("(unknown #"),
         "the visible game log must name every object it cites, got: {rendered}"
+    );
+}
+
+/// A synthetic snow basic land face, so the Momir fixed deck resolves against a
+/// synthetic database.
+fn snow_basic_face(name: &str) -> CardFace {
+    let basic_type = name.trim_start_matches("Snow-Covered ").to_string();
+    CardFace {
+        name: name.to_string(),
+        mana_cost: ManaCost::NoCost,
+        card_type: CardType {
+            supertypes: vec![Supertype::Basic, Supertype::Snow],
+            core_types: vec![CoreType::Land],
+            subtypes: vec![basic_type],
+        },
+        ..Default::default()
+    }
+}
+
+/// Regression: game two of a Momir Bo3 created no creature tokens for anyone.
+/// The between-games rebuild (`match_flow`) is a fresh `GameState::new`, whose
+/// `#[serde(skip)]` card-database handle defaults to `None`, so every emblem
+/// activation in games two and three drew from an empty corpus (CR 609.3 no-op).
+///
+/// REVERT-PROBE: drop the `card_db` carry in
+/// `restart_between_games_with_starting_player` and the game-two activation
+/// creates no token, failing the `token_count` assertion.
+#[test]
+fn momir_emblem_creates_token_in_game_two_of_bo3() {
+    let mut faces: Vec<CardFace> = MOMIR_SNOW_BASICS
+        .iter()
+        .map(|name| snow_basic_face(name))
+        .collect();
+    faces.push(creature_face("Hill Giant", 3));
+
+    let mut state = GameState::new(FormatConfig::momir(), 2, 42);
+    state.match_config.match_type = MatchType::Bo3;
+    let db = crate::support::install_synthetic_card_db(&mut state, &faces);
+    load_and_hydrate_decks(&mut state, &DeckPayload::default(), Some(&db));
+    let _ = engine::game::engine::start_game(&mut state);
+
+    let mut runner = GameRunner::from_state(state);
+    runner
+        .act(GameAction::Concede {
+            player_id: PlayerId(1),
+        })
+        .expect("conceding game one must be accepted");
+    let fixed_deck: Vec<DeckCardCount> = MOMIR_SNOW_BASICS
+        .iter()
+        .map(|name| DeckCardCount {
+            name: name.to_string(),
+            count: 12,
+        })
+        .collect();
+    for _ in 0..2 {
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::BetweenGamesSideboard { .. }
+        ));
+        runner
+            .act(GameAction::SubmitSideboard {
+                main: fixed_deck.clone(),
+                sideboard: vec![],
+            })
+            .expect("resubmitting the fixed Momir deck must be accepted");
+    }
+    runner
+        .act(GameAction::ChoosePlayDraw { play_first: true })
+        .expect("choosing play/draw starts game two");
+    assert_eq!(runner.state().game_number, 2);
+
+    let mut state = runner.state().clone();
+    assert!(
+        state.card_db.is_some(),
+        "game two must keep the card database the emblem draws from"
+    );
+    assert!(
+        state.all_card_names.iter().any(|name| name == "Hill Giant"),
+        "game two must be hydrated from the card database like game one"
+    );
+    let emblem_id = *state
+        .command_zone
+        .iter()
+        .find(|id| state.objects[*id].is_emblem && state.objects[*id].controller == P0)
+        .expect("game two grants P0 a fresh Momir emblem");
+    state.phase = Phase::PreCombatMain;
+    state.turn_number = 2;
+    state.active_player = P0;
+    state.priority_player = P0;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+    let card = fund_and_card(&mut state, 3);
+
+    let runner = activate_emblem(state, emblem_id, 3, card);
+    let token_count = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter_map(|id| runner.state().objects.get(id))
+        .filter(|o| o.is_token && o.name == "Hill Giant")
+        .count();
+    assert_eq!(
+        token_count, 1,
+        "game two's emblem must create a creature token"
     );
 }

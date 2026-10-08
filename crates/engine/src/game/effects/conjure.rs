@@ -295,9 +295,9 @@ fn resolve_duplicate_reference(
     ability: &ResolvedAbility,
     reference: &TargetFilter,
 ) -> Option<ObjectId> {
-    let resolved = crate::game::targeting::resolved_targets(ability, reference, state);
-    let object_ids = crate::game::effects::effect_object_targets(reference, &resolved);
-    object_ids.into_iter().next()
+    crate::game::effects::resolved_effect_object_ids(state, ability, reference)
+        .into_iter()
+        .next()
 }
 
 /// Place every just-conjured copy for one recipient into `owner`'s library at the
@@ -328,14 +328,14 @@ fn place_conjured_in_library(
     if conjured.is_empty() {
         return;
     }
-    let Some(pidx) = state.players.iter().position(|p| p.id == owner) else {
+    if !state.players.iter().any(|p| p.id == owner) {
         return;
-    };
+    }
     // The recipient's existing library, with the just-conjured copies (currently at
     // the bottom in creation order) removed, so index math and the random window
     // treat the copies as being *inserted* among the existing cards.
-    let mut rest: Vec<ObjectId> = state.players[pidx]
-        .library
+    let mut rest: Vec<ObjectId> = state
+        .library_of(owner)
         .iter()
         .copied()
         .filter(|id| !conjured.contains(id))
@@ -387,7 +387,7 @@ fn place_conjured_in_library(
     };
 
     // allow-raw-zone: in-library reorder of just-conjured cards, not a zone event.
-    state.players[pidx].library = final_library.into_iter().collect();
+    *state.library_of_mut(owner) = final_library.into_iter().collect();
 }
 
 #[cfg(test)]

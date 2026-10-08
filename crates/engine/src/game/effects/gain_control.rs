@@ -3,8 +3,8 @@ use crate::types::ability::{
     TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
-use crate::types::identifiers::ObjectId;
+use crate::types::game_state::{GameState, TransientContinuousEffectBindings};
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 
@@ -31,20 +31,39 @@ pub fn resolve(
     let new_controller = gain_control_controller(ability, target);
     let object_ids = gain_control_object_targets(state, ability, target);
 
+    // Settle first so the captured prior controllers are post-layer values.
+    if duration.is_for_as_long_as() {
+        crate::game::layers::flush_layers(state);
+    }
+
     for obj_id in object_ids {
-        let Some(old_controller) = state.objects.get(&obj_id).map(|obj| obj.controller) else {
+        let Some(object) = state.objects.get(&obj_id) else {
             return Err(EffectError::ObjectNotFound(obj_id));
         };
-
-        // CR 613.3: Create a transient continuous effect at Layer 2 (Control).
-        state.add_transient_continuous_effect(
+        let old_controller = object.controller;
+        let recipient = ObjectIncarnationRef::from_object(object);
+        // CR 611.2c + CR 400.7: state durations track this exact recipient.
+        // CR 400.7a: other control effects retain spell-to-permanent continuity.
+        // CR 611.2b: a duration that never starts installs nothing, so no
+        // control or echo side effect follows.
+        let installed = state.add_transient_continuous_effect_with_bindings(
             ability.source_id,
             new_controller,
             duration.clone(),
             TargetFilter::SpecificObject { id: obj_id },
             vec![ContinuousModification::ChangeController],
             None,
+            TransientContinuousEffectBindings {
+                affected_recipient: matches!(duration, Duration::ForAsLongAs { .. })
+                    .then_some(recipient),
+                duration_subject: matches!(duration, Duration::ForAsLongAs { .. })
+                    .then_some(recipient),
+                granting_object: None,
+            },
         );
+        if installed.is_none() {
+            continue;
+        }
         mark_echo_due_for_new_controller(state, obj_id);
 
         // CR 613.1b: emit the control-change event so "when you lose control"
@@ -118,10 +137,16 @@ pub fn resolve_all(
     // "you gain control" — the ability's controller takes control.
     let new_controller = ability.controller;
 
+    // Settle first so matching and the captured prior controllers read
+    // post-layer values.
+    if duration.is_for_as_long_as() {
+        crate::game::layers::flush_layers(state);
+    }
+
     // Ability-context filter evaluation, identical to `destroy::resolve_all`:
     // `resolved_object_filter` binds anaphoric scopes (e.g. `controller:
     // TargetPlayer`) from the ability before matching.
-    let effective_filter = crate::game::effects::resolved_object_filter(ability, target);
+    let effective_filter = crate::game::effects::resolved_object_filter(state, ability, target);
     let ctx = crate::game::filter::FilterContext::from_ability(ability);
     let matching: Vec<ObjectId> = state
         .battlefield
@@ -135,7 +160,9 @@ pub fn resolve_all(
     for obj_id in matching {
         let old_controller = state.objects.get(&obj_id).map(|obj| obj.controller);
         // CR 613.1b: register a Layer 2 (Control) transient continuous effect.
-        state.add_transient_continuous_effect(
+        // CR 611.2b: one whose duration never starts (The Wretched after its
+        // controller lost it) installs nothing and emits no side effect.
+        let installed = state.add_transient_continuous_effect(
             ability.source_id,
             new_controller,
             duration.clone(),
@@ -143,6 +170,9 @@ pub fn resolve_all(
             vec![ContinuousModification::ChangeController],
             None,
         );
+        if installed.is_none() {
+            continue;
+        }
         mark_echo_due_for_new_controller(state, obj_id);
         if let Some(old_controller) = old_controller.filter(|old| *old != new_controller) {
             events.push(GameEvent::ControllerChanged {
@@ -195,14 +225,19 @@ fn gain_control_object_targets(
     // CR 608.2c: a precise slot anaphor ("gain control of that Equipment" →
     // slot 1) indexes the whole resolving chain's declared targets. The
     // per-clause `ability.targets` may carry only the nearest propagated target,
-    // so route through the root-chain authority; `effect_object_targets` would
-    // fall through to "all inherited targets" when the index is out of range.
+    // so route through the root-chain slot authority. The slot answer is final:
+    // falling through would index the local targets and then `resolved_targets`'
+    // whole root chain, taking control of every declared object. CR 608.2b: a
+    // slot whose target was illegal at resolution (or whose pinned referent
+    // departed, CR 400.7) gains control of nothing.
     if let TargetFilter::ParentTargetSlot { index } = filter {
-        if let Some(TargetRef::Object(id)) =
-            crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index)
-        {
-            return vec![id];
-        }
+        return crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, *index)
+            .and_then(|target| match target {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            })
+            .into_iter()
+            .collect();
     }
 
     // CR 400.7 + CR 603.7c: a delayed gain-control whose pinned referent became
@@ -218,9 +253,9 @@ fn gain_control_object_targets(
     // and falls to its UNCONDITIONAL `EffectResolved` push. An emptied list is
     // already a clean no-op with the event.
     //
-    // Slot carve-out does NOT apply here: `ParentTargetSlot` is handled above by
-    // `resolve_parent_slot_from_root` and never reaches this read. Adding a
-    // `matches!` guard would be dead code.
+    // Slot carve-out does NOT apply here: `ParentTargetSlot` returns above
+    // through `resolve_live_parent_slot_from_root` and never reaches this read.
+    // Adding a `matches!` guard would be dead code.
     let live_targets = ability.live_object_targets(state);
     let chosen_objects = super::effect_object_targets(filter, &live_targets);
 
@@ -280,8 +315,9 @@ pub fn resolve_give(
         let old_controller = state.objects.get(&obj_id).map(|obj| obj.controller);
 
         // CR 613.3: Create a transient continuous effect at Layer 2 (Control)
-        // with the recipient as the new controller.
-        state.add_transient_continuous_effect(
+        // with the recipient as the new controller. CR 611.2b: one whose
+        // duration never starts installs nothing and emits no side effect.
+        let installed = state.add_transient_continuous_effect(
             ability.source_id,
             recipient_id,
             duration.clone(),
@@ -289,6 +325,9 @@ pub fn resolve_give(
             vec![ContinuousModification::ChangeController],
             None,
         );
+        if installed.is_none() {
+            continue;
+        }
         mark_echo_due_for_new_controller(state, obj_id);
 
         // CR 110.2: Record the handoff for downstream "if they do" riders and
@@ -818,6 +857,7 @@ mod tests {
             attacker_ids: vec![attacker],
             defending_player: PlayerId(0),
             attacks: vec![],
+            declaration_records: Vec::new(),
         });
         let ability = ResolvedAbility::new(
             Effect::GiveControl {

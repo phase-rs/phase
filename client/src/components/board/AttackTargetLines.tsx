@@ -6,6 +6,7 @@ import type { MultiplayerBoardLayout } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { GAME_Z_LAYER } from "../../constants/ui.ts";
 import { objectAnchorSelector } from "../../utils/objectAnchorSelector.ts";
 import { getVisibleBoardPlayerIds, isOneOnOne } from "../../viewmodel/gameStateView.ts";
 import {
@@ -160,7 +161,7 @@ export function AttackTargetLines({
   if (creatureArrowData.length === 0 && hudIndicators.length === 0) return null;
 
   return createPortal(
-    <svg className="pointer-events-none fixed inset-0 z-30 h-full w-full">
+    <svg className={`pointer-events-none fixed inset-0 ${GAME_Z_LAYER.combatArrow} h-full w-full`}>
       <defs>
         {!isMinimal && (
           <filter id="attack-target-glow">

@@ -117,6 +117,8 @@
     "coverageThresholdHint": "Excluir mazos por debajo de este umbral de compatibilidad del motor",
     "bracket": "Nivel",
     "bracketHint": "La IA aleatoria elige de estos niveles. Los mazos sin etiqueta se excluyen al filtrar.",
+    "bracketPoolEmpty": "Ningún mazo coincide con los niveles seleccionados. La IA aleatoria elegirá entre todos los mazos legales.",
+    "cedhPoolEmpty": "No hay mazos de nivel 5 disponibles. No se pueden asignar mazos a la IA aleatoria.",
     "opponentLabel": "Oponente {{number}}",
     "deck": "Mazo",
     "difficulty": "Dificultad",
@@ -131,7 +133,9 @@
       "feed": "Feed",
       "user": "Usuario",
       "precon": "Precon"
-    }
+    },
+    "brain": "Controlado por",
+    "brainEngine": "IA del motor"
   },
   "feedManager": {
     "title": "Gestionar feeds",

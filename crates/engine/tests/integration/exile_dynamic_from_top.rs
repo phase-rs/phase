@@ -28,7 +28,9 @@ use engine::game::effects::resolve_ability_chain;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::create_object;
 use engine::parser::oracle_effect::parse_effect_chain;
-use engine::types::ability::{AbilityKind, CastingPermission, Effect, TargetRef};
+use engine::types::ability::{
+    AbilityKind, CastingPermission, Effect, ManaSpendPermission, TargetRef,
+};
 use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
@@ -309,10 +311,9 @@ cast those spells.";
         );
     }
 
-    // HONEST-GAP (R5): the exiled P1 cards carry PlayFromExile granted to the
-    // controller, with the "mana of any type" rider still DROPPED
-    // (mana_spend_permission == None) — the exile-count fix did not upgrade the
-    // pre-existing silent drop.
+    // CR 609.4b: the exiled P1 cards carry PlayFromExile granted to the
+    // controller, and the ", and mana of any type can be spent to cast those
+    // spells" rider rides that grant (#9213).
     let granted_card = p1_lib[0];
     let perms = &runner.state().objects[&granted_card].casting_permissions;
     let play_perm = perms.iter().find_map(|perm| match perm {
@@ -325,10 +326,10 @@ cast those spells.";
     });
     let mana_spend =
         play_perm.expect("exiled card must carry the controller's PlayFromExile grant");
-    assert!(
-        mana_spend.is_none(),
-        "the \"mana of any type can be spent\" rider is a pre-existing honest gap and must stay \
-         dropped (mana_spend_permission == None), not upgraded to a false-supported Some(..); got {mana_spend:?}"
+    assert_eq!(
+        mana_spend,
+        Some(ManaSpendPermission::AnyTypeOrColor),
+        "the \"mana of any type can be spent\" rider must ride the play grant"
     );
 }
 

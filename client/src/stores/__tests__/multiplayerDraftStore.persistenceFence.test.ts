@@ -97,7 +97,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
     await expect(useMultiplayerDraftStore.getState().hostDraft({
       ...config,
       signal: controller.signal,
-    })).resolves.toBe(true);
+    })).resolves.toEqual({ status: "opened" });
     await Promise.resolve();
     expect(saveDraftHostSession).toHaveBeenCalledOnce();
 
@@ -111,7 +111,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
 
     releaseStaleSave();
 
-    await expect(replacement).resolves.toBe(true);
+    await expect(replacement).resolves.toEqual({ status: "opened" });
     expect(hostRoom).toHaveBeenCalledTimes(2);
     expect(saveDraftHostSession).toHaveBeenCalledTimes(2);
   });
@@ -167,8 +167,8 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
     expect(hostRoom).toHaveBeenCalledOnce();
     resolveStaleHostRoom(staleHostResult);
 
-    await expect(stale).resolves.toBe(false);
-    await expect(replacement).resolves.toBe(true);
+    await expect(stale).resolves.toEqual({ status: "superseded" });
+    await expect(replacement).resolves.toEqual({ status: "opened" });
     expect(hostRoom).toHaveBeenCalledTimes(2);
   });
 });

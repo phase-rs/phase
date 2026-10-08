@@ -50,6 +50,9 @@ function customRules(id = 0): CustomFormatRules {
     },
     legality: {
       legal_sets: null,
+      // Present because the engine always emits it; the persisted-before-the-
+      // field case drops it explicitly in its own test below.
+      legal_cards: [],
       banned: [],
       restricted: [],
       legacy: {
@@ -260,6 +263,26 @@ describe("isCustomFormatRulesShape", () => {
     ).toBe(false);
   });
 
+  it("accepts an Enabled command zone with FreeformAnyCastableCard", () => {
+    // Paired with the "Bogus" rejection above so each is non-vacuous: this
+    // asserts an accept where that one asserts a reject for the same shape.
+    const rules = customRules();
+    expect(
+      isCustomFormatRulesShape({
+        ...rules,
+        structural: {
+          ...rules.structural,
+          command_zone_mode: {
+            Enabled: {
+              commander_damage_threshold: 21,
+              eligibility_rule: "FreeformAnyCastableCard",
+            },
+          },
+        },
+      }),
+    ).toBe(true);
+  });
+
   it("distinguishes a null legal_sets from a missing one", () => {
     const rules = customRules();
     // `null` means unrestricted — legal, and NOT the same claim as [].
@@ -287,6 +310,37 @@ describe("isCustomFormatRulesShape", () => {
         },
       }),
     ).toBe(false);
+  });
+
+  it("validates legal_cards, and accepts a definition persisted without it", () => {
+    const rules = customRules();
+
+    // Present and valid.
+    expect(
+      isCustomFormatRulesShape({
+        ...rules,
+        legality: { ...rules.legality, legal_cards: ["Arena", "Sewers of Estark"] },
+      }),
+    ).toBe(true);
+
+    // Absent: a definition saved before the field existed must still load, or
+    // every custom format a player had saved would be discarded.
+    const { legal_cards: _dropped, ...legalityWithout } = rules.legality;
+    expect(
+      isCustomFormatRulesShape({ ...rules, legality: legalityWithout }),
+    ).toBe(true);
+
+    // Present but the wrong type — the guard stands between `JSON.parse` and
+    // code that will index it, so a non-array must be refused rather than
+    // reaching a `.map`.
+    for (const bad of ["Arena", 7, {}, [1, 2]]) {
+      expect(
+        isCustomFormatRulesShape({
+          ...rules,
+          legality: { ...rules.legality, legal_cards: bad },
+        }),
+      ).toBe(false);
+    }
   });
 
   it("accepts a definition persisted before the ante axis existed", () => {
@@ -331,5 +385,21 @@ describe("isCustomFormatRulesShape", () => {
         },
       }),
     ).toBe(false);
+  });
+});
+
+describe("removed experimental-dungeons key", () => {
+  it("still validates a blob persisting the removed key", () => {
+    // Saves and broker frames written before the flag was deleted still
+    // carry it. The guard names required fields but never rejects unknown
+    // ones, so the stale key — true or false — must not fail validation.
+    for (const stale of [true, false]) {
+      expect(
+        isFormatConfigShape({
+          ...builtInConfig(),
+          allow_experimental_dungeons: stale,
+        }),
+      ).toBe(true);
+    }
   });
 });

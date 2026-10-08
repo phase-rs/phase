@@ -84,6 +84,7 @@ fn counter_with_unravel(reduce_target_cost: bool) -> (bool, i64) {
                 amount: ManaCost::generic(1),
                 spell_filter: None,
                 dynamic_count: None,
+                reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
             }));
     }
 

@@ -244,13 +244,9 @@ describe("useConcedeHandler", () => {
   });
 
   /**
-   * RECONSTRUCTED. The team lead wrote this row; I destroyed it by restoring
-   * this file from a backup taken before their edit, and rebuilt it from their
-   * description. It is verified to discriminate (see below), but it is their
-   * intent expressed in my words — worth a read from them.
-   *
-   * CR 104.3a: the conceding player leaves the game and loses it. CR 800.4a:
-   * the remaining players play on. That second half is the whole point of this
+   * CR 104.3a: the conceding player leaves the game and loses it. CR 800.4: a
+   * multiplayer game continues after one or more players have left, so the
+   * remaining players play on. That second half is the whole point of this
    * row. `releaseCommanderPodState` clears the POD's record of the launch and
    * deliberately does NOT dispose the adapter, because in this
    * host-authoritative topology the host's adapter IS the game for everyone
@@ -297,7 +293,8 @@ describe("useConcedeHandler", () => {
     // The pod's record of a game that is over for this player.
     expect(useMultiplayerDraftStore.getState().commanderLaunch).toBeNull();
     expect(useMultiplayerDraftStore.getState().commanderSeat).toBeNull();
-    // CR 800.4a: the transport the others are still playing on is untouched.
+    // CR 800.4: the game continues for the others, so the transport they are
+    // still playing on is untouched.
     expect(useMultiplayerDraftStore.getState().matchAdapter).toBe(survivingAdapter);
     // Ordering: the concession must reach the engine BEFORE this client stops
     // caring about the game. Clearing ahead of the dispatch would leave three

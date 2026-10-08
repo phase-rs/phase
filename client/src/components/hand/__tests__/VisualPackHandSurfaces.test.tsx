@@ -60,7 +60,7 @@ beforeEach(() => seed(secretOpponent()));
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
-  useUiStore.setState({ mobileHandOpen: false, focusedOpponent: null });
+  useUiStore.setState({ mobileHandOpen: false, focusedOpponent: null, previewSource: null });
 });
 
 describe("visual-pack opponent hand boundary", () => {
@@ -230,5 +230,47 @@ describe("visual-pack owned hand surfaces", () => {
     );
     fireEvent.error(image);
     expect(advanceFailedSource).toHaveBeenCalledWith("installed-token-normal.png");
+  });
+
+  it("closes and disables the mobile hand drawer when a local board choice begins", () => {
+    const card = buildGameObject({
+      id: 32,
+      owner: 0,
+      controller: 0,
+      zone: "Hand",
+      name: "Mobile Hand Card",
+    });
+    useGameStore.setState({
+      gameMode: "local",
+      gameState: buildGameState({
+        players: buildPlayers([{ id: 0, hand: [card.id] }, 1]),
+        objects: buildObjectMap(card),
+        seat_order: [0, 1],
+      }),
+      legalActionsByObject: {},
+      spellCosts: {},
+    });
+    useUiStore.setState({ mobileHandOpen: true });
+    mockUseCardImage.mockReturnValue({
+      src: "installed-hand-card.png",
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+
+    const { rerender } = render(<MobileHandDrawer />);
+    expect(screen.getByRole("img", { name: "Mobile Hand Card" })).toBeInTheDocument();
+    expect(mockUseCardHover).toHaveBeenCalledWith(card.id, "playerHand");
+    useUiStore.setState({
+      inspectedObjectId: card.id,
+      previewSource: "playerHand",
+      previewSticky: true,
+    });
+
+    rerender(<MobileHandDrawer interactionDisabled />);
+
+    expect(screen.queryByRole("img", { name: "Mobile Hand Card" })).not.toBeInTheDocument();
+    expect(useUiStore.getState().mobileHandOpen).toBe(false);
+    expect(useUiStore.getState().inspectedObjectId).toBeNull();
   });
 });

@@ -22,6 +22,7 @@
 //!      representation.
 
 use super::oracle::{is_draft_matters_sentence, ParsedAbilities};
+use super::oracle_effect::gap_diagnosis::{swallowed_clause_gap, GuardWord, SwallowedAxis};
 use super::oracle_effect::player_lookback_relative_clause_owns_suffix;
 use super::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
 use super::oracle_ir::doc::OracleItemIr;
@@ -29,21 +30,24 @@ use super::oracle_ir::feature::{
     audit_units, scope_to_unit, AuditUnit, ItemIdTracks, OracleSemanticFeature,
 };
 use super::oracle_nom::error::OracleError;
+use super::oracle_nom::primitives::{scan_contains, split_sentence_units};
 use super::swallow_evidence::UnitEvidence;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission, Comparator,
-    ContinuousModification, CopyRetargetPermission, DamageModification, DelayedTriggerCondition,
-    Duration, Effect, FilterProp, ManaProduction, ModalSelectionConstraint, OpponentMayScope,
-    ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, RestrictionExpiry, StaticCondition, StaticDefinition,
+    AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission,
+    ChooseFromZoneConstraint, Comparator, ContinuousModification, CopyRetargetPermission,
+    DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp, ManaProduction,
+    ModalSelectionConstraint, OpponentMayScope, ParsedCondition, PerPlayerScope, PlayerFilter,
+    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
+    RestrictionExpiry, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
     TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, UnlessPayScaling,
+    ZoneOwner,
 };
 use crate::types::ability_visit::{
     visit_ability_def, visit_replacement, visit_static, visit_trigger,
 };
 use crate::types::game_state::RetargetScope;
-use crate::types::keywords::Keyword;
-use crate::types::mana::{ManaCost, ManaExpiry};
+use crate::types::keywords::{Keyword, WardCost};
+use crate::types::mana::{ManaCost, ManaExpiry, ManaSpellGrant};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::ActivationExemption;
 use crate::types::statics::{CastCostMode, StaticMode};
@@ -52,8 +56,8 @@ use crate::types::zones::Zone;
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_until, take_while1},
-    character::complete::digit1,
-    combinator::{opt, value},
+    character::complete::{digit1, multispace0},
+    combinator::{eof, opt, value},
     Parser,
 };
 use std::ops::ControlFlow;
@@ -213,7 +217,7 @@ pub(crate) fn check_swallowed_clauses(
         detect_activate_limit(&cleaned, fragment, &scoped, &mut found);
         detect_duration_until_eot(&cleaned, fragment, &scoped, &evidence, &mut found);
         detect_optional_you_may(&cleaned, fragment, &scoped, &mut found);
-        detect_dynamic_qty(&cleaned, fragment, &evidence, &mut found);
+        detect_dynamic_qty(&cleaned, fragment, &scoped, &evidence, &mut found);
         detect_condition_if(&cleaned, fragment, &evidence, &scoped, &mut found);
         detect_condition_unless(&cleaned, fragment, &evidence, &mut found);
         detect_condition_as_long_as(&cleaned, fragment, &evidence, &scoped, &mut found);
@@ -421,6 +425,7 @@ fn detect_replacement(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::Replacement.detector_label(),
         truncate(original, 140),
+        None,
     ));
 }
 
@@ -509,6 +514,118 @@ fn enters_with_counter_carrier_is_only_enters_with_marker(
     })
 }
 
+/// CR 701.6a + CR 614.1a: true when this def tree carries a typed
+/// `Effect::Counter { countered_spell_zone: Some(Library | Hand) }` — the modeled
+/// "put it <zone> instead of into that player's graveyard" redirect (Memory Lapse,
+/// Lapse of Certainty, Spell Crumple, Remand). `None` (Hinder's "your choice of top or
+/// bottom") is deliberately not a carrier, and `Some(Exile)` is pinned out so a future
+/// parser change to that shape fails loudly instead of being silently accepted.
+///
+/// Declined (the warning stays): Hinder (`Counter { None }` plus a sub-ability
+/// `ChangeZone`, "your choice of top or bottom"); the exile-it-instead ETB counter card
+/// and the artifact-or-creature-onto-the-battlefield-under-your-control counter card are
+/// declined by construction (no Library/Hand slot), not fixture-tested; and
+/// a second " instead" sentence after a populated redirect (e.g. "you gain 2 life
+/// instead", or a different "countered this way ... instead" clause).
+///
+/// Deliberately NOT part of `effect_is_replacement_carrier`: that matcher also feeds
+/// the skip/enters-with/as-enters detector, where a Counter node proves nothing.
+fn def_tree_has_countered_spell_zone_redirect(def: &AbilityDefinition) -> bool {
+    if matches!(
+        &*def.effect,
+        Effect::Counter {
+            countered_spell_zone: Some(
+                SpellStackToGraveyardReplacement::Library { .. }
+                    | SpellStackToGraveyardReplacement::Hand
+            ),
+            ..
+        }
+    ) {
+        return true;
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_countered_spell_zone_redirect(effect) {
+            return true;
+        }
+    }
+    def.sub_ability
+        .as_deref()
+        .is_some_and(def_tree_has_countered_spell_zone_redirect)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(def_tree_has_countered_spell_zone_redirect)
+        || def
+            .mode_abilities
+            .iter()
+            .any(def_tree_has_countered_spell_zone_redirect)
+}
+
+fn any_ability_has_countered_spell_zone_redirect(parsed: &ParsedAbilities) -> bool {
+    parsed
+        .abilities
+        .iter()
+        .any(def_tree_has_countered_spell_zone_redirect)
+        || parsed.triggers.iter().any(|t| {
+            t.execute
+                .as_deref()
+                .is_some_and(def_tree_has_countered_spell_zone_redirect)
+        })
+}
+
+/// CR 701.6a + CR 614.1a: the countered-spell redirect sentence
+/// "if that spell is countered this way, put it <destination> instead of into
+/// <that player's|its owner's|their owner's> graveyard", anchored at BOTH ends of the
+/// sentence unit so no unmodelled head or tail can ride along with the typed slot.
+/// The destinations are exactly those modelled by
+/// `SpellStackToGraveyardReplacement::{Library, Hand}` (Memory Lapse / Lapse of Certainty:
+/// top of library; Spell Crumple: bottom of library; Remand: hand).
+fn parse_countered_spell_redirect_shape(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    // The redirect must START the sentence: an unmodelled head ("..., you gain 2 life
+    // instead of ... and put it ...") must not be swallowed by the typed slot.
+    let (rest, _) = tag("if that spell is countered this way, put it ").parse(input)?;
+    let (rest, _) = alt((
+        tag("on top of its owner's library"),
+        tag("on the bottom of its owner's library"),
+        tag("into its owner's hand"),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" instead of into ").parse(rest)?;
+    let (rest, _) = alt((
+        tag("that player's"),
+        tag("its owner's"),
+        tag("their owner's"),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" graveyard").parse(rest)?;
+    // The redirect must be the WHOLE sentence: an unmodelled tail (", and you gain 2 life
+    // instead ...") must not be swallowed by the typed slot.
+    let (rest, _) = opt(tag(".")).parse(rest)?;
+    let (rest, _) = multispace0.parse(rest)?;
+    value((), eof).parse(rest)
+}
+
+/// CR 701.6a + CR 614.1a: true when the typed countered-spell redirect accounts for
+/// EVERY " instead" sentence of the unit. The redirect slot carries no sentence-level
+/// provenance, so even a second matching redirect sentence must keep the warning.
+/// Require exactly one "instead" sentence, and require it to BE the redirect clause
+/// itself (`parse_countered_spell_redirect_shape`, whole-unit match).
+fn countered_spell_zone_redirect_is_only_instead_marker(
+    cleaned: &str,
+    parsed: &ParsedAbilities,
+) -> bool {
+    if !any_ability_has_countered_spell_zone_redirect(parsed) {
+        return false;
+    }
+    let mut instead_sentences = split_sentence_units(cleaned)
+        .into_iter()
+        .filter(|sentence| scan_contains(sentence, "instead"));
+    let Some(sentence) = instead_sentences.next() else {
+        return false;
+    };
+    parse_countered_spell_redirect_shape(sentence).is_ok() && instead_sentences.next().is_none()
+}
+
 // ── Detector A: Replacement_Instead ─────────────────────────────────────
 
 /// CR 614: "if X would Y, [do Z] instead" — every "instead" phrase outside of
@@ -557,9 +674,16 @@ fn detect_replacement_instead(
     if any_ability_has_replacement_carrier(parsed) {
         return;
     }
+    // CR 701.6a + CR 614.1a + CR 608.2c: "If that spell is countered this way, put it
+    // <zone> instead of into that player's graveyard" is the typed
+    // `Counter.countered_spell_zone` redirect, provided it is the ONLY "instead" clause.
+    if countered_spell_zone_redirect_is_only_instead_marker(cleaned, parsed) {
+        return;
+    }
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::ReplacementInstead.detector_label(),
         truncate(original, 140),
+        swallowed_clause_gap(SwallowedAxis::Replacement, cleaned),
     ));
 }
 
@@ -584,6 +708,7 @@ fn detect_activate_only_during(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::ActivateOnlyDuring.detector_label(),
         truncate(original, 140),
+        None,
     ));
 }
 
@@ -612,6 +737,7 @@ fn detect_activate_limit(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::ActivateLimit.detector_label(),
         truncate(original, 140),
+        None,
     ));
 }
 
@@ -678,6 +804,7 @@ fn detect_duration_until_eot(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::DurationUntilEndOfTurn.detector_label(),
         truncate(original, 140),
+        None,
     ));
 }
 
@@ -756,6 +883,7 @@ fn detect_optional_you_may(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::OptionalYouMay.detector_label(),
         truncate(original, 140),
+        None,
     ));
 }
 
@@ -898,6 +1026,39 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
         // Veil's "you may activate one of its loyalty abilities once this turn"
         // is the permission itself; the player still decides each activation.
         | Effect::GrantExtraLoyaltyActivations { .. } => true,
+        // CR 706.3a + CR 706.3b: "Roll a d20." with a printed result table carries
+        // its "you may" inside a result BRANCH definition ("1—9 | Copy that card.
+        // You may cast the copy." — Wizard's Spellbook), not at the RollDie
+        // effect's own def. The branches are `DieResultBranch` payloads, which
+        // the def-tree walk above cannot see (they are not `sub_ability` /
+        // `else_ability` / `mode_abilities`), so recurse into each branch's own
+        // def tree — the branch is where the optionality lives.
+        Effect::RollDie { results, .. } => {
+            results.iter().any(|branch| def_tree_has_optional(&branch.effect))
+        }
+        // CR 603.3 + CR 707.10c / CR 115.7d: a mana-spend trigger's "you may
+        // choose new targets for the copy" (Primal Wellspring, Pyromancer's
+        // Goggles) lives inside the `TriggerOnSpend` ability payload — the
+        // trigger the mana's controller may put on the stack — not at the
+        // producing def. Walk the granted ability's own def tree.
+        Effect::Mana { grants, .. } => grants.iter().any(|grant| {
+            matches!(
+                grant,
+                ManaSpellGrant::TriggerOnSpend { ability, .. } if def_tree_has_optional(ability)
+            )
+        }),
+        // CR 608.2d: `ChooseFromZone { up_to: true }` ("For each card type, you
+        // may put a card of that type from among the revealed cards into your
+        // hand." — Atraxa, Grand Unifier) lets the chooser select zero cards at
+        // resolution — choosing zero IS the decline, so the "may" is represented
+        // by the effect's own `up_to` parameter without a def-level `optional`
+        // flag (the same internal-optionality shape as `Dig { up_to: true }`).
+        Effect::ChooseFromZone { up_to: true, .. } => true,
+        // CR 608.2g + CR 601.2: `FreeCastFromZones` casts spells during
+        // resolution through the interactive selection loop, which stops early
+        // when the controller declines — every cast is optional, so the "you
+        // may" needs no def-level flag (Plargg and Nassari, Invoke Calamity).
+        Effect::FreeCastFromZones { .. } => true,
         // CR 111.3 + CR 603.5: a token's quoted text is part of its
         // characteristics, including optional triggered abilities. The
         // optionality therefore lives inside the Token's static-ability grant,
@@ -1329,23 +1490,17 @@ fn def_tree_has_cast_graveyard_redirect_rider(def: &AbilityDefinition) -> bool {
 /// A graveyard-redirect rider body: a move of the cast/countered spell
 /// (`ParentTarget`) to exile, the owner's hand, or a library position. Walks the
 /// sub-ability chain so an intervening continuation does not hide the rider.
+///
+/// The shape set is the runtime rider classifier's in
+/// `game::effects::cast_from_zone` — the single authority the resolver itself
+/// reads, so a parser-side copy cannot drift from what the resolver consumes.
+/// This function adds only the sub-ability walk around it.
 fn def_is_graveyard_redirect_to_parent(def: &AbilityDefinition) -> bool {
-    if matches!(
-        &*def.effect,
-        Effect::ChangeZone {
-            destination: crate::types::zones::Zone::Exile | crate::types::zones::Zone::Hand,
-            target: crate::types::ability::TargetFilter::ParentTarget,
-            ..
-        } | Effect::PutAtLibraryPosition {
-            target: crate::types::ability::TargetFilter::ParentTarget,
-            ..
-        }
-    ) {
-        return true;
-    }
-    def.sub_ability
-        .as_deref()
-        .is_some_and(def_is_graveyard_redirect_to_parent)
+    crate::game::effects::cast_from_zone::graveyard_destination_rider(&def.effect).is_some()
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(def_is_graveyard_redirect_to_parent)
 }
 
 /// CR 119.7 + CR 608.2c: True when any ability/trigger tree contains a
@@ -1615,6 +1770,35 @@ fn effect_is_replacement_carrier(effect: &Effect) -> bool {
         // Feather return / Lilah plot parameterization is a second consequence
         // folded into the same carrier, so it stays exempt either way).
         | Effect::ExileResolvingSpellInsteadOfGraveyard { .. } => true,
+        // CR 614.1a: a resolution-created permission whose granted static carries
+        // the replacement ("If a spell cast this way would be put into a
+        // graveyard, exile it instead" folded into a graveyard cast permission —
+        // The Great Work). The granted static answers the same question it does
+        // when printed on a permanent.
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => static_abilities
+            .iter()
+            .flat_map(|grant| grant.modifications.iter())
+            .any(|modification| match modification {
+                ContinuousModification::GrantStaticAbility { definition } => {
+                    static_is_replacement_carrier(definition)
+                }
+                // CR 614.1a: a quoted "If this permanent would leave the battlefield,
+                // exile it instead …" grant (Geth, Thane of Contracts; Llanowar
+                // Greenwidow) carries its `ReplacementDefinition` directly — the same
+                // payload `parsed.replacements` holds for a printed replacement.
+                // Deliberately presence-based rather than event-checked like
+                // `static_is_replacement_carrier`: it mirrors the detector's
+                // `!parsed.replacements.is_empty()` early return, which accepts any
+                // parsed replacement as the represented "instead". Who the grant is
+                // bound to (`affected`) is an anaphor question this detector does not
+                // answer; note a `SelfRef` grant after a `forward_result` zone move is
+                // rebound to the moved object at resolution
+                // (`rebind_child_to_forwarded_objects`, CR 400.7j — Spirit-Sister's Call).
+                ContinuousModification::GrantReplacement { .. } => true,
+                _ => false,
+            }),
         _ => false,
     }
 }
@@ -1680,8 +1864,8 @@ fn static_is_replacement_carrier(static_def: &StaticDefinition) -> bool {
         static_def.mode,
         // CR 614.1a: "if a spell cast this way would be put into your graveyard, exile it
         // instead". `Some(zone)` IS the rider; `None` means this printing dropped it, so
-        // it must NOT suppress — `glimpse the cosmos` and `maestros ascendancy` both carry
-        // `None` here and correctly keep warning.
+        // it must NOT suppress — `glimpse the cosmos` (whose variant sentence is still
+        // unmodeled) carries `None` here and correctly keeps warning.
         StaticMode::GraveyardCastPermission {
             graveyard_destination_replacement: Some(_),
             ..
@@ -2464,6 +2648,248 @@ fn dynamic_markers_are_all_recorded_unrecognized(
     })
 }
 
+/// CR 702.21a + CR 608.2h + CR 113.7a: how many dynamic ward payments a parsed
+/// `WardCost` actually REPRESENTS AT RUNTIME — one for the bare
+/// `PayLifeEqualToPower`, and zero for every other shape.
+///
+/// **`Compound` deliberately counts zero, and is not recursed into.**
+/// `ward_cost_to_ability_cost` (`game/triggers.rs`) converts only `costs.first()`
+/// of a compound cost, with the remaining components explicitly deferred — so for
+/// `Compound([Mana({2}), PayLifeEqualToPower])` the engine asks for {2} and drops
+/// the life payment. Counting the nested payment here would discharge the very
+/// `" equal to "` marker that flags the dropped quantity. The compound spelling
+/// therefore stays DIAGNOSED (conservative-red) until the runtime charges every
+/// component; when it does, this arm flips back to a recursive count. No printed
+/// card is affected today: no printed compound ward spelling carries a dynamic
+/// component (the printed compounds are fixed-cost, e.g. "Ward—{2}, Pay 2 life").
+///
+/// EXHAUSTIVE on purpose: a future `WardCost` variant must decide whether it
+/// represents a dynamic amount rather than defaulting into invisibility behind a `_`
+/// arm. `PayLifeEqualToPower` is the only variant that represents one today; every
+/// other parsed ward cost is a fixed amount, a mana cost, or a non-quantity payment.
+fn ward_power_life_payments(cost: &WardCost) -> usize {
+    match cost {
+        WardCost::PayLifeEqualToPower => 1,
+        WardCost::Mana(_)
+        | WardCost::PayLife(_)
+        | WardCost::DiscardCard
+        | WardCost::Sacrifice { .. }
+        | WardCost::Waterbend(_)
+        | WardCost::GetPlayerCounters { .. }
+        | WardCost::Compound(_) => 0,
+    }
+}
+
+/// CR 702.21a + CR 608.2h + CR 113.7a: true when every dynamic-quantity marker the
+/// line raises is an `" equal to "` occurrence discharged by a represented Ward
+/// power-life payment.
+///
+/// **Occurrence-counted, not set-like** — the same consumption contract
+/// [`dynamic_markers_are_all_recorded_unrecognized`] documents, applied to the Ward
+/// carrier instead of to recorded gap text. A predicate of the shape "some Ward in
+/// this unit pays life equal to power" answers a question about the carrier's TYPE,
+/// not about its OCCURRENCES: a unit whose text raises `" equal to "` twice, from two
+/// independent clauses, of which only ONE is the Ward payment, satisfied that
+/// predicate and had BOTH occurrences suppressed — so the second clause's dropped
+/// dynamic quantity was reported by nothing at all. That is the silent false green
+/// this detector exists to prevent.
+///
+/// So each represented payment CONSUMES one raised `" equal to "` occurrence and no
+/// more. The gate is deliberately narrow twice over: the raised marker set must be
+/// exactly `[" equal to "]` (any other marker — `"for each "`, `"the number of "`, …
+/// — falls through to the remaining probes), and the represented payment count must
+/// cover the raised occurrence count. Everything else is left to the other probes, so
+/// an unrepresented quantity still warns.
+fn ward_power_life_payments_cover_all_equal_to_markers(
+    cleaned: &str,
+    markers: &[&'static str],
+    evidence: &UnitEvidence,
+) -> bool {
+    // Exactly the one marker this leg can discharge; a second marker kind belongs to
+    // a clause no Ward payload represents.
+    if markers.len() != 1 || markers[0] != " equal to " {
+        return false;
+    }
+    // allow-noncombinator: swallow detector marker scan on classified text
+    let raised = cleaned.matches(" equal to ").count();
+    let represented: usize = evidence
+        .keywords()
+        .into_iter()
+        // CR 702.21a: a granted Ward ("Other creatures you control have ward—pay
+        // life equal to ~'s power") carries the same payment under
+        // `ContinuousModification::AddKeyword`, reached through the typed parent
+        // carrier — see `UnitEvidence::granted_keywords`.
+        .chain(evidence.granted_keywords())
+        .map(|keyword| match keyword {
+            Keyword::Ward(cost) => ward_power_life_payments(&cost),
+            // Every non-Ward keyword represents no ward payment.
+            _ => 0,
+        })
+        .sum();
+    raised > 0 && represented >= raised
+}
+
+/// CR 205.2 + CR 608.2c/d: the number of card-type iterations `def`'s tree
+/// represents, one per `DistinctCardTypes` `ChooseFromZone` constraint.
+///
+/// "For each card type, you may put a card of that type from among the revealed
+/// cards into your hand." (Atraxa, Grand Unifier) realizes its per-card-type pick
+/// as `ChooseFromZone { up_to: true, constraint: DistinctCardTypes { .. } }`: the
+/// constraint IS the iteration, so no `QuantityExpr` carrier exists and the
+/// generic quantity probes cannot see it. The walk is the authoritative
+/// [`visit_ability_def`], so every nested carrier (`sub_ability`, `else_ability`,
+/// `mode_abilities`) counts.
+fn def_tree_distinct_card_type_constraint_count(def: &AbilityDefinition) -> usize {
+    let mut count = 0usize;
+    let _ = visit_ability_def(def, &mut |effect| {
+        if matches!(
+            effect,
+            Effect::ChooseFromZone {
+                constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes { .. }),
+                ..
+            }
+        ) {
+            count += 1;
+        }
+        ControlFlow::Continue(())
+    });
+    count
+}
+
+/// CR 113.2c + CR 603.1b: the number of card-type iterations the unit's parse
+/// represents. Spell-ability roots are separate printed items and are summed.
+/// Every root in a unit's `scoped` comes from an item starting on the unit's
+/// one source line (`audit_units` / `scope_to_unit`), and that paragraph is one
+/// ability. The parser splits one printed triggered ability with several trigger
+/// conditions into one `TriggerDefinition` per condition, each carrying the
+/// ability's whole instruction list — equal clones or per-condition re-parses —
+/// so the ability counts as the MAX over the unit's trigger roots, never their
+/// sum. CR 113.2c + CR 614.1c / CR 614.1e: likewise a compound replacement head
+/// ("As ~ enters or is turned face up") counts as the max over the unit's
+/// replacement roots. Neither the item id (each split definition is its own
+/// item) nor structural equality (split halves may differ) can identify the
+/// splits; the unit can. Per category the max never exceeds the sum, so it
+/// under-counts (a visible `DynamicQty` gap) when one unit carries two
+/// separately printed triggered abilities (or replacement effects) that each
+/// hold a constraint (CR 113.2c's keyword-line exception). It stays silent,
+/// within the one-line granularity `AuditUnit` accepts, when split roots of one
+/// ability diverge and only some of them carry every printed constraint.
+fn distinct_card_type_constraint_count(scoped: &ParsedAbilities) -> usize {
+    root_aware_count(scoped, def_tree_distinct_card_type_constraint_count)
+}
+
+/// CR 113.2c: sum `per_def` over the unit's spell-ability roots, and
+/// take its max over the trigger roots and over the replacement roots — see
+/// [`distinct_card_type_constraint_count`] for why split trigger and replacement
+/// roots of one printed ability count once.
+fn root_aware_count(scoped: &ParsedAbilities, per_def: fn(&AbilityDefinition) -> usize) -> usize {
+    scoped.abilities.iter().map(per_def).sum::<usize>()
+        + scoped
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_deref())
+            .map(per_def)
+            .max()
+            .unwrap_or(0)
+        + scoped
+            .replacements
+            .iter()
+            .filter_map(|r| r.execute.as_deref())
+            .map(per_def)
+            .max()
+            .unwrap_or(0)
+}
+
+/// CR 102.2 + CR 608.2c: the number of per-opponent choices `def`'s tree
+/// represents, one per `ChooseFromZone { zone_owner: Each(Opponents) }`.
+///
+/// "For each opponent, choose an artifact or land that player controls"
+/// (Ultimate Magic: Meteor) realizes its per-opponent iteration as the
+/// choice's population, not as a `QuantityExpr`, so the generic quantity probes
+/// cannot see it.
+fn def_tree_per_opponent_choice_count(def: &AbilityDefinition) -> usize {
+    let mut count = 0usize;
+    let _ = visit_ability_def(def, &mut |effect| {
+        if matches!(
+            effect,
+            Effect::ChooseFromZone {
+                zone_owner: ZoneOwner::Each(PerPlayerScope::Opponents),
+                ..
+            }
+        ) {
+            count += 1;
+        }
+        ControlFlow::Continue(())
+    });
+    count
+}
+
+/// CR 102.2 + CR 608.2c: true when every `"for each "` occurrence the line
+/// raises opens a "for each opponent, choose …" clause and each is represented
+/// by its own per-opponent `ChooseFromZone`. Occurrence-counted like
+/// [`for_each_card_type_constraints_cover_all_for_each_markers`]: a second,
+/// unrepresented `"for each "` in the unit still warns, and a raised occurrence
+/// with any other continuation belongs to a clause this carrier does not
+/// represent.
+fn per_opponent_choices_cover_all_for_each_markers(
+    cleaned: &str,
+    markers: &[&'static str],
+    scoped: &ParsedAbilities,
+) -> bool {
+    if markers.len() != 1 || markers[0] != "for each " {
+        return false;
+    }
+    let mut raised = 0usize;
+    // allow-noncombinator: swallow detector marker scan on classified text
+    for (idx, _) in cleaned.match_indices("for each ") {
+        let rest = &cleaned[idx + "for each ".len()..];
+        let opens_choice = alt((
+            tag::<_, _, nom::error::Error<&str>>("opponent, choose "),
+            tag("opponent choose "),
+        ))
+        .parse(rest)
+        .is_ok();
+        if !opens_choice {
+            return false;
+        }
+        raised += 1;
+    }
+    raised > 0 && root_aware_count(scoped, def_tree_per_opponent_choice_count) >= raised
+}
+
+/// CR 205.2 + CR 608.2c/d: true when every `"for each "` occurrence the line
+/// raises is a card-type iteration represented by a `DistinctCardTypes`
+/// `ChooseFromZone` constraint.
+///
+/// **Occurrence-counted, not set-like** — the same consumption contract
+/// [`ward_power_life_payments_cover_all_equal_to_markers`] documents, applied to
+/// the card-type constraint instead of the Ward carrier. One represented
+/// constraint consumes exactly one raised `"for each "` occurrence; a unit whose
+/// text raises a second, unrepresented `"for each "` still warns (regression test:
+/// `dynamic_qty_still_warns_for_a_sibling_for_each_beside_a_card_type_constraint`).
+/// CR 113.2c + CR 603.1b: the represented count is root-aware
+/// ([`distinct_card_type_constraint_count`]), so one printed ability split into
+/// several trigger roots counts once rather than once per root.
+///
+/// The raised marker set must be exactly `["for each "]` — any other marker
+/// belongs to a clause no card-type constraint represents, and is left to the
+/// remaining probes.
+fn for_each_card_type_constraints_cover_all_for_each_markers(
+    cleaned: &str,
+    markers: &[&'static str],
+    scoped: &ParsedAbilities,
+) -> bool {
+    // Exactly the one marker this leg can discharge; a second marker kind belongs
+    // to a clause no card-type constraint represents.
+    if markers.len() != 1 || markers[0] != "for each " {
+        return false;
+    }
+    // allow-noncombinator: swallow detector marker scan on classified text
+    let raised = cleaned.matches("for each ").count();
+    let represented = distinct_card_type_constraint_count(scoped);
+    raised > 0 && represented >= raised
+}
+
 /// Oracle text contains dynamic-quantity grammar ("equal to", "for each",
 /// "twice", "where x is", "the number of", "half [poss]") but the parsed
 /// AST contains no dynamic carrier (Ref, Multiply, DivideRounded, Offset,
@@ -2474,6 +2900,7 @@ fn dynamic_markers_are_all_recorded_unrecognized(
 fn detect_dynamic_qty(
     cleaned: &str,
     original: &str,
+    scoped: &ParsedAbilities,
     evidence: &UnitEvidence,
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
@@ -2626,12 +3053,43 @@ fn detect_dynamic_qty(
     if evidence.any::<PlayerFilter>(|p| matches!(p, PlayerFilter::VotedFor { .. })) {
         return;
     }
-    //   CR 702.139 / 702.41  Affinity-style built-in cost mods carry their scaling in the
-    //              keyword payload. `Keyword` is EXTERNALLY tagged, so it is key-anchored
-    //              (array elements inherit their field's key).
-    if evidence.any_at::<Keyword>(&["extracted_keywords", "keywords"], |k| {
-        matches!(k, Keyword::Affinity { .. })
-    }) {
+    // CR 702.41  There is deliberately NO whole-unit Affinity exemption
+    //              here. Affinity's scaling text is REMINDER text ("This spell costs
+    //              {1} less to cast for each artifact you control"), which
+    //              `strip_parens` removes before any detector runs — so an Affinity
+    //              keyword in this unit can never be the source of a raised
+    //              "for each " occurrence, and a presence check could only ever
+    //              discharge an UNRELATED clause's dropped quantity (the same
+    //              false-green the Ward leg's occurrence-counted gate closes). A
+    //              future card that raises a marker the Affinity payload genuinely
+    //              represents needs an occurrence-counted association with the
+    //              keyword's own `TypedFilter`, not a presence check. Regression
+    //              test: `dynamic_qty_still_warns_for_a_sibling_marker_beside_affinity`.
+    //   CR 702.21a + CR 608.2h + CR 113.7a  A Ward whose life payment is the
+    //              warded permanent's power ("Ward—Pay life equal to ~'s power") is
+    //              a dynamic quantity intrinsic to the `WardCost` variant: the power
+    //              is read as the ability resolves (608.2h / 113.7a), and for the
+    //              BARE `PayLifeEqualToPower` variant `ward_cost_to_ability_cost`
+    //              resolves it to `AbilityCost::PayLife { amount: Ref(Power { scope:
+    //              Source }) }` at payment time. The compound spelling
+    //              ("Ward—{2}, Pay life equal to ~'s power") is NOT counted: the
+    //              runtime charges only `costs.first()` of a compound, so for that
+    //              shape the life payment is dropped and the quantity is not
+    //              represented — the marker must stay diagnosed (conservative-red)
+    //              until every component is charged. See `ward_power_life_payments`
+    //              for the full rationale and the reversal condition. (The
+    //              fixed-cost printed compounds — Gisa, the Hellraiser / Captain
+    //              Howler, Sea Scourge / Ovika, Enigma Goliath — raise no dynamic
+    //              marker at all; their dropped non-first components remain a
+    //              pre-existing runtime gap, reported on this PR.) No `QuantityExpr`
+    //              field exists for the probes above to see, so the variant itself is
+    //              the evidence — but each payment discharges exactly ONE raised
+    //              " equal to " occurrence
+    //              (`ward_power_life_payments_cover_all_equal_to_markers`), so a
+    //              second, unrepresented " equal to "/"for each "/… clause in the
+    //              same unit still warns. Cards: Raubahn, Bull of Ala Mhigo;
+    //              Phyrexian Fleshgorger.
+    if ward_power_life_payments_cover_all_equal_to_markers(cleaned, &markers, evidence) {
         return;
     }
     // Slot-shaped carriers: the fact IS "the parser filled this slot", and the slot's
@@ -2762,9 +3220,34 @@ fn detect_dynamic_qty(
             return;
         }
     }
+    // CR 205.2 + CR 608.2c/d: "For each card type, you may put a card of that
+    // type from among the revealed cards into your hand." (Atraxa, Grand
+    // Unifier) realizes the per-card-type iteration as a `DistinctCardTypes`
+    // `ChooseFromZone` constraint — the constraint itself is the represented
+    // quantity, not a `QuantityExpr`. One constraint discharges one raised
+    // "for each " occurrence (`for_each_card_type_constraints_cover_all_for_each_markers`),
+    // so a sibling unrepresented "for each " in the same unit still warns.
+    if for_each_card_type_constraints_cover_all_for_each_markers(cleaned, &markers, scoped) {
+        return;
+    }
+    // CR 102.2 + CR 608.2c: "For each opponent, choose …" (Ultimate Magic:
+    // Meteor) realizes its iteration as a per-opponent `ChooseFromZone`
+    // population; one choice discharges one raised "for each " occurrence.
+    if per_opponent_choices_cover_all_for_each_markers(cleaned, &markers, scoped) {
+        return;
+    }
+    // CR 608.2c: each printed "For each <population>," is represented by its own
+    // distinct co-scoped player_scope + ParentTarget iteration (occurrence-counted
+    // per population); an unmatched occurrence is a swallowed clause.
+    if let Some(populations) = cleaned_for_each_is_only_player_iteration(cleaned, &markers) {
+        if player_iterations_cover_all_for_each_markers(&populations, scoped) {
+            return;
+        }
+    }
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::DynamicQty.detector_label(),
         truncate(original, 140),
+        swallowed_clause_gap(SwallowedAxis::Quantity, cleaned),
     ));
 }
 
@@ -2829,6 +3312,7 @@ fn detect_modal_dynamic_max_dropped(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::ModalDynamicMaxDropped.detector_label(),
         truncate(original, 140),
+        None,
     ));
 }
 
@@ -2948,6 +3432,170 @@ fn decline_iteration_prefix(input: &str) -> bool {
     ))
     .parse(input)
     .is_ok()
+}
+
+/// CR 608.2c: the population a "For each <population>," per-player iteration
+/// head names.
+fn player_iteration_head(input: &str) -> Option<PlayerFilter> {
+    alt((
+        value(
+            PlayerFilter::Opponent,
+            tag::<_, _, nom::error::Error<&str>>("for each opponent, "),
+        ),
+        value(PlayerFilter::All, tag("for each player, ")),
+    ))
+    .parse(input)
+    .ok()
+    .map(|(_, population)| population)
+}
+
+/// CR 608.2c: `Some(populations)` when the only dynamic marker this line raises
+/// is "for each " (per the shared `active_dynamic_markers` authority, so
+/// " twice " and every other marker are excluded) and every "for each "
+/// occurrence is a "For each <population>," per-player iteration head. The
+/// returned `Vec` holds one entry per printed occurrence (duplicates kept):
+/// `player_iterations_cover_all_for_each_markers` counts it as a multiset.
+fn cleaned_for_each_is_only_player_iteration(
+    cleaned: &str,
+    markers: &[&str],
+) -> Option<Vec<PlayerFilter>> {
+    if markers != ["for each "] {
+        return None;
+    }
+    cleaned
+        .match_indices("for each ") // allow-noncombinator: swallow detector marker scan on classified text
+        .map(|(idx, _)| player_iteration_head(&cleaned[idx..]))
+        .collect()
+}
+
+/// CR 608.2c: the co-scoped `ParentTarget` consumer of a per-iteration
+/// referent introducer scoped to `pop`, if `def` heads one printed per-player
+/// iteration. "For each <population>," realised as a per-player iteration: a
+/// def scoped to that population introduces a per-iteration object referent
+/// and its sub, co-scoped to the same population, consumes it through
+/// `ParentTarget`. A structural fact the parser produces only by binding the
+/// iteration, never implied by the "for each" text itself.
+fn co_scoped_parent_target_consumer<'a>(
+    def: &'a AbilityDefinition,
+    pop: &PlayerFilter,
+) -> Option<&'a AbilityDefinition> {
+    if def.player_scope.as_ref() != Some(pop)
+        || !crate::game::effects::effect_introduces_per_iteration_referent(&def.effect)
+    {
+        return None;
+    }
+    def.sub_ability.as_deref().filter(|sub| {
+        sub.player_scope.as_ref() == Some(pop)
+            && matches!(sub.effect.target_filter(), Some(TargetFilter::ParentTarget))
+    })
+}
+
+/// Iterations of `pop` below `def`: its `CreateDelayedTrigger` inner effect,
+/// the given `sub` (the def's own `sub_ability`, or `None` when that sub was
+/// spent as a consumer), its `else_ability` and its `mode_abilities`.
+fn iteration_count_below(
+    def: &AbilityDefinition,
+    pop: &PlayerFilter,
+    sub: Option<&AbilityDefinition>,
+) -> usize {
+    let delayed = match &*def.effect {
+        Effect::CreateDelayedTrigger { effect, .. } => {
+            def_tree_co_scoped_parent_target_iteration_count(effect, pop)
+        }
+        _ => 0,
+    };
+    delayed
+        + sub.map_or(0, |s| {
+            def_tree_co_scoped_parent_target_iteration_count(s, pop)
+        })
+        + def.else_ability.as_deref().map_or(0, |branch| {
+            def_tree_co_scoped_parent_target_iteration_count(branch, pop)
+        })
+        + def
+            .mode_abilities
+            .iter()
+            .map(|mode| def_tree_co_scoped_parent_target_iteration_count(mode, pop))
+            .sum::<usize>()
+}
+
+/// CR 608.2c: the number of distinct per-player iterations of `pop` in `def`'s
+/// tree. Each parsed node takes part in at most one (introducer, consumer)
+/// pair, so a consumer that is itself an introducer is never counted twice,
+/// while chained iterations along `sub_ability` each count.
+fn def_tree_co_scoped_parent_target_iteration_count(
+    def: &AbilityDefinition,
+    pop: &PlayerFilter,
+) -> usize {
+    match co_scoped_parent_target_consumer(def, pop) {
+        // CR 608.2c: one printed iteration = this introducer + its co-scoped consumer.
+        // The consumer is spent on this pair and never heads a second one, so the
+        // walk resumes at the consumer's own children (one node, at most one pair).
+        Some(consumer) => {
+            1 + iteration_count_below(def, pop, None)
+                + iteration_count_below(consumer, pop, consumer.sub_ability.as_deref())
+        }
+        None => iteration_count_below(def, pop, def.sub_ability.as_deref()),
+    }
+}
+
+/// CR 608.2c: the number of distinct printed per-player iterations of `pop`
+/// that the unit's parse represents. Spell-ability roots are separate printed
+/// items and are summed. CR 113.2c + CR 603.1b: every root in a unit's
+/// `scoped` comes from an item starting on the unit's one source line
+/// (`audit_units` / `scope_to_unit`), and that paragraph is one ability. The
+/// parser splits one printed triggered ability with several trigger conditions
+/// into one `TriggerDefinition` per condition, each carrying the ability's
+/// whole instruction list — equal clones or per-condition re-parses — so the
+/// ability counts as the MAX over the unit's trigger roots, never their sum.
+/// CR 113.2c + CR 614.1c / CR 614.1e: likewise a compound replacement head
+/// ("As ~ enters or is turned face up") counts as the max over the unit's
+/// replacement roots. Neither the item id (each split definition is its own
+/// item) nor structural equality (split halves may differ) can identify the
+/// splits; the unit can. Per category the max never exceeds the sum, so it
+/// under-counts (a visible `DynamicQty` gap) when one unit carries two
+/// separately printed triggered abilities (or replacement effects) that each
+/// hold an iteration (CR 113.2c's keyword-line exception). It stays silent,
+/// within the one-line granularity `AuditUnit` accepts, when split roots of one
+/// ability diverge and only some of them carry every printed iteration.
+fn co_scoped_parent_target_iteration_count(parsed: &ParsedAbilities, pop: &PlayerFilter) -> usize {
+    let count =
+        |def: &AbilityDefinition| def_tree_co_scoped_parent_target_iteration_count(def, pop);
+    parsed.abilities.iter().map(count).sum::<usize>()
+        + parsed
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_deref())
+            .map(count)
+            .max()
+            .unwrap_or(0)
+        + parsed
+            .replacements
+            .iter()
+            .filter_map(|r| r.execute.as_deref())
+            .map(count)
+            .max()
+            .unwrap_or(0)
+}
+
+/// CR 608.2c: every printed "For each <population>," occurrence is represented
+/// by its own distinct parsed per-player iteration of that population.
+///
+/// Occurrence-counted, not set-like (as `ward_power_life_payments_cover_all_equal_to_markers`):
+/// asking "does some parsed iteration of this population exist?" once per
+/// occurrence would let one parsed iteration discharge every same-population
+/// occurrence, hiding a second printed clause the parser dropped. Each printed
+/// occurrence consumes one distinct parsed iteration of its population — the
+/// same consumption contract as `dynamic_markers_are_all_recorded_unrecognized`
+/// — so a second printed clause with no iteration of its own stays reported.
+fn player_iterations_cover_all_for_each_markers(
+    populations: &[PlayerFilter],
+    scoped: &ParsedAbilities,
+) -> bool {
+    !populations.is_empty()
+        && populations.iter().all(|pop| {
+            populations.iter().filter(|p| *p == pop).count()
+                <= co_scoped_parent_target_iteration_count(scoped, pop)
+        })
 }
 
 /// The counter-multiplier phrases whose ×2 is carried intrinsically by the
@@ -3948,6 +4596,11 @@ fn detect_condition_if(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::ConditionIf.detector_label(),
         truncate(original, 140),
+        // Report AFTER this detector's exemptions are applied: `stripped` is `cleaned` with the
+        // CR-implicit "if" sentences, the represented replacement-antecedent sentences and the
+        // represented tiered counter pairs removed. Reporting from `cleaned` here would name a
+        // guard this detector has already decided is represented.
+        swallowed_clause_gap(SwallowedAxis::Guard(GuardWord::If), &stripped),
     ));
 }
 
@@ -4196,6 +4849,7 @@ fn detect_condition_unless(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::ConditionUnless.detector_label(),
         truncate(original, 140),
+        swallowed_clause_gap(SwallowedAxis::Guard(GuardWord::Unless), cleaned),
     ));
 }
 
@@ -4265,6 +4919,7 @@ fn detect_condition_as_long_as(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::ConditionAsLongAs.detector_label(),
         truncate(original, 140),
+        swallowed_clause_gap(SwallowedAxis::Guard(GuardWord::AsLongAs), cleaned),
     ));
 }
 
@@ -4774,6 +5429,7 @@ fn detect_duration_this_turn(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::DurationThisTurn.detector_label(),
         truncate(original, 140),
+        None,
     ));
 }
 
@@ -4831,6 +5487,7 @@ fn detect_duration_next_turn(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::DurationNextTurn.detector_label(),
         truncate(original, 140),
+        None,
     ));
 }
 
@@ -4877,6 +5534,7 @@ fn detect_optional_may_have(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::OptionalMayHave.detector_label(),
         truncate(original, 140),
+        None,
     ));
 }
 
@@ -4905,6 +5563,7 @@ fn detect_apnap(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::Apnap.detector_label(),
         truncate(original, 140),
+        None,
     ));
 }
 
@@ -5205,6 +5864,7 @@ fn detect_damage_subject_conjunction(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::DamageSubjectConjunction.detector_label(),
         truncate(original, 140),
+        None,
     ));
 }
 
@@ -5368,18 +6028,27 @@ mod tests {
         effect_has_internal_optionality, trigger_tree_has_optional, twice_is_activation_limit,
     };
     use crate::parser::oracle::parse_oracle_text;
+    use crate::parser::oracle_effect::gap_diagnosis::{
+        swallowed_clause_gap, GuardWord, SwallowedAxis,
+    };
+    use crate::parser::oracle_ir::diagnostic::ClauseGap; // `pub enum` in oracle_ir::diagnostic
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ContinuousModification, DamageModification, Effect,
-        OutsideGameSourcePool, PlayerFilter, QuantityExpr, StaticCondition, StaticDefinition,
-        TargetFilter, TriggerCondition,
+        AbilityDefinition, AbilityKind, CardSelectionMode, ChooseFromZoneConstraint, Chooser,
+        Comparator, ContinuousModification, CopyRetargetPermission, DamageModification, Effect,
+        FilterProp, ManaProduction, OutsideGameSourcePool, ParsedCondition, PlayerFilter,
+        QuantityExpr, QuantityRef, SpellStackToGraveyardReplacement, StaticCondition,
+        StaticDefinition, TargetFilter, TriggerCondition, TypedFilter, ZoneChoiceCandidateSource,
+        ZoneOwner,
     };
+    use crate::types::card_type::CoreType;
     use crate::types::identifiers::TrackedSetId;
-    use crate::types::keywords::Keyword;
-    use crate::types::mana::ManaCost;
+    use crate::types::keywords::{Keyword, WardCost};
+    use crate::types::mana::{ManaCost, ManaSpellGrant};
     use crate::types::statics::StaticMode;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+    use std::collections::BTreeSet; // the non-phrase set-equality guard
 
     fn parse(text: &str, types: &[&str]) -> crate::parser::oracle::ParsedAbilities {
         parse_named(text, "Test Card", types)
@@ -5399,6 +6068,436 @@ mod tests {
         )
     }
 
+    // ── Swallow phrases: each detector carries the phrase its own axis rejected ──
+    //
+    // Venue B: `parse_named` with VERBATIM Oracle text and the card's real name, so
+    // `normalize_card_name_refs` behaves exactly as it does in production. Every test
+    // opens with a REACH GUARD asserting its detector actually fired — without one, an
+    // upstream `Effect::Unimplemented` (which makes `check_swallowed_clauses` skip the
+    // whole unit at its `any_ability_has_unimplemented` guard) would satisfy a
+    // `.all(...)` assertion vacuously.
+
+    /// Every `SwallowedClause` on `parsed` whose detector is `detector`.
+    fn swallows_for<'a>(
+        parsed: &'a crate::parser::oracle::ParsedAbilities,
+        detector: &str,
+    ) -> Vec<&'a OracleDiagnostic> {
+        parsed
+            .parse_warnings
+            .iter()
+            .filter(|w| {
+                matches!(w, OracleDiagnostic::SwallowedClause { detector: d, .. } if d == detector)
+            })
+            .collect()
+    }
+
+    /// The one warning `detector` raised, failing with the whole warning list if the
+    /// count is anything but one.
+    fn only_swallow<'a>(
+        parsed: &'a crate::parser::oracle::ParsedAbilities,
+        detector: &str,
+    ) -> &'a OracleDiagnostic {
+        let found = swallows_for(parsed, detector);
+        assert_eq!(
+            found.len(),
+            1,
+            "expected exactly one {detector} warning; got {:?}",
+            parsed.parse_warnings
+        );
+        found[0]
+    }
+
+    /// `Condition_If` reports the first `if`-guard its ladder rejects, in both
+    /// the leading-trigger position and the trailing position.
+    #[test]
+    fn condition_if_swallow_carries_the_rejected_guard() {
+        // Aggressive Detective (UNK) — a guard leading a later sentence of a non-trigger
+        // ability. The same guard between a trigger condition and its effect is a CR 603.4
+        // intervening-if, which fails the trigger closed with a clause gap before this
+        // detector runs.
+        let parsed = parse_named(
+            "Draw a card. If all your commanders have been revealed, Aggressive Detective \
+             deals 2 damage to each opponent.",
+            "Aggressive Detective",
+            &["Sorcery"],
+        );
+        assert_eq!(
+            only_swallow(&parsed, "Condition_If").gap(),
+            Some(&ClauseGap::Condition {
+                guard: "all your commanders have been revealed".to_string()
+            }),
+            "full warning: {:?}",
+            only_swallow(&parsed, "Condition_If")
+        );
+
+        // Barrin's Unmaking (INV) — the sibling case: a TRAILING guard, which a
+        // leading-only extractor built on `split_leading_conditional` would miss entirely.
+        let parsed = parse_named(
+            "Return target permanent to its owner's hand if that permanent shares a color \
+             with the most common color among all permanents or a color tied for most common.",
+            "Barrin's Unmaking",
+            &["Instant"],
+        );
+        assert_eq!(
+            only_swallow(&parsed, "Condition_If").gap(),
+            Some(&ClauseGap::Condition {
+                guard: "that permanent shares a color with the most common color among all \
+                        permanents or a color tied for most common"
+                    .to_string()
+            }),
+            "full warning: {:?}",
+            only_swallow(&parsed, "Condition_If")
+        );
+    }
+
+    /// CONSTRUCTED, and deliberately so: no corpus card exercises this path, because the
+    /// exemption works. Both sentences below ARE corpus-attested — the outer text is
+    /// Land Aid '04 verbatim (UNH; it fires `Condition_If` at base), and "If you search
+    /// your library this way, shuffle." is printed on many corpus cards, NONE of which
+    /// produces a `Condition_If` warning. Only the COMPOSITION is synthetic.
+    ///
+    /// The two corpus facts above are stated as predicates rather than counts, because a
+    /// count here would rot silently against every corpus refresh while this comment sat
+    /// unchanged. Regenerate both with `scripts/swallow_phrase_freq.py` over a current
+    /// export, or directly: cards whose lowercased `oracle_text` contains "if you search
+    /// your library this way" (or the "searched" variant), intersected with cards
+    /// producing a `Condition_If` `SwallowedClause` — the intersection is what must stay
+    /// empty.
+    const EXEMPTED_FIRST_IF: &str = "Search your library for a basic land card, put that card \
+onto the battlefield tapped, then shuffle. If you search your library this way, shuffle. \
+If you sang a song the whole time you were searching and shuffling, you may untap that land.";
+
+    /// A text whose FIRST `if` is exempted reports the guard that survives.
+    ///
+    /// What this discriminates: `strip_cr_implicit_if_phrases` drops the inserted
+    /// sentence, so the surviving guard is the sang-a-song one. Passing `cleaned` instead
+    /// of `stripped` at the `Condition_If` push site yields
+    /// `Some(Condition { guard: "you search your library this way" })` — a DIFFERENT,
+    /// non-None value, measured. The test is therefore red under the single most likely
+    /// wiring mistake, and it cannot be satisfied vacuously by an upstream short-circuit,
+    /// which would give `None` rather than the other guard.
+    #[test]
+    fn condition_if_swallow_reports_the_guard_that_survives_the_exemptions() {
+        let parsed = parse_named(EXEMPTED_FIRST_IF, "Land Aid '04", &["Sorcery"]);
+        let warning = only_swallow(&parsed, "Condition_If");
+
+        assert_eq!(
+            warning.gap(),
+            Some(&ClauseGap::Condition {
+                guard: "you sang a song the whole time you were searching and shuffling"
+                    .to_string()
+            }),
+            "full warning: {warning:?}"
+        );
+    }
+
+    /// The exemption's effect on the reported guard, without the parse chain.
+    ///
+    /// Venue B′: it lives here rather than beside the other extractor tests because
+    /// `strip_cr_implicit_if_phrases` is private to this module's parent, and
+    /// `gap_diagnosis` is a sibling that cannot see it. Independent of the detector-level
+    /// test above, which goes
+    /// through the whole `parse_oracle_text` chain and could in principle stop firing
+    /// `Condition_If` on this constructed text.
+    #[test]
+    fn strip_then_extract_reports_the_surviving_guard() {
+        // `swallowed_clause_gap`'s documented precondition is lowercased input — in
+        // production the detector passes `cleaned`/`stripped`, both `to_ascii_lowercase`
+        // outputs. This reproduces that rather than relying on the extractor to
+        // re-lowercase; it must not, and "no defensive re-lowercasing" is the recorded
+        // idiom.
+        let lower = EXEMPTED_FIRST_IF.to_ascii_lowercase();
+
+        // `super::`-qualified, NOT imported: this module has no `use super::*` — it opens
+        // a selective `use super::{ … }` list — and the qualified call is the idiom it
+        // already uses to reach the parent-private `detect_dynamic_qty`. No production
+        // visibility change and no import line.
+        let stripped = super::strip_cr_implicit_if_phrases(&lower);
+        let after = swallowed_clause_gap(SwallowedAxis::Guard(GuardWord::If), &stripped);
+        let before = swallowed_clause_gap(SwallowedAxis::Guard(GuardWord::If), &lower);
+
+        // REACH GUARD on the PRE-strip side only. The row's discriminator is that the two
+        // sides DIFFER, and `after` is pinned to a literal below — so a `None` there is
+        // already red. `before` is pinned by nothing, so without this a stripper that
+        // deleted the whole text would satisfy "they differ" for the wrong reason.
+        assert!(
+            before.is_some(),
+            "pre-strip extraction returned None; got {before:?}"
+        );
+        assert_ne!(before, after, "the exemption changed nothing: {before:?}");
+
+        assert_eq!(
+            after,
+            Some(ClauseGap::Condition {
+                guard: "you sang a song the whole time you were searching and shuffling"
+                    .to_string()
+            }),
+            "post-strip guard: {after:?}"
+        );
+    }
+
+    /// `Condition_Unless` reports the rejected `unless` guard, and a
+    /// co-resident warning on a DIFFERENT axis keeps its own verdict.
+    #[test]
+    fn condition_unless_swallow_carries_the_rejected_guard() {
+        // Essence Vortex (ICE) fires two detectors on one audit unit, i.e. two
+        // authorities asked about one text. This is the multi-authority hostile fixture:
+        // a shared phrase buffer, or extraction hoisted above the per-detector call,
+        // gives both records the same verdict and turns the second half red.
+        let parsed = parse_named(
+            "Destroy target creature unless its controller pays life equal to its \
+             toughness. A creature destroyed this way can't be regenerated.",
+            "Essence Vortex",
+            &["Instant"],
+        );
+
+        assert_eq!(
+            only_swallow(&parsed, "Condition_Unless").gap(),
+            Some(&ClauseGap::Condition {
+                guard: "its controller pays life equal to its toughness".to_string()
+            }),
+            "full warning: {:?}",
+            only_swallow(&parsed, "Condition_Unless")
+        );
+
+        // The same parse's `DynamicQty` record is SEPARATE and carries its own
+        // axis's answer. Measured `None` here: the quantity authorities accept this
+        // card's operand, so the axis names no phrase. What matters is that it is never
+        // the `Condition` verdict its co-resident holds.
+        let dynamic = only_swallow(&parsed, "DynamicQty");
+        assert_eq!(
+            dynamic.gap(),
+            None,
+            "the DynamicQty record must carry its own axis's answer, not the \
+             Condition_Unless verdict its co-resident holds: {dynamic:?}"
+        );
+    }
+
+    /// `Condition_AsLongAs` reports the rejected "as long as" guard.
+    #[test]
+    fn condition_as_long_as_swallow_carries_the_rejected_guard() {
+        // Torrent of Lava (MIR). The guard is bounded at the clause break, so it must not
+        // run on into the quoted granted ability that follows it.
+        let parsed = parse_named(
+            "Torrent of Lava deals X damage to each creature without flying.\nAs long as \
+             Torrent of Lava is on the stack, each creature has \"{T}: Prevent the next 1 \
+             damage that would be dealt to this creature by Torrent of Lava this turn.\"",
+            "Torrent of Lava",
+            &["Sorcery"],
+        );
+        let warning = only_swallow(&parsed, "Condition_AsLongAs");
+
+        // Removing the `trailing_guard` arm this phase adds turns this `None`: measured,
+        // the scanner has no "as long as" arm at base at all.
+        assert_eq!(
+            warning.gap(),
+            Some(&ClauseGap::Condition {
+                guard: "torrent of lava is on the stack".to_string()
+            }),
+            "full warning: {warning:?}"
+        );
+    }
+
+    /// `DynamicQty` reports the rejected operand.
+    #[test]
+    fn dynamic_qty_swallow_carries_the_rejected_operand() {
+        // Chong and Lily, Nomads (second mode, standalone). The operand
+        // is spanned by the marker's own `OperandSpan` and bounded by its own
+        // `end_bounds`; a hand-rolled split would produce a different string.
+        let parsed = parse_named(
+            "Whenever one or more Bards you control attack, creatures you control get \
+             +1/+0 until end of turn for each lore counter among Sagas you control.",
+            "Chong and Lily, Nomads",
+            &["Creature"],
+        );
+        let warning = only_swallow(&parsed, "DynamicQty");
+
+        assert_eq!(
+            warning.gap(),
+            Some(&ClauseGap::Quantity {
+                operand: "lore counter among sagas you control".to_string()
+            }),
+            "full warning: {warning:?}"
+        );
+    }
+
+    /// `Replacement_Instead` reports the ANTECEDENT, connector-stripped and
+    /// line-scoped.
+    #[test]
+    fn replacement_instead_swallow_carries_the_event_antecedent() {
+        // Lava Burst (ME2). Dropping `condition_names_an_event` would put a `Some` on the
+        // majority of `Replacement_Instead` warnings that carry no "would" at all.
+        let parsed = parse_named(
+            "Lava Burst deals X damage to any target. If Lava Burst would deal damage to a \
+             creature, that damage can't be prevented or dealt instead to another permanent \
+             or player.",
+            "Lava Burst",
+            &["Sorcery"],
+        );
+        assert_eq!(
+            only_swallow(&parsed, "Replacement_Instead").gap(),
+            Some(&ClauseGap::Replacement {
+                antecedent: "lava burst would deal damage to a creature".to_string()
+            }),
+            "full warning: {:?}",
+            only_swallow(&parsed, "Replacement_Instead")
+        );
+
+        // Flitwing, Lyev Detective (MBC) — the line-scoping case. Its audit unit spans a
+        // bare keyword line and the clause line. Dropping the per-LINE scoping makes the
+        // antecedent carry "flying\n"; dropping `parse_leading_conditional_prefix` makes
+        // it keep "if ".
+        let parsed = parse_named(
+            "Flying\nIf you would create one or more tokens, you may create that many Clue \
+             tokens instead. (They're artifacts with \"{2}, Sacrifice this token: Draw a \
+             card.\")",
+            "Flitwing, Lyev Detective",
+            &["Creature"],
+        );
+        let warning = only_swallow(&parsed, "Replacement_Instead");
+        assert_eq!(
+            warning.gap(),
+            Some(&ClauseGap::Replacement {
+                antecedent: "you would create one or more tokens".to_string()
+            }),
+            "full warning: {warning:?}"
+        );
+    }
+
+    /// CR 614.1a: a quoted grant whose ability is a replacement ("It gains \"If this
+    /// creature would leave the battlefield, exile it instead …\"") lowers to a
+    /// `GrantReplacement` modification, which IS the "instead" clause — not a swallow.
+    #[test]
+    fn replacement_instead_is_represented_by_a_granted_replacement() {
+        let parsed = parse_named(
+            "{1}{B}{B}, {T}: Return target creature card from your graveyard to the \
+             battlefield. It gains \"If this creature would leave the battlefield, exile it \
+             instead of putting it anywhere else.\" Activate only as a sorcery.",
+            "Geth, Thane of Contracts",
+            &["Creature"],
+        );
+        // Reach guard: the line parsed cleanly (so the detector ran) and the grant
+        // carries the replacement.
+        assert!(
+            !any_ability_has_unimplemented(&parsed),
+            "{:?}",
+            parsed.abilities
+        );
+        let grant = parsed.abilities[0]
+            .sub_ability
+            .as_deref()
+            .expect("the quoted grant chains after the return");
+        assert!(
+            matches!(
+                &*grant.effect,
+                Effect::GenericEffect { static_abilities, .. }
+                    if static_abilities.iter().any(|definition| {
+                        definition.modifications.iter().any(|modification| {
+                            matches!(modification, ContinuousModification::GrantReplacement { .. })
+                        })
+                    })
+            ),
+            "{:?}",
+            grant.effect
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Replacement_Instead"),
+            "{:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// The nine detector labels that pass `None` and are measured present in the phase-base
+    /// corpus. `ActivateLimit` and `ModalDynamicMaxDropped` are deliberately absent: both
+    /// have ZERO corpus warnings at base, so no fixture can reach them. They are bought by
+    /// the compiler instead — the constructor's new parameter makes omission a compile error.
+    ///
+    /// "Non-phrase" here means "no gap axis wired at the push site", NOT "no phrase is
+    /// nameable". `Replacement` is in this set and its axis names phrases perfectly well —
+    /// `Replacement_Instead` runs that same `SwallowedAxis::Replacement` and mints
+    /// antecedents from it. See `SwallowedClause::gap`, case 1.
+    const EXPECTED_NON_PHRASE: &[&str] = &[
+        "APNAP",
+        "ActivateOnlyDuring",
+        "DamageSubjectConjunction",
+        "Duration_NextTurn",
+        "Duration_ThisTurn",
+        "Duration_UntilEndOfTurn",
+        "Optional_MayHave",
+        "Optional_YouMay",
+        "Replacement",
+    ];
+
+    const PHRASE_BEARING: &[&str] = &[
+        "Condition_AsLongAs",
+        "Condition_If",
+        "Condition_Unless",
+        "DynamicQty",
+        "Replacement_Instead",
+    ];
+
+    /// A detector with no gap axis wired at its push site passes `None`.
+    ///
+    /// The reach guard is a SET EQUALITY, not a count and not `!is_empty()`. An
+    /// `assert!(!observed.is_empty())` here would be satisfied by eight of the nine
+    /// ceasing to fire, which is the "guarded assertion satisfied by the guarded paths
+    /// ceasing to fire" shape this suite has shipped before. This is red the moment any
+    /// one of them stops.
+    #[test]
+    fn non_phrase_detectors_carry_no_gap() {
+        // One verbatim-Oracle corpus card per corpus-present non-phrase detector. Several
+        // also fire a phrase-bearing detector; those records are filtered out below, so a
+        // card carrying both is fine.
+        let fixtures: &[(&str, &str, &[&str])] = &[
+            ("Protection Racket", "At the beginning of your upkeep, repeat the following process for each opponent in turn order. Reveal the top card of your library. That player may pay life equal to that card's mana value. If they do, exile that card. Otherwise, put it into your hand.", &["Enchantment"]),
+            ("Dementia Sliver", "All Slivers have \"{T}: Choose a card name. Target opponent reveals a card at random from their hand. If that card has the chosen name, that player discards it. Activate only during your turn.\"", &["Creature"]),
+            ("Disorder", "Disorder deals 2 damage to each white creature and each player who controls a white creature.", &["Sorcery"]),
+            ("Perch Protection", "Gift an extra turn (You may promise an opponent a gift as you cast this spell. If you do, they take an extra turn after this one.)\nCreate four 2/2 blue Bird creature tokens with flying. If the gift was promised, all permanents you control phase out, and until your next turn, your life total can't change and you gain protection from everything.\nExile Perch Protection.", &["Instant"]),
+            ("Jandor's Ring", "{2}, {T}, Discard the last card you drew this turn: Draw a card.", &["Artifact"]),
+            ("Dragon Egg", "Defender\nWhen this creature dies, create a 2/2 red Dragon creature token with flying and \"{R}: This token gets +1/+0 until end of turn.\"", &["Creature"]),
+            ("The Legend of Yangchen", "(As this Saga enters and after your draw step, add a lore counter.)\nI — Starting with you, each player chooses up to one permanent with mana value 3 or greater from among permanents your opponents control. Exile those permanents.\nII — You may have target opponent draw three cards. If you do, draw three cards.\nIII — Exile this Saga, then return it to the battlefield transformed under your control.", &["Enchantment"]),
+            ("Ballot Broker", "While voting, you may vote an additional time. (The votes can be for different choices or for the same choice.)", &["Creature"]),
+            ("Mikey & Don, Party Planners", "Ward {2}\nYou may look at the top card of your library any time.\nYou may play lands and cast Mutant, Ninja, or Turtle spells from the top of your library. If you cast a creature spell this way, that creature enters with an additional +1/+1 counter on it.", &["Creature"]),
+        ];
+
+        let mut observed: BTreeSet<String> = BTreeSet::new();
+        let mut gapful: Vec<String> = Vec::new();
+
+        for (name, text, types) in fixtures {
+            let parsed = parse_named(text, name, types);
+            for warning in &parsed.parse_warnings {
+                let OracleDiagnostic::SwallowedClause { detector, .. } = warning else {
+                    continue;
+                };
+                if PHRASE_BEARING.contains(&detector.as_str()) {
+                    continue;
+                }
+                observed.insert(detector.clone());
+                if warning.gap().is_some() {
+                    gapful.push(format!("{name}/{detector}: {warning:?}"));
+                }
+            }
+        }
+
+        // REACH GUARD — set equality.
+        assert_eq!(
+            observed,
+            EXPECTED_NON_PHRASE
+                .iter()
+                .map(|d| (*d).to_string())
+                .collect::<BTreeSet<_>>(),
+            "observed non-phrase detector set differs from the corpus-measured nine; \
+             observed = {observed:?}"
+        );
+
+        // A blanket `swallowed_clause_gap(...)` applied at all sixteen push sites turns
+        // this red.
+        assert!(
+            gapful.is_empty(),
+            "a detector with no gap axis wired reported a phrase: {gapful:?}"
+        );
+    }
+
     /// Evidence carrying NO `StaticMode::ModifyActivationLimit` — for exercising the
     /// "rather than once" arm of `twice_is_activation_limit` /
     /// `cleaned_twice_is_only_dynamic_marker` against text-only wording with no typed
@@ -5407,7 +6506,11 @@ mod tests {
     /// definition in `crates/engine/src/parser/oracle.rs` (same pattern as
     /// `parsed_with_one_replacement_description` below).
     fn no_activation_limit_evidence() -> UnitEvidence {
-        UnitEvidence::of(&crate::parser::oracle::ParsedAbilities {
+        UnitEvidence::of(&no_activation_limit_abilities())
+    }
+
+    fn no_activation_limit_abilities() -> crate::parser::oracle::ParsedAbilities {
+        crate::parser::oracle::ParsedAbilities {
             abilities: Vec::new(),
             triggers: Vec::new(),
             statics: Vec::new(),
@@ -5420,13 +6523,13 @@ mod tests {
             solve_condition: None,
             strive_cost: None,
             parse_warnings: Vec::new(),
-        })
+        }
     }
 
-    /// Evidence with a `repeat_for` carrier but no activation-limit static. This
+    /// Parsed abilities with a `repeat_for` carrier but no activation-limit static. This
     /// distinguishes a real repeat-count parse from unsupported "rather than
     /// once" wording that must still be reported as dynamic quantity text.
-    fn repeat_for_without_activation_limit_evidence() -> UnitEvidence {
+    fn repeat_for_without_activation_limit_abilities() -> crate::parser::oracle::ParsedAbilities {
         let mut ability = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Draw {
@@ -5435,7 +6538,7 @@ mod tests {
             },
         );
         ability.repeat_for = Some(QuantityExpr::Fixed { value: 2 });
-        UnitEvidence::of(&crate::parser::oracle::ParsedAbilities {
+        crate::parser::oracle::ParsedAbilities {
             abilities: vec![ability],
             triggers: Vec::new(),
             statics: Vec::new(),
@@ -5448,7 +6551,7 @@ mod tests {
             solve_condition: None,
             strive_cost: None,
             parse_warnings: Vec::new(),
-        })
+        }
     }
 
     fn has_swallowed_detector(
@@ -6330,6 +7433,7 @@ mod tests {
                 StaticMode::SpendManaAsAnyColor {
                     spell_filter: None,
                     activation_source_filter: None,
+                    concession: crate::types::ability::ManaSpendPermission::AnyColor,
                 }
             )),
             "expected SpendManaAsAnyColor static to parse, got statics: {:#?}",
@@ -6956,6 +8060,35 @@ mod tests {
         );
 
         assert!(!has_swallowed_detector(&parsed, "Replacement_Instead"));
+    }
+
+    /// CR 614.1a: The Great Work's chapter III folds "If a spell cast this way would
+    /// be put into a graveyard, exile it instead" into the graveyard cast
+    /// permission it grants, so the clause is represented. The same grant with a
+    /// destination the permission cannot carry (a library) is not folded and must
+    /// keep warning.
+    #[test]
+    fn replacement_instead_accepts_a_granted_graveyard_permission_rider() {
+        let folded = parse_named(
+            "Until end of turn, you may cast instant and sorcery spells from any graveyard. \
+             If a spell cast this way would be put into a graveyard, exile it instead.",
+            "Folded Grant",
+            &["Sorcery"],
+        );
+        assert!(!has_swallowed_detector(&folded, "Replacement_Instead"));
+
+        let unfolded = parse_named(
+            "Until end of turn, you may cast instant and sorcery spells from any graveyard. \
+             If a spell cast this way would be put into a graveyard, put it on the bottom of \
+             its owner's library instead.",
+            "Unfolded Grant",
+            &["Sorcery"],
+        );
+        assert!(
+            has_swallowed_detector(&unfolded, "Replacement_Instead"),
+            "{:?}",
+            unfolded.parse_warnings
+        );
     }
 
     #[test]
@@ -7762,6 +8895,179 @@ mod tests {
         assert!(!has_swallowed_detector(&remand, "Condition_If"));
     }
 
+    /// CR 701.6a + CR 614.1a + CR 608.2c: the typed countered-spell redirect IS the
+    /// "instead" replacement (Memory Lapse, Spell Crumple, Remand) — but only when it is
+    /// the sole " instead" clause. Declines: Hinder (`Counter{None}`), a second
+    /// unmodelled " instead" sentence, or an unmodelled same-sentence tail. The exile-it-instead
+    /// and onto-battlefield counter cards are declined by construction (no Library/Hand
+    /// slot), not fixture-tested.
+    #[test]
+    fn replacement_instead_accepts_countered_spell_zone_redirect() {
+        fn counter_zone(
+            parsed: &crate::parser::oracle::ParsedAbilities,
+        ) -> Option<&Option<SpellStackToGraveyardReplacement>> {
+            parsed.abilities.first().and_then(|a| match &*a.effect {
+                Effect::Counter {
+                    countered_spell_zone,
+                    ..
+                } => Some(countered_spell_zone),
+                _ => None,
+            })
+        }
+        fn no_unimplemented(parsed: &crate::parser::oracle::ParsedAbilities) -> bool {
+            !any_ability_has_unimplemented(parsed)
+        }
+
+        let memory_lapse_text = "Counter target spell. If that spell is countered this way, \
+             put it on top of its owner's library instead of into that \
+             player's graveyard.";
+        let cases = [
+            ("Memory Lapse", memory_lapse_text.to_string()),
+            (
+                "Spell Crumple",
+                "Counter target spell. If that spell is countered this way, put it on the \
+                 bottom of its owner's library instead of into that player's graveyard. \
+                 Put Spell Crumple on the bottom of its owner's library."
+                    .to_string(),
+            ),
+            (
+                "Remand",
+                "Counter target spell. If that spell is countered this way, \
+                 put it into its owner's hand instead of into that player's \
+                 graveyard.\nDraw a card."
+                    .to_string(),
+            ),
+        ];
+        for (name, text) in &cases {
+            let parsed = parse_named(text, name, &["Instant"]);
+            // Reach guards: the redirect slot is populated and the " instead" marker is
+            // present, so the absence of a warning is not vacuous.
+            assert!(
+                no_unimplemented(&parsed),
+                "{name}: unexpected Unimplemented"
+            );
+            assert!(
+                matches!(counter_zone(&parsed), Some(Some(_))),
+                "{name}: expected Counter with countered_spell_zone"
+            );
+            assert!(crate::parser::oracle_nom::primitives::scan_contains(
+                text, "instead"
+            ));
+            assert!(
+                !has_swallowed_detector(&parsed, "Replacement_Instead"),
+                "{name}: redirect must discharge Replacement_Instead"
+            );
+        }
+
+        // Hostile: Hinder has no modeled destination -> still warns.
+        let hinder = parse_named(
+            "Counter target spell. If that spell is countered this way, put that card on \
+             your choice of the top or bottom of its owner's library instead of into that \
+             player's graveyard.",
+            "Hinder",
+            &["Instant"],
+        );
+        assert!(no_unimplemented(&hinder));
+        assert!(
+            matches!(counter_zone(&hinder), Some(None)),
+            "Hinder: expected Counter with countered_spell_zone == None"
+        );
+        assert!(has_swallowed_detector(&hinder, "Replacement_Instead"));
+
+        // Hostile: a second, unmodelled " instead" sentence must keep the warning even
+        // though the redirect slot is populated.
+        let second_instead = parse_named(
+            &format!("{memory_lapse_text} You gain 2 life instead."),
+            "Memory Lapse",
+            &["Instant"],
+        );
+        assert!(no_unimplemented(&second_instead));
+        assert!(
+            matches!(counter_zone(&second_instead), Some(Some(_))),
+            "second-instead fixture: expected Counter with countered_spell_zone"
+        );
+        assert!(has_swallowed_detector(
+            &second_instead,
+            "Replacement_Instead"
+        ));
+
+        // One redirect slot cannot prove that two matching printed sentences were modeled.
+        let redirect_sentence =
+            crate::parser::oracle_nom::primitives::split_sentence_units(memory_lapse_text)
+                .into_iter()
+                .last()
+                .expect("Memory Lapse carries a redirect sentence");
+        let repeated_redirect = parse_named(
+            &format!("{memory_lapse_text} {redirect_sentence}"),
+            "Memory Lapse",
+            &["Instant"],
+        );
+        assert!(no_unimplemented(&repeated_redirect));
+        assert!(matches!(counter_zone(&repeated_redirect), Some(Some(_))));
+        assert!(has_swallowed_detector(
+            &repeated_redirect,
+            "Replacement_Instead"
+        ));
+
+        // Hostile: the extra sentence mentions "countered this way" but is a different
+        // " instead" clause, not the redirect shape -> must still warn.
+        let second_countered_instead = parse_named(
+            &format!(
+                "{memory_lapse_text} If it was countered this way, you gain 2 life instead of \
+                 drawing a card."
+            ),
+            "Memory Lapse",
+            &["Instant"],
+        );
+        assert!(no_unimplemented(&second_countered_instead));
+        assert!(
+            matches!(counter_zone(&second_countered_instead), Some(Some(_))),
+            "second-countered-instead fixture: expected Counter with countered_spell_zone"
+        );
+        assert!(has_swallowed_detector(
+            &second_countered_instead,
+            "Replacement_Instead"
+        ));
+
+        // Hostile: same sentence — the redirect is followed by an unmodelled tail, so the
+        // shape must be anchored to the end of the sentence and keep the warning.
+        let same_sentence_tail = parse_named(
+            "Counter target spell. If that spell is countered this way, put it on top of its \
+             owner's library instead of into that player's graveyard and you gain 2 life \
+             instead of drawing a card.",
+            "Memory Lapse",
+            &["Instant"],
+        );
+        assert!(no_unimplemented(&same_sentence_tail));
+        assert!(
+            matches!(counter_zone(&same_sentence_tail), Some(Some(_))),
+            "same-sentence-tail fixture: expected Counter with countered_spell_zone"
+        );
+        assert!(has_swallowed_detector(
+            &same_sentence_tail,
+            "Replacement_Instead"
+        ));
+
+        // Hostile: an " instead" sentence that ENDS with the redirect shape but carries an
+        // unmodelled head must not be discharged — the shape is anchored to the start of
+        // the sentence. Probed on the predicate directly: through the full parse, such a
+        // sentence is caught by earlier gates before the redirect discharge is reached.
+        let memory_lapse = parse_named(memory_lapse_text, "Memory Lapse", &["Instant"]);
+        assert!(super::countered_spell_zone_redirect_is_only_instead_marker(
+            &memory_lapse_text.to_ascii_lowercase(),
+            &memory_lapse
+        ));
+        let with_head = format!(
+            "{memory_lapse_text} If a creature spell is countered this way, you gain 2 life \
+             instead and put it on top of its owner's library instead of into that player's \
+             graveyard."
+        )
+        .to_ascii_lowercase();
+        assert!(
+            !super::countered_spell_zone_redirect_is_only_instead_marker(&with_head, &memory_lapse)
+        );
+    }
+
     /// CR 702.170c + CR 608.2c: "You may exile a card … If you do, it becomes
     /// plotted." — the "if you do" gate is the optional-exile linkage,
     /// represented by the chained `GrantCastingPermission { Plotted }`, so the
@@ -8278,6 +9584,71 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         );
     }
 
+    /// CR 508.1k + CR 118.9 + CR 701.8a: Pitfall Trap — the "exactly one
+    /// creature is attacking" gate binds the {W} alternative cost to
+    /// `casting_options`, so the spell line is the Destroy alone (no on-resolution
+    /// `PayCost` chain) and no Condition_If is reported.
+    #[test]
+    fn condition_if_accepts_pitfall_trap_alt_cost_gate() {
+        let parsed = parse_named(
+            "If exactly one creature is attacking, you may pay {W} rather than pay \
+this spell's mana cost.\nDestroy target attacking creature without flying.",
+            "Pitfall Trap",
+            &["Instant"],
+        );
+        assert_eq!(
+            parsed.casting_options.len(),
+            1,
+            "expected one alternative casting option, got {:?}",
+            parsed.casting_options
+        );
+        assert_eq!(
+            parsed.casting_options[0].condition,
+            Some(ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .properties(vec![FilterProp::Attacking { defender: None }]),
+                        ),
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            })
+        );
+        assert_eq!(
+            parsed.abilities.len(),
+            1,
+            "expected only the Destroy spell ability, got {:?}",
+            parsed.abilities
+        );
+        let spell = &parsed.abilities[0];
+        assert!(
+            spell.sub_ability.is_none(),
+            "the alt-cost line must not chain onto the spell, got {spell:?}"
+        );
+        let Effect::Destroy {
+            target: TargetFilter::Typed(typed),
+            ..
+        } = spell.effect.as_ref()
+        else {
+            panic!("expected Destroy of a typed target, got {:?}", spell.effect);
+        };
+        assert!(typed
+            .properties
+            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(typed.properties.contains(&FilterProp::WithoutKeyword {
+            value: Keyword::Flying
+        }));
+        assert!(!any_ability_has_unimplemented(&parsed));
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "alt-cost exactly-one gate must bind to casting_options: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
     /// CR 115.7d: Standalone retarget spells (Deflecting Swat, Redirect) lower
     /// to `ChangeTargets { scope: All }` with the full `you may choose new
     /// targets` surface preserved — not `def.optional`.
@@ -8439,36 +9810,517 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
     }
 
-    /// CR 701.20a: Atraxa, Grand Unifier — `you may put a card of that type
-    /// from among the revealed cards into your hand` carries the `from among`
-    /// continuation, so the `is_specialized_put_body` shape guard blocks the
-    /// `you may ` peel; the optionality is encoded as `up_to: true` on the
-    /// internal `ChangeZone` (Dig keep grammar). The refactor must NOT
-    /// regress this — verified via `effect_has_internal_optionality`.
+    /// CR 706.3a + CR 706.3b: a d20 result branch's own definition carries the
+    /// "you may" the branch prints ("1—9 | Copy that card. You may cast the
+    /// copy."). Before the `RollDie` recursion, `effect_has_internal_optionality`
+    /// could not see into `results` — they are `DieResultBranch` payloads, not
+    /// `sub_ability` / `else_ability` / `mode_abilities` — so all seven of these
+    /// cards reported a swallowed `Optional_YouMay` while their branch payloads
+    /// carried the choice (`CastFromZone`, `CastCopyOfCard`, `ChangeTargets`,
+    /// `GrantCastingPermission`).
+    ///
+    /// Every negative is preceded by the positive reach guard on the same
+    /// fixture: the verbatim Oracle text (the hostile evidence tree for the
+    /// sibling tests below) parses with zero `Effect::Unimplemented` in the unit
+    /// and the named `RollDie` carrier present; the hostile sibling keeps the
+    /// carrier shape and removes only the optionality.
     #[test]
-    fn optional_you_may_atraxa_grand_unifier_reports_known_gap() {
+    fn roll_die_branch_optionality_is_evidence() {
+        let cases: &[(&str, &str, &[&str])] = &[
+            (
+                "{T}: Exile target instant or sorcery card from a graveyard. Roll a d20. \
+                 Activate only as a sorcery.\n\
+                 1—9 | Copy that card. You may cast the copy.\n\
+                 10—19 | Copy that card. You may cast the copy by paying {1} rather than \
+                 paying its mana cost.\n\
+                 20 | Copy each card exiled with this artifact. You may cast any number of \
+                 the copies without paying their mana costs.",
+                "Wizard's Spellbook",
+                &["Artifact"],
+            ),
+            (
+                "Choose target spell or ability with one or more targets. Roll a d20 and add \
+                 the greatest power among creatures you control.\n\
+                 1—14 | You may choose new targets for that spell or ability.\n\
+                 15+ | You may choose new targets for that spell or ability. Then copy it. \
+                 You may choose new targets for the copy.",
+                "Wyll's Reversal",
+                &["Instant"],
+            ),
+            (
+                "Whenever you cast an instant or sorcery spell with mana value 3 or greater, \
+                 roll a d20.\n\
+                 1-9 | Each player draws a card.\n\
+                 10-19 | You draw a card.\n\
+                 20 | Copy that spell. You may choose new targets for the copy.",
+                "Mathise, Surge Channeler",
+                &["Creature"],
+            ),
+            (
+                "Psionic Spells — When this creature enters, choose target instant or sorcery \
+                 card in your graveyard, then roll a d20.\n\
+                 1—9 | You may put that card on top of your library.\n\
+                 10—20 | Return that card to your hand.",
+                "Aberrant Mind Sorcerer",
+                &["Creature"],
+            ),
+            (
+                "Wild Magic Surge — Whenever this creature attacks, roll a d20.\n\
+                 1—9 | Exile the top card of your library. You may play it this turn.\n\
+                 10—19 | Exile the top two cards of your library. You may play them this turn.\n\
+                 20 | Exile the top three cards of your library. You may play them this turn.",
+                "Chaos Channeler",
+                &["Creature"],
+            ),
+            (
+                "Exile target spell, then roll a d20 and add that spell's mana value.\n\
+                 1—14 | You may cast the exiled card for as long as it remains exiled, and \
+                 you may spend mana as though it were mana of any color to cast that spell.\n\
+                 15+ | You may cast the exiled card without paying its mana cost for as long \
+                 as it remains exiled.",
+                "Gale's Redirection",
+                &["Instant"],
+            ),
+            (
+                "{4}, Sacrifice this artifact: Roll a d20.\n\
+                 1 | Trapped! — You lose 3 life.\n\
+                 2—9 | Create five Treasure tokens.\n\
+                 10—19 | You gain 3 life and draw three cards.\n\
+                 20 | Search your library for a card. If it's an artifact card, you may put it \
+                 onto the battlefield. Otherwise, put that card into your hand. Then shuffle.",
+                "Treasure Chest",
+                &["Artifact"],
+            ),
+        ];
+        for (oracle, name, types) in cases {
+            let parsed = parse_named(oracle, name, types);
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "{name} reach guard: production parse must contain zero Unimplemented: {parsed:#?}"
+            );
+            assert!(
+                unit_has_effect(&parsed, &|effect| matches!(effect, Effect::RollDie { .. })),
+                "{name} reach guard: the RollDie carrier must be present"
+            );
+            assert!(
+                !has_swallowed_detector(&parsed, "Optional_YouMay"),
+                "{name} must account for its printed 'you may' through the die-roll branch \
+                 definitions; warnings: {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
+    /// Hostile sibling of `roll_die_branch_optionality_is_evidence`: the same
+    /// carrier shape (a d20 with one printed result branch) with the branch's
+    /// optionality removed. The branch def is a bare mandatory `Draw`, so
+    /// nothing represents the printed "you may" and the detector must still
+    /// warn; the paired positive control sets only `def.optional` on the branch
+    /// and silences it.
+    #[test]
+    fn roll_die_mandatory_branches_are_not_optional() {
+        fn hostile_roll(branch_optional: bool) -> AbilityDefinition {
+            let mut branch = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            );
+            branch.optional = branch_optional;
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::RollDie {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    sides: 20,
+                    results: vec![crate::types::ability::DieResultBranch {
+                        min: 1,
+                        max: 9,
+                        effect: Box::new(branch),
+                    }],
+                    modifier: None,
+                },
+            )
+        }
+
+        let cleaned = "roll a d20.\n1—9 | you may draw a card.";
+        let hostile = parsed_with_ability(hostile_roll(false));
+        // Reach guard: the RollDie carrier is present in the evidence tree and the
+        // unit raises the marker, so the warning below cannot be vacuous.
+        let evidence = UnitEvidence::of(&hostile);
+        assert!(
+            evidence.any_effect(|effect| matches!(effect, Effect::RollDie { .. })),
+            "reach: the RollDie carrier must deserialize"
+        );
+        assert_eq!(
+            super::active_dynamic_markers(cleaned, &evidence)
+                .iter()
+                .filter(|marker| **marker == "for each ")
+                .count(),
+            0,
+            "reach: this fixture raises no dynamic marker"
+        );
+        let mut diagnostics = Vec::new();
+        super::detect_optional_you_may(cleaned, cleaned, &hostile, &mut diagnostics);
+        assert_eq!(
+            optional_you_may_count(&diagnostics),
+            1,
+            "a mandatory die-roll branch represents no 'you may': {diagnostics:?}"
+        );
+
+        // Positive control: the SAME carrier with only the branch's optionality set.
+        let control = parsed_with_ability(hostile_roll(true));
+        let mut control_diagnostics = Vec::new();
+        super::detect_optional_you_may(cleaned, cleaned, &control, &mut control_diagnostics);
+        assert_eq!(
+            optional_you_may_count(&control_diagnostics),
+            0,
+            "the branch's own optional flag must discharge the marker: {control_diagnostics:?}"
+        );
+    }
+
+    /// CR 603.3 + CR 707.10c / CR 115.7d: the "you may choose new targets for
+    /// the copy" on a mana-spend trigger lives inside the `TriggerOnSpend`
+    /// ability payload — the trigger the mana's controller may put on the stack.
+    /// Before the `Effect::Mana` leg, `effect_has_internal_optionality` saw only
+    /// the producing def, so both of these cards reported a swallowed
+    /// `Optional_YouMay` while their grants carried the retarget permission.
+    ///
+    /// Every negative is preceded by the positive reach guard on the same
+    /// fixture: the verbatim Oracle text parses with zero `Effect::Unimplemented`
+    /// in the unit and the `TriggerOnSpend` grant carrying
+    /// `CopySpell { retarget: MayChooseNewTargets }` present.
+    #[test]
+    fn mana_spend_grant_optionality_is_evidence() {
+        let cases: &[(&str, &str, &[&str])] = &[
+            (
+                "(Transforms from Primal Amulet.)\n\
+                 {T}: Add one mana of any color. When that mana is spent to cast an instant \
+                 or sorcery spell, copy that spell and you may choose new targets for the copy.",
+                "Primal Wellspring",
+                &["Land"],
+            ),
+            (
+                "{T}: Add {R}. When that mana is spent to cast a red instant or sorcery spell, \
+                 copy that spell and you may choose new targets for the copy.",
+                "Pyromancer's Goggles",
+                &["Artifact"],
+            ),
+        ];
+        for (oracle, name, types) in cases {
+            let parsed = parse_named(oracle, name, types);
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "{name} reach guard: production parse must contain zero Unimplemented: {parsed:#?}"
+            );
+            assert!(
+                unit_has_effect(&parsed, &mana_grant_with_copy_retarget),
+                "{name} reach guard: the TriggerOnSpend grant carrying the retarget permission \
+                 must be present"
+            );
+            assert!(
+                !has_swallowed_detector(&parsed, "Optional_YouMay"),
+                "{name} must account for its printed 'you may' through the mana-spend grant's \
+                 ability; warnings: {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
+    /// Hostile sibling of `mana_spend_grant_optionality_is_evidence`: the same
+    /// `Mana → TriggerOnSpend` carrier shape with the retarget permission removed
+    /// (`CopySpell { retarget: KeepOriginalTargets }`). The printed "you may" is
+    /// then represented by nothing and the detector must still warn.
+    #[test]
+    fn mana_spend_grant_without_optional_ability_is_not_optional() {
+        let grant = ManaSpellGrant::TriggerOnSpend {
+            filter: TargetFilter::Any,
+            ability: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CopySpell {
+                    target: TargetFilter::TriggeringSource,
+                    retarget: CopyRetargetPermission::KeepOriginalTargets,
+                    copier: None,
+                    additional_modifications: Vec::new(),
+                    starting_loyalty_from_casualty_sacrifice: false,
+                },
+            )),
+        };
+        let hostile = parsed_with_ability(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: Vec::new(),
+                grants: vec![grant],
+                expiry: None,
+                target: None,
+            },
+        ));
+        // Reach guard: the Mana carrier — with its TriggerOnSpend grant — is
+        // present in the evidence tree.
+        let evidence = UnitEvidence::of(&hostile);
+        assert!(
+            evidence.any_effect(|effect| matches!(effect, Effect::Mana { .. })),
+            "reach: the Mana carrier must deserialize"
+        );
+        let cleaned = "when that mana is spent to cast a red instant or sorcery spell, copy \
+                       that spell and you may choose new targets for the copy.";
+        let mut diagnostics = Vec::new();
+        super::detect_optional_you_may(cleaned, cleaned, &hostile, &mut diagnostics);
+        assert_eq!(
+            optional_you_may_count(&diagnostics),
+            1,
+            "a mana grant whose ability carries no retarget permission represents nothing: \
+             {diagnostics:?}"
+        );
+    }
+
+    /// CR 701.38d is a TIMING rule for a player who already has multiple votes
+    /// ("those votes all happen at the same time the player would otherwise have
+    /// voted") — it does NOT make the printed "While voting, you may vote an
+    /// additional time." optional. The runtime forces every allocated ballot:
+    /// `game/effects/vote.rs`'s `votes_per_session_for` allocates `1 + extras`
+    /// at vote-session start, and `engine_resolution_choices.rs`'s
+    /// `append_vote_ballot_and_advance` re-opens `WaitingFor::VoteChoice` for
+    /// the same player whenever `remaining_votes > 1` — no action declines an
+    /// allocated extra vote. The printed "you may" is therefore not represented,
+    /// so the Optional_YouMay warning must survive (red-honest). Both printed
+    /// carriers are pinned: Ballot Broker (the vote static alone) and The
+    /// Valeyard (the vote static beside its unrelated villainous-choice
+    /// sibling).
+    #[test]
+    fn grants_extra_vote_stays_red_until_the_vote_session_can_decline() {
+        let ballot_broker = parse_named(
+            "While voting, you may vote an additional time. (The votes can be for different \
+             choices or for the same choice.)",
+            "Ballot Broker",
+            &["Creature"],
+        );
+        assert!(
+            ballot_broker
+                .statics
+                .iter()
+                .any(|s| matches!(s.mode, StaticMode::GrantsExtraVote)),
+            "reach: Ballot Broker's static must parse as GrantsExtraVote, got {:#?}",
+            ballot_broker.statics
+        );
+        assert!(
+            !any_ability_has_unimplemented(&ballot_broker),
+            "reach: Ballot Broker must parse with zero Unimplemented: {ballot_broker:#?}"
+        );
+        assert!(
+            has_swallowed_detector(&ballot_broker, "Optional_YouMay"),
+            "the extra ballot is forced, not offered — the printed 'you may' has no decline \
+             path and must stay red: {:?}",
+            ballot_broker.parse_warnings
+        );
+
+        let valeyard = parse_named(
+            "If an opponent would face a villainous choice, they face that choice an additional \
+             time. (They can make the same or different choices.)\n\
+             While voting, you may vote an additional time.",
+            "The Valeyard",
+            &["Creature"],
+        );
+        assert!(
+            valeyard
+                .statics
+                .iter()
+                .any(|s| matches!(s.mode, StaticMode::GrantsExtraVote)),
+            "reach: The Valeyard's vote static must parse as GrantsExtraVote, got {:#?}",
+            valeyard.statics
+        );
+        assert!(
+            !any_ability_has_unimplemented(&valeyard),
+            "reach: The Valeyard must parse with zero Unimplemented: {valeyard:#?}"
+        );
+        assert!(
+            has_swallowed_detector(&valeyard, "Optional_YouMay"),
+            "the extra ballot is forced, not offered — the printed 'you may' has no decline \
+             path and must stay red: {:?}",
+            valeyard.parse_warnings
+        );
+    }
+
+    /// Hostile sibling of `grants_extra_vote_stays_red_until_the_vote_session_can_decline`:
+    /// the same vote-family carrier shape with the sibling mode
+    /// (`GrantsExtraVillainousChoice`) and the printed vote "you may" — the
+    /// villainous-choice mode is a CR 701.55 replacement, and the vote mode is a
+    /// forced-allocation static with no decline path, so neither is a CR 701.38d
+    /// "you may" permission and the unrepresented "you may" must still warn.
+    #[test]
+    fn grants_extra_villainous_choice_is_not_an_optional_permission() {
+        let hostile = parsed_with_statics(vec![StaticDefinition::new(
+            StaticMode::GrantsExtraVillainousChoice,
+        )]);
+        let cleaned = "if an opponent would face a villainous choice, they face that choice an \
+                       additional time. while voting, you may vote an additional time.";
+        // Reach guard: the sibling carrier is present in the unit's evidence, and the
+        // marker is raised; neither vote-family mode is in the permission set, so the
+        // red-honesty control below keeps the surviving warning a verdict on the carrier.
+        let evidence = UnitEvidence::of(&hostile);
+        assert!(
+            evidence
+                .any_static_mode(|mode| matches!(mode, StaticMode::GrantsExtraVillainousChoice)),
+            "reach: the villainous-choice static must be present"
+        );
+        assert!(
+            !super::static_mode_is_optional_permission(&StaticMode::GrantsExtraVote),
+            "red-honesty control: the vote static is not a permission — the runtime forces \
+             every allocated ballot, so the printed 'you may' has no decline path"
+        );
+        assert!(
+            !super::static_mode_is_optional_permission(&StaticMode::GrantsExtraVillainousChoice),
+            "the villainous-choice sibling is a replacement, not a 'you may' permission"
+        );
+        let mut diagnostics = Vec::new();
+        super::detect_optional_you_may(cleaned, cleaned, &hostile, &mut diagnostics);
+        assert_eq!(
+            optional_you_may_count(&diagnostics),
+            1,
+            "an unrepresented vote 'you may' beside the villainous-choice sibling must warn: \
+             {diagnostics:?}"
+        );
+    }
+
+    /// CR 608.2g + CR 601.2: `FreeCastFromZones` casts spells during resolution
+    /// through the interactive selection loop, which stops early when the
+    /// controller declines — every cast is optional, so the printed "you may"
+    /// needs no def-level flag. Both cards in the class are pinned together:
+    /// Plargg and Nassari's window is its "you may cast up to two spells", and
+    /// Invoke Calamity's window clears while its two genuine residual gaps
+    /// (`Replacement_Instead`, `Condition_If`) stay red-honest.
+    ///
+    /// Every negative is preceded by the positive reach guard on the same
+    /// fixture: zero `Effect::Unimplemented` in the unit and the named
+    /// `FreeCastFromZones` carrier present.
+    #[test]
+    fn optional_you_may_accepts_free_cast_from_zones_window() {
+        let plargg = parse_named(
+            "At the beginning of your upkeep, each player exiles cards from the top of their \
+             library until they exile a nonland card. An opponent chooses a nonland card exiled \
+             this way. You may cast up to two spells from among the other cards exiled this way \
+             without paying their mana costs.",
+            "Plargg and Nassari",
+            &["Creature"],
+        );
+        assert!(
+            !any_ability_has_unimplemented(&plargg),
+            "Plargg and Nassari reach guard: production parse must contain zero \
+             Unimplemented: {plargg:#?}"
+        );
+        assert!(
+            unit_has_effect(&plargg, &|effect| matches!(
+                effect,
+                Effect::FreeCastFromZones { .. }
+            )),
+            "Plargg and Nassari reach guard: the FreeCastFromZones window must be present"
+        );
+        assert!(
+            !has_swallowed_detector(&plargg, "Optional_YouMay"),
+            "Plargg and Nassari's cast window accounts for its 'you may'; warnings: {:?}",
+            plargg.parse_warnings
+        );
+
+        let invoke = parse_named(
+            "You may cast up to two instant and/or sorcery spells with total mana value 6 or \
+             less from your graveyard and/or hand without paying their mana costs. If those \
+             spells would be put into your graveyard, exile them instead. Exile Invoke Calamity.",
+            "Invoke Calamity",
+            &["Instant"],
+        );
+        assert!(
+            !any_ability_has_unimplemented(&invoke),
+            "Invoke Calamity reach guard: production parse must contain zero \
+             Unimplemented: {invoke:#?}"
+        );
+        assert!(
+            unit_has_effect(&invoke, &|effect| matches!(
+                effect,
+                Effect::FreeCastFromZones { .. }
+            )),
+            "Invoke Calamity reach guard: the FreeCastFromZones window must be present"
+        );
+        assert!(
+            !has_swallowed_detector(&invoke, "Optional_YouMay"),
+            "Invoke Calamity's cast window accounts for its 'you may'; warnings: {:?}",
+            invoke.parse_warnings
+        );
+        assert!(
+            has_swallowed_detector(&invoke, "Replacement_Instead")
+                && has_swallowed_detector(&invoke, "Condition_If"),
+            "Invoke Calamity's residual 'instead'/'if' gaps must stay red-honest; warnings: {:?}",
+            invoke.parse_warnings
+        );
+    }
+
+    /// Atraxa, Grand Unifier's VERBATIM Oracle text, shared by the two
+    /// acceptance tests for the `Optional_YouMay` and `DynamicQty` legs so both
+    /// fixtures are guaranteed identical to the printed card.
+    const ATRAXA_GRAND_UNIFIER_ORACLE: &str = "Flying, vigilance, deathtouch, lifelink\n\
+         When Atraxa enters, reveal the top ten cards of your library. For each card type, \
+         you may put a card of that type from among the revealed cards into your hand. Put \
+         the rest on the bottom of your library in a random order. (Artifact, battle, \
+         creature, enchantment, instant, land, planeswalker, and sorcery are card types.)";
+
+    /// CR 701.20b + CR 608.2d: Atraxa, Grand Unifier — `you may put a card of
+    /// that type from among the revealed cards into your hand` carries the
+    /// `from among` continuation, so the `is_specialized_put_body` shape guard
+    /// blocks the `you may ` peel; the optionality is encoded as `up_to: true` on
+    /// the `ChooseFromZone` (`effect_has_internal_optionality`), and the
+    /// per-card-type "for each " is the `DistinctCardTypes` constraint itself
+    /// (`for_each_card_type_constraints_cover_all_for_each_markers`), not a
+    /// `QuantityExpr`. Both warnings must therefore clear.
+    #[test]
+    fn optional_you_may_atraxa_grand_unifier_clears_optionality_and_quantity_gaps() {
         let parsed = parse_named(
-            "Flying, vigilance, deathtouch, lifelink\n\
-             When this creature enters, reveal the top ten cards of your library. \
-             For each card type, you may put a card of that type from among the \
-             revealed cards into your hand. Put the rest on the bottom of your \
-             library in a random order.",
+            ATRAXA_GRAND_UNIFIER_ORACLE,
             "Atraxa, Grand Unifier",
             &["Creature"],
         );
 
-        // KNOWN GAP, pinned deliberately — see `condition_as_long_as_accepts_bronze_
-        // horse_and_champions_helm` for the full explanation. Atraxa reports a swallowed
-        // `Optional_YouMay` (and `DynamicQty`), and did so in the shipped card data long
-        // before this change: the per-card-type "you may put a card of that type" choice
-        // is not typed as optional. The test asserted the opposite and passed only
-        // because its empty MTGJSON keyword list turned the "Flying, vigilance,
-        // deathtouch, lifelink" line into an `Effect::Unimplemented`, tripping the
-        // card-wide gate that silenced every detector on the card.
+        // Reach guard: the ETB unit parses with zero Unimplemented (the card-wide
+        // `!any_ability_has_unimplemented` cannot be used here — `parse_named`'s empty
+        // MTGJSON keyword list turns the first keyword line into Unimplemented, which is
+        // a different unit), and the DistinctCardTypes constraint is present.
+        let etb = parsed
+            .triggers
+            .iter()
+            .find(|trigger| matches!(trigger.mode, TriggerMode::ChangesZone))
+            .expect("Atraxa's ETB trigger must parse");
+        let execute = etb
+            .execute
+            .as_deref()
+            .expect("ETB trigger must have execute");
         assert!(
-            has_swallowed_detector(&parsed, "Optional_YouMay"),
-            "pre-existing gap: the per-card-type 'you may put' optionality is not typed. \
-             Warnings: {:?}",
+            !def_tree_has_unimplemented(execute),
+            "reach: the ETB unit parses with zero Unimplemented: {parsed:#?}"
+        );
+        assert!(
+            unit_has_effect(&parsed, &|effect| matches!(
+                effect,
+                Effect::ChooseFromZone {
+                    up_to: true,
+                    constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes { .. }),
+                    ..
+                }
+            )),
+            "reach: the ChooseFromZone DistinctCardTypes constraint must be present"
+        );
+        // The two demotions this class no longer deserves: the choice is `up_to`
+        // (declining at resolution), and the per-card-type iteration IS the constraint.
+        assert!(
+            !has_swallowed_detector(&parsed, "Optional_YouMay"),
+            "Atraxa's per-card-type 'you may put' is represented by ChooseFromZone {{ up_to: \
+             true }}; warnings: {:?}",
+            parsed.parse_warnings
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "DynamicQty"),
+            "Atraxa's 'for each card type' is represented by the DistinctCardTypes \
+             constraint; warnings: {:?}",
             parsed.parse_warnings
         );
     }
@@ -8785,6 +10637,730 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         );
 
         assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    /// CR 702.21a + CR 608.2h + CR 113.7a: a Ward whose life payment is the
+    /// warded permanent's power ("Ward—Pay life equal to ~'s power") is a dynamic
+    /// quantity intrinsic to the `WardCost::PayLifeEqualToPower` variant — the
+    /// power is read as the ability resolves (608.2h / 113.7a, the same authority
+    /// `oracle_keyword.rs` cites for the read) and `ward_cost_to_ability_cost`
+    /// resolves it to `AbilityCost::PayLife { amount: Ref(Power { Source }) }`.
+    /// No `QuantityExpr` field exists, so the " equal to " marker must NOT raise
+    /// a DynamicQty swallow warning; the variant itself is the carrier.
+    /// Reverting the evidence leg re-reds Raubahn, Bull of Ala Mhigo and
+    /// Phyrexian Fleshgorger, both of which carried a live warning in shipped
+    /// card data.
+    #[test]
+    fn dynamic_qty_accepts_ward_pay_life_equal_to_power() {
+        // Detector-liveness control, same run: a fixture whose dynamic quantity
+        // is genuinely dropped still warns, so the two greens below cannot be
+        // produced by a detector that never fires. (Drown in the Loch's modal
+        // bullets are the suite's pinned DynamicQty positive.)
+        let dropped = parse_named(
+            "Choose one \u{2014}\n\
+             \u{2022} Counter target spell with mana value less than or equal to the number of \
+             cards in its controller's graveyard.\n\
+             \u{2022} Destroy target creature with mana value less than or equal to the number of \
+             cards in its controller's graveyard.",
+            "Drown in the Loch",
+            &["Instant"],
+        );
+        assert!(
+            has_swallowed_detector(&dropped, "DynamicQty"),
+            "control: the DynamicQty detector must be live in this test"
+        );
+
+        // The real cards, parsed with the production keyword/type inputs so the
+        // fixture reaches the same branches the card-data pipeline does.
+        let raubahn_keywords = vec!["Ward".to_string()];
+        let fleshgorger_keywords = vec![
+            "Prototype".to_string(),
+            "Menace".to_string(),
+            "Lifelink".to_string(),
+            "Ward".to_string(),
+        ];
+        let cases = [
+            (
+                "Raubahn, Bull of Ala Mhigo",
+                "Ward\u{2014}Pay life equal to Raubahn's power.\n\
+                 Whenever Raubahn attacks, attach up to one target Equipment you \
+                 control to target attacking creature.",
+                &raubahn_keywords,
+                vec!["Legendary".to_string(), "Creature".to_string()],
+                vec!["Human".to_string(), "Warrior".to_string()],
+            ),
+            (
+                "Phyrexian Fleshgorger",
+                "Prototype {1}{B}{B} \u{2014} 3/3 (You may cast this spell with different mana \
+                 cost, color, and size. It keeps its abilities and types.)\n\
+                 Menace, lifelink\n\
+                 Ward\u{2014}Pay life equal to this creature's power.",
+                &fleshgorger_keywords,
+                vec!["Artifact".to_string(), "Creature".to_string()],
+                vec!["Phyrexian".to_string(), "Wurm".to_string()],
+            ),
+        ];
+        for (name, text, keywords, core_types, subtypes) in cases {
+            // Reach guard 1: the fixture raises the detector's " equal to "
+            // expectation — without it, green could mean the marker never fired.
+            assert!(
+                // allow-noncombinator: test fixture assertion on classified text
+                text.to_ascii_lowercase().contains(" equal to "),
+                "{name}: fixture must raise the detector's dynamic marker"
+            );
+            let parsed = parse_oracle_text(text, name, keywords, &core_types, &subtypes);
+            // Reach guard 2: the typed carrier the leg keys on is present, so a
+            // green result is the leg's doing rather than a parse failure.
+            assert!(
+                parsed
+                    .extracted_keywords
+                    .iter()
+                    .any(|keyword| matches!(keyword, Keyword::Ward(WardCost::PayLifeEqualToPower))),
+                "{name} must carry the dynamic Ward cost: {:?}",
+                parsed.extracted_keywords
+            );
+            // Reach guard 3: no `Unimplemented` root effect, which would make
+            // `check_swallowed_clauses` skip the unit and green the negative
+            // assertion vacuously.
+            assert!(
+                parsed
+                    .abilities
+                    .iter()
+                    .chain(parsed.triggers.iter().filter_map(|t| t.execute.as_deref()))
+                    .all(|ability| !matches!(
+                        ability.effect.as_ref(),
+                        Effect::Unimplemented { .. }
+                    )),
+                "{name}: no Unimplemented root effect may suppress the unit"
+            );
+            assert!(
+                !has_swallowed_detector(&parsed, "DynamicQty"),
+                "{name} must not report a swallowed dynamic quantity: {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
+    /// CR 702.21a + CR 608.2h + CR 113.7a: a dynamic Ward GRANTED to other
+    /// permanents ("Other creatures you control have ward—Pay life equal to ~'s
+    /// power") parses to `ContinuousModification::AddKeyword { Ward(
+    /// PayLifeEqualToPower) }`, so the Ward leg must count it from the typed grant
+    /// carrier (`UnitEvidence::granted_keywords`) and stay silent. The control — the
+    /// same text with the same-shaped grant carrying a FIXED Ward — does not
+    /// represent the dynamic quantity, so the warning must still fire.
+    #[test]
+    fn dynamic_qty_accepts_granted_ward_pay_life_equal_to_power() {
+        use crate::types::ability::{ContinuousModification, StaticDefinition};
+
+        let text = "Other creatures you control have ward\u{2014}pay life equal to ~'s power.";
+
+        // Production parse: the grant lowers to AddKeyword(Ward(PayLifeEqualToPower)).
+        let granted = parse_named(text, "Test Grantor", &["Creature"]);
+        assert!(
+            granted
+                .statics
+                .iter()
+                .any(|stat| stat.modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Ward(WardCost::PayLifeEqualToPower)
+                    }
+                ))),
+            "reach guard: the production parser must lower the granted dynamic ward \
+             to AddKeyword(Ward(PayLifeEqualToPower)): {:?}",
+            granted.statics
+        );
+        let evidence = UnitEvidence::of(&granted);
+        let cleaned = text.to_ascii_lowercase();
+        assert!(
+            !super::active_dynamic_markers(&cleaned, &evidence).is_empty(),
+            "fixture must raise the dynamic marker"
+        );
+        // Reach guard: the typed grant carrier exposes the payment to the counting path.
+        assert!(
+            !evidence.granted_keywords().is_empty(),
+            "evidence must expose the granted keyword"
+        );
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(&cleaned, &cleaned, &granted, &evidence, &mut diagnostics);
+        assert!(
+            dynamic_qty_descriptions(&diagnostics).is_empty(),
+            "a granted power-life Ward must not report DynamicQty: {diagnostics:?}"
+        );
+
+        // Control: the same text with a fixed-cost grant. Nothing represents the
+        // raised " equal to " occurrence, so the warning must fire.
+        let mut fixed_static = StaticDefinition::new(StaticMode::Continuous);
+        fixed_static.modifications = vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Ward(WardCost::PayLife(2)),
+        }];
+        let control = crate::parser::oracle::ParsedAbilities {
+            abilities: Vec::new(),
+            triggers: Vec::new(),
+            statics: vec![fixed_static],
+            replacements: Vec::new(),
+            extracted_keywords: Vec::new(),
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: Vec::new(),
+        };
+        let control_evidence = UnitEvidence::of(&control);
+        let mut control_diagnostics = Vec::new();
+        super::detect_dynamic_qty(
+            &cleaned,
+            &cleaned,
+            &control,
+            &control_evidence,
+            &mut control_diagnostics,
+        );
+        assert_eq!(
+            dynamic_qty_descriptions(&control_diagnostics).len(),
+            1,
+            "a granted fixed Ward represents no dynamic quantity: {control_diagnostics:?}"
+        );
+    }
+
+    /// CR 702.41: an Affinity keyword's scaling lives in its REMINDER text ("This
+    /// spell costs {1} less to cast for each artifact you control"), which
+    /// `strip_parens` removes before the detectors run — so an Affinity keyword in this
+    /// unit can never be the source of a raised "for each " occurrence, and no
+    /// whole-unit Affinity exemption exists (see `detect_dynamic_qty`). A sibling
+    /// clause whose "for each " is unrepresented must therefore still warn; the
+    /// removed presence-check leg suppressed it.
+    #[test]
+    fn dynamic_qty_still_warns_for_a_sibling_marker_beside_affinity() {
+        use crate::types::ability::{TypeFilter, TypedFilter};
+
+        let parsed = parsed_with_keywords(vec![Keyword::Affinity(TypedFilter::new(
+            TypeFilter::Artifact,
+        ))]);
+        let evidence = UnitEvidence::of(&parsed);
+        let cleaned = "affinity for artifacts. when this creature enters, create a treasure \
+                       token for each artifact you control.";
+        // Reach guard: the marker is raised and the Affinity keyword is visible to the
+        // unit's evidence, so a warning here cannot be vacuous.
+        assert!(
+            !super::active_dynamic_markers(cleaned, &evidence).is_empty(),
+            "fixture must raise the dynamic marker"
+        );
+        assert!(
+            evidence
+                .keywords()
+                .iter()
+                .any(|keyword| matches!(keyword, Keyword::Affinity(_))),
+            "fixture must expose the Affinity keyword: {:?}",
+            evidence.keywords()
+        );
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(cleaned, cleaned, &parsed, &evidence, &mut diagnostics);
+        assert_eq!(
+            dynamic_qty_descriptions(&diagnostics).len(),
+            1,
+            "a sibling unrepresented \"for each \" clause beside an Affinity keyword must \
+             warn: {diagnostics:?}"
+        );
+    }
+
+    /// One `ChooseFromZone { up_to: true, constraint: DistinctCardTypes { .. } }`
+    /// carrier — the parsed representation of the Atraxa per-card-type pick.
+    fn distinct_card_types_choose() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseFromZone {
+                count: 8,
+                zone: Zone::Library,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::Controller,
+                filter: None,
+                chooser: Chooser::Controller.into(),
+                candidate_source: ZoneChoiceCandidateSource::Legacy,
+                reciprocal_role: None,
+                up_to: true,
+                selection: CardSelectionMode::Chosen,
+                constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes {
+                    categories: vec![CoreType::Artifact, CoreType::Creature],
+                }),
+            },
+        )
+    }
+
+    /// CR 205.2 + CR 608.2c/d: a single `DistinctCardTypes` `ChooseFromZone`
+    /// constraint consumes exactly ONE raised "for each " occurrence. The
+    /// direct-probe counterpart of the Atraxa parse test: the evidence tree is
+    /// identical in shape to `dynamic_qty_still_warns_for_a_sibling_marker_beside_affinity`
+    /// (one typed carrier, one sibling clause), so only the OCCURRENCE COUNT can
+    /// distinguish "the constraint represents this iteration" from "the
+    /// constraint is merely somewhere on the unit".
+    #[test]
+    fn dynamic_qty_still_warns_for_a_sibling_for_each_beside_a_card_type_constraint() {
+        let parsed = parsed_with_ability(distinct_card_types_choose());
+        let evidence = UnitEvidence::of(&parsed);
+        let cleaned = "for each card type, you may put a card of that type from among the \
+                       revealed cards into your hand. create a treasure token for each artifact \
+                       you control.";
+        // Reach guard: the root-aware count sees the constraint carrier and the
+        // fixture raises the one marker kind this leg can discharge.
+        assert_eq!(
+            super::distinct_card_type_constraint_count(&parsed),
+            1,
+            "fixture must expose exactly one represented constraint"
+        );
+        assert_eq!(
+            super::active_dynamic_markers(cleaned, &evidence),
+            vec!["for each "],
+            "fixture must raise exactly the card-type marker"
+        );
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(cleaned, cleaned, &parsed, &evidence, &mut diagnostics);
+        assert_eq!(
+            dynamic_qty_descriptions(&diagnostics).len(),
+            1,
+            "one represented constraint discharges one \"for each \" occurrence; the sibling \
+             clause must still warn: {diagnostics:?}"
+        );
+    }
+
+    /// CR 113.2c + CR 603.1b: one printed triggered ability with several trigger
+    /// conditions parses to one trigger root per condition, each carrying the
+    /// ability's whole instruction list — so one `DistinctCardTypes` constraint
+    /// cloned across the split roots is ONE represented card-type iteration,
+    /// counted as the max over the unit's trigger roots, never their sum. A
+    /// whole-unit evidence count would count it once per root and could discharge
+    /// a real sibling gap.
+    #[test]
+    fn dynamic_qty_split_card_type_constraint_roots_count_once() {
+        use crate::types::ability::TriggerDefinition;
+
+        let mut parsed = no_activation_limit_abilities();
+        parsed.triggers = vec![
+            TriggerDefinition::new(TriggerMode::ChangesZone).execute(distinct_card_types_choose()),
+            TriggerDefinition::new(TriggerMode::BecomeMonstrous)
+                .execute(distinct_card_types_choose()),
+        ];
+        assert_eq!(
+            super::distinct_card_type_constraint_count(&parsed),
+            1,
+            "two split roots of one ability count once"
+        );
+        let evidence = UnitEvidence::of(&parsed);
+        let single = "for each card type, you may put a card of that type from among the \
+                      revealed cards into your hand.";
+        let sibling = "for each card type, you may put a card of that type from among the \
+                       revealed cards into your hand. create a treasure token for each artifact \
+                       you control.";
+        // Reach guard: with the single-occurrence Atraxa clause alone the same
+        // two-root fixture suppresses — the roots are walked (a skipped walk would
+        // leave `represented = 0 < raised = 1`), and only the occurrence count
+        // keeps the sibling clause reported.
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(single, single, &parsed, &evidence, &mut diagnostics);
+        assert_eq!(
+            dynamic_qty_descriptions(&diagnostics).len(),
+            0,
+            "the split roots represent the one raised \"for each \": {diagnostics:?}"
+        );
+        // Two raised "for each " occurrences against one represented iteration
+        // (max over the split roots, never their sum): exactly the unrepresented
+        // sibling still warns.
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(sibling, sibling, &parsed, &evidence, &mut diagnostics);
+        assert_eq!(
+            dynamic_qty_descriptions(&diagnostics).len(),
+            1,
+            "one represented iteration must not discharge the unrepresented sibling \
+             \"for each \": {diagnostics:?}"
+        );
+    }
+
+    /// CR 205.2 + CR 608.2c/d: Atraxa, Grand Unifier's "For each card type, you
+    /// may put a card of that type from among the revealed cards into your hand"
+    /// raises exactly one "for each " occurrence, and the parsed
+    /// `ChooseFromZone { up_to: true, constraint: DistinctCardTypes { .. } }`
+    /// represents that iteration — so `DynamicQty` must not fire, even though the
+    /// chosen count lives in `count: u32` rather than a `QuantityExpr`.
+    ///
+    /// Every negative is preceded by the positive reach guard on the same
+    /// fixture: the verbatim Oracle text parses with zero `Effect::Unimplemented`
+    /// in the ETB unit and the named `DistinctCardTypes` constraint present.
+    #[test]
+    fn dynamic_qty_distinct_card_types_constraint_consumes_one_for_each() {
+        let parsed = parse_named(
+            ATRAXA_GRAND_UNIFIER_ORACLE,
+            "Atraxa, Grand Unifier",
+            &["Creature"],
+        );
+        let etb = parsed
+            .triggers
+            .iter()
+            .find(|trigger| matches!(trigger.mode, TriggerMode::ChangesZone))
+            .expect("Atraxa's ETB trigger must parse");
+        let execute = etb
+            .execute
+            .as_deref()
+            .expect("ETB trigger must have execute");
+        assert!(
+            !def_tree_has_unimplemented(execute),
+            "reach: the ETB unit parses with zero Unimplemented: {parsed:#?}"
+        );
+        let evidence = UnitEvidence::of(&parsed);
+        assert_eq!(
+            super::distinct_card_type_constraint_count(&parsed),
+            1,
+            "reach: exactly one represented card-type constraint must be present"
+        );
+        assert!(
+            evidence
+                .any_effect(|effect| matches!(effect, Effect::ChooseFromZone { up_to: true, .. })),
+            "reach: the choosing-zero decline carrier must be present"
+        );
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(
+            "for each card type, you may put a card of that type from among the revealed \
+             cards into your hand. put the rest on the bottom of your library in a random \
+             order.",
+            ATRAXA_GRAND_UNIFIER_ORACLE,
+            &parsed,
+            &evidence,
+            &mut diagnostics,
+        );
+        assert_eq!(
+            dynamic_qty_descriptions(&diagnostics).len(),
+            0,
+            "the DistinctCardTypes constraint IS the per-card-type iteration: {diagnostics:?}"
+        );
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    /// A minimal `ParsedAbilities` carrying exactly the given extracted keywords and
+    /// no other definitions — the direct-probe fixture for the Ward evidence leg.
+    /// Field list taken verbatim from `ParsedAbilities` in
+    /// `crates/engine/src/parser/oracle.rs`.
+    fn parsed_with_keywords(keywords: Vec<Keyword>) -> crate::parser::oracle::ParsedAbilities {
+        crate::parser::oracle::ParsedAbilities {
+            abilities: Vec::new(),
+            triggers: Vec::new(),
+            statics: Vec::new(),
+            replacements: Vec::new(),
+            extracted_keywords: keywords,
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: Vec::new(),
+        }
+    }
+
+    /// The `DynamicQty` `SwallowedClause` descriptions in `diagnostics`, in order.
+    fn dynamic_qty_descriptions(diagnostics: &[OracleDiagnostic]) -> Vec<&str> {
+        diagnostics
+            .iter()
+            .filter_map(|warning| match warning {
+                OracleDiagnostic::SwallowedClause {
+                    detector,
+                    description,
+                    ..
+                } if detector == "DynamicQty" => Some(description.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// How many `Optional_YouMay` `SwallowedClause` warnings `diagnostics` carries.
+    fn optional_you_may_count(diagnostics: &[OracleDiagnostic]) -> usize {
+        diagnostics
+            .iter()
+            .filter(|warning| {
+                matches!(
+                    warning,
+                    OracleDiagnostic::SwallowedClause { detector, .. }
+                        if detector == "Optional_YouMay"
+                )
+            })
+            .count()
+    }
+
+    /// Does any `Effect` reachable from `def`'s tree satisfy `pred`?
+    ///
+    /// Recursive over the def tree AND into the two nested-def carriers a reach
+    /// guard must be able to name: `Effect::Mana.grants[].ability` (a CR 603.3
+    /// spend trigger that resolves later, so the shared visitor deliberately does
+    /// not descend for conjure purposes) and `Effect::RollDie.results[].effect`
+    /// (a CR 706.3a result-branch striation, not a `sub_ability`). Reach guard only — never
+    /// a parser or resolver authority.
+    fn def_tree_has_effect(def: &AbilityDefinition, pred: &impl Fn(&Effect) -> bool) -> bool {
+        if pred(&def.effect) {
+            return true;
+        }
+        let nested_def_has_effect = match &*def.effect {
+            Effect::RollDie { results, .. } => results
+                .iter()
+                .any(|branch| def_tree_has_effect(&branch.effect, pred)),
+            // CR 603.3: the spend trigger resolves in a later resolution, so the
+            // shared visitor deliberately does not descend into the grant; a
+            // reach guard must.
+            Effect::Mana { grants, .. } => grants.iter().any(|grant| match grant {
+                ManaSpellGrant::TriggerOnSpend { ability, .. } => {
+                    def_tree_has_effect(ability, pred)
+                }
+                _ => false,
+            }),
+            _ => false,
+        };
+        if nested_def_has_effect {
+            return true;
+        }
+        def.sub_ability
+            .as_deref()
+            .is_some_and(|sub| def_tree_has_effect(sub, pred))
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(|els| def_tree_has_effect(els, pred))
+            || def
+                .mode_abilities
+                .iter()
+                .any(|mode| def_tree_has_effect(mode, pred))
+    }
+
+    /// Does any def tree in the unit (abilities, triggers, replacements) satisfy
+    /// `pred` anywhere? The unit-level reach guard.
+    fn unit_has_effect(
+        parsed: &crate::parser::oracle::ParsedAbilities,
+        pred: &impl Fn(&Effect) -> bool,
+    ) -> bool {
+        parsed
+            .abilities
+            .iter()
+            .any(|def| def_tree_has_effect(def, pred))
+            || parsed.triggers.iter().any(|trigger| {
+                trigger
+                    .execute
+                    .as_deref()
+                    .is_some_and(|execute| def_tree_has_effect(execute, pred))
+            })
+            || parsed.replacements.iter().any(|replacement| {
+                replacement
+                    .execute
+                    .as_deref()
+                    .is_some_and(|execute| def_tree_has_effect(execute, pred))
+            })
+    }
+
+    /// Reach-guard predicate for the CR 603.3 mana-spend grant: a `Mana` effect
+    /// whose grants carry a `TriggerOnSpend` ability that itself reaches
+    /// `CopySpell { retarget: MayChooseNewTargets }`.
+    fn mana_grant_with_copy_retarget(effect: &Effect) -> bool {
+        let Effect::Mana { grants, .. } = effect else {
+            return false;
+        };
+        grants.iter().any(|grant| match grant {
+            ManaSpellGrant::TriggerOnSpend { ability, .. } => {
+                def_tree_has_effect(ability, &|inner| {
+                    matches!(
+                        inner,
+                        Effect::CopySpell {
+                            retarget: CopyRetargetPermission::MayChooseNewTargets,
+                            ..
+                        }
+                    )
+                })
+            }
+            _ => false,
+        })
+    }
+
+    /// A minimal `ParsedAbilities` carrying exactly the given ability and no
+    /// other definitions — the direct-probe fixture for the hostile Optional_YouMay
+    /// siblings. Field list taken verbatim from `ParsedAbilities` in
+    /// `crates/engine/src/parser/oracle.rs`.
+    fn parsed_with_ability(def: AbilityDefinition) -> crate::parser::oracle::ParsedAbilities {
+        crate::parser::oracle::ParsedAbilities {
+            abilities: vec![def],
+            triggers: Vec::new(),
+            statics: Vec::new(),
+            replacements: Vec::new(),
+            extracted_keywords: Vec::new(),
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: Vec::new(),
+        }
+    }
+
+    /// A minimal `ParsedAbilities` carrying exactly the given statics and no
+    /// other definitions — the direct-probe fixture for the hostile
+    /// `GrantsExtraVillainousChoice` sibling.
+    fn parsed_with_statics(
+        statics: Vec<StaticDefinition>,
+    ) -> crate::parser::oracle::ParsedAbilities {
+        crate::parser::oracle::ParsedAbilities {
+            abilities: Vec::new(),
+            triggers: Vec::new(),
+            statics,
+            replacements: Vec::new(),
+            extracted_keywords: Vec::new(),
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: Vec::new(),
+        }
+    }
+
+    /// CR 702.21a + CR 608.2h + CR 113.7a: a Compound Ward cost whose components
+    /// include `PayLifeEqualToPower` ("Ward—{2}, Pay life equal to ~'s power", the
+    /// comma-separated form `oracle_keyword::parse_ward_cost` lowers) is NOT
+    /// exempted. `ward_cost_to_ability_cost` charges only `costs.first()` of a
+    /// compound, so for this exact shape the engine asks for {2} and drops the life
+    /// payment: the dynamic quantity is not represented at runtime, and suppressing
+    /// the warning would hide the drop. The compound spelling therefore stays
+    /// diagnosed (conservative-red) until every component is charged. Reverting
+    /// `ward_power_life_payments` to recurse into `Compound` fails this test.
+    #[test]
+    fn dynamic_qty_flags_compound_ward_with_power_life_payment() {
+        let compound = parsed_with_keywords(vec![Keyword::Ward(WardCost::Compound(vec![
+            WardCost::Mana(ManaCost::generic(2)),
+            WardCost::PayLifeEqualToPower,
+        ]))]);
+        let evidence = UnitEvidence::of(&compound);
+
+        let cleaned = "ward\u{2014}{2}, pay life equal to ~'s power.";
+        // Reach guards: the fixture raises the " equal to " marker, and the compound
+        // carrier with its dynamic component is visible to the evidence probe — so
+        // the warning below is a verdict on the carrier, not a fixture that never
+        // engaged.
+        assert!(
+            !super::active_dynamic_markers(cleaned, &evidence).is_empty(),
+            "fixture must raise the dynamic marker"
+        );
+        assert!(
+            evidence.keywords().iter().any(|keyword| matches!(
+                keyword,
+                Keyword::Ward(WardCost::Compound(parts))
+                    if parts.contains(&WardCost::PayLifeEqualToPower)
+            )),
+            "fixture must expose the compound carrier with its dynamic component: {:?}",
+            evidence.keywords()
+        );
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(cleaned, cleaned, &compound, &evidence, &mut diagnostics);
+        assert_eq!(
+            dynamic_qty_descriptions(&diagnostics).len(),
+            1,
+            "a compound Ward whose dynamic component is not charged must stay flagged: \
+             {diagnostics:?}"
+        );
+
+        // Control: the BARE spelling of the same payment IS fully charged, so the
+        // same text is silent — proving the warning above is about the compound
+        // carrier, not about the text or the marker gate.
+        let bare = UnitEvidence::of(&parsed_with_keywords(vec![Keyword::Ward(
+            WardCost::PayLifeEqualToPower,
+        )]));
+        let mut bare_diagnostics = Vec::new();
+        super::detect_dynamic_qty(
+            cleaned,
+            cleaned,
+            &parsed_with_keywords(vec![Keyword::Ward(WardCost::PayLifeEqualToPower)]),
+            &bare,
+            &mut bare_diagnostics,
+        );
+        assert!(
+            dynamic_qty_descriptions(&bare_diagnostics).is_empty(),
+            "the bare spelling must stay silent: {bare_diagnostics:?}"
+        );
+    }
+
+    /// CR 702.21a + CR 608.2h + CR 113.7a: each represented Ward power-life payment
+    /// discharges exactly ONE raised " equal to " occurrence — the consumption
+    /// contract `dynamic_markers_are_all_recorded_unrecognized` documents, applied to
+    /// the Ward carrier. A unit carrying the Ward clause PLUS a second, unrepresented
+    /// dynamic clause must still warn; the whole-unit boolean this leg replaces
+    /// suppressed both, and the second clause's dropped quantity was reported by
+    /// nothing at all.
+    #[test]
+    fn dynamic_qty_still_warns_for_a_second_unrepresented_marker_in_a_ward_unit() {
+        // Evidence: exactly ONE represented Ward power-life payment and no other
+        // carrier (no abilities/statics/replacements at all).
+        let parsed = parsed_with_keywords(vec![Keyword::Ward(WardCost::PayLifeEqualToPower)]);
+        let evidence = UnitEvidence::of(&parsed);
+
+        // Positive reach/control: the ward-only text stays silent with this
+        // evidence — one occurrence, one payment.
+        let ward_only = "ward\u{2014}pay life equal to ~'s power.";
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(ward_only, ward_only, &parsed, &evidence, &mut diagnostics);
+        assert!(
+            dynamic_qty_descriptions(&diagnostics).is_empty(),
+            "the ward-only text must stay silent: {diagnostics:?}"
+        );
+
+        // A second, unrepresented " equal to " clause: one payment cannot discharge
+        // two occurrences. (The clause carries only the " equal to " marker, so the
+        // raised set is exactly [" equal to "] and the occurrence count is what
+        // refuses.)
+        let second_equal_to = "ward\u{2014}pay life equal to ~'s power. whenever ~ attacks, it \
+                               deals damage equal to its power to any target.";
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(
+            second_equal_to,
+            second_equal_to,
+            &parsed,
+            &evidence,
+            &mut diagnostics,
+        );
+        assert_eq!(
+            dynamic_qty_descriptions(&diagnostics).len(),
+            1,
+            "a second unrepresented \" equal to \" clause must warn: {diagnostics:?}"
+        );
+
+        // A second clause that also raises "the number of " — the raised marker set
+        // is no longer exactly [" equal to "], so the Ward leg cannot discharge it.
+        let second_number_of = "ward\u{2014}pay life equal to ~'s power. whenever ~ attacks, it \
+                                deals damage equal to the number of cards in your hand to any target.";
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(
+            second_number_of,
+            second_number_of,
+            &parsed,
+            &evidence,
+            &mut diagnostics,
+        );
+        assert_eq!(
+            dynamic_qty_descriptions(&diagnostics).len(),
+            1,
+            "a second \"the number of \" clause must warn: {diagnostics:?}"
+        );
+
+        // A second clause with a different marker ("for each ") also warns: the
+        // raised marker set is no longer exactly [" equal to "].
+        let second_for_each = "ward\u{2014}pay life equal to ~'s power. put a soul counter on ~ \
+                               for each player who lost life this turn.";
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(
+            second_for_each,
+            second_for_each,
+            &parsed,
+            &evidence,
+            &mut diagnostics,
+        );
+        assert_eq!(
+            dynamic_qty_descriptions(&diagnostics).len(),
+            1,
+            "a second \"for each \" clause must warn: {diagnostics:?}"
+        );
     }
 
     /// CR 702.143d: Singing Towers of Darillium grants foretell whose cost is
@@ -9206,17 +11782,12 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         assert!(!has_swallowed_detector(&parsed, "Optional_MayHave"));
     }
 
-    /// KNOWN GAP, pinned deliberately — see `condition_as_long_as_accepts_bronze_horse_
-    /// and_champions_helm` for the full explanation of the vacuity this replaces.
-    ///
-    /// Siege Behemoth reports `Optional_MayHave`, `Optional_YouMay` and `DynamicQty` as
-    /// swallowed, and reported all three in the shipped card data long before this
-    /// change (verified against the pre-cutover full-pool export). This test asserted
-    /// the opposite and passed only because its empty MTGJSON keyword list turned the
-    /// "Hexproof" line into an `Effect::Unimplemented`, tripping the card-wide gate that
-    /// silenced every detector on the card.
+    /// Siege Behemoth's per-creature "you may have that creature assign its combat damage
+    /// as though it weren't blocked" is typed (`AssignDamageAsThoughUnblocked` on a gated
+    /// class static), so the optionality detectors no longer report it as swallowed. This
+    /// replaces the former known-gap pin. Reach guard: the typed grant is present.
     #[test]
-    fn optional_may_have_siege_behemoth_reports_known_gap() {
+    fn optional_may_have_siege_behemoth_is_typed() {
         let parsed = parse_named(
             "Hexproof\nAs long as this creature is attacking, for each creature you control, \
              you may have that creature assign its combat damage as though it weren't blocked.",
@@ -9224,11 +11795,24 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             &["Creature"],
         );
         assert!(
-            has_swallowed_detector(&parsed, "Optional_MayHave"),
-            "pre-existing gap: the per-creature 'you may have' optionality is not typed. \
-             Warnings: {:?}",
+            parsed.statics.iter().any(|d| d
+                .modifications
+                .contains(&ContinuousModification::AssignDamageAsThoughUnblocked)),
+            "reach guard: typed grant missing: {:?}",
+            parsed.statics
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Optional_MayHave"),
+            "Warnings: {:?}",
             parsed.parse_warnings
         );
+        for detector in ["Optional_YouMay", "DynamicQty"] {
+            assert!(
+                !has_swallowed_detector(&parsed, detector),
+                "{detector} must not fire: {:?}",
+                parsed.parse_warnings
+            );
+        }
     }
 
     #[test]
@@ -9868,12 +12452,12 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
     /// `Effect::CastFromZone` carrying `mana_spend_permission: Some(AnyTypeOrColor)`
     /// (full-cost graveyard cast with the any-type concession), with the trailing
     /// "exile it instead" rider rebound onto the cast spell as a
-    /// `ChangeZone{Exile, ParentTarget}` sub-ability — NOT degraded to a bare
-    /// `GenericEffect{SpendManaAsAnyColor}` that drops the cast.
+    /// `ChangeZone{Exile, ParentTarget}` sub-ability — NOT the standalone
+    /// concession gap that drops the cast.
     ///
-    /// DISCRIMINATING: reverting the Q1 head parser
-    /// (`try_parse_cast_target_from_graveyard_any_mana`) flips the effect back to
-    /// `GenericEffect{SpendManaAsAnyColor}` (no `CastFromZone`), failing the
+    /// DISCRIMINATING: without the clause splitter's rider cut
+    /// (`starts_mana_spend_rider_conjunct`) nothing claims the sentence and it
+    /// lowers to the standalone concession gap (no `CastFromZone`), failing the
     /// effect-type assertion; reverting Commit 1's rider rebind generalization
     /// binds the exile rider to the triggering source (Quistis), so the
     /// sub-ability target is no longer `ParentTarget`.
@@ -9905,7 +12489,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         } = &*execute.effect
         else {
             panic!(
-                "expected CastFromZone (not degraded GenericEffect), got {:?}",
+                "expected CastFromZone (not the standalone concession gap), got {:?}",
                 execute.effect
             );
         };
@@ -9972,16 +12556,16 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         assert!(!has_swallowed_detector(&parsed, "Condition_If"));
     }
 
-    /// CR 611.2a + CR 108.3 (multiplayer FINDING-4): Tinybones the Pickpocket casts
+    /// CR 400.3 + CR 115.1 (multiplayer FINDING-4): Tinybones the Pickpocket casts
     /// "from that player's graveyard" — the combat-damaged player's. The
     /// `CastFromZone` target MUST carry `Owned{TriggeringPlayer}` so a 3+ player
     /// game restricts the cast to that one player's graveyard, never any
     /// opponent's. Also carries `mana_spend_permission: Some(AnyTypeOrColor)`.
     ///
-    /// DISCRIMINATING: reverting the FINDING-4 owner-add in
-    /// `try_parse_cast_target_from_graveyard_any_mana` drops the
-    /// `Owned{TriggeringPlayer}` property; reverting the Q1 head parser degrades
-    /// the whole clause to `GenericEffect{SpendManaAsAnyColor}` (no CastFromZone).
+    /// DISCRIMINATING: reverting the FINDING-4 owner-add in `try_parse_cast_effect`
+    /// drops the `Owned{TriggeringPlayer}` property; without the clause
+    /// splitter's rider cut (`starts_mana_spend_rider_conjunct`) the whole clause
+    /// lowers to the standalone concession gap (no CastFromZone).
     #[test]
     fn tinybones_cast_from_damaged_player_graveyard_owned_triggering_player_any_mana() {
         use crate::types::ability::{
@@ -10011,7 +12595,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         } = &*execute.effect
         else {
             panic!(
-                "expected CastFromZone (not degraded GenericEffect), got {:?}",
+                "expected CastFromZone (not the standalone concession gap), got {:?}",
                 execute.effect
             );
         };
@@ -10192,7 +12776,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
     /// is present somewhere in it, silently hiding the second, unrelated rider.
     ///
     /// Constructed directly against `detect_replacement` (mirroring the
-    /// `no_activation_limit_evidence` / `repeat_for_without_activation_limit_evidence`
+    /// `no_activation_limit_evidence` / `repeat_for_without_activation_limit_abilities`
     /// direct-`UnitEvidence` pattern above) rather than through `parse_named`: the
     /// real front-end recognizes at most one ability grammar per physical source
     /// line, so two unrelated cast-permission abilities cannot be forced onto one
@@ -10230,6 +12814,8 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: Some(CounterType::Finality),
+            required_cast_keyword: None,
+            pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
         });
         let parsed = crate::parser::oracle::ParsedAbilities {
             abilities: Vec::new(),
@@ -10315,6 +12901,8 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: Some(CounterType::Finality),
+            required_cast_keyword: None,
+            pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
         });
         let parsed = crate::parser::oracle::ParsedAbilities {
             abilities: Vec::new(),
@@ -10840,9 +13428,10 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
     fn dynamic_qty_flags_unbacked_rather_than_once_wording() {
         let cleaned = "creatures you control can forage twice during each of your turns rather \
                        than once.";
-        let evidence = no_activation_limit_evidence();
+        let parsed = no_activation_limit_abilities();
+        let evidence = UnitEvidence::of(&parsed);
         let mut found = Vec::new();
-        super::detect_dynamic_qty(cleaned, cleaned, &evidence, &mut found);
+        super::detect_dynamic_qty(cleaned, cleaned, &parsed, &evidence, &mut found);
         assert!(
             found.iter().any(|d| matches!(
                 d,
@@ -10860,9 +13449,10 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
     fn dynamic_qty_flags_unbacked_rather_than_once_with_repeat_for() {
         let cleaned = "creatures you control can forage twice during each of your turns rather \
                        than once.";
-        let evidence = repeat_for_without_activation_limit_evidence();
+        let parsed = repeat_for_without_activation_limit_abilities();
+        let evidence = UnitEvidence::of(&parsed);
         let mut found = Vec::new();
-        super::detect_dynamic_qty(cleaned, cleaned, &evidence, &mut found);
+        super::detect_dynamic_qty(cleaned, cleaned, &parsed, &evidence, &mut found);
         assert!(
             found.iter().any(|d| matches!(
                 d,
@@ -10871,6 +13461,430 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             "repeat_for must not hide unbacked 'rather than once' wording"
         );
     }
+
+    // ── DynamicQty: co-scoped per-player iteration (CR 608.2c) ──────────
+
+    const VALKI_FULL: &str = "When Valki enters, each opponent reveals their hand. For each opponent, exile a creature card they revealed this way until Valki leaves the battlefield.\n{X}: Choose a creature card exiled with Valki with mana value X. Valki becomes a copy of that card.";
+
+    /// A scoped `RevealHand` that parks a creature-card choice, optionally with a
+    /// co-scoped `ChangeZone { target }` consumer.
+    fn scoped_reveal_choice(
+        reveal_scope: PlayerFilter,
+        consumer: Option<(PlayerFilter, TargetFilter)>,
+    ) -> AbilityDefinition {
+        let mut reveal = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RevealHand {
+                target: TargetFilter::Controller,
+                card_filter: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                count: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                choice_optional: false,
+                reveal: true,
+            },
+        );
+        reveal.player_scope = Some(reveal_scope);
+        if let Some((consumer_scope, target)) = consumer {
+            let mut exile = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            );
+            exile.player_scope = Some(consumer_scope);
+            reveal.sub_ability = Some(Box::new(exile));
+        }
+        reveal
+    }
+
+    fn dynamic_qty_fires(cleaned: &str, abilities: Vec<AbilityDefinition>) -> bool {
+        let mut parsed = no_activation_limit_abilities();
+        parsed.abilities = abilities;
+        dynamic_qty_fires_parsed(cleaned, parsed)
+    }
+
+    /// Run `detect_dynamic_qty` over `cleaned` with `parsed` as the unit's
+    /// scoped roots (abilities, triggers and replacements).
+    fn dynamic_qty_fires_parsed(
+        cleaned: &str,
+        parsed: crate::parser::oracle::ParsedAbilities,
+    ) -> bool {
+        let evidence = UnitEvidence::of(&parsed);
+        let mut found = Vec::new();
+        super::detect_dynamic_qty(cleaned, cleaned, &parsed, &evidence, &mut found);
+        found.iter().any(|d| {
+            matches!(d, OracleDiagnostic::SwallowedClause { detector, .. } if detector == "DynamicQty")
+        })
+    }
+
+    const CO_SCOPED_TEXT: &str = "each opponent reveals their hand. for each opponent, exile a \
+                                  creature card they revealed this way.";
+
+    /// CR 608.2c: Valki's "For each opponent," is bound as a per-opponent
+    /// iteration (co-scoped reveal choice + `ParentTarget` exile), not a count,
+    /// so it is represented and raises no `DynamicQty`.
+    #[test]
+    fn valki_verbatim_co_scoped_iteration_raises_no_dynamic_qty() {
+        let parsed = parse_named(VALKI_FULL, "Valki, God of Lies", &["Creature"]);
+        // Reach-guards: the unit is audited (no Unimplemented skip) and carries
+        // the co-scoped per-opponent shape.
+        assert!(!any_ability_has_unimplemented(&parsed));
+        let etb = parsed.triggers[0].execute.as_deref().expect("Valki ETB");
+        assert_eq!(etb.player_scope, Some(PlayerFilter::Opponent));
+        assert!(!crate::game::effects::reveal_hand::effect_parks_reveal_card_choice(&etb.effect));
+        let choice = etb.sub_ability.as_deref().expect("choice step");
+        assert_eq!(choice.player_scope, Some(PlayerFilter::Opponent));
+        assert!(crate::game::effects::reveal_hand::effect_parks_reveal_card_choice(&choice.effect));
+        let sub = choice.sub_ability.as_deref().expect("exile consumer");
+        assert_eq!(sub.player_scope, Some(PlayerFilter::Opponent));
+        assert_eq!(
+            sub.effect.target_filter(),
+            Some(&TargetFilter::ParentTarget)
+        );
+        // The text itself raises the expectation: with no evidence it fires.
+        assert!(dynamic_qty_fires(
+            "when valki enters, each opponent reveals their hand. for each opponent, exile a \
+             creature card they revealed this way until valki leaves the battlefield.",
+            vec![],
+        ));
+
+        assert!(
+            swallows_for(&parsed, "DynamicQty").is_empty(),
+            "{:#?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// Make an Example's "For each opponent, you choose one of their piles" is
+    /// not a co-scoped reveal iteration; it still raises exactly one `DynamicQty`.
+    #[test]
+    fn make_an_example_verbatim_still_raises_one_dynamic_qty() {
+        let parsed = parse_named(
+            "Each opponent separates the creatures they control into two piles. For each opponent, you choose one of their piles. Each opponent sacrifices the creatures in their chosen pile. (Piles can be empty.)",
+            "Make an Example",
+            &["Sorcery"],
+        );
+        assert_eq!(swallows_for(&parsed, "DynamicQty").len(), 1);
+    }
+
+    /// Breach the Multiverse's "For each player, choose …" has no co-scoped
+    /// referent consumer; it still raises exactly one `DynamicQty`.
+    #[test]
+    fn breach_the_multiverse_verbatim_still_raises_one_dynamic_qty() {
+        let parsed = parse_named(
+            "Each player mills ten cards. For each player, choose a creature or planeswalker card in that player's graveyard. Put those cards onto the battlefield under your control. Then each creature you control becomes a Phyrexian in addition to its other types.",
+            "Breach the Multiverse",
+            &["Sorcery"],
+        );
+        assert_eq!(swallows_for(&parsed, "DynamicQty").len(), 1);
+    }
+
+    /// CR 102.2 + CR 608.2c: Ultimate Magic: Meteor's "for each opponent,
+    /// choose …" is represented by its per-opponent `ChooseFromZone`, so it
+    /// raises no `DynamicQty`.
+    #[test]
+    fn per_opponent_choice_represents_its_for_each() {
+        let parsed = parse_named(
+            "Ultimate Magic: Meteor deals 7 damage to each creature. If this spell was cast from exile, for each opponent, choose an artifact or land that player controls. Destroy the chosen permanents.",
+            "Ultimate Magic: Meteor",
+            &["Sorcery"],
+        );
+        let swallows = swallows_for(&parsed, "DynamicQty");
+        assert!(swallows.is_empty(), "{swallows:?}");
+        // Reach: the parse the detector saw is the full per-opponent chain, not
+        // a gap the card-wide `Unimplemented` guard would have excused.
+        assert_eq!(
+            crate::parser::swallow_check::root_aware_count(
+                &parsed,
+                crate::parser::swallow_check::def_tree_per_opponent_choice_count,
+            ),
+            1,
+            "exactly one ChooseFromZone {{ Each(Opponents) }}: {:#?}",
+            parsed.abilities
+        );
+        let mut unimplemented = false;
+        for def in &parsed.abilities {
+            let _ = crate::types::ability_visit::visit_ability_def(def, &mut |effect| {
+                if matches!(effect, Effect::Unimplemented { .. }) {
+                    unimplemented = true;
+                }
+                std::ops::ControlFlow::<()>::Continue(())
+            });
+        }
+        assert!(!unimplemented, "{:#?}", parsed.abilities);
+    }
+
+    /// Occurrence-counted: one per-opponent choice discharges one raised
+    /// "for each opponent, choose", and a "for each " that opens anything else
+    /// is not discharged at all.
+    #[test]
+    fn per_opponent_choice_does_not_discharge_a_second_for_each() {
+        let one_choice = parse_named(
+            "For each opponent, choose a creature that player controls. Destroy the chosen permanents.",
+            "Probe",
+            &["Sorcery"],
+        );
+        let markers = ["for each "];
+        assert!(
+            crate::parser::swallow_check::per_opponent_choices_cover_all_for_each_markers(
+                "for each opponent, choose a creature that player controls.",
+                &markers,
+                &one_choice,
+            ),
+            "reach: one raised occurrence, one represented choice"
+        );
+        assert!(
+            !crate::parser::swallow_check::per_opponent_choices_cover_all_for_each_markers(
+                "for each opponent, choose a creature that player controls. for each opponent, choose a land that player controls.",
+                &markers,
+                &one_choice,
+            ),
+            "two raised occurrences, one represented choice"
+        );
+        assert!(
+            !crate::parser::swallow_check::per_opponent_choices_cover_all_for_each_markers(
+                "for each opponent, choose a creature that player controls. you gain 1 life for each creature you control.",
+                &markers,
+                &one_choice,
+            ),
+            "a for each that opens something else is not this carrier's"
+        );
+    }
+    #[test]
+    fn co_scoped_parent_target_iteration_is_represented() {
+        assert!(
+            dynamic_qty_fires(CO_SCOPED_TEXT, vec![]),
+            "reach: the text raises it"
+        );
+        assert!(!dynamic_qty_fires(
+            CO_SCOPED_TEXT,
+            vec![scoped_reveal_choice(
+                PlayerFilter::Opponent,
+                Some((PlayerFilter::Opponent, TargetFilter::ParentTarget)),
+            )],
+        ));
+    }
+
+    /// "Body absent" twin: a scoped reveal with no co-scoped
+    /// consumer does not represent the iteration.
+    #[test]
+    fn single_scoped_def_without_co_scoped_consumer_still_warns() {
+        assert!(!dynamic_qty_fires(
+            CO_SCOPED_TEXT,
+            vec![scoped_reveal_choice(
+                PlayerFilter::Opponent,
+                Some((PlayerFilter::Opponent, TargetFilter::ParentTarget)),
+            )],
+        ));
+        assert!(dynamic_qty_fires(
+            CO_SCOPED_TEXT,
+            vec![scoped_reveal_choice(PlayerFilter::Opponent, None)],
+        ));
+    }
+
+    /// The iteration's population must be the one the text names.
+    #[test]
+    fn co_scoped_iteration_population_mismatch_still_warns() {
+        let pair = || {
+            vec![scoped_reveal_choice(
+                PlayerFilter::Opponent,
+                Some((PlayerFilter::Opponent, TargetFilter::ParentTarget)),
+            )]
+        };
+        assert!(!dynamic_qty_fires(CO_SCOPED_TEXT, pair()));
+        assert!(dynamic_qty_fires(
+            "each opponent reveals their hand. for each player, exile a creature card they \
+             revealed this way.",
+            pair(),
+        ));
+    }
+
+    /// Another dynamic marker on the line is not discharged by the iteration.
+    #[test]
+    fn co_scoped_iteration_with_extra_marker_still_warns() {
+        let pair = || {
+            vec![scoped_reveal_choice(
+                PlayerFilter::Opponent,
+                Some((PlayerFilter::Opponent, TargetFilter::ParentTarget)),
+            )]
+        };
+        assert!(!dynamic_qty_fires(CO_SCOPED_TEXT, pair()));
+        assert!(dynamic_qty_fires(
+            "each opponent reveals their hand. for each opponent, exile a creature card they \
+             revealed this way with mana value equal to its power.",
+            pair(),
+        ));
+    }
+
+    /// One line, two same-population "For each opponent," markers.
+    const TWO_OPP_TEXT: &str = "each opponent reveals their hand. for each opponent, exile a \
+                                creature card they revealed this way. for each opponent, exile a \
+                                creature card they revealed this way.";
+
+    /// One line, one "For each opponent," and one "For each player," marker.
+    const MIXED_TEXT: &str = "each opponent reveals their hand. for each opponent, exile a \
+                              creature card they revealed this way. for each player, exile a \
+                              creature card they revealed this way.";
+
+    /// One co-scoped per-player iteration of `pop` (introducer + `ParentTarget`
+    /// consumer).
+    fn pair(pop: PlayerFilter) -> AbilityDefinition {
+        scoped_reveal_choice(pop.clone(), Some((pop, TargetFilter::ParentTarget)))
+    }
+
+    /// Two chained co-scoped iterations of `pop` in one tree: the second pair
+    /// hangs off the first pair's consumer.
+    fn chain(pop: PlayerFilter) -> AbilityDefinition {
+        let mut p1 = pair(pop.clone());
+        p1.sub_ability.as_mut().expect("consumer").sub_ability = Some(Box::new(pair(pop)));
+        p1
+    }
+
+    /// CR 608.2c: two printed same-population iterations on one line need two
+    /// distinct parsed iterations; one parsed iteration leaves the second
+    /// printed clause reported.
+    #[test]
+    fn co_scoped_iteration_two_same_population_markers_one_iteration_still_warns() {
+        assert!(
+            dynamic_qty_fires(TWO_OPP_TEXT, vec![]),
+            "reach: the text raises it"
+        );
+        assert!(
+            !dynamic_qty_fires(
+                TWO_OPP_TEXT,
+                vec![pair(PlayerFilter::Opponent), pair(PlayerFilter::Opponent)],
+            ),
+            "two distinct iterations discharge two markers"
+        );
+        assert!(
+            dynamic_qty_fires(TWO_OPP_TEXT, vec![pair(PlayerFilter::Opponent)]),
+            "one iteration must not discharge two printed markers"
+        );
+    }
+
+    /// The count continues past a matched pair: chained iterations each count.
+    #[test]
+    fn co_scoped_iteration_chained_pairs_each_count() {
+        assert!(!dynamic_qty_fires(
+            TWO_OPP_TEXT,
+            vec![chain(PlayerFilter::Opponent)]
+        ));
+        // Negative twin: the inner iteration has no co-scoped consumer.
+        let mut broken = pair(PlayerFilter::Opponent);
+        broken.sub_ability.as_mut().expect("consumer").sub_ability =
+            Some(Box::new(scoped_reveal_choice(PlayerFilter::Opponent, None)));
+        assert!(dynamic_qty_fires(TWO_OPP_TEXT, vec![broken]));
+    }
+
+    /// A consumer that is itself an introducer is spent on one pair and never
+    /// opens a second: head → mid → tail counts one iteration, not two.
+    #[test]
+    fn co_scoped_iteration_shared_node_counts_once() {
+        let shared_chain = || {
+            let mut mid = pair(PlayerFilter::Opponent);
+            if let Effect::RevealHand { target, .. } = &mut *mid.effect {
+                *target = TargetFilter::ParentTarget;
+            }
+            let mut head = scoped_reveal_choice(PlayerFilter::Opponent, None);
+            head.sub_ability = Some(Box::new(mid));
+            head
+        };
+        assert!(
+            !dynamic_qty_fires(CO_SCOPED_TEXT, vec![shared_chain()]),
+            "the chain represents one iteration"
+        );
+        assert!(dynamic_qty_fires(TWO_OPP_TEXT, vec![shared_chain()]));
+    }
+
+    /// Mixed populations are counted per population, never pooled.
+    #[test]
+    fn co_scoped_iteration_mixed_populations_count_per_population() {
+        assert!(!dynamic_qty_fires(
+            MIXED_TEXT,
+            vec![pair(PlayerFilter::Opponent), pair(PlayerFilter::All)],
+        ));
+        assert!(dynamic_qty_fires(
+            MIXED_TEXT,
+            vec![pair(PlayerFilter::Opponent)]
+        ));
+        assert!(
+            dynamic_qty_fires(
+                MIXED_TEXT,
+                vec![pair(PlayerFilter::Opponent), pair(PlayerFilter::Opponent)],
+            ),
+            "two Opponent iterations must not discharge the Player marker"
+        );
+    }
+
+    /// CR 113.2c + CR 603.1b / CR 614.1c / CR 614.1e: one printed ability split
+    /// into several trigger or replacement roots counts once (the per-category
+    /// max), whether the split roots are equal or divergent.
+    #[test]
+    fn co_scoped_iteration_split_trigger_and_replacement_roots_count_once() {
+        use crate::types::ability::{ReplacementDefinition, TriggerDefinition};
+        use crate::types::replacements::ReplacementEvent;
+
+        // (a) Identical trigger clones.
+        let mut parsed = no_activation_limit_abilities();
+        parsed.triggers = vec![
+            TriggerDefinition::new(TriggerMode::ChangesZone).execute(pair(PlayerFilter::Opponent)),
+            TriggerDefinition::new(TriggerMode::BecomeMonstrous)
+                .execute(pair(PlayerFilter::Opponent)),
+        ];
+        assert!(
+            !dynamic_qty_fires_parsed(CO_SCOPED_TEXT, parsed.clone()),
+            "reach: trigger roots are walked"
+        );
+        assert!(dynamic_qty_fires_parsed(TWO_OPP_TEXT, parsed));
+
+        // (b) Identical replacement clones.
+        let mut parsed = no_activation_limit_abilities();
+        parsed.replacements = vec![
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .execute(pair(PlayerFilter::Opponent)),
+            ReplacementDefinition::new(ReplacementEvent::TurnFaceUp)
+                .execute(pair(PlayerFilter::Opponent)),
+        ];
+        assert!(
+            !dynamic_qty_fires_parsed(CO_SCOPED_TEXT, parsed.clone()),
+            "reach: replacement roots are walked"
+        );
+        assert!(dynamic_qty_fires_parsed(TWO_OPP_TEXT, parsed));
+
+        // (c) Divergent trigger clones (per-condition re-parse).
+        let mut second = pair(PlayerFilter::Opponent);
+        second.description = Some("second".into());
+        let mut parsed = no_activation_limit_abilities();
+        parsed.triggers = vec![
+            TriggerDefinition::new(TriggerMode::ChangesZone).execute(pair(PlayerFilter::Opponent)),
+            TriggerDefinition::new(TriggerMode::BecomeMonstrous).execute(second),
+        ];
+        assert!(
+            !dynamic_qty_fires_parsed(CO_SCOPED_TEXT, parsed.clone()),
+            "reach: divergent trigger roots are walked"
+        );
+        assert!(dynamic_qty_fires_parsed(TWO_OPP_TEXT, parsed));
+
+        // (d) One trigger root holding two chained iterations discharges two markers.
+        let mut parsed = no_activation_limit_abilities();
+        parsed.triggers =
+            vec![TriggerDefinition::new(TriggerMode::ChangesZone)
+                .execute(chain(PlayerFilter::Opponent))];
+        assert!(!dynamic_qty_fires_parsed(TWO_OPP_TEXT, parsed));
+    }
+
     // ── Detector P: DamageSubjectConjunction ────────────────────────────
 
     /// Run detector P over one line of Oracle text plus the AST that text parsed
@@ -11215,6 +14229,8 @@ mod detect_condition_if_replacement_exemption_tests {
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: Some(CounterType::Finality),
+            required_cast_keyword: None,
+            pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
         });
         let parsed = crate::parser::oracle::ParsedAbilities {
             abilities: Vec::new(),
@@ -11286,7 +14302,7 @@ mod detect_condition_if_replacement_exemption_tests {
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
             alt_ability_cost: Some(AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 0 },
             }),
@@ -11364,7 +14380,7 @@ mod detect_condition_if_replacement_exemption_tests {
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
             alt_ability_cost: Some(AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 0 },
             }),

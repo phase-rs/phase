@@ -85,6 +85,7 @@ fn add_free_exile_spell(runner: &mut GameRunner, mana_value: u32) -> ObjectId {
             enters_with_counter: None,
             enters_with_modifications: Vec::new(),
             mana_spend_permission: None,
+            cast_cost_modifier: None,
         });
     id
 }

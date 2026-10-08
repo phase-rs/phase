@@ -1090,8 +1090,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, ChoiceValue, DevotionColors, QuantityExpr,
-        QuantityRef, TargetFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, ChoiceValue, ControllerRef, DevotionColors,
+        QuantityExpr, QuantityRef, TargetFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -1404,7 +1404,7 @@ mod tests {
     /// controller's.
     #[test]
     fn context_ref_recipient_with_real_count_source_reads_the_count_slot() {
-        use crate::types::ability::{ManaProduction, ManaTargetRole, ZoneRef};
+        use crate::types::ability::{ControllerRef, ManaProduction, ManaTargetRole, ZoneRef};
 
         let mut state = GameState::new_two_player(42);
         let source = create_object(
@@ -1435,6 +1435,8 @@ mod tests {
                     count: QuantityExpr::Ref {
                         qty: QuantityRef::TargetZoneCardCount {
                             zone: ZoneRef::Hand,
+                            scope: ControllerRef::TargetOpponent,
+                            binding: crate::types::ability::CountBinding::Explicit,
                         },
                     },
                 },
@@ -1562,6 +1564,8 @@ mod tests {
             count: QuantityExpr::Ref {
                 qty: QuantityRef::TargetZoneCardCount {
                     zone: ZoneRef::Hand,
+                    scope: ControllerRef::TargetPlayer,
+                    binding: crate::types::ability::CountBinding::Explicit,
                 },
             },
             color_options: vec![ManaColor::Blue],
@@ -3043,6 +3047,106 @@ mod tests {
         )
         .unwrap();
         assert_eq!(state.players[0].mana_pool.total(), 0);
+    }
+
+    /// Builds a two-player Commander board for issue #9525: P0 (the surveyor)
+    /// has a black/red commander, P1 has a mono-blue commander and controls a
+    /// Command Tower. The commanders deliberately share no color, so a survey
+    /// that reads the wrong player's commander produces visibly wrong mana.
+    fn commander_board_with_opponent_command_tower() -> GameState {
+        let mut state = GameState::new_two_player(42);
+
+        for (card_id, owner, name, colors) in [
+            (
+                CardId(501),
+                PlayerId(0),
+                "Rakdos, Lord of Riots",
+                vec![ManaColor::Black, ManaColor::Red],
+            ),
+            (
+                CardId(502),
+                PlayerId(1),
+                "Talrand, Sky Summoner",
+                vec![ManaColor::Blue],
+            ),
+        ] {
+            let commander =
+                create_object(&mut state, card_id, owner, name.to_string(), Zone::Command);
+            let obj = state.objects.get_mut(&commander).unwrap();
+            obj.is_commander = true;
+            obj.color = colors;
+        }
+
+        let tower = create_object(
+            &mut state,
+            CardId(503),
+            PlayerId(1),
+            "Command Tower".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&tower).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::AnyInCommandersColorIdentity {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+
+        state
+    }
+
+    /// CR 106.7 + CR 109.5 (issue #9525): Fellwar Stone / Exotic Orchard asks
+    /// what an opponent's Command Tower could produce. "Your commander" on the
+    /// tower means its controller's commander, so the survey yields only blue.
+    ///
+    /// Revert-failing discriminator: evaluating the tower as the activator reads
+    /// P0's black/red commander, offering {B, R} and producing no blue.
+    #[test]
+    fn opponent_land_colors_reads_command_tower_for_its_controller() {
+        let mut state = commander_board_with_opponent_command_tower();
+
+        let options = crate::game::mana_sources::opponent_land_color_options(&state, PlayerId(0));
+        assert_eq!(options, vec![ManaType::Blue]);
+
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &make_mana_ability(ManaProduction::OpponentLandColors {
+                count: QuantityExpr::Fixed { value: 1 },
+            }),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 1);
+        assert_eq!(state.players[0].mana_pool.total(), 1);
+    }
+
+    /// CR 106.7 + CR 109.5 (issue #9525): the filter-scoped survey
+    /// (`AnyTypeProduceableBy`) evaluates each admitted land for its own
+    /// controller too, so an opponent-scoped filter over a Command Tower
+    /// yields that opponent's commander colors, not the activator's.
+    #[test]
+    fn produceable_types_by_opponent_filter_reads_command_tower_for_its_controller() {
+        let state = commander_board_with_opponent_command_tower();
+
+        let options = crate::game::mana_sources::produceable_mana_types_by_filter(
+            &state,
+            &TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::Opponent)),
+            PlayerId(0),
+            ObjectId(100),
+        );
+        assert_eq!(options, vec![ManaType::Blue]);
     }
 
     #[test]

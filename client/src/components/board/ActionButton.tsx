@@ -68,6 +68,8 @@ export function ActionButton() {
   const clearCombatSelection = useUiStore((s) => s.clearCombatSelection);
   const setCombatMode = useUiStore((s) => s.setCombatMode);
   const setCombatClickHandler = useUiStore((s) => s.setCombatClickHandler);
+  const pendingBlocker = useUiStore((s) => s.pendingBlocker);
+  const setPendingBlocker = useUiStore((s) => s.setPendingBlocker);
 
   const blockerPairs = useMemo(
     () => blockerAssignmentPairs(blockerAssignments),
@@ -92,9 +94,6 @@ export function ActionButton() {
   // Skip-confirm state for No Attacks / No Blocks
   const [skipArmed, setSkipArmed] = useState<"attackers" | "blockers" | null>(null);
   const skipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Pending blocker for two-click assignment
-  const [pendingBlocker, setPendingBlocker] = useState<ObjectId | null>(null);
 
   // Attack target picker visibility (multiplayer)
   const [showTargetPicker, setShowTargetPicker] = useState(false);
@@ -148,7 +147,7 @@ export function ActionButton() {
   const blockerPrompt = waitingFor?.type === "DeclareBlockers" ? waitingFor : null;
   useEffect(() => {
     setPendingBlocker(null);
-  }, [blockerPrompt]);
+  }, [blockerPrompt, setPendingBlocker]);
 
   // Blocker click handler
   const handleBlockerClick = useCallback(
@@ -157,7 +156,7 @@ export function ActionButton() {
       // be assigned to multiple attackers. A second click on an attacker toggles
       // only that pair, using the engine-provided candidate list.
       if (validBlockerIds.includes(objectId) && validBlockTargets[objectId]?.length > 0) {
-        setPendingBlocker((current) => current === objectId ? null : objectId);
+        setPendingBlocker(pendingBlocker === objectId ? null : objectId);
         return;
       }
 
@@ -172,7 +171,7 @@ export function ActionButton() {
         }
       }
     },
-    [pendingBlocker, validBlockerIds, validBlockTargets, combatAttackerIds, assignBlocker, blockerAssignments, removeBlockerAssignment],
+    [pendingBlocker, setPendingBlocker, validBlockerIds, validBlockTargets, combatAttackerIds, assignBlocker, blockerAssignments, removeBlockerAssignment],
   );
 
   useEffect(() => {
@@ -189,7 +188,7 @@ export function ActionButton() {
   // Reset pending blocker on mode change
   useEffect(() => {
     setPendingBlocker(null);
-  }, [mode]);
+  }, [mode, setPendingBlocker]);
 
   // Valid attacker IDs from engine
   const validAttackerIds =

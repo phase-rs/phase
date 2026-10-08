@@ -1,7 +1,7 @@
 use rand::Rng;
 use std::collections::HashSet;
 
-use crate::game::quantity::resolve_quantity;
+use crate::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     DieRollIgnoreRule, DieRollModifier, Effect, EffectError, EffectKind, ResolvedAbility,
@@ -14,7 +14,7 @@ use crate::types::proposed_event::ProposedEvent;
 use crate::types::resolution::{DieRollContinuation, PendingDieRoll, PendingDieRollInstruction};
 
 use super::resolve_ability_chain;
-use crate::game::ability_utils::build_resolved_from_def_with_targets;
+use crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root;
 
 /// CR 706.2: Draw one natural result from the game's seeded RNG — "the number
 /// indicated on the top face of the die before any modifiers."
@@ -26,9 +26,10 @@ use crate::game::ability_utils::build_resolved_from_def_with_targets;
 /// die, decide which are ignored from the NATURALS, and only THEN emit
 /// `DieRolled` — carrying the post-modifier value — for the survivors. An
 /// ignored roll "is considered to have never happened" (CR 706.6), so it must
-/// never reach the event log, which is also what keeps every events-slice reader
-/// correct: the die-roll trigger layer, `game/contraptions.rs`, and
-/// `game/effects/effect.rs`'s CR 611.2d snapshot.
+/// never emit `DieRolled`; only the display-only `DieRollIgnored` mirror reaches
+/// the event log. Rules-facing readers (`game/trigger_matchers.rs`,
+/// `game/contraptions.rs`, and the CR 611.2d snapshot in
+/// `game/effects/effect.rs`) exclude that mirror.
 ///
 /// `sides == 0` names no die and no distribution. `rand`'s `random_range`
 /// asserts on an empty range, so it would panic mid-resolution; callers are
@@ -190,8 +191,7 @@ pub fn resolve(
     // CR 706.1: Resolve how many dice of this kind to roll, in the ability's
     // context; clamp at zero (a 0-count roll is a no-op). Each die is rolled
     // independently with the same sides/modifier/results table.
-    let count =
-        resolve_quantity(state, count_expr, ability.controller, ability.source_id).max(0) as u32;
+    let count = resolve_quantity_with_targets(state, count_expr, ability).max(0) as u32;
 
     let instruction = PendingDieRollInstruction {
         source_id: ability.source_id,
@@ -208,6 +208,11 @@ pub fn resolve(
         // CR 706.3a: an `Effect::RollDie` resolution finishes here, in
         // `execute_roll`.
         continuation: DieRollContinuation::Resolution,
+        // CR 608.2h: propagate so a counter-gated "that many" nested in a
+        // results-table branch still resolves against the live chain-root
+        // target once that branch runs (see
+        // `build_resolved_from_def_with_chain_root`'s doc).
+        chain_root_targets: ability.context.chain_root_targets.clone(),
     };
 
     // CR 706.1 + CR 614.1a: route the instruction through the replacement
@@ -312,6 +317,7 @@ fn execute_roll(
         // (`resume_roll_dice_after_replacement`), so anything arriving here owns
         // the results-table route by construction.
         continuation: _,
+        chain_root_targets,
     } = instruction;
 
     let pending = PendingDieRoll {
@@ -333,6 +339,7 @@ fn execute_roll(
         // CR 706.6: the determined part of the ignore set, held so the resume
         // path drops it alongside whatever the roller picks from the tie.
         forced_ignored: outcome.forced.clone(),
+        chain_root_targets,
     };
 
     // CR 706.6: when the ignored set is fully determined the roller has no
@@ -479,8 +486,8 @@ pub(crate) fn drain_active_die_roll(state: &mut GameState, events: &mut Vec<Game
 /// the no-prompt fast path calls straight into here.
 ///
 /// `ignore_indices` names the rolls that "never happened" (CR 706.6): they emit
-/// no event, receive no modifier, run no results branch, and contribute nothing
-/// to the aggregate.
+/// only a display mirror, receive no modifier, run no results branch, and
+/// contribute nothing to the aggregate.
 ///
 /// Returns `Ok(Some(wf))` when a results branch re-suspended for another
 /// interactive choice, and `Ok(None)` when the whole instruction completed; the
@@ -512,6 +519,7 @@ pub fn resume_after_ignore(
         // argument (the caller unions the roller's picks into it), so the
         // frame's own copy is only a carrier across the suspension.
         forced_ignored: _,
+        chain_root_targets,
     } = pending;
 
     // Clear any resolving keep choice so a re-suspension below is unambiguous
@@ -534,8 +542,15 @@ pub fn resume_after_ignore(
         .skip(next_index.min(results.len()))
     {
         // CR 706.6: an ignored roll is considered never to have happened — no
-        // event, no modifier, no results branch, no aggregate contribution.
+        // modifier, no results branch, no aggregate contribution. It still
+        // emits a DISPLAY-ONLY `DieRollIgnored` mirror (natural value) so the
+        // UI can show what the lowest roll was; no rules consumer may read it.
         if ignore_indices.contains(&index) {
+            events.push(GameEvent::DieRollIgnored {
+                player_id: roller,
+                sides,
+                result: natural,
+            });
             continue;
         }
 
@@ -572,11 +587,12 @@ pub fn resume_after_ignore(
             // sub_abilities, conditions, etc.). `ResolvedAbility::new` with only the
             // effect drops `player_scope`, so "each opponent loses N life" on a d20
             // table (Herald of Hadar) incorrectly hit the controller (#2026).
-            let sub = build_resolved_from_def_with_targets(
+            let sub = build_resolved_from_def_with_targets_and_chain_root(
                 &branch.effect,
                 source_id,
                 controller,
                 targets.clone(),
+                chain_root_targets.clone(),
             );
             resolve_ability_chain(state, &sub, events, 0)?;
 
@@ -613,6 +629,7 @@ pub fn resume_after_ignore(
                     // could silently pick a different tied roll than the one the
                     // roller committed to.
                     forced_ignored: ignore_indices.clone(),
+                    chain_root_targets: chain_root_targets.clone(),
                 };
                 // CR 706.3a: park the owner in the structurally valid slot.
                 // A results-table branch that suspended on its own prompt is
@@ -1470,6 +1487,65 @@ mod tests {
         assert!(
             rolls.iter().all(|r| (1..=6).contains(r)),
             "every die result must be in 1..=6, got {rolls:?}"
+        );
+    }
+
+    /// CR 706.6 display mirror: an ignored die emits `DieRollIgnored` carrying
+    /// its NATURAL value, alongside the survivors' `DieRolled` events.
+    /// Removing the mirror emission flips the ignored assertion; the survivor
+    /// assertions pin that the mirror changes nothing else.
+    #[test]
+    fn ignored_rolls_emit_display_mirror_alongside_survivors() {
+        let mut state = GameState::new_two_player(42);
+        let pending = PendingDieRoll {
+            source_id: ObjectId(1),
+            controller: PlayerId(0),
+            roller: PlayerId(0),
+            targets: vec![],
+            sides: 20,
+            results: vec![4, 17],
+            ignore_rules: vec![],
+            results_table: vec![],
+            modifier: None,
+            die_result: None,
+            next_index: 0,
+            running_total: 0,
+            rolled_any: false,
+            forced_ignored: vec![],
+            chain_root_targets: vec![],
+        };
+        let mut events = Vec::new();
+        let waiting = resume_after_ignore(&mut state, pending, vec![0], &mut events).unwrap();
+        assert!(waiting.is_none(), "no branches means no suspension");
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::DieRollIgnored {
+                    player_id: PlayerId(0),
+                    sides: 20,
+                    result: 4
+                }
+            )),
+            "the ignored lowest die must emit its natural value, got {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::DieRolled {
+                    player_id: PlayerId(0),
+                    sides: 20,
+                    result: Some(17)
+                }
+            )),
+            "the surviving die must still emit DieRolled, got {events:?}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, GameEvent::DieRolled { .. }))
+                .count(),
+            1,
+            "exactly one survivor event, got {events:?}"
         );
     }
 

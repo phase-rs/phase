@@ -4,7 +4,7 @@ use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::char;
 use nom::combinator::opt;
 use nom::combinator::value;
-use nom::sequence::delimited;
+use nom::sequence::{delimited, preceded};
 use nom::Parser;
 
 use crate::types::ability::{
@@ -13,9 +13,12 @@ use crate::types::ability::{
 };
 use crate::types::keywords::{EscapeCost, Keyword};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
-use crate::types::statics::StaticMode;
+use crate::types::statics::{CostReductionReach, StaticMode};
 
-use super::oracle_cost::{parse_or_separated_mana_costs, parse_single_cost};
+use super::oracle_cost::{
+    parse_colored_mana_only_clause, parse_or_separated_mana_costs, parse_single_cost,
+    ColoredManaOnlyScope,
+};
 use super::oracle_effect::imperative::try_parse_die_result_line;
 use super::oracle_effect::{capitalize, lower_ability_ir, parse_ability_ir_standalone};
 use super::oracle_ir::ast::parsed_clause;
@@ -106,18 +109,29 @@ pub(super) fn parse_defiler_cost_reduction(
     };
     let (rest, mana_reduction) =
         parse_defiler_reduction_sentence(reduction_text.trim(), color).ok()?;
-    let (rest, mana_limit) = opt((
-        tag::<_, _, OracleError<'_>>(". this effect reduces only the amount of "),
-        parse_defiler_color,
-        tag(" mana you pay"),
+    // CR 118.7b/c/d: the printed rider ("This effect reduces only the amount of
+    // [color] mana you pay") is parsed through the shared authority so this
+    // cycle and the general `ModifyCost` path agree on the phrasings that count.
+    // A named color other than the reduction's own color is not a Defiler.
+    let (rest, mana_limit) = opt(preceded(
+        tag::<_, _, OracleError<'_>>(". "),
+        parse_colored_mana_only_clause,
     ))
     .parse(rest)
     .ok()?;
-    if let Some((_, limit_color, _)) = mana_limit {
+    if let Some(ColoredManaOnlyScope::Single(limit_color)) = mana_limit {
         if limit_color != color {
             return None;
         }
     }
+    // CR 118.7b/c/d: carry what the card actually printed. Present = the
+    // reduction is confined to that color and never spills onto generic mana;
+    // absent (MTGJSON split the rider onto another line) = the rules default.
+    let reach = if mana_limit.is_some() {
+        CostReductionReach::ColoredManaOnly
+    } else {
+        CostReductionReach::SpillsToGeneric
+    };
     let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
     if !rest.is_empty() {
         return None;
@@ -128,6 +142,7 @@ pub(super) fn parse_defiler_cost_reduction(
             color,
             life_cost,
             mana_reduction,
+            reach,
         })
         .affected(TargetFilter::SelfRef)
         .description(format!(

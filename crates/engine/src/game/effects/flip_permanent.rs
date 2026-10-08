@@ -124,6 +124,7 @@ mod tests {
         obj.base_color = obj.color.clone();
         obj.back_face = Some(BackFaceData {
             is_swap_snapshot: false,
+            trigger_printed_origins: Vec::new(),
             name: "Stabwhisker the Odious".to_string(),
             power: Some(3),
             toughness: Some(3),

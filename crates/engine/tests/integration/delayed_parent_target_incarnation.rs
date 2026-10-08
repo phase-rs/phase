@@ -19,6 +19,7 @@
 //! card enters") expects the referent to have moved, and must keep working.
 
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::ability::{DelayedTriggerCondition, TargetFilter};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
@@ -37,6 +38,8 @@ const EPHEMERATE: &str =
     "Exile target creature you control, then return it to the battlefield under its owner's control.";
 
 const SAFFI_ERIKSDOTTER: &str = "Sacrifice Saffi Eriksdotter: When target creature is put into your graveyard this turn, return that card to the battlefield.";
+
+const LAGRELLA: &str = "When Lagrella enters, exile any number of other target creatures controlled by different players until Lagrella leaves the battlefield. When an exiled card enters under your control this way, put two +1/+1 counters on it.";
 
 /// A plain removal spell used to move a referent to the graveyard through the
 /// real cast pipeline rather than by mutating state behind the engine's back.
@@ -450,12 +453,13 @@ fn t_z1_saffi_eriksdotter_still_returns_the_creature() {
     );
 }
 
-// ====================================================== T-Z4 (MUST STAY GREEN)
+// ====================================================== T-Z4 (controller restriction)
 
-/// T-Z4 — MUST-STAY-GREEN CONTROL (Lagrella, the Magpie), the ENTRY direction.
+/// T-Z4 — Lagrella's selected card enters under its owner's control (CR 610.3c).
+/// Its delayed "under your control" trigger can affect that card only when
+/// its controller is the creating ability's controller (CR 109.5 + CR 603.7e).
 ///
-/// Every other control in this file is a departure case. This is the only test
-/// that distinguishes the `WhenEntersBattlefield` arm: the referent is expected
+/// The Lagrella pair distinguishes the `WhenEntersBattlefield` arm: the referent is expected
 /// to have moved ONTO the battlefield, and `zones.rs:816` bumps the incarnation
 /// unconditionally on `to == Battlefield`, so pinning this condition would make
 /// the card a permanent no-op at 100% of firings.
@@ -465,13 +469,8 @@ fn t_z1_saffi_eriksdotter_still_returns_the_creature() {
 /// condition is rewritten at `bind_tracked_set_to_condition` — which is exactly
 /// why the expected-zone gate must read the PARSER-EMITTED condition.
 ///
-/// Must pass BOTH before and after the fix.
 #[test]
-fn t_z4_lagrella_still_places_counters_on_the_returned_card() {
-    // The card's own `oracle_text` as card-data stores it (what the engine
-    // actually parses), not a paraphrase.
-    const LAGRELLA: &str = "When Lagrella enters, exile any number of other target creatures controlled by different players until Lagrella leaves the battlefield. When an exiled card enters under your control this way, put two +1/+1 counters on it.";
-
+fn t_z4_lagrella_does_not_counter_opponents_returned_card() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_mana_pool(P0, mana(12));
@@ -494,6 +493,27 @@ fn t_z4_lagrella_still_places_counters_on_the_returned_card() {
         Zone::Exile,
         "reach-guard: Lagrella's ETB must exile the opposing creature"
     );
+    assert_eq!(runner.state().delayed_triggers.len(), 1);
+    let delayed = &runner.state().delayed_triggers[0];
+    assert_eq!(delayed.controller, P0);
+    let DelayedTriggerCondition::WhenEntersBattlefield { filter } = &delayed.condition else {
+        panic!(
+            "reach-guard: expected a delayed entry condition, got {:?}",
+            delayed.condition
+        );
+    };
+    let tracked_set_id = match filter {
+        TargetFilter::TrackedSet { id } => *id,
+        TargetFilter::And { filters } => match filters.first() {
+            Some(TargetFilter::TrackedSet { id }) => *id,
+            other => panic!("reach-guard: expected a tracked subject, got {other:?}"),
+        },
+        other => panic!("reach-guard: expected a tracked subject, got {other:?}"),
+    };
+    assert!(
+        runner.state().tracked_object_sets[&tracked_set_id].contains(&opposing),
+        "reach-guard: the delayed trigger must use the set produced by Lagrella's exile"
+    );
 
     let removed = runner.cast(removal).target_object(lagrella).resolve();
     assert_eq!(
@@ -502,16 +522,19 @@ fn t_z4_lagrella_still_places_counters_on_the_returned_card() {
         "reach-guard: Lagrella must leave the battlefield to return the card"
     );
 
-    advance_until_delayed_triggers_resolve(&mut runner);
-
-    // Reach-guard 2: the card really is on the battlefield when the delayed
-    // trigger resolves, so "counters placed" cannot pass vacuously on a card
-    // that never moved.
+    // The public cast driver settles the return and stack. A correctly filtered
+    // one-shot delayed trigger remains installed because it did not fire.
     assert_eq!(
         runner.state().objects[&opposing].zone,
         Zone::Battlefield,
         "reach-guard: the exiled card must return to the battlefield"
     );
+    assert_eq!(runner.state().objects[&opposing].controller, P1);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
 
     let counters = runner.state().objects[&opposing]
         .counters
@@ -519,10 +542,50 @@ fn t_z4_lagrella_still_places_counters_on_the_returned_card() {
         .copied()
         .unwrap_or(0);
     assert_eq!(
-        counters, 2,
-        "T-Z4: the delayed WhenEntersBattlefield trigger names the referent's \
-         OWN entry, so the referent is expected to have moved and must still be \
-         affected (CR 603.7c operative test + CR 400.7e)"
+        counters, 0,
+        "T-Z4: a selected card returning under P1's control does not satisfy \
+         Lagrella's printed 'under your control' restriction"
+    );
+}
+
+/// The matching P0 return proves that the controller restriction does not
+/// suppress the tracked delayed entry trigger for an eligible card.
+#[test]
+fn t_z4_lagrella_counters_own_returned_card() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, mana(12));
+    let lagrella = scenario
+        .add_creature_to_hand_from_oracle(P0, "Lagrella, the Magpie", 3, 3, LAGRELLA)
+        .as_legendary()
+        .id();
+    let own = scenario.add_creature(P0, "Own Bear", 2, 2).id();
+    let removal = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, DESTROY_TARGET_CREATURE)
+        .id();
+    let mut runner = scenario.build();
+
+    let entered = runner.cast(lagrella).target_object(own).resolve();
+    assert_eq!(entered.zone_of(own), Zone::Exile);
+    assert_eq!(runner.state().delayed_triggers.len(), 1);
+
+    let removed = runner.cast(removal).target_object(lagrella).resolve();
+    assert_eq!(removed.zone_of(lagrella), Zone::Graveyard);
+    assert_eq!(runner.state().objects[&own].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&own].controller, P0);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        runner.state().objects[&own]
+            .counters
+            .get(&engine::types::counter::CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+        2,
+        "an eligible tracked card returning under P0's control gets two counters"
     );
 }
 

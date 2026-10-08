@@ -12,6 +12,7 @@ SCRYFALL_DATA_DIR="${SCRYFALL_DATA_DIR:-data/scryfall}"
 ALL_CARDS_FILE="${SCRYFALL_ALL_CARDS_FILE:-$SCRYFALL_DATA_DIR/all-cards.json}"
 OUTPUT_DIR="${SCRYFALL_LOCALE_IMAGES_OUTPUT_DIR:-client/public}"
 SCHEMA_VERSION="v2"
+FALLBACK_MARKER="$OUTPUT_DIR/scryfall-images.$SCHEMA_VERSION.fallback.json"
 
 # MTGJSON `foreignData.language` (full English language name) -> UI locale code.
 # MUST stay in lockstep with `locale_code` in crates/engine/src/bin/oracle_gen.rs,
@@ -28,6 +29,7 @@ LOCALE_MAP='{
   "Spanish": "es",
   "French": "fr",
   "Italian": "it",
+  "Japanese": "ja",
   "Portuguese (Brazil)": "pt"
 }'
 
@@ -52,15 +54,19 @@ validate_locale_map() {
   ' "$1" > /dev/null
 }
 
-# Skip only when every locale output already exists — a partial set must
-# regenerate, or a locale added to LOCALE_MAP would never be built. A cached
-# output must also match this schema version's contract before we reuse it.
+# Skip only when every locale output exists and the same-card fallback pass has
+# completed. The marker prevents legacy exact-only caches from silently
+# bypassing the fallback pass; it is included in the locale-map cache glob.
 ALL_PRESENT=1
 for code in $CODES; do
   out="$OUTPUT_DIR/scryfall-images.$SCHEMA_VERSION.$code.json"
   [ -f "$out" ] && validate_locale_map "$out" || ALL_PRESENT=0
 done
-if [ "$ALL_PRESENT" = 1 ]; then
+if [ "$ALL_PRESENT" = 1 ] && jq -e --arg schema "$SCHEMA_VERSION" '
+    type == "object"
+    and .schema_version == $schema
+    and .algorithm == "same-card-localized-printing-v1"
+  ' "$FALLBACK_MARKER" > /dev/null 2>&1; then
   echo "Skipping generation — all $SCHEMA_VERSION locale maps already exist in $OUTPUT_DIR (delete to regenerate)."
   exit 0
 fi
@@ -257,6 +263,12 @@ for code in $CODES; do
   fi
   printf "  %-8s %7d entries  %s\n" "$code" "$(jq 'length' "$out")" "$(du -h "$out" | cut -f1)"
 done
+
+echo "Filling missing localized printings from same-card candidates..."
+python3 "$SCRIPT_DIR/lib/localized-image-fallback.py" \
+  --bulk "$ALL_CARDS_FILE" \
+  --output "$OUTPUT_DIR" \
+  --schema-version "$SCHEMA_VERSION"
 
 # Validate the exact URLs stored in the output, not a reconstructed CDN path.
 # A sample keeps generation bounded while still catching a stale all_cards

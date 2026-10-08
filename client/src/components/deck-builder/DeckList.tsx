@@ -8,6 +8,7 @@ import {
   resolveCommander,
 } from "../../services/deckParser";
 import type { ExportFormat } from "../../services/deckParser";
+import { canonicalizeDeckNames } from "../../services/canonicalCardNames";
 import type { DeckCompatibilityResult, UnsupportedCard } from "../../services/deckCompatibility";
 import type { ScryfallCard } from "../../services/scryfall";
 
@@ -144,7 +145,7 @@ export function DeckList({
   }, [compatibility?.coverage?.unsupported_cards]);
 
   const importParsedDeck = async (content: string): Promise<boolean> => {
-    const parsed = await resolveCommander(detectAndParseDeck(content));
+    const parsed = await resolveCommander(await canonicalizeDeckNames(detectAndParseDeck(content)));
     if (!parsedDeckHasCards(parsed)) {
       setPasteError(t("deckList.parseError"));
       return false;

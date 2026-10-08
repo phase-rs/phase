@@ -117,10 +117,15 @@ fn fight_rigging_counters_the_target_and_offers_only_the_hidden_card() {
     let hidden = scenario.add_creature_to_exile(P0, "Hidden Card", 0, 0).id();
 
     let mut runner = scenario.build();
+    let incarnation = runner.state().objects[&fight_rigging].incarnation;
     runner.state_mut().exile_links.push(ExileLink {
         exiled_id: hidden,
         source_id: fight_rigging,
-        kind: ExileLinkKind::HideawayLookable,
+        kind: ExileLinkKind::HideawayLookable {
+            grant: engine::types::game_state::LookGrant::SourceController,
+            lookers: [P0].into(),
+            source_incarnation: incarnation,
+        },
     });
 
     runner.pass_both_players();
@@ -194,10 +199,15 @@ fn fight_rigging_below_power_threshold_only_places_the_counter() {
     let hidden = scenario.add_creature_to_exile(P0, "Hidden Card", 0, 0).id();
 
     let mut runner = scenario.build();
+    let incarnation = runner.state().objects[&fight_rigging].incarnation;
     runner.state_mut().exile_links.push(ExileLink {
         exiled_id: hidden,
         source_id: fight_rigging,
-        kind: ExileLinkKind::HideawayLookable,
+        kind: ExileLinkKind::HideawayLookable {
+            grant: engine::types::game_state::LookGrant::SourceController,
+            lookers: [P0].into(),
+            source_incarnation: incarnation,
+        },
     });
 
     runner.pass_both_players();
@@ -263,10 +273,15 @@ fn watcher_for_tomorrow_leaving_the_battlefield_finds_the_hideaway_linked_card()
         .id();
 
     let mut runner = scenario.build();
+    let incarnation = runner.state().objects[&watcher].incarnation;
     runner.state_mut().exile_links.push(ExileLink {
         exiled_id: hidden,
         source_id: watcher,
-        kind: ExileLinkKind::HideawayLookable,
+        kind: ExileLinkKind::HideawayLookable {
+            grant: engine::types::game_state::LookGrant::SourceController,
+            lookers: [P0].into(),
+            source_incarnation: incarnation,
+        },
     });
 
     // Destroy Watcher through the REAL casting/resolution/zone pipeline —

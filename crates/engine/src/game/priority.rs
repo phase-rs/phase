@@ -1,6 +1,7 @@
 use crate::game::engine::EngineError;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{AutoPassMode, GameState, WaitingFor};
+use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 
 use super::players;
@@ -40,6 +41,20 @@ pub fn handle_priority_pass(
 pub(crate) struct PriorityPassOutcome {
     pub(crate) waiting_for: WaitingFor,
     pub(crate) consumed_stack_entries: u32,
+    /// A phase transition (the cleanup step, or a leave that ends the turn)
+    /// deferred until a live resolution settles; the engine pipeline settles
+    /// it and retries the transition once.
+    pub(crate) transition_deferred: bool,
+}
+
+/// The pass leaves the step's priority window open while its phase transition
+/// waits for a live resolution to settle.
+fn deferred_transition_outcome(state: &GameState) -> PriorityPassOutcome {
+    PriorityPassOutcome {
+        waiting_for: state.waiting_for.clone(),
+        consumed_stack_entries: 0,
+        transition_deferred: true,
+    }
 }
 
 pub(crate) fn handle_priority_pass_with_limit(
@@ -66,6 +81,14 @@ pub(crate) fn handle_priority_pass_with_limit(
         clear_priority_passes(state);
 
         if state.stack.is_empty() {
+            // Cleanup -> Untap is owned by the phase interpreter, but only
+            // after the resolution pipeline has retired every popped carrier
+            // and typed continuation.  Returning the current Priority window
+            // lets `engine::pass_priority_once_with_pipeline` perform that
+            // settlement before asking the turn interpreter to retry.
+            if state.phase == Phase::Cleanup && turns::phase_transition_requires_settlement(state) {
+                return deferred_transition_outcome(state);
+            }
             // CR 510.4: The combat damage step's turn-based action runs in two
             // sub-steps when a first-strike/double-strike creature is present. If
             // the first-strike sub-step paused on a CR 603.3b trigger-ordering
@@ -85,9 +108,12 @@ pub(crate) fn handle_priority_pass_with_limit(
                     .as_ref()
                     .is_some_and(|c| !c.regular_damage_done);
             if combat_damage_incomplete {
+                let (waiting_for, transition_deferred) =
+                    turns::auto_advance_reporting_deferral(state, events);
                 PriorityPassOutcome {
-                    waiting_for: turns::auto_advance(state, events),
+                    waiting_for,
                     consumed_stack_entries: 0,
+                    transition_deferred,
                 }
             } else if state.phase == crate::types::phase::Phase::Cleanup {
                 // CR 514.3a: Triggered abilities that triggered during the
@@ -100,16 +126,34 @@ pub(crate) fn handle_priority_pass_with_limit(
                 // returns `None` and advances normally (the until-EOT control
                 // TCE is already pruned, so no new loss event re-fires — the
                 // one-shot trigger is gone, guaranteeing termination).
+                // CR 514.3a: "another cleanup step begins", re-running the cleanup arm
+                // directly rather than through the turn machine's step entry.
+                turns::record_step_begin(state, crate::types::phase::Phase::Cleanup);
+                let (waiting_for, transition_deferred) =
+                    turns::auto_advance_reporting_deferral(state, events);
                 PriorityPassOutcome {
-                    waiting_for: turns::auto_advance(state, events),
+                    waiting_for,
                     consumed_stack_entries: 0,
+                    transition_deferred,
                 }
             } else {
-                // CR 117.4: Empty stack — advance to next phase.
-                let _ = turns::advance_phase_once(state, events);
+                // CR 117.4: Empty stack — advance to next phase. CR 500.1 +
+                // CR 500.8: a leave that ends the turn (the final step of a
+                // unit added after the cleanup step) defers while a
+                // resolution is live; the step's priority window stays open
+                // for the engine pipeline's retry.
+                match turns::advance_phase_once(state, events) {
+                    turns::AdvancePhaseOnce::Deferred => {
+                        return deferred_transition_outcome(state);
+                    }
+                    turns::AdvancePhaseOnce::Entry(_) | turns::AdvancePhaseOnce::Skipped => {}
+                }
+                let (waiting_for, transition_deferred) =
+                    turns::auto_advance_reporting_deferral(state, events);
                 PriorityPassOutcome {
-                    waiting_for: turns::auto_advance(state, events),
+                    waiting_for,
                     consumed_stack_entries: 0,
+                    transition_deferred,
                 }
             }
         } else {
@@ -166,6 +210,7 @@ pub(crate) fn handle_priority_pass_with_limit(
             PriorityPassOutcome {
                 waiting_for,
                 consumed_stack_entries: consumed,
+                transition_deferred: false,
             }
         }
     } else {
@@ -183,6 +228,7 @@ pub(crate) fn handle_priority_pass_with_limit(
         PriorityPassOutcome {
             waiting_for: WaitingFor::Priority { player: next },
             consumed_stack_entries: 0,
+            transition_deferred: false,
         }
     }
 }
@@ -320,7 +366,7 @@ mod tests {
     use crate::types::ability::ResolvedAbility;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{CastingVariant, StackEntry};
-    use crate::types::identifiers::CardId;
+    use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
 
     fn setup() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -374,6 +420,52 @@ mod tests {
 
         // Should advance past combat to PostCombatMain
         assert!(matches!(result, WaitingFor::Priority { .. }));
+    }
+
+    #[test]
+    fn empty_stack_phase_wrap_propagates_cleanup_deferral() {
+        let mut state = setup();
+        state.phase = Phase::End;
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+        state.priority_passes.insert(PlayerId(0));
+        state.priority_pass_count = 1;
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(1),
+            source_id: ObjectId(1),
+            controller: PlayerId(0),
+            kind: crate::types::game_state::StackEntryKind::TriggeredAbility {
+                source_id: ObjectId(1),
+                ability: Box::new(ResolvedAbility::new(
+                    crate::types::ability::Effect::NoOp,
+                    vec![],
+                    ObjectId(1),
+                    PlayerId(0),
+                )),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        state.resolving_trigger_firing = Some(TriggerFiring::Ordinary);
+
+        let outcome =
+            handle_priority_pass_with_limit(PlayerId(1), &mut state, &mut Vec::new(), None);
+
+        assert!(outcome.transition_deferred);
+        assert_eq!(state.phase, Phase::Cleanup);
+        assert!(matches!(
+            outcome.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(1)
+            }
+        ));
     }
 
     #[test]

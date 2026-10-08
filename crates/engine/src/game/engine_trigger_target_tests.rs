@@ -363,6 +363,7 @@ fn triggered_modal_modes_with_targets_wait_for_target_selection() {
         is_activated: false,
         ability_index: None,
         ability_cost: None,
+        activation_cost_snapshot: None,
         unavailable_modes: vec![],
     };
 
@@ -656,6 +657,7 @@ fn triggered_modal_modes_without_targets_consume_pending_trigger() {
         is_activated: false,
         ability_index: None,
         ability_cost: None,
+        activation_cost_snapshot: None,
         unavailable_modes: vec![],
     };
 
@@ -1142,6 +1144,7 @@ fn triggered_modal_modes_reject_unsatisfiable_target_constraints() {
         is_activated: false,
         ability_index: None,
         ability_cost: None,
+        activation_cost_snapshot: None,
         unavailable_modes: vec![],
     };
 

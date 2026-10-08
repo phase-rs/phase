@@ -243,7 +243,7 @@ export function GameLogPanel() {
         <aside
           role="region"
           aria-label={t("log.panelLabel")}
-          className="flex h-[min(50dvh,28rem)] w-full shrink-0 flex-col border-t border-gray-700 bg-gray-900/95 pb-[env(safe-area-inset-bottom)] shadow-2xl lg:h-full lg:w-80 lg:border-l lg:border-t-0"
+          className="relative z-40 flex h-[min(50dvh,28rem)] w-full shrink-0 flex-col border-t border-gray-700 bg-gray-900/95 pb-[env(safe-area-inset-bottom)] shadow-2xl lg:h-full lg:w-80 lg:border-l lg:border-t-0"
         >
           <div className="flex items-center justify-between border-b border-gray-700 px-3 py-2">
             <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-300">{t("log.title")}</h3>
@@ -287,8 +287,36 @@ export function GameLogPanel() {
             )}
           </div>
 
-          <div ref={scrollRef} role="region" tabIndex={0} aria-label={t("log.title")} onScroll={handleScroll} className="select-text flex-1 overflow-y-auto px-3 py-1 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400">
-            {rows.length === 0 ? <div className="py-4 text-center text-xs text-gray-500"><p>{t("log.noMatchingEvents")}</p><button type="button" onClick={clearFilters} className="mt-2 min-h-11 rounded px-2 text-cyan-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400">{t("log.clearFilters")}</button></div> : rows.map((row) => row.type === "entry" ? <LogEntry key={row.entry.seq} entry={row.entry} onInspectObjectSticky={inspectLogCardSticky} /> : <div key={`divider-${row.divider.seq}`} className="my-2 border-y border-gray-700 py-1 text-center text-xs font-semibold tracking-wide text-gray-400">{row.divider.turnSegments ? `${segmentsToPlainText(row.divider.turnSegments)} · ` : row.divider.turn > 0 && `${t("log.turnChip", { turn: row.divider.turn })} · `}{t(`phaseName.${row.divider.phase}`)}</div>)}
+          <div ref={scrollRef} role="region" tabIndex={0} aria-label={t("log.title")} onScroll={handleScroll} className="select-text flex-1 overflow-y-auto px-2 py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400">
+            {rows.length === 0 ? (
+              <div className="py-4 text-center text-xs text-gray-500">
+                <p>{t("log.noMatchingEvents")}</p>
+                <button type="button" onClick={clearFilters} className="mt-2 min-h-11 rounded px-2 text-cyan-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400">
+                  {t("log.clearFilters")}
+                </button>
+              </div>
+            ) : rows.map((row) => row.type === "entry" ? (
+              <LogEntry
+                key={row.entry.seq}
+                entry={row.entry}
+                categoryLabel={t(CATEGORY_LABEL_KEYS[row.entry.category])}
+                showCategoryLabel={view !== "timeline"}
+                onInspectObjectSticky={inspectLogCardSticky}
+              />
+            ) : (
+              <div
+                key={`divider-${row.divider.seq}`}
+                data-boundary={row.divider.turnSegments ? "Turn" : row.divider.boundary}
+                className={row.divider.turnSegments
+                  ? "my-3 rounded-md border-y border-cyan-700/70 bg-cyan-950/35 px-2 py-2 text-center text-xs font-bold uppercase tracking-[0.14em] text-cyan-100 shadow-sm"
+                  : "my-2 border-y border-gray-700/80 bg-gray-800/30 px-2 py-1.5 text-center text-[11px] font-semibold uppercase tracking-wider text-gray-300"}
+              >
+                {row.divider.turnSegments
+                  ? `${segmentsToPlainText(row.divider.turnSegments)} · `
+                  : row.divider.turn > 0 && `${t("log.turnChip", { turn: row.divider.turn })} · `}
+                {t(`phaseName.${row.divider.phase}`)}
+              </div>
+            ))}
           </div>
           {unreadCount > 0 && <button type="button" onClick={jumpToLatest} className="m-2 min-h-11 rounded bg-cyan-700 px-3 text-xs font-medium text-white shadow focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-200">{t("log.jumpToLatest", { count: unreadCount })}</button>}
           <p className="sr-only" aria-live="polite">{copyStatus === "success" ? t("log.copySuccess") : copyStatus === "failure" ? t("log.copyFailure") : filterSummary}</p>

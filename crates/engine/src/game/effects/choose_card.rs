@@ -25,7 +25,7 @@ pub fn resolve(
             .players
             .iter()
             .find(|p| p.id == ability.controller)
-            .map(|p| p.graveyard.iter().copied().collect())
+            .map(|p| state.graveyard_of(p.id).iter().copied().collect())
             .unwrap_or_default(),
         "Hand" => state
             .players
@@ -37,7 +37,7 @@ pub fn resolve(
             .players
             .iter()
             .find(|p| p.id == ability.controller)
-            .map(|p| p.library.iter().copied().collect())
+            .map(|p| state.library_of(p.id).iter().copied().collect())
             .unwrap_or_default(),
         "Exile" => state
             .exile
@@ -86,6 +86,8 @@ pub fn resolve(
         up_to: false,
         kept_destination: None,
         rest_destination: None,
+        // A bare card choice moves no remainder, so it never splits one.
+        rest_split_top_count: None,
         rest_order: crate::types::ability::DigRestOrder::Preserve,
         source_id: Some(ability.source_id),
         enter_tapped: false,
@@ -211,6 +213,43 @@ mod tests {
                 assert_eq!(*keep_count, 2);
             }
             other => panic!("Expected DigChoice, got {:?}", other),
+        }
+    }
+}
+
+#[cfg(test)]
+mod dandan_read_sweep_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::TargetFilter;
+    use crate::types::format::FormatConfig;
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    /// CR 400.1: a "choose a card from your <zone>" prompt offers the shared
+    /// pile's cards to the non-canonical seat.
+    #[test]
+    fn offers_the_shared_pile_to_the_non_canonical_seat() {
+        for (zone, name) in [(Zone::Graveyard, "Graveyard"), (Zone::Library, "Library")] {
+            let mut state = GameState::new(FormatConfig::dandan(), 2, 42);
+            let card = create_object(&mut state, CardId(1), PlayerId(1), "Card".into(), zone);
+            let ability = ResolvedAbility::new(
+                Effect::ChooseCard {
+                    choices: vec![name.to_string()],
+                    target: TargetFilter::Any,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(1),
+            );
+
+            resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+            let WaitingFor::DigChoice { cards, .. } = &state.waiting_for else {
+                panic!("{name}: expected DigChoice, got {:?}", state.waiting_for);
+            };
+            assert_eq!(cards, &vec![card], "{name}");
         }
     }
 }

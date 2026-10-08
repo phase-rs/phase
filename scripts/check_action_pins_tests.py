@@ -16,6 +16,8 @@ import unittest
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parent / "check_action_pins.py"
+sys.path.insert(0, str(SCRIPT.parent))
+import check_action_pins  # noqa: E402  (path set above)
 SHA = "0" * 40
 ENTRY = ".github/workflows/entry.yml"
 
@@ -114,8 +116,9 @@ class CheckActionPinsTests(unittest.TestCase):
         # How the base-branch audit reads a pull request's workflows: the script
         # is the reviewed one, the tree it walks is the untrusted one.
         audited = self.gate()
-        audited.write(".github/workflows/release.yml", "actions/checkout@v4")
-        audited.write(".github/workflows/deploy.yml", f"actions/cache@{SHA} # v4.3.0")
+        for entry in check_action_pins.DEFAULT_ENTRIES:
+            audited.write(entry, f"actions/cache@{SHA} # v4.3.0")
+        audited.write(check_action_pins.DEFAULT_ENTRIES[0], "actions/checkout@v4")
         r = subprocess.run(
             [sys.executable, str(SCRIPT)],
             env={"PATH": "/usr/bin:/bin", "PIN_CHECK_ROOT": str(audited.root)},
@@ -129,8 +132,9 @@ class CheckActionPinsTests(unittest.TestCase):
         # and edits a privileged workflow in one commit. The audited tree's own
         # copy of the script is inert because it is never executed.
         audited = self.gate()
-        audited.write(".github/workflows/release.yml", "actions/checkout@v4")
-        audited.write(".github/workflows/deploy.yml", f"actions/cache@{SHA} # v4.3.0")
+        for entry in check_action_pins.DEFAULT_ENTRIES:
+            audited.write(entry, f"actions/cache@{SHA} # v4.3.0")
+        audited.write(check_action_pins.DEFAULT_ENTRIES[0], "actions/checkout@v4")
         stub = audited.root / "scripts" / SCRIPT.name
         stub.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
         self.assertEqual(subprocess.run([sys.executable, str(stub)]).returncode, 0,
@@ -141,6 +145,7 @@ class CheckActionPinsTests(unittest.TestCase):
             capture_output=True, text=True,
         )
         self.assertEqual(r.returncode, 1)
+        self.assertIn("actions/checkout@v4", r.stderr)
 
     def test_quoted_and_flow_style_keys_do_not_evade_the_walk(self) -> None:
         # YAML accepts these as `uses`, so a gate that matched the text of

@@ -10,7 +10,13 @@ export type HelloGateOutcome =
 export interface ConnAttachment {
   client_hello: { client_version: string; build_commit: string } | null;
   subscribed: boolean;
-  host_game: string | null;
+  /**
+   * The lobby registration this connection hosts. Mirrors
+   * `lobby_broker::LobbyRegistration`: the code plus the registration's
+   * generation, so a stamp outliving its reaped listing never acts on a later
+   * registration under the same code.
+   */
+  host_game: { game_code: string; generation: number } | null;
   reservations: unknown[];
   /**
    * Tournament codes this connection CREATED — one appended per successful
@@ -118,6 +124,19 @@ function classifyClientHello(
     };
   }
   return { kind: "accept" };
+}
+
+/**
+ * The frame a lobby fan-out delivers to `conn`, or `null`. `forViewer` is the
+ * broker's per-viewer projection, keyed by the accepted hello's build.
+ */
+export function lobbyFrameFor(
+  conn: Pick<ConnAttachment, "subscribed" | "client_hello"> | null,
+  frame: string,
+  forViewer: (frame: string, viewerBuildCommit: string) => string | undefined,
+): string | null {
+  if (conn?.subscribed !== true) return null;
+  return forViewer(frame, conn.client_hello?.build_commit ?? "") ?? null;
 }
 
 export function helloGateErrorMessage(

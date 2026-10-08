@@ -23,6 +23,10 @@ import type {
   WaitingFor,
   Zone,
 } from "../../adapter/types.ts";
+import type {
+  InteractionId,
+  ViewerInteraction,
+} from "../../adapter/generated/interaction/index.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import {
   CancelButton,
@@ -58,8 +62,10 @@ import {
   CoinFlipKeepModal,
   DieKeepModal,
   DigModal,
+  DigRestSplitModal,
   RevealModal,
   RippleBottomOrderModal,
+  RevealUntilBottomOrderModal,
   ScryModal,
   ArrangePlanarDeckTopModal,
   SurveilModal,
@@ -116,6 +122,45 @@ type ManifestDreadChoice = Extract<WaitingFor, { type: "ManifestDreadChoice" }>;
 type DamageSourceChoice = Extract<WaitingFor, { type: "DamageSourceChoice" }>;
 type LearnChoice = Extract<WaitingFor, { type: "LearnChoice" }>;
 type BeholdChoice = Extract<WaitingFor, { type: "BeholdChoice" }>;
+type EmpowerJaceChoice = Extract<WaitingFor, { type: "EmpowerJaceChoice" }>;
+type SpellCopyOrderChoice = Extract<WaitingFor, { type: "SpellCopyOrderChoice" }>;
+
+function selectionInteractionId(
+  interaction: ViewerInteraction | null,
+): InteractionId | null {
+  for (const opportunity of interaction?.opportunities ?? []) {
+    if (opportunity.response.type !== "schema") continue;
+    if (opportunity.response.data.spec.type === "select") {
+      return opportunity.interactionId;
+    }
+  }
+  return null;
+}
+
+function effectZoneChoiceFallbackKey(data: EffectZoneChoice["data"]): string {
+  return [
+    data.player,
+    data.source_id,
+    data.cards.join(","),
+    data.count,
+    data.min_count ?? 0,
+    data.up_to === true,
+    data.effect_kind,
+    data.zone,
+    data.destination ?? "",
+  ].join("|");
+}
+
+function payCostPromptKey(data: PayCost["data"]): string {
+  return [
+    data.player,
+    JSON.stringify(data.kind),
+    data.choices.join(","),
+    data.count,
+    data.min_count,
+    JSON.stringify(data.resume),
+  ].join("|");
+}
 
 /**
  * Generic card choice modal for Scry, Dig, Surveil, Reveal, Search, and NamedChoice.
@@ -126,13 +171,26 @@ export function CardChoiceModal() {
   const canActForWaitingState = useCanActForWaitingState();
   const waitingFor = useGameStore((s) => s.waitingFor);
   const objects = useGameStore((s) => s.gameState?.objects);
+  const activeSelectInteractionId = useGameStore((s) =>
+    selectionInteractionId(s.viewerInteraction),
+  );
+  const scryPromptId = useGameStore((s) => s.gameState?.derived?.scry_prompt_id);
 
   if (!waitingFor) return null;
 
   switch (waitingFor.type) {
     case "ScryChoice":
       if (!canActForWaitingState) return null;
-      return <ScryModal data={waitingFor.data} />;
+      return (
+        <ScryModal
+          key={
+            activeSelectInteractionId ??
+            scryPromptId ??
+            `${waitingFor.data.player}:${waitingFor.data.cards.join(",")}`
+          }
+          data={waitingFor.data}
+        />
+      );
     case "ArrangePlanarDeckTopChoice":
       if (!canActForWaitingState) return null;
       return <ArrangePlanarDeckTopModal data={waitingFor.data} />;
@@ -141,6 +199,17 @@ export function CardChoiceModal() {
       return (
         <RippleBottomOrderModal
           key={waitingFor.data.cards.join("-")}
+          data={waitingFor.data}
+        />
+      );
+    case "RevealUntilBottomOrder":
+      if (!canActForWaitingState) return null;
+      return (
+        <RevealUntilBottomOrderModal
+          key={
+            activeSelectInteractionId ??
+            `${waitingFor.data.player}:${waitingFor.data.source_id}:${waitingFor.data.cards.join(",")}`
+          }
           data={waitingFor.data}
         />
       );
@@ -153,6 +222,18 @@ export function CardChoiceModal() {
     case "DigChoice":
       if (!canActForWaitingState) return null;
       return <DigModal data={waitingFor.data} />;
+    case "DigRestSplitChoice":
+      if (!canActForWaitingState) return null;
+      // Prompt-identity key, same as `RippleBottomOrder` above: the modal
+      // seeds its drag order from `data.cards` at mount, so two consecutive
+      // split prompts must REMOUNT it rather than re-render it with the first
+      // prompt's stale ids still selected.
+      return (
+        <DigRestSplitModal
+          key={waitingFor.data.cards.join("-")}
+          data={waitingFor.data}
+        />
+      );
     case "SurveilChoice":
       if (!canActForWaitingState) return null;
       return <SurveilModal data={waitingFor.data} />;
@@ -203,10 +284,21 @@ export function CardChoiceModal() {
     case "BeholdChoice":
       if (!canActForWaitingState) return null;
       return <BeholdChoiceModal data={waitingFor.data} />;
+    case "EmpowerJaceChoice":
+      if (!canActForWaitingState) return null;
+      return <EmpowerJaceChoiceModal data={waitingFor.data} />;
+    case "SpellCopyOrderChoice":
+      if (!canActForWaitingState) return null;
+      return <SpellCopyOrderChoiceModal data={waitingFor.data} />;
     case "EffectZoneChoice":
       if (!canActForWaitingState) return null;
       if (getBoardChoiceView(waitingFor, objects)) return null;
-      return <EffectZoneModal data={waitingFor.data} />;
+      return (
+        <EffectZoneModal
+          key={activeSelectInteractionId ?? effectZoneChoiceFallbackKey(waitingFor.data)}
+          data={waitingFor.data}
+        />
+      );
     case "DrawnThisTurnTopdeckChoice":
       if (!canActForWaitingState) return null;
       return <DrawnThisTurnTopdeckModal data={waitingFor.data} />;
@@ -243,7 +335,7 @@ export function CardChoiceModal() {
     case "PayCost":
       if (!canActForWaitingState) return null;
       if (getBoardChoiceView(waitingFor, objects)) return null;
-      return <PayCostDispatch data={waitingFor.data} />;
+      return <PayCostDispatch key={payCostPromptKey(waitingFor.data)} data={waitingFor.data} />;
     case "MultiTargetSelection":
       if (!canActForWaitingState) return null;
       return <MultiTargetSelectionModal data={waitingFor.data} />;
@@ -866,9 +958,11 @@ function OutsideGameModal({ data }: { data: OutsideGameChoice["data"] }) {
             entry.source.type === "FaceUpExile"
               ? t("outsideGame.fromExile")
               : entry.source.type === "BoosterPack"
-                ? t("outsideGame.fromBoosterPack", {
-                    setCode: entry.source.data.set_code,
-                  })
+                ? entry.source.data.origin.type === "Set"
+                  ? t("outsideGame.fromBoosterPack", {
+                      setCode: entry.source.data.origin.data,
+                    })
+                  : t("outsideGame.fromCubeBoosterPack")
                 : t("outsideGame.fromSideboard");
           return (
             <button
@@ -1038,6 +1132,90 @@ function BeholdChoiceModal({ data }: { data: BeholdChoice["data"] }) {
     >
       <ScrollableCardStrip>
         {data.choices.map((id, index) => {
+          const obj = objects[id];
+          if (!obj) return null;
+          return (
+            <motion.button
+              key={id}
+              className="relative shrink-0 rounded-lg transition hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+              initial={{ opacity: 0, y: 60, scale: 0.85 }}
+              animate={{ opacity: 0.85, y: 0, scale: 1 }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+              whileHover={{ scale: 1.05, y: -6, opacity: 1 }}
+              onClick={() => handleChoose(id)}
+              {...hoverProps(id)}
+            >
+              <CardImage
+                {...objectImageProps(obj)}
+                size="normal"
+                className={CHOICE_CARD_IMAGE_CLASS}
+              />
+            </motion.button>
+          );
+        })}
+      </ScrollableCardStrip>
+    </ChoiceOverlay>
+  );
+}
+
+// CR 701.71a: Empower Jace N — the controller picks exactly ONE Jace
+// planeswalker token they control to receive N loyalty counters. Display-only:
+// the engine supplies `choices` and `count` and enforces legality; clicking a
+// token dispatches a single-object SelectCards.
+function EmpowerJaceChoiceModal({ data }: { data: EmpowerJaceChoice["data"] }) {
+  const { t } = useTranslation("game");
+  return (
+    <SingleObjectPickModal
+      title={t("cardChoice.empowerJace.title")}
+      subtitle={t("cardChoice.empowerJace.subtitle", { count: data.count })}
+      choices={data.choices}
+    />
+  );
+}
+
+// CR 405.3 + CR 707.10: the controller of a batch of spell copies picks the
+// spell whose copy goes on the stack next. Display-only: the engine supplies
+// `choices` and enforces legality; clicking a spell dispatches a single-object
+// SelectCards.
+function SpellCopyOrderChoiceModal({ data }: { data: SpellCopyOrderChoice["data"] }) {
+  const { t } = useTranslation("game");
+  return (
+    <SingleObjectPickModal
+      title={t("cardChoice.spellCopyOrder.title")}
+      subtitle={t("cardChoice.spellCopyOrder.subtitle")}
+      choices={data.choices}
+    />
+  );
+}
+
+// A strip of engine-offered objects; clicking one dispatches it as a
+// single-object SelectCards.
+function SingleObjectPickModal({
+  title,
+  subtitle,
+  choices,
+}: {
+  title: string;
+  subtitle: string;
+  choices: ObjectId[];
+}) {
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+
+  const handleChoose = useCallback(
+    (id: ObjectId) => {
+      dispatch({ type: "SelectCards", data: { cards: [id] } });
+    },
+    [dispatch],
+  );
+
+  if (!objects) return null;
+
+  return (
+    <ChoiceOverlay title={title} subtitle={subtitle}>
+      <ScrollableCardStrip>
+        {choices.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
           return (
@@ -2251,18 +2429,32 @@ function BeholdModal({
   );
 }
 
+function RevealForCostModal({ data }: { data: PayCost["data"] }) {
+  const { t } = useTranslation("game");
+  return (
+    <ExileForCostModal
+      cards={data.choices}
+      count={data.count}
+      minCount={data.count}
+      title={t("cardChoice.reveal.titleReveal")}
+      subtitle={t("cardChoice.reveal.subtitleChoose")}
+      confirmLabel={t("cardChoice.badges.reveal")}
+    />
+  );
+}
+
 // CR 118.3 + CR 601.2b + CR 605.3b: single dispatch for the unified `PayCost`
 // state — branch on `kind.type` to the matching cost-selection modal. The
-// `key` forces a fresh selection set when the eligible-object list changes.
+// `key` forces a fresh selection set when the prompt identity or cost step changes.
 function PayCostDispatch({ data }: { data: PayCost["data"] }) {
   const { t } = useTranslation("game");
   const isManaAbility = data.resume.type === "ManaAbility";
-  const choicesKey = data.choices.join(",");
+  const promptKey = payCostPromptKey(data);
   switch (data.kind.type) {
     case "Discard":
       return (
         <DiscardModal
-          key={choicesKey}
+          key={promptKey}
           data={{ ...data, cards: data.choices }}
           title={
             isManaAbility
@@ -2272,30 +2464,32 @@ function PayCostDispatch({ data }: { data: PayCost["data"] }) {
           canCancel={!isManaAbility}
         />
       );
+    case "Reveal":
+      return <RevealForCostModal key={promptKey} data={data} />;
     case "Sacrifice":
       return isManaAbility ? (
-        <SacrificeForManaAbilityModal data={data} />
+        <SacrificeForManaAbilityModal key={promptKey} data={data} />
       ) : (
-        <SacrificeModal key={choicesKey} data={data} />
+        <SacrificeModal key={promptKey} data={data} />
       );
     case "ReturnToHand":
-      return <ReturnToHandModal key={choicesKey} data={data} />;
+      return <ReturnToHandModal key={promptKey} data={data} />;
     case "RemoveCounter":
-      return <RemoveCounterModal key={choicesKey} data={data} />;
+      return <RemoveCounterModal key={promptKey} data={data} />;
     case "TapCreatures":
       // Tap-creature costs are resolved by battlefield clicks + TargetingOverlay,
       // not a modal (mirrors the pre-collapse behavior).
       return null;
     case "Behold":
-      return <BeholdModal data={data} action={data.kind.action} />;
+      return <BeholdModal key={promptKey} data={data} action={data.kind.action} />;
     case "ExileFromZone":
-      return <ExileForCostDispatch data={data} zone={data.kind.zone} />;
+      return <ExileForCostDispatch key={promptKey} data={data} zone={data.kind.zone} />;
     case "ExileMaterials":
-      return <CraftMaterialsModal data={data} />;
+      return <CraftMaterialsModal key={promptKey} data={data} />;
     case "ExilePermanent":
-      return <ExilePermanentForCostModal data={data} />;
+      return <ExilePermanentForCostModal key={promptKey} data={data} />;
     case "ExileFromManaZone":
-      return <ExileForManaAbilityModal data={data} zone={data.kind.zone} />;
+      return <ExileForManaAbilityModal key={promptKey} data={data} zone={data.kind.zone} />;
   }
 }
 
@@ -3123,7 +3317,7 @@ function ManaSingleColorChoiceModal({
         />
       }
     >
-      <div className="mx-auto flex w-full flex-wrap items-center justify-center gap-3 px-4 py-4 lg:w-fit lg:flex-nowrap sm:gap-5 sm:px-6 sm:py-6">
+      <div className="mx-auto flex w-full flex-wrap items-center justify-center gap-3 px-4 py-4 lg:w-fit sm:gap-5 sm:px-6 sm:py-6">
         {options.map((color, index) => {
           const isSelected = selected === color;
           return (

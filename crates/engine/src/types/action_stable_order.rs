@@ -1,10 +1,11 @@
 // @generated-style: maintained by action enum structure; update when GameAction grows.
 //
 // Issue #4878: allocation-free total order for deterministic AI / legal-action
-// sorting. Every payload field type used below derives `Ord`, so payload
+// sorting. Ordinary generated payloads derive `Ord`, so their
 // comparison reduces to `cmp_val` (a thin `Ord::cmp` wrapper) chained with
-// `then_with`. The single exception is `GameAction::Debug`, whose payload
-// (`DebugAction`) transitively contains non-`Ord` types (`Keyword`,
+// `then_with`. Cold replacement-preference actions compare opaque selectors via
+// `cmp_val`. `GameAction::Debug` also has a payload (`DebugAction`) that
+// transitively contains non-`Ord` types (`Keyword`,
 // `TokenCharacteristics`); it is a cold path (debug actions are never in
 // `legal_actions()`) handled by the exhaustive `cmp_debug_action`. No `Debug`
 // string formatting is used for ordering.
@@ -13,7 +14,8 @@ use std::cmp::Ordering;
 use super::ability::LibraryPosition;
 use super::actions::{DebugAction, DebugTokenRequest, GameAction, GameActionKind};
 
-/// Total, allocation-free order over `GameAction`: variant discriminant first
+/// Total order over `GameAction`, allocation-free for generated gameplay actions:
+/// variant discriminant first
 /// (`GameActionKind`, declaration order), then payload fields.
 pub fn cmp_game_actions(a: &GameAction, b: &GameAction) -> Ordering {
     GameActionKind::from(a)
@@ -312,6 +314,18 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
                 cmp_val(a0, b0)
             }
         }
+        GameAction::ChooseReplacementAndRemember { choice: a0 } => {
+            let GameAction::ChooseReplacementAndRemember { choice: b0 } = b else {
+                unreachable!("same variant")
+            };
+            cmp_val(a0, b0)
+        }
+        GameAction::SetReplacementAutoChoice { selector: a0 } => {
+            let GameAction::SetReplacementAutoChoice { selector: b0 } = b else {
+                unreachable!("same variant")
+            };
+            cmp_val(a0, b0)
+        }
         GameAction::ChooseReplacement { index: a0 } => {
             let GameAction::ChooseReplacement { index: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
@@ -330,6 +344,21 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             };
             {
                 cmp_val(a0, b0)
+            }
+        }
+        GameAction::OrderCostReductions {
+            order: a0,
+            hybrid_announcement: a1,
+        } => {
+            let GameAction::OrderCostReductions {
+                order: b0,
+                hybrid_announcement: b1,
+            } = b
+            else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            {
+                cmp_val(a0, b0).then_with(|| cmp_val(a1, b1))
             }
         }
         GameAction::CancelCast => {
@@ -1270,6 +1299,7 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
             attach_to: a4,
             run_etb: a5,
             nonlegendary: a6,
+            creation_kind: a7,
         } => {
             let DebugAction::CreateCard {
                 card_name: b0,
@@ -1279,6 +1309,7 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
                 attach_to: b4,
                 run_etb: b5,
                 nonlegendary: b6,
+                creation_kind: b7,
             } = b
             else {
                 unreachable!("cmp_debug_action_payload: same-variant invariant");
@@ -1290,6 +1321,7 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
                 .then_with(|| cmp_val(a4, b4))
                 .then_with(|| cmp_val(a5, b5))
                 .then_with(|| cmp_val(a6, b6))
+                .then_with(|| cmp_val(a7, b7))
         }
         DebugAction::RemoveObject { object_id: a0 } => {
             let DebugAction::RemoveObject { object_id: b0 } = b else {
@@ -1730,10 +1762,28 @@ mod tests {
     };
     use crate::types::game_state::{
         EndEffectGroupId, MayTriggerAutoChoiceKey, MayTriggerAutoChoiceSelector, MayTriggerOrigin,
+        ReplacementAutoChoiceId,
     };
     use crate::types::identifiers::ObjectId;
     use crate::types::mana::{ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
+
+    #[test]
+    fn replacement_removal_orders_opaque_selectors() {
+        let id = ReplacementAutoChoiceId("r".to_owned() + &"a".repeat(64));
+        assert_distinct_order(
+            GameAction::SetReplacementAutoChoice {
+                selector: Some(id.clone()),
+            },
+            GameAction::SetReplacementAutoChoice {
+                selector: Some(ReplacementAutoChoiceId("r".to_owned() + &"b".repeat(64))),
+            },
+        );
+        assert_distinct_order(
+            GameAction::SetReplacementAutoChoice { selector: Some(id) },
+            GameAction::SetReplacementAutoChoice { selector: None },
+        );
+    }
 
     fn assert_distinct_order(a: GameAction, b: GameAction) {
         assert_ne!(a.cmp_stable(&b), Ordering::Equal);

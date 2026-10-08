@@ -374,6 +374,7 @@ fn a_replacement_that_leaves_a_non_aura_entrant_still_creates_the_token() {
             display_name: "Spirit".to_string(),
             power: Some(1),
             toughness: Some(1),
+            loyalty: None,
             core_types: vec![CoreType::Creature],
             // What the replacement left behind: no Aura subtype.
             subtypes: vec!["Spirit".to_string()],

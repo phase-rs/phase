@@ -35,11 +35,19 @@ expression: "&lowered"
           "kind": "Spell",
           "effect": {
             "type": "AdditionalPhase",
-            "target": {
-              "type": "Controller"
+            "recipient": {
+              "type": "NoPlayer"
             },
-            "phase": "BeginCombat",
-            "after": "EndCombat",
+            "segment": {
+              "type": "Phase",
+              "data": "Combat"
+            },
+            "after": {
+              "type": "ThisPhase",
+              "data": {
+                "named": null
+              }
+            },
             "followed_by": [],
             "count": {
               "type": "Fixed",

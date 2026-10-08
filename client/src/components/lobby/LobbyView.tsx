@@ -12,7 +12,6 @@ import {
   compareLobbyGameEntries,
   findLobbyGameByCode,
   hostingLobbySource,
-  isLobbyEntryCompatible,
   lobbySources,
   useMultiplayerStore,
   type LobbyGameEntry,
@@ -405,7 +404,7 @@ export function LobbyView({
 
   const filteredEntries = useMemo(() => {
     return entries.filter(({ game: g }) => {
-      if (formatFilter && (g.format ?? "Standard") !== formatFilter) return false;
+      if (formatFilter && (g.draft_metadata != null || (g.format ?? "Standard") !== formatFilter)) return false;
       if (roomTypeFilter === "draft" && g.draft_metadata == null) return false;
       if (roomTypeFilter === "p2p" && g.is_p2p !== true) return false;
       if (roomTypeFilter === "server" && g.is_p2p === true) return false;
@@ -551,7 +550,6 @@ export function LobbyView({
                 key={`${entry.source.url}:${entry.game.game_code}`}
                 entry={entry}
                 onJoin={handleJoinFromList}
-                compatible={isLobbyEntryCompatible(entry.game.host_build_commit)}
                 hostGameCode={hostGameCode}
                 healthHint={hintByUrl.get(entry.source.url) ?? null}
               />

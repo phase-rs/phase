@@ -1530,7 +1530,13 @@ fn path_keys_cannot_escape_the_scratch_dir() {
         format!(
             "{}{}/{name}",
             "../".repeat(up),
-            ws.strip_prefix("/").unwrap().display()
+            ws.components()
+                .filter_map(|component| match component {
+                    std::path::Component::Normal(name) => Some(name.to_str().unwrap()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("/")
         )
     };
     let listing = || {
@@ -2088,7 +2094,13 @@ fn proj_missing() {
     let broken = fixtures().join("astgrep_broken.sh");
     let e = project::count(&m.projections[0], &fixtures(), broken.to_str().unwrap()).unwrap_err();
     assert!(matches!(e, Abort::ProjectionToolMissing { .. }), "{e}");
+}
 
+/// Shell-script fixtures require a Unix host; missing-tool checks run on every host.
+#[test]
+#[cfg_attr(not(unix), ignore = "executes Unix shell-script fixtures")]
+fn proj_present() {
+    let m = load("projection.toml");
     // positive: a working tool renders the sentence with the measured count
     let ok = fixtures().join("astgrep_three.sh");
     let count = project::count(&m.projections[0], &fixtures(), ok.to_str().unwrap()).unwrap();

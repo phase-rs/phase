@@ -43,6 +43,10 @@ import {
   normalizeDisabledDirectorySources,
   normalizeRememberedHostConfig,
   normalizeUserLobbySources,
+  hydrateSessionTournamentCredentials,
+  maybeRenewNearExpiry,
+  rememberTournamentCredential,
+  shouldRenewCredential,
   userLobbySource,
   type AmbientLobbyFrame,
   type HostingSettings,
@@ -50,6 +54,8 @@ import {
   type LobbySource,
   useMultiplayerStore,
 } from "../multiplayerStore";
+import { renewTournamentCredentialOver } from "../../services/tournamentClient";
+import type { PhaseSocket } from "../../services/openPhaseSocket";
 import { SERVER_PRESETS } from "../../services/serverDetection";
 import {
   DIRECTORY_VERSION,
@@ -70,8 +76,18 @@ import {
   clearWsSession,
   loadWsSession,
   saveWsSession,
+  WS_SESSION_STORAGE_KEY,
+  WS_SESSION_TTL_MS,
 } from "../../services/multiplayerSession";
 import { HandshakeError, openPhaseSocket, withReconnect } from "../../services/openPhaseSocket";
+import { NativeEngineSocket } from "../../services/nativeEngineSocket";
+import {
+  BrokerRequestError,
+  LobbyCapabilityError,
+  type RegisterHostRequest,
+} from "../../services/brokerClient";
+import i18n from "i18next";
+import multiplayerEn from "../../i18n/locales/en/multiplayer.json";
 
 const p2pMocks = vi.hoisted(() => ({
   hostDestroy: vi.fn(),
@@ -114,6 +130,25 @@ const socketMocks = vi.hoisted(() => ({
   } | null,
 }));
 
+const tauriMocks = vi.hoisted(() => ({
+  bridgeListener: null as ((event: unknown) => void) | null,
+  invoke: vi.fn(),
+  isDesktopTauri: vi.fn(() => false),
+}));
+vi.mock("@tauri-apps/api/core", async (importActual) => ({
+  ...(await importActual<typeof import("@tauri-apps/api/core")>()),
+  Channel: class {
+    constructor(callback: (event: unknown) => void) {
+      tauriMocks.bridgeListener = callback;
+    }
+  },
+  invoke: tauriMocks.invoke,
+}));
+vi.mock("../../services/platform", async (importActual) => ({
+  ...(await importActual<typeof import("../../services/platform")>()),
+  isDesktopTauri: tauriMocks.isDesktopTauri,
+}));
+
 vi.mock("../../network/connection", () => ({
   hostRoom: vi.fn(async () => ({
     peer: { id: "peer-id", destroy: p2pMocks.hostDestroy },
@@ -137,12 +172,30 @@ vi.mock("../../adapter/p2p-adapter", () => ({
   }),
 }));
 
-vi.mock("../../services/brokerClient", () => ({
-  openBrokerClient: brokerMocks.openBrokerClient,
-  subscribeLobbyOver: brokerMocks.subscribeLobbyOver,
-  lookupJoinTargetOver: brokerMocks.lookupJoinTargetOver,
-  resolveGuestOver: brokerMocks.resolveGuestOver,
-}));
+// `BrokerRequestError` and `LobbyCapabilityError` are the real classes so the
+// store's `instanceof` checks and this file's constructed errors share the
+// production identity.
+vi.mock("../../services/brokerClient", async (importActual) => {
+  const actual = await importActual<typeof import("../../services/brokerClient")>();
+  return {
+    BrokerRequestError: actual.BrokerRequestError,
+    LobbyCapabilityError: actual.LobbyCapabilityError,
+    openBrokerClient: brokerMocks.openBrokerClient,
+    subscribeLobbyOver: brokerMocks.subscribeLobbyOver,
+    lookupJoinTargetOver: brokerMocks.lookupJoinTargetOver,
+    resolveGuestOver: brokerMocks.resolveGuestOver,
+  };
+});
+
+// Only `renewTournamentCredentialOver` is stubbed — every other tournament
+// sender stays real (importActual) so unrelated store tests are untouched.
+// Stubbing this one lets `maybeRenewNearExpiry`'s gate and lost-reply-recovery
+// paths be driven directly, without a live socket exchange.
+vi.mock("../../services/tournamentClient", async (importActual) => {
+  const actual =
+    await importActual<typeof import("../../services/tournamentClient")>();
+  return { ...actual, renewTournamentCredentialOver: vi.fn() };
+});
 
 /**
  * The metrics module is MOCKED here, module-level, and that is the mitigation —
@@ -214,8 +267,8 @@ function hostingSettings(
   };
 }
 
-function emitServerMessage(type: string, data?: unknown): void {
-  socketMocks.currentWs?.onmessage?.({
+function emitServerMessage(type: string, data?: unknown, ws = socketMocks.currentWs): void {
+  ws?.onmessage?.({
     data: JSON.stringify({ type, data }),
   } as MessageEvent);
 }
@@ -673,6 +726,39 @@ describe("multiplayerStore", () => {
     expect(migratePersistedMultiplayerState(blob, 6)).toEqual(blob);
   });
 
+  // v6 -> v7: tournament bearer credentials leave localStorage. A pre-v7 blob
+  // that persisted them has them stripped; every other field is preserved.
+  it("strips tournament credentials from a pre-v7 store (v6 -> v7)", () => {
+    const migrated = migratePersistedMultiplayerState(
+      {
+        hostingServer: "wss://play.example.com/ws",
+        userLobbySources: [],
+        tournamentCredentials: {
+          TOUR01: { organizerToken: "secret", updatedAt: 1 },
+        },
+      },
+      6,
+    ) as Record<string, unknown>;
+
+    expect(migrated.tournamentCredentials).toBeUndefined();
+    expect(migrated.hostingServer).toBe("wss://play.example.com/ws");
+  });
+
+  // The strip must survive the early return the `version < 6` serverAddress arm
+  // takes — a pre-v6 blob carrying BOTH a legacy address and credentials.
+  it("strips credentials even when the legacy serverAddress arm runs (v5 -> v7)", () => {
+    const migrated = migratePersistedMultiplayerState(
+      {
+        serverAddress: "wss://play.example.com/ws",
+        tournamentCredentials: { TOUR01: { playerToken: "secret", updatedAt: 1 } },
+      },
+      5,
+    ) as Record<string, unknown>;
+
+    expect(migrated.tournamentCredentials).toBeUndefined();
+    expect(migrated.hostingServer).toBe("wss://play.example.com/ws");
+  });
+
   it("drops malformed persisted user sources on hydration", () => {
     const normalized = normalizeUserLobbySources([
       { url: "wss://keep.example/ws", name: "keep.example", origin: "user" },
@@ -877,6 +963,32 @@ describe("multiplayerStore", () => {
     ]);
   });
 
+  it("keeps a remembered custom config carrying the removed experimental-dungeons key", () => {
+    seedSavedCustomFormat("saved-1");
+    // Persisted before the flag was removed: every field plus the stale key.
+    const legacyConfig = {
+      ...customFormatConfigFixture(),
+      allow_experimental_dungeons: true,
+    };
+
+    const normalized = normalizeRememberedHostConfig(
+      persistedCustomHostConfig({ formatConfig: legacyConfig }),
+    );
+
+    // The setup survives with the stale key ignored — not discarded.
+    expect(normalized).not.toBeNull();
+    expect(normalized?.format).toBe("Custom:0");
+    expect(normalized?.formatConfig).toEqual(
+      expect.objectContaining(customFormatConfigFixture()),
+    );
+    // ...and the format-independent tail ran, so nothing else was lost either.
+    expect(normalized?.playerCount).toBe(3);
+    expect(normalized?.isPublic).toBe(false);
+    expect(normalized?.aiSeats).toEqual([
+      { seatIndex: 1, difficulty: "Hard", deckName: null },
+    ]);
+  });
+
   it("clamps a remembered custom-format player count to the format's own seats", () => {
     seedSavedCustomFormat("saved-1");
     // The shared tail must clamp against the CUSTOM config's max_players (4),
@@ -1023,6 +1135,42 @@ describe("multiplayerStore", () => {
       expect(useMultiplayerStore.getState().connectionMode).toBe(stored);
     },
   );
+
+  it.each([
+    ["a string", "yes"],
+    ["a number", 1],
+    ["null", null],
+  ])("hydrates %s remembered pod listing choice as never chosen", (_label, stored) => {
+    localStorage.setItem(
+      "phase-multiplayer",
+      JSON.stringify({ state: { lastPodListingPublic: stored }, version: 6 }),
+    );
+
+    act(() => useMultiplayerStore.persist.rehydrate());
+
+    expect(useMultiplayerStore.getState().lastPodListingPublic).toBeNull();
+  });
+
+  it.each([true, false])(
+    "hydrates a stored %s pod listing choice",
+    (stored) => {
+      localStorage.setItem(
+        "phase-multiplayer",
+        JSON.stringify({ state: { lastPodListingPublic: stored }, version: 6 }),
+      );
+
+      act(() => useMultiplayerStore.persist.rehydrate());
+
+      expect(useMultiplayerStore.getState().lastPodListingPublic).toBe(stored);
+    },
+  );
+
+  it("persists the remembered pod listing choice", () => {
+    act(() => useMultiplayerStore.getState().rememberPodListingPublic(false));
+
+    const persisted = JSON.parse(localStorageItems.get("phase-multiplayer") ?? "null");
+    expect(persisted?.state?.lastPodListingPublic).toBe(false);
+  });
 
   it("strips AI seats from team-based server host settings", async () => {
     useMultiplayerStore.getState().startHosting(
@@ -1190,6 +1338,362 @@ describe("multiplayerStore", () => {
     expect(loadWsSession()?.hostSession).toBeUndefined();
   });
 
+  describe("the lobby host's started-game session", () => {
+    const deck = { main_deck: ["Forest"], sideboard: [], commander: ["Goreclaw, Terror of Qal Sisma"] };
+    const startedGame = { gameCode: "ABCDE", playerToken: "host-token" };
+    const failSessionKey = (method: "getItem" | "setItem", name: string) => {
+      const real = localStorage[method] as (...args: string[]) => string | null | void;
+      return vi.spyOn(localStorage, method).mockImplementation(((key: string, value?: string) => {
+        if (key === WS_SESSION_STORAGE_KEY) throw new DOMException(name, name);
+        return real(key, value as string);
+      }) as never);
+    };
+    async function hostUntilCreated(): Promise<void> {
+      useMultiplayerStore.getState().startHosting(hostingSettings(), deck, HOST_URL);
+      await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+      emitServerMessage("GameCreated", {
+        game_code: "ABCDE",
+        player_token: "host-token",
+        full_key: { game_code: "ABCDE", generation: 1 },
+      });
+    }
+    function storedHostSession(gameCode: string, timestamp = Date.now()) {
+      return {
+        gameCode,
+        playerToken: "resumed-token",
+        fullKey: { game_code: gameCode, generation: 1 },
+        serverUrl: HOST_URL,
+        timestamp,
+        hostIsPublic: true,
+        hostSession: { formatConfig: FORMAT_DEFAULTS.Commander, timerSeconds: null, matchType: "Bo1" as const },
+      };
+    }
+
+    it("stays reachable when the store refuses the session write", async () => {
+      const refuse = failSessionKey("setItem", "QuotaExceededError");
+      try {
+        await hostUntilCreated();
+        emitServerMessage("GameStarted", {});
+        expect(refuse.mock.calls.some(([key]) => key === WS_SESSION_STORAGE_KEY)).toBe(true);
+        expect(useMultiplayerStore.getState().pendingGameRoute).toMatch(/^\/game\/[^?]+\?mode=host$/);
+        expect(loadWsSession()).toMatchObject(startedGame);
+      } finally {
+        refuse.mockRestore();
+      }
+    });
+
+    it("stays reachable when the store blocks reads and writes", async () => {
+      const blockedGet = failSessionKey("getItem", "SecurityError");
+      const blockedSet = failSessionKey("setItem", "SecurityError");
+      try {
+        await hostUntilCreated();
+        emitServerMessage("GameStarted", {});
+        const session = loadWsSession();
+        expect(blockedGet.mock.calls.some(([key]) => key === WS_SESSION_STORAGE_KEY)).toBe(true);
+        expect(session).toMatchObject(startedGame);
+      } finally {
+        blockedGet.mockRestore();
+        blockedSet.mockRestore();
+      }
+    });
+
+    it("stays reachable when the pregame session outlived the TTL", async () => {
+      const t0 = Date.now();
+      const now = vi.spyOn(Date, "now").mockReturnValue(t0);
+      try {
+        await hostUntilCreated();
+        expect(loadWsSession()?.gameCode).toBe("ABCDE");
+        now.mockReturnValue(t0 + WS_SESSION_TTL_MS + 1000);
+        emitServerMessage("GameStarted", {});
+        expect(useMultiplayerStore.getState().pendingGameRoute).toMatch(/^\/game\/[^?]+\?mode=host$/);
+        expect(loadWsSession()).toMatchObject(startedGame);
+      } finally {
+        now.mockRestore();
+      }
+    });
+
+    it("stays reachable when the stored pregame copy expired and the re-stamp is refused", async () => {
+      const t0 = Date.now();
+      const now = vi.spyOn(Date, "now").mockReturnValue(t0);
+      let refuse: ReturnType<typeof failSessionKey> | undefined;
+      try {
+        await hostUntilCreated();
+        expect(loadWsSession()?.gameCode).toBe("ABCDE");
+        now.mockReturnValue(t0 + WS_SESSION_TTL_MS + 1000);
+        refuse = failSessionKey("setItem", "QuotaExceededError");
+        emitServerMessage("GameStarted", {});
+        expect(loadWsSession()).toMatchObject(startedGame);
+        expect(refuse.mock.calls.some(([key]) => key === WS_SESSION_STORAGE_KEY)).toBe(true);
+      } finally {
+        refuse?.mockRestore();
+        now.mockRestore();
+      }
+    });
+
+    it("re-stamps a resumed host session without its pregame metadata", async () => {
+      const before = Date.now() - 1000;
+      saveWsSession(storedHostSession("ABCDE", before));
+      expect(useMultiplayerStore.getState().resumeServerHosting()).toBe(true);
+      await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+      emitServerMessage("GameStarted", {});
+      const session = loadWsSession();
+      expect(session).toMatchObject({ gameCode: "ABCDE", playerToken: "resumed-token" });
+      expect(session?.hostSession).toBeUndefined();
+      expect(session!.timestamp).toBeGreaterThan(before);
+    });
+
+    function expectRestamped(gameCode: string, writtenAt: number): void {
+      const session = loadWsSession();
+      expect(session?.gameCode).toBe(gameCode);
+      expect(session?.hostSession).toBeUndefined();
+      expect(session!.timestamp).toBeGreaterThan(writtenAt);
+    }
+    function dialedFrame(): { type: string; data?: { game_code?: string } } {
+      return JSON.parse(socketMocks.send.mock.lastCall![0] as string);
+    }
+
+    it("re-stamps the resumed game, not an earlier hosting's held session", async () => {
+      await hostUntilCreated();
+      expect(loadWsSession()?.gameCode).toBe("ABCDE");
+      useMultiplayerStore.getState().cancelHosting();
+      const before = Date.now() - 1000;
+      saveWsSession(storedHostSession("FGHIJ", before));
+      socketMocks.send.mockClear();
+      expect(useMultiplayerStore.getState().resumeServerHosting()).toBe(true);
+      await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+      expect(dialedFrame()).toMatchObject({ type: "Reconnect", data: { game_code: "FGHIJ" } });
+      emitServerMessage("GameStarted", {});
+      expectRestamped("FGHIJ", before);
+    });
+
+    it("re-stamps the game a dropped host socket's reconnect dialed", async () => {
+      await hostUntilCreated();
+      vi.useFakeTimers();
+      try {
+        const before = Date.now() - 1000;
+        const { hostSession: _h, hostIsPublic: _p, ...otherPagesGame } = storedHostSession("FGHIJ", before);
+        localStorage.setItem(WS_SESSION_STORAGE_KEY, JSON.stringify(otherPagesGame));
+        socketMocks.send.mockClear();
+        socketMocks.currentWs!.onclose!();
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(dialedFrame()).toMatchObject({ type: "Reconnect", data: { game_code: "FGHIJ" } });
+        emitServerMessage("GameStarted", {});
+        expectRestamped("FGHIJ", before);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("re-stamps the game a failed create's reconnect dialed", async () => {
+      await hostUntilCreated();
+      useMultiplayerStore.setState({ hostingStatus: "idle", hostGameCode: null });
+      vi.useFakeTimers();
+      try {
+        vi.mocked(openPhaseSocket).mockRejectedValueOnce(new Error("dial failed"));
+        socketMocks.send.mockClear();
+        useMultiplayerStore.getState().startHosting(hostingSettings(), deck, HOST_URL);
+        const before = Date.now() - 1000;
+        localStorage.setItem(WS_SESSION_STORAGE_KEY, JSON.stringify(storedHostSession("FGHIJ", before)));
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(dialedFrame()).toMatchObject({ type: "Reconnect", data: { game_code: "FGHIJ" } });
+        emitServerMessage("GameStarted", {});
+        expectRestamped("FGHIJ", before);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("re-stamps nothing when a new hosting's GameCreated carries no full key", async () => {
+      await hostUntilCreated();
+      expect(loadWsSession()?.gameCode).toBe("ABCDE");
+      socketMocks.send.mockClear();
+      useMultiplayerStore.getState().startHosting(hostingSettings(), deck, HOST_URL);
+      await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+      emitServerMessage("GameCreated", { game_code: "KLMNO", player_token: "lobby-token" });
+      expect(useMultiplayerStore.getState().hostGameCode).toBe("KLMNO");
+      emitServerMessage("GameStarted", {});
+      expect(useMultiplayerStore.getState().pendingGameRoute).toMatch(/^\/game\/[^?]+\?mode=host$/);
+      expect(loadWsSession()).toBeNull();
+    });
+
+    it.each(["before", "after"] as const)(
+      "re-stamps the delivering socket's game while another host socket is live (%s that socket's GameCreated)",
+      async (window) => {
+        await hostUntilCreated();
+        vi.useFakeTimers();
+        try {
+          const A = socketMocks.currentWs!;
+          A.onclose!();
+          const before = Date.now() - 1000;
+          localStorage.setItem(WS_SESSION_STORAGE_KEY, JSON.stringify(storedHostSession("FGHIJ", before)));
+          useMultiplayerStore.setState({ hostingStatus: "idle", hostGameCode: null });
+          socketMocks.send.mockClear();
+          expect(useMultiplayerStore.getState().resumeServerHosting()).toBe(true);
+          await vi.advanceTimersByTimeAsync(0);
+          const B = socketMocks.currentWs!;
+          expect(B).not.toBe(A);
+          expect(dialedFrame()).toMatchObject({ type: "Reconnect", data: { game_code: "FGHIJ" } });
+          emitServerMessage("GameCreated", {
+            game_code: "FGHIJ",
+            player_token: "resumed-token",
+            full_key: { game_code: "FGHIJ", generation: 1 },
+          }, B);
+          await vi.advanceTimersByTimeAsync(1000);
+          const C = socketMocks.currentWs!;
+          expect(C).not.toBe(B);
+          expect(dialedFrame()).toMatchObject({ type: "Reconnect", data: { game_code: "ABCDE" } });
+          expect(B.close).not.toHaveBeenCalled();
+          if (window === "after") {
+            emitServerMessage("GameCreated", {
+              game_code: "ABCDE",
+              player_token: "host-token",
+              full_key: { game_code: "ABCDE", generation: 1 },
+            }, C);
+          }
+          expect(loadWsSession()?.gameCode).toBe(window === "after" ? "ABCDE" : "FGHIJ");
+          emitServerMessage("GameStarted", {}, B);
+          expect(useMultiplayerStore.getState().pendingGameRoute).toMatch(/^\/game\/[^?]+\?mode=host$/);
+          expectRestamped("FGHIJ", before);
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    // GamePage's `lobbyProgress` arm makes this write while a server hosting session is live.
+    async function resumeWhileAReconnects() {
+      const A = socketMocks.currentWs!;
+      A.onclose!();
+      localStorage.setItem(WS_SESSION_STORAGE_KEY, JSON.stringify(storedHostSession("FGHIJ", Date.now() - 1000)));
+      useMultiplayerStore.setState({ hostingStatus: "idle", hostGameCode: null });
+      socketMocks.send.mockClear();
+      expect(useMultiplayerStore.getState().resumeServerHosting()).toBe(true);
+      await vi.advanceTimersByTimeAsync(0);
+      const B = socketMocks.currentWs!;
+      expect(dialedFrame()).toMatchObject({ type: "Reconnect", data: { game_code: "FGHIJ" } });
+      emitServerMessage("GameCreated", {
+        game_code: "FGHIJ",
+        player_token: "resumed-token",
+        full_key: { game_code: "FGHIJ", generation: 1 },
+      }, B);
+      return B;
+    }
+    const createdFor = (code: string, token: string) => ({
+      game_code: code,
+      player_token: token,
+      full_key: { game_code: code, generation: 1 },
+    });
+
+    it.each([
+      { route: "live", handsOff: "resumed" },
+      { route: "live", handsOff: "reconnected" },
+      { route: "dial", handsOff: "resumed" },
+    ] as const)(
+      "keeps the started game when a superseded host bring-up delivers GameCreated after the handoff ($route, $handsOff socket hands off)",
+      async ({ route, handsOff }) => {
+        await hostUntilCreated();
+        vi.useFakeTimers();
+        try {
+          const B = await resumeWhileAReconnects();
+          let release = () => {};
+          if (route === "dial") {
+            const openDefault = vi.mocked(openPhaseSocket).getMockImplementation()!;
+            const gate = new Promise<void>((resolve) => { release = resolve; });
+            vi.mocked(openPhaseSocket).mockImplementationOnce(async (...args) => {
+              await gate;
+              return openDefault(...args);
+            });
+          }
+          const dialsBefore = vi.mocked(openPhaseSocket).mock.calls.length;
+          await vi.advanceTimersByTimeAsync(1000);
+          expect(vi.mocked(openPhaseSocket).mock.calls.length - dialsBefore).toBe(1);
+          const C = route === "live" ? socketMocks.currentWs! : null;
+          if (C) expect(C).not.toBe(B);
+          const [handoff, stale] = handsOff === "resumed" ? [B, C] : [C!, B];
+          const [startedCode, staleCode] = handsOff === "resumed" ? ["FGHIJ", "ABCDE"] : ["ABCDE", "FGHIJ"];
+          emitServerMessage("GameStarted", {}, handoff);
+          const routed = useMultiplayerStore.getState().pendingGameRoute;
+          expect(routed).toMatch(/^\/game\/[^?]+\?mode=host$/);
+          expect(loadWsSession()?.gameCode).toBe(startedCode);
+          socketMocks.send.mockClear();
+          const closedAtHandoff = C?.close.mock.calls.length ?? 0;
+          release();
+          await vi.advanceTimersByTimeAsync(0);
+          const late = stale ?? socketMocks.currentWs!;
+          expect(late).not.toBe(handoff);
+          const framesAfterHandoff = socketMocks.send.mock.calls.length;
+          const closedBeforeItsFrame = late.close.mock.calls.length;
+          emitServerMessage("GameCreated", createdFor(staleCode, "stale-token"), late);
+          expect(loadWsSession()?.gameCode).toBe(startedCode);
+          expect(useMultiplayerStore.getState()).toMatchObject({ hostingStatus: "idle", hostGameCode: null, pendingGameRoute: routed });
+          expect(late.close).toHaveBeenCalled();
+          if (route === "dial") {
+            expect(framesAfterHandoff).toBe(0);
+            expect(closedBeforeItsFrame).toBe(1);
+          } else if (stale === C) {
+            expect(closedAtHandoff).toBe(1);
+          }
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it("does not answer from memory once another page removed the stored session", async () => {
+      await hostUntilCreated();
+      emitServerMessage("GameStarted", {});
+      expect(loadWsSession()).toMatchObject(startedGame);
+      localStorage.removeItem(WS_SESSION_STORAGE_KEY);
+      expect(loadWsSession()).toBeNull();
+    });
+
+    it("does not resume a cancelled hosting whose session the store refused", async () => {
+      const refuse = failSessionKey("setItem", "QuotaExceededError");
+      try {
+        await hostUntilCreated();
+        expect(refuse.mock.calls.some(([key]) => key === WS_SESSION_STORAGE_KEY)).toBe(true);
+        expect(loadWsSession()?.gameCode).toBe("ABCDE");
+        useMultiplayerStore.getState().cancelHosting();
+        expect(loadWsSession()).toBeNull();
+        expect(useMultiplayerStore.getState().resumeServerHosting()).toBe(false);
+      } finally {
+        refuse.mockRestore();
+      }
+    });
+
+    it("answers the landed re-stamp, not the refused pregame copy", async () => {
+      const refuse = failSessionKey("setItem", "QuotaExceededError");
+      try {
+        await hostUntilCreated();
+        expect(refuse.mock.calls.some(([key]) => key === WS_SESSION_STORAGE_KEY)).toBe(true);
+      } finally {
+        refuse.mockRestore();
+      }
+      emitServerMessage("GameStarted", {});
+      const session = loadWsSession();
+      expect(session).toMatchObject(startedGame);
+      expect(session?.hostSession).toBeUndefined();
+      localStorage.removeItem(WS_SESSION_STORAGE_KEY);
+      expect(loadWsSession()).toBeNull();
+    });
+
+    it("does not answer a refused session once it outlives the TTL", async () => {
+      const t0 = Date.now();
+      const now = vi.spyOn(Date, "now").mockReturnValue(t0);
+      const refuse = failSessionKey("setItem", "QuotaExceededError");
+      try {
+        await hostUntilCreated();
+        expect(refuse.mock.calls.some(([key]) => key === WS_SESSION_STORAGE_KEY)).toBe(true);
+        expect(loadWsSession()?.gameCode).toBe("ABCDE");
+        now.mockReturnValue(t0 + WS_SESSION_TTL_MS + 1000);
+        expect(loadWsSession()).toBeNull();
+      } finally {
+        refuse.mockRestore();
+        now.mockRestore();
+      }
+    });
+  });
+
   // ── U15: the chosen host server ─────────────────────────────────────────
 
   // V-U15d
@@ -1250,6 +1754,237 @@ describe("multiplayerStore", () => {
     useMultiplayerStore.getState().cancelHosting();
     clearWsSession();
     expect(useMultiplayerStore.getState().resumeServerHosting()).toBe(false);
+  });
+
+  it("closes a cancelled host socket after a bounded wait for GameAbandoned", async () => {
+    useMultiplayerStore.getState().startHosting(
+      hostingSettings(),
+      { main_deck: ["Forest"], sideboard: [], commander: [] },
+      HOST_URL,
+    );
+    await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+    emitServerMessage("GameCreated", {
+      game_code: "ABCDE",
+      player_token: "host-token",
+      full_key: { game_code: "ABCDE", generation: 1 },
+    });
+    const ws = socketMocks.currentWs!;
+    const sentTypes = () =>
+      socketMocks.send.mock.calls.map(
+        (call) => (JSON.parse(call[0] as string) as { type: string }).type,
+      );
+    expect(sentTypes()).toContain("CreateGameWithSettings");
+
+    vi.useFakeTimers();
+    try {
+      useMultiplayerStore.getState().cancelHosting();
+
+      expect(sentTypes()).toContain("AbandonGame");
+      expect(ws.close).not.toHaveBeenCalled();
+      vi.runOnlyPendingTimers();
+      expect(ws.close).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a cancelled LAN host bridge open until the server confirms the abandon", async () => {
+    const log: string[] = [];
+    let deliverAbandon: (() => void) | null = null;
+    const bridgeMessage = (type: string, data: unknown) =>
+      tauriMocks.bridgeListener!({ type: "message", text: JSON.stringify({ type, data }) });
+    tauriMocks.isDesktopTauri.mockReturnValue(true);
+    tauriMocks.invoke.mockImplementation(async (command: string, args: { text?: string }) => {
+      const frame = args.text ? `:${(JSON.parse(args.text) as { type: string }).type}` : "";
+      log.push(`${command}${frame}`);
+      if (command === "connect_lan_server") return 7;
+      if (frame === ":AbandonGame") {
+        deliverAbandon = () => {
+          log.push("delivered");
+          bridgeMessage("GameAbandoned", { game_code: "ABCDE" });
+        };
+      }
+      return undefined;
+    });
+    vi.mocked(openPhaseSocket).mockImplementationOnce(async (url) => {
+      const ws = new NativeEngineSocket({ type: "lan", url, origin: "https://phase-rs.dev" });
+      await waitFor(() => expect(ws.readyState).toBe(NativeEngineSocket.OPEN));
+      return { serverInfo: { mode: "Full", protocolVersion: 14 }, ws } as unknown as Awaited<
+        ReturnType<typeof openPhaseSocket>
+      >;
+    });
+    try {
+      useMultiplayerStore.getState().startHosting(
+        hostingSettings(),
+        { main_deck: ["Forest"], sideboard: [], commander: [] },
+        "ws://192.168.1.10:9374/ws",
+      );
+      await waitFor(() => expect(log).toContain("lan_bridge_send:CreateGameWithSettings"));
+      bridgeMessage("GameCreated", {
+        game_code: "ABCDE",
+        player_token: "host-token",
+        full_key: { game_code: "ABCDE", generation: 1 },
+      });
+      useMultiplayerStore.getState().cancelHosting();
+      expect(useMultiplayerStore.getState().hostingStatus).toBe("idle");
+      await waitFor(() => expect(deliverAbandon).not.toBeNull());
+      expect(log).not.toContain("lan_bridge_close");
+      deliverAbandon!();
+      await waitFor(() => expect(log).toContain("lan_bridge_close"));
+      expect(log.indexOf("delivered")).toBeLessThan(log.indexOf("lan_bridge_close"));
+    } finally {
+      tauriMocks.isDesktopTauri.mockReturnValue(false);
+      tauriMocks.invoke.mockReset();
+    }
+  });
+
+  it("drops a host socket that finishes connecting after cancel", async () => {
+    const openDefault = vi.mocked(openPhaseSocket).getMockImplementation()!;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.mocked(openPhaseSocket).mockImplementationOnce(async (...args) => {
+      await gate;
+      return openDefault(...args);
+    });
+    useMultiplayerStore.getState().startHosting(
+      hostingSettings(),
+      { main_deck: ["Forest"], sideboard: [], commander: [] },
+      HOST_URL,
+    );
+    expect(useMultiplayerStore.getState().hostingStatus).toBe("connecting");
+
+    useMultiplayerStore.getState().cancelHosting();
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const ws = socketMocks.currentWs!;
+    expect(ws).not.toBeNull();
+    emitServerMessage("GameCreated", {
+      game_code: "ABCDE",
+      player_token: "host-token",
+      full_key: { game_code: "ABCDE", generation: 1 },
+    });
+
+    expect(socketMocks.send).not.toHaveBeenCalled();
+    expect(ws.close).toHaveBeenCalled();
+    expect(useMultiplayerStore.getState().hostingStatus).toBe("idle");
+  });
+
+  it("drops a host socket that finishes connecting after a P2P host replaces it", async () => {
+    const openDefault = vi.mocked(openPhaseSocket).getMockImplementation()!;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.mocked(openPhaseSocket).mockImplementationOnce(async (...args) => {
+      await gate;
+      return openDefault(...args);
+    });
+    useMultiplayerStore.getState().startHosting(
+      hostingSettings(),
+      { main_deck: ["Forest"], sideboard: [], commander: [] },
+      HOST_URL,
+    );
+    const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+      hostingSettings(),
+      { main_deck: ["Forest"], sideboard: [], commander: [] },
+      { brokerUrl: null },
+    );
+    expect(ok).toBe(true);
+    const { hostingStatus, hostGameCode } = useMultiplayerStore.getState();
+
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const ws = socketMocks.currentWs!;
+    expect(ws).not.toBeNull();
+    emitServerMessage("GameCreated", {
+      game_code: "SRVCD",
+      player_token: "host-token",
+      full_key: { game_code: "SRVCD", generation: 1 },
+    });
+
+    expect(socketMocks.send).not.toHaveBeenCalled();
+    expect(ws.close).toHaveBeenCalled();
+    expect(useMultiplayerStore.getState()).toMatchObject({ hostingStatus, hostGameCode });
+    expect(loadWsSession()?.gameCode).not.toBe("SRVCD");
+  });
+
+  it("ignores a host dial that fails after cancel", async () => {
+    const lostToasts = () =>
+      [...useMultiplayerStore.getState().toasts.values()].filter(
+        (toast) => toast.message === "Connection to server lost.",
+      ).length;
+    const failDial = async (cancelFirst: boolean) => {
+      let fail!: () => void;
+      vi.mocked(openPhaseSocket).mockImplementationOnce(
+        () => new Promise((_, reject) => (fail = () => reject(new Error("down")))),
+      );
+      useMultiplayerStore.getState().startHosting(
+        hostingSettings(),
+        { main_deck: ["Forest"], sideboard: [], commander: [] },
+        HOST_URL,
+      );
+      if (cancelFirst) useMultiplayerStore.getState().cancelHosting();
+      fail();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    };
+
+    await failDial(false);
+    expect(lostToasts()).toBe(1);
+    useMultiplayerStore.setState({ toasts: new Map() });
+    await failDial(true);
+    expect(lostToasts()).toBe(0);
+  });
+
+  it("spares the replacement hosting when a closed host socket errors late", async () => {
+    const deck = { main_deck: ["Forest"], sideboard: [], commander: [] };
+    useMultiplayerStore.getState().startHosting(hostingSettings(), deck, HOST_URL);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const first = socketMocks.currentWs!;
+    emitServerMessage("GameCreated", {
+      game_code: "AAAAA",
+      player_token: "host-token",
+      full_key: { game_code: "AAAAA", generation: 1 },
+    });
+    useMultiplayerStore.getState().startHosting(hostingSettings(), deck, HOST_URL);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(socketMocks.currentWs).not.toBe(first);
+    expect(first.close).toHaveBeenCalled();
+
+    first.onerror?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const lost = [...useMultiplayerStore.getState().toasts.values()].filter(
+      (toast) => toast.message === "Connection to server lost.",
+    ).length;
+    expect({ status: useMultiplayerStore.getState().hostingStatus, lost }).toEqual({
+      status: "connecting",
+      lost: 0,
+    });
+  });
+
+  it("re-dials when the live host socket errors before the game starts", async () => {
+    vi.useFakeTimers();
+    try {
+      useMultiplayerStore.getState().startHosting(
+        hostingSettings(),
+        { main_deck: ["Forest"], sideboard: [], commander: [] },
+        HOST_URL,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      emitServerMessage("GameCreated", {
+        game_code: "ABCDE",
+        player_token: "host-token",
+        full_key: { game_code: "ABCDE", generation: 1 },
+      });
+      const opensBefore = vi.mocked(openPhaseSocket).mock.calls.length;
+      socketMocks.currentWs!.onerror!();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(vi.mocked(openPhaseSocket).mock.calls.length).toBeGreaterThan(opensBefore);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // V-U15h — the LIVE mid-game reconnect, the third `openServerHostSocket`
@@ -1413,6 +2148,183 @@ describe("multiplayerStore", () => {
     },
   );
 
+  describe("registerHost lobby-capability toast", () => {
+    beforeEach(() => {
+      useMultiplayerStore.setState({ toasts: new Map() });
+    });
+
+    function openBrokerRequest(): RegisterHostRequest {
+      return {
+        hostPeerId: "peer-host",
+        displayName: "Host",
+        public: true,
+        password: null,
+        timerSeconds: null,
+        playerCount: 2,
+        matchConfig: { match_type: "Bo1" },
+        formatConfig: null,
+        roomName: null,
+        draftMetadata: null,
+      };
+    }
+
+    it("startP2PHostingSession resolves false and toasts on LobbyCapabilityError", async () => {
+      brokerMocks.registerHost.mockRejectedValueOnce(new LobbyCapabilityError(10, 9));
+
+      const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+        hostingSettings(),
+        {
+          main_deck: ["Forest"],
+          sideboard: [],
+          commander: ["Goreclaw, Terror of Qal Sisma"],
+        },
+        { brokerUrl: "wss://broker.example/ws" },
+      );
+
+      expect(ok).toBe(false);
+      expect(useMultiplayerStore.getState().toasts.get("generic")?.message).toBe(
+        i18n.t("multiplayer:lobbyCapability.formatNeedsNewerServer", { needed: 10 }),
+      );
+    });
+
+    it("startP2PHostingSession resolves false with no capability toast on a generic error", async () => {
+      brokerMocks.registerHost.mockRejectedValueOnce(new Error("boom"));
+
+      const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+        hostingSettings(),
+        {
+          main_deck: ["Forest"],
+          sideboard: [],
+          commander: ["Goreclaw, Terror of Qal Sisma"],
+        },
+        { brokerUrl: "wss://broker.example/ws" },
+      );
+
+      expect(ok).toBe(false);
+      expect(useMultiplayerStore.getState().toasts.get("generic")).toBeUndefined();
+    });
+
+    it("openBroker resolves null and toasts on LobbyCapabilityError", async () => {
+      useMultiplayerStore.getState().setHostingServer("wss://broker.example/ws");
+      brokerMocks.registerHost.mockRejectedValueOnce(new LobbyCapabilityError(10, 9));
+
+      const result = await useMultiplayerStore.getState().openBroker(openBrokerRequest());
+
+      expect(result).toBeNull();
+      expect(brokerMocks.close).toHaveBeenCalledOnce();
+      expect(useMultiplayerStore.getState().toasts.get("generic")?.message).toBe(
+        i18n.t("multiplayer:lobbyCapability.formatNeedsNewerServer", { needed: 10 }),
+      );
+    });
+
+    it("openBroker resolves null with no capability toast on a generic error", async () => {
+      useMultiplayerStore.getState().setHostingServer("wss://broker.example/ws");
+      brokerMocks.registerHost.mockRejectedValueOnce(new Error("boom"));
+
+      const result = await useMultiplayerStore.getState().openBroker(openBrokerRequest());
+
+      expect(result).toBeNull();
+      expect(useMultiplayerStore.getState().toasts.get("generic")).toBeUndefined();
+    });
+
+    it("closes the broker socket it opened when registerHost rejects", async () => {
+      useMultiplayerStore.getState().setHostingServer("wss://broker.example/ws");
+      brokerMocks.registerHost.mockRejectedValueOnce(new Error("boom"));
+
+      const result = await useMultiplayerStore.getState().openBroker(openBrokerRequest());
+
+      expect(result).toBeNull();
+      expect(brokerMocks.close).toHaveBeenCalledOnce();
+    });
+
+    it("keeps the broker open and hands it to getBroker when registerHost resolves", async () => {
+      useMultiplayerStore.getState().setHostingServer("wss://broker.example/ws");
+
+      const result = await useMultiplayerStore.getState().openBroker(openBrokerRequest());
+
+      expect(result).not.toBeNull();
+      expect(brokerMocks.close).not.toHaveBeenCalled();
+      expect(useMultiplayerStore.getState().getBroker()).toEqual({
+        broker: result!.broker,
+        gameCode: result!.gameCode,
+      });
+    });
+
+    function fakeBroker(gameCode: string, registerHost = vi.fn(async () => ({ gameCode, playerToken: "t" }))) {
+      return {
+        serverInfo: { mode: "LobbyOnly", protocolVersion: 14 },
+        registerHost,
+        updateMetadata: vi.fn(),
+        unregister: vi.fn(async () => undefined),
+        close: vi.fn(),
+      };
+    }
+
+    it("keeps the newer of two overlapping openBroker calls and closes the older", async () => {
+      useMultiplayerStore.getState().setHostingServer("wss://broker.example/ws");
+      const older = fakeBroker("OLDER");
+      const newer = fakeBroker("NEWER");
+      let releaseOlder!: (broker: unknown) => void;
+      brokerMocks.openBrokerClient
+        .mockImplementationOnce(() => new Promise((resolve) => { releaseOlder = resolve; }))
+        .mockResolvedValueOnce(newer);
+      const first = useMultiplayerStore.getState().openBroker(openBrokerRequest());
+      expect(await useMultiplayerStore.getState().openBroker(openBrokerRequest())).not.toBeNull();
+      releaseOlder(older);
+      expect(await first).toBeNull();
+      expect(useMultiplayerStore.getState().getBroker()?.gameCode).toBe("NEWER");
+      expect(newer.close).not.toHaveBeenCalled();
+      expect(older.close).toHaveBeenCalledOnce();
+    });
+
+    it("keeps the newer broker when the older call is parked in registerHost", async () => {
+      useMultiplayerStore.getState().setHostingServer("wss://broker.example/ws");
+      let releaseRegister!: () => void;
+      const older = fakeBroker("OLDER", vi.fn(() => new Promise<{ gameCode: string; playerToken: string }>((resolve) => {
+        releaseRegister = () => resolve({ gameCode: "OLDER", playerToken: "t" });
+      })));
+      const newer = fakeBroker("NEWER");
+      brokerMocks.openBrokerClient.mockResolvedValueOnce(older).mockResolvedValueOnce(newer);
+      const first = useMultiplayerStore.getState().openBroker(openBrokerRequest());
+      await waitFor(() => expect(older.registerHost).toHaveBeenCalled());
+      expect(await useMultiplayerStore.getState().openBroker(openBrokerRequest())).not.toBeNull();
+      releaseRegister();
+      expect(await first).toBeNull();
+      expect(useMultiplayerStore.getState().getBroker()?.gameCode).toBe("NEWER");
+      expect(older.close).toHaveBeenCalledOnce();
+    });
+
+    it("closes the broker and registers nothing when openBroker's signal aborts while the socket opens", async () => {
+      useMultiplayerStore.getState().setHostingServer("wss://broker.example/ws");
+      const broker = fakeBroker("ROOM1");
+      let release!: (broker: unknown) => void;
+      brokerMocks.openBrokerClient.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+      const abort = new AbortController();
+      const open = useMultiplayerStore.getState().openBroker(openBrokerRequest(), abort.signal);
+      expect(brokerMocks.openBrokerClient).toHaveBeenCalledOnce();
+      abort.abort();
+      release(broker);
+      expect(await open).toBeNull();
+      expect(broker.registerHost).not.toHaveBeenCalled();
+      expect(broker.close).toHaveBeenCalledOnce();
+      expect(useMultiplayerStore.getState().getBroker()).toBeNull();
+    });
+
+    it("closeBroker of a replaced broker leaves the active one open", async () => {
+      useMultiplayerStore.getState().setHostingServer("wss://broker.example/ws");
+      const first = fakeBroker("B1");
+      const second = fakeBroker("B2");
+      brokerMocks.openBrokerClient.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+      await useMultiplayerStore.getState().openBroker(openBrokerRequest());
+      await useMultiplayerStore.getState().openBroker(openBrokerRequest());
+      const closesBefore = first.close.mock.calls.length;
+      useMultiplayerStore.getState().closeBroker(first as never);
+      expect(first.close).toHaveBeenCalledTimes(closesBefore + 1);
+      expect(useMultiplayerStore.getState().getBroker()?.gameCode).toBe("B2");
+      expect(second.close).not.toHaveBeenCalled();
+    });
+  });
+
   it("removes open P2P seats in order before starting with current players", async () => {
     const ok = await useMultiplayerStore.getState().startP2PHostingSession(
       hostingSettings(),
@@ -1495,6 +2407,154 @@ describe("multiplayerStore", () => {
 
     expect(useMultiplayerStore.getState().activePlayerId).toBe(2);
     expect(useMultiplayerStore.getState().pendingGameRoute).toBeNull();
+  });
+
+  describe("Discord requested codes", () => {
+    const deck = { main_deck: ["Forest"], sideboard: [], commander: [] };
+    const BROKER_URL = "wss://broker.example/ws";
+
+    beforeEach(() => {
+      useMultiplayerStore.setState({ toasts: new Map() });
+    });
+
+    it("withdraws a P2P listing when an old broker mints its own code", async () => {
+      brokerMocks.registerHost.mockResolvedValueOnce({
+        gameCode: "ZZZ999",
+        playerToken: "host-token",
+      });
+
+      const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+        hostingSettings({ requestedCode: "AB12CD" }),
+        deck,
+        { brokerUrl: BROKER_URL },
+      );
+
+      // Reach guard: the requested code reached the broker request.
+      expect(brokerMocks.registerHost).toHaveBeenCalledWith(
+        expect.objectContaining({ requestedCode: "AB12CD" }),
+      );
+      expect(ok).toBe(false);
+      expect(brokerMocks.unregister).toHaveBeenCalledWith("ZZZ999");
+      expect(useMultiplayerStore.getState().toasts.get("generic")?.message).toBe(
+        multiplayerEn.botLink.codeUnsupported,
+      );
+      expect(useMultiplayerStore.getState().hostingStatus).toBe("idle");
+    });
+
+    it("keeps a P2P listing whose code matches the requested one", async () => {
+      brokerMocks.registerHost.mockResolvedValueOnce({
+        gameCode: "AB12CD",
+        playerToken: "host-token",
+      });
+
+      const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+        hostingSettings({ requestedCode: "AB12CD" }),
+        deck,
+        { brokerUrl: BROKER_URL },
+      );
+
+      expect(ok).toBe(true);
+      expect(brokerMocks.unregister).not.toHaveBeenCalled();
+    });
+
+    it("explains a held code on the P2P host path", async () => {
+      brokerMocks.registerHost.mockRejectedValueOnce(
+        new BrokerRequestError("Game code AB12CD is already in use", "code_in_use"),
+      );
+
+      const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+        hostingSettings({ requestedCode: "AB12CD" }),
+        deck,
+        { brokerUrl: BROKER_URL },
+      );
+
+      expect(ok).toBe(false);
+      expect(useMultiplayerStore.getState().toasts.get("generic")?.message).toBe(
+        multiplayerEn.botLink.codeInUse,
+      );
+    });
+
+    it("stays silent on a generic P2P registration failure", async () => {
+      brokerMocks.registerHost.mockRejectedValueOnce(new Error("socket gone"));
+
+      const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+        hostingSettings({ requestedCode: "AB12CD" }),
+        deck,
+        { brokerUrl: BROKER_URL },
+      );
+
+      expect(ok).toBe(false);
+      expect(useMultiplayerStore.getState().toasts.get("generic")).toBeUndefined();
+    });
+
+    it("cancels a Full host when an old server mints its own code", async () => {
+      useMultiplayerStore.getState().startHosting(
+        hostingSettings({ requestedCode: "AB12CD" }),
+        deck,
+        HOST_URL,
+      );
+
+      await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+      const frame = JSON.parse(socketMocks.send.mock.calls[0][0] as string) as {
+        data: { requested_code: unknown };
+      };
+      expect(frame.data.requested_code).toBe("AB12CD");
+
+      emitServerMessage("GameCreated", { game_code: "ZZZ999", player_token: "host-token" });
+
+      expect(useMultiplayerStore.getState().hostingStatus).toBe("idle");
+      expect(useMultiplayerStore.getState().toasts.get("generic")?.message).toBe(
+        multiplayerEn.botLink.codeUnsupported,
+      );
+    });
+
+    it("waits on a Full host whose code matches the requested one", async () => {
+      useMultiplayerStore.getState().startHosting(
+        hostingSettings({ requestedCode: "AB12CD" }),
+        deck,
+        HOST_URL,
+      );
+
+      await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+      emitServerMessage("GameCreated", { game_code: "AB12CD", player_token: "host-token" });
+
+      expect(useMultiplayerStore.getState().hostingStatus).toBe("waiting");
+      expect(useMultiplayerStore.getState().hostGameCode).toBe("AB12CD");
+    });
+
+    it("explains a held code on the Full host path", async () => {
+      useMultiplayerStore.getState().startHosting(
+        hostingSettings({ requestedCode: "AB12CD" }),
+        deck,
+        HOST_URL,
+      );
+
+      await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+      emitServerMessage("Error", {
+        message: "Game code AB12CD is already in use",
+        code: "code_in_use",
+      });
+
+      expect(useMultiplayerStore.getState().toasts.get("generic")?.message).toBe(
+        multiplayerEn.botLink.codeInUse,
+      );
+      expect(useMultiplayerStore.getState().hostingStatus).toBe("idle");
+    });
+
+    it("shows an un-coded Full host error verbatim", async () => {
+      useMultiplayerStore.getState().startHosting(hostingSettings(), deck, HOST_URL);
+
+      await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+      const frame = JSON.parse(socketMocks.send.mock.calls[0][0] as string) as {
+        data: { requested_code: unknown };
+      };
+      expect(frame.data.requested_code).toBeNull();
+      emitServerMessage("Error", { message: "Server is full" });
+
+      expect(useMultiplayerStore.getState().toasts.get("generic")?.message).toBe(
+        "Server is full",
+      );
+    });
   });
 
   it("reports a server host connection error instead of falling through to P2P", async () => {
@@ -2660,3 +3720,520 @@ describe("multiplayerStore", () => {
   });
 });
 
+describe("tournament credential storage (sessionStorage, not localStorage)", () => {
+  const SESSION_KEY = "phase-tournament-credentials";
+
+  beforeEach(() => {
+    sessionStorage.clear();
+    localStorageItems.clear();
+    useMultiplayerStore.setState({ tournamentCredentials: {} });
+  });
+
+  it("writes credentials to sessionStorage and NOT to the localStorage persist blob", () => {
+    act(() => {
+      useMultiplayerStore.setState((state) => ({
+        tournamentCredentials: rememberTournamentCredential(
+          state.tournamentCredentials,
+          "TOUR01",
+          { organizerToken: "secret" },
+        ),
+      }));
+    });
+
+    // Present in sessionStorage.
+    const session = JSON.parse(sessionStorage.getItem(SESSION_KEY) ?? "null");
+    expect(session?.TOUR01?.organizerToken).toBe("secret");
+
+    // Absent from the localStorage persist blob — the whole point of the move.
+    const persisted = JSON.parse(localStorageItems.get("phase-multiplayer") ?? "null");
+    expect(persisted?.state?.tournamentCredentials).toBeUndefined();
+  });
+
+  it("hydrates credentials from sessionStorage into the store", () => {
+    // The store is already empty from `beforeEach`; seed sessionStorage with no
+    // intervening `setState`, or the change subscription would wipe the seed
+    // (an emptied map removes the key).
+    sessionStorage.setItem(
+      SESSION_KEY,
+      JSON.stringify({
+        TOUR01: {
+          playerToken: "secret",
+          playerOrigin: "wss://o.example/ws",
+          updatedAt: 5,
+        },
+      }),
+    );
+
+    hydrateSessionTournamentCredentials();
+
+    expect(
+      useMultiplayerStore.getState().tournamentCredentials.TOUR01?.playerToken,
+    ).toBe("secret");
+  });
+
+  // Maintainer [HIGH] #2: a legacy persisted credential with NO recorded origin
+  // is an authority bypass — it could be replayed against an unintended broker.
+  // Fail closed: drop the origin-less token on load.
+  it("drops an origin-less (legacy) stored credential on hydration", () => {
+    sessionStorage.setItem(
+      SESSION_KEY,
+      JSON.stringify({
+        // Organizer token with no organizerOrigin, and a player token with no
+        // playerOrigin — both legacy, both must be dropped.
+        LEGACY: { organizerToken: "org", updatedAt: 1 },
+        MIXED: {
+          organizerToken: "org2",
+          playerToken: "ply",
+          playerOrigin: "wss://o.example/ws",
+          updatedAt: 2,
+        },
+      }),
+    );
+
+    hydrateSessionTournamentCredentials();
+
+    const creds = useMultiplayerStore.getState().tournamentCredentials;
+    // The wholly origin-less credential is gone entirely.
+    expect(creds.LEGACY).toBeUndefined();
+    // The mixed one keeps only the token whose origin survived.
+    expect(creds.MIXED?.organizerToken).toBeUndefined();
+    expect(creds.MIXED?.playerToken).toBe("ply");
+  });
+
+  it("removes the sessionStorage key when the credential map empties", () => {
+    act(() => {
+      useMultiplayerStore.setState((state) => ({
+        tournamentCredentials: rememberTournamentCredential(
+          state.tournamentCredentials,
+          "TOUR01",
+          { organizerToken: "secret" },
+        ),
+      }));
+    });
+    expect(sessionStorage.getItem(SESSION_KEY)).not.toBeNull();
+
+    act(() => {
+      useMultiplayerStore.setState({ tournamentCredentials: {} });
+    });
+    expect(sessionStorage.getItem(SESSION_KEY)).toBeNull();
+  });
+});
+
+
+describe("proactive credential rotation", () => {
+  const NOW = 1_700_000_000_000;
+  const MARGIN = 24 * 60 * 60 * 1000;
+
+  /** A socket whose only load-bearing property here is the broker's advertised
+   *  lobby version — the version gate reads exactly that. */
+  function socketAtLobbyVersion(
+    lobbyProtocolVersion: number | undefined,
+  ): PhaseSocket {
+    return {
+      serverInfo: {
+        version: "0.0.0",
+        buildCommit: "test",
+        protocolVersion: 1,
+        mode: "LobbyOnly",
+        lobbyProtocolVersion,
+      },
+    } as unknown as PhaseSocket;
+  }
+
+  function seedOrganizer(expiresAtMs: number | undefined): void {
+    useMultiplayerStore.setState({
+      tournamentCredentials: {
+        TOUR01: {
+          organizerToken: "old",
+          ...(expiresAtMs !== undefined
+            ? { organizerTokenExpiresAtMs: expiresAtMs }
+            : {}),
+          updatedAt: 0,
+        },
+      },
+    });
+  }
+
+  beforeEach(() => {
+    sessionStorage.clear();
+    vi.mocked(renewTournamentCredentialOver).mockReset();
+    useMultiplayerStore.setState({ tournamentCredentials: {} });
+  });
+
+  it("shouldRenewCredential renews only a still-valid credential inside the margin", () => {
+    // No expiry known (a pre-v6 broker minted none) -> never.
+    expect(shouldRenewCredential(undefined, NOW, MARGIN)).toBe(false);
+    // Already expired -> never: an expired credential is unrenewable, so this
+    // would only draw a refusal.
+    expect(shouldRenewCredential(NOW, NOW, MARGIN)).toBe(false);
+    expect(shouldRenewCredential(NOW - 1, NOW, MARGIN)).toBe(false);
+    // Valid but outside the margin -> not yet (no needless round trip).
+    expect(shouldRenewCredential(NOW + MARGIN + 1, NOW, MARGIN)).toBe(false);
+    // Valid and within the margin (inclusive at exactly the margin) -> renew.
+    expect(shouldRenewCredential(NOW + MARGIN, NOW, MARGIN)).toBe(true);
+    expect(shouldRenewCredential(NOW + 1, NOW, MARGIN)).toBe(true);
+  });
+
+  it("does NOT rotate against a broker below the recoverable-rotation floor", async () => {
+    // Near expiry, so the ONLY thing stopping a rotation is the version gate:
+    // an old broker invalidates instantly, so proactively rotating there would
+    // risk stranding on a lost reply.
+    seedOrganizer(NOW + 1000);
+    const controller = new AbortController();
+    const token = await maybeRenewNearExpiry(
+      useMultiplayerStore.setState,
+      useMultiplayerStore.getState,
+      socketAtLobbyVersion(8),
+      "wss://o.example/ws",
+      "TOUR01",
+      "organizer",
+      "old",
+      controller.signal,
+      NOW,
+    );
+    expect(token).toBe("old");
+    expect(renewTournamentCredentialOver).not.toHaveBeenCalled();
+    expect(
+      useMultiplayerStore.getState().tournamentCredentials.TOUR01
+        ?.organizerToken,
+    ).toBe("old");
+  });
+
+  it("does NOT rotate a credential that is not yet near expiry", async () => {
+    seedOrganizer(NOW + MARGIN + 60_000); // well outside the margin
+    const controller = new AbortController();
+    const token = await maybeRenewNearExpiry(
+      useMultiplayerStore.setState,
+      useMultiplayerStore.getState,
+      socketAtLobbyVersion(9),
+      "wss://o.example/ws",
+      "TOUR01",
+      "organizer",
+      "old",
+      controller.signal,
+      NOW,
+    );
+    expect(token).toBe("old");
+    expect(renewTournamentCredentialOver).not.toHaveBeenCalled();
+  });
+
+  it("does NOT rotate a credential with no known expiry", async () => {
+    seedOrganizer(undefined); // pre-v6 broker minted no expiry
+    const controller = new AbortController();
+    const token = await maybeRenewNearExpiry(
+      useMultiplayerStore.setState,
+      useMultiplayerStore.getState,
+      socketAtLobbyVersion(9),
+      "wss://o.example/ws",
+      "TOUR01",
+      "organizer",
+      "old",
+      controller.signal,
+      NOW,
+    );
+    expect(token).toBe("old");
+    expect(renewTournamentCredentialOver).not.toHaveBeenCalled();
+  });
+
+  it("rotates and adopts the fresh secret when near expiry against a v9 broker", async () => {
+    seedOrganizer(NOW + 1000);
+    const newExpiry = NOW + 7 * 24 * 60 * 60 * 1000;
+    vi.mocked(renewTournamentCredentialOver).mockResolvedValue({
+      ok: true,
+      value: {
+        code: "TOUR01",
+        role: "Organizer",
+        token: "fresh",
+        expires_at_ms: newExpiry,
+      },
+    });
+
+    const controller = new AbortController();
+    const token = await maybeRenewNearExpiry(
+      useMultiplayerStore.setState,
+      useMultiplayerStore.getState,
+      socketAtLobbyVersion(9),
+      "wss://o.example/ws",
+      "TOUR01",
+      "organizer",
+      "old",
+      controller.signal,
+      NOW,
+    );
+
+    expect(renewTournamentCredentialOver).toHaveBeenCalledWith(
+      expect.anything(),
+      "TOUR01",
+      "Organizer", // the CAPITALIZED wire role
+      "old",
+      expect.any(String), // the client-minted rotation nonce
+      expect.objectContaining({ signal: controller.signal }),
+    );
+    expect(token).toBe("fresh");
+    const stored = useMultiplayerStore.getState().tournamentCredentials.TOUR01;
+    expect(stored?.organizerToken).toBe("fresh");
+    expect(stored?.organizerTokenExpiresAtMs).toBe(newExpiry);
+    // The pending nonce is cleared once the rotation confirms.
+    expect(stored?.organizerPendingRotationNonce).toBeUndefined();
+  });
+
+  // The #8782 [HIGH] regression, client layer: an uncertain renewal must not
+  // strand the holder. It retries once in-call with the SAME nonce (to replay a
+  // committed-but-lost rotation), and if still uncertain leaves the held token
+  // and the PERSISTED nonce in place so the next attempt recovers.
+  it("retries with the same nonce on an uncertain result and persists it for recovery", async () => {
+    seedOrganizer(NOW + 1000);
+    // A genuinely uncertain result (not an abort): triggers the in-call retry.
+    vi.mocked(renewTournamentCredentialOver).mockResolvedValue({
+      ok: false,
+      reason: "timeout",
+      message: "timeout",
+    });
+
+    const controller = new AbortController();
+    const token = await maybeRenewNearExpiry(
+      useMultiplayerStore.setState,
+      useMultiplayerStore.getState,
+      socketAtLobbyVersion(9),
+      "wss://o.example/ws",
+      "TOUR01",
+      "organizer",
+      "old",
+      controller.signal,
+      NOW,
+    );
+
+    // Initial attempt + one in-call retry, both with the SAME nonce.
+    expect(renewTournamentCredentialOver).toHaveBeenCalledTimes(2);
+    const firstNonce = vi.mocked(renewTournamentCredentialOver).mock.calls[0][4];
+    const retryNonce = vi.mocked(renewTournamentCredentialOver).mock.calls[1][4];
+    expect(retryNonce).toBe(firstNonce);
+
+    // The held token flows through to the action; the secret is not advanced.
+    expect(token).toBe("old");
+    const stored = useMultiplayerStore.getState().tournamentCredentials.TOUR01;
+    expect(stored?.organizerToken).toBe("old");
+    // The nonce is PERSISTED so the next proactive renewal replays rather than
+    // minting a fresh nonce the broker would refuse against a superseded token.
+    expect(stored?.organizerPendingRotationNonce).toBe(firstNonce);
+  });
+
+  it("reuses the persisted nonce on a later attempt, then clears it on recovery", async () => {
+    // Seed a credential mid-recovery: a prior uncertain attempt left a nonce.
+    useMultiplayerStore.setState({
+      tournamentCredentials: {
+        TOUR01: {
+          organizerToken: "old",
+          organizerTokenExpiresAtMs: NOW + 1000,
+          organizerPendingRotationNonce: "stuck-nonce",
+          updatedAt: 0,
+        },
+      },
+    });
+    vi.mocked(renewTournamentCredentialOver).mockResolvedValue({
+      ok: true,
+      value: {
+        code: "TOUR01",
+        role: "Organizer",
+        token: "recovered",
+        expires_at_ms: NOW + 7 * 24 * 60 * 60 * 1000,
+      },
+    });
+
+    const controller = new AbortController();
+    const token = await maybeRenewNearExpiry(
+      useMultiplayerStore.setState,
+      useMultiplayerStore.getState,
+      socketAtLobbyVersion(9),
+      "wss://o.example/ws",
+      "TOUR01",
+      "organizer",
+      "old",
+      controller.signal,
+      NOW,
+    );
+
+    // The retry reused the PERSISTED nonce (so the broker can replay), not a
+    // fresh one.
+    expect(vi.mocked(renewTournamentCredentialOver).mock.calls[0][4]).toBe(
+      "stuck-nonce",
+    );
+    expect(token).toBe("recovered");
+    const stored = useMultiplayerStore.getState().tournamentCredentials.TOUR01;
+    expect(stored?.organizerToken).toBe("recovered");
+    expect(stored?.organizerPendingRotationNonce).toBeUndefined();
+  });
+
+  // Superagent P2: two near-expiry gated actions firing at once must not rotate
+  // twice (the second would orphan the first's fresh secret). They share one
+  // in-flight renewal and both settle on the same surviving secret.
+  it("dedupes concurrent near-expiry rotations of the same authority", async () => {
+    seedOrganizer(NOW + 1000);
+    const newExpiry = NOW + 7 * 24 * 60 * 60 * 1000;
+    vi.mocked(renewTournamentCredentialOver).mockImplementation(async () => ({
+      ok: true,
+      value: {
+        code: "TOUR01",
+        role: "Organizer",
+        token: "fresh",
+        expires_at_ms: newExpiry,
+      },
+    }));
+
+    const controller = new AbortController();
+    // Fire both without awaiting between them, so the second observes the first's
+    // in-flight renewal rather than starting its own.
+    const [a, b] = await Promise.all([
+      maybeRenewNearExpiry(
+        useMultiplayerStore.setState,
+        useMultiplayerStore.getState,
+        socketAtLobbyVersion(9),
+        "wss://o.example/ws",
+        "TOUR01",
+        "organizer",
+        "old",
+        controller.signal,
+        NOW,
+      ),
+      maybeRenewNearExpiry(
+        useMultiplayerStore.setState,
+        useMultiplayerStore.getState,
+        socketAtLobbyVersion(9),
+        "wss://o.example/ws",
+        "TOUR01",
+        "organizer",
+        "old",
+        controller.signal,
+        NOW,
+      ),
+    ]);
+
+    // Rotated exactly once, and both actions carry the same surviving secret.
+    expect(renewTournamentCredentialOver).toHaveBeenCalledTimes(1);
+    expect(a).toBe("fresh");
+    expect(b).toBe("fresh");
+    expect(
+      useMultiplayerStore.getState().tournamentCredentials.TOUR01
+        ?.organizerToken,
+    ).toBe("fresh");
+  });
+
+  // Maintainer [HIGH] #1, discriminating: with A's renewal in flight, a host
+  // switch to B and a SECOND renewal against B (distinct socket + token) must
+  // NOT dedupe onto A's promise — reverting the broker-origin component of the
+  // key would make B await A's promise and send A's bearer to B, and this test
+  // would catch it. B settles only from B's own response, and A's stale
+  // completion afterward cannot clobber B's credential (the CAS adoption).
+  it("scopes the dedupe by broker origin: a B renewal never awaits an in-flight A renewal", async () => {
+    // Resolve each renewal by hand, keyed by the presented token, so A and B can
+    // be driven independently.
+    const resolvers: Record<
+      string,
+      (r: {
+        ok: true;
+        value: {
+          code: string;
+          role: "Organizer" | "Player";
+          token: string;
+          expires_at_ms: number;
+        };
+      }) => void
+    > = {};
+    vi.mocked(renewTournamentCredentialOver).mockImplementation(
+      (_socket, _code, _role, token) =>
+        new Promise((res) => {
+          resolvers[token] = res;
+        }),
+    );
+    const now = NOW;
+
+    // Broker A: credential near expiry. Start A's renewal (pending).
+    useMultiplayerStore.setState({
+      hostingServer: "wss://a.example/ws",
+      tournamentCredentials: {
+        TOUR01: {
+          organizerToken: "A-old",
+          organizerTokenExpiresAtMs: now + 1000,
+          updatedAt: 0,
+        },
+      },
+    });
+    const aInflight = maybeRenewNearExpiry(
+      useMultiplayerStore.setState,
+      useMultiplayerStore.getState,
+      socketAtLobbyVersion(9),
+      "wss://a.example/ws", // A's broker origin, passed immutably
+      "TOUR01",
+      "organizer",
+      "A-old",
+      new AbortController().signal,
+      now,
+    );
+
+    // Host switch to B — SAME code, distinct credential — and start B's renewal
+    // (distinct socket + token) while A is still pending.
+    useMultiplayerStore.setState({
+      hostingServer: "wss://b.example/ws",
+      tournamentCredentials: {
+        TOUR01: {
+          organizerToken: "B-old",
+          organizerTokenExpiresAtMs: now + 1000,
+          updatedAt: 1,
+        },
+      },
+    });
+    const bInflight = maybeRenewNearExpiry(
+      useMultiplayerStore.setState,
+      useMultiplayerStore.getState,
+      socketAtLobbyVersion(9),
+      "wss://b.example/ws", // B's broker origin — distinct from A's
+      "TOUR01",
+      "organizer",
+      "B-old",
+      new AbortController().signal,
+      now,
+    );
+
+    // Let the two microtasks reach their awaits, then assert BOTH rotations went
+    // out — no cross-origin dedupe. (With a code:role-only key, B would await A's
+    // promise and only ONE send would have happened.)
+    await Promise.resolve();
+    expect(renewTournamentCredentialOver).toHaveBeenCalledTimes(2);
+    expect(resolvers["A-old"]).toBeDefined();
+    expect(resolvers["B-old"]).toBeDefined();
+
+    // Resolve B first: B settles from B's own response.
+    resolvers["B-old"]({
+      ok: true,
+      value: {
+        code: "TOUR01",
+        role: "Organizer",
+        token: "B-fresh",
+        expires_at_ms: now + 7 * 24 * 60 * 60 * 1000,
+      },
+    });
+    expect(await bInflight).toBe("B-fresh");
+    expect(
+      useMultiplayerStore.getState().tournamentCredentials.TOUR01
+        ?.organizerToken,
+    ).toBe("B-fresh");
+
+    // A's stale completion lands afterward: it returns A's token for A's own
+    // socket but does NOT clobber B's credential (CAS: stored token is B-fresh,
+    // not the A-old this rotation started from).
+    resolvers["A-old"]({
+      ok: true,
+      value: {
+        code: "TOUR01",
+        role: "Organizer",
+        token: "A-fresh",
+        expires_at_ms: now + 999,
+      },
+    });
+    expect(await aInflight).toBe("A-fresh");
+    expect(
+      useMultiplayerStore.getState().tournamentCredentials.TOUR01
+        ?.organizerToken,
+    ).toBe("B-fresh");
+  });
+});

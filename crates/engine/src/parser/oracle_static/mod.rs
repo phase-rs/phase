@@ -15,7 +15,9 @@ mod prelude {
     pub(super) use nom::sequence::{preceded, terminated};
     pub(super) use nom::Parser;
 
-    pub(super) use super::super::oracle_cost::{parse_gerund_cost, parse_oracle_cost};
+    pub(super) use super::super::oracle_cost::{
+        line_reduces_colored_mana_only, parse_gerund_cost, parse_oracle_cost,
+    };
     pub(super) use super::super::oracle_effect::subject::{
         parse_restriction_modes, static_mode_needs_grant_propagation,
     };
@@ -65,9 +67,10 @@ mod prelude {
         ActivationExemption, AdditionalCostTaxAction, AttackDefenderScope, BlockExceptionKind,
         CastCostMode, CastExtraCost, CastFreeOrigin, CastFrequency, CastingProhibitionCondition,
         CombatAloneAction, CombatAloneRequirement, CostModifyMode, CostPaymentProhibition,
-        CrewAction, CrewContributionKind, ExileCardPool, ExileCastCost, ExileCastTiming,
-        HandSizeModification, ProhibitionScope, RequiredDefender, StaticMode,
-        SuppressedTriggerEvent, TriggerCause, ZoneChangeQualifier,
+        CostReductionReach, CrewAction, CrewContributionKind, ExileCardPool, ExileCastCost,
+        ExileCastGrantee, ExileCastTiming, GraveyardPermissionPool, HandSizeModification,
+        ProhibitionScope, RequiredDefender, StaticMode, SuppressedTriggerEvent, TriggerCause,
+        ZoneChangeQualifier,
     };
     pub(super) use crate::types::zones::Zone;
 }
@@ -92,6 +95,7 @@ mod shared;
 mod static_helpers;
 mod type_change;
 
+pub(crate) use shared::add_property;
 pub(crate) use shared::parse_commander_subject_filter_prefix;
 pub(crate) use shared::peel_color_quality_prefix;
 
@@ -101,6 +105,7 @@ pub(crate) use dispatch::try_parse_counts_as_named_static;
 use dispatch::{parse_static_line_inner, InvertedAsLongAs};
 use prelude::StaticIr;
 pub(crate) use restriction::is_control_players_during_own_library_search;
+pub(crate) use restriction::is_graveyard_cast_permission_lead;
 
 mod support {
     pub(super) use super::anthem::{
@@ -114,14 +119,15 @@ mod support {
     pub(super) use super::evasion::{
         classify_block_exception, parse_compound_subject_keyword_static,
         parse_compound_subject_rule_static, parse_leading_except_for_rule_static,
-        parse_property_descriptor, parse_rule_static_separator_nom, try_parse_compound_subtypes,
+        parse_property_descriptor, parse_rule_static_separator_nom,
+        try_defender_exception_with_companion, try_parse_compound_subtypes,
         try_parse_scoped_must_attack_block, try_split_and_can_attack_despite_defender,
         try_split_and_can_block_additional, try_split_and_cant_activate_abilities,
         try_split_and_cant_attack, try_split_and_cant_attack_or_block,
         try_split_and_cant_attack_scoped, try_split_and_cant_be_attached,
         try_split_and_cant_be_blocked, try_split_and_cant_be_sacrificed,
         try_split_and_cant_be_targeted, try_split_and_cant_block, try_split_and_doesnt_untap,
-        try_split_and_foreign_keyword_grant, try_split_and_must_attack_block,
+        try_split_and_foreign_subject_grant, try_split_and_must_attack_block,
     };
     pub(super) use super::grammar::*;
     pub(super) use super::keyword_grant::{
@@ -147,7 +153,7 @@ mod support {
 pub(crate) use cost_mod::{
     parse_activated_ability_cost_head, parse_alt_cost_frequency_prefix,
     parse_alternative_keyword_cost, parse_cast_spells_alternative_cost_multi,
-    parse_collect_evidence_alt_cost, parse_spells_alternative_cost,
+    parse_collect_evidence_alt_cost, parse_spells_alternative_cost, ActivatedAbilityCostHead,
 };
 pub(crate) use evasion::{
     classify_block_exception, is_extra_blockers_static_candidate, is_forced_block_static_candidate,
@@ -176,6 +182,7 @@ pub(crate) use shared::parse_continuous_subject_filter;
 pub(crate) use shared::parse_dynamic_x_clause;
 pub use shared::parse_static_line_multi;
 pub(crate) use shared::parse_subtype_or_list_insensitive_prefix;
+pub(crate) use shared::parse_targeting_bypass_tail;
 pub(crate) use shared::target_filter_is_your_graveyard;
 pub(crate) use shared::GrantedCastKeywordKind;
 pub(crate) use shared::{
@@ -186,6 +193,7 @@ pub(crate) use static_helpers::apply_raw_parenthetical_cant_cast_gate;
 pub(crate) use static_helpers::parse_basic_land_type_plural;
 pub(crate) use static_helpers::parse_leading_turn_scope;
 pub(crate) use static_helpers::peel_compound_all_quantified_conjuncts;
+pub(crate) use static_helpers::unenforceable_gate_marker;
 pub(crate) use type_change::parse_additive_type_clause_modifications;
 pub(crate) use type_change::parse_inverted_base_pt_type_grant;
 

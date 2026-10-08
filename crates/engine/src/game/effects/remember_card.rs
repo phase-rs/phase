@@ -3,7 +3,7 @@ use crate::game::targeting::resolve_tracked_set_sentinel;
 use crate::types::ability::{ChosenAttribute, Effect, EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 
 /// CR 608.2c + CR 613.1f: `Effect::RememberCard` — record the card chosen by a
 /// preceding selection (typically `ChooseFromZone`) onto the resolving ability's
@@ -49,12 +49,18 @@ pub fn resolve(
         return Ok(());
     };
 
+    // CR 400.7: pin the chosen object's exact incarnation while it is still
+    // live — a later object reusing this `ObjectId` after a zone change is a
+    // new object and must not satisfy the reader. Captured before the mutable
+    // source borrow below.
+    let pin = ObjectIncarnationRef::from_object(&state.objects[&card_id]);
+
     if let Some(src) = state.objects.get_mut(&ability.source_id) {
         // Replace-on-rechoose (CR 608.2c "the last chosen card"): a fresh choice
         // supersedes the prior one. `chosen_attributes` is cleared on zone change.
         src.chosen_attributes
             .retain(|a| !matches!(a, ChosenAttribute::Card(_)));
-        src.chosen_attributes.push(ChosenAttribute::Card(card_id));
+        src.chosen_attributes.push(ChosenAttribute::Card(pin));
     }
 
     // CR 613.1f: the companion static grant reads `ChosenAttribute::Card` at layer

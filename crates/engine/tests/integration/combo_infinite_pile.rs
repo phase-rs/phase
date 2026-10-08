@@ -196,7 +196,7 @@ fn real_4p_object_growth_accept_writes_infinite_pile() {
 
     drive_all_accept(&mut state);
 
-    // The protocol closed cleanly back to ordinary priority (CR 800.4a).
+    // CR 732.2a: the protocol closed at its ending point — a place where a player has priority.
     assert!(
         matches!(state.waiting_for, WaitingFor::Priority { .. }),
         "after all accept, materialize hands priority back, got {:?}",
@@ -1312,6 +1312,7 @@ fn real_4p_mana_and_token_boundary_drains_mana_and_still_collapses() {
         keywords: vec![],
         abilities: std::sync::Arc::default(),
         trigger_definitions: std::sync::Arc::default(),
+        trigger_printed_origins: std::sync::Arc::default(),
         replacement_definitions: std::sync::Arc::default(),
         static_definitions: std::sync::Arc::default(),
         room_halves: None,

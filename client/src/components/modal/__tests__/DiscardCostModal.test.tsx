@@ -1,6 +1,10 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type {
+  InteractionId,
+  ViewerInteraction,
+} from "../../../adapter/generated/interaction/index.ts";
 import type { GameObject, WaitingFor } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
@@ -44,6 +48,17 @@ const cancellablePrompts: Array<[string, WaitingFor]> = [
     }),
   ],
   [
+    "PayCost Reveal",
+    buildPayCostWaitingFor({
+      player: 0,
+      kind: { type: "Reveal" },
+      choices: [10],
+      count: 1,
+      min_count: 1,
+      resume: { type: "Spell", Spell: buildPendingCast() },
+    }),
+  ],
+  [
     "CollectEvidenceChoice",
     {
       type: "CollectEvidenceChoice",
@@ -67,7 +82,11 @@ function makeObject(id: number, name: string, zone: GameObject["zone"] = "Hand")
   });
 }
 
-function setWaitingFor(waitingFor: WaitingFor, objects?: Record<string, GameObject>) {
+function setWaitingFor(
+  waitingFor: WaitingFor,
+  objects?: Record<string, GameObject>,
+  viewerInteraction: ViewerInteraction | null = null,
+) {
   const state = buildGameState({
     objects: objects ?? {},
     waiting_for: waitingFor,
@@ -78,7 +97,46 @@ function setWaitingFor(waitingFor: WaitingFor, objects?: Record<string, GameObje
     gameMode: "online",
     gameState: state,
     waitingFor,
+    viewerInteraction,
   });
+}
+
+function effectZoneChoiceInteraction(interactionId: string): ViewerInteraction {
+  return {
+    waitingForKind: { simultaneous: null, terminal: false, code: "select" },
+    authorizedSubmitters: [0],
+    canSubmit: true,
+    autoPassRecommended: false,
+    opportunities: [
+      {
+        interactionId: interactionId as InteractionId,
+        response: {
+          type: "schema",
+          data: {
+            spec: {
+              type: "select",
+              data: {
+                constraint: { type: "count", data: { min: 1, max: 1 } },
+                confirm: "explicit",
+              },
+            },
+            candidates: [],
+          },
+        },
+        surfaces: [],
+        progress: {
+          selected: 0,
+          minimum: 1,
+          maximum: 1,
+          aggregate: null,
+          confirmable: false,
+        },
+      },
+    ],
+    attachmentFans: {},
+    attachmentViews: {},
+    availability: { type: "inputRequired" },
+  };
 }
 
 describe("Discard cost modal", () => {
@@ -298,6 +356,127 @@ describe("Discard cost modal", () => {
     expect(screen.queryByText(/battlefield/i)).not.toBeInTheDocument();
   });
 
+  it("clears a prior zone-choice pick before confirming the next prompt", () => {
+    const firstPrompt = buildEffectZoneChoiceWaitingFor({
+      player: 0,
+      cards: [10],
+      count: 1,
+      min_count: 0,
+      up_to: false,
+      source_id: 1,
+      effect_kind: "ChangeZone",
+      zone: "Graveyard",
+      destination: "Battlefield",
+    });
+    const secondPrompt = buildEffectZoneChoiceWaitingFor({
+      player: 0,
+      cards: [11],
+      count: 1,
+      min_count: 0,
+      up_to: false,
+      source_id: 1,
+      effect_kind: "ChangeZone",
+      zone: "Graveyard",
+      destination: "Battlefield",
+    });
+    const objects: Record<string, GameObject> = {
+      10: { ...makeObject(10, "Midnight Reaper"), zone: "Graveyard" },
+      11: { ...makeObject(11, "Verdant Sun's Avatar"), zone: "Graveyard" },
+    };
+
+    setWaitingFor(firstPrompt, objects);
+    render(<CardChoiceModal />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Loading Midnight Reaper" }));
+
+    act(() => {
+      setWaitingFor(secondPrompt, objects);
+    });
+
+    const confirm = screen.getByRole("button", { name: "Put (0/1)" });
+    expect(confirm).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Loading Verdant Sun's Avatar" }));
+    fireEvent.click(confirm);
+
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [11] },
+    });
+  });
+
+  it("retains a zone-choice pick when the same prompt is refreshed", () => {
+    const prompt = buildEffectZoneChoiceWaitingFor({
+      player: 0,
+      cards: [10],
+      count: 1,
+      min_count: 0,
+      up_to: false,
+      source_id: 1,
+      effect_kind: "ChangeZone",
+      zone: "Graveyard",
+      destination: "Battlefield",
+    });
+    const objects: Record<string, GameObject> = {
+      10: { ...makeObject(10, "Midnight Reaper"), zone: "Graveyard" },
+    };
+    const interaction = effectZoneChoiceInteraction("zone-choice-1");
+
+    setWaitingFor(prompt, objects, interaction);
+    render(<CardChoiceModal />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Loading Midnight Reaper" }));
+
+    act(() => {
+      setWaitingFor(
+        { ...prompt, data: { ...prompt.data } },
+        objects,
+        interaction,
+      );
+    });
+
+    const confirm = screen.getByRole("button", { name: "Put (1/1)" });
+    expect(confirm).toBeEnabled();
+    fireEvent.click(confirm);
+
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [10] },
+    });
+  });
+
+  it("clears a pick for a distinct zone-choice interaction with identical data", () => {
+    const prompt = buildEffectZoneChoiceWaitingFor({
+      player: 0,
+      cards: [10],
+      count: 1,
+      min_count: 0,
+      up_to: false,
+      source_id: 1,
+      effect_kind: "ChangeZone",
+      zone: "Graveyard",
+      destination: "Battlefield",
+    });
+    const objects: Record<string, GameObject> = {
+      10: { ...makeObject(10, "Midnight Reaper"), zone: "Graveyard" },
+    };
+
+    setWaitingFor(prompt, objects, effectZoneChoiceInteraction("zone-choice-1"));
+    render(<CardChoiceModal />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Loading Midnight Reaper" }));
+
+    act(() => {
+      setWaitingFor(
+        { ...prompt, data: { ...prompt.data } },
+        objects,
+        effectZoneChoiceInteraction("zone-choice-2"),
+      );
+    });
+
+    expect(screen.getByRole("button", { name: "Put (0/1)" })).toBeDisabled();
+  });
+
   it("allocates any-combination mana with color steppers", () => {
     setWaitingFor({
       type: "ChooseManaColor",
@@ -394,20 +573,19 @@ describe("Discard cost modal", () => {
       .closest(".card-scale-reset")?.parentElement;
     expect(dialog).toHaveClass("w-full", "lg:w-fit", "max-w-md");
 
-    const green = screen.getByRole("button", { name: "Green" });
-    expect(green.parentElement).toHaveClass(
+    const colorless = screen.getByRole("button", { name: "Colorless" });
+    expect(colorless.parentElement).toHaveClass(
       "w-full",
       "flex-wrap",
       "lg:w-fit",
-      "lg:flex-nowrap",
     );
 
-    fireEvent.click(green);
+    fireEvent.click(colorless);
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
 
     expect(dispatchMock).toHaveBeenCalledWith({
       type: "ChooseManaColor",
-      data: { choice: { type: "SingleColor", data: "Green" }, count: 1 },
+      data: { choice: { type: "SingleColor", data: "Colorless" }, count: 1 },
     });
   });
 
@@ -464,6 +642,158 @@ describe("Discard cost modal", () => {
     expect(dispatchMock).toHaveBeenCalledWith({
       type: "SelectCards",
       data: { cards: [11, 10] },
+    });
+  });
+
+  it("renders reveal cost modal and dispatches selected card on confirm", () => {
+    setWaitingFor(
+      buildPayCostWaitingFor({
+        player: 0,
+        kind: { type: "Reveal" },
+        choices: [10, 11],
+        count: 1,
+        min_count: 1,
+        resume: { type: "Spell", Spell: buildPendingCast() },
+      }),
+      {
+        10: makeObject(10, "Llanowar Elves", "Hand"),
+        11: makeObject(11, "Elvish Mystic", "Hand"),
+      },
+    );
+
+    render(<CardChoiceModal />);
+
+    expect(screen.getByText("Reveal from Hand")).toBeInTheDocument();
+    expect(screen.getByText("Choose a card")).toBeInTheDocument();
+
+    const confirmButton = screen.getByRole("button", { name: /^Reveal/i });
+    expect(confirmButton).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: /Llanowar Elves/i }));
+    expect(screen.getByRole("button", { name: "Reveal (1/1)" })).not.toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reveal (1/1)" }));
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [10] },
+    });
+  });
+
+  it("resets Reveal selection across consecutive prompts with different eligible choices", () => {
+    setWaitingFor(
+      buildPayCostWaitingFor({
+        player: 0,
+        kind: { type: "Reveal" },
+        choices: [10],
+        count: 1,
+        min_count: 1,
+        resume: { type: "Spell", Spell: buildPendingCast() },
+      }),
+      {
+        10: makeObject(10, "Llanowar Elves", "Hand"),
+        20: makeObject(20, "Elvish Mystic", "Hand"),
+      },
+    );
+
+    const { rerender } = render(<CardChoiceModal />);
+
+    // Select card 10 in the first prompt
+    fireEvent.click(screen.getByRole("button", { name: /Llanowar Elves/i }));
+    expect(screen.getByRole("button", { name: "Reveal (1/1)" })).not.toBeDisabled();
+
+    // Rerender with a subsequent Reveal prompt offering only card 20
+    setWaitingFor(
+      buildPayCostWaitingFor({
+        player: 0,
+        kind: { type: "Reveal" },
+        choices: [20],
+        count: 1,
+        min_count: 1,
+        resume: { type: "Spell", Spell: buildPendingCast() },
+      }),
+      {
+        10: makeObject(10, "Llanowar Elves", "Hand"),
+        20: makeObject(20, "Elvish Mystic", "Hand"),
+      },
+    );
+
+    rerender(<CardChoiceModal />);
+
+    // The selection must have reset: button is disabled at (0/1)
+    const confirmButton = screen.getByRole("button", { name: "Reveal (0/1)" });
+    expect(confirmButton).toBeDisabled();
+
+    // Selecting card 20 now confirms with [20], not the stale [10]
+    fireEvent.click(screen.getByRole("button", { name: /Elvish Mystic/i }));
+    expect(screen.getByRole("button", { name: "Reveal (1/1)" })).not.toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reveal (1/1)" }));
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [20] },
+    });
+  });
+
+  it("resets Reveal selection across consecutive prompts with the same eligible choices", () => {
+    setWaitingFor(
+      buildPayCostWaitingFor({
+        player: 0,
+        kind: { type: "Reveal" },
+        choices: [10],
+        count: 1,
+        min_count: 1,
+        resume: {
+          type: "Spell",
+          Spell: buildPendingCast({
+            pinned_pool_units: [1],
+          }),
+        },
+      }),
+      {
+        10: makeObject(10, "Llanowar Elves", "Hand"),
+      },
+    );
+
+    const { rerender } = render(<CardChoiceModal />);
+
+    // Select card 10 in the first prompt
+    fireEvent.click(screen.getByRole("button", { name: /Llanowar Elves/i }));
+    expect(screen.getByRole("button", { name: "Reveal (1/1)" })).not.toBeDisabled();
+
+    // Rerender with a second sequential Reveal prompt offering the same [10] choices list
+    setWaitingFor(
+      buildPayCostWaitingFor({
+        player: 0,
+        kind: { type: "Reveal" },
+        choices: [10],
+        count: 1,
+        min_count: 1,
+        resume: {
+          type: "Spell",
+          Spell: buildPendingCast({
+            pinned_pool_units: [1, 2],
+          }),
+        },
+      }),
+      {
+        10: makeObject(10, "Llanowar Elves", "Hand"),
+      },
+    );
+
+    rerender(<CardChoiceModal />);
+
+    // The second prompt must start unselected at (0/1) with confirm disabled even though choices is [10]
+    const confirmButton = screen.getByRole("button", { name: "Reveal (0/1)" });
+    expect(confirmButton).toBeDisabled();
+
+    // Selecting card 10 enables confirm for the second prompt
+    fireEvent.click(screen.getByRole("button", { name: /Llanowar Elves/i }));
+    expect(screen.getByRole("button", { name: "Reveal (1/1)" })).not.toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reveal (1/1)" }));
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [10] },
     });
   });
 });

@@ -19,6 +19,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DebugPanel } from "../DebugPanel";
 import type { GameMode } from "../../../stores/gameStore";
 import { restoreGameState } from "../../../game/dispatch";
+import { exportAuthoritativeGameStateZip, exportGameStateDebugZip } from "../../../services/gameStateExport";
+import { buildGameState } from "../../../test/factories/gameStateFactory";
 
 const sendRequestTakeback = vi.fn();
 
@@ -73,6 +75,11 @@ vi.mock("../../../audio/AudioManager", () => ({
 }));
 vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (k: string) => k }) }));
 vi.mock("../../../services/cardNames", () => ({ getCardNames: async () => [] }));
+vi.mock("../../../services/gameStateExport", () => ({
+  copyGameStateDebugSnapshot: vi.fn(),
+  exportAuthoritativeGameStateZip: vi.fn(),
+  exportGameStateDebugZip: vi.fn(),
+}));
 
 beforeEach(() => {
   storeState.gameMode = "native-ai";
@@ -89,6 +96,34 @@ afterEach(() => {
 });
 
 describe("DebugPanel — server-published turn rewind", () => {
+  it("shows the native export failure reason", async () => {
+    storeState.adapter = { exportPersistenceState: vi.fn() };
+    vi.mocked(exportAuthoritativeGameStateZip).mockRejectedValueOnce(
+      new Error("Failed to serialize authoritative game state: key must be a string"),
+    );
+
+    render(<DebugPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "debug.exportAuthoritative" }));
+
+    expect(await screen.findByText(/key must be a string/)).toBeInTheDocument();
+    expect(exportAuthoritativeGameStateZip).toHaveBeenCalledWith(storeState.adapter);
+  });
+
+  it("downloads the viewer snapshot in multiplayer without requesting private state", async () => {
+    storeState.gameMode = "online";
+    storeState.gameState = buildGameState();
+    storeState.adapter = { exportPersistenceState: vi.fn() };
+    vi.mocked(exportGameStateDebugZip).mockResolvedValueOnce({ kind: "saved", filename: "snapshot.zip" });
+
+    render(<DebugPanel />);
+    expect(screen.getByRole("button", { name: "debug.exportAuthoritative" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "game:engineLost.exportClientSnapshot" }));
+
+    expect(await screen.findByText("help.status.exported")).toBeInTheDocument();
+    expect(exportGameStateDebugZip).toHaveBeenCalledWith(storeState.gameState);
+    expect(exportAuthoritativeGameStateZip).not.toHaveBeenCalled();
+  });
+
   it("renders the server's boundaries and asks the server to roll back to one", () => {
     storeState.adapter = rewindCapableAdapter();
     storeState.rewindTargets = [{ turn_number: 3, active_player: 1 }];

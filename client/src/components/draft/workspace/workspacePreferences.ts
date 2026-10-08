@@ -11,6 +11,24 @@ export const DRAFT_WORKSPACE_PACK_SCALE_DEFAULT = 1.65;
 export const DRAFT_WORKSPACE_PACK_SCALE_MIN = 0.4;
 export const DRAFT_WORKSPACE_PACK_SCALE_MAX = 2.9;
 export const DRAFT_WORKSPACE_PACK_SCALE_STEP = 0.01;
+/**
+ * Pile card scale for a shared-stack draft, on the same axis and the same base
+ * width as `packScale` but stored separately.
+ *
+ * A separate number rather than a reuse, because the two surfaces show
+ * different things at once: a pack is a grid of up to fifteen cards, while a
+ * Winston pile column is one pile's face-down remainder with its revealed run
+ * stacked under it, one such column per published pile. A player who has tuned
+ * one has said nothing about the other, and a shared value would move a setting
+ * they never touched the first time they draft the other format.
+ *
+ * The two defaults are tuned independently and neither is computed from the
+ * other, which is the whole point of the separate declaration.
+ */
+export const DRAFT_WORKSPACE_PILE_SCALE_DEFAULT = 1.35;
+export const DRAFT_WORKSPACE_PILE_SCALE_MIN = 0.4;
+export const DRAFT_WORKSPACE_PILE_SCALE_MAX = 2.9;
+export const DRAFT_WORKSPACE_PILE_SCALE_STEP = 0.01;
 export const DRAFT_PACK_CARD_BASE_WIDTH_PX = 146;
 export const DRAFT_WORKSPACE_COLLAPSED_SIDEBOARD_CARD_WIDTH_PX
   = DRAFT_PACK_CARD_BASE_WIDTH_PX * DRAFT_WORKSPACE_PACK_SCALE_DEFAULT;
@@ -48,6 +66,8 @@ export interface DraftWorkspacePreferences {
   explicitView: DraftWorkspaceView | null;
   cardPreviewMode: DraftCardPreviewMode;
   packScale: number;
+  /** Shared-stack pile card scale. See `DRAFT_WORKSPACE_PILE_SCALE_DEFAULT`. */
+  pileScale: number;
   sideboardCollapsed: boolean | null;
   builderPhoneSideboardCollapsed: boolean;
   phoneDeckVisualColumnCaps: DraftPhoneDeckVisualColumnCaps;
@@ -118,6 +138,26 @@ export function repairDraftWorkspacePackScale(value: unknown): number {
   ) / 100;
 }
 
+/**
+ * The pile-scale half of the same repair, and the reason the schema version did
+ * NOT move for this field: every stored-shape branch below runs this, and it is
+ * total — a preferences blob written before `pileScale` existed has `undefined`
+ * here and gets the default, which is exactly the migration the field needs. A
+ * version bump would instead send every existing v3 blob down the
+ * unknown-version arm and discard the player's pack scale, columns and sort
+ * along with it.
+ */
+export function repairDraftWorkspacePileScale(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DRAFT_WORKSPACE_PILE_SCALE_DEFAULT;
+  }
+  const hundredths = Math.round(value * 100);
+  return Math.min(
+    DRAFT_WORKSPACE_PILE_SCALE_MAX * 100,
+    Math.max(DRAFT_WORKSPACE_PILE_SCALE_MIN * 100, hundredths),
+  ) / 100;
+}
+
 function repairBoardPreferences(
   value: unknown,
   defaults: Readonly<DraftBoardPreferences>,
@@ -169,6 +209,7 @@ function repairSchemaV1Preferences(value: Record<string, unknown>): DraftWorkspa
       : null,
     cardPreviewMode: isDraftCardPreviewMode(value.cardPreviewMode) ? value.cardPreviewMode : "none",
     packScale: repairDraftWorkspacePackScale(value.packScale),
+    pileScale: repairDraftWorkspacePileScale(value.pileScale),
     sideboardCollapsed: value.sideboardCollapsed === null || typeof value.sideboardCollapsed === "boolean"
       ? value.sideboardCollapsed
       : null,
@@ -186,6 +227,7 @@ export function createDefaultDraftWorkspacePreferences(): DraftWorkspacePreferen
     explicitView: null,
     cardPreviewMode: "none",
     packScale: DRAFT_WORKSPACE_PACK_SCALE_DEFAULT,
+    pileScale: DRAFT_WORKSPACE_PILE_SCALE_DEFAULT,
     sideboardCollapsed: null,
     builderPhoneSideboardCollapsed: true,
     phoneDeckVisualColumnCaps: { ...PHONE_DECK_VISUAL_COLUMN_CAPS_DEFAULTS },
@@ -209,6 +251,7 @@ export function repairDraftWorkspacePreferences(value: unknown): DraftWorkspaceP
         : null,
       cardPreviewMode: isDraftCardPreviewMode(value.cardPreviewMode) ? value.cardPreviewMode : "none",
       packScale: repairDraftWorkspacePackScale(value.packScale),
+      pileScale: repairDraftWorkspacePileScale(value.pileScale),
       sideboardCollapsed: value.sideboardCollapsed === null || typeof value.sideboardCollapsed === "boolean"
         ? value.sideboardCollapsed
         : null,
@@ -232,6 +275,7 @@ export function repairDraftWorkspacePreferences(value: unknown): DraftWorkspaceP
       : null,
     cardPreviewMode: isDraftCardPreviewMode(value.cardPreviewMode) ? value.cardPreviewMode : "none",
     packScale: repairDraftWorkspacePackScale(value.packScale),
+    pileScale: repairDraftWorkspacePileScale(value.pileScale),
     sideboardCollapsed: value.sideboardCollapsed === null || typeof value.sideboardCollapsed === "boolean"
       ? value.sideboardCollapsed
       : null,
@@ -268,6 +312,50 @@ export function saveDraftWorkspacePreferences(
   } catch {
     return "storage-unavailable";
   }
+}
+
+/**
+ * The deck board geometry the mounted draft page is currently showing.
+ *
+ * Read by the stores' arriving-card placement, which has to know which columns
+ * the board means but has no access to page state. It lives here rather than in
+ * either store because it is a PRESENTATION preference — the same thing
+ * `loadDraftWorkspacePreferences` reads and `saveDraftWorkspacePreferences`
+ * writes — and because both `draftStore` and `multiplayerDraftStore` need it:
+ * a copy per store would be two same-named exports a caller could import from
+ * the wrong module.
+ *
+ * Module state rather than store state: no view publishes it, and it is absent
+ * from the persisted `QuickDraftSnapshotInput`.
+ *
+ * Seeded from the player's STORED preferences rather than the module defaults,
+ * so an install that lands before the page has published anything still places
+ * against the columns the player chose. Pinned by
+ * `draftStore.workspace.test.ts::places_an_install_before_any_publish_against_the_stored_preferences`,
+ * which seeds `localStorage`, re-imports the store into a fresh module registry
+ * and drives a `startDraft` install with no publish in front of it; making this
+ * initializer `{ ...DECK_DEFAULTS }` reds it with `expected 6 to be 2`.
+ *
+ * One page is mounted at a time — `/draft/quick` and `/draft-pod` are separate
+ * routes — so the solo and pod pages never contend. The publishers are
+ * `DraftPage`'s `handleWorkspacePreferencesChange` and the DRAFTING screen's
+ * `handlePreferencesChange` in `DraftPodPage`, each with a mount effect
+ * alongside it. `DraftPodPage` has two further same-named handlers, on the
+ * intergame screen and in `PodDeckBuilder`, which save without publishing:
+ * neither screen receives pool arrivals, and the drafting screen's mount effect
+ * re-reads `localStorage` on the way back in.
+ */
+let arrivingCardBoardPreferences: DraftBoardPreferences =
+  loadDraftWorkspacePreferences().deck;
+
+/** Tell the placement paths which columns the deck board currently means. */
+export function setArrivingCardBoardPreferences(preferences: DraftBoardPreferences): void {
+  arrivingCardBoardPreferences = preferences;
+}
+
+/** The value last published by the mounted draft page. */
+export function getArrivingCardBoardPreferences(): DraftBoardPreferences {
+  return arrivingCardBoardPreferences;
 }
 
 export function resolveDraftWorkspaceView(

@@ -67,6 +67,8 @@ interface DeckCompatibilityRequest {
   /** Oathbreaker RC: signature spell card name (empty for non-Oathbreaker formats). */
   signature_spell: string[];
   companion: string[];
+  /** CR 903.13f(3): set codes the draft contained, latched by the draft session. */
+  draft_set_codes: string[];
   selected_format?: GameFormat | null;
   selected_match_type?: MatchType | null;
   player_count?: number;
@@ -75,6 +77,7 @@ interface DeckCompatibilityRequest {
 
 interface EvaluateOptions {
   selectedFormat?: GameFormat | null;
+  draftSetCodes?: readonly string[];
   selectedMatchType?: MatchType | null;
   summaryOnly?: boolean;
   onResult?: (name: string, result: DeckCompatibilityResult) => void;
@@ -94,6 +97,7 @@ function buildRequest(deck: ParsedDeck, options: EvaluateOptions): DeckCompatibi
     selected_match_type: options.selectedMatchType ?? null,
     player_count: options.playerCount ?? 2,
     summary_only: options.summaryOnly ?? false,
+    draft_set_codes: [...(options.draftSetCodes ?? [])],
   };
 }
 
@@ -109,6 +113,16 @@ function compatibilityCacheKey(request: DeckCompatibilityRequest): string {
     selected_format: request.selected_format ?? null,
     selected_match_type: request.selected_match_type ?? null,
     player_count: request.player_count ?? 2,
+    // Every request field the engine READS has to be named in
+    // compatibilityCacheKey, because this module's four cache/inflight maps are
+    // keyed only by what this function names: a field buildRequest sends but
+    // this key omits would let two requests the engine answers differently
+    // share one cached verdict. `summary_only` is the one deliberate exclusion
+    // among fields the engine reads. Both halves are exercised by the two
+    // cache rows in client/src/services/__tests__/deckCompatibility.test.ts;
+    // run `cd client && npx vitest run --coverage.enabled=false
+    // src/services/__tests__/deckCompatibility.test.ts`.
+    draft_set_codes: request.draft_set_codes,
   });
 }
 

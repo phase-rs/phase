@@ -375,8 +375,8 @@ describe("CardPreview chosen attributes", () => {
 
   it("renders keyword reminder tooltips for battlefield permanents", () => {
     const object = battlefieldObject({
-      keywords: ["Flying", { Ward: { type: "Mana", data: { Cost: { shards: [], generic: 2 } } } }],
-      base_keywords: ["Flying", { Ward: { type: "Mana", data: { Cost: { shards: [], generic: 2 } } } }],
+      keywords: ["Flying", { Ward: { type: "Mana", data: { type: "Cost", shards: [], generic: 2 } } }],
+      base_keywords: ["Flying", { Ward: { type: "Mana", data: { type: "Cost", shards: [], generic: 2 } } }],
     });
     useGameStore.setState({ gameState: gameStateWithObject(object), spellCosts: {} });
     useUiStore.setState({ inspectedObjectId: object.id, altHeld: false });

@@ -757,9 +757,47 @@ fn every_waiting_for_arm_declares_its_acting_authority() {
     // `WaitingFor::acting_authority` as `ActingAuthority::One(player)`. Not
     // actorless: the prompt cannot advance without that player's
     // `GameAction::SelectDieRolls`.
-    if declared.len() != 136 {
+    // 136 -> 137 is adjudicated: the CR 401.2 Telling Time-class remainder
+    // split ("...one on top of your library, and one on the bottom of your
+    // library") added `DigRestSplitChoice`. It names one acting `player` and is
+    // classified by `WaitingFor::acting_authority` as
+    // `ActingAuthority::One(player)`. WHICH player that is depends on the
+    // variant's `scope`: the partition belongs to the looking player
+    // (CR 608.2d + CR 701.20e — the remainder was shown only to them), while
+    // the arrangement of a 2+ card pile belongs to the LIBRARY'S OWNER
+    // (CR 401.4), who may be a different player for a dig of another player's
+    // library. Either way exactly one player acts, so the classification is
+    // unchanged. Not actorless: the prompt cannot advance without that
+    // player's `GameAction::SelectCards`.
+    // 137 -> 138 is adjudicated: CR 601.2f's caster-elected cost-reduction
+    // ordering added `OrderCostReductions`. It names one acting `player` —
+    // CR 601.2f gives the choice to "the player" determining the total cost,
+    // i.e. the caster — and is classified by `WaitingFor::acting_authority` as
+    // `ActingAuthority::One(player)`. Not actorless: the prompt cannot advance
+    // without that caster's `GameAction::OrderCostReductions` (or a
+    // `GameAction::CancelCast`).
+    // 138 -> 139 is adjudicated: CR 401.4's library-order choice added
+    // `RevealUntilBottomOrder` for a RevealUntil bottom placement. It names one
+    // acting `player` (the revealing player)
+    // and is classified by `WaitingFor::acting_authority` as
+    // `ActingAuthority::One(player)`. Not actorless: the prompt cannot advance without
+    // that player's `GameAction::SelectCards`.
+    // 139 -> 140 is adjudicated: CR 701.71a's Empower Jace choice (CR 608.2d)
+    // added `EmpowerJaceChoice`. It names one acting `player` — CR 701.71a
+    // gives "Choose a Jace planeswalker token you control" to the player
+    // performing the keyword action, i.e. the resolving controller — and is
+    // classified by `WaitingFor::acting_authority` as
+    // `ActingAuthority::One(player)`. Not actorless: the prompt cannot advance
+    // without that player's `GameAction::SelectCards`.
+    // 140 -> 141 is adjudicated: CR 405.3's relative stack order for a batch
+    // of spell copies (CR 707.10) added `SpellCopyOrderChoice`. It names one
+    // acting `player` — CR 405.3 gives the order to the player who controls
+    // the copies — and is classified by `WaitingFor::acting_authority` as
+    // `ActingAuthority::One(player)`. Not actorless: the prompt cannot advance
+    // without that player's `GameAction::SelectCards`.
+    if declared.len() != 141 {
         failures.push(format!(
-            "PIN declared.len()={} != 136.\n\
+            "PIN declared.len()={} != 141.\n\
              \n\
              Adding a `WaitingFor` variant IS the counted event this gate exists to make loud. \
              Repair it by ADJUDICATING, not by bumping the number:\n\
@@ -822,6 +860,7 @@ fn mulligan_adapters_preserve_the_single_pending_actor_rule() {
             })
             .collect(),
         free_first_mulligan: false,
+        declared: Vec::new(),
     };
     let bottoming = |n: u8| WaitingFor::OpeningHandBottomCards {
         pending: (0..n)

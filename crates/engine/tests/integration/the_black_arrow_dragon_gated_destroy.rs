@@ -13,8 +13,8 @@ use engine::game::{effects, zones::create_object};
 use engine::parser::oracle::parse_oracle_text;
 use engine::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use engine::types::ability::{
-    AbilityCondition, Comparator, DamageChannel, Effect, PreventionAmount, PreventionScope,
-    QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+    AbilityCondition, Comparator, DamageChannel, Effect, EffectScope, PreventionAmount,
+    PreventionScope, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
@@ -193,6 +193,7 @@ fn cast_the_black_arrow(target: ArrowTarget, prevent_damage: bool) -> (Zone, u32
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::ParentTarget,
+                recipient_scope: EffectScope::Single,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: None,
                 prevention_duration: None,

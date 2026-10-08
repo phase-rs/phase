@@ -210,7 +210,7 @@ expression: "&ir"
                     "parsed": {
                       "effect": {
                         "type": "Unimplemented",
-                        "name": "the",
+                        "name": "unparsed_quantity",
                         "description": "The flashback cost is equal to its mana cost"
                       },
                       "duration": null,

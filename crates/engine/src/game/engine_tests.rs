@@ -95,11 +95,7 @@ fn restored_automation_action_result(
     events: Vec<GameEvent>,
     log_entries: Vec<GameLogEntry>,
 ) -> ActionResult {
-    ActionResult {
-        events,
-        waiting_for: WaitingFor::Priority { player: P0 },
-        log_entries,
-    }
+    ActionResult::applied(events, WaitingFor::Priority { player: P0 }).with_log_entries(log_entries)
 }
 
 #[test]
@@ -514,11 +510,7 @@ fn terminal_reconcile_does_not_run_sbas_for_cant_lose_player() {
         discard_frame: None,
     };
     let original_waiting_for = state.waiting_for.clone();
-    let mut result = ActionResult {
-        events: Vec::new(),
-        waiting_for: original_waiting_for.clone(),
-        log_entries: Vec::new(),
-    };
+    let mut result = ActionResult::applied(Vec::new(), original_waiting_for.clone());
 
     reconcile_terminal_result(&mut state, &mut result);
 
@@ -542,11 +534,7 @@ fn terminal_reconcile_runs_player_loss_sba_for_unprotected_player() {
         unless_filter: None,
         discard_frame: None,
     };
-    let mut result = ActionResult {
-        events: Vec::new(),
-        waiting_for: state.waiting_for.clone(),
-        log_entries: Vec::new(),
-    };
+    let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
 
     reconcile_terminal_result(&mut state, &mut result);
 
@@ -1789,6 +1777,7 @@ fn broadside_bombardiers_boast_activates_after_attacking_and_requires_sacrifice(
 fn room_back_face(name: &str) -> BackFaceData {
     BackFaceData {
         is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: name.to_string(),
         power: None,
         toughness: None,
@@ -2325,19 +2314,22 @@ fn an_ordinary_permanent_copying_a_room_gains_its_door_gated_form() {
         .push(CoreType::Creature);
 
     let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
-    let effect_id = state.add_transient_continuous_effect(
-        bear,
-        PlayerId(0),
-        crate::types::ability::Duration::Permanent,
-        TargetFilter::SpecificObject { id: bear },
-        vec![crate::types::ability::ContinuousModification::CopyValues {
-            values: Box::new(values),
-            display_source: crate::game::game_object::DisplaySource::Card,
-            printed_ref: None,
-            token_image_ref: None,
-        }],
-        None,
-    );
+    let effect_id = state
+        .add_transient_continuous_effect(
+            bear,
+            PlayerId(0),
+            crate::types::ability::Duration::Permanent,
+            TargetFilter::SpecificObject { id: bear },
+            vec![crate::types::ability::ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display_source: crate::game::game_object::DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+                token_art: None,
+            }],
+            None,
+        )
+        .expect("the fixture's duration begins");
     crate::game::layers::evaluate_layers(&mut state);
 
     assert_eq!(
@@ -2434,19 +2426,22 @@ fn a_room_under_a_copy_effect_shows_the_copied_rooms_halves() {
     }
 
     let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
-    let effect_id = state.add_transient_continuous_effect(
-        room,
-        PlayerId(0),
-        crate::types::ability::Duration::Permanent,
-        TargetFilter::SpecificObject { id: room },
-        vec![crate::types::ability::ContinuousModification::CopyValues {
-            values: Box::new(values),
-            display_source: crate::game::game_object::DisplaySource::Card,
-            printed_ref: None,
-            token_image_ref: None,
-        }],
-        None,
-    );
+    let effect_id = state
+        .add_transient_continuous_effect(
+            room,
+            PlayerId(0),
+            crate::types::ability::Duration::Permanent,
+            TargetFilter::SpecificObject { id: room },
+            vec![crate::types::ability::ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display_source: crate::game::game_object::DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+                token_art: None,
+            }],
+            None,
+        )
+        .expect("the fixture's duration begins");
     crate::game::layers::evaluate_layers(&mut state);
     assert_eq!(
         state.objects[&room].name, "Bright Hall",
@@ -2496,19 +2491,22 @@ fn a_copy_of_an_already_copied_room_snapshots_the_copied_halves() {
         Zone::Battlefield,
     );
     let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
-    state.add_transient_continuous_effect(
-        bear,
-        PlayerId(0),
-        crate::types::ability::Duration::Permanent,
-        TargetFilter::SpecificObject { id: bear },
-        vec![crate::types::ability::ContinuousModification::CopyValues {
-            values: Box::new(values),
-            display_source: crate::game::game_object::DisplaySource::Card,
-            printed_ref: None,
-            token_image_ref: None,
-        }],
-        None,
-    );
+    state
+        .add_transient_continuous_effect(
+            bear,
+            PlayerId(0),
+            crate::types::ability::Duration::Permanent,
+            TargetFilter::SpecificObject { id: bear },
+            vec![crate::types::ability::ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display_source: crate::game::game_object::DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+                token_art: None,
+            }],
+            None,
+        )
+        .expect("the fixture's duration begins");
     crate::game::layers::evaluate_layers(&mut state);
 
     // CR 707.3: the bear's CURRENT copiable values are the Room's — including
@@ -2561,6 +2559,7 @@ fn a_set_name_exception_survives_the_room_name_derivation() {
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             },
             // CR 707.9b: the "except its name is X" rider follows CopyValues
             // within the same effect, exactly as production installs it.
@@ -2613,19 +2612,22 @@ fn a_set_name_exception_survives_the_room_name_derivation() {
         chained.name, "Wrong Turn",
         "CR 707.9b: the exception is part of the snapshot a later copy takes"
     );
-    state.add_transient_continuous_effect(
-        bear2,
-        PlayerId(0),
-        crate::types::ability::Duration::Permanent,
-        TargetFilter::SpecificObject { id: bear2 },
-        vec![crate::types::ability::ContinuousModification::CopyValues {
-            values: Box::new(chained),
-            display_source: crate::game::game_object::DisplaySource::Card,
-            printed_ref: None,
-            token_image_ref: None,
-        }],
-        None,
-    );
+    state
+        .add_transient_continuous_effect(
+            bear2,
+            PlayerId(0),
+            crate::types::ability::Duration::Permanent,
+            TargetFilter::SpecificObject { id: bear2 },
+            vec![crate::types::ability::ContinuousModification::CopyValues {
+                values: Box::new(chained),
+                display_source: crate::game::game_object::DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+                token_art: None,
+            }],
+            None,
+        )
+        .expect("the fixture's duration begins");
     crate::game::layers::evaluate_layers(&mut state);
     assert_eq!(
         state.objects[&bear2].name, "Wrong Turn",
@@ -2636,19 +2638,22 @@ fn a_set_name_exception_survives_the_room_name_derivation() {
     // marker must reset with it, so the door gate applies again. The bear's
     // left door is still unlocked from above, so the copied left name shows.
     let plain = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
-    state.add_transient_continuous_effect(
-        bear,
-        PlayerId(0),
-        crate::types::ability::Duration::Permanent,
-        TargetFilter::SpecificObject { id: bear },
-        vec![crate::types::ability::ContinuousModification::CopyValues {
-            values: Box::new(plain),
-            display_source: crate::game::game_object::DisplaySource::Card,
-            printed_ref: None,
-            token_image_ref: None,
-        }],
-        None,
-    );
+    state
+        .add_transient_continuous_effect(
+            bear,
+            PlayerId(0),
+            crate::types::ability::Duration::Permanent,
+            TargetFilter::SpecificObject { id: bear },
+            vec![crate::types::ability::ContinuousModification::CopyValues {
+                values: Box::new(plain),
+                display_source: crate::game::game_object::DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+                token_art: None,
+            }],
+            None,
+        )
+        .expect("the fixture's duration begins");
     crate::game::layers::evaluate_layers(&mut state);
     assert_eq!(
         state.objects[&bear].name, "Bright Hall",
@@ -3008,6 +3013,8 @@ fn a_room_cast_from_the_graveyard_offers_the_face_choice_per_cast() {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                required_cast_keyword: None,
+                pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
             })
             .affected(TargetFilter::Any),
         );
@@ -3072,6 +3079,7 @@ fn a_room_cast_from_exile_offers_the_face_choice_per_cast() {
                 grants_flash: false,
                 extra_cost: None,
                 enters_with_counter: None,
+                grantee: crate::types::statics::ExileCastGrantee::SourceController,
             })
             .affected(TargetFilter::Any),
         );
@@ -9283,6 +9291,9 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         prepaid_actual_mana_spent: None,
         base_cost: None,
         declared_mana_additions: Vec::new(),
+        accepted_cost_reductions: Vec::new(),
+        cost_reduction_election: None,
+        activation_cost_snapshot: None,
         activation_cost: None,
         deferred_random_discard_cost: None,
         activation_ability_index: None,
@@ -9306,6 +9317,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         declared_kickers_to_pay: Vec::new(),
         declined_kickers: Vec::new(),
         convoked_creatures: Vec::new(),
+        delved_cards: Vec::new(),
         deferred_sacrificed_permanents: Vec::new(),
         pinned_pool_units: Vec::new(),
         cancel_restore_prepared_source: None,
@@ -9721,6 +9733,9 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         prepaid_actual_mana_spent: None,
         base_cost: None,
         declared_mana_additions: Vec::new(),
+        accepted_cost_reductions: Vec::new(),
+        cost_reduction_election: None,
+        activation_cost_snapshot: None,
         activation_cost: None,
         deferred_random_discard_cost: None,
         activation_ability_index: None,
@@ -9744,6 +9759,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         declared_kickers_to_pay: Vec::new(),
         declined_kickers: Vec::new(),
         convoked_creatures: Vec::new(),
+        delved_cards: Vec::new(),
         deferred_sacrificed_permanents: Vec::new(),
         pinned_pool_units: Vec::new(),
         cancel_restore_prepared_source: None,
@@ -11705,6 +11721,8 @@ fn grant_graveyard_creature_cast_and_bury(
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                required_cast_keyword: None,
+                pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),
@@ -12699,5 +12717,282 @@ fn derived_fodder_class_is_one_class_multiset_gate() {
         derived_fodder_class(&torn_before, &torn_after).is_none(),
         "A-2c: a torn frame is refused, not under-counted (delete the `.then_some` \
          reconciliation and this returns Some((class, 1)))"
+    );
+}
+
+/// CR 732.2a: `entry_publishes_pin_slots` must withhold the CR 603.5 "may" pin
+/// slot once the stamped announcer is not the proposer — a shortcut cannot
+/// describe "a sequence of game choices" that includes a choice which will
+/// never be posed to the proposer. Academy Loremaster's bare-`ScopedPlayer`
+/// stamp (P7: `filter_uses_relative_controller_scoped` does not match a bare
+/// `ScopedPlayer`, so this route is genuinely new) moves the announcer seat to
+/// whichever player's draw step it is, so once the draw step belongs to
+/// someone other than the ability's controller (== the proposer here), the
+/// slot this instrument publishes for that proposer must disappear.
+///
+/// Direction: strictly FEWER offers, never more — a shortcut slot is withheld
+/// when the announcer is not the proposer, never published to a seat that will
+/// not be asked. (The "Direction: strictly FEWER offers, never more." comment
+/// at `engine.rs:3894` documents a PRIOR change — the `optional_for`/infeasible
+/// withholds — and is not the evidence for this one; this test is.)
+///
+/// Willie cannot reach this branch (his stamp lives on a `sub_ability`; the
+/// stack entry's ability is the unstamped top-level), and none of the 23
+/// `SearchLibrary` movers reach it either (their `prompt_player` does not
+/// move — P2 runtime neutrality). Academy Loremaster is the fixture because
+/// its stamp lands on the top-level `execute` this instrument reads.
+///
+/// Positive control IN THIS SAME TEST: at the controller's own draw step, the
+/// identical call publishes a `may` slot — proving the instrument publishes a
+/// slot at all, and that the withhold below is caused by the seat move and not
+/// by a broken instrument.
+#[test]
+fn academy_loremaster_may_slot_is_withheld_when_the_announcer_is_not_the_proposer() {
+    const ACADEMY_LOREMASTER_ORACLE: &str = "At the beginning of each player's draw step, that \
+         player may draw an additional card. If they do, spells they cast this turn cost {2} \
+         more to cast.";
+
+    fn advance_to_priority_with_nonempty_stack(runner: &mut crate::game::scenario::GameRunner) {
+        for _ in 0..240 {
+            match runner.state().waiting_for.clone() {
+                // The `phase == Draw` conjunct makes the caller's reach-guard a
+                // loop invariant rather than a post-hoc hope: without it this
+                // could stop on an unrelated non-empty-stack priority window if
+                // the fixture ever gains another trigger source.
+                WaitingFor::Priority { .. }
+                    if !runner.state().stack.is_empty() && runner.state().phase == Phase::Draw =>
+                {
+                    return
+                }
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).ok();
+                }
+                WaitingFor::DeclareAttackers { .. } => {
+                    runner
+                        .act(GameAction::DeclareAttackers {
+                            attacks: vec![],
+                            bands: vec![],
+                        })
+                        .ok();
+                }
+                WaitingFor::DeclareBlockers { .. } => {
+                    runner
+                        .act(GameAction::DeclareBlockers {
+                            assignments: vec![],
+                        })
+                        .ok();
+                }
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: false })
+                        .ok();
+                }
+                _ => return,
+            }
+        }
+    }
+
+    fn settle_optional_effect_and_pass(runner: &mut crate::game::scenario::GameRunner) {
+        for _ in 0..240 {
+            match runner.state().waiting_for.clone() {
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: false })
+                        .ok();
+                }
+                // Stop as soon as THIS trigger has finished resolving. Without
+                // this guard the loop passes straight through the OTHER player's
+                // draw step and consumes the very trigger the negative half
+                // below inspects, then burns the whole iteration budget and
+                // lands back on the controller's own draw step.
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).ok();
+                }
+                WaitingFor::DeclareAttackers { .. } => {
+                    runner
+                        .act(GameAction::DeclareAttackers {
+                            attacks: vec![],
+                            bands: vec![],
+                        })
+                        .ok();
+                }
+                WaitingFor::DeclareBlockers { .. } => {
+                    runner
+                        .act(GameAction::DeclareBlockers {
+                            assignments: vec![],
+                        })
+                        .ok();
+                }
+                _ => return,
+            }
+        }
+    }
+
+    let proposer = P0;
+    let restricted = crate::game::scenario::P1;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Untap);
+    for &pid in &[P0, restricted] {
+        scenario.with_library_top(pid, &["Lib A", "Lib B", "Lib C", "Lib D", "Lib E", "Lib F"]);
+    }
+    scenario.add_creature_from_oracle(P0, "Academy Loremaster", 2, 2, ACADEMY_LOREMASTER_ORACLE);
+    let mut runner = scenario.build();
+
+    // ---- Positive control: the controller's OWN draw step (this turn). ----
+    advance_to_priority_with_nonempty_stack(&mut runner);
+    assert_eq!(
+        runner.state().active_player,
+        P0,
+        "reach-guard: this must be the controller's own draw step"
+    );
+    assert_eq!(runner.state().phase, Phase::Draw);
+    {
+        let state = runner.state();
+        let entry = state
+            .stack
+            .back()
+            .expect("Academy Loremaster's draw-step trigger is on the stack");
+        let pins = entry_publishes_pin_slots(state, entry, proposer)
+            .expect("the controller's own draw step must publish a pin slot at all");
+        assert!(
+            pins.may.is_some(),
+            "positive control: at the controller's own draw step the may slot IS published"
+        );
+    }
+    settle_optional_effect_and_pass(&mut runner);
+
+    // ---- Negative: the OTHER player's draw step (next occurrence). ----
+    advance_to_priority_with_nonempty_stack(&mut runner);
+    assert_eq!(
+        runner.state().active_player,
+        restricted,
+        "reach-guard: this must be the OTHER player's draw step"
+    );
+    assert_eq!(runner.state().phase, Phase::Draw);
+    {
+        let state = runner.state();
+        let entry = state
+            .stack
+            .back()
+            .expect("Academy Loremaster's draw-step trigger is on the stack");
+        let pins = entry_publishes_pin_slots(state, entry, proposer);
+        let withheld = pins.is_none_or(|p| p.may.is_none());
+        assert!(
+            withheld,
+            "CR 732.2a: the announcer moved to the other player, who is not the proposer, so the \
+             may slot must be withheld"
+        );
+    }
+}
+
+/// CR 602.2b + CR 601.2h: a reversed activation commits none of its attempt's
+/// lifecycle facts. An ordinary (`Applied`) outermost boundary hands its frame to
+/// the prospective consumer — `Some`, even when empty — while a reversal
+/// DISCARDS the frame, so the consumer sees `None`.
+#[test]
+fn a_reversed_activation_discards_its_lifecycle_frame() {
+    use crate::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, QuantityExpr, StaticDefinition,
+        TargetFilter, TypedFilter,
+    };
+    use crate::types::game_state::ActionDisposition;
+    use crate::types::statics::{ActivationExemption, CostModifyMode};
+
+    fn board() -> (GameState, ObjectId) {
+        let reducer = |amount: u32, minimum_mana: Option<u32>| {
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Reduce,
+                keyword: "activated".to_string(),
+                amount,
+                minimum_mana,
+                dynamic_count: None,
+                exemption: ActivationExemption::None,
+                activator: None,
+                targets: None,
+                frequency: None,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+        };
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario
+            .add_creature(P0, "Floored reducer", 1, 1)
+            .with_static_definition(reducer(2, Some(2)));
+        scenario
+            .add_creature(P0, "Unfloored reducer", 1, 1)
+            .with_static_definition(reducer(3, None));
+        let source = scenario
+            .add_creature(P0, "Activator", 2, 2)
+            .with_ability_definition(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                )
+                .cost(AbilityCost::Mana {
+                    cost: ManaCost::generic(5),
+                }),
+            )
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            )],
+        );
+        let mut state = scenario.build().state().clone();
+        apply(
+            &mut state,
+            P0,
+            GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            },
+        )
+        .expect("the activation reaches its election");
+        (state, source)
+    }
+    fn answer(state: &mut GameState, outcome: usize) -> ProspectiveSimulationOutcome {
+        let order = match &state.waiting_for {
+            WaitingFor::OrderCostReductions { outcomes, .. } => outcomes[outcome].order.clone(),
+            other => panic!("expected the cost election, got {other:?}"),
+        };
+        apply_interaction_for_prospective_simulation(
+            state,
+            P0,
+            P0,
+            GameAction::OrderCostReductions {
+                order,
+                hybrid_announcement: Vec::new(),
+            },
+        )
+        .expect("a legal election")
+    }
+
+    // −2 (floor two) then −3 on {5} is {0}; the reverse is {2}, and one mana
+    // cannot pay it.
+    let (mut state, _) = board();
+    let applied = answer(&mut state, 0);
+    assert_eq!(applied.action.disposition, ActionDisposition::Applied);
+    assert!(
+        applied.has_outer_lifecycle_facts(),
+        "control: an applied boundary hands its frame on"
+    );
+
+    let (mut state, _) = board();
+    let reversed = answer(&mut state, 1);
+    assert_eq!(reversed.action.disposition, ActionDisposition::Reversed);
+    assert!(
+        !reversed.has_outer_lifecycle_facts(),
+        "a reversal must discard its lifecycle frame"
     );
 }

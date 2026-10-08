@@ -22,9 +22,9 @@
 //! | artifact | bytes | sha256 |
 //! |---|---|---|
 //! | `game-state-turn-15-2026-08-15T14-02-22-524Z.json` (raw capture) | 11 944 525 | `ec8c609c1f2ccb92d76afc536ddd10aab6e9b9d62d15f408e2e40cdb81de0107` |
-//! | derived `mycoloth_devour_wedge_turn15.json.gz` | 393 753 | `18bab04a4ff3f9c4ab55a9b95b5f39f648a071ae755484dcf51600b7bd5ec2c2` |
+//! | derived `mycoloth_devour_wedge_turn15.json.gz` | 393 761 | `b7e83521f548fe0776a47d5954d887653e5ea29d7050421bfbae5bbcae138f25` |
 //! | `game-state-turn-20-2026-08-15T01-13-36-601Z.json` (raw capture) | 13 351 646 | `1788737cf6d499f8878c9869546967c0aad768d8187ae2959d5cc0bc54dd6353` |
-//! | derived `mycoloth_devour_wedge_turn20.json.gz` | 314 865 | `9f7e662fbbfc811080fc5359e36b9ca5f673cb4996745b310efb6613e2755064` |
+//! | derived `mycoloth_devour_wedge_turn20.json.gz` | 314 873 | `45f1422dfc84eb51e1a60e9dbfdf30c055c0de937cb13b96972951de5f32d7ec` |
 //!
 //! Byte-reproducible regeneration is the recipe below **plus the U5 `deck_size`
 //! migration** — `-n` is load-bearing, since without it gzip stamps an mtime and
@@ -41,6 +41,10 @@
 //! `format` field, `Commander` for both captures. Piping a raw dump straight
 //! through does not merely miss the digest; it yields a fixture that
 //! `PersistedGameState` cannot deserialize, and a red test on a green engine.
+//! Then the retired `combat_phases_started_this_turn` /
+//! `end_steps_started_this_turn` keys must be rewritten to
+//! `steps_started_this_turn` (`{"BeginCombat": n, "End": m}`, zeros dropped,
+//! placed at the first old key).
 //!
 //! # What these fixtures do and do not prove
 //!
@@ -93,13 +97,19 @@
 
 use engine::game::engine::apply;
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, Effect, PostReplacementContinuation, QuantityExpr, TargetFilter,
+};
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::counter::CounterType;
-use engine::types::game_state::{GameState, PersistedGameState, WaitingFor};
+use engine::types::game_state::{
+    GameState, PendingMultiDraw, PersistedGameState, PersistedRestoreError,
+    PersistedRestoreFinalization, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::resolution::ResolutionStateWire;
+use engine::types::resolution::{ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION};
 use engine::types::zones::Zone;
 
 fn gunzip(gz: &[u8]) -> String {
@@ -126,11 +136,11 @@ fn gunzip(gz: &[u8]) -> String {
 /// reader rejects any payload carrying `resolution_stack` outright — that
 /// rejection is correct, because v1 predates typed frames entirely.
 ///
-/// So the snapshot is first projected onto the v2 wire, which is precisely the
-/// transformation `ResolutionStateWire::to_value` performs when persisting a
-/// live state: move `resolution_stack` to `resolution_frames` and stamp version
-/// 2. Nothing else is touched — in particular the wedged frame and its
-/// `Dispatching` drain cross verbatim.
+/// So the snapshot is first projected onto the historical v2 typed-frame wire
+/// shape: move `resolution_stack` to `resolution_frames` and stamp version 2.
+/// The current writer emits v4; this projection deliberately selects the
+/// supported legacy reader. Nothing in the frame stack is touched — in
+/// particular the wedged frame and its `Dispatching` drain cross verbatim.
 fn projected_capture_snapshot(gz: &[u8]) -> serde_json::Value {
     let json = gunzip(gz);
     let envelope: serde_json::Value =
@@ -183,6 +193,21 @@ fn load_turn20() -> GameState {
     ))
 }
 
+fn zurs_weirding_prompt_runner() -> engine::game::scenario::GameRunner {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    {
+        let mut zurs_weirding =
+            scenario.add_creature_from_oracle(P0, "Zur's Weirding", 0, 1, ZURS_WEIRDING_ORACLE);
+        zurs_weirding.as_enchantment();
+    }
+    scenario.with_library_top(P1, &["Grizzly Bears", "Forest", "Plains"]);
+    scenario.with_library_top(P0, &["P0 Library 1", "P0 Library 2", "P0 Library 3"]);
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+    runner
+}
+
 #[test]
 fn persisted_wedged_captures_settle_before_publication() {
     for capture in [
@@ -199,6 +224,324 @@ fn persisted_wedged_captures_settle_before_publication() {
             "the production restore must settle the terminal stack carrier"
         );
     }
+}
+
+/// A supported current-format Ready continuation remains admissible through the
+/// production restore preparation boundary. The state is made with the public
+/// runtime installer and an executable draw continuation, then serialized via
+/// the current v4 persistence writer; the assertion protects live parked work
+/// from being mistaken for an ownerless Dispatching drain.
+#[test]
+fn current_ready_postreplacement_continuation_remains_restorable() {
+    let mut state = GameState::new_two_player(42);
+    state.install_ready_continuation(PostReplacementContinuation::Template(Box::new(
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ),
+    )));
+
+    let wire = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
+        .expect("the current Ready state serializes through the persistence writer");
+    assert_eq!(
+        wire["resolution_state_version"],
+        RESOLUTION_STATE_WIRE_VERSION
+    );
+    let restored = serde_json::from_value::<PersistedGameState>(wire)
+        .expect("the current Ready persistence payload decodes")
+        .prepare_for_restore(PersistedRestoreFinalization::Immediate)
+        .expect("a valid Ready continuation remains admissible")
+        .finalize_immediately()
+        .expect("the Ready state finalizes without manufacturing an action");
+
+    assert!(matches!(
+        restored.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
+    assert_eq!(
+        post_replacement_drain_statuses(&restored),
+        vec![vec!["Ready".to_string()]],
+        "restore must preserve a live Ready continuation"
+    );
+}
+
+/// The supported v1 raw persistence shape also crosses the actual restore
+/// preparation boundary. Its legacy single-slot draw tail is migrated into a
+/// typed draw frame, after which the checked restore remains playable.
+#[test]
+fn supported_v1_draw_state_restores_through_persisted_game_state() {
+    let mut v1 =
+        serde_json::to_value(GameState::new_two_player(43)).expect("serialize v1 baseline");
+    v1["pending_multi_draw"] = serde_json::to_value(PendingMultiDraw {
+        player: PlayerId(0),
+        remaining: 2,
+        accumulated: 1,
+    })
+    .expect("serialize legacy v1 draw tail");
+    assert!(v1.get("resolution_state_version").is_none());
+    assert!(v1.get("pending_multi_draw").is_some());
+
+    let prepared = serde_json::from_value::<PersistedGameState>(v1)
+        .expect("the persistence boundary supplies the v1 discriminator")
+        .prepare_for_restore(PersistedRestoreFinalization::Immediate)
+        .expect("the supported v1 draw state remains admissible");
+    let restored = prepared
+        .finalize_immediately()
+        .expect("the v1 state finalizes without manufacturing an action");
+    assert_eq!(
+        restored.active_draw_sequence().map(|frame| frame.remaining),
+        Some(2),
+        "the legacy draw tail must be migrated to the active typed sequence"
+    );
+
+    let current = serde_json::to_value(PersistedGameState::Raw(Box::new(restored)))
+        .expect("restored v1 state rewrites through the current persistence writer");
+    assert_eq!(
+        current["resolution_state_version"],
+        RESOLUTION_STATE_WIRE_VERSION
+    );
+    assert!(current["resolution_frames"].is_object());
+    assert!(current.get("pending_multi_draw").is_none());
+}
+
+/// Restore admission regression for the historically measured Zur's Weirding
+/// prompt. The compressed source is a raw runtime `GameState` dump captured at
+/// the pre-#7485 revision `b2071a7f41a422d8d43b66189e4ae976ce451e07`, after
+/// the real debug draw reached `OpponentMayChoice`. At that revision the frame
+/// stack was `[PostReplacement(Dispatching), MultiDraw, OptionalEffect]`.
+/// Current healthy play does not produce this ownerless persisted state; the
+/// fixture records the older runtime state and its lost synchronous owner.
+/// No measured shallow `[PostReplacement(Dispatching), OptionalEffect]` producer
+/// state was found: the current producer pauses its drain before publishing a
+/// choice, while the pre-#7485 capture is the measured nested
+/// `[PostReplacement(Dispatching), MultiDraw, OptionalEffect]` witness. The
+/// stack's generic gate rules alone would admit a matching direct-choice child,
+/// but that structural possibility is not runtime provenance and is not turned
+/// into another synthetic defect case here.
+///
+/// `projected_capture_snapshot` applies the same persistence-wire projection
+/// used for the reporter captures above: `resolution_stack` becomes
+/// `resolution_frames`, version 2 is stamped, and all frame payloads cross
+/// unchanged. The test then uses `PersistedGameState`'s production decoder and
+/// `prepare_for_restore`, so it exercises admission rather than only frame
+/// decoding.
+///
+/// Provenance/normalization: the pre-migration raw runtime JSON had SHA-256
+/// `4cc99fda95ca784974a644f47b7c0b500e187e7896e508da604d6184fba51b11`. Its
+/// Standard `format_config.deck_size: 60` is represented in the fixture as the
+/// current `DeckSizeRule::Minimum(60)` tagged shape; the snapshot has none of
+/// the retired phase-counter keys. The deterministic gzip fixture has SHA-256
+/// `f1dcde618c4941adb1a5dab501b7f7f7e5cda0dd8e050e6afcc85b6b0207a0af`.
+#[test]
+fn persisted_historical_nested_dispatching_fails_closed_before_publication() {
+    let snapshot = projected_capture_snapshot(include_bytes!(
+        "fixtures/zurs_weirding_nested_dispatching_pre_7485.json.gz"
+    ));
+    assert_eq!(snapshot["resolution_state_version"], 2);
+    assert_eq!(snapshot["waiting_for"]["type"], "OpponentMayChoice");
+    assert_eq!(
+        snapshot["resolution_frames"]["frames"][0]["type"],
+        "PostReplacement"
+    );
+    assert_eq!(
+        snapshot["resolution_frames"]["frames"][1]["type"],
+        "MultiDraw"
+    );
+    assert_eq!(
+        snapshot["resolution_frames"]["frames"][2]["type"],
+        "OptionalEffect"
+    );
+    assert_eq!(
+        snapshot["resolution_frames"]["frames"][0]["data"]["drains"][0]["status"],
+        "Dispatching"
+    );
+
+    let persisted = serde_json::from_value::<PersistedGameState>(snapshot)
+        .expect("the historical v2 payload decodes through PersistedGameState");
+    let prepared = persisted.prepare_for_restore(PersistedRestoreFinalization::Immediate);
+    assert!(matches!(
+        prepared,
+        Err(PersistedRestoreError::OwnerlessPostReplacementDispatch)
+    ));
+}
+
+/// A nonresident drain entry is still unsupported when another drain in the
+/// same nested frame is legitimately paused for the live choice.
+#[test]
+fn persisted_nonresident_dispatching_drain_is_rejected() {
+    let snapshot = projected_capture_snapshot(include_bytes!(
+        "fixtures/zurs_weirding_nested_dispatching_pre_7485.json.gz"
+    ));
+    let template = snapshot["resolution_frames"]["frames"][0]["data"]["drains"][0].clone();
+    let with_statuses = |first_status: &str, second_status: &str| {
+        let mut variant = snapshot.clone();
+        let drains = variant["resolution_frames"]["frames"][0]["data"]["drains"]
+            .as_array_mut()
+            .expect("the historical PostReplacement frame has a drain stack");
+        let mut first = template.clone();
+        let mut second = template.clone();
+        first["status"] = serde_json::Value::String(first_status.to_string());
+        second["status"] = serde_json::Value::String(second_status.to_string());
+        *drains = vec![first, second];
+        serde_json::from_value::<PersistedGameState>(variant)
+            .expect("the nested two-drain topology decodes")
+            .prepare_for_restore(PersistedRestoreFinalization::Immediate)
+    };
+
+    assert!(
+        with_statuses("Paused", "Paused").is_ok(),
+        "the same two-drain topology is admissible without an ownerless dispatch"
+    );
+    for (first, second) in [("Dispatching", "Paused"), ("Paused", "Dispatching")] {
+        assert!(matches!(
+            with_statuses(first, second),
+            Err(PersistedRestoreError::OwnerlessPostReplacementDispatch)
+        ));
+    }
+}
+
+/// The historical v2 fixture differs from a supported paused direct-choice
+/// save in one lifecycle tag. This control proves the same topology and payload
+/// remain admissible when the dispatch has actually paused.
+#[test]
+fn historical_v2_paused_direct_choice_remains_restorable() {
+    let mut snapshot = projected_capture_snapshot(include_bytes!(
+        "fixtures/zurs_weirding_nested_dispatching_pre_7485.json.gz"
+    ));
+    snapshot["resolution_frames"]["frames"][0]["data"]["drains"][0]["status"] =
+        serde_json::Value::String("Paused".to_string());
+
+    let state = serde_json::from_value::<PersistedGameState>(snapshot)
+        .expect("the paused v2 direct-choice control decodes")
+        .prepare_for_restore(PersistedRestoreFinalization::Immediate)
+        .expect("a paused v2 direct-choice state remains admissible")
+        .finalize_immediately()
+        .expect("the paused v2 state finalizes without manufacturing an action");
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::OpponentMayChoice { .. }
+    ));
+    assert_eq!(
+        post_replacement_drain_statuses(&state),
+        vec![vec!["Paused".to_string()]],
+        "the direct-choice save must retain its paused replacement continuation"
+    );
+}
+
+/// The same genuinely paused direct-choice state remains readable through the
+/// v3 wire. The v4 writer's only later draw-frame requirement, `delivery_owner`,
+/// is removed before selecting the supported v3 reader.
+#[test]
+fn v3_paused_postreplacement_direct_choice_remains_restorable() {
+    let mut runner = zurs_weirding_prompt_runner();
+    runner
+        .act(GameAction::Debug(DebugAction::DrawCards {
+            player_id: P1,
+            count: 1,
+        }))
+        .expect("debug draw reaches the direct-choice prompt");
+    assert_eq!(
+        post_replacement_drain_statuses(runner.state()),
+        vec![vec!["Paused".to_string()]],
+        "the current producer must leave a valid paused replacement continuation"
+    );
+
+    let mut wire = serde_json::to_value(PersistedGameState::Raw(Box::new(runner.state().clone())))
+        .expect("current persisted wire serializes");
+    assert_eq!(
+        wire["resolution_state_version"],
+        RESOLUTION_STATE_WIRE_VERSION
+    );
+    let delivery_owner = wire["resolution_frames"]["frames"][1]["data"]["draw_sequences"]["frames"]
+        [0]
+    .as_object_mut()
+    .expect("the MultiDraw frame contains a draw-sequence frame")
+    .remove("delivery_owner");
+    assert!(
+        delivery_owner.is_some(),
+        "the current draw frame must carry the v4-only delivery owner"
+    );
+    wire["resolution_state_version"] = serde_json::Value::from(3);
+
+    let state = serde_json::from_value::<PersistedGameState>(wire)
+        .expect("the valid v3 paused direct-choice state decodes")
+        .prepare_for_restore(PersistedRestoreFinalization::Immediate)
+        .expect("the valid v3 paused direct-choice state remains admissible")
+        .finalize_immediately()
+        .expect("the valid v3 state finalizes");
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::OpponentMayChoice { .. }
+    ));
+    assert_eq!(
+        post_replacement_drain_statuses(&state),
+        vec![vec!["Paused".to_string()]]
+    );
+}
+
+/// A current, genuinely paused direct-choice save must still resume through a
+/// normal action with the same persisted semantics as uninterrupted play.
+#[test]
+fn current_paused_postreplacement_round_trip_resumes_like_uninterrupted() {
+    let mut uninterrupted = zurs_weirding_prompt_runner();
+    let mut restored = zurs_weirding_prompt_runner();
+    for runner in [&mut uninterrupted, &mut restored] {
+        runner
+            .act(GameAction::Debug(DebugAction::DrawCards {
+                player_id: P1,
+                count: 1,
+            }))
+            .expect("debug draw reaches the direct-choice prompt");
+    }
+
+    assert!(matches!(
+        restored.state().waiting_for,
+        WaitingFor::OpponentMayChoice { .. }
+    ));
+    assert_eq!(
+        post_replacement_drain_statuses(restored.state()),
+        vec![vec!["Paused".to_string()]],
+        "current healthy execution must pause the replacement before saving"
+    );
+
+    let wire = serde_json::to_value(PersistedGameState::Raw(Box::new(restored.state().clone())))
+        .expect("current persisted wire serializes");
+    assert_eq!(
+        wire["resolution_state_version"],
+        RESOLUTION_STATE_WIRE_VERSION
+    );
+    let state = serde_json::from_value::<PersistedGameState>(wire)
+        .expect("current persisted wire decodes")
+        .prepare_for_restore(PersistedRestoreFinalization::Immediate)
+        .expect("current paused state remains admissible")
+        .finalize_immediately()
+        .expect("current paused state finalizes");
+    *restored.state_mut() = state;
+
+    let answer = GameAction::DecideOptionalEffect { accept: true };
+    uninterrupted
+        .act(answer.clone())
+        .expect("uninterrupted direct-choice answer succeeds");
+    restored
+        .act(answer)
+        .expect("restored direct-choice answer succeeds");
+
+    let uninterrupted_wire = serde_json::to_value(PersistedGameState::Raw(Box::new(
+        uninterrupted.state().clone(),
+    )))
+    .expect("uninterrupted result serializes");
+    let restored_wire =
+        serde_json::to_value(PersistedGameState::Raw(Box::new(restored.state().clone())))
+            .expect("restored result serializes");
+    assert_eq!(
+        restored_wire, uninterrupted_wire,
+        "normal action after restore must match uninterrupted resolution semantics"
+    );
 }
 
 /// The per-`PostReplacement`-frame drain statuses of the LOADED runtime state,

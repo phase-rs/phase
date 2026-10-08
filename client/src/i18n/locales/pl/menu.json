@@ -117,6 +117,8 @@
     "coverageThresholdHint": "Wyklucz talie poniżej tego progu obsługi przez silnik",
     "bracket": "Poziom",
     "bracketHint": "Losowe AI wybiera z tych poziomów. Talie bez tagów są wykluczane podczas filtrowania.",
+    "bracketPoolEmpty": "Żadne talie nie odpowiadają wybranym poziomom. Losowe AI będzie dobierać ze wszystkich dozwolonych talii.",
+    "cedhPoolEmpty": "Brak talii poziomu 5. Nie można przydzielić talii losowemu AI.",
     "opponentLabel": "Przeciwnik {{number}}",
     "deck": "Talia",
     "difficulty": "Poziom trudności",
@@ -131,7 +133,9 @@
       "feed": "Kanał",
       "user": "Użytkownik",
       "precon": "Precon"
-    }
+    },
+    "brain": "Sterowany przez",
+    "brainEngine": "AI silnika"
   },
   "feedManager": {
     "title": "Zarządzaj kanałami",

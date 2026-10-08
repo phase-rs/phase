@@ -1,7 +1,22 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DeckList } from "../DeckList";
+
+const mocks = vi.hoisted(() => ({
+  canonicalCardNames: vi.fn(
+    async (names: string[]): Promise<(string | null)[]> => names.map(() => null),
+  ),
+}));
+
+vi.mock("../../../adapter/wasm-adapter", () => ({
+  getSharedAdapter: () => ({ canonicalCardNames: mocks.canonicalCardNames }),
+}));
+
+beforeEach(() => {
+  mocks.canonicalCardNames.mockReset();
+  mocks.canonicalCardNames.mockImplementation(async (names: string[]) => names.map(() => null));
+});
 
 afterEach(cleanup);
 
@@ -79,5 +94,35 @@ describe("DeckList import modal", () => {
     ).toBeInTheDocument();
     expect(onImport).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: /^parse$/i })).toBeInTheDocument();
+  });
+
+  it("imports pasted card names in the engine's canonical spelling", async () => {
+    mocks.canonicalCardNames.mockImplementation(async (names: string[]) =>
+      names.map((name) => (name === "Revival/Revenge" ? "Revival // Revenge" : null)),
+    );
+    const onImport = vi.fn();
+    render(
+      <DeckList
+        deck={emptyDeck}
+        onRemoveCard={vi.fn()}
+        onIncrementCard={vi.fn()}
+        canIncrementCard={() => true}
+        onMoveCard={vi.fn()}
+        onImport={onImport}
+        cardDataCache={new Map()}
+        groupMode="type"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /^import$/i }));
+    fireEvent.change(screen.getByPlaceholderText(/paste deck list/i), {
+      target: { value: "1 Revival/Revenge" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^parse$/i }));
+
+    await waitFor(() => expect(onImport).toHaveBeenCalled());
+    expect(onImport.mock.calls[0][0].main).toEqual([
+      { count: 1, name: "Revival // Revenge" },
+    ]);
   });
 });

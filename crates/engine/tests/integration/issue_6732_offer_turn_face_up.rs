@@ -15,8 +15,8 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
-    ReplacementDefinition, TargetFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, Effect, ManaContribution,
+    ManaProduction, ReplacementDefinition, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
@@ -159,10 +159,122 @@ fn redirect_exile_to_graveyard() -> ReplacementDefinition {
         ))
 }
 
-const WARBREAK_TRUMPETER: &str = "Morph {X}{X}{R} (You may cast this card face down as a 2/2 \\
-                                  creature for {3}. Turn it face up any time for its morph \\
-                                  cost.)\nWhen this creature is turned face up, create X 1/1 red \\
+const WARBREAK_TRUMPETER: &str = "Morph {X}{X}{R} (You may cast this card face down as a 2/2 \
+                                  creature for {3}. Turn it face up any time for its morph \
+                                  cost.)\nWhen this creature is turned face up, create X 1/1 red \
                                   Goblin creature tokens.";
+
+/// CR 304.5 + CR 702.37e: priority-only mana cannot fund the morph payment.
+/// CR 702.37f: the paid X remains bound to the face-up trigger.
+#[test]
+fn instant_only_mana_does_not_pay_warbreak_morph_x() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(check_warbreak_morph_x)
+        .expect("spawn Warbreak test thread")
+        .join()
+        .expect("Warbreak test thread panicked");
+}
+
+fn check_warbreak_morph_x() {
+    let warbreak_board = |instant_only: bool| {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let trumpet = scenario
+            .add_creature_to_hand_from_oracle(P0, "Warbreak Trumpeter", 1, 1, WARBREAK_TRUMPETER)
+            .id();
+        let source = scenario
+            .add_artifact_from_oracle(
+                P0,
+                "Two-Mana Source",
+                if instant_only {
+                    "{T}: Add {C}{C}. Activate only as an instant."
+                } else {
+                    "{T}: Add {C}{C}."
+                },
+            )
+            .id();
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&trumpet].card_id;
+        runner
+            .act(GameAction::PlayFaceDown {
+                object_id: trumpet,
+                card_id,
+            })
+            .expect("Warbreak is played face down");
+        runner.state_mut().players[P0.0 as usize]
+            .mana_pool
+            .add(ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]));
+        (runner, trumpet, source)
+    };
+
+    let (mut restricted, trumpet, source) = warbreak_board(true);
+    assert!(restricted.state().objects[&source]
+        .abilities
+        .iter()
+        .any(|ability| {
+            ability
+                .activation_restrictions
+                .contains(&ActivationRestriction::AsInstant)
+                && matches!(*ability.effect, Effect::Mana { .. })
+        }));
+    assert!(restricted
+        .act(GameAction::TurnFaceUp {
+            object_id: trumpet,
+            x: 1
+        })
+        .is_err());
+    assert!(restricted.state().objects[&trumpet].face_down);
+    assert!(!restricted.state().objects[&source].tapped);
+    assert_eq!(
+        restricted.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Red),
+        1
+    );
+
+    let (mut zero_x, trumpet, _) = warbreak_board(true);
+    zero_x
+        .act(GameAction::TurnFaceUp {
+            object_id: trumpet,
+            x: 0,
+        })
+        .expect("pre-floated red mana permits X=0");
+    assert!(!zero_x.state().objects[&trumpet].face_down);
+
+    let (mut unrestricted, trumpet, source) = warbreak_board(false);
+    unrestricted
+        .act(GameAction::TurnFaceUp {
+            object_id: trumpet,
+            x: 1,
+        })
+        .expect("unrestricted two-mana source pays {2}{R}");
+    assert!(!unrestricted.state().objects[&trumpet].face_down);
+    assert!(unrestricted.state().objects[&source].tapped);
+    let bound_x = unrestricted
+        .state()
+        .stack
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility {
+                source_id, ability, ..
+            } if *source_id == trumpet => Some(ability.chosen_x),
+            _ => None,
+        });
+    assert_eq!(bound_x, Some(Some(1)));
+    unrestricted.advance_until_stack_empty();
+    let goblins = unrestricted
+        .state()
+        .battlefield
+        .iter()
+        .filter(|object_id| {
+            unrestricted.state().objects[object_id]
+                .name
+                .contains("Goblin")
+        })
+        .count();
+    assert_eq!(goblins, 1);
+}
 
 /// CR 605.3b + CR 616.1: the offer is only honest if the action can FINISH.
 ///

@@ -326,6 +326,21 @@ class MediaPluginPackagingTests(unittest.TestCase):
         self.assertEqual(r.returncode, 2, r.stdout)
         self.assertIn("Linux matrix arm", r.stderr)
 
+    def test_a_composite_apt_step_condition_refuses(self) -> None:
+        # Matching the Linux arm as one part of a larger condition does not
+        # prove that the step runs on Linux; the other part may make it false.
+        t = self.tree()
+        t.write_workflow(condition="matrix.os == 'linux' && false")
+        r = t.run()
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("Linux matrix arm", r.stderr)
+
+    def test_an_exact_github_expression_linux_condition_is_accepted(self) -> None:
+        t = self.tree()
+        t.write_workflow(condition="${{ matrix.os == 'linux' }}")
+        r = t.run()
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+
     def test_absent_deb_depends_refuses(self) -> None:
         t = self.tree()
         t.write_tauri_conf(None)
@@ -582,6 +597,8 @@ class MediaPluginPackagingTests(unittest.TestCase):
         # refusal on a tree that is entirely correct.
         for shape, extra in (
             ("quoted keyword", 'echo "done"'),
+            ("quoted function prose", 'echo "preparing; install_media() {"'),
+            ("quoted separator and header", 'echo ";" "install_media() {"'),
             ("keyword in prose", "echo Installed GStreamer plugins for the AppImage"),
             ("keyword as a package-ish word", "echo done building"),
         ):
@@ -712,6 +729,44 @@ class MediaPluginPackagingTests(unittest.TestCase):
                 r = t.run()
                 self.assertEqual(r.returncode, 2, r.stdout)
                 self.assertIn("depends on the command before it", r.stderr)
+                self.assertNotIn("is missing", r.stderr)
+
+    def test_an_install_inside_a_shell_function_is_not_credited(self) -> None:
+        # The line-scoped reader cannot know whether a function is called, so
+        # an install inside its body must be refused like other shell control
+        # flow rather than credited as an executed command.
+        definitions = (
+            ("install_media() {", "", "}"),
+            ("function install_media {", "", "}"),
+            ("install_media()", "{", "}"),
+            ("function install_media", "{", "}"),
+            ("install_media() # not called below", "{", "}"),
+            ("function install_media # not called below", "{", "}"),
+            ("install_media() (", "", ")"),
+            ("function install_media() (", "", ")"),
+            ("install-media() {", "", "}"),
+            ("function install-media {", "", "}"),
+            ("install.media() {", "", "}"),
+            ("function install:media {", "", "}"),
+            ("install-media() (", "", ")"),
+            ("function install.media() (", "", ")"),
+            ("echo preparing; install_media() {", "", "}"),
+            ("echo preparing; function install-media {", "", "}"),
+            ("echo preparing&&install.media() (", "", ")"),
+            ("echo preparing || function install:media() (", "", ")"),
+        )
+        for definition, opener, closer in definitions:
+            with self.subTest(definition=definition):
+                t = self.tree()
+                run = (
+                    f"{definition}\n"
+                    + (f"{opener}\n" if opener else "")
+                    + f"  sudo apt-get install -y {' '.join(DEFAULT_PACKAGES)}\n"
+                    + f"{closer}\n")
+                t.write_workflow(run=run)
+                r = t.run()
+                self.assertEqual(r.returncode, 2, r.stdout)
+                self.assertIn("uses shell control flow", r.stderr)
                 self.assertNotIn("is missing", r.stderr)
 
     def test_a_piped_install_refuses_via_the_more_specific_head_check(self) -> None:

@@ -1,4 +1,5 @@
 {
+  "playerLatency": {"host":"Host","waiting":"Waiting","value":"{{ms}} ms","description":"Round-trip latency to the host. A missing reply does not disconnect the game."},
   "abilityBlock": {
     "badge": "Blocked",
     "cantBeActivated": "This ability can't be activated",
@@ -9,6 +10,9 @@
   "manaSourceSelection": {
     "title": "Choose a mana source",
     "description": "This mana ability requires sacrificing a permanent.",
+    "baseOutput_one": "Base output: {{count}} mana",
+    "baseOutput_other": "Base output: {{count}} mana",
+    "baseOutputVariable": "Base amount determined on activation",
     "sacrifice": "Sacrifice",
     "back": "Back to mana payment",
     "unknownSource": "Mana source"
@@ -17,10 +21,10 @@
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
     "respondTitle": "Loop Shortcut Proposed",
-    "respondSubtitle": "An opponent proposes taking a loop shortcut. Accept it, or break out to keep playing manually.",
+    "respondSubtitle": "An opponent proposes taking a loop shortcut. Accept it, or name the place where the sequence stops.",
     "confirm": "Take the shortcut",
     "accept": "Accept",
-    "shorten": "Break out",
+    "shorten": "Shorten it",
     "decline": "Decline the shortcut",
     "untilLethal": "Repeat until the game ends.",
     "fixedCount_one": "Repeat at most once.",
@@ -104,11 +108,16 @@
   },
   "debugCreate": {
     "copies": "Copies",
+    "asToken": "Create as token",
     "tokenPower": "Power",
     "tokenToughness": "Toughness",
     "tokenPowerPlaceholder": "Power",
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
+  },
+  "debugMove": {
+    "runEtbEffects": "Run ETB effects",
+    "simulate": "Simulate (ETB effects, triggers + SBAs)"
   },
   "debugLibrary": {
     "openActions": "Open debug actions for {{name}}"
@@ -305,14 +314,20 @@
     "eligibleCount": "{{count}} legal",
     "attackingCount": "atk {{count}}",
     "selectedCount": "sel {{count}}",
+    "directBlockTargetCount": "block targets {{count}}",
+    "blockingWith": "Blocking with {{name}}",
+    "blockedBy": "Blocked by {{names}}",
+    "unblocked": "Unblocked",
     "pickAll": "All",
     "pickNone": "None",
     "underAttack_one": "Attacked by {{count}} creature",
     "underAttack_other": "Attacked by {{count}} creatures",
     "target": "Target",
     "sacrifice": "Sacrifice",
+    "token": "Token",
+    "tokenTooltip": "Token copy of a real card",
     "copy": "Copy",
-    "copyTooltip": "Token copy of a real card",
+    "copyTooltip": "Nontoken permanent copying another card",
     "cantBeBlocked": "Can't be blocked",
     "ringBearer": "Ring",
     "ringBearerTooltip": "Ring-bearer",
@@ -793,6 +808,8 @@
     "mustAttackSatisfiedBadge": "Attacking ✓",
     "mustBlockBadge": "Must block",
     "mustBlockExactBadge": "Must block {{attacker}}",
+    "mustBeBlockedBadge": "Must be blocked",
+    "bandBadge": "Band {{n}}",
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
@@ -827,6 +844,7 @@
     "titleTargets": "Targets: {{targets}}",
     "titlePaid": "Paid: {{paid}}",
     "titleContext": "Context: {{context}}",
+    "revealedCards": "Revealed: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} mana",
     "paidColorsSpent": "{{count}} colors",
@@ -1149,6 +1167,8 @@
       "usePowder": "Use {{name}}",
       "powderDescription": "Exile every card in hand, draw the same number — not a mulligan",
       "powderTooltip": "Exile every card in your hand and draw the same number. Not a mulligan — count and bottoms unaffected.",
+      "freeReveal": "Reveal and redraw (free)",
+      "freeRevealDescription": "Reveal your hand, shuffle it back and draw 7 — free, no cards to the bottom, not a mulligan",
       "eyebrowMulligan": "Mulligan {{count}} · London",
       "eyebrowOpening": "Opening Hand · London Mulligan",
       "reviewTitle": "Review your opening hand",
@@ -1406,6 +1426,7 @@
       "target": "Target",
       "return": "Return",
       "discard": "Discard",
+      "reveal": "Reveal",
       "evidence": "Evidence",
       "manifest": "Manifest",
       "untap": "Untap",
@@ -1456,7 +1477,16 @@
       "subtitleUpTo_other": "Select up to {{count}} cards to put {{destination}}",
       "destinationTop": "on top of your library",
       "destinationBattlefield": "onto the battlefield",
-      "destinationHand": "into your hand"
+      "destinationHand": "into your hand",
+      "titleSplit": "Split the Remaining Cards",
+      "subtitleSplit_one": "Arrange {{count}} card for the top of your library; the other {{remaining}} go on the bottom",
+      "subtitleSplit_other": "Arrange these cards: {{count}} go on top of your library, the other {{remaining}} go on the bottom",
+      "badgeTop": "Top {{order}}",
+      "badgeBottom": "Bottom",
+      "hintSplit": "Drag to reorder · green cards go on top (leftmost is topmost), grey cards go on the bottom",
+      "moveEarlier": "Move {{card}} earlier",
+      "moveLater": "Move {{card}} later",
+      "hintSplitOrderOnly": "Drag or use the arrow buttons to reorder within each pile · another player chose which cards go on top"
     },
     "surveil": {
       "title": "Surveil",
@@ -1705,6 +1735,14 @@
       "labelExile": "Exile",
       "labelBehold": "Behold"
     },
+    "empowerJace": {
+      "title": "Empower Jace",
+      "subtitle": "Choose a Jace token you control to gain +{{count}} loyalty"
+    },
+    "spellCopyOrder": {
+      "title": "Order the copies",
+      "subtitle": "Choose the spell whose copy goes on the stack next"
+    },
     "collectEvidence": {
       "title": "Collect Evidence",
       "subtitle": "Exile cards from your graveyard with total mana value {{minimum}} or greater"
@@ -1823,6 +1861,14 @@
       "subtitle_one": "Put {{count}} revealed card on the bottom of your library",
       "subtitle_other": "Put {{count}} revealed cards on the bottom of your library, in any order",
       "hint": "Drag to reorder · position 1 ends up on top of this pile"
+    },
+    "revealUntilBottom": {
+      "title": "Order the rest on the bottom",
+      "subtitle_one": "Put {{count}} revealed card on the bottom of your library",
+      "subtitle_other": "Put {{count}} revealed cards on the bottom of your library, in any order",
+      "hint": "Drag to reorder · position 1 ends up on top of this pile",
+      "moveLeft": "Move left",
+      "moveRight": "Move right"
     }
   },
   "specializeColor": {
@@ -1934,6 +1980,10 @@
     "prowlNormalLabel": "Cast Normally",
     "prowlAltLabel": "Cast with Prowl",
     "prowlSubtitle": "Cast {{name}} normally, or pay its Prowl cost (available because a matching creature dealt combat damage to a player this turn).",
+    "surgeEyebrow": "Surge",
+    "surgeNormalLabel": "Cast Normally",
+    "surgeAltLabel": "Cast with Surge",
+    "surgeSubtitle": "Cast {{name}} normally, or pay its Surge cost (available because you or a teammate cast another spell this turn).",
     "overloadEyebrow": "Overload",
     "overloadNormalLabel": "Cast Normally",
     "overloadAltLabel": "Cast with Overload",
@@ -1957,6 +2007,8 @@
     "additionalExile": "+ Exile a card",
     "additionalSacrifice": "+ Sacrifice a permanent",
     "additionalPayLife": "+ Pay life",
+    "additionalPayLifeAmount": "+ Pay {{amount}} life",
+    "additionalCollectEvidence": "+ Collect evidence {{amount}}",
     "additionalDiscard": "+ Discard a card",
     "additionalTapCreatures": "+ Tap creatures",
     "additionalGeneric": "+ {{type}}"
@@ -2001,7 +2053,11 @@
   },
   "zoneOpponentChooser": {
     "title": "Choose Opponent",
-    "subtitle": "Choose which opponent makes the choice."
+    "subtitle": "Choose which opponent makes the choice.",
+    "orderTitle": "Choose Next Player",
+    "orderSubtitle": "Choose whose selection to make next.",
+    "substituteTitle": "Choose Player",
+    "substituteSubtitle": "Choose who makes this choice."
   },
   "pileOpponent": {
     "title": "Choose Opponent",
@@ -2035,10 +2091,15 @@
     "subtitleCascade": "Cascade exiled {{name}} (mana value below {{sourceMv}}). Cast it without paying its mana cost, or decline and shuffle all {{total}} exiled cards to the bottom of your library.",
     "subtitleDiscover": "Discover exiled {{name}}. Cast it without paying its mana cost, or put it into your hand and shuffle the other {{missCount}} exiled cards to the bottom of your library.",
     "subtitleRipple": "Ripple revealed {{name}}. Cast it without paying its mana cost, or decline and put all {{total}} revealed cards on the bottom of your library in a random order.",
-    "subtitleGraveyardPaid": "Cast {{name}} from a graveyard by paying its mana cost — mana of any type may be spent. Or decline and leave it in the graveyard.",
+    "subtitleGraveyardPaid": "Cast {{name}} from a graveyard by paying its mana cost{{extra}}{{concession}}. Or decline and leave it in the graveyard.",
     "castNamed": "Cast {{name}}",
     "castSuffix": "(without paying its mana cost)",
-    "castPaidSuffix": "(pay its mana cost — any type of mana may be spent)",
+    "castPaidSuffix": "(pay its mana cost{{extra}}{{concession}})",
+    "paidExtraFragment": " plus {{extra}}",
+    "paidAnyTypeSubtitleFragment": " — mana of any type may be spent",
+    "paidAnyColorSubtitleFragment": " — mana of any color may be spent",
+    "paidAnyTypeSuffixFragment": " — any type of mana may be spent",
+    "paidAnyColorSuffixFragment": " — any color of mana may be spent",
     "putIntoHand": "Put into hand",
     "decline": "Decline",
     "discoverDeclineSuffix": "(put the rest on the bottom)",
@@ -2079,6 +2140,7 @@
     "variantForetell": "Cast from Foretell",
     "variantOverload": "Cast with Overload",
     "variantBestow": "Cast with Bestow",
+    "variantBlitz": "Cast with Blitz",
     "variantFreerunning": "Cast with Freerunning",
     "variantFuse": "Cast with Fuse",
     "variantMutate": "Cast with Mutate",
@@ -2088,7 +2150,14 @@
     "variantMoreThanMeetsTheEye": "Cast Converted",
     "variantPrototype": "Cast with Prototype",
     "variantFaceDown": "Cast Face Down",
-    "variantFallback": "Cast with {{type}}"
+    "variantFallback": "Cast with {{type}}",
+    "viaSource": "via {{name}}",
+    "extraCostAdditional": "+ {{cost}}",
+    "extraCostAlternative": "instead of its mana cost: {{cost}}",
+    "entersWithCounter": "enters with a {{counter}} counter",
+    "slotPerType": "uses its {{type}} slot",
+    "slotChooseType": "choose a permanent type",
+    "slotOncePerTurn": "once this turn"
   },
   "categoryChoice": {
     "title": "Choose Permanents to Keep",
@@ -2150,6 +2219,7 @@
     "exportClientSnapshot": "Export client snapshot",
     "exported": "Exported",
     "exportFailed": "Export failed",
+    "exportRequested": "Export unconfirmed",
     "copyDiagnostic": "Copy diagnostic",
     "copied": "Copied!",
     "reportOnGithub": "Report on GitHub",
@@ -2245,7 +2315,9 @@
     "accept": "Yes",
     "decline": "No",
     "sourceFallback": "Effect",
-    "entryLabel": "{{source}} — {{decision}}"
+    "entryLabel": "{{source}} — {{decision}}",
+    "optionalTriggers": "Optional triggers ({{count, number}})",
+    "replacementChoices": "Replacement choices ({{count, number}})"
   },
   "optionalEffect": {
     "sourceFallback": "Effect",
@@ -2253,7 +2325,13 @@
     "yes": "Yes",
     "no": "No",
     "dontAskAgain": "Don't ask again this game",
-    "dontAskAgainForSameCard": "Apply this to every copy of this card"
+    "dontAskAgainForSameCard": "Use this choice for every copy of this card this game"
+  },
+  "keywordDetail": {
+    "selfManaCost": "its mana cost",
+    "selfManaValue": "its mana value",
+    "manaCostReduced": "its mana cost reduced by {{reduction}}",
+    "spliceOnto": "onto {{subtype}} {{cost}}"
   },
   "resolutionOptionalPayment": {
     "title": "Choose an optional payment",
@@ -2272,7 +2350,8 @@
       "zoneExile": "exile",
       "zoneHand": "your hand",
       "discard": "Discard {{count}} {{cards}}",
-      "exile": "Exile {{count}} {{cards}} from {{zone}}"
+      "exile": "Exile {{count}} {{cards}} from {{zone}}",
+      "reveal": "Reveal {{count}} {{cards}} from {{zone}}"
     }
   },
   "topOrBottom": {
@@ -2318,6 +2397,8 @@
     "confirm": "Confirm"
   },
   "replacement": {
+    "remember": "Remember this choice this game",
+    "savedChoice": "Replacement: {{choice}}",
     "eyebrow": "Resolution Order",
     "title": "Replacement Effects",
     "orderSubtitle": "These effects all change how this event happens. Drag to set the order they apply in — the last one applied is the one that takes effect (CR 616.1).",
@@ -2387,6 +2468,25 @@
     "moveDown": "Move down",
     "triggerFallback": "Trigger {{number}}"
   },
+  "costReductionOrder": {
+    "eyebrow": "Cost Reduction Order",
+    "title": "Order Your Cost Reductions",
+    "subtitle": "These reductions lock in a different total depending on the order you apply them (CR 601.2f). The top of this list is applied first.",
+    "appliedFirst": "Applied first",
+    "appliedLast": "Applied last",
+    "lockedCost": "Total cost locked in",
+    "lockedCostUnknown": "Same as one of the totals below",
+    "outcomesHeading": "Totals you can lock in",
+    "reachColoredOnly": "Reduces only colored mana",
+    "reachSpills": "Can reduce generic mana",
+    "multiplier": "×{{count}}",
+    "confirmOrder": "Confirm Order",
+    "cancel": "Cancel",
+    "moveUp": "Move up",
+    "moveDown": "Move down",
+    "reductionFallback": "Reduction {{number}}",
+    "floor": "Can't reduce the cost below {{count}} mana"
+  },
   "unhandledWaitingFor": {
     "title": "Action required, but UI is missing",
     "body": "The game is waiting on you for an action, but this version of phase.rs does not yet have a UI for it. This is a bug — please report it so we can fix it. Use the button below to leave the game.",
@@ -2414,10 +2514,12 @@
   "outsideGame": {
     "fromExile": "From exile",
     "fromSideboard": "From sideboard",
-    "fromBoosterPack": "From {{setCode}} booster pack"
+    "fromBoosterPack": "From {{setCode}} booster pack",
+    "fromCubeBoosterPack": "From a Cube booster pack"
   },
   "boosterPack": {
     "title": "{{setCode}} Booster Pack",
+    "cubeTitle": "Cube Booster Pack",
     "subtitleExact_one": "Choose {{count}} card to keep — the rest are removed from the game",
     "subtitleExact_other": "Choose {{count}} cards to keep — the rest are removed from the game",
     "subtitleUpTo_one": "Choose up to {{count}} card to keep — the rest are removed from the game",
@@ -2515,6 +2617,7 @@
       "mulligan": "mulligan decision",
       "discarding": "discarding",
       "orderingTriggers": "ordering triggers",
+      "orderingCostReductions": "ordering cost reductions",
       "respondingToStack": "responding to the stack",
       "priorityCombat": "combat",
       "priorityMain": "main phase",
@@ -2530,6 +2633,7 @@
       "mulligan": "Mulligan",
       "discarding": "Discarding",
       "orderingTriggers": "Ordering triggers",
+      "orderingCostReductions": "Ordering cost reductions",
       "respondingToStack": "Responding",
       "priorityCombat": "Combat",
       "priorityMain": "Main phase",

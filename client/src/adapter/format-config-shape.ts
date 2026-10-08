@@ -99,7 +99,8 @@ function isCommandZoneMode(value: unknown): value is CommandZoneMode {
     && (enabled.eligibility_rule === "Standard"
       || enabled.eligibility_rule === "TinyLeaders"
       || enabled.eligibility_rule === "OathbreakerSignatureSpell"
-      || enabled.eligibility_rule === "BrawlColorIdentity")
+      || enabled.eligibility_rule === "BrawlColorIdentity"
+      || enabled.eligibility_rule === "FreeformAnyCastableCard")
   );
 }
 
@@ -161,6 +162,10 @@ export function isCustomFormatRulesShape(value: unknown): value is CustomFormatR
   return (
     isStringArray(legality.banned)
     && isStringArray(legality.restricted)
+    // Absent is valid: a definition persisted before this field existed
+    // carries no `legal_cards` key, and rejecting those would discard every
+    // custom format a player had already saved.
+    && (legality.legal_cards === undefined || isStringArray(legality.legal_cards))
     && isLegacyRuleSet(legality.legacy)
   );
 }
@@ -177,6 +182,10 @@ export function isFormatConfigShape(value: unknown): value is FormatConfig {
   if (!isRecord(value)) return false;
   if (typeof value.format !== "string") return false;
 
+  // A blob persisting the removed `allow_experimental_dungeons` key (saves
+  // and broker frames written before the flag was deleted) still validates:
+  // this guard names required fields but never rejects unknown ones, and the
+  // pool is format-derived now, so the stale key is inert either way.
   if (
     !isInteger(value.starting_life)
     || !isInteger(value.min_players)

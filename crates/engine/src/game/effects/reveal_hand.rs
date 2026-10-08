@@ -12,6 +12,27 @@ use crate::types::resolved_commands::{
     ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
 };
 
+/// CR 608.2d + CR 701.20a: whether a hand reveal with this card filter and
+/// optionality parks a post-reveal card choice (`WaitingFor::RevealChoice`).
+pub(crate) fn reveal_hand_parks_card_choice(
+    card_filter: &TargetFilter,
+    choice_optional: bool,
+) -> bool {
+    choice_optional || !matches!(card_filter, TargetFilter::None)
+}
+
+/// CR 608.2d + CR 701.20a: "this effect parks a post-reveal card choice" over a
+/// whole `Effect` — read by the fan-out referent predicate, the trigger-lowering
+/// chosen-object boundary and the parser's per-player reveal-choice rule; the
+/// resolver's needs-choice test reads `reveal_hand_parks_card_choice` directly.
+pub(crate) fn effect_parks_reveal_card_choice(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::RevealHand { card_filter, choice_optional, .. }
+            if reveal_hand_parks_card_choice(card_filter, *choice_optional)
+    )
+}
+
 /// CR 701.20a / CR 701.20e: RevealHand — reveal or privately look at a target
 /// player's hand, then optionally let the caster choose a card.
 ///
@@ -62,6 +83,22 @@ pub fn resolve(
             TargetRef::Player(pid) => Some(*pid),
             _ => None,
         })
+        // CR 608.2c + CR 109.4 + CR 108.3: a possessive-shift subject ("target
+        // spell's/creature's controller|owner reveals their hand" — Denied!,
+        // Friendly Fire) names the targeted object's controller/owner as the
+        // player whose hand is revealed (CR 701.20a). The parent's object
+        // target is inherited, so there is no `TargetRef::Player` above; resolve
+        // the anaphor through the shared effect-player authority (the same
+        // `parent_target_controller` / `parent_target_owner` reads
+        // `resolve_player_for_context_ref` makes for Draw/Discard/Mill). Its
+        // `Option` result keeps an unresolvable referent fail-closed
+        // (`MissingParam`) instead of defaulting to the caster's hand.
+        .or_else(|| match &target {
+            TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner => {
+                crate::game::targeting::resolve_effect_player_ref(state, ability, &target)
+            }
+            _ => None,
+        })
         // CR 608.2d + CR 608.2c: "an opponent" is a choice the controller
         // announces while resolving the effect. For the as-enters look-at-hand
         // class (Anointed Peacekeeper, Sorcerous Spyglass), the parser's as-enters
@@ -102,12 +139,32 @@ pub fn resolve(
         hand.truncate(n);
     }
 
-    let needs_reveal_choice = choice_optional || !matches!(card_filter, TargetFilter::None);
+    let needs_reveal_choice = reveal_hand_parks_card_choice(&card_filter, choice_optional);
+    // CR 109.5 + CR 608.2c + CR 608.2d: the post-reveal choice belongs to the
+    // player the choosing instruction addresses. The parser only produces a
+    // card-parking reveal inside a player scope when that instruction is
+    // addressed to the ability's controller ("you" / imperative): the chain
+    // builder's consumer-actor gate declines any other continuation (a declined
+    // "from it" consumer becomes an explicit unimplemented gap), and a
+    // per-player clause's own reveal choice becomes the same gap. So the chooser
+    // is the printed controller: a player-scope fan-out rebinds `controller` to
+    // the iterating player and preserves the printed one in
+    // `original_controller`.
+    let chooser = ability.original_controller.unwrap_or(ability.controller);
 
     if hand.is_empty() {
+        if needs_reveal_choice {
+            // CR 608.2c + issue #4950: an empty hand is the degenerate
+            // empty-eligible case — a choice was required and there is nothing
+            // to choose, so a chained `ParentTarget` consumer must resolve to a
+            // no-op instead of reusing a stale chain target (the resumed
+            // per-player leg).
+            state.last_parent_target_missing_reason =
+                Some(ParentTargetMissingReason::RevealHandChoice);
+        }
         if choice_optional && ability.sub_ability.is_some() {
             state.waiting_for = WaitingFor::RevealChoice {
-                player: ability.controller,
+                player: chooser,
                 cards: vec![],
                 filter: card_filter,
                 optional: true,
@@ -152,13 +209,13 @@ pub fn resolve(
             card_names,
         });
     } else {
-        // CR 701.20e: "Look at" privately shows the hand to the ability controller.
+        // CR 701.20e + CR 109.5: "Look at" privately shows the hand to the printed controller (the chooser) — inside a player-scope fan-out `controller` is the iterating player.
         state.remember_card_identities(
-            crate::game::turn_control::decision_audience_for_player(state, ability.controller),
+            crate::game::turn_control::decision_audience_for_player(state, chooser),
             &hand,
         );
         state.private_look_ids = hand.clone();
-        state.private_look_player = Some(ability.controller);
+        state.private_look_player = Some(chooser);
     }
 
     if !needs_reveal_choice {
@@ -197,7 +254,7 @@ pub fn resolve(
         state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::RevealHandChoice);
         if choice_optional && ability.sub_ability.is_some() {
             state.waiting_for = WaitingFor::RevealChoice {
-                player: ability.controller,
+                player: chooser,
                 cards: vec![],
                 filter: card_filter,
                 optional: true,
@@ -213,7 +270,7 @@ pub fn resolve(
     }
 
     state.waiting_for = WaitingFor::RevealChoice {
-        player: ability.controller,
+        player: chooser,
         cards: eligible,
         filter: card_filter,
         optional: choice_optional,
@@ -237,6 +294,146 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    /// CR 109.5 + CR 608.2c + CR 608.2d: inside a player-scope fan-out the
+    /// iterating player is `controller` and the printed controller survives in
+    /// `original_controller`; the post-reveal choice (which the parser only
+    /// produces there for an instruction addressed to the controller) is made by
+    /// the printed controller, while the revealed hand is the iterating player's.
+    #[test]
+    fn reveal_hand_scoped_choice_is_made_by_printed_controller() {
+        use crate::types::card_type::CoreType;
+
+        let run = |original_controller: Option<PlayerId>| {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(10),
+                PlayerId(0),
+                "Reveal Source".to_string(),
+                Zone::Battlefield,
+            );
+            let creature = create_object(
+                &mut state,
+                CardId(11),
+                PlayerId(1),
+                "Opp Bear".to_string(),
+                Zone::Hand,
+            );
+            state
+                .objects
+                .get_mut(&creature)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            let mut ability = ResolvedAbility::new(
+                Effect::RevealHand {
+                    target: TargetFilter::Controller,
+                    card_filter: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                    count: None,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    choice_optional: false,
+                    reveal: true,
+                },
+                vec![],
+                source,
+                PlayerId(1),
+            );
+            ability.original_controller = original_controller;
+            resolve(&mut state, &ability, &mut Vec::new()).expect("scoped reveal resolves");
+            match state.waiting_for {
+                WaitingFor::RevealChoice { player, cards, .. } => {
+                    assert_eq!(
+                        cards,
+                        vec![creature],
+                        "the iterating player's hand is revealed"
+                    );
+                    player
+                }
+                other => panic!("expected RevealChoice, got {other:?}"),
+            }
+        };
+
+        assert_eq!(
+            run(Some(PlayerId(0))),
+            PlayerId(0),
+            "the printed controller chooses"
+        );
+        // Positive twin: with no fan-out rebinding, the controller chooses.
+        assert_eq!(run(None), PlayerId(1));
+    }
+
+    /// CR 701.20e + CR 109.5: a player-scoped "look at" choice step privately
+    /// shows the iterating player's hand to the printed controller (the
+    /// chooser), not to the iterating player that `controller` is rebound to.
+    #[test]
+    fn reveal_hand_scoped_look_is_shown_to_printed_controller() {
+        use crate::types::card_type::CoreType;
+
+        let run = |original_controller: Option<PlayerId>| {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(10),
+                PlayerId(0),
+                "Look Source".to_string(),
+                Zone::Battlefield,
+            );
+            let creature = create_object(
+                &mut state,
+                CardId(11),
+                PlayerId(1),
+                "Opp Bear".to_string(),
+                Zone::Hand,
+            );
+            state
+                .objects
+                .get_mut(&creature)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            let mut ability = ResolvedAbility::new(
+                Effect::RevealHand {
+                    target: TargetFilter::Controller,
+                    card_filter: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                    count: None,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    choice_optional: false,
+                    reveal: false,
+                },
+                vec![],
+                source,
+                PlayerId(1),
+            );
+            ability.original_controller = original_controller;
+            resolve(&mut state, &ability, &mut Vec::new()).expect("scoped look resolves");
+            // Reach guard: the look branch ran over the iterating player's hand
+            // and parked the choice.
+            let chooser = match &state.waiting_for {
+                WaitingFor::RevealChoice { player, cards, .. } => {
+                    assert_eq!(cards, &vec![creature]);
+                    *player
+                }
+                other => panic!("expected RevealChoice, got {other:?}"),
+            };
+            assert_eq!(
+                state.private_look_ids,
+                vec![creature],
+                "the iterating player's hand is looked at"
+            );
+            (chooser, state.private_look_player)
+        };
+
+        assert_eq!(
+            run(Some(PlayerId(0))),
+            (PlayerId(0), Some(PlayerId(0))),
+            "the printed controller chooses and privately sees the hand"
+        );
+        // Positive twin: with no fan-out rebinding, the controller looks.
+        assert_eq!(run(None), (PlayerId(1), Some(PlayerId(1))));
+    }
 
     #[test]
     fn deep_cavern_bat_reveal_choice_excludes_lands() {

@@ -208,6 +208,8 @@ pub fn roll_to_visit_attractions(
         modifier: None,
         die_result: None,
         continuation: DieRollContinuation::RollToVisitAttractions,
+        // CR 608.2h: no resolution context — see the reach-guard comment above.
+        chain_root_targets: Vec::new(),
     }));
     let proposal = roll_die::propose_roll(state, player, 1, 6, events);
     if !matches!(proposal, roll_die::RollProposal::Suspended) {

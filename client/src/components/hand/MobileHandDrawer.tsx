@@ -27,7 +27,11 @@ import { StormCopyBadge } from "./StormCopyBadge.tsx";
 const EMPTY_OBJECTS: Record<string, GameObject> = {};
 const EMPTY_STORM_COUNTS: Record<string, number> = {};
 
-export function MobileHandDrawer() {
+interface MobileHandDrawerProps {
+  interactionDisabled?: boolean;
+}
+
+export function MobileHandDrawer({ interactionDisabled = false }: MobileHandDrawerProps) {
   const { t } = useTranslation("game");
   const isOpen = useUiStore((s) => s.mobileHandOpen);
   const setOpen = useUiStore((s) => s.setMobileHandOpen);
@@ -54,6 +58,14 @@ export function MobileHandDrawer() {
     if (wf?.type === "TargetSelection") return wf.data.pending_cast.object_id;
     return null;
   });
+
+  useEffect(() => {
+    if (!interactionDisabled) return;
+    setOpen(false);
+    if (useUiStore.getState().previewSource === "playerHand") {
+      useUiStore.getState().dismissPreview();
+    }
+  }, [interactionDisabled, setOpen]);
 
   useEffect(() => {
     if (
@@ -134,7 +146,7 @@ export function MobileHandDrawer() {
     [hasPriority, objects, legalActionsByObject, inspectObject, setPendingAbilityChoice, setOpen],
   );
 
-  if (!player || !objects) return null;
+  if (interactionDisabled || !player || !objects) return null;
 
   return (
     <AnimatePresence>
@@ -276,7 +288,7 @@ const DrawerCard = memo(function DrawerCard({
   // This is what lets a player read any card in the full-hand modal: the fanned
   // hand overlaps cards, so the modal is the only place to inspect the ones
   // hidden behind others — and that inspection must work for mouse and touch.
-  const { handlers, firedRef } = useCardHover(objectId);
+  const { handlers, firedRef } = useCardHover(objectId, "playerHand");
 
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
@@ -296,7 +308,7 @@ const DrawerCard = memo(function DrawerCard({
       if (isPlayable) {
         onPlay(objectId);
       } else {
-        inspectObject(objectId);
+        inspectObject(objectId, undefined, "hover", "cursor", "playerHand");
         setPreviewSticky(true);
       }
     },

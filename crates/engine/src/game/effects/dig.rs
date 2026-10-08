@@ -23,6 +23,7 @@ pub fn resolve(
         filter,
         kept_dest,
         rest_dest,
+        rest_split_top,
         rest_order,
         is_reveal,
         enter_tapped,
@@ -38,6 +39,7 @@ pub fn resolve(
             filter,
             destination,
             rest_destination,
+            rest_split_top_count,
             rest_order,
             reveal,
             enter_tapped,
@@ -67,6 +69,12 @@ pub fn resolve(
                 filter.clone(),
                 *destination,
                 *rest_destination,
+                // CR 608.2c + CR 107.1b: the split size is fixed as the effect
+                // is applied (and clamped non-negative), exactly like the
+                // sibling `keep_count_expr` above.
+                rest_split_top_count
+                    .as_ref()
+                    .map(|e| resolve_quantity_with_targets(state, e, ability).max(0) as usize),
                 *rest_order,
                 *reveal,
                 *enter_tapped,
@@ -80,6 +88,7 @@ pub fn resolve(
             1,
             false,
             TargetFilter::Any,
+            None,
             None,
             None,
             DigRestOrder::Preserve,
@@ -115,6 +124,7 @@ pub fn resolve(
             filter,
             kept_dest,
             rest_dest,
+            rest_split_top,
             rest_order,
             enter_tapped,
             enters_attacking,
@@ -128,7 +138,7 @@ pub fn resolve(
         .ok_or(EffectError::PlayerNotFound)?;
 
     // CR 401.5: If a library has fewer cards than required, use as many as available.
-    let count = dig_num.min(player.library.len());
+    let count = dig_num.min(state.library_of(player.id).len());
     if count == 0 {
         // CR 608.2c: Nothing was looked at — a chained `ParentTarget` consumer
         // ("put up to one of them on top … the rest on the bottom") has no
@@ -143,8 +153,8 @@ pub fn resolve(
         return Ok(());
     }
 
-    let cards: Vec<_> = player
-        .library
+    let cards: Vec<_> = state
+        .library_of(player.id)
         .iter()
         .take(count)
         .copied()
@@ -157,6 +167,7 @@ pub fn resolve(
     // Calamity). Set last_revealed_ids (and emit CardsRevealed for public
     // reveals) then return without creating a DigChoice interaction.
     if raw_keep_count == 0 {
+        super::publish_fresh_tracked_set(state, cards.clone());
         state.last_revealed_ids = cards.clone();
         if is_reveal {
             // CR 701.20a: public reveal — show to all players.
@@ -275,6 +286,7 @@ pub fn resolve(
         up_to: is_up_to,
         kept_destination: kept_dest,
         rest_destination: rest_dest,
+        rest_split_top_count: rest_split_top,
         rest_order,
         source_id: Some(ability.source_id),
         enter_tapped,
@@ -314,6 +326,7 @@ fn resolve_from_prior_look(
     filter: TargetFilter,
     kept_dest: Option<Zone>,
     rest_dest: Option<Zone>,
+    rest_split_top: Option<usize>,
     rest_order: DigRestOrder,
     enter_tapped: bool,
     enters_attacking: bool,
@@ -435,6 +448,7 @@ fn resolve_from_prior_look(
         up_to: is_up_to,
         kept_destination: kept_dest,
         rest_destination: rest_dest,
+        rest_split_top_count: rest_split_top,
         rest_order,
         source_id: Some(ability.source_id),
         enter_tapped,
@@ -539,7 +553,8 @@ pub(crate) fn move_mass_put_all_selected(
                 object_id,
                 destination,
                 source_id,
-            );
+            )
+            .hand_taker(player);
             request.mods.enter_tapped = enter_tapped;
             request.mods.enters_attacking = enters_attacking;
             request
@@ -593,6 +608,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
@@ -689,6 +705,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
@@ -744,6 +761,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
@@ -799,6 +817,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: Some(Zone::Library),
+                rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
@@ -871,6 +890,7 @@ mod tests {
             up_to: true,
             kept_destination: None,
             rest_destination: Some(Zone::Library),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
@@ -954,6 +974,7 @@ mod tests {
             up_to: true,
             kept_destination: None,
             rest_destination: Some(Zone::Library),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
@@ -1016,6 +1037,7 @@ mod tests {
             up_to: false,
             kept_destination: Some(Zone::Library),
             rest_destination: Some(Zone::Library),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
@@ -1089,6 +1111,7 @@ mod tests {
             up_to: false,
             kept_destination: Some(Zone::Library),
             rest_destination: Some(Zone::Library),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
@@ -1154,6 +1177,7 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Graveyard),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
@@ -1216,6 +1240,7 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Graveyard),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
@@ -1287,6 +1312,7 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Library),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
@@ -1361,6 +1387,7 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Library),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
@@ -1429,6 +1456,7 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Library),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
@@ -1508,6 +1536,7 @@ mod tests {
                 up_to: false,
                 filter,
                 rest_destination: None,
+                rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
@@ -1586,6 +1615,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Typed(TypedFilter::creature()),
                 rest_destination: Some(Zone::Library),
+                rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
@@ -1900,6 +1930,7 @@ mod tests {
                 up_to: true,
                 filter: filter.clone(),
                 rest_destination: Some(Zone::Library),
+                rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
@@ -1958,6 +1989,7 @@ mod tests {
                 up_to: true,
                 filter: filter_you,
                 rest_destination: Some(Zone::Library),
+                rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
@@ -2027,6 +2059,7 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Battlefield),
             rest_destination: Some(Zone::Library),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,

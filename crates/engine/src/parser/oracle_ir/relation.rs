@@ -138,9 +138,10 @@ pub(crate) enum LinkedChoiceKind {
     ChosenTypeStatic {
         /// The resolved subtype the linked consumers are realigned to.
         chosen: ChosenSubtypeKind,
-        /// CR 205.3 + CR 608.2c: items whose `IsChosenCardType` discriminator is
-        /// realigned to `IsChosenCreatureType` (a static's `ModifyCost` spell
-        /// filter, or an ability's/trigger's `Dig` filter). Non-empty only when
+        /// CR 205.3 + CR 608.2c: exact item IDs whose `IsChosenCardType`
+        /// discriminator is realigned to `IsChosenCreatureType`: a static's
+        /// `ModifyCost` spell filter, an ability's/trigger's `Dig` filter, or a
+        /// `SpellCast` trigger's `valid_card` filter. Non-empty only when
         /// `chosen` is a creature type — a card-type chooser (Umori) keeps
         /// `IsChosenCardType`.
         retarget: Vec<OracleItemId>,

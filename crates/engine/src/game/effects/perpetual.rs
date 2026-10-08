@@ -69,6 +69,17 @@ fn perpetual_target_object_ids(
         }
     }
 
+    // Digital-only Alchemy (no CR entry for "perpetually"): the typed
+    // `LastCreated` authority beats inherited chain-target propagation — an
+    // unrelated object target declared at cast time must never capture a
+    // rider that names the just-created set (`effect_object_targets`'s
+    // raw-inherited fallback arm would otherwise win). An empty ledger means
+    // the antecedent never existed, so the rider applies to nothing (CR 609.3 —
+    // same no-referent outcome as the anaphor arm below).
+    if matches!(target, TargetFilter::LastCreated) {
+        return state.last_created_token_ids.clone();
+    }
+
     if !ability.targets.is_empty() {
         let propagated = super::effect_object_targets(target, &ability.targets);
         if !propagated.is_empty()
@@ -89,8 +100,14 @@ fn perpetual_target_object_ids(
         return Vec::new();
     }
 
-    let effective_targets = crate::game::targeting::resolved_targets(ability, target, state);
-    let mut ids = super::effect_object_targets(target, &effective_targets);
+    // Digital-only Alchemy (no CR entry for "perpetually"): the `LastCreated`
+    // fan-out arm lives ABOVE the inherited-propagation block (the typed
+    // ledger authority beats the raw-inherited fallback). The shared
+    // `resolved_targets` path below stays singular by design (first-only via
+    // `resolve_event_context_target`), which is correct for every other
+    // consumer — only the perpetual rider needs the plural set, so that arm
+    // lives here at the perpetual seam, not in `targeting.rs`.
+    let mut ids = super::resolved_effect_object_ids(state, ability, target);
 
     if matches!(target, TargetFilter::ParentTarget) && ids == [ability.source_id] {
         if let Some(id) = parent_object_from_resolution_trigger_context(state) {
@@ -119,22 +136,18 @@ fn perpetual_target_object_ids(
     // referent, so the perpetual edit applies to nothing — it must NOT fall back
     // to the ability source, which is a different object entirely.
     //
-    // `ParentTarget` ("it", the parent instruction's target) and `LastCreated`
-    // ("it", the object the previous clause just made — `state.last_created_token_ids`,
-    // see `publishes_chain_created_referent` in `oracle_effect/lower.rs`) are both
-    // anaphors: they NAME an antecedent rather than describing a set. When the
-    // antecedent does not exist — a `Conjure` that conjured zero cards, a token
-    // producer that made none — the clause has no subject and does nothing.
+    // `ParentTarget` ("it", the parent instruction's target) is an anaphor:
+    // it NAMES an antecedent rather than describing a set. (`LastCreated` is
+    // the other anaphor but never reaches this arm — the typed ledger read
+    // above returns first, including the empty-ledger no-referent case.) When
+    // the antecedent does not exist — a `Conjure` that conjured zero cards, a
+    // token producer that made none — the clause has no subject and does
+    // nothing.
     //
     // The source fallback below is for `TargetFilter::Any` and friends, where a
     // perpetual rider with no declared target genuinely means "this object"
     // (Mutable Pupa's self-grant).
-    if ids.is_empty()
-        && matches!(
-            target,
-            TargetFilter::ParentTarget | TargetFilter::LastCreated
-        )
-    {
+    if ids.is_empty() && matches!(target, TargetFilter::ParentTarget) {
         return ids;
     }
 
@@ -584,12 +597,12 @@ mod tests {
             }],
         };
         // `targets` is deliberately EMPTY here (not `vec![TargetRef::Object(conjured_id)]`):
-        // `perpetual_target_object_ids` short-circuits on a non-empty `ability.targets`
-        // and returns it directly WITHOUT ever calling `resolved_targets` — the
-        // actual `TargetFilter::LastCreated => state.last_created_token_ids` lookup
-        // this test exists to exercise. A real "It perpetually gains ..." clause
-        // reaches this resolver with empty targets (Conjure declares none), so an
-        // empty vec here is the production-faithful fixture, not a shortcut.
+        // a real "It perpetually gains ..." clause reaches this resolver with empty
+        // targets (Conjure declares none), so an empty vec here is the
+        // production-faithful fixture, not a shortcut. The `LastCreated`
+        // ledger read takes precedence over inherited targets either way (see
+        // `perpetual_target_object_ids`); non-empty-target shapes are pinned by
+        // the `last_created_rider_*` chain regressions in `perpetual_gains.rs`.
         let grant_ability = ResolvedAbility::new(
             Effect::ApplyPerpetual {
                 target: TargetFilter::LastCreated,
@@ -625,11 +638,12 @@ mod tests {
     /// duplicate of the top card of their library into your hand. It
     /// perpetually gains \"You may spend mana as though it were mana of any
     /// color to cast this spell.\" Then they exile the top card of their
-    /// library face down." routes its quoted grant body through
-    /// `classify_quoted_inner`'s default `GrantAbility` fallback, wrapping
-    /// `Effect::GenericEffect { static_abilities:
+    /// library face down." routed its quoted grant body through
+    /// `classify_quoted_inner`'s default `GrantAbility` fallback, which then
+    /// wrapped `Effect::GenericEffect { static_abilities:
     /// [SpendManaAsAnyColor { spell_filter: None, .. }], target:
-    /// Some(Controller), .. }`. Before this fix,
+    /// Some(Controller), .. }` (today it wraps the standalone concession gap
+    /// instead). Before this fix,
     /// `PerpetualGrantModification::try_from`'s `GrantAbility` arm rejected
     /// only an `Effect::Unimplemented`-bearing tree (Blocker 1); a
     /// `GenericEffect` is not `Unimplemented`, so it was ACCEPTED -- a green
@@ -637,7 +651,7 @@ mod tests {
     /// `AbilityDefinition` onto the conjured duplicate's
     /// `abilities`/`base_abilities` (wrongly board-wide in scope, AND never
     /// even checked: `static_abilities.rs`'s
-    /// `player_can_spend_as_any_color_for_spell_object` only ever scans
+    /// `player_mana_spend_permission_for_spell_object` only ever scans
     /// `game_active_statics` -- battlefield + command zone -- never hand or
     /// the stack, per CR 113.6e the very zones this self-cast concession
     /// would need to function in).
@@ -653,11 +667,13 @@ mod tests {
     /// parse produces is applied (or not) exactly as a real game would. The
     /// duplicate is then CAST for real with only off-color mana in the pool.
     ///
-    /// Mutation-tested: reverting the `types/ability.rs` gate makes
-    /// `parse_effect` return `Effect::ApplyPerpetual` again, so this test's
-    /// `match` takes the "install the modification" arm, the duplicate
-    /// receives the extra granted ability, and the first assertion below
-    /// (no extra ability on the duplicate) fails.
+    /// The quoted concession is now the standalone mana-spend concession gap,
+    /// so `PerpetualGrantModification::try_from` rejects it at its
+    /// `Effect::Unimplemented` arm; the `GenericEffect`-static arm this test
+    /// used to reach is pinned by
+    /// `perpetual_grant_ability_rejects_resolution_time_generic_effect_body`.
+    /// Accepting the grant would still make this test's `match` take the
+    /// "install the modification" arm and fail the first assertion below.
     #[test]
     fn perpetual_grant_ability_rejects_agent_of_raffine_spend_any_color_to_cast_this_spell() {
         use crate::game::scenario::GameScenario;
@@ -778,9 +794,8 @@ mod tests {
         // {U} cost before the cast is allowed to proceed at all
         // (`casting_costs.rs`); with only Green available it cannot, so the
         // action is rejected outright regardless of whether the parser gate
-        // above works. NON-DISCRIMINATING (see the mutation-test note above
-        // this test): `static_abilities.rs`'s
-        // `player_can_spend_as_any_color_for_spell_object` only ever scans
+        // above works. NON-DISCRIMINATING (see the doc above this test): `static_abilities.rs`'s
+        // `player_mana_spend_permission_for_spell_object` only ever scans
         // `game_active_statics` -- battlefield + command zone -- so even a
         // rejected-gate regression that let the grant install onto the
         // duplicate's HAND-zone `abilities` would never be found by that
@@ -947,6 +962,7 @@ mod tests {
                     amount: ManaCost::generic(1),
                     spell_filter: None,
                     dynamic_count: None,
+                    reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
                 },
             }],
             "the quoted cost body must classify to a self ModifyCost AddStaticMode"

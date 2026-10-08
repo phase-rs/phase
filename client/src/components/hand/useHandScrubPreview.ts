@@ -131,7 +131,7 @@ export function useHandScrubPreview(
         width: card.offsetWidth || rect.width,
       };
       cardGrabOffsetXRef.current = x - centerX;
-      inspectObject(objectId, undefined, "immediate");
+      inspectObject(objectId, undefined, "immediate", "cursor", "playerHand");
       setPreviewSticky(true);
       return objectId;
     },

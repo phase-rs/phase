@@ -15,7 +15,7 @@ const persistenceMocks = vi.hoisted(() => ({
 vi.mock("../../services/draftPersistence", () => persistenceMocks);
 vi.mock("../draft-adapter", () => ({
   DraftAdapter: vi.fn().mockImplementation(function () {
-    return {};
+    return { boosterPackPoolForGame: vi.fn(async () => null) };
   }),
   EMPTY_DRAFT_POOL_GROUPS: {
     color_groups: [],
@@ -55,7 +55,15 @@ function card(instanceId: string) {
 }
 
 function view(...instanceIds: string[]): DraftPlayerView {
-  return { launch_capability: "None", commanders_required: 0, pool: instanceIds.map(card) } as unknown as DraftPlayerView;
+  // `distribution` is required from v30 on: the draft protocol is compared
+  // for EXACT equality at the handshake, so a frame without it is malformed
+  // rather than old, and `normalizeDraftPlayerView` now refuses it.
+  return {
+    launch_capability: "None",
+    commanders_required: 0,
+    distribution: "PickAndPass",
+    pool: instanceIds.map(card),
+  } as unknown as DraftPlayerView;
 }
 
 function workspace(

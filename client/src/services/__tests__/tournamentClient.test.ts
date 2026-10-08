@@ -4,20 +4,24 @@ import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { repoRoot } from "../../adapter/__tests__/rustEnumVariants";
-import type { TournamentSummary, TournamentView } from "../../adapter/types";
+import type { GameFormat, TournamentSummary, TournamentView } from "../../adapter/types";
 import type { PhaseSocket } from "../openPhaseSocket";
 import {
   LOBBY_PROTOCOL_VERSION,
+  MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING,
+  MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS,
   MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK,
   type ServerInfo,
 } from "../../adapter/ws-adapter";
 import {
   createTournamentOver,
+  defaultScoringForArity,
   dropFromTournamentOver,
   endTournamentOver,
   getTournamentOver,
   joinTournamentOver,
   matchTypeNeedsCapability,
+  renewTournamentCredentialOver,
   reportMatchResultOver,
   startTournamentRoundOver,
   subscribeTournamentsOver,
@@ -373,6 +377,62 @@ describe("matchTypeNeedsCapability", () => {
   });
 });
 
+describe("renewTournamentCredentialOver", () => {
+  it("sends the RenewTournamentCredential frame with the CAPITALIZED wire role", async () => {
+    const ws = new MockWebSocket();
+    const controller = new AbortController();
+    const promise = renewTournamentCredentialOver(
+      makePhaseSocket(ws),
+      CODE,
+      "Organizer",
+      "tok",
+      "nonce-1",
+      { signal: controller.signal },
+    );
+
+    // Uncorrelated (no request_id), the role is the wire spelling — the broker
+    // rejects a lowercase "organizer" with a serde unknown-variant error — and
+    // the client-minted nonce rides as `rotation_nonce`.
+    expect(ws.send).toHaveBeenCalledWith(
+      `{"type":"RenewTournamentCredential","data":{"code":"${CODE}","role":"Organizer","token":"tok","rotation_nonce":"nonce-1"}}`,
+    );
+
+    controller.abort();
+    await expect(promise).resolves.toMatchObject({ ok: false, reason: "aborted" });
+  });
+
+  it("settles ok on a TournamentCredentialRenewed matching code and role", async () => {
+    const ws = new MockWebSocket();
+    const promise = renewTournamentCredentialOver(makePhaseSocket(ws), CODE, "Player", "tok", "n");
+    ws.deliver(
+      JSON.stringify({
+        type: "TournamentCredentialRenewed",
+        data: { code: CODE, role: "Player", token: "fresh-tok", expires_at_ms: 1_800_000_000_000 },
+      }),
+    );
+    await expect(promise).resolves.toEqual({
+      ok: true,
+      value: { code: CODE, role: "Player", token: "fresh-tok", expires_at_ms: 1_800_000_000_000 },
+    });
+  });
+
+  it("does NOT settle on a renewal of the OTHER authority on the same code", async () => {
+    const ws = new MockWebSocket();
+    // An organizer who also joined holds both authorities on one code; a Player
+    // renewal reply must not settle an Organizer request with the wrong token.
+    const promise = renewTournamentCredentialOver(makePhaseSocket(ws), CODE, "Organizer", "tok", "n", {
+      timeoutMs: 40,
+    });
+    ws.deliver(
+      JSON.stringify({
+        type: "TournamentCredentialRenewed",
+        data: { code: CODE, role: "Player", token: "wrong-authority", expires_at_ms: 1 },
+      }),
+    );
+    await expect(promise).resolves.toMatchObject({ ok: false, reason: "timeout" });
+  });
+});
+
 describe("tournament request frames", () => {
   it.each(HELPERS)(
     "$name puts the exact protocol.rs literal on the wire",
@@ -472,6 +532,142 @@ describe("tournament request frames", () => {
 
     controller.abort();
     await expect(promise).resolves.toMatchObject({ ok: false, reason: "aborted" });
+  });
+
+  // The `scoring` version gate: `null` (Automatic) is sent as `scoring: null`
+  // at or above `MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING` (the broker resolves
+  // its own default), and substituted with the explicit `defaultScoringForArity`
+  // below it — where an omitted `scoring` is a hard `missing field` parse error,
+  // not a degrade. An explicit override is sent verbatim regardless.
+  describe("createTournamentOver scoring gate", () => {
+    // V12 (moved here from tournamentPageState): mirrors `default_for_arity`'s
+    // `2n-1 / 1 / 0`. The below-floor send path is this helper's only consumer.
+    it.each([
+      [2, 3],
+      [4, 7],
+      [128, 255],
+    ])("defaultScoringForArity: arity %i -> %i win points", (arity, winPoints) => {
+      expect(defaultScoringForArity(arity)).toEqual({
+        win_points: winPoints,
+        draw_points: 1,
+        loss_points: 0,
+      });
+    });
+
+    async function createWithScoring(
+      ws: MockWebSocket,
+      lobbyProtocolVersion: number | undefined,
+      scoring: { win_points: number; draw_points: number; loss_points: number } | null,
+    ): Promise<void> {
+      const controller = new AbortController();
+      const promise = createTournamentOver(
+        makePhaseSocket(ws, { lobbyProtocolVersion }),
+        { name: "Friday Night", arity: 2, scoring, bracket: "Swiss", totalRounds: 3 },
+        { signal: controller.signal },
+      );
+      controller.abort();
+      await expect(promise).resolves.toMatchObject({ ok: false, reason: "aborted" });
+    }
+
+    it("sends scoring: null at or above the default-scoring floor", async () => {
+      const ws = new MockWebSocket();
+      await createWithScoring(ws, MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING, null);
+      expect(ws.send).toHaveBeenCalledWith(
+        '{"type":"CreateTournament","data":{"name":"Friday Night","arity":2,"scoring":null,"bracket":"Swiss","total_rounds":3,"plus_rounds":null,"format":null,"match_type":null}}',
+      );
+    });
+
+    it.each([
+      ["a pre-floor broker", 4 as number | undefined],
+      ["a broker advertising no lobby version", undefined],
+    ])("substitutes the explicit default against %s", async (_label, lobbyProtocolVersion) => {
+      const ws = new MockWebSocket();
+      await createWithScoring(ws, lobbyProtocolVersion, null);
+      expect(ws.send).toHaveBeenCalledWith(
+        '{"type":"CreateTournament","data":{"name":"Friday Night","arity":2,"scoring":{"win_points":3,"draw_points":1,"loss_points":0},"bracket":"Swiss","total_rounds":3,"plus_rounds":null,"format":null,"match_type":null}}',
+      );
+    });
+
+    it("sends an explicit override verbatim below the floor", async () => {
+      const ws = new MockWebSocket();
+      // draw_points 0 — the broker accepts any non-`win_points==0` policy, so an
+      // explicit choice must never be rewritten to the default.
+      await createWithScoring(ws, 4, {
+        win_points: 5,
+        draw_points: 0,
+        loss_points: 0,
+      });
+      expect(ws.send).toHaveBeenCalledWith(
+        '{"type":"CreateTournament","data":{"name":"Friday Night","arity":2,"scoring":{"win_points":5,"draw_points":0,"loss_points":0},"bracket":"Swiss","total_rounds":3,"plus_rounds":null,"format":null,"match_type":null}}',
+      );
+    });
+  });
+
+  describe("createTournamentOver format gate", () => {
+    async function createWithFormat(
+      ws: MockWebSocket,
+      lobbyProtocolVersion: number | undefined,
+      format: GameFormat | null,
+    ): Promise<void> {
+      const controller = new AbortController();
+      const promise = createTournamentOver(
+        makePhaseSocket(ws, { lobbyProtocolVersion }),
+        {
+          name: "Friday Night",
+          arity: 2,
+          scoring: { win_points: 3, draw_points: 1, loss_points: 0 },
+          bracket: "Swiss",
+          totalRounds: 3,
+          format,
+        },
+        { signal: controller.signal },
+      );
+      controller.abort();
+      await expect(promise).resolves.toMatchObject({ ok: false, reason: "aborted" });
+    }
+
+    function sentFormat(ws: MockWebSocket): unknown {
+      const frame = JSON.parse(ws.send.mock.calls[0][0] as string) as {
+        data: { format: unknown };
+      };
+      return frame.data.format;
+    }
+
+    it.each([
+      ["Freeform", 9],
+      ["FreeformCommander", 9],
+    ] as const)(
+      "sends format: null for %s below the floor (lobby %i)",
+      async (format, lobbyProtocolVersion) => {
+        const ws = new MockWebSocket();
+        await createWithFormat(ws, lobbyProtocolVersion, format);
+        expect(sentFormat(ws)).toBeNull();
+      },
+    );
+
+    it("sends format: null when the broker advertises no lobby version (fails closed)", async () => {
+      const ws = new MockWebSocket();
+      await createWithFormat(ws, undefined, "Freeform");
+      expect(sentFormat(ws)).toBeNull();
+    });
+
+    it("sends the format once the broker is at the floor (reach guard)", async () => {
+      const ws = new MockWebSocket();
+      await createWithFormat(ws, MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS, "Freeform");
+      expect(sentFormat(ws)).toBe("Freeform");
+    });
+
+    it("sends a long-standing format regardless of lobby version (control)", async () => {
+      const ws = new MockWebSocket();
+      await createWithFormat(ws, 9, "Commander");
+      expect(sentFormat(ws)).toBe("Commander");
+    });
+
+    it("sends format: null as-is when the request names no format", async () => {
+      const ws = new MockWebSocket();
+      await createWithFormat(ws, 9, null);
+      expect(sentFormat(ws)).toBeNull();
+    });
   });
 
   it("serializes a pod draw outcome as the bare Draw unit variant", async () => {

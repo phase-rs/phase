@@ -89,6 +89,7 @@ fn tamiyo_third_draw_returns_transformed_not_stranded_in_exile() {
         .unwrap()
         .back_face = Some(BackFaceData {
         is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: "Tamiyo, Seasoned Scholar".to_string(),
         power: None,
         toughness: None,

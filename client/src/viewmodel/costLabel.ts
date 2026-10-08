@@ -310,6 +310,15 @@ export function loyaltyStartIconClasses(amount: number): string | null {
 }
 
 export function formatCost(cost: SerializedCost): string {
+  return formatKnownCost(cost) ?? "Activate";
+}
+
+/**
+ * `formatCost` without its "Activate" fallback: null when the cost's type has
+ * no rendering here, so a caller that labels something other than an
+ * activation (a keyword's cost) can show nothing instead.
+ */
+export function formatKnownCost(cost: SerializedCost): string | null {
   switch (cost.type) {
     case "Loyalty": {
       // CR 606.1: Loyalty cost is always a literal `i32` on the Rust side.
@@ -345,6 +354,15 @@ export function formatCost(cost: SerializedCost): string {
         zone: formatZone(cost.zone),
       });
     }
+    case "Reveal": {
+      const count = formatQuantity(cost.count, 1);
+      const cards = formatFilteredCard(cost.filter, quantityIsPlural(cost.count));
+      return i18n.t("game:resolutionOptionalPayment.cost.reveal", {
+        count,
+        cards,
+        zone: formatZone(cost.zone),
+      });
+    }
     case "Blight": return `Blight ${cost.count ?? 1}`;
     case "CollectEvidence":
       return `Collect evidence ${cost.amount ?? 0}`;
@@ -358,7 +376,7 @@ export function formatCost(cost: SerializedCost): string {
     case "OneOf":
       return (cost.costs ?? []).map(formatCost).join(" or ");
     default:
-      return "Activate";
+      return null;
   }
 }
 

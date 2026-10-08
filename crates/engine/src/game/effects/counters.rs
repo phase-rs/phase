@@ -12,9 +12,9 @@ use crate::types::counter::parse_counter_type;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CounterAddedRecord, CounterMoveChoice, CounterRemoveChoice, DelayedTrigger, GameState,
-    PendingCounterAddition, PendingCounterAdditionQueue, PendingCounterMove,
-    PendingCounterMoveQueue, PendingCounterPostAction, PendingCounterRemoval,
+    BattlefieldDepartureSourceContext, CounterAddedRecord, CounterMoveChoice, CounterRemoveChoice,
+    DelayedTrigger, GameState, PendingCounterAddition, PendingCounterAdditionQueue,
+    PendingCounterMove, PendingCounterMoveQueue, PendingCounterPostAction, PendingCounterRemoval,
     PendingCounterRemovalQueue, PendingEffectResolutionEvent, PendingEffectResolved, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
@@ -261,6 +261,55 @@ pub fn add_counter_with_replacement(
             false
         }
     }
+}
+
+/// CR 122.1 + CR 614.1 + CR 616.1: place `count` `counter_type` counters on each
+/// of `recipients`, then run `post_action`.
+///
+/// Returns `true` when the whole batch landed inline AND the post-action ran to
+/// completion. Returns `false` when either paused: a replacement consult parks
+/// the remaining additions and `post_action` on the counter-addition queue and
+/// `drain_pending_counter_additions` runs the tail once the batch settles; or
+/// the post-action itself parked its own continuation, in which case NOTHING is
+/// re-parked here — the post-action owns its resumption (the same contract
+/// `apply_object_counter_addition`'s `false` carries).
+///
+/// This is the generic "counter batch, then typed work" primitive; it exists
+/// so callers outside this module compose it instead of reaching for the
+/// private `object_counter_addition` / `apply_object_counter_addition` pair.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn add_object_counters_then(
+    state: &mut GameState,
+    actor: PlayerId,
+    recipients: &[ObjectId],
+    counter_type: &CounterType,
+    count: u32,
+    kind: EffectKind,
+    source_id: ObjectId,
+    post_action: PendingCounterPostAction,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    // CR 608.2c: the completion carries the SAME post-action so a pause mid-batch
+    // resumes it once every addition has landed. `Suppress`: the sacrifice this
+    // post-action runs already pushes its own terminal `EffectResolved` (see the
+    // dispatch arm below and `V-F1h-E`); emitting a second one here would be an
+    // observable duplicate on the paused path.
+    let completion = PendingEffectResolved::with_post_actions_without_effect(
+        kind,
+        source_id,
+        vec![post_action.clone()],
+    );
+    let additions: Vec<PendingCounterAddition> = recipients
+        .iter()
+        .map(|&object_id| object_counter_addition(actor, object_id, counter_type.clone(), count))
+        .collect();
+    for (index, addition) in additions.iter().cloned().enumerate() {
+        if !apply_object_counter_addition(state, addition, events) {
+            stash_pending_counter_additions(state, additions[index + 1..].to_vec(), completion);
+            return false;
+        }
+    }
+    apply_pending_counter_post_action(state, post_action, events)
 }
 
 pub(crate) fn stash_pending_counter_additions(
@@ -583,6 +632,23 @@ fn apply_pending_counter_post_action(
         PendingCounterPostAction::ContinueProliferateActions { pending } => {
             super::proliferate::continue_proliferate_actions(state, pending, events)
         }
+        // CR 701.21a: the keeper marks have settled; the disposal half of the same
+        // printed instruction is now owed.
+        PendingCounterPostAction::ContinuePlayerScopeSacrifice {
+            kept,
+            scoped_players,
+            sacrifice_filter,
+            source_id,
+            source_controller,
+        } => super::choose_and_sacrifice_rest::continue_player_scope_sacrifice(
+            state,
+            &kept,
+            &scoped_players,
+            &sacrifice_filter,
+            source_id,
+            source_controller,
+            events,
+        ),
         PendingCounterPostAction::AddSubtype { object_id, subtype } => {
             if let Some(obj) = state.objects.get_mut(&object_id) {
                 if !obj
@@ -604,6 +670,16 @@ fn apply_pending_counter_post_action(
             ability,
         } => super::amass::continue_amass_after_token_creation(
             state, controller, &subtype, count, &ability, events,
+        ),
+        // CR 701.71a: the token-creation replacement settled; choose a Jace
+        // token and put the counters on it. `false` = paused again, either on
+        // `EmpowerJaceChoice` or on a counter-placement replacement choice.
+        PendingCounterPostAction::ContinueEmpowerJaceAfterTokenCreation {
+            controller,
+            source_id,
+            count,
+        } => super::empower_jace::continue_after_creation(
+            state, controller, source_id, count, events,
         ),
         PendingCounterPostAction::FinalizeAmass {
             object_id,
@@ -938,6 +1014,17 @@ fn apply_pending_counter_post_action(
                             return false;
                         }
                     }
+                    // CR 305.1 + CR 603.2: a played land whose delivery-tail
+                    // counter-order choice paused this entry parked its
+                    // `LandPlayed` occurrence in `deferred_entry_events`. The
+                    // entry is now complete, so flush it into `events` for the
+                    // priority-time trigger scan (issue #8738).
+                    if to == Zone::Battlefield {
+                        crate::game::engine_replacement::flush_deferred_entry_events_into_priority_scan(
+                            state,
+                            events,
+                        );
+                    }
                     true
                 }
                 super::change_zone::ZoneDeliveryResult::NeedsChoice(_) => false,
@@ -1061,6 +1148,76 @@ pub fn apply_resolved_counter_edit(
         );
     }
 
+    // Reject invalid edits before inspecting any lifetime. The same validated
+    // command is then applied once, both in live execution and prefix replay.
+    let next_count = match &command.edit {
+        ResolvedObjectCounterEdit::Add { count, .. } => {
+            if *count == 0 {
+                return Err(ResolvedObjectCounterReplayInvariantError::ZeroCount);
+            }
+            command.expected_old.checked_add(*count).ok_or(
+                ResolvedObjectCounterReplayInvariantError::CounterOverflow {
+                    counter_type: command.counter_type.clone(),
+                    previous: command.expected_old,
+                    added: *count,
+                },
+            )?
+        }
+        ResolvedObjectCounterEdit::Remove { count } => {
+            if *count == 0 {
+                return Err(ResolvedObjectCounterReplayInvariantError::ZeroCount);
+            }
+            command.expected_old.checked_sub(*count).ok_or(
+                ResolvedObjectCounterReplayInvariantError::CounterPreconditionMismatch {
+                    counter_type: command.counter_type.clone(),
+                    expected: command.expected_old,
+                    found: *count,
+                },
+            )?
+        }
+    };
+
+    // CR 611.2a + CR 611.2b: A resolved "for as long as" effect lasts only
+    // for its stated duration.
+    // Capture only a duration that is presently true for the exact object
+    // incarnation named by this accepted edit. The independent application
+    // condition does not determine whether the duration has ended.
+    let started_counter_durations: Vec<u64> = state
+        .transient_continuous_effects
+        .iter()
+        .filter_map(|effect| {
+            let Duration::ForAsLongAs {
+                condition:
+                    crate::types::ability::StaticCondition::RecipientHasCounters {
+                        counters,
+                        minimum,
+                        maximum,
+                    },
+            } = &effect.duration
+            else {
+                return None;
+            };
+            let subject = match effect.duration_subject {
+                Some(subject) => subject,
+                None => match &effect.affected {
+                    TargetFilter::SpecificObject { id } => effect
+                        .affected_recipient
+                        .or_else(|| state.objects.get(id).map(ObjectIncarnationRef::from_object))?,
+                    _ => return None,
+                },
+            };
+            (subject == command.object
+                && subject.is_current(state)
+                && crate::game::conditions::counter_condition_matches(
+                    state.objects.get(&subject.object_id)?,
+                    counters,
+                    *minimum,
+                    *maximum,
+                ))
+            .then_some(effect.id)
+        })
+        .collect();
+
     let affects_layers = counter_type_affects_layers(&command.counter_type);
     let added_record = {
         let object = state.objects.get_mut(&command.object.object_id).ok_or(
@@ -1068,17 +1225,9 @@ pub fn apply_resolved_counter_edit(
         )?;
         match &command.edit {
             ResolvedObjectCounterEdit::Add { actor, count } => {
-                if *count == 0 {
-                    return Err(ResolvedObjectCounterReplayInvariantError::ZeroCount);
-                }
-                let next = command.expected_old.checked_add(*count).ok_or(
-                    ResolvedObjectCounterReplayInvariantError::CounterOverflow {
-                        counter_type: command.counter_type.clone(),
-                        previous: command.expected_old,
-                        added: *count,
-                    },
-                )?;
-                object.counters.insert(command.counter_type.clone(), next);
+                object
+                    .counters
+                    .insert(command.counter_type.clone(), next_count);
                 sync_derived_from_counters(object, &command.counter_type);
                 crate::types::counter::prune_zero_counters(&mut object.counters);
                 Some(CounterAddedRecord {
@@ -1106,23 +1255,15 @@ pub fn apply_resolved_counter_edit(
                         .collect(),
                 })
             }
-            ResolvedObjectCounterEdit::Remove { count } => {
-                if *count == 0 {
-                    return Err(ResolvedObjectCounterReplayInvariantError::ZeroCount);
-                }
-                let next = command.expected_old.checked_sub(*count).ok_or(
-                    ResolvedObjectCounterReplayInvariantError::CounterPreconditionMismatch {
-                        counter_type: command.counter_type.clone(),
-                        expected: command.expected_old,
-                        found: *count,
-                    },
-                )?;
-                object.counters.insert(command.counter_type.clone(), next);
+            ResolvedObjectCounterEdit::Remove { .. } => {
+                object
+                    .counters
+                    .insert(command.counter_type.clone(), next_count);
                 sync_derived_from_counters(object, &command.counter_type);
 
                 // CR 122.1 + CR 306.5c: A drained tracked planeswalker keeps a
                 // present zero loyalty key so layer re-derivation preserves 0.
-                let keep_zero = command.counter_type == CounterType::Loyalty && next == 0;
+                let keep_zero = command.counter_type == CounterType::Loyalty && next_count == 0;
                 crate::types::counter::prune_zero_counters(&mut object.counters);
                 if keep_zero {
                     object.counters.insert(command.counter_type.clone(), 0);
@@ -1132,7 +1273,38 @@ pub fn apply_resolved_counter_edit(
         }
     };
 
-    if affects_layers {
+    // CR 611.2a + CR 611.2b: Retire effects whose duration ends on this
+    // edit; later counters cannot resume an ended effect.
+    let mut retired = false;
+    if !started_counter_durations.is_empty() {
+        state.transient_continuous_effects.retain(|effect| {
+            if !started_counter_durations.contains(&effect.id) {
+                return true;
+            }
+            let Duration::ForAsLongAs {
+                condition:
+                    crate::types::ability::StaticCondition::RecipientHasCounters {
+                        counters,
+                        minimum,
+                        maximum,
+                    },
+            } = &effect.duration
+            else {
+                return true;
+            };
+            let still_holds = state
+                .objects
+                .get(&command.object.object_id)
+                .is_some_and(|object| {
+                    crate::game::conditions::counter_condition_matches(
+                        object, counters, *minimum, *maximum,
+                    )
+                });
+            retired |= !still_holds;
+            still_holds
+        });
+    }
+    if affects_layers || retired {
         state.layers_dirty.mark_full();
     }
     if let Some(record) = added_record {
@@ -1149,13 +1321,13 @@ pub(crate) fn apply_counter_removal(
     counter_type: CounterType,
     count: u32,
     events: &mut Vec<GameEvent>,
-) {
+) -> u32 {
     if count == 0 {
-        return;
+        return 0;
     }
     let (object, expected_old) = {
         let Some(object) = state.objects.get(&object_id) else {
-            return;
+            return 0;
         };
         (
             ObjectIncarnationRef::from_object(object),
@@ -1164,7 +1336,7 @@ pub(crate) fn apply_counter_removal(
     };
     let removed = expected_old.min(count);
     if removed == 0 {
-        return;
+        return 0;
     }
     let command = ResolvedObjectCounterCommand {
         object,
@@ -1174,7 +1346,7 @@ pub(crate) fn apply_counter_removal(
         cause: state.current_or_begin_rules_execution_node(),
     };
     if apply_resolved_counter_edit(state, &command).is_err() {
-        return;
+        return 0;
     }
     state
         .resolved_rules_journal
@@ -1186,6 +1358,7 @@ pub(crate) fn apply_counter_removal(
         counter_type,
         count: removed,
     });
+    removed
 }
 
 /// CR 601.2h: Resolve a `CounterMatch` cost intent against the counters
@@ -1762,59 +1935,59 @@ pub fn resolve_add_all(
     // authority SKIPS empty sets, and here not skipping is the correct semantics
     // (a chained counter effect refers to the preceding effect's set even when it
     // affected no objects).
-    let target_filter = match crate::game::effects::resolved_object_filter(ability, &target_filter)
-    {
-        TargetFilter::TrackedSet {
-            id: crate::types::identifiers::TrackedSetId(0),
-        } => state
-            .chain_tracked_set_id
-            .map(|id| TargetFilter::TrackedSet { id })
-            .or_else(|| crate::game::targeting::current_combat_damage_source_filter(state))
-            .or_else(|| {
-                state
-                    .tracked_object_sets
-                    .iter()
-                    .max_by_key(|(id, _)| id.0)
-                    .map(|(id, _)| TargetFilter::TrackedSet { id: *id })
-            })
-            .unwrap_or(TargetFilter::TrackedSet {
+    let target_filter =
+        match crate::game::effects::resolved_object_filter(state, ability, &target_filter) {
+            TargetFilter::TrackedSet {
                 id: crate::types::identifiers::TrackedSetId(0),
-            }),
-        TargetFilter::TrackedSetFiltered {
-            id: crate::types::identifiers::TrackedSetId(0),
-            filter,
-            caused_by,
-        } => {
-            if let Some(id) = state.chain_tracked_set_id {
-                TargetFilter::TrackedSetFiltered {
-                    id,
-                    filter,
-                    caused_by,
-                }
-            } else if let Some(source_filter) =
-                crate::game::targeting::current_combat_damage_source_filter(state)
-            {
-                TargetFilter::And {
-                    filters: vec![source_filter, *filter],
-                }
-            } else if let Some((&id, _)) =
-                state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
-            {
-                TargetFilter::TrackedSetFiltered {
-                    id,
-                    filter,
-                    caused_by,
-                }
-            } else {
-                TargetFilter::TrackedSetFiltered {
+            } => state
+                .chain_tracked_set_id
+                .map(|id| TargetFilter::TrackedSet { id })
+                .or_else(|| crate::game::targeting::current_combat_damage_source_filter(state))
+                .or_else(|| {
+                    state
+                        .tracked_object_sets
+                        .iter()
+                        .max_by_key(|(id, _)| id.0)
+                        .map(|(id, _)| TargetFilter::TrackedSet { id: *id })
+                })
+                .unwrap_or(TargetFilter::TrackedSet {
                     id: crate::types::identifiers::TrackedSetId(0),
-                    filter,
-                    caused_by,
+                }),
+            TargetFilter::TrackedSetFiltered {
+                id: crate::types::identifiers::TrackedSetId(0),
+                filter,
+                caused_by,
+            } => {
+                if let Some(id) = state.chain_tracked_set_id {
+                    TargetFilter::TrackedSetFiltered {
+                        id,
+                        filter,
+                        caused_by,
+                    }
+                } else if let Some(source_filter) =
+                    crate::game::targeting::current_combat_damage_source_filter(state)
+                {
+                    TargetFilter::And {
+                        filters: vec![source_filter, *filter],
+                    }
+                } else if let Some((&id, _)) =
+                    state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
+                {
+                    TargetFilter::TrackedSetFiltered {
+                        id,
+                        filter,
+                        caused_by,
+                    }
+                } else {
+                    TargetFilter::TrackedSetFiltered {
+                        id: crate::types::identifiers::TrackedSetId(0),
+                        filter,
+                        caused_by,
+                    }
                 }
             }
-        }
-        filter => filter,
-    };
+            filter => filter,
+        };
 
     // Collect matching IDs first to avoid borrow conflict during mutation.
     // CR 107.3a + CR 601.2b: ability-context filter evaluation.
@@ -2095,7 +2268,7 @@ pub(super) fn nontargeted_counter_population_ids(
     {
         return None;
     }
-    let effective_filter = crate::game::effects::resolved_object_filter(ability, target);
+    let effective_filter = crate::game::effects::resolved_object_filter(state, ability, target);
     let ctx = crate::game::filter::FilterContext::from_ability(ability);
     Some(
         state
@@ -2108,8 +2281,25 @@ pub(super) fn nontargeted_counter_population_ids(
     )
 }
 
+/// CR 122.1: the objects a `RemoveCounter` node removes counters from. Shared
+/// by `resolve_remove` and `stack_reach`, so a pending node is read with the
+/// resolver's own binding.
+pub(super) fn counter_removal_targets(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Vec<crate::types::identifiers::ObjectId> {
+    match &ability.effect {
+        Effect::RemoveCounter {
+            target:
+                target @ (TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }),
+            ..
+        } => crate::game::targeting::resolved_object_ids_for_filter(state, ability, target),
+        _ => resolve_defined_or_targets(state, ability),
+    }
+}
+
 /// Resolve targeting to object IDs using the typed TargetFilter.
-fn resolve_defined_or_targets(
+pub(super) fn resolve_defined_or_targets(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Vec<crate::types::identifiers::ObjectId> {
@@ -2154,6 +2344,11 @@ fn resolve_defined_or_targets(
     // targets via chain propagation in `effects::mod.rs::resolve_ability_chain`.
     if let Some(TargetFilter::SelfRef) = target_spec {
         return vec![ability.source_id];
+    }
+
+    // CR 201.5a + CR 400.7: a granter named by a granted body is its stamped incarnation.
+    if let Some(filter @ TargetFilter::GrantingObject { .. }) = target_spec {
+        return crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter);
     }
 
     // CR 608.2c (tier 2 of `resolved_targets`): `None` falls back to the source
@@ -2217,15 +2412,16 @@ fn resolve_defined_or_targets(
     // +1/+1 counter on the creature you control", index 0). The counter node's
     // local `ability.targets` may have been replaced with the most-recent parent
     // slot by chain propagation, so resolve against the flattened chain root
-    // (single authority in `targeting`), then keep only the object at `index`.
+    // through the single slot authority in `targeting`.
     //
-    // CR 400.7 + CR 603.7c: deliberately NOT pin-filtered — see the standing
+    // CR 608.2b + CR 400.7 + CR 603.7c: the authority indexes the declared
+    // slots first and only then drops the selected referent when it was an
+    // illegal target at resolution or its pin went stale, so no later slot is
+    // renumbered. Never pre-filter the slot list itself — see the standing
     // constraint recorded at the `ParentTargetSlot` arm in
-    // `targeting::resolved_object_ids_for_filter_with_context`. Slot numbering
-    // is declared, not live, so filtering here would renumber later slots. Do
-    // not "complete the pattern" by adding a pin check.
+    // `targeting::resolved_object_ids_for_filter_with_context`.
     if let Some(TargetFilter::ParentTargetSlot { index }) = target_spec {
-        return crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index)
+        return crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, *index)
             .into_iter()
             .filter_map(|target| match target {
                 TargetRef::Object(id) => Some(id),
@@ -2266,6 +2462,12 @@ fn resolve_defined_or_targets(
     }
 
     if let Some(filter) = target_spec {
+        if matches!(
+            filter,
+            TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+        ) {
+            return crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter);
+        }
         let event_targets =
             crate::game::targeting::resolve_event_context_targets(state, filter, ability.source_id);
         if !event_targets.is_empty() {
@@ -2277,11 +2479,10 @@ fn resolve_defined_or_targets(
                 })
                 .collect();
         }
-        if ability.target_choice_timing == TargetChoiceTiming::Resolution
-            && ability.targets.is_empty()
-            && filter.contains_source_attachment_host()
+        if let Some(hosts) =
+            crate::game::targeting::resolution_bound_attachment_hosts(state, ability, filter)
         {
-            return crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter);
+            return hosts;
         }
     }
 
@@ -2399,8 +2600,13 @@ pub fn resolve_move(
         // pipeline rather than the atomic move-counter path.
         let mut additions = Vec::new();
         for source_id in source_ids {
-            let source_counters =
-                counter_transfer_source_counters(state, source_id, mode, counter_type_filter);
+            let source_counters = counter_transfer_source_counters(
+                state,
+                source_id,
+                mode,
+                counter_type_filter,
+                ability.context.creation_lookback_event.as_deref(),
+            );
             if source_counters.is_empty() {
                 continue;
             }
@@ -2441,8 +2647,13 @@ pub fn resolve_move(
     }
 
     for source_id in source_ids {
-        let source_counters =
-            counter_transfer_source_counters(state, source_id, mode, counter_type_filter);
+        let source_counters = counter_transfer_source_counters(
+            state,
+            source_id,
+            mode,
+            counter_type_filter,
+            ability.context.creation_lookback_event.as_deref(),
+        );
 
         if source_counters.is_empty() {
             continue;
@@ -2513,6 +2724,7 @@ fn resolve_move_distribution(
         source_id,
         CounterTransferMode::Move,
         counter_type_filter,
+        ability.context.creation_lookback_event.as_deref(),
     );
     let destinations =
         resolution_counter_move_destinations(state, ability, target_filter, source_id);
@@ -2563,6 +2775,7 @@ fn resolve_stack_target_move_distribution(
         source_id,
         CounterTransferMode::Move,
         counter_type_filter,
+        ability.context.creation_lookback_event.as_deref(),
     );
 
     if available.is_empty() || destinations.is_empty() {
@@ -2591,7 +2804,8 @@ fn resolution_counter_move_destinations(
     target_filter: &TargetFilter,
     source_id: ObjectId,
 ) -> Vec<ObjectId> {
-    let effective_filter = crate::game::effects::resolved_object_filter(ability, target_filter);
+    let effective_filter =
+        crate::game::effects::resolved_object_filter(state, ability, target_filter);
     let ctx = crate::game::filter::FilterContext::from_ability(ability);
     state
         .battlefield_phased_in_ids()
@@ -2710,6 +2924,20 @@ fn resolve_counter_transfer_destinations(
         return vec![ability.source_id];
     }
 
+    if matches!(target_filter, TargetFilter::LastCreated) {
+        return crate::game::targeting::resolve_event_context_targets(
+            state,
+            target_filter,
+            ability.source_id,
+        )
+        .into_iter()
+        .filter_map(|target| match target {
+            TargetRef::Object(id) => Some(id),
+            TargetRef::Player(_) => None,
+        })
+        .collect();
+    }
+
     if let Some(TargetRef::Object(id)) = crate::game::targeting::resolve_event_context_target(
         state,
         target_filter,
@@ -2735,14 +2963,30 @@ fn counter_transfer_source_counters(
     source_id: ObjectId,
     mode: CounterTransferMode,
     counter_type_filter: Option<&CounterType>,
+    creation_lookback_event: Option<&GameEvent>,
 ) -> Vec<(CounterType, u32)> {
-    let mut counters = state
-        .objects
-        .get(&source_id)
-        .map(|obj| obj.counters.clone())
-        .unwrap_or_default();
+    let departure_counters = (mode == CounterTransferMode::Put)
+        .then(|| {
+            departure_counters_for_counter_reproduction(state, source_id, creation_lookback_event)
+        })
+        .flatten();
+    let mut counters = if mode == CounterTransferMode::Put {
+        departure_counters.clone().unwrap_or_else(|| {
+            state
+                .objects
+                .get(&source_id)
+                .map(|obj| obj.counters.clone())
+                .unwrap_or_default()
+        })
+    } else {
+        state
+            .objects
+            .get(&source_id)
+            .map(|obj| obj.counters.clone())
+            .unwrap_or_default()
+    };
 
-    if counters.is_empty() && mode == CounterTransferMode::Put {
+    if counters.is_empty() && mode == CounterTransferMode::Put && departure_counters.is_none() {
         counters = state
             .lki_cache
             .get(&source_id)
@@ -2754,6 +2998,45 @@ fn counter_transfer_source_counters(
         .into_iter()
         .filter(|(ct, count)| *count > 0 && counter_type_filter.is_none_or(|filter| filter == ct))
         .collect()
+}
+
+/// CR 122.8 + CR 603.7 + CR 603.10a: the departure a counter reproduction reads.
+/// A phase-delayed ability carries the departure it was created under
+/// (`creation_lookback_event`) because the phase event that fires it names no
+/// object; every other resolution reads the event that fired it.
+fn departure_counters_for_counter_reproduction(
+    state: &GameState,
+    source_id: ObjectId,
+    creation_lookback_event: Option<&GameEvent>,
+) -> Option<std::collections::HashMap<CounterType, u32>> {
+    let Some(
+        event @ GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Battlefield),
+            ..
+        },
+    ) = creation_lookback_event.or(state.current_trigger_event.as_ref())
+    else {
+        return None;
+    };
+    if *object_id != source_id {
+        return None;
+    }
+
+    // CR 122.8 + CR 400.7 + CR 608.2h: a dies trigger that puts the departed
+    // object's counters on another object reproduces the old incarnation's LKI
+    // counters, not counters on a same-id object that later returned.
+    Some(
+        match crate::types::game_state::battlefield_departure_trigger_source_context(event) {
+            BattlefieldDepartureSourceContext::Present(context) => context.lki.counters.clone(),
+            BattlefieldDepartureSourceContext::Absent => state
+                .lki_cache
+                .get(object_id)
+                .map(|lki| lki.counters.clone())
+                .unwrap_or_default(),
+            BattlefieldDepartureSourceContext::Malformed => Default::default(),
+        },
+    )
 }
 
 /// CR 122.5 + CR 608.2d: an optional fixed stack-target counter move is
@@ -2796,6 +3079,7 @@ pub(crate) fn move_counters_optional_is_infeasible(
             source_id,
             CounterTransferMode::Move,
             counter_type.as_ref(),
+            ability.context.creation_lookback_event.as_deref(),
         )
         .into_iter()
         .any(|(counter_type, available)| {
@@ -2869,14 +3153,7 @@ pub fn resolve_remove(
         _ => (Some(CounterType::Plus1Plus1), 1),
     };
 
-    let targets = match &ability.effect {
-        Effect::RemoveCounter {
-            target:
-                target @ (TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }),
-            ..
-        } => crate::game::targeting::resolved_object_ids_for_filter(state, ability, target),
-        _ => resolve_defined_or_targets(state, ability),
-    };
+    let targets = counter_removal_targets(state, ability);
     let mut remaining = Vec::new();
     for obj_id in targets {
         // Build the list of (counter_type, count) pairs to remove.
@@ -3164,6 +3441,544 @@ pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut
 
 #[cfg(test)]
 mod tests {
+    use crate::types::ability::{ContinuousModification, StaticCondition};
+    use crate::types::counter::CounterMatch;
+    use crate::types::game_state::TransientContinuousEffectBindings;
+    use crate::types::resolved_commands::ResolvedRulesCommand;
+
+    fn make_two_power_creature(state: &mut GameState, id: ObjectId) {
+        let object = state.objects.get_mut(&id).unwrap();
+        object.card_types.core_types.push(CoreType::Creature);
+        object.base_card_types = object.card_types.clone();
+        object.power = Some(2);
+        object.base_power = Some(2);
+        object.toughness = Some(2);
+        object.base_toughness = Some(2);
+    }
+
+    fn bound_counter_effect(
+        state: &mut GameState,
+        affected: ObjectId,
+        subject: ObjectIncarnationRef,
+        counters: CounterMatch,
+        minimum: u32,
+        maximum: Option<u32>,
+        application_condition: Option<StaticCondition>,
+    ) -> u64 {
+        let affected_ref = ObjectIncarnationRef::from_object(&state.objects[&affected]);
+        state
+            .add_transient_continuous_effect_with_bindings(
+                affected,
+                PlayerId(0),
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::RecipientHasCounters {
+                        counters,
+                        minimum,
+                        maximum,
+                    },
+                },
+                TargetFilter::SpecificObject { id: affected },
+                vec![ContinuousModification::AddPower { value: 1 }],
+                application_condition,
+                TransientContinuousEffectBindings {
+                    affected_recipient: Some(affected_ref),
+                    duration_subject: Some(subject),
+                    granting_object: None,
+                },
+            )
+            .expect("the fixture's duration begins")
+    }
+
+    #[test]
+    fn accepted_counter_edit_retires_only_exact_started_duration_subject() {
+        let mut state = GameState::new_two_player(42);
+        let affected = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Affected".into(),
+            Zone::Battlefield,
+        );
+        let subject = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Subject".into(),
+            Zone::Battlefield,
+        );
+        make_two_power_creature(&mut state, affected);
+        state
+            .objects
+            .get_mut(&affected)
+            .unwrap()
+            .counters
+            .insert(CounterType::Shield, 1);
+        state
+            .objects
+            .get_mut(&subject)
+            .unwrap()
+            .counters
+            .insert(CounterType::Shield, 1);
+        let subject_ref = ObjectIncarnationRef::from_object(&state.objects[&subject]);
+        let id = bound_counter_effect(
+            &mut state,
+            affected,
+            subject_ref,
+            CounterMatch::OfType(CounterType::Shield),
+            1,
+            None,
+            None,
+        );
+        crate::game::layers::evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&affected].power,
+            Some(3),
+            "the bound B duration begins and modifies A"
+        );
+        let mut events = Vec::new();
+
+        assert_eq!(
+            apply_counter_removal(&mut state, affected, CounterType::Shield, 1, &mut events),
+            1
+        );
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .any(|effect| effect.id == id),
+            "editing affected A cannot end a duration bound to B"
+        );
+        crate::game::layers::evaluate_layers(&mut state);
+        assert_eq!(state.objects[&affected].power, Some(3));
+        assert_eq!(
+            apply_counter_removal(&mut state, subject, CounterType::Shield, 1, &mut events),
+            1
+        );
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .all(|effect| effect.id != id),
+            "the last counter on bound B must retire its started duration"
+        );
+        crate::game::layers::evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&affected].power,
+            Some(2),
+            "A loses the modification when B's duration ends"
+        );
+        assert_eq!(events.len(), 2);
+        let removals: Vec<_> = state
+            .resolved_rules_journal
+            .entries()
+            .iter()
+            .filter_map(|entry| entry.command.as_ref())
+            .filter(|command| matches!(command, ResolvedRulesCommand::ObjectCounter(_)))
+            .collect();
+        assert_eq!(
+            removals.len(),
+            2,
+            "each accepted edit records exactly one counter command"
+        );
+        state
+            .objects
+            .get_mut(&subject)
+            .unwrap()
+            .counters
+            .insert(CounterType::Shield, 1);
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .all(|effect| effect.id != id),
+            "a later shield cannot revive the retired id"
+        );
+    }
+
+    #[test]
+    fn any_counter_duration_retires_only_after_total_reaches_zero() {
+        let mut state = GameState::new_two_player(42);
+        let affected = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Affected".into(),
+            Zone::Battlefield,
+        );
+        let subject = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Subject".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&subject)
+            .unwrap()
+            .counters
+            .extend([(CounterType::Shield, 1), (CounterType::Plus1Plus1, 1)]);
+        let subject_ref = ObjectIncarnationRef::from_object(&state.objects[&subject]);
+        let any_id = bound_counter_effect(
+            &mut state,
+            affected,
+            subject_ref,
+            CounterMatch::Any,
+            1,
+            None,
+            None,
+        );
+        let shield_id = bound_counter_effect(
+            &mut state,
+            affected,
+            subject_ref,
+            CounterMatch::OfType(CounterType::Shield),
+            1,
+            None,
+            None,
+        );
+        let mut events = Vec::new();
+        let mut of_type_case = state.clone();
+        let mut of_type_events = Vec::new();
+        assert_eq!(
+            apply_counter_removal(
+                &mut of_type_case,
+                subject,
+                CounterType::Plus1Plus1,
+                1,
+                &mut of_type_events,
+            ),
+            1
+        );
+        assert_eq!(
+            of_type_case.objects[&subject]
+                .counters
+                .get(&CounterType::Shield),
+            Some(&1)
+        );
+        assert!(
+            of_type_case
+                .transient_continuous_effects
+                .iter()
+                .any(|effect| effect.id == shield_id),
+            "OfType ignores removal of another kind"
+        );
+        assert_eq!(
+            apply_counter_removal(&mut state, subject, CounterType::Shield, 1, &mut events),
+            1
+        );
+        assert_eq!(
+            state.objects[&subject]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&1)
+        );
+        assert!(state
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| effect.id == any_id));
+        assert!(state
+            .transient_continuous_effects
+            .iter()
+            .all(|effect| effect.id != shield_id));
+        assert_eq!(
+            apply_counter_removal(&mut state, subject, CounterType::Plus1Plus1, 1, &mut events),
+            1
+        );
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .all(|effect| effect.id != any_id),
+            "Any must retire when a different final counter kind is removed"
+        );
+    }
+
+    #[test]
+    fn counter_duration_expiry_respects_bounds_and_rejected_commands() {
+        let mut state = GameState::new_two_player(42);
+        let subject = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Subject".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&subject)
+            .unwrap()
+            .counters
+            .insert(CounterType::Shield, 1);
+        let subject_ref = ObjectIncarnationRef::from_object(&state.objects[&subject]);
+        let max_id = bound_counter_effect(
+            &mut state,
+            subject,
+            subject_ref,
+            CounterMatch::OfType(CounterType::Shield),
+            1,
+            Some(2),
+            None,
+        );
+        let independent_gate_id = bound_counter_effect(
+            &mut state,
+            subject,
+            subject_ref,
+            CounterMatch::OfType(CounterType::Shield),
+            1,
+            Some(2),
+            Some(StaticCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                minimum: 1,
+                maximum: None,
+            }),
+        );
+        let source_gate_id = state
+            .add_transient_continuous_effect(
+                subject,
+                PlayerId(0),
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::HasCounters {
+                        counters: CounterMatch::OfType(CounterType::Shield),
+                        minimum: 1,
+                        maximum: None,
+                    },
+                },
+                TargetFilter::SpecificObject { id: subject },
+                vec![ContinuousModification::AddPower { value: 1 }],
+                None,
+            )
+            .expect("the fixture's duration begins");
+        let mut events = Vec::new();
+        assert_eq!(
+            apply_counter_removal(&mut state, subject, CounterType::Shield, 0, &mut events),
+            0
+        );
+        assert!(state
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| effect.id == max_id));
+        let stale = ResolvedObjectCounterCommand {
+            object: ObjectIncarnationRef::of(subject, subject_ref.incarnation + 1),
+            counter_type: CounterType::Shield,
+            expected_old: 1,
+            edit: ResolvedObjectCounterEdit::Remove { count: 1 },
+            cause: state.current_or_begin_rules_execution_node(),
+        };
+        assert!(apply_resolved_counter_edit(&mut state, &stale).is_err());
+        assert!(state
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| effect.id == max_id));
+        for expected_old in [1, 2] {
+            let command = ResolvedObjectCounterCommand {
+                object: subject_ref,
+                counter_type: CounterType::Shield,
+                expected_old,
+                edit: ResolvedObjectCounterEdit::Add {
+                    actor: PlayerId(0),
+                    count: 1,
+                },
+                cause: state.current_or_begin_rules_execution_node(),
+            };
+            apply_resolved_counter_edit(&mut state, &command).unwrap();
+            if expected_old == 1 {
+                assert!(
+                    state
+                        .transient_continuous_effects
+                        .iter()
+                        .any(|effect| effect.id == max_id),
+                    "one to two shields preserves the true upper bound"
+                );
+            }
+        }
+        assert_eq!(
+            state.objects[&subject].counters.get(&CounterType::Shield),
+            Some(&3)
+        );
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .all(|effect| effect.id != max_id),
+            "the upper bound becomes false on the third shield"
+        );
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .all(|effect| effect.id != independent_gate_id),
+            "an independent false application gate does not keep an ended duration stored"
+        );
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .any(|effect| effect.id == source_gate_id),
+            "source-side HasCounters is not a recipient duration"
+        );
+    }
+
+    #[test]
+    fn stale_duration_subject_does_not_bind_to_new_incarnation() {
+        let mut state = GameState::new_two_player(42);
+        let affected = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Affected".into(),
+            Zone::Battlefield,
+        );
+        let subject = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Subject".into(),
+            Zone::Battlefield,
+        );
+        make_two_power_creature(&mut state, affected);
+        state
+            .objects
+            .get_mut(&subject)
+            .unwrap()
+            .counters
+            .insert(CounterType::Shield, 1);
+        let old_ref = ObjectIncarnationRef::from_object(&state.objects[&subject]);
+        let id = bound_counter_effect(
+            &mut state,
+            affected,
+            old_ref,
+            CounterMatch::OfType(CounterType::Shield),
+            1,
+            None,
+            None,
+        );
+        crate::game::layers::evaluate_layers(&mut state);
+        assert_eq!(state.objects[&affected].power, Some(3));
+        assert!(state
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| effect.id == id));
+        state.objects.get_mut(&subject).unwrap().bump_incarnation();
+        // Keep a separate pre-flush fixture so the counter-edit identity check
+        // cannot pass merely because layer evaluation already retired the id.
+        let mut counter_edit_state = state.clone();
+        crate::game::layers::evaluate_layers(&mut state);
+        // CR 611.2a + CR 400.7: the old subject's duration has ended; a new
+        // occurrence cannot sustain the effect.
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .all(|effect| effect.id != id),
+            "layer evaluation must immediately retire the stale subject's effect"
+        );
+        assert_eq!(
+            state.objects[&affected].power,
+            Some(2),
+            "the old duration subject is no longer live after its incarnation changes"
+        );
+        let old_command = ResolvedObjectCounterCommand {
+            object: old_ref,
+            counter_type: CounterType::Shield,
+            expected_old: 1,
+            edit: ResolvedObjectCounterEdit::Remove { count: 1 },
+            cause: state.current_or_begin_rules_execution_node(),
+        };
+        assert!(
+            apply_resolved_counter_edit(&mut state, &old_command).is_err(),
+            "the old occurrence's command cannot edit the new occurrence"
+        );
+        assert_eq!(
+            state.objects[&subject].counters.get(&CounterType::Shield),
+            Some(&1)
+        );
+        let mut events = Vec::new();
+        assert!(counter_edit_state
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| effect.id == id));
+        assert_eq!(
+            apply_counter_removal(
+                &mut counter_edit_state,
+                subject,
+                CounterType::Shield,
+                1,
+                &mut events,
+            ),
+            1
+        );
+        assert!(
+            counter_edit_state
+                .transient_continuous_effects
+                .iter()
+                .any(|effect| effect.id == id),
+            "an edit to the new occurrence cannot match the old duration subject"
+        );
+    }
+
+    #[test]
+    fn affected_object_exit_prunes_counter_bound_effect_before_later_counter() {
+        let mut state = GameState::new_two_player(42);
+        let affected = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Affected".into(),
+            Zone::Battlefield,
+        );
+        let subject = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Subject".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&subject)
+            .unwrap()
+            .counters
+            .insert(CounterType::Shield, 1);
+        let subject_ref = ObjectIncarnationRef::from_object(&state.objects[&subject]);
+        let id = bound_counter_effect(
+            &mut state,
+            affected,
+            subject_ref,
+            CounterMatch::OfType(CounterType::Shield),
+            1,
+            None,
+            None,
+        );
+        assert!(state
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| effect.id == id));
+        crate::game::zones::prune_object_bound_effects_on_exit(
+            &mut state,
+            affected,
+            Zone::Battlefield,
+            Zone::Graveyard,
+        );
+        assert!(state
+            .transient_continuous_effects
+            .iter()
+            .all(|effect| effect.id != id));
+        state.objects.get_mut(&affected).unwrap().bump_incarnation();
+        state
+            .objects
+            .get_mut(&subject)
+            .unwrap()
+            .counters
+            .insert(CounterType::Shield, 2);
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .all(|effect| effect.id != id),
+            "the affected object's later incarnation cannot revive an exited effect"
+        );
+    }
 
     /// CR 115.10a: the non-targeted population tier is gated on
     /// `TargetChoiceTiming::Resolution` — the stamp

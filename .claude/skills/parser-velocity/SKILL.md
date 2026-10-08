@@ -8,8 +8,8 @@ description: "Fast-iteration loop for quick parser wins — surface near-miss ca
 `unlock-set` runs full gates (`cargo fmt` / `clippy-strict` / `test -p phase-engine` / `coverage` / `semantic-audit`) between every cluster. That's right for cluster-level infrastructure but fatal for near-miss work where the real fix is "add one `tag()` arm to an existing `alt()`." This skill keeps the inner loop fast by batching edits per compile cycle, then running the full gate exactly **once** at session end.
 
 **When to use this skill vs. `unlock-set`:**
-- **Use this skill** when the target is "cards that are almost supported" — the parser recognizes most of the text but misses one variation. Category A (VerbVariation), B (SubjectStripping), D (StaticCondition), and parser-miss C (TriggerEffect) cards.
-- **Use `unlock-set`** when the target requires a new typed primitive, CR-grounded infrastructure, new runtime mechanic, or anything that warrants plan→implement→review per cluster. Category F (NewMechanic) lives there.
+- **Use this skill** when the target is "cards that are almost supported" — the parser recognizes most of the text but misses one variation. These are the `parser:*` categories of `cargo parser-gaps`, where the parser rejected a clause with a typed verdict. A family's `fixes_alone_cards` are the cards that family's fix would make supported on its own.
+- **Use `unlock-set`** when the target requires a new typed primitive, CR-grounded infrastructure, new runtime mechanic, or anything that warrants plan→implement→review per cluster. The `resolver:*` categories — the resolver lacks a feature the parser produced — live there.
 
 **Prerequisite:** The Phase 1 jq pipeline uses `--rawfile`, which requires **jq ≥ 1.6**. Confirm once per machine: `jq --version`. macOS system jq is sometimes 1.5 — install a newer version via Homebrew if needed.
 
@@ -38,32 +38,30 @@ Runs at the start of each batch. Does **not** re-run `gen-card-data.sh` — per-
 Default format is Standard. User can override (e.g., `--format commander`).
 
 ```bash
-cargo run --profile tool --bin parser-gap-analyzer -- data/ \
-  --near-misses-only --format standard \
+cargo run --profile tool --bin parser-gap-analyzer -- data/ --format standard \
   | jq -r --rawfile excluded /tmp/velocity-flipped.txt '
       ($excluded | split("\n") | map(select(length > 0))) as $ex |
-      .quick_wins
-      | map(select(.category | test("^[ABCD]_")))
-      | sort_by(-.cards_unlocked)
-      | [.[].affected_cards[]]
+      [.categories | to_entries[] | select(.key | startswith("parser:")) | .value.families[]]
+      | sort_by(-.fixes_alone)
+      | [.[].fixes_alone_cards[]]
       | map(select(. as $c | $ex | index($c) | not))
       | .[]' \
   | awk '!seen[$0]++' | head -10 > /tmp/batch.txt
 ```
 
 **jq mechanics — don't regress these:**
-- **Category regex matches the serialized label, not the enum variant name.** `GapCategory::label()` emits `A_verb_variation`, `B_subject_stripping`, `C_trigger_effect`, `D_static_condition`, `F_new_mechanic`, `G_unclassified`. The regex `^[ABCD]_` includes only the parser-only categories (A/B/D + parser-miss C) and excludes F/G. **Do not** use PascalCase variant names like `VerbVariation` — those are never emitted to JSON.
+- **Category keys are the serialized labels.** `parser:<verdict>` (e.g. `parser:unparsed_condition`), `resolver:<family>` and `undiagnosed`. `startswith("parser:")` keeps only the parser-verdict categories. `--category` takes the same keys, and an unknown one errors listing them all.
 - `--rawfile`, not `--slurpfile`. Reads the file as a single string; `split("\n") | map(select(length > 0))` produces a clean `[string]` array. `--slurpfile` would require NDJSON semantics and force a file-format change.
-- `awk '!seen[$0]++'` after jq preserves the `sort_by(-.cards_unlocked)` priority ranking while deduping. jq's `unique` would re-sort alphabetically and lose priority.
+- `awk '!seen[$0]++'` after jq preserves the `sort_by(-.fixes_alone)` priority ranking while deduping. jq's `unique` would re-sort alphabetically and lose priority.
 - Single jq invocation via terminal `| .[]` to stream strings — no double jq pipe.
 
-**Category inclusion.** Include Category C (TriggerEffect) alongside A/B/D. C fires when a trigger mode parses but a co-occurring `Effect:*` gap exists; that effect gap is often a parser miss, not runtime work. Route the human to the `Effect:` gap's `source_text` (step 2 below). Genuinely-runtime C cards fall out at grep time (step 3) — skip them there, don't force runtime work into this loop. Skip F (NewMechanic) entirely; those belong in `unlock-set`.
+**Category inclusion.** Only `parser:*` categories feed the batch. `resolver:*` gaps are runtime work and belong in `unlock-set`. `undiagnosed` families are keyed by coverage handler (e.g. `Trigger:…`, `Static:Unrecognized(…)`). Some are parser misses, but the report cannot say which, so they stay out of the automatic batch.
 
 Empty `/tmp/batch.txt` → the quick-win pool for this format is exhausted for this session. Stop or switch formats.
 
 ### Phase 1.5 — Alternative selector: swallow-warning batching
 
-When the parser-gap-analyzer pool is thin or you want to target a specific *anti-pattern class* (rather than verb-variation cards), batch by `parse_warnings` instead. The swallow detectors in `crates/engine/src/parser/swallow_check.rs` flag cards where the AST silently dropped Oracle text — `Condition_If`, `DynamicQty`, `Duration_ThisTurn`, `Optional_YouMay`, `Condition_Unless`, `Replacement_Instead`, etc. Each detector is a recognition-without-binding bug class or a detector false positive; use the drilldown report before editing.
+When the parser-gap-analyzer pool is thin or you want to target a specific *anti-pattern class* (rather than a `parser:*` phrase family), batch by `parse_warnings` instead. The swallow detectors in `crates/engine/src/parser/swallow_check.rs` flag cards where the AST silently dropped Oracle text — `Condition_If`, `DynamicQty`, `Duration_ThisTurn`, `Optional_YouMay`, `Condition_Unless`, `Replacement_Instead`, etc. Each detector is a recognition-without-binding bug class or a detector false positive; use the drilldown report before editing.
 
 ```bash
 # Rank exact warning patterns by likely shared fix.
@@ -93,7 +91,7 @@ jq -r '.cards[].name | ascii_downcase' /tmp/warning-drilldown.json \
 Use this selector when:
 - A specific swallow prefix dominates the warning histogram (e.g., 750 `DynamicQty` cards) — fixing the dispatch site cascades across hundreds of cards.
 - You want to drive a metric down deliberately (e.g., "eliminate `Replacement_Instead` swallows this session").
-- The parser-gap-analyzer near-miss list is exhausted for the format.
+- The `parser:*` families' `fixes_alone_cards` are exhausted for the format.
 
 Interpretation rules:
 - High `supported_cards` / low `single_gap_cards` means the first pass is probably detector cleanup or minor chomp/capture work, not new engine support.
@@ -119,7 +117,7 @@ For each batch:
    done
    ```
 2. **Find the analogous existing combinator.** Grep `crates/engine/src/parser/oracle_nom/` and the relevant `oracle_*.rs` for a similar phrase already handled. Almost always a `tag()` arm added to an existing `alt()` (per CLAUDE.md's "Compose nom combinators, don't enumerate permutations").
-3. **For Category C cards:** if no analogous parser combinator exists and the gap requires runtime work (new resolver handler, new event matcher, new CR-grounded behavior), **skip the card**. Don't force runtime work into the velocity loop — that's `unlock-set` territory.
+3. **Skip runtime work.** If no analogous parser combinator exists and the gap needs runtime work (new resolver handler, new event matcher, new CR-grounded behavior), **skip the card**. Don't force runtime work into the velocity loop — that's `unlock-set` territory.
 4. **Edit the whole batch.** One parser file per card (or shared file for related cards). No compile between edits.
 5. **Compile + parser test.**
    ```bash
@@ -146,7 +144,7 @@ For each batch:
      and ([.value | .. | objects | select(.type? == "Unrecognized")] | length == 0)
    ) | .key' /tmp/batch-ast.json >> /tmp/velocity-flipped.txt
    ```
-   **Caveat for Category D (StaticCondition).** `Static:Unrecognized` gaps may surface only in the coverage classifier's `gap_details`, not necessarily as an `Unrecognized` node in the card's AST. If a D-category card doesn't flip via the walk above, re-check in the next Phase 1 batch — if it no longer appears, append manually to the exclude file. If step 6 errored entirely (oracle-gen crash, profile incompat), manually append any cards you know flipped and proceed.
+   **Caveat for `Static:Unrecognized` gaps.** `Static:Unrecognized` gaps may surface only in the coverage classifier's `gap_details`, not necessarily as an `Unrecognized` node in the card's AST. If such a card doesn't flip via the walk above, re-check in the next Phase 1 batch — if it no longer appears, append manually to the exclude file. If step 6 errored entirely (oracle-gen crash, profile incompat), manually append any cards you know flipped and proceed.
 8. **Loop to Phase 1.** Continuous. Interrupt at any time — the exclude set preserves progress.
 
 ---
@@ -211,8 +209,7 @@ Re-invoke the skill. Phase 0's `: > /tmp/velocity-flipped.txt` clears any stale 
 | Pitfall | Symptom | Fix |
 |---|---|---|
 | Compiling per card | Each edit takes 60s | Batch 5–10 edits, compile once. |
-| Including Category F | Forced into runtime work | The jq filter explicitly excludes `NewMechanic` — keep it that way. |
-| Treating C as all-runtime | Missed parser quick wins | Include C, skip at step 3 if truly runtime. |
+| Including `resolver:*` categories | Forced into runtime work | The jq filter keeps only `parser:*` keys — keep it that way. |
 | Skipping `gen-card-data.sh` at Phase 3 | Coverage report shows stale numbers | Always regen at the top of the gate. |
 | Per-batch `gen-card-data.sh` | Destroys velocity | Never; exclude set replaces that purpose. |
 | Using `--slurpfile` in Phase 1 | jq errors or returns empty | Use `--rawfile` + `split("\n")`. |

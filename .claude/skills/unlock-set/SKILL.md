@@ -14,7 +14,7 @@ This skill runs the **heavy** loop: cluster→plan→implement→review per clus
 Use the companion **`parser-velocity`** skill instead when:
 - The target cards are "almost supported" — parser recognizes most of the text but misses one variation.
 - The fix per card is "add a `tag()` arm to an existing `alt()`" with no runtime work.
-- You want to iterate across Category A (VerbVariation), B (SubjectStripping), D (StaticCondition), or parser-miss C (TriggerEffect) cards — these are the parser-only categories in `gap_analysis.rs`.
+- You want to iterate across the `parser:*` categories of `cargo parser-gaps` — gaps with a typed parser verdict, which are the parser-only work.
 - You want to defer the full gate (`fmt` / `clippy` / `test-all` / `coverage` / `semantic-audit`) to session end instead of paying it per cluster.
 
 `parser-velocity` batches edits per compile cycle and avoids the `$engine-implementer` plan/review overhead — use it for quick wins, then return here for the cluster-level work that remains.

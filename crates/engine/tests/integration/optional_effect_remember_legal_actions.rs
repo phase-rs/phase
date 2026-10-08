@@ -33,6 +33,7 @@ fn keyed_optional_effect_exposes_and_resolves_remember_choices() {
     state.waiting_for = WaitingFor::OptionalEffectChoice {
         player: PlayerId(0),
         source_id,
+        decision_subject_id: None,
         description: None,
         may_trigger_key: Some(key.clone()),
         same_card_may_trigger_choice_available: false,
@@ -52,6 +53,7 @@ fn keyed_optional_effect_exposes_and_resolves_remember_choices() {
         trigger_event: None,
         trigger_events: Vec::new(),
         trigger_match_count: None,
+        return_result_occurrence: None,
     });
 
     let accept = GameAction::DecideOptionalEffectAndRemember {

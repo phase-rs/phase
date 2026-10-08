@@ -327,6 +327,7 @@ fn witch_king_state_is_red_under_the_chain_set_binding() {
         attacker_ids: vec![witch_king, wraith],
         defending_player: P1,
         attacks: vec![],
+        declaration_records: Vec::new(),
     }];
 
     let batch = QuantityExpr::Ref {
@@ -401,6 +402,7 @@ fn kylox_state_is_red_under_the_triggering_batch_binding() {
         attacker_ids: vec![kylox],
         defending_player: P1,
         attacks: vec![],
+        declaration_records: Vec::new(),
     }];
     let set_id = engine::types::identifiers::TrackedSetId(state.next_tracked_set_id);
     state.next_tracked_set_id += 1;

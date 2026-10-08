@@ -31,6 +31,11 @@ export function OptionalEffectModalContent({
 
   const sourceObj = objects?.[waitingFor.data.source_id];
   const sourceName = sourceObj?.name ?? t("optionalEffect.sourceFallback");
+  const decisionSubjectObj =
+    waitingFor.data.decision_subject_id == null
+      ? undefined
+      : objects?.[waitingFor.data.decision_subject_id];
+  const previewObj = decisionSubjectObj ?? sourceObj;
   const description = waitingFor.data.description as string | undefined;
   const canRemember =
     waitingFor.type === "OptionalEffectChoice" && waitingFor.data.may_trigger_key != null;
@@ -42,8 +47,8 @@ export function OptionalEffectModalContent({
     <ChoiceModal
       title={t("optionalEffect.title", { name: sourceName })}
       subtitle={description}
-      previewCardName={sourceObj?.name}
-      previewObjectId={waitingFor.data.source_id}
+      previewCardName={previewObj?.name}
+      previewObjectId={previewObj?.id}
       options={[
         { id: "accept", label: t("optionalEffect.yes") },
         { id: "decline", label: t("optionalEffect.no") },

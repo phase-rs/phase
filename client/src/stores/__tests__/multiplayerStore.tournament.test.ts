@@ -27,6 +27,7 @@ const localStorageMock = vi.hoisted(() => {
 
 import {
   MAX_TOURNAMENT_CREDENTIALS,
+  hydrateSessionTournamentCredentials,
   rememberTournamentCredential,
   useMultiplayerStore,
   findLobbyGameByCode,
@@ -239,7 +240,13 @@ function heldMap(
 ): Record<string, TournamentCredential> {
   const map: Record<string, TournamentCredential> = {};
   codes.forEach((code, index) => {
-    map[code] = { organizerToken: `org-${code}`, updatedAt: updatedAt(code, index) };
+    map[code] = {
+      organizerToken: `org-${code}`,
+      // Bound to the harness's hosting broker so the fail-closed origin check
+      // admits the gated action (the RPC runs against this same origin).
+      organizerOrigin: SERVER_PRESETS[0].url,
+      updatedAt: updatedAt(code, index),
+    };
   });
   return map;
 }
@@ -277,35 +284,47 @@ afterEach(() => {
 // ── A. tournament credentials (R1, R2, R6, R10, R11, R11b) ───────────────
 
 describe("tournament credentials", () => {
-  it("persists tournament credentials across a rehydrate", async () => {
-    useMultiplayerStore.setState({
-      tournamentCredentials: {
-        AAA: { organizerToken: "org-a", updatedAt: 10 },
-        BBB: { playerToken: "ply-b", playerKey: "key-b", updatedAt: 20 },
+  it("persists tournament credentials to sessionStorage, not the localStorage blob", () => {
+    const CREDS = {
+      AAA: {
+        organizerToken: "org-a",
+        organizerOrigin: SERVER_PRESETS[0].url,
+        updatedAt: 10,
       },
-    });
+      BBB: {
+        playerToken: "ply-b",
+        playerOrigin: SERVER_PRESETS[0].url,
+        playerKey: "key-b",
+        updatedAt: 20,
+      },
+    };
+    useMultiplayerStore.setState({ tournamentCredentials: CREDS });
 
+    // The bearer secrets must NOT ride the localStorage persist blob.
     const raw = localStorage.getItem("phase-multiplayer");
     expect(raw).not.toBeNull();
     const blob = JSON.parse(raw as string) as { state: Record<string, unknown> };
-    expect(blob.state.tournamentCredentials).toEqual({
-      AAA: { organizerToken: "org-a", updatedAt: 10 },
-      BBB: { playerToken: "ply-b", playerKey: "key-b", updatedAt: 20 },
-    });
-    // Positive reach-guard: the credentials rode the SAME partition as the
-    // other persisted keys, so this is not a coincidentally-present blob.
+    expect(blob.state.tournamentCredentials).toBeUndefined();
+    // Positive reach-guard: the blob IS being written (other keys ride it), so
+    // the absence above is a real exclusion, not a coincidentally-absent blob.
     expect(blob.state.playerId).toBe(store().playerId);
 
-    // Wipe in memory, restore the blob (the wipe re-persisted an empty map),
-    // and hydrate through `merge` + the normalizer.
-    useMultiplayerStore.setState({ tournamentCredentials: {} });
-    localStorage.setItem("phase-multiplayer", raw as string);
-    await useMultiplayerStore.persist.rehydrate();
+    // They live in sessionStorage instead.
+    const session = JSON.parse(
+      sessionStorage.getItem("phase-tournament-credentials") ?? "null",
+    );
+    expect(session).toEqual(CREDS);
 
-    expect(store().tournamentCredentials).toEqual({
-      AAA: { organizerToken: "org-a", updatedAt: 10 },
-      BBB: { playerToken: "ply-b", playerKey: "key-b", updatedAt: 20 },
-    });
+    // Hydrate them back. Reseed sessionStorage right before hydrating: a
+    // `setState` wipe would fire the change subscription and clear the key.
+    useMultiplayerStore.setState({ tournamentCredentials: {} });
+    sessionStorage.setItem(
+      "phase-tournament-credentials",
+      JSON.stringify(CREDS),
+    );
+    hydrateSessionTournamentCredentials();
+
+    expect(store().tournamentCredentials).toEqual(CREDS);
   });
 
   it("hydrates a pre-phase-2 blob with an empty credential map", async () => {
@@ -330,38 +349,48 @@ describe("tournament credentials", () => {
     expect(store().displayName).toBe("Legacy");
   });
 
-  it("drops malformed persisted credentials and enforces the cap on hydrate", async () => {
-    const hydrateWith = async (credentials: unknown) => {
-      localStorage.setItem(
-        "phase-multiplayer",
-        JSON.stringify({
-          state: {
-            playerId: "p",
-            serverAddress: "ws://localhost:8787",
-            tournamentCredentials: credentials,
-          },
-          version: 5,
-        }),
+  it("drops malformed persisted credentials and enforces the cap on hydrate", () => {
+    const hydrateWith = (credentials: unknown) => {
+      // Credentials hydrate from sessionStorage now; seed it directly (a
+      // `setState` wipe would fire the change subscription and clear the key)
+      // and hydrate through the same normalizer + cap.
+      sessionStorage.setItem(
+        "phase-tournament-credentials",
+        JSON.stringify(credentials),
       );
-      await useMultiplayerStore.persist.rehydrate();
+      hydrateSessionTournamentCredentials();
       return store().tournamentCredentials;
     };
 
     // Part 1 — malformed entries, well under the cap so eviction cannot be
     // confused with rejection.
-    const cleaned = await hydrateWith({
-      AAA: { organizerToken: "t", updatedAt: 5 },
+    const cleaned = hydrateWith({
+      AAA: { organizerToken: "t", organizerOrigin: "wss://o/ws", updatedAt: 5 },
       BBB: { playerToken: 42 }, // non-string token, no other authority
       CCC: "not-an-object",
       DDD: { playerKey: "only-a-key", updatedAt: 1 }, // no authority at all
-      EEE: { playerToken: "p", playerKey: "k", updatedAt: "nope" },
+      EEE: {
+        playerToken: "p",
+        playerOrigin: "wss://o/ws",
+        playerKey: "k",
+        updatedAt: "nope",
+      },
     });
 
     // Positive reach-guard: a normalizer that returned `{}` unconditionally
     // would fail this line.
-    expect(cleaned.AAA).toEqual({ organizerToken: "t", updatedAt: 5 });
+    expect(cleaned.AAA).toEqual({
+      organizerToken: "t",
+      organizerOrigin: "wss://o/ws",
+      updatedAt: 5,
+    });
     // A non-numeric `updatedAt` degrades to 0 rather than poisoning the sort.
-    expect(cleaned.EEE).toEqual({ playerToken: "p", playerKey: "k", updatedAt: 0 });
+    expect(cleaned.EEE).toEqual({
+      playerToken: "p",
+      playerOrigin: "wss://o/ws",
+      playerKey: "k",
+      updatedAt: 0,
+    });
     expect("BBB" in cleaned).toBe(false);
     expect("CCC" in cleaned).toBe(false);
     expect("DDD" in cleaned).toBe(false);
@@ -371,9 +400,13 @@ describe("tournament credentials", () => {
     // hydrate, oldest-first.
     const overflowing: Record<string, unknown> = {};
     paddedCodes(1, 40).forEach((code, index) => {
-      overflowing[code] = { organizerToken: `org-${code}`, updatedAt: 1000 + index };
+      overflowing[code] = {
+        organizerToken: `org-${code}`,
+        organizerOrigin: "wss://o/ws",
+        updatedAt: 1000 + index,
+      };
     });
-    const capped = await hydrateWith(overflowing);
+    const capped = hydrateWith(overflowing);
 
     expect(Object.keys(capped)).toHaveLength(MAX_TOURNAMENT_CREDENTIALS);
     expect("T40" in capped).toBe(true); // newest survives
@@ -603,12 +636,18 @@ describe("tournament credentials", () => {
     fake.deliver("TournamentCreated", {
       code: "ZZZ",
       organizer_token: "org-zzz",
+      expires_at_ms: 1_800_000_000_000,
       view: viewFor("ZZZ"),
     });
     const result = await pending;
 
     expect(result.ok).toBe(true);
     expect(store().tournamentCredentials.ZZZ?.organizerToken).toBe("org-zzz");
+    // The mint reply's expiry is filed beside the token, so proactive rotation
+    // has something to renew ahead of.
+    expect(store().tournamentCredentials.ZZZ?.organizerTokenExpiresAtMs).toBe(
+      1_800_000_000_000,
+    );
     expect(Object.keys(store().tournamentCredentials)).toEqual(["ZZZ"]);
   });
 
@@ -716,6 +755,7 @@ describe("tournament credentials", () => {
     fake.deliver("TournamentJoined", {
       code: "AAA",
       player_token: "ply-a",
+      expires_at_ms: 1_800_000_000_000,
       view: viewFor("AAA"),
     });
     const result = await pending;
@@ -723,10 +763,110 @@ describe("tournament credentials", () => {
     expect(result.ok).toBe(true);
     expect(store().tournamentCredentials.AAA).toEqual({
       playerToken: "ply-a",
+      playerTokenExpiresAtMs: 1_800_000_000_000,
       playerKey: sent.player_key,
+      // The player token is bound to the broker it was minted against.
+      playerOrigin: SERVER_PRESETS[0].url,
       updatedAt: expect.any(Number) as unknown as number,
     });
     expect(sent.player_key).toBe(store().playerId);
+  });
+
+  // Maintainer [HIGH] #1, ordinary (non-renewal) path: a bearer minted on server
+  // A must never be sent to server B after a host switch. The origin-bound
+  // credential makes a gated action refuse locally, before anything is sent.
+  it("refuses a gated action when the host has switched away from the credential's origin", async () => {
+    const fake = makeFakeSocket();
+    primeSocket(fake);
+
+    // Create a tournament on server A (SERVER_PRESETS[0]); its organizer token is
+    // bound to that origin.
+    const created = store().createTournament({
+      name: "Origin Bound",
+      arity: 2,
+      scoring: { win_points: 3, draw_points: 1, loss_points: 0 },
+      bracket: "Swiss",
+    });
+    await flush();
+    fake.deliver("TournamentCreated", {
+      code: "OBND",
+      organizer_token: "org-a",
+      expires_at_ms: 1_800_000_000_000,
+      view: viewFor("OBND"),
+    });
+    await created;
+    expect(store().tournamentCredentials.OBND?.organizerOrigin).toBe(
+      SERVER_PRESETS[0].url,
+    );
+
+    // The user switches their hosting server to a DIFFERENT broker.
+    const otherBroker = "wss://other-broker.example/ws";
+    expect(otherBroker).not.toBe(SERVER_PRESETS[0].url);
+    store().setHostingServer(otherBroker);
+
+    // A gated action now resolves against server B. It must be refused locally as
+    // not-authorized — the A-minted bearer is never put on the wire to B.
+    fake.send.mockClear();
+    const result = await store().startTournamentRound("OBND");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("not_authorized");
+    expect(fake.tally("StartTournamentRound")).toBe(0);
+  });
+
+  // Maintainer [HIGH] #1: organizer authority on broker A and player authority on
+  // broker B under the SAME invite code must coexist without overwriting each
+  // other, and each token must only ever be sent to its own broker.
+  it("keeps organizer-on-A and player-on-B authorities for one code distinct by origin", async () => {
+    const fake = makeFakeSocket();
+    primeSocket(fake);
+    const originA = SERVER_PRESETS[0].url;
+    const originB = "wss://broker-b.example/ws";
+    expect(originB).not.toBe(originA);
+
+    // Organizer creates code "DUP" on broker A.
+    const created = store().createTournament({
+      name: "Dup Code",
+      arity: 2,
+      scoring: { win_points: 3, draw_points: 1, loss_points: 0 },
+      bracket: "Swiss",
+    });
+    await flush();
+    fake.deliver("TournamentCreated", {
+      code: "DUP",
+      organizer_token: "org-a",
+      expires_at_ms: 1_800_000_000_000,
+      view: viewFor("DUP"),
+    });
+    await created;
+
+    // Switch to broker B and JOIN a same-code "DUP" event there as a player.
+    store().setHostingServer(originB);
+    const joined = store().joinTournament("DUP", "Rajah");
+    await flush();
+    fake.deliver("TournamentJoined", {
+      code: "DUP",
+      player_token: "ply-b",
+      expires_at_ms: 1_800_000_000_000,
+      view: viewFor("DUP"),
+    });
+    await joined;
+
+    // Both authorities survive under one code, each bound to its own broker —
+    // the join did NOT overwrite the organizer authority.
+    const cred = store().tournamentCredentials.DUP;
+    expect(cred?.organizerToken).toBe("org-a");
+    expect(cred?.organizerOrigin).toBe(originA);
+    expect(cred?.playerToken).toBe("ply-b");
+    expect(cred?.playerOrigin).toBe(originB);
+
+    // On broker B, an ORGANIZER action is refused (A's organizer token is never
+    // sent to B), while the B-bound player authority is what this browser holds
+    // here.
+    fake.send.mockClear();
+    const orgOnB = await store().startTournamentRound("DUP");
+    expect(orgOnB.ok).toBe(false);
+    if (!orgOnB.ok) expect(orgOnB.reason).toBe("not_authorized");
+    expect(fake.tally("StartTournamentRound")).toBe(0);
   });
 });
 
@@ -919,8 +1059,8 @@ describe("tournament store actions", () => {
     primeSocket(fake);
     useMultiplayerStore.setState({
       tournamentCredentials: {
-        AAA: { organizerToken: "org-a", updatedAt: 1 },
-        BBB: { organizerToken: "org-b", updatedAt: 2 },
+        AAA: { organizerToken: "org-a", organizerOrigin: SERVER_PRESETS[0].url, updatedAt: 1 },
+        BBB: { organizerToken: "org-b", organizerOrigin: SERVER_PRESETS[0].url, updatedAt: 2 },
       },
     });
 
@@ -973,7 +1113,7 @@ describe("tournament store actions", () => {
     const fake = makeFakeSocket();
     primeSocket(fake);
     useMultiplayerStore.setState({
-      tournamentCredentials: { AAA: { organizerToken: "org-a", updatedAt: 1 } },
+      tournamentCredentials: { AAA: { organizerToken: "org-a", organizerOrigin: SERVER_PRESETS[0].url, updatedAt: 1 } },
     });
 
     const refused = await store().reportMatchResult("AAA", 7, "Draw");
@@ -994,7 +1134,7 @@ describe("tournament store actions", () => {
     primeSocket(fake);
     useMultiplayerStore.setState({
       tournamentCredentials: {
-        AAA: { organizerToken: "org-a", playerToken: "ply-a", updatedAt: 1 },
+        AAA: { organizerToken: "org-a", organizerOrigin: SERVER_PRESETS[0].url, playerToken: "ply-a", playerOrigin: SERVER_PRESETS[0].url, updatedAt: 1 },
       },
     });
 
@@ -1028,14 +1168,14 @@ describe("tournament store actions", () => {
     {
       label: "startTournamentRound",
       role: "organizer" as const,
-      credential: { organizerToken: "org-a", updatedAt: 1 },
+      credential: { organizerToken: "org-a", organizerOrigin: SERVER_PRESETS[0].url, updatedAt: 1 },
       frame: "StartTournamentRound",
       run: () => store().startTournamentRound("AAA"),
     },
     {
       label: "reportMatchResult",
       role: "player" as const,
-      credential: { playerToken: "ply-a", updatedAt: 1 },
+      credential: { playerToken: "ply-a", playerOrigin: SERVER_PRESETS[0].url, updatedAt: 1 },
       frame: "ReportMatchResult",
       run: () => store().reportMatchResult("AAA", 7, "Draw"),
     },
@@ -1085,7 +1225,7 @@ describe("tournament store actions", () => {
     const fake = makeFakeSocket();
     primeSocket(fake);
     useMultiplayerStore.setState({
-      tournamentCredentials: { AAA: { organizerToken: "org-a", updatedAt: 1 } },
+      tournamentCredentials: { AAA: { organizerToken: "org-a", organizerOrigin: SERVER_PRESETS[0].url, updatedAt: 1 } },
     });
     const before = structuredClone(store().tournamentCredentials);
 
@@ -1151,7 +1291,7 @@ describe("tournament store actions", () => {
     primeSocket(fake);
     useMultiplayerStore.setState({
       tournamentCredentials: {
-        AAA: { organizerToken: "org-a", playerToken: "ply-a", updatedAt: 1 },
+        AAA: { organizerToken: "org-a", organizerOrigin: SERVER_PRESETS[0].url, playerToken: "ply-a", playerOrigin: SERVER_PRESETS[0].url, updatedAt: 1 },
       },
     });
 

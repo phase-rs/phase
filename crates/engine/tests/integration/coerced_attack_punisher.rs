@@ -112,14 +112,17 @@ fn test1_active_player_coerce_binds_controller() {
     typed_controllers(&coerce, &mut ctrls);
     // Revert-failing: without Step 3 the controller parses to `You`, not `ActivePlayer`.
     assert_eq!(ctrls, vec![Some(ControllerRef::ActivePlayer)]);
-    // Reach-guard: the coerce clause produced a real effect, no Unimplemented.
-    let has_unimpl_coerce = p.abilities.iter().any(
-        |a| matches!(a.effect.as_ref(), Effect::Unimplemented { name, .. } if name == "creatures"),
-    );
-    assert!(
-        !has_unimpl_coerce,
-        "coerce clause must not be Unimplemented"
-    );
+    // Paired positive reach-guard: the `ActivePlayer` controller assertion immediately
+    // above proves the coerce clause produced a real typed effect. The negative is keyed
+    // on the CLAUSE a gap would record, not on the gap's name — a name compare against
+    // the clause's old first word can never be true once gaps are named by verdict.
+    const COERCE_PHRASE: &str = "active player controls attack this turn if able";
+    let has_unimpl_coerce = p.abilities.iter().any(|a| {
+        a.effect
+            .unimplemented_description()
+            .is_some_and(|d| d.to_lowercase().contains(COERCE_PHRASE))
+    });
+    assert!(!has_unimpl_coerce, "coerce clause must not be a gap node");
 }
 
 // Sibling: "creatures you control attack this turn if able" still → controller:You.

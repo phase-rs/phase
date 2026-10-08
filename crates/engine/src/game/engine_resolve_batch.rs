@@ -526,11 +526,9 @@ pub fn recover_orphaned_resolve_all(_: &mut GameState) -> Option<ResolveAllFastF
 /// stack entry.
 pub fn resume_restored_stack_automation(state: &mut GameState) -> RestoredStackAutomationResume {
     let result = match classify_restored_stack_automation(state) {
-        RestoredStackAutomation::None => RestoredStackAutomationResult::Noop(ActionResult {
-            events: Vec::new(),
-            waiting_for: state.waiting_for.clone(),
-            log_entries: Vec::new(),
-        }),
+        RestoredStackAutomation::None => RestoredStackAutomationResult::Noop(
+            ActionResult::applied(Vec::new(), state.waiting_for.clone()),
+        ),
         RestoredStackAutomation::ActiveSession => {
             RestoredStackAutomationResult::Progressed(resume_stack_resolution_session_runner(state))
         }
@@ -668,11 +666,7 @@ fn repair_restored_stack_automation(state: &mut GameState) -> ActionResult {
     bump_state_revision(state);
     finalize_display_state(state);
     interaction::ensure_interaction_authority(state);
-    ActionResult {
-        events: Vec::new(),
-        waiting_for: state.waiting_for.clone(),
-        log_entries: Vec::new(),
-    }
+    ActionResult::applied(Vec::new(), state.waiting_for.clone())
 }
 
 fn restore_ordinary_priority_after_stack_automation_repair(state: &mut GameState) {

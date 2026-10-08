@@ -90,6 +90,7 @@ function view(overrides: Partial<DraftPlayerView> = {}): DraftPlayerView {
     status: "Drafting",
     kind: "Premier",
     launch_capability: "None",
+    distribution: "PickAndPass",
     commanders_required: 0,
     current_pack_number: 0,
     pick_number: 0,

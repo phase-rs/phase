@@ -43,7 +43,7 @@ const GIDEONS_SACRIFICE_TEXT: &str = "Choose a creature or planeswalker you cont
 ///
 /// REVERT GUARDS — each assertion names the axis it pins:
 /// * `protector.damage_marked == 3` after event 1 → the parser production and
-///   the `ChosenObjectTarget` recipient reading the parent's bound target. With
+///   the `ChosenTarget` recipient reading the parent's bound target. With
 ///   the clause back to `Effect::Unimplemented`, no shield exists at all and P0
 ///   simply loses 3 life.
 /// * `bystander.damage_marked == 0` / `protector == 7` after event 2 → BOTH the

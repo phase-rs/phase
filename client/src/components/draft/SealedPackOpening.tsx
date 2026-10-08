@@ -13,18 +13,19 @@ interface SealedPackOpeningProps {
   onComplete: () => void;
 }
 
-function PullCard({ card, index }: { card: DraftCardInstance; index: number }) {
+function PullCard({ card, index, delay }: { card: DraftCardInstance; index: number; delay?: number }) {
   const { src, isLoading, rungs, advanceFailedSource } = useCardImage(card.name, {
     size: "normal",
     sourcePrinting: { setCode: card.set_code, collectorNumber: card.collector_number },
   });
   const reduceMotion = useReducedMotion();
+  const resolvedDelay = delay ?? index * 0.045;
 
   return (
     <motion.div
       initial={reduceMotion ? false : { opacity: 0, y: 26, rotate: index % 2 ? 2 : -2 }}
       animate={{ opacity: 1, y: 0, rotate: 0 }}
-      transition={{ delay: reduceMotion ? 0 : index * 0.045, type: "spring", stiffness: 230, damping: 22 }}
+      transition={{ delay: reduceMotion ? 0 : resolvedDelay, type: "spring", stiffness: 230, damping: 22 }}
       className="relative overflow-hidden rounded-[14px] ring-1 ring-white/10"
     >
       {isLoading || !src ? (
@@ -127,6 +128,53 @@ function OpenedPack({ cards, packNumber, packCount, onNext }: {
   );
 }
 
+function OpenedAllPacks({ packs, startPackNumber, packCount, onFinish }: {
+  packs: DraftCardInstance[][];
+  startPackNumber: number;
+  packCount: number;
+  onFinish: () => void;
+}) {
+  const { t } = useTranslation("draft");
+  let cardIndex = 0;
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      className="flex flex-col gap-8"
+    >
+      <div className="text-center">
+        <h2 className="menu-display text-2xl text-white">{t("sealedOpening.pulls")}</h2>
+      </div>
+      {packs.map((cards, packOffset) => {
+        const packNumber = startPackNumber + packOffset;
+        return (
+          <section key={packNumber} className="flex flex-col gap-3">
+            <div className="flex flex-wrap items-end justify-between gap-3">
+              <p className="text-sm font-medium uppercase tracking-[0.18em] text-white/50">
+                {t("sealedOpening.packProgress", { current: packNumber, total: packCount })}
+              </p>
+              <span className="text-sm text-white/45">{t("pack.cardsInPack", { count: cards.length })}</span>
+            </div>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-7">
+              {cards.map((card) => {
+                const delay = packOffset * 0.12 + (cardIndex % cards.length) * 0.02;
+                cardIndex += 1;
+                return <PullCard key={card.instance_id} card={card} index={cardIndex} delay={delay} />;
+              })}
+            </div>
+          </section>
+        );
+      })}
+      <div className="flex justify-center pt-2">
+        <button type="button" onClick={onFinish} className={menuButtonClass({ tone: "emerald", size: "lg" })}>
+          {t("sealedOpening.viewPool")}
+        </button>
+      </div>
+    </motion.div>
+  );
+}
+
 function SealedPoolReview({ groups, poolSize, onComplete }: {
   groups: DraftPoolGroup[];
   poolSize: number;
@@ -174,6 +222,7 @@ export function SealedPackOpening({ view, onComplete }: SealedPackOpeningProps) 
   const packs = view.sealed_packs ?? [];
   const [packIndex, setPackIndex] = useState(0);
   const [opened, setOpened] = useState(false);
+  const [openAllMode, setOpenAllMode] = useState(false);
 
   useEffect(() => {
     setOpened(false);
@@ -184,15 +233,30 @@ export function SealedPackOpening({ view, onComplete }: SealedPackOpeningProps) 
   const packNumber = packIndex + 1;
   const showReview = packIndex >= packs.length;
   const advance = () => setPackIndex((current) => current + 1);
+  const finishOpeningAll = () => {
+    setOpenAllMode(false);
+    setPackIndex(packs.length);
+  };
 
   return (
     <div className="mx-auto w-full max-w-6xl py-4" aria-live="polite">
       {!showReview && (
-        <div className="mb-5 text-center">
-          <h1 className="menu-display text-3xl text-white">{t("sealedOpening.title")}</h1>
-          <p className="mt-2 text-sm text-white/50">
-            {t("sealedOpening.subtitle", { count: view.pack_count })}
-          </p>
+        <div className="mb-5 flex flex-col items-center gap-3 text-center">
+          <div>
+            <h1 className="menu-display text-3xl text-white">{t("sealedOpening.title")}</h1>
+            <p className="mt-2 text-sm text-white/50">
+              {t("sealedOpening.subtitle", { count: view.pack_count })}
+            </p>
+          </div>
+          {!openAllMode && !opened && packIndex < packs.length && (
+            <button
+              type="button"
+              onClick={() => setOpenAllMode(true)}
+              className={menuButtonClass({ tone: "slate", size: "sm" })}
+            >
+              {t("sealedOpening.openAllPacks")}
+            </button>
+          )}
         </div>
       )}
       <AnimatePresence mode="wait">
@@ -202,6 +266,14 @@ export function SealedPackOpening({ view, onComplete }: SealedPackOpeningProps) 
             groups={view.pool_groups.type_groups}
             poolSize={view.pool.length}
             onComplete={onComplete}
+          />
+        ) : openAllMode ? (
+          <OpenedAllPacks
+            key="opened-all"
+            packs={packs.slice(packIndex)}
+            startPackNumber={packNumber}
+            packCount={packs.length}
+            onFinish={finishOpeningAll}
           />
         ) : opened ? (
           <OpenedPack

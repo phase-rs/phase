@@ -127,7 +127,7 @@ export function CardImage({
         // overlay badges below stay on screen: an artless card must not also
         // lose its unimplemented-mechanics warning.
         <CardArtFallback
-          name={cardName}
+          name={fallbackData?.name ?? cardName}
           oracleText={resolvedOracleText}
           className={baseClasses}
           style={borderStyle ?? { border: "1px solid #4b5563" }}

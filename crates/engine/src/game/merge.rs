@@ -161,7 +161,7 @@ pub fn merge_object_onto(
     // base values rather than the prior merged form.
     remove_merge_layer_effect(state, target_id);
 
-    let Some((values, display_source, printed_ref, token_image_ref)) =
+    let Some((values, display_source, printed_ref, token_image_ref, token_art)) =
         merged_copiable_values(state, &ordered, topmost_id)
     else {
         return;
@@ -202,6 +202,7 @@ pub fn merge_object_onto(
         display_source,
         printed_ref,
         token_image_ref,
+        token_art,
     );
 
     // CR 702.140c-d: the mutation is observable. NO ETB (CR 730.2b/c).
@@ -215,6 +216,7 @@ pub fn merge_object_onto(
 /// CR 730.2a + CR 702.140e: Build the copiable values for a merged permanent:
 /// the topmost component's copiable characteristics, with the ability sets
 /// replaced by the union of every component's intrinsic abilities.
+#[allow(clippy::type_complexity)]
 fn merged_copiable_values(
     state: &GameState,
     ordered: &[ObjectId],
@@ -224,6 +226,7 @@ fn merged_copiable_values(
     crate::game::game_object::DisplaySource,
     Option<crate::types::card::PrintedCardRef>,
     Option<crate::types::card::TokenImageRef>,
+    Option<crate::types::card::TokenArtDescriptor>,
 )> {
     let topmost = state.objects.get(&topmost_id)?;
     let printed_ref = topmost
@@ -235,10 +238,12 @@ fn merged_copiable_values(
     // the token's `display_source`/`token_image_ref`, not just `printed_ref`).
     let display_source = topmost.display_source;
     let token_image_ref = topmost.token_image_ref.clone();
+    let token_art = topmost.token_art.clone();
     let mut values = crate::game::layers::compute_current_copiable_values(state, topmost_id)
         .unwrap_or_else(|| intrinsic_copiable_values(topmost));
     let mut abilities = Vec::new();
     let mut triggers = Vec::new();
+    let mut trigger_printed_origins = Vec::new();
     let mut statics = Vec::new();
     let mut replacements = Vec::new();
     let mut keywords: Vec<crate::types::keywords::Keyword> = Vec::new();
@@ -273,6 +278,11 @@ fn merged_copiable_values(
         );
         abilities.extend(abil.iter().cloned());
         triggers.extend(trig.iter().cloned());
+        trigger_printed_origins.extend(
+            crate::game::printed_cards::base_trigger_printed_origins(obj)
+                .iter()
+                .cloned(),
+        );
         statics.extend(stat.iter().cloned());
         // CR 707.2 / CR 611.2b: merged copiable values are printed/defining
         // characteristics, not runtime locks or target-bound die-exile riders
@@ -294,10 +304,17 @@ fn merged_copiable_values(
 
     values.abilities = Arc::new(abilities);
     values.trigger_definitions = Arc::new(triggers);
+    values.trigger_printed_origins = Arc::new(trigger_printed_origins);
     values.static_definitions = Arc::new(statics);
     values.replacement_definitions = Arc::new(replacements);
     values.keywords = keywords;
-    Some((values, display_source, printed_ref, token_image_ref))
+    Some((
+        values,
+        display_source,
+        printed_ref,
+        token_image_ref,
+        token_art,
+    ))
 }
 
 pub(crate) fn remove_merge_layer_effect(state: &mut GameState, target_id: ObjectId) {
@@ -317,6 +334,7 @@ pub(crate) fn remove_merge_layer_effect(state: &mut GameState, target_id: Object
     crate::game::layers::mark_layers_full(state);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn install_merge_layer_effect(
     state: &mut GameState,
     target_id: ObjectId,
@@ -325,6 +343,7 @@ pub(crate) fn install_merge_layer_effect(
     display_source: crate::game::game_object::DisplaySource,
     printed_ref: Option<crate::types::card::PrintedCardRef>,
     token_image_ref: Option<crate::types::card::TokenImageRef>,
+    token_art: Option<crate::types::card::TokenArtDescriptor>,
 ) {
     let effect_id = state.add_transient_continuous_effect(
         target_id,
@@ -336,11 +355,12 @@ pub(crate) fn install_merge_layer_effect(
             display_source,
             printed_ref,
             token_image_ref,
+            token_art,
         }],
         None,
     );
     if let Some(obj) = state.objects.get_mut(&target_id) {
-        obj.merge_layer_effect_id = Some(effect_id);
+        obj.merge_layer_effect_id = effect_id;
     }
     crate::game::layers::flush_layers(state);
 }
@@ -897,7 +917,7 @@ mod tests {
         // Non-topmost cloaked face-down component carries ward {2}.
         let buried = make_face_down(&mut state, player, FaceDownProfile::cloaked_2_2());
 
-        let (values, _, _, _) = merged_copiable_values(&state, &[top, buried], top).unwrap();
+        let (values, _, _, _, _) = merged_copiable_values(&state, &[top, buried], top).unwrap();
         assert!(values.keywords.contains(&Keyword::Flying)); // allow-raw-authority: merged_copiable_values snapshot struct, not a GameObject
         assert!(
             !values.keywords.contains(&ward_2()), // allow-raw-authority: merged_copiable_values snapshot struct, not a GameObject
@@ -907,7 +927,7 @@ mod tests {
         // NEGATIVE: a non-topmost FACE-UP component IS unioned.
         let buried_up = make_creature(&mut state, 2, player, "BuriedUp", 1, 1);
         state.objects.get_mut(&buried_up).unwrap().base_keywords = vec![Keyword::Trample];
-        let (values2, _, _, _) = merged_copiable_values(&state, &[top, buried_up], top).unwrap();
+        let (values2, _, _, _, _) = merged_copiable_values(&state, &[top, buried_up], top).unwrap();
         assert!(
             values2.keywords.contains(&Keyword::Trample), // allow-raw-authority: merged_copiable_values snapshot struct, not a GameObject
             "a face-up non-topmost component's keywords are unioned (CR 702.140e)"
@@ -944,7 +964,7 @@ mod tests {
         Arc::make_mut(&mut obj.base_replacement_definitions)
             .extend([die_exile.clone(), printed.clone()]);
 
-        let (values, _, _, _) = merged_copiable_values(&state, &[top, marked], top).unwrap();
+        let (values, _, _, _, _) = merged_copiable_values(&state, &[top, marked], top).unwrap();
         assert!(
             !values.replacement_definitions.contains(&die_exile),
             "CR 707.2: merge/mutate must not copy a target-bound turn-long die-exile rider"

@@ -663,6 +663,7 @@ fn exile_return_occurs_before_a_pending_resolution_choice() {
     move_to_zone(state, source_id, Zone::Graveyard, &mut events);
     state.waiting_for = WaitingFor::OptionalEffectChoice {
         player: PlayerId(0),
+        decision_subject_id: None,
         source_id,
         description: Some("Search your library for a land card".to_string()),
         may_trigger_key: None,

@@ -19,7 +19,64 @@ const validWorkspace = {
   virtualBasics: [{ instanceId: "basic-1", name: "Island" }],
 };
 
-const validDraftView = { launch_capability: "None" as const, commanders_required: 0 };
+// v30 requires `distribution`: the draft protocol is compared for EXACT
+// equality at the handshake, so a peer that omits it is malformed, not old.
+/** A well-formed shared-stack projection: every nested v30 shape, populated. */
+const validSharedStack = {
+  main_stack_remaining: 11,
+  total_cards: 20,
+  active_seat: 1,
+  active_pile: 0,
+  // THREE piles, because the fully-populated positive declares
+  // `pile_count: 3`: the boundary now requires the declared count and the
+  // published vector to agree, and a fixture that contradicted itself was the
+  // first thing that check caught.
+  piles: [
+    {
+      index: 0,
+      total: 2,
+      revealed: [{ instance_id: "card-1", name: "Ponder" }],
+      legality: [
+        { decision: "Take", refusal: null },
+        { decision: "Decline", refusal: "NoGuaranteedCard" },
+      ],
+    },
+    { index: 1, total: 1, revealed: [], legality: [{ decision: "Take", refusal: null }] },
+    { index: 2, total: 1, revealed: [], legality: [{ decision: "Take", refusal: null }] },
+  ],
+  decisions: 5,
+  history: [{ seat: 0, pile: 1, decision: "Decline", pile_size: 2 }],
+  // POPULATED, so the paired positive carries a real card down the forced-draw
+  // path. With `null` here no positive frame ever exercised it, and a check that
+  // wrongly rejected every drawing seat's frame would have passed.
+  forced_draw: { instance_id: "drawn-1", name: "Brainstorm" },
+};
+
+/** A frame that DECLARES a shared stack, so a `shared_stack` override in the
+ *  table below reaches the rule it names instead of being refused for pairing a
+ *  stack with a distribution that deals no piles. `pile_count` matches
+ *  `validSharedStack`'s three piles. */
+const winstonSeat = (seat_index: number) => ({
+  seat_index,
+  active_pack_count: 0,
+  drafted_card_count: 0,
+  pick_status: "Pending",
+});
+const validWinstonView = {
+  launch_capability: "None" as const,
+  commanders_required: 0,
+  distribution: { SharedStackPiles: { pile_count: 3 } },
+  // TWO SEATS, because the shared-stack references are validated against how
+  // many this frame carries -- `active_seat`, every history `seat`, and
+  // `play_first_chooser`. A frame with no seats would refuse them all.
+  seats: [winstonSeat(0), winstonSeat(1)],
+};
+
+const validDraftView = {
+  launch_capability: "None" as const,
+  commanders_required: 0,
+  distribution: "PickAndPass" as const,
+};
 
 /** A well-formed `DraftCommanderLaunch`, rebuilt per case so mutations cannot leak. */
 const commanderLaunch = () => ({
@@ -55,8 +112,8 @@ describe("draftProtocol", () => {
   });
 
   describe("DRAFT_PROTOCOL_VERSION", () => {
-    it("is version 28", () => {
-      expect(DRAFT_PROTOCOL_VERSION).toBe(28);
+    it("is version 30", () => {
+      expect(DRAFT_PROTOCOL_VERSION).toBe(30);
     });
   });
 
@@ -390,6 +447,56 @@ describe("draftProtocol", () => {
       );
     });
 
+    // ── draft_pile_decision: the shared-stack turn's wire bound ───────
+    //
+    // A TRANSPORT bound, not a legality check. `validatePileDecision` cannot
+    // see a session, so the only refusals owed here are the ones a payload
+    // alone can earn: a pile index outside the mirrored `MAX_SHARED_STACK_PILES`
+    // ceiling, and a decision outside the two the axis defines. Whether the
+    // named pile is the cursor, and whether this seat may decide at all, is
+    // `shared_stack::refusal_for`'s answer inside the engine.
+
+    it.each([
+      ["Take", 0],
+      ["Decline", 0],
+      ["Take", 2],
+      ["Decline", 2],
+    ] as const)("accepts a %s on pile %i", (decision, pile) => {
+      expect(validateDraftMessage({ type: "draft_pile_decision", pile, decision })).toEqual({
+        type: "draft_pile_decision",
+        pile,
+        decision,
+      });
+    });
+
+    it.each([
+      { pile: 3, decision: "Take" },
+      { pile: 255, decision: "Take" },
+      { pile: -1, decision: "Decline" },
+      { pile: 1.5, decision: "Take" },
+      { pile: "0", decision: "Take" },
+      { pile: undefined, decision: "Take" },
+      { pile: null, decision: "Take" },
+      { pile: Number.NaN, decision: "Take" },
+    ])("rejects an out-of-range pile index", (payload) => {
+      expect(() => validateDraftMessage({ type: "draft_pile_decision", ...payload })).toThrow(
+        "Invalid pile decision: pile must be an integer",
+      );
+    });
+
+    it.each([
+      { pile: 0, decision: "take" },
+      { pile: 0, decision: "Pass" },
+      { pile: 0, decision: "" },
+      { pile: 0, decision: 1 },
+      { pile: 0, decision: undefined },
+      { pile: 0, decision: ["Take"] },
+    ])("rejects a decision outside the two-member axis", (payload) => {
+      expect(() => validateDraftMessage({ type: "draft_pile_decision", ...payload })).toThrow(
+        "Invalid pile decision: decision must be one of",
+      );
+    });
+
     // ── draft_submit_deck: the CR 903.3 designation's wire bound ──────
     //
     // This suite is the ONLY one in client/src that runs
@@ -557,6 +664,248 @@ describe("draftProtocol", () => {
       },
     );
 
+    /**
+     * THE v30 FIELDS USED TO CROSS THE BOUNDARY ON A CAST.
+     *
+     * `normalizeDraftPlayerView` validated a handful of named fields and then
+     * spread the rest of the frame through `as unknown as DraftPlayerView`. A
+     * cast is not a check: `distribution`, `shared_stack` and
+     * `play_first_chooser` arrived with their declared TypeScript shape and none
+     * of their content, straight into the store and the renderer.
+     *
+     * The rows below are the malformed and unknown NESTED values specifically --
+     * a bad tag, an unknown enum member several levels down, a frame that
+     * contradicts itself -- because the outer field being an object was the part
+     * the old code effectively did check by accident.
+     */
+    it.each([
+      ["an unknown distribution name", { distribution: "RochesterDraft" }],
+      ["a distribution that is not a string or object", { distribution: 3 }],
+      ["a tagged distribution with an unknown variant", { distribution: { GridDraft: {} } }],
+      ["a tagged distribution carrying a second key", {
+        distribution: { SharedStackPiles: { pile_count: 3 }, AllAtOnce: {} },
+      }],
+      ["a pile count past a u8", {
+        distribution: { SharedStackPiles: { pile_count: 256 } },
+      }],
+      ["a negative pile count", {
+        distribution: { SharedStackPiles: { pile_count: -1 } },
+      }],
+    ])("rejects %s at protocol v30", (_label, overrides) => {
+      expect(() => validateDraftMessage({
+        type: "draft_state_update",
+        view: { ...validDraftView, ...overrides },
+      })).toThrow(/Invalid draft message/);
+    });
+
+    it.each([
+      ["a shared stack that is not an object", { shared_stack: 7 }],
+      ["shared-stack piles that are not an array", {
+        shared_stack: { ...validSharedStack, piles: {} },
+      }],
+      ["a negative seat index", {
+        shared_stack: { ...validSharedStack, active_seat: -1 },
+      }],
+      ["an unknown decision in a pile's legality", {
+        distribution: { SharedStackPiles: { pile_count: 1 } },
+        shared_stack: {
+          ...validSharedStack,
+          history: [],
+          piles: [{ index: 0, total: 1, revealed: [], legality: [{ decision: "Burn", refusal: null }] }],
+        },
+      }],
+      ["an unknown refusal in a pile's legality", {
+        distribution: { SharedStackPiles: { pile_count: 1 } },
+        shared_stack: {
+          ...validSharedStack,
+          history: [],
+          piles: [{
+            index: 0,
+            total: 1,
+            revealed: [],
+            legality: [{ decision: "Take", refusal: "NotYourTurn" }],
+          }],
+        },
+      }],
+      ["a revealed prefix longer than the pile it belongs to", {
+        distribution: { SharedStackPiles: { pile_count: 1 } },
+        shared_stack: {
+          ...validSharedStack,
+          history: [],
+          piles: [{
+            index: 0,
+            total: 1,
+            // Well-formed CARDS, so the length check is what fires here rather
+            // than the card-shape check catching it first for another reason.
+            revealed: [
+              { instance_id: "a", name: "Ponder" },
+              { instance_id: "b", name: "Opt" },
+            ],
+            legality: [],
+          }],
+        },
+      }],
+      ["a revealed card with no instance id", {
+        distribution: { SharedStackPiles: { pile_count: 1 } },
+        shared_stack: {
+          ...validSharedStack,
+          history: [],
+          piles: [{ index: 0, total: 1, revealed: [{ name: "Ponder" }], legality: [] }],
+        },
+      }],
+      // An OBJECT missing `instance_id`, not a string: a string was already
+      // refused by the old "is it an object" check, so that row pinned nothing
+      // the card validation added.
+      // The schema the reducer could never have produced. Each of these looks
+      // locally plausible and is refused on a rule the engine states elsewhere.
+      ["a zero pile count, which `piles_needed` refuses outright", {
+        distribution: { SharedStackPiles: { pile_count: 0 } },
+      }],
+      ["a declared pile count that disagrees with the published piles", {
+        distribution: { SharedStackPiles: { pile_count: 2 } },
+        shared_stack: validSharedStack,
+      }],
+      // THE COUNTEREXAMPLES THE INTEGER BOUND ADMITTED. Every value below fits
+      // a u8 comfortably; what makes each impossible is this frame's own
+      // cardinality -- two seats and three piles.
+      ["an active seat past the frame's seat count", {
+        shared_stack: { ...validSharedStack, active_seat: 2 },
+      }],
+      ["an active pile past the declared pile count", {
+        shared_stack: { ...validSharedStack, active_pile: 3 },
+      }],
+      ["a decision counter past a u32", {
+        shared_stack: { ...validSharedStack, decisions: 4294967296 },
+      }],
+      ["a history record addressing a seat the frame does not have", {
+        shared_stack: {
+          ...validSharedStack,
+          history: [{ seat: 2, pile: 0, decision: "Decline", pile_size: 2 }],
+        },
+      }],
+      ["a history record addressing a pile the frame does not have", {
+        shared_stack: {
+          ...validSharedStack,
+          history: [{ seat: 0, pile: 3, decision: "Decline", pile_size: 2 }],
+        },
+      }],
+      ["a play-first chooser past the frame's seat count", { play_first_chooser: 2 }],
+      // `seat_index` is the address the CLIENT resolves seats through -- whose
+      // turn it is, the React key, the local-seat test, the kick target. Two
+      // seats sharing one makes them answer to the same address, which is the
+      // defect the pile-index rule refuses and this one closes for seats.
+      ["duplicate seat indices, which would make two seats share an address", {
+        seats: [winstonSeat(0), { ...winstonSeat(1), seat_index: 0 }],
+      }],
+      ["a seat index that is not its own position", {
+        seats: [winstonSeat(1), winstonSeat(0)],
+      }],
+      // The seat count is the authority for seat references, and it carries no
+      // ceiling of its own -- so the `u8` bound has to survive alongside it. A
+      // frame publishing 300 seats must still not name seat 280: the engine's
+      // `active_seat` is a `u8` and could never hold it.
+      ["a seat reference past a u8, however many seats the frame publishes", {
+        seats: Array.from({ length: 300 }, (_, i) => winstonSeat(i)),
+        shared_stack: { ...validSharedStack, active_seat: 280 },
+      }],
+      ["a pile index that is not its own position", {
+        distribution: { SharedStackPiles: { pile_count: 1 } },
+        shared_stack: {
+          ...validSharedStack,
+          history: [],
+          piles: [{ index: 1, total: 1, revealed: [], legality: [] }],
+        },
+      }],
+      ["duplicate pile indices, which would make two piles share an address", {
+        distribution: { SharedStackPiles: { pile_count: 2 } },
+        shared_stack: {
+          ...validSharedStack,
+          history: [],
+          piles: [
+            { index: 0, total: 1, revealed: [], legality: [] },
+            { index: 0, total: 1, revealed: [], legality: [] },
+          ],
+        },
+      }],
+      ["a forced draw with no instance id", {
+        shared_stack: { ...validSharedStack, forced_draw: { name: "Ponder" } },
+      }],
+      ["a forced draw whose name is not a string", {
+        shared_stack: {
+          ...validSharedStack,
+          forced_draw: { instance_id: "drawn-1", name: 7 },
+        },
+      }],
+      ["an unknown decision in the public history", {
+        shared_stack: {
+          ...validSharedStack,
+          history: [{ seat: 0, pile: 0, decision: "Shuffle", pile_size: 2 }],
+        },
+      }],
+      ["a play-first chooser that is not a seat index", { play_first_chooser: "seat-1" }],
+      ["a fractional play-first chooser", { play_first_chooser: 1.5 }],
+      // A live pile turn beside a distribution that deals no piles. This is the
+      // frame that used to SKIP every shared-stack rule while still rendering
+      // the pile table, because the client keys that surface on
+      // `view.shared_stack` alone.
+      ["a shared stack beside a distribution that deals no piles", {
+        distribution: "PickAndPass",
+        shared_stack: validSharedStack,
+      }],
+    ])("rejects %s at protocol v30", (_label, overrides) => {
+      expect(() => validateDraftMessage({
+        type: "draft_state_update",
+        view: { ...validWinstonView, ...overrides },
+      })).toThrow(/Invalid draft message/);
+    });
+
+    /**
+     * REQUIRED, and pinned ON THE REQUIREMENT.
+     *
+     * `history` and `forced_draw` carry no `skip_serializing_if` in
+     * `draft-core::view`, so every real frame has both — `forced_draw` as
+     * `null` when the viewer drew nothing. Defaulting them on absence turned a
+     * truncated frame into a plausible one: a missing history read as "no
+     * decisions yet".
+     *
+     * These assert the SPECIFIC message rather than "some refusal", because
+     * both absences are also caught a line or two later by adjacent narrowings
+     * — the array check for `history`, and `undefined` reaching the card
+     * validator for `forced_draw`. A row matching only `/Invalid draft message/`
+     * therefore stayed green with the requirement deleted, which is exactly how
+     * this was measured to be pinning nothing.
+     */
+    it.each([
+      ["history", (({ history: _h, ...rest }) => rest)(validSharedStack)],
+      ["forced_draw", (({ forced_draw: _f, ...rest }) => rest)(validSharedStack)],
+    ])("rejects a shared stack with no %s, naming it as required", (field, shared_stack) => {
+      expect(() => validateDraftMessage({
+        type: "draft_state_update",
+        view: { ...validWinstonView, shared_stack },
+      })).toThrow(`shared_stack.${field} is required`);
+    });
+
+    /**
+     * The paired positive, and the reason the rows above discriminate: a
+     * well-formed shared-stack frame with every nested shape populated must
+     * still pass. Without this, a normalizer that rejected EVERYTHING would
+     * satisfy all of them.
+     */
+    it("accepts a fully populated shared-stack frame at protocol v30", () => {
+      const msg = validateDraftMessage({
+        type: "draft_state_update",
+        view: {
+          // The shared-stack base, so the frame carries the seats its own
+          // references are checked against -- and a POPULATED chooser, since a
+          // `null` one never exercises the seat-count bound at all.
+          ...validWinstonView,
+          shared_stack: validSharedStack,
+          play_first_chooser: 1,
+        },
+      });
+      expect(msg.type).toBe("draft_state_update");
+    });
+
     it.each([undefined, null, -1, 0.5, 256, "1"])(
       "rejects a missing or invalid commander count at protocol v26",
       (commanders_required) => {
@@ -663,7 +1012,7 @@ describe("draftProtocol", () => {
         type: "draft_state_update",
         view: {
           ...validDraftView,
-          seats: [{ seat_index: 1, display_name: "Alex", active_pack_count: 1 }],
+          seats: [{ seat_index: 0, display_name: "Alex", pick_status: "Pending", active_pack_count: 1, drafted_card_count: 7 }],
         },
       });
 
@@ -716,6 +1065,21 @@ describe("draftProtocol", () => {
       }
     });
 
+    it("drops the former cube source field from an incoming participant view", () => {
+      const msg = validateDraftMessage({
+        type: "draft_state_update",
+        view: {
+          ...validDraftView,
+          booster_pack_pool: ["Undealt cube entry"],
+        },
+      });
+
+      expect(msg.type).toBe("draft_state_update");
+      if (msg.type === "draft_state_update") {
+        expect("booster_pack_pool" in msg.view).toBe(false);
+      }
+    });
+
     it.each([undefined, null, "1", 0.5, -1, 2])(
       "rejects invalid active-pack presence %j",
       (activePackCount) => {
@@ -723,7 +1087,7 @@ describe("draftProtocol", () => {
           type: "draft_state_update",
           view: {
             ...validDraftView,
-            seats: [{ active_pack_count: activePackCount }],
+            seats: [{ seat_index: 0, pick_status: "Pending", active_pack_count: activePackCount, drafted_card_count: 0 }],
           },
         })).toThrow("active_pack_count must be an integer 0 or 1");
       },
@@ -732,19 +1096,44 @@ describe("draftProtocol", () => {
     it.each([0, 1])("accepts active-pack presence %i", (activePackCount) => {
       const msg = validateDraftMessage({
         type: "draft_lobby_update",
-        seats: [{ active_pack_count: activePackCount }],
+        seats: [{ seat_index: 0, pick_status: "Pending", active_pack_count: activePackCount, drafted_card_count: 0 }],
       });
 
       expect(msg).toMatchObject({
-        seats: [{ active_pack_count: activePackCount }],
+        seats: [{ seat_index: 0, pick_status: "Pending", active_pack_count: activePackCount, drafted_card_count: 0 }],
       });
     });
 
     it("requires active-pack presence in lobby seats", () => {
       expect(() => validateDraftMessage({
         type: "draft_lobby_update",
-        seats: [{}],
+        // A valid `seat_index`, so this row reaches the rule it names rather
+        // than the positional check that now runs first.
+        seats: [{ seat_index: 0 }],
       })).toThrow("active_pack_count must be an integer 0 or 1");
+    });
+
+    it.each([undefined, null, "3", 1.5, -1])(
+      "rejects a drafted-card count that is not a whole number of cards %j",
+      (draftedCardCount) => {
+        expect(() => validateDraftMessage({
+          type: "draft_lobby_update",
+          seats: [{ seat_index: 0, pick_status: "Pending", active_pack_count: 0, drafted_card_count: draftedCardCount }],
+        })).toThrow("drafted_card_count must be a non-negative integer");
+      },
+    );
+
+    it("accepts a drafted-card count with no upper bound", () => {
+      // Deliberately larger than any booster product this client ships with: a
+      // shared-stack cube pod's per-seat total follows the host's own
+      // `cards_per_pack`, so a ceiling written here would be a second and wrong
+      // authority on how many cards a pool can hold.
+      const msg = validateDraftMessage({
+        type: "draft_lobby_update",
+        seats: [{ seat_index: 0, pick_status: "Pending", active_pack_count: 0, drafted_card_count: 4096 }],
+      });
+
+      expect(msg).toMatchObject({ seats: [{ drafted_card_count: 4096 }] });
     });
 
     it.each([null, {}])("rejects present non-array draft_effects values", (draftEffects) => {
@@ -767,7 +1156,7 @@ describe("draftProtocol", () => {
         view: {
           ...validDraftView,
           draft_effects: [],
-          seats: [{ active_pack_count: 0, face_up_draft_cards: faceUpCards }],
+          seats: [{ seat_index: 0, pick_status: "Pending", active_pack_count: 0, drafted_card_count: 0, face_up_draft_cards: faceUpCards }],
         },
       })).toThrow("face_up_draft_cards must be an array");
     });
@@ -928,6 +1317,7 @@ describe("draftProtocol", () => {
         },
         draft_reconnect_rejected: { kind: "NoReconnectWindow", reason: "No grace window" },
         draft_deck_submit_ack: { submissionId: "submission-1", view: validDraftView },
+        draft_match_start: { launch: { type: "Bot", deckPayload: {} } },
         draft_commander_launch: { launch: commanderLaunch() },
       };
       const msg = validateDraftMessage(
@@ -1020,6 +1410,7 @@ describe("draftProtocol", () => {
       const longView = {
         launch_capability: "None" as const,
         commanders_required: 0,
+        distribution: "PickAndPass" as const,
         status: "Deckbuilding",
         kind: "Sealed",
         current_pack_number: 1,
@@ -1203,7 +1594,14 @@ describe("draftProtocol", () => {
       }
     });
 
-    it("round-trips a deck-carrying draft match start message", async () => {
+    it.each([
+      { pool: ["Cube A", "Cube A", "Undealt sentinel"] },
+      { pool: [] },
+      // A guest-authority launch names no source: the host sends an explicit null.
+      { pool: null },
+      { pool: undefined },
+    ])(
+      "round-trips a deck-carrying draft match start message: $pool", async ({ pool }) => {
       const deck = {
         main_deck: ["Island"],
         sideboard: [],
@@ -1222,6 +1620,7 @@ describe("draftProtocol", () => {
             player: deck,
             opponent: { main_deck: ["Mountain"], sideboard: [], commander: [] },
             ai_decks: [],
+            booster_pack_pool: pool,
           },
           matchConfig: { match_type: "Bo1" },
           binding: {

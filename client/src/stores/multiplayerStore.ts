@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import i18n from "i18next";
 
 import type { PlayerAvatarIdentity } from "../services/playerAvatars.ts";
 
@@ -15,6 +16,7 @@ import type {
   PlayerId,
   PodOutcome,
   TournamentCreatedReply,
+  TournamentCredentialRole,
   TournamentJoinedReply,
   TournamentSummary,
   TournamentUpdateReply,
@@ -26,6 +28,7 @@ import { AI_DIFFICULTIES } from "../constants/ai";
 import { FORMAT_REGISTRY } from "../data/formatRegistry";
 import {
   MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE,
+  MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION,
   serverProtocolRejection,
   type ServerInfo,
 } from "../adapter/ws-adapter";
@@ -33,8 +36,11 @@ import {
   clearWsSession,
   loadWsSession,
   saveWsSession,
+  type WsSessionData,
 } from "../services/multiplayerSession";
 import {
+  BrokerRequestError,
+  LobbyCapabilityError,
   lookupJoinTargetOver,
   openBrokerClient,
   resolveGuestOver,
@@ -52,6 +58,7 @@ import {
   getTournamentOver,
   joinTournamentOver,
   matchTypeNeedsCapability,
+  renewTournamentCredentialOver,
   reportMatchResultOver,
   startTournamentRoundOver,
   subscribeTournamentsOver,
@@ -102,6 +109,7 @@ import type { DirectorySource } from "../services/serverDirectory";
 import { reportConnectOutcome } from "../services/serverMetrics";
 import {
   DEFAULT_MULTIPLAYER_SERVER_URL,
+  OFFICIAL_MULTIPLAYER_SERVER_URL,
   isOfficialMultiplayerServerUrl,
 } from "../config/multiplayerServer";
 import { saveActiveGame, useGameStore } from "./gameStore";
@@ -149,9 +157,15 @@ let hostPingStop: (() => void) | null = null;
 // navigations so the lobby entry stays alive while the tile is showing.
 let activeBroker: BrokerClient | null = null;
 let activeBrokerGameCode: string | null = null;
+// Only the latest `openBroker` call may publish its broker.
+let brokerOpenAttempt = 0;
 let activeP2PHostAdapter: P2PHostAdapter | null = null;
 let activeP2PHostGameId: string | null = null;
 let p2pHostingAttempt = 0;
+// A server-host dial acts after its socket opens only while it is the latest.
+let serverHostAttempt = 0;
+// A host socket acts only while no `GameStarted` has handed the page off since it was dialed.
+let hostHandoffs = 0;
 
 function asDeckPayload(deck: HostingDeck): {
   main_deck: string[];
@@ -592,6 +606,17 @@ function closeChannel(set: MultiplayerSet, get: MultiplayerGet, url: string): vo
   if (status.delete(url)) set({ sourceStatus: status });
 }
 
+/** Show the shared toast for a `registerHost` refusal from
+ * {@link LobbyCapabilityError}. A no-op for any other rejection. */
+function toastLobbyCapabilityRefusal(get: MultiplayerGet, err: unknown): void {
+  if (!(err instanceof LobbyCapabilityError)) return;
+  get().showToast(
+    i18n.t("multiplayer:lobbyCapability.formatNeedsNewerServer", {
+      needed: err.neededLobbyVersion,
+    }),
+  );
+}
+
 function setSourceStatus(
   set: MultiplayerSet,
   get: MultiplayerGet,
@@ -993,8 +1018,13 @@ async function runTournamentRpc<T>(
   send: (
     socket: PhaseSocket,
     signal: AbortSignal,
+    origin: string,
   ) => Promise<TournamentRpcResult<T>>,
 ): Promise<TournamentRpcResult<T>> {
+  // `url` is the broker authority captured ONCE, synchronously, at entry. It is
+  // threaded to `send` as `origin` so nothing downstream re-reads the mutable
+  // `hostingServer` — a host switch during socket acquisition cannot re-bind the
+  // action or its renewal to a different broker than the one this socket is for.
   const url = tournamentBroadcastUrl(get);
   if (url === null) {
     return {
@@ -1003,7 +1033,319 @@ async function runTournamentRpc<T>(
       message: "Lobby connection unavailable. Check your server address.",
     };
   }
-  return withOriginSocket(set, get, url, send);
+  return withOriginSocket(set, get, url, (socket, signal) =>
+    send(socket, signal, url),
+  );
+}
+
+/**
+ * How long before a credential's `expires_at_ms` the client proactively rotates
+ * it. Rotation MUST be driven from the client's own stored expiry and MUST land
+ * while the credential is still valid: the broker refuses to renew an
+ * already-expired credential (rotation extends nothing that has lapsed), and its
+ * reject is a generic wire `Error` with no typed "expired" signal to react to.
+ *
+ * Sized against the broker's 7-day credential TTL (`TOURNAMENT_CREDENTIAL_TTL_MS`,
+ * `crates/lobby-broker/src/tournament.rs`): a day of headroom means a genuinely
+ * multi-day event refreshes on its organizer's next action well before the
+ * window closes, while a normal same-day event — whose credential never enters
+ * this margin — never spends a rotation round trip.
+ *
+ * Recovery does NOT depend on this margin: a lost renewal reply is recovered by
+ * retrying with the same (token, nonce), which the broker replays regardless of
+ * how long the organizer waited (see {@link maybeRenewNearExpiry}). The margin
+ * only governs WHEN a proactive rotation is attempted, not whether a lost one
+ * can be recovered.
+ */
+const TOURNAMENT_CREDENTIAL_RENEW_MARGIN_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The wire role (`crates/lobby-broker/src/tournament.rs::TournamentRole`) for a
+ * store display role. The two spellings are wire-incompatible — the broker
+ * rejects the lowercase form with a serde unknown-variant error. See
+ * {@link TournamentCredentialRole}.
+ */
+function wireRoleFor(role: TournamentRole): TournamentCredentialRole {
+  return role === "organizer" ? "Organizer" : "Player";
+}
+
+/** The stored expiry for `code`'s `role` token, or `undefined` when none is
+ *  known (a pre-v6 broker minted it, or nothing is held for that authority). */
+function tokenExpiryFor(
+  credential: TournamentCredential | undefined,
+  role: TournamentRole,
+): number | undefined {
+  return role === "organizer"
+    ? credential?.organizerTokenExpiresAtMs
+    : credential?.playerTokenExpiresAtMs;
+}
+
+/** The nonce a prior, not-yet-confirmed rotation of `code`'s `role` credential
+ *  minted, or `undefined` when none is pending. Reusing it lets a retry REPLAY
+ *  the committed secret instead of minting one the broker refuses. */
+function pendingRotationNonceFor(
+  credential: TournamentCredential | undefined,
+  role: TournamentRole,
+): string | undefined {
+  return role === "organizer"
+    ? credential?.organizerPendingRotationNonce
+    : credential?.playerPendingRotationNonce;
+}
+
+/** A fresh, unguessable rotation nonce. Unguessability is what binds recovery to
+ *  the initiator: a holder of a merely-superseded secret cannot present the
+ *  matching nonce, so it cannot replay. */
+function newRotationNonce(): string {
+  return crypto.randomUUID();
+}
+
+/** Patch that records a pending rotation nonce for `role`. */
+function pendingNoncePatch(
+  role: TournamentRole,
+  nonce: string,
+): Omit<Partial<TournamentCredential>, "updatedAt"> {
+  return role === "organizer"
+    ? { organizerPendingRotationNonce: nonce }
+    : { playerPendingRotationNonce: nonce };
+}
+
+/** Patch that adopts a freshly rotated secret + expiry for `role` and CLEARS the
+ *  pending nonce (the rotation is confirmed, so a retry must not replay it). */
+function adoptRotatedPatch(
+  role: TournamentRole,
+  token: string,
+  expiresAtMs: number,
+): Omit<Partial<TournamentCredential>, "updatedAt"> {
+  return role === "organizer"
+    ? {
+        organizerToken: token,
+        organizerTokenExpiresAtMs: expiresAtMs,
+        organizerPendingRotationNonce: undefined,
+      }
+    : {
+        playerToken: token,
+        playerTokenExpiresAtMs: expiresAtMs,
+        playerPendingRotationNonce: undefined,
+      };
+}
+
+/**
+ * Whether a credential should be proactively rotated now. Three conjuncts, each
+ * a real boundary:
+ *  - a known expiry (a pre-v6 broker minted none — nothing to rotate ahead of);
+ *  - still valid (`> now`): an already-expired credential is UNRENEWABLE, so
+ *    rotating it would only draw a refusal — leave it for the action itself;
+ *  - within `marginMs` of lapsing: outside the margin costs a needless round trip.
+ *
+ * Pure and exported so the boundaries are tested directly, without a socket.
+ */
+export function shouldRenewCredential(
+  expiresAtMs: number | undefined,
+  now: number,
+  marginMs: number = TOURNAMENT_CREDENTIAL_RENEW_MARGIN_MS,
+): boolean {
+  if (expiresAtMs === undefined) return false;
+  if (expiresAtMs <= now) return false;
+  return expiresAtMs - now <= marginMs;
+}
+
+/**
+ * Proactive credential rotation, run once before a gated action goes out. When
+ * the held `role` credential for `code` is still valid but within
+ * {@link TOURNAMENT_CREDENTIAL_RENEW_MARGIN_MS} of its expiry, this rotates it
+ * and returns the fresh secret; otherwise it returns `heldToken` untouched.
+ *
+ * **Gated on the broker's lobby protocol version.** Idempotent-replay recovery
+ * only exists at or above {@link MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION}:
+ * there, a renewal reply lost after the server commits is recovered by retrying
+ * with the SAME nonce (the broker replays the committed secret). Against an
+ * older broker there is no replay, so proactive rotation is skipped entirely —
+ * leaving the pre-rotation behavior (the credential simply lapses at its TTL)
+ * rather than risking a strand on a superseded, unreplayable secret.
+ *
+ * Recovery, not best-effort-and-forget: the rotation mints a per-attempt nonce
+ * (reusing a persisted one from a prior uncertain attempt), and on an uncertain
+ * result retries with that same nonce so a lost reply is replayed rather than
+ * re-minted. The nonce is persisted on the credential until a rotation confirms,
+ * so even a give-up-then-later-action recovers instead of minting a fresh nonce
+ * the broker would refuse against the now-superseded token. It never rotates a
+ * credential with no known expiry (nothing to rotate ahead of) or one already
+ * past expiry (the broker refuses it as unrenewable). `now` is injectable for
+ * deterministic tests.
+ *
+ * Concurrent near-expiry actions on the same authority share a single rotation
+ * (see {@link credentialRenewalsInFlight}), so two actions firing at once can
+ * never rotate twice and strand the first on a superseded secret. That sharing
+ * is scoped to the BROKER ORIGIN — an A->B host switch can never make a B action
+ * await an A renewal — and the adopted result is compare-and-swapped against the
+ * token this rotation started from, so a renewal that completes after a switch
+ * cannot clobber the credential B has since stored under the same code.
+ *
+ * Exported for direct testing of the version gate, the lost-reply recovery path
+ * (the composed failure the #8782 review asked be covered), and the concurrent-
+ * rotation dedup — none reachable through {@link shouldRenewCredential} alone.
+ */
+export async function maybeRenewNearExpiry(
+  set: MultiplayerSet,
+  get: MultiplayerGet,
+  socket: PhaseSocket,
+  origin: string,
+  code: string,
+  role: TournamentRole,
+  heldToken: string,
+  signal: AbortSignal,
+  now: number = Date.now(),
+): Promise<string> {
+  // Version gate first: without the broker's idempotent-nonce replay, a lost
+  // renewal reply cannot be recovered (a retry with a superseded token is just
+  // refused), so proactive rotation is only correct at or above the
+  // recoverable-rotation floor. An absent version predates the floor.
+  const brokerVersion = socket.serverInfo.lobbyProtocolVersion;
+  if (
+    brokerVersion === undefined ||
+    brokerVersion < MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION
+  ) {
+    return heldToken;
+  }
+
+  const expiry = tokenExpiryFor(get().tournamentCredentials[code], role);
+  if (!shouldRenewCredential(expiry, now)) return heldToken;
+
+  // Dedupe concurrent near-expiry rotations of the SAME authority. Two gated
+  // actions firing at once each capture the same held token and would otherwise
+  // BOTH rotate: the second's fresh secret supersedes the first's, so the first
+  // action proceeds with a token that is now a mismatch and fails despite a
+  // successful renewal. Sharing one in-flight renewal makes both actions settle
+  // on the same surviving secret. The entry is cleared when the renewal settles
+  // so a later, non-concurrent action starts fresh.
+  //
+  // Keyed on (BROKER ORIGIN, code, role), not just (code, role): the `origin` is
+  // the broker this RPC was bound to at entry, threaded in IMMUTABLY (not re-read
+  // from the mutable `hostingServer` here, which could have changed during socket
+  // acquisition). Without it, an action against broker B after an A→B host switch
+  // could await broker A's still-in-flight renewal and send A's bearer token to
+  // B. `JSON.stringify` of the triple is the key so no origin, code, or role can
+  // be spelled to collide with another triple (it escapes internal quotes).
+  const key = JSON.stringify([origin, code, role]);
+  const existing = credentialRenewalsInFlight.get(key);
+  if (existing !== undefined) return existing;
+
+  const inflight = performCredentialRotation(
+    set,
+    get,
+    socket,
+    code,
+    role,
+    heldToken,
+    signal,
+  );
+  credentialRenewalsInFlight.set(key, inflight);
+  try {
+    return await inflight;
+  } finally {
+    if (credentialRenewalsInFlight.get(key) === inflight) {
+      credentialRenewalsInFlight.delete(key);
+    }
+  }
+}
+
+/**
+ * In-flight proactive renewals, keyed by `${code}:${role}`. The mechanism that
+ * makes {@link maybeRenewNearExpiry} rotate at most once per authority even when
+ * several near-expiry gated actions fire concurrently. Module-level because the
+ * concurrent callers are independent action dispatches, not one shared caller.
+ */
+const credentialRenewalsInFlight = new Map<string, Promise<string>>();
+
+/**
+ * The actual rotation round trip behind {@link maybeRenewNearExpiry}, split out
+ * so the in-flight dedup there wraps exactly one call.
+ *
+ * Nonce lifecycle — the heart of recoverable-yet-safe rotation. It reuses a
+ * nonce persisted by a prior uncertain attempt (so a retry REPLAYS the committed
+ * secret rather than minting a second one) or mints a fresh one, and persists it
+ * BEFORE the attempt so a reconnect or a later action retries with the SAME
+ * nonce. On an uncertain (non-aborted) result it retries once in-call with that
+ * nonce, recovering a single lost reply within this action. On success it adopts
+ * the fresh secret and CLEARS the pending nonce; on give-up it leaves the nonce
+ * persisted and returns the held token, so the next proactive renewal recovers.
+ */
+async function performCredentialRotation(
+  set: MultiplayerSet,
+  get: MultiplayerGet,
+  socket: PhaseSocket,
+  code: string,
+  role: TournamentRole,
+  heldToken: string,
+  signal: AbortSignal,
+): Promise<string> {
+  const existingNonce = pendingRotationNonceFor(
+    get().tournamentCredentials[code],
+    role,
+  );
+  const nonce = existingNonce ?? newRotationNonce();
+  if (existingNonce === undefined) {
+    // Persist the nonce before the attempt: if this call is torn down or its
+    // reply is lost, the next attempt must reuse it to replay, not mint anew.
+    set((state) => ({
+      tournamentCredentials: rememberTournamentCredential(
+        state.tournamentCredentials,
+        code,
+        pendingNoncePatch(role, nonce),
+      ),
+    }));
+  }
+
+  let result = await renewTournamentCredentialOver(
+    socket,
+    code,
+    wireRoleFor(role),
+    heldToken,
+    nonce,
+    { signal },
+  );
+  if (!result.ok && !signal.aborted) {
+    // One in-call retry with the SAME nonce recovers a single lost reply: the
+    // broker replays if the first attempt committed, or mints if it never
+    // arrived. Skipped on abort — that is teardown, not a lost reply.
+    result = await renewTournamentCredentialOver(
+      socket,
+      code,
+      wireRoleFor(role),
+      heldToken,
+      nonce,
+      { signal },
+    );
+  }
+  if (!result.ok) {
+    // Leave the pending nonce persisted; the next proactive renewal retries with
+    // it. The held token flows through — the action may fail if it was already
+    // superseded, and that next renewal recovers.
+    return heldToken;
+  }
+
+  // Compare-and-swap before adopting: only overwrite the stored credential if it
+  // is STILL the token this rotation started from. While the renewal was in
+  // flight a host switch may have replaced the code-keyed credential with a
+  // different broker's bearer (codes are only unique per broker), or a
+  // concurrent path may have already rotated it. Adopting unconditionally would
+  // clobber that newer authority with this (possibly other-broker) secret. The
+  // returned token is still correct for THIS RPC's own socket; we simply do not
+  // persist it over a credential that is no longer the one we rotated.
+  const stillOurs =
+    role === "organizer"
+      ? get().tournamentCredentials[code]?.organizerToken === heldToken
+      : get().tournamentCredentials[code]?.playerToken === heldToken;
+  if (stillOurs) {
+    set((state) => ({
+      tournamentCredentials: rememberTournamentCredential(
+        state.tournamentCredentials,
+        code,
+        adoptRotatedPatch(role, result.value.token, result.value.expires_at_ms),
+      ),
+    }));
+  }
+  return result.value.token;
 }
 
 /**
@@ -1047,14 +1389,21 @@ async function runGatedTournamentRpc<T>(
     signal: AbortSignal,
   ) => Promise<TournamentRpcResult<T>>,
 ): Promise<GatedTournamentRpcResult<T>> {
+  // The broker authority this RPC will run against, captured synchronously here
+  // (same tick `runTournamentRpc` will re-derive its socket url from), so the
+  // credential check below and the socket acquisition agree on one origin.
+  const rpcOrigin = tournamentBroadcastUrl(get);
   const held = get().tournamentCredentials[code];
   let token: string | undefined;
+  let tokenOrigin: string | undefined;
   switch (role) {
     case "organizer":
       token = held?.organizerToken;
+      tokenOrigin = held?.organizerOrigin;
       break;
     case "player":
       token = held?.playerToken;
+      tokenOrigin = held?.playerOrigin;
       break;
   }
   if (token === undefined) {
@@ -1068,10 +1417,42 @@ async function runGatedTournamentRpc<T>(
           : "You are not entered in this tournament.",
     };
   }
+  // Origin binding, PER ROLE and FAIL-CLOSED: a bearer minted against a DIFFERENT
+  // broker must never be sent to this one (codes are only unique per broker, so
+  // an A→B host switch could otherwise send A's token to B). The role's origin
+  // must be present AND equal this RPC's origin, or nothing goes on the wire — an
+  // origin-less token (a legacy blob that escaped the load-time drop) is refused,
+  // not trusted. Skipped only when there is no origin to run against (`null`,
+  // direct-codes mode), where `runTournamentRpc` returns `connection_lost`.
+  if (rpcOrigin !== null && tokenOrigin !== rpcOrigin) {
+    return {
+      ok: false,
+      reason: "not_authorized",
+      role,
+      message:
+        "This credential was issued by a different server. Reconnect to that server to act on this tournament.",
+    };
+  }
   const heldToken = token;
-  return runTournamentRpc(set, get, (socket, signal) =>
-    send(socket, heldToken, signal),
-  );
+  return runTournamentRpc(set, get, async (socket, signal, origin) => {
+    // Proactive rotation before the action: a credential nearing its expiry is
+    // refreshed while still valid, since an expired one cannot be renewed. A
+    // fresh credential (or a broker below the recoverable-rotation floor) falls
+    // straight through — `maybeRenewNearExpiry` returns the held token with no
+    // round trip. `origin` is the immutable broker authority threaded from
+    // `runTournamentRpc`, so the renewal binds to the same broker the action does.
+    const freshToken = await maybeRenewNearExpiry(
+      set,
+      get,
+      socket,
+      origin,
+      code,
+      role,
+      heldToken,
+      signal,
+    );
+    return send(socket, freshToken, signal);
+  });
 }
 
 export interface AiSeatConfig {
@@ -1136,6 +1517,9 @@ export interface HostingSettings {
   roomName: string | null;
   /** Enable ranked rating updates for the room. */
   ranked: boolean;
+  /** Pre-minted `[A-Z0-9]{6}` game code from a Discord link. Absent → the
+   *  broker/server mints one. */
+  requestedCode?: string;
 }
 
 /** Snapshot of the host's session config, captured at startHosting time.
@@ -1231,6 +1615,9 @@ interface MultiplayerState {
   /** Last host-setup form choices, persisted across sessions. `null` until the
    *  player has hosted at least once. See {@link RememberedHostConfig}. */
   lastHostConfig: RememberedHostConfig | null;
+  /** The last "List in lobby" choice submitted from pod setup; `null` until
+   *  one is made. */
+  lastPodListingPublic: boolean | null;
   /**
    * Tournament code → bearer credentials this browser holds. Persisted:
    * `organizer_token` and `player_token` are minted once in a point reply and
@@ -1253,6 +1640,7 @@ interface MultiplayerState {
   // Action round-trip tracking (ephemeral — not persisted)
   actionPending: boolean;
   latencyMs: number | null;
+  playerLatencies: Record<number, number | null>;
   // Hosting session (ephemeral — not persisted)
   hostGameCode: string | null;
   hostIsPublic: boolean;
@@ -1314,6 +1702,7 @@ interface MultiplayerActions {
   setCompatibilityPlayerCount: (count: number | null) => void;
   rememberHostConfig: (config: RememberedHostConfig) => void;
   clearRememberedHostConfig: () => void;
+  rememberPodListingPublic: (isPublic: boolean) => void;
   setPlayerSlots: (slots: PlayerSlot[]) => void;
   setSpectators: (names: string[]) => void;
   setIsSpectator: (value: boolean) => void;
@@ -1331,8 +1720,12 @@ interface MultiplayerActions {
   cancelHosting: () => void;
   clearPendingGameRoute: () => void;
   setServerInfo: (info: ServerInfo | null) => void;
-  openBroker: (req: RegisterHostRequest) => Promise<{ broker: BrokerClient; gameCode: string } | null>;
-  closeBroker: () => void;
+  openBroker: (
+    req: RegisterHostRequest,
+    signal?: AbortSignal,
+  ) => Promise<{ broker: BrokerClient; gameCode: string } | null>;
+  /** Closes `broker`, and clears the active slot only if it holds that broker. */
+  closeBroker: (broker: BrokerClient) => void;
   getBroker: () => { broker: BrokerClient; gameCode: string } | null;
   startP2PHostingSession: (
     settings: HostingSettings,
@@ -1359,6 +1752,12 @@ interface MultiplayerActions {
    * crash.
    */
   ensureSubscriptionSocket: (url: string) => Promise<PhaseSocket | null>;
+  /**
+   * Choose and probe the broker a P2P registration uses. Preserve a custom
+   * broker anchor; the official broker is the fallback. Unknown custom
+   * endpoints are probed before deciding.
+   */
+  resolveP2PBroker: (anchor: string | null) => Promise<{ url: string; socket: PhaseSocket | null }>;
   /** Close and discard every source's subscription socket. Called on store
    * teardown. */
   closeSubscriptionSocket: () => void;
@@ -1500,6 +1899,7 @@ function disposeActiveP2PHost(): void {
 }
 
 function closeHostWebSocket(): void {
+  serverHostAttempt += 1;
   if (hostReconnectTimer) {
     clearTimeout(hostReconnectTimer);
     hostReconnectTimer = null;
@@ -1512,6 +1912,23 @@ function closeHostWebSocket(): void {
     hostWs.close();
     hostWs = null;
   }
+}
+
+const ABANDON_CLOSE_TIMEOUT_MS = 5_000;
+
+// Closing a LAN bridge drops frames it has not yet written, so wait for the server's reply.
+function abandonThenClose(ws: PhaseSocketTransport): void {
+  const close = () => {
+    clearTimeout(timer);
+    ws.close();
+  };
+  const timer = setTimeout(close, ABANDON_CLOSE_TIMEOUT_MS);
+  ws.onerror = null;
+  ws.onclose = null;
+  ws.onmessage = (event) => {
+    if ((JSON.parse(event.data) as { type: string }).type === "GameAbandoned") close();
+  };
+  ws.send(JSON.stringify({ type: "AbandonGame" }));
 }
 
 function activeServerHostingSocket(get: () => MultiplayerState): PhaseSocketTransport | null {
@@ -1567,25 +1984,6 @@ async function startActiveP2PHostGame(
 }
 
 /**
- * Checks whether a lobby entry's host is running a compatible build with
- * the browsing client. Used by the lobby list to disable incompatible
- * rows. A missing `hostBuildCommit` (restored session, legacy entry) is
- * treated as unknown-but-allowed, matching the server's behavior at the
- * join gate. We compare against this client's `__BUILD_HASH__` rather
- * than the server's commit because in `LobbyOnly` mode the server is a
- * P2P peer broker — its commit is independent of the host/guest engine
- * build that actually has to agree at game time. In `Full` mode the
- * protocol-version check in `isServerCompatible` covers the client-to-
- * server direction, and host/guest still need matching engine builds.
- */
-export function isLobbyEntryCompatible(
-  hostBuildCommit: string | undefined,
-): boolean {
-  if (!hostBuildCommit) return true;
-  return hostBuildCommit === __BUILD_HASH__;
-}
-
-/**
  * True when the client's wire-protocol can speak to `info` on the FULL-GAME
  * surface — the surface that decides whether a game can actually be played.
  * Delegates to `serverProtocolRejection` — the same decision the game
@@ -1624,8 +2022,32 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export interface TournamentCredential {
   /** Organizer authority for this code. Present iff this browser created it. */
   organizerToken?: string;
+  /**
+   * When `organizerToken` stops being accepted (epoch ms), as the minting reply
+   * reported it. Absent when a pre-v6 broker minted the token without an
+   * expiry — that absence is itself the rotation capability gate: with no
+   * expiry there is nothing to renew ahead of, so {@link maybeRenewNearExpiry}
+   * never fires. Independent of the player token's expiry: the two secrets are
+   * rotated separately.
+   */
+  organizerTokenExpiresAtMs?: number;
+  /**
+   * The nonce of an organizer rotation this browser started but has not yet
+   * confirmed (its reply was lost or the attempt is mid-flight). Present only
+   * between initiating a rotation and confirming one; reused so a retry REPLAYS
+   * the committed secret rather than minting one the broker would refuse against
+   * the now-superseded token. Persisted with the credential so recovery survives
+   * a reconnect. See {@link maybeRenewNearExpiry}.
+   */
+  organizerPendingRotationNonce?: string;
   /** Entrant authority for this code. Present iff this browser joined it. */
   playerToken?: string;
+  /** When `playerToken` stops being accepted (epoch ms). Same semantics as
+   * {@link TournamentCredential.organizerTokenExpiresAtMs}. */
+  playerTokenExpiresAtMs?: number;
+  /** Pending player rotation nonce. Same semantics as
+   * {@link TournamentCredential.organizerPendingRotationNonce}. */
+  playerPendingRotationNonce?: string;
   /**
    * The `player_key` this browser joined under — the identity every later
    * `TournamentView` keys on (`PlayerSummary.player_key`). Stored beside the
@@ -1633,6 +2055,21 @@ export interface TournamentCredential {
    * am I in THIS event" stays answerable even if the ambient id ever changes.
    */
   playerKey?: string;
+  /**
+   * The broker origin (hosting-server URL) the ORGANIZER token was minted
+   * against — bound PER ROLE, not per code, because one code can carry an
+   * organizer authority from server A and a player authority from server B at
+   * once (an organizer of an A event who also joined a same-code B event), and a
+   * single per-code origin would let those overwrite each other. Bearer tokens
+   * are broker-scoped: a gated organizer RPC refuses to send unless its resolved
+   * origin matches this, so a token minted on A is never sent to B. A token
+   * whose role-origin is missing is dropped on load (fail-closed) — see
+   * {@link normalizeTournamentCredentials}.
+   */
+  organizerOrigin?: string;
+  /** The broker origin the PLAYER token was minted against. Same per-role
+   * binding and fail-closed handling as {@link TournamentCredential.organizerOrigin}. */
+  playerOrigin?: string;
   /** ms epoch of the last write. The eviction key; never rendered. */
   updatedAt: number;
 }
@@ -1734,16 +2171,69 @@ export function normalizeTournamentCredentials(
   const out: Record<string, TournamentCredential> = {};
   for (const [code, raw] of Object.entries(persisted)) {
     if (!isRecord(raw)) continue;
-    const organizerToken =
-      typeof raw.organizerToken === "string" ? raw.organizerToken : undefined;
-    const playerToken =
-      typeof raw.playerToken === "string" ? raw.playerToken : undefined;
     const playerKey =
       typeof raw.playerKey === "string" ? raw.playerKey : undefined;
+    // The broker origin each token is bound to — preserved so the per-role
+    // origin-binding check survives a sessionStorage round trip.
+    const organizerOrigin =
+      typeof raw.organizerOrigin === "string" ? raw.organizerOrigin : undefined;
+    const playerOrigin =
+      typeof raw.playerOrigin === "string" ? raw.playerOrigin : undefined;
+    // FAIL CLOSED: a bearer with no recorded broker origin is DROPPED, not kept
+    // unchecked — a legacy origin-less credential could otherwise be replayed
+    // against an unintended broker, which is exactly the authority-partition
+    // bypass this binding closes. A token survives only beside its role's origin.
+    const organizerToken =
+      organizerOrigin !== undefined && typeof raw.organizerToken === "string"
+        ? raw.organizerToken
+        : undefined;
+    const playerToken =
+      playerOrigin !== undefined && typeof raw.playerToken === "string"
+        ? raw.playerToken
+        : undefined;
     if (organizerToken === undefined && playerToken === undefined) continue;
+    // An expiry is kept only beside a token that actually survived — a bare
+    // expiry with no token is meaningless, and its token's absence already
+    // dropped the authority above.
+    const organizerTokenExpiresAtMs =
+      organizerToken !== undefined && isFiniteNumber(raw.organizerTokenExpiresAtMs)
+        ? raw.organizerTokenExpiresAtMs
+        : undefined;
+    const playerTokenExpiresAtMs =
+      playerToken !== undefined && isFiniteNumber(raw.playerTokenExpiresAtMs)
+        ? raw.playerTokenExpiresAtMs
+        : undefined;
+    // A pending rotation nonce is kept only beside a surviving token — like the
+    // expiry — so a recovery in flight when the tab was backgrounded resumes.
+    const organizerPendingRotationNonce =
+      organizerToken !== undefined &&
+      typeof raw.organizerPendingRotationNonce === "string"
+        ? raw.organizerPendingRotationNonce
+        : undefined;
+    const playerPendingRotationNonce =
+      playerToken !== undefined &&
+      typeof raw.playerPendingRotationNonce === "string"
+        ? raw.playerPendingRotationNonce
+        : undefined;
     out[code] = {
       ...(organizerToken !== undefined ? { organizerToken } : {}),
+      // The origin rides only beside a token that survived — dropping the token
+      // drops its origin too.
+      ...(organizerToken !== undefined ? { organizerOrigin } : {}),
+      ...(organizerTokenExpiresAtMs !== undefined
+        ? { organizerTokenExpiresAtMs }
+        : {}),
+      ...(organizerPendingRotationNonce !== undefined
+        ? { organizerPendingRotationNonce }
+        : {}),
       ...(playerToken !== undefined ? { playerToken } : {}),
+      ...(playerToken !== undefined ? { playerOrigin } : {}),
+      ...(playerTokenExpiresAtMs !== undefined
+        ? { playerTokenExpiresAtMs }
+        : {}),
+      ...(playerPendingRotationNonce !== undefined
+        ? { playerPendingRotationNonce }
+        : {}),
       ...(playerKey !== undefined ? { playerKey } : {}),
       updatedAt:
         typeof raw.updatedAt === "number" && Number.isFinite(raw.updatedAt)
@@ -1759,6 +2249,16 @@ function isIntegerInRange(value: unknown, upperBound: number): value is number {
     && Number.isInteger(value)
     && value > 0
     && value <= upperBound;
+}
+
+/**
+ * A finite `number`, no range bound. Credential expiries are epoch-ms `u64`s
+ * that overflow i32, so the `isI32` family does not fit — but a persisted
+ * `Infinity`/`NaN`/non-number must still be rejected before it reaches the
+ * near-expiry arithmetic in {@link maybeRenewNearExpiry}.
+ */
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
 }
 
 function isI32(value: unknown): value is number {
@@ -1848,6 +2348,9 @@ function normalizeCustomHostConfig(
   if (typeof savedCustomFormatId !== "string") return null;
   if (!findSavedCustomFormat(savedCustomFormatId)) return null;
 
+  // The shape guard names required fields but never rejects unknown ones,
+  // so configs persisted when the removed experimental-dungeons flag still
+  // existed keep validating with the stale key ignored.
   const storedFormatConfig = persisted.formatConfig;
   if (!isFormatConfigShape(storedFormatConfig)) return null;
   // The blob must describe the format it is filed under. `isFormatConfigShape`
@@ -2061,6 +2564,17 @@ export function migratePersistedMultiplayerState(
 ): unknown {
   if (!persisted || typeof persisted !== "object") return persisted;
   const migrated = persisted as Record<string, unknown>;
+  // v6 → v7: tournament bearer credentials moved OFF localStorage. They are
+  // secrets that must not sit at rest in localStorage (readable by any
+  // same-origin script for the life of the profile); a dedicated sessionStorage
+  // sync owns them going forward and `partialize` no longer writes them here.
+  // Strip any a pre-v7 build persisted.
+  //
+  // Placed BEFORE the `version < 6` arm below, which returns early when a legacy
+  // `serverAddress` is present — a strip that ran after it could be skipped.
+  if (version < 7 && "tournamentCredentials" in migrated) {
+    delete migrated.tournamentCredentials;
+  }
   if (version < 3) {
     migrated.serverAddress = migrateOfficialServerAddress(
       migrated.serverAddress,
@@ -2103,11 +2617,12 @@ function savePregameHostSession(
   get: MultiplayerGet,
   data: { game_code: string; player_token: string; full_key?: { game_code: string; generation: number } },
   serverUrl: string,
+  held: { session: WsSessionData | null },
 ): void {
   if (!data.full_key || data.full_key.game_code !== data.game_code) return;
   const existing = loadWsSession();
   const hostSession = get().hostSession ?? existing?.hostSession;
-  saveWsSession({
+  held.session = {
     gameCode: data.game_code,
     playerToken: data.player_token,
     fullKey: data.full_key,
@@ -2115,11 +2630,12 @@ function savePregameHostSession(
     timestamp: Date.now(),
     ...(hostSession ? { hostSession } : {}),
     ...(hostSession ? { hostIsPublic: get().hostIsPublic } : {}),
-  });
+  };
+  saveWsSession(held.session);
 }
 
-function clearPregameHostMetadataFromWsSession(): void {
-  const session = loadWsSession();
+function clearPregameHostMetadataFromWsSession(held: { session: WsSessionData | null }): void {
+  const session = held.session;
   if (!session) return;
   saveWsSession({
     gameCode: session.gameCode,
@@ -2136,6 +2652,8 @@ function handleServerHostMessage(
   ws: PhaseSocketTransport,
   msg: { type: string; data?: unknown },
   serverUrl: string,
+  held: { session: WsSessionData | null },
+  requestedCode?: string,
 ): void {
   if (msg.type === "GameCreated") {
     const data = msg.data as {
@@ -2143,14 +2661,23 @@ function handleServerHostMessage(
       player_token: string;
       full_key?: { game_code: string; generation: number };
     };
-    savePregameHostSession(get, data, serverUrl);
+    // A pre-10 server drops `requested_code` and mints its own code, which no
+    // Discord guest link names.
+    if (requestedCode !== undefined && data.game_code !== requestedCode) {
+      get().showToast(i18n.t("multiplayer:botLink.codeUnsupported"));
+      get().cancelHosting();
+      return;
+    }
+    savePregameHostSession(get, data, serverUrl, held);
     // Reset reconnect counter on successful (re)connection.
     hostReconnectAttempt = 0;
     set({ hostGameCode: data.game_code, hostingStatus: "waiting" });
   } else if (msg.type === "GameStarted") {
     gameStartedFired = true;
-    clearPregameHostMetadataFromWsSession();
+    hostHandoffs += 1;
+    clearPregameHostMetadataFromWsSession(held);
     ws.close();
+    if (hostWs && hostWs !== ws) hostWs.close();
     hostWs = null;
     // This arm performs the handoff itself and never routes through
     // `closeHostWebSocket`, so the keepalive has to be stopped here.
@@ -2186,9 +2713,13 @@ function handleServerHostMessage(
       get().showToast(`${joiner.name} joined the game.`);
     }
   } else if (msg.type === "Error") {
-    const data = msg.data as { message: string };
+    const data = msg.data as { message: string; code?: string };
     console.error("Host error:", data.message);
-    get().showToast(data.message || "Failed to create game.");
+    get().showToast(
+      data.code === "code_in_use"
+        ? i18n.t("multiplayer:botLink.codeInUse")
+        : data.message || "Failed to create game.",
+    );
     if (get().hostingStatus !== "waiting") {
       get().cancelHosting();
     }
@@ -2201,6 +2732,8 @@ async function openServerHostSocket(
   setupFrame: () => unknown,
   onReopen: () => void,
   serverUrl: string,
+  dialed: WsSessionData | null,
+  requestedCode?: string,
 ): Promise<void> {
   // The dialed URL arrives as an argument rather than being read from store
   // state, and every caller supplies the one the session records: every frame
@@ -2215,10 +2748,13 @@ async function openServerHostSocket(
     return;
   }
 
+  const attempt = ++serverHostAttempt;
+  const handoffs = hostHandoffs;
   let socket;
   try {
     socket = await openPhaseSocket(url);
   } catch (err) {
+    if (attempt !== serverHostAttempt) return;
     if (
       err instanceof HandshakeError &&
       err.kind === "protocol_mismatch"
@@ -2233,21 +2769,32 @@ async function openServerHostSocket(
     }
     return;
   }
+  if (attempt !== serverHostAttempt || handoffs !== hostHandoffs) {
+    socket.ws.close();
+    return;
+  }
 
   set({ serverInfo: socket.serverInfo });
   hostWs = socket.ws;
   const stopPing = startSocketKeepalive(socket.ws);
   hostPingStop = stopPing;
 
+  // Each host socket carries the session it dialed, so `GameStarted`
+  // re-stamps this socket's game even if the stored copy expired or was refused.
+  const held = { session: dialed };
   socket.ws.onmessage = (event) => {
+    if (handoffs !== hostHandoffs) {
+      socket.ws.close();
+      return;
+    }
     const msg = JSON.parse(event.data as string) as {
       type: string;
       data?: unknown;
     };
-    handleServerHostMessage(set, get, socket.ws, msg, url);
+    handleServerHostMessage(set, get, socket.ws, msg, url, held, requestedCode);
   };
   socket.ws.onerror = () => {
-    if (!gameStartedFired) {
+    if (!gameStartedFired && hostWs === socket.ws) {
       hostWs = null;
       onReopen();
     }
@@ -2296,6 +2843,7 @@ function attemptServerHostReconnect(
       // mid-game host-socket drop, and it must return to the server the game
       // is actually on even if the browsing anchor has since moved.
       session.serverUrl,
+      session,
     );
   }, delay);
 }
@@ -2380,6 +2928,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       toasts: new Map(),
       formatConfig: null,
       lastHostConfig: null,
+      lastPodListingPublic: null as boolean | null,
       tournamentCredentials: {},
       playerSlots: [],
       spectators: [],
@@ -2390,6 +2939,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       disconnectedPlayers: new Set(),
       actionPending: false,
       latencyMs: null,
+      playerLatencies: {},
       hostGameCode: null,
       hostIsPublic: false,
       hostingStatus: "idle" as HostingStatus,
@@ -2544,6 +3094,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         lastHostConfig: normalizeRememberedHostConfig(config),
       }),
       clearRememberedHostConfig: () => set({ lastHostConfig: null }),
+      rememberPodListingPublic: (isPublic) => set({ lastPodListingPublic: isPublic }),
       setPlayerSlots: (slots) => set({ playerSlots: slots }),
       setSpectators: (names) => set({ spectators: names }),
       setIsSpectator: (value) => set({ isSpectator: value }),
@@ -2612,10 +3163,13 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               room_name: settings.roomName,
               start_when_full: settings.startWhenFull,
               ranked: settings.ranked,
+              requested_code: settings.requestedCode ?? null,
             },
           }),
           () => attemptServerHostReconnect(set, get),
           serverUrl,
+          null,
+          settings.requestedCode,
         );
       },
 
@@ -2657,6 +3211,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           }),
           () => attemptServerHostReconnect(set, get),
           session.serverUrl,
+          session,
         );
 
         return true;
@@ -2664,6 +3219,11 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
 
       cancelHosting: () => {
         p2pHostingAttempt += 1;
+        // A closed host socket leaves the room alive for the reconnect grace.
+        if (hostWs?.readyState === WebSocket.OPEN) {
+          abandonThenClose(hostWs);
+          hostWs = null;
+        }
         closeHostWebSocket();
         disposeActiveP2PHost();
         if (activeBroker) {
@@ -2689,7 +3249,9 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
 
       clearPendingGameRoute: () => set({ pendingGameRoute: null }),
 
-      openBroker: async (req) => {
+      openBroker: async (req, signal) => {
+        const attempt = ++brokerOpenAttempt;
+        const isStale = () => attempt !== brokerOpenAttempt || signal?.aborted === true;
         if (activeBroker) {
           activeBroker.close();
           activeBroker = null;
@@ -2700,22 +3262,38 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           console.error("[openBroker] no hosting server selected");
           return null;
         }
+        let broker: BrokerClient | null = null;
         try {
-          const broker = await openBrokerClient(url);
+          broker = await openBrokerClient(url);
+          if (isStale()) {
+            broker.close();
+            return null;
+          }
           const registered = await broker.registerHost(req);
+          if (isStale()) {
+            broker.close();
+            return null;
+          }
           activeBroker = broker;
           activeBrokerGameCode = registered.gameCode;
           return { broker, gameCode: registered.gameCode };
         } catch (err) {
+          // registerHost can reject after openBrokerClient already opened the
+          // socket; activeBroker is only assigned once both succeed, so
+          // closing here is what closeBroker() would otherwise never reach.
+          broker?.close();
           console.error("[openBroker] failed:", err);
+          toastLobbyCapabilityRefusal(get, err);
           return null;
         }
       },
 
-      closeBroker: () => {
-        activeBroker?.close();
-        activeBroker = null;
-        activeBrokerGameCode = null;
+      closeBroker: (broker) => {
+        broker.close();
+        if (activeBroker === broker) {
+          activeBroker = null;
+          activeBrokerGameCode = null;
+        }
       },
 
       getBroker: () => {
@@ -2829,7 +3407,6 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             }
             const registered = await broker.registerHost({
               hostPeerId: host.peer.id,
-              deck: asDeckPayload(deck),
               displayName: get().displayName || "Host",
               public: settings.public,
               password: settings.password || null,
@@ -2840,15 +3417,26 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
                 loop_detection: settings.loopDetection,
               },
               formatConfig: settings.formatConfig,
-              aiSeats,
               roomName: opts.roomName ?? null,
               draftMetadata: null,
               startWhenFull: settings.startWhenFull,
               ranked: settings.ranked,
+              requestedCode: settings.requestedCode,
             });
             brokerGameCode = registered.gameCode;
             if (!isCurrentAttempt()) {
               releaseAttempt();
+              return false;
+            }
+            // A pre-10 broker drops `requested_code` and mints its own code,
+            // which no Discord guest link names: withdraw that listing.
+            if (
+              settings.requestedCode !== undefined
+              && registered.gameCode !== settings.requestedCode
+            ) {
+              get().showToast(i18n.t("multiplayer:botLink.codeUnsupported"));
+              releaseAttempt();
+              resetFailedHosting();
               return false;
             }
             activeBroker = broker;
@@ -2959,7 +3547,13 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             && err.code === AdapterErrorCode.NOT_INITIALIZED
           ) {
             get().showToast(err.message);
+          } else if (
+            err instanceof BrokerRequestError
+            && err.code === "code_in_use"
+          ) {
+            get().showToast(i18n.t("multiplayer:botLink.codeInUse"));
           }
+          toastLobbyCapabilityRefusal(get, err);
           resetFailedHosting();
           return false;
         }
@@ -3210,6 +3804,18 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         return channel.firstOpen;
       },
 
+      resolveP2PBroker: async (anchor) => {
+        let url = anchor !== null && get().sourceStatus.get(anchor)?.serverInfo?.mode !== "Full"
+          ? anchor
+          : OFFICIAL_MULTIPLAYER_SERVER_URL;
+        let socket = await get().ensureSubscriptionSocket(url);
+        if (socket?.serverInfo.mode === "Full") {
+          url = OFFICIAL_MULTIPLAYER_SERVER_URL;
+          socket = await get().ensureSubscriptionSocket(url);
+        }
+        return { url, socket };
+      },
+
       closeSubscriptionSocket: () => {
         lobbySubscribers.clear();
         ambientSubscribers.clear();
@@ -3398,7 +4004,20 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               tournamentCredentials: rememberTournamentCredential(
                 state.tournamentCredentials,
                 result.value.code,
-                { organizerToken: result.value.organizer_token },
+                {
+                  organizerToken: result.value.organizer_token,
+                  // The broker this organizer token was minted against — `url` is
+                  // the socket's origin, captured at RPC entry. Binds the bearer
+                  // so a later host switch cannot send it to a different server.
+                  organizerOrigin: url,
+                  // Guarded, not merely read: the reply TYPE marks
+                  // `expires_at_ms` required, but a pre-v6 broker omits it and
+                  // the field is `undefined` at this trust boundary. No expiry
+                  // stored means rotation never fires for this credential.
+                  ...(isFiniteNumber(result.value.expires_at_ms)
+                    ? { organizerTokenExpiresAtMs: result.value.expires_at_ms }
+                    : {}),
+                },
               ),
             }));
           }
@@ -3407,7 +4026,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       },
 
       joinTournament: async (code, displayName) =>
-        runTournamentRpc(set, get, async (socket, signal) => {
+        runTournamentRpc(set, get, async (socket, signal, origin) => {
           // Captured BEFORE the await so the credential records the key that
           // was actually sent, not whatever `playerId` reads as afterwards.
           const playerKey = get().playerId;
@@ -3423,7 +4042,17 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               tournamentCredentials: rememberTournamentCredential(
                 state.tournamentCredentials,
                 result.value.code,
-                { playerToken: result.value.player_token, playerKey },
+                {
+                  playerToken: result.value.player_token,
+                  playerKey,
+                  // The broker this entrant token was minted against — binds the
+                  // bearer to its origin (same reasoning as the organizer mint).
+                  playerOrigin: origin,
+                  // Guarded for the same reason as the organizer mint above.
+                  ...(isFiniteNumber(result.value.expires_at_ms)
+                    ? { playerTokenExpiresAtMs: result.value.expires_at_ms }
+                    : {}),
+                },
               ),
             }));
           }
@@ -3459,7 +4088,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
     }),
     {
       name: "phase-multiplayer",
-      version: 6,
+      version: 7,
       // v0/v1 → v2: official hosted lobby addresses are deployment defaults,
       // not user intent. A self-hosted build must move returning browsers from
       // the official lobby to its configured default while preserving explicit
@@ -3490,6 +4119,12 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       // authorities it browses). A hand-typed address becomes both; an
       // official or build-default address is already derived as a preset, so
       // it becomes the hosting server only.
+      //
+      // v6 → v7: tournament bearer credentials leave this localStorage-backed
+      // persist for sessionStorage (secrets must not sit at rest in
+      // localStorage). The migration strips any a pre-v7 build wrote here;
+      // `partialize` no longer emits them and a dedicated sessionStorage sync
+      // (below the store) owns them.
       migrate: migratePersistedMultiplayerState,
       // Persisted state is external input. Migration only runs when the schema
       // version changes, so hydrate current-version blobs through the same
@@ -3502,9 +4137,13 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           ...current,
           ...saved,
           lastHostConfig: normalizeRememberedHostConfig(saved.lastHostConfig),
-          tournamentCredentials: normalizeTournamentCredentials(
-            saved.tournamentCredentials,
-          ),
+          // Tournament credentials are NEVER hydrated from this localStorage
+          // blob (v7): they live in sessionStorage now. Forcing the in-memory
+          // initial here — after `...saved` — guarantees a stray or
+          // pre-migration localStorage copy cannot win;
+          // `hydrateSessionTournamentCredentials` (below the store) fills the
+          // real value right after creation.
+          tournamentCredentials: current.tournamentCredentials,
           userLobbySources: normalizeUserLobbySources(saved.userLobbySources),
           disabledDirectorySources: normalizeDisabledDirectorySources(
             saved.disabledDirectorySources,
@@ -3525,6 +4164,10 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             saved.connectionMode === "server" || saved.connectionMode === "p2p"
               ? saved.connectionMode
               : null,
+          lastPodListingPublic:
+            typeof saved.lastPodListingPublic === "boolean"
+              ? saved.lastPodListingPublic
+              : null,
         };
       },
       partialize: (state) => ({
@@ -3541,11 +4184,85 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         // projection is rebuilt each session, never persisted.
         disabledDirectorySources: state.disabledDirectorySources,
         lastHostConfig: state.lastHostConfig,
-        tournamentCredentials: state.tournamentCredentials,
+        lastPodListingPublic: state.lastPodListingPublic,
+        // `tournamentCredentials` is deliberately ABSENT: these are bearer
+        // secrets and must not be written to localStorage. They persist to
+        // sessionStorage instead — see `hydrateSessionTournamentCredentials`
+        // and the subscription just below the store.
       }),
     },
   ),
 );
+
+// ── Tournament credentials: sessionStorage, not localStorage ───────────────
+//
+// Bearer secrets (`organizer_token` / `player_token`) must not sit at rest in
+// localStorage, where any same-origin script can read them for the life of the
+// browser profile. They live in sessionStorage instead: preserved across a
+// refresh (an organizer keeps authority), cleared when the tab closes. This is
+// a separate persistence from the localStorage-backed `persist` above — the
+// store's `partialize` omits the credentials and its `merge` never hydrates
+// them from localStorage.
+
+const TOURNAMENT_CREDENTIALS_SESSION_KEY = "phase-tournament-credentials";
+
+/** Reads and validates the credential map from sessionStorage. Any failure
+ *  (absent, quota, disabled, malformed) yields an empty map — credentials then
+ *  simply do not survive, exactly as a fresh tab. */
+function readSessionTournamentCredentials(): Record<string, TournamentCredential> {
+  try {
+    const raw = sessionStorage.getItem(TOURNAMENT_CREDENTIALS_SESSION_KEY);
+    if (raw === null) return {};
+    return normalizeTournamentCredentials(JSON.parse(raw));
+  } catch {
+    return {};
+  }
+}
+
+/** Writes the credential map to sessionStorage, removing the key entirely when
+ *  the map is empty so a cleared session leaves nothing behind. */
+function writeSessionTournamentCredentials(
+  credentials: Record<string, TournamentCredential>,
+): void {
+  try {
+    if (Object.keys(credentials).length === 0) {
+      sessionStorage.removeItem(TOURNAMENT_CREDENTIALS_SESSION_KEY);
+      return;
+    }
+    sessionStorage.setItem(
+      TOURNAMENT_CREDENTIALS_SESSION_KEY,
+      JSON.stringify(credentials),
+    );
+  } catch {
+    // Non-fatal: with no sessionStorage the credentials just do not survive a
+    // refresh, which is a strictly safer failure than persisting them anyway.
+  }
+}
+
+/**
+ * Loads sessionStorage-persisted credentials into the store. Runs once at
+ * module load, after `create` has finished localStorage hydration, so it is the
+ * final word on the initial `tournamentCredentials` value. Idempotent and
+ * exported so a test can drive it against a seeded sessionStorage.
+ */
+export function hydrateSessionTournamentCredentials(): void {
+  const hydrated = readSessionTournamentCredentials();
+  if (Object.keys(hydrated).length > 0) {
+    useMultiplayerStore.setState({ tournamentCredentials: hydrated });
+  }
+}
+
+hydrateSessionTournamentCredentials();
+
+// Mirror every later change to the credential map back to sessionStorage. Keyed
+// on identity: `rememberTournamentCredential` and the fan-out both return a new
+// object only when the map actually changed, so unrelated store updates do not
+// touch storage.
+useMultiplayerStore.subscribe((state, prev) => {
+  if (state.tournamentCredentials !== prev.tournamentCredentials) {
+    writeSessionTournamentCredentials(state.tournamentCredentials);
+  }
+});
 
 export function getPlayerDisplayName(playerId: number, myId?: number): string {
   if (playerId === myId) return "You";

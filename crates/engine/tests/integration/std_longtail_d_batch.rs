@@ -5,7 +5,8 @@
 //! SHIPPED (0-Unimplemented + discriminating runtime/derived assertion that
 //! flips on revert):
 //!   - Laughing Jasper Flint — "Creatures you control but don't own are
-//!     Mercenaries in addition to their other types" (LT-F type-grant). Two
+//!     Mercenaries in addition to their other types" (LT-F type-grant; its
+//!     upkeep cast line is an honest gap, see its test). Two
 //!     parser arms: a generic consonant+y → "-ies" plural rule in `parse_subtype`
 //!     ("Mercenaries" → "Mercenary"), and a "<creatures you control> but don't
 //!     own" negated-ownership qualifier in the static dispatch arm.
@@ -105,14 +106,14 @@ fn assert_zero_unimplemented_kw(
 
 const LJF_ORACLE: &str = "Creatures you control but don't own are Mercenaries in addition to their other types.\nAt the beginning of your upkeep, exile the top X cards of target opponent's library, where X is the number of outlaws you control. Until end of turn, you may cast spells from among those cards, and mana of any type can be spent to cast those spells.";
 
+/// Both lines are fully supported. The upkeep line's ", and mana of any type
+/// can be spent to cast those spells" rides the "you may cast spells from
+/// among those cards" grant it follows (CR 609.4b, #9213).
 #[test]
 fn laughing_jasper_flint_zero_unimplemented() {
-    assert_zero_unimplemented(
-        LJF_ORACLE,
-        "Laughing Jasper Flint",
-        &["Legendary".to_string(), "Creature".to_string()],
-        &["Goblin".to_string(), "Mercenary".to_string()],
-    );
+    let types = ["Legendary".to_string(), "Creature".to_string()];
+    let subtypes = ["Goblin".to_string(), "Mercenary".to_string()];
+    assert_zero_unimplemented(LJF_ORACLE, "Laughing Jasper Flint", &types, &subtypes);
 }
 
 #[test]

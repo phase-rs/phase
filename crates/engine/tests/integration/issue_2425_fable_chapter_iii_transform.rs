@@ -26,6 +26,7 @@ use engine::types::Keyword;
 fn reflection_back_face() -> BackFaceData {
     BackFaceData {
         is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: "Reflection of Kiki-Jiki".to_string(),
         power: Some(2),
         toughness: Some(2),
@@ -58,6 +59,7 @@ fn reflection_back_face() -> BackFaceData {
 fn etching_back_face() -> BackFaceData {
     BackFaceData {
         is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: "Etching of Kumano".to_string(),
         power: Some(2),
         toughness: Some(2),

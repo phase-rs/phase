@@ -254,16 +254,8 @@ fn resolve_candidates(
     let mut candidates = Vec::new();
     for zone in zones_to_search {
         let ids: Vec<ObjectId> = match zone {
-            Zone::Library => state.players[player.0 as usize]
-                .library
-                .iter()
-                .copied()
-                .collect(),
-            Zone::Graveyard => state.players[player.0 as usize]
-                .graveyard
-                .iter()
-                .copied()
-                .collect(),
+            Zone::Library => state.library_of(player).iter().copied().collect(),
+            Zone::Graveyard => state.graveyard_of(player).iter().copied().collect(),
             Zone::Hand => state.players[player.0 as usize]
                 .hand
                 .iter()
@@ -307,7 +299,7 @@ fn combine_card_with_host(
         zones::absorb_component(state, augment_id, Some(zone));
     }
 
-    let Some((values, display_source, printed_ref, token_image_ref)) =
+    let Some((values, display_source, printed_ref, token_image_ref, token_art)) =
         merged_copiable_values(state, augment_id, host_id)
     else {
         return;
@@ -339,6 +331,7 @@ fn combine_card_with_host(
         display_source,
         printed_ref,
         token_image_ref,
+        token_art,
     );
     events.push(GameEvent::Augmented {
         merged_id: host_id,
@@ -347,6 +340,7 @@ fn combine_card_with_host(
     });
 }
 
+#[allow(clippy::type_complexity)]
 fn merged_copiable_values(
     state: &GameState,
     augment_id: ObjectId,
@@ -356,6 +350,7 @@ fn merged_copiable_values(
     DisplaySource,
     Option<PrintedCardRef>,
     Option<TokenImageRef>,
+    Option<crate::types::card::TokenArtDescriptor>,
 )> {
     let augment = state.objects.get(&augment_id)?;
     let host = state.objects.get(&host_id)?;
@@ -381,7 +376,8 @@ fn merged_copiable_values(
         }
     }
 
-    let (abilities, triggers, statics, replacements) = merged_ability_sets(augment, &host_values);
+    let (abilities, triggers, trigger_printed_origins, statics, replacements) =
+        merged_ability_sets(augment, &host_values);
     let values = CopiableValues {
         name: combine_name(&augment.base_name, &host_values.name),
         mana_cost: host_values.mana_cost,
@@ -395,6 +391,7 @@ fn merged_copiable_values(
         keywords,
         abilities: Arc::new(abilities),
         trigger_definitions: Arc::new(triggers),
+        trigger_printed_origins: Arc::new(trigger_printed_origins),
         replacement_definitions: Arc::new(replacements),
         static_definitions: Arc::new(statics),
         // An augment merge is a Host+Augment creature, never a Room — augment
@@ -408,18 +405,22 @@ fn merged_copiable_values(
         host.display_source,
         host.printed_ref.clone(),
         host.token_image_ref.clone(),
+        host.token_art.clone(),
     ))
 }
+
+type MergedAbilitySets = (
+    Vec<AbilityDefinition>,
+    Vec<TriggerDefinition>,
+    Vec<Option<crate::types::ability::TriggerPrintedOrigin>>,
+    Vec<crate::types::ability::StaticDefinition>,
+    Vec<crate::types::ability::ReplacementDefinition>,
+);
 
 fn merged_ability_sets(
     augment: &crate::game::game_object::GameObject,
     host_values: &CopiableValues,
-) -> (
-    Vec<AbilityDefinition>,
-    Vec<TriggerDefinition>,
-    Vec<crate::types::ability::StaticDefinition>,
-    Vec<crate::types::ability::ReplacementDefinition>,
-) {
+) -> MergedAbilitySets {
     let host_body = host_values
         .trigger_definitions
         .iter()
@@ -456,16 +457,21 @@ fn merged_ability_sets(
     }
 
     let mut triggers = Vec::new();
-    for trigger in augment.base_trigger_definitions.iter() {
+    let mut trigger_printed_origins = Vec::new();
+    let augment_origins = printed_cards::base_trigger_printed_origins(augment);
+    for (printed_occurrence, trigger) in augment.base_trigger_definitions.iter().enumerate() {
         if trigger.execute.is_none() {
             if let Some(body) = host_body.clone() {
                 let mut combined = trigger.clone();
                 combined.execute = Some(Box::new(body));
                 triggers.push(combined);
+                trigger_printed_origins
+                    .push(augment_origins.get(printed_occurrence).cloned().flatten());
             }
             continue;
         }
         triggers.push(trigger.clone());
+        trigger_printed_origins.push(augment_origins.get(printed_occurrence).cloned().flatten());
     }
 
     let statics = augment.base_static_definitions.iter().cloned().collect();
@@ -476,7 +482,13 @@ fn merged_ability_sets(
         .cloned()
         .collect();
 
-    (abilities, triggers, statics, replacements)
+    (
+        abilities,
+        triggers,
+        trigger_printed_origins,
+        statics,
+        replacements,
+    )
 }
 
 fn splice_host_body_onto_activated_prefix(
@@ -528,6 +540,46 @@ fn push_unique_colors(into: &mut Vec<ManaColor>, extra: &[ManaColor]) {
     for color in extra {
         if !into.contains(color) {
             into.push(*color);
+        }
+    }
+}
+
+#[cfg(test)]
+mod dandan_read_sweep_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::format::FormatConfig;
+    use crate::types::identifiers::CardId;
+
+    /// CR 400.1: an augment search over the controller's library and graveyard
+    /// reads the shared pile for the non-canonical seat, and the seat's own
+    /// zones otherwise.
+    #[test]
+    fn candidates_read_the_storage_authority() {
+        for (format, shared) in [
+            (FormatConfig::dandan(), true),
+            (FormatConfig::standard(), false),
+        ] {
+            let mut state = GameState::new(format, 2, 1);
+            let p1 = PlayerId(1);
+            let library = create_object(&mut state, CardId(1), p1, "Library".into(), Zone::Library);
+            let graveyard = create_object(
+                &mut state,
+                CardId(2),
+                p1,
+                "Graveyard".into(),
+                Zone::Graveyard,
+            );
+
+            let found = resolve_candidates(
+                &state,
+                p1,
+                &[Zone::Library, Zone::Graveyard],
+                &TargetFilter::Any,
+            );
+
+            assert_eq!(found, vec![library, graveyard], "shared={shared}");
+            assert_eq!(state.players[1].library.is_empty(), shared);
         }
     }
 }

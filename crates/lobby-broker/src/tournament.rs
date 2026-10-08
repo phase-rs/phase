@@ -36,7 +36,7 @@
 //! tiebreakers, byes, drops, retention) is not CR-governed game logic.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -132,6 +132,64 @@ pub struct MintedCredential {
     pub expires_at_ms: u64,
 }
 
+/// The result of [`TournamentCredential::renew`]. `Minted` and `Replayed` both
+/// carry the secret to relay to the holder; they are kept distinct so the
+/// caller (and tests) can tell a fresh rotation from an idempotent lost-reply
+/// recovery, even though the broker relays either identically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenewOutcome {
+    /// A fresh secret was minted; the authority advanced. Reached only by
+    /// presenting the live current secret.
+    Minted(MintedCredential),
+    /// The last rotation was replayed: the already-committed current secret is
+    /// returned unchanged. Reached by presenting that rotation's superseded
+    /// secret together with its nonce.
+    Replayed(MintedCredential),
+    /// The presented secret matched but the credential has expired.
+    Expired,
+    /// The presented secret is neither the current secret nor a replayable
+    /// superseded-secret + nonce pair.
+    Mismatch,
+}
+
+/// The read-only classification [`TournamentCredential::renew_kind`] returns:
+/// what a renewal *would* do, with no minted secret and no mutation. Distinct
+/// from [`RenewOutcome`] because a probe cannot (and must not) mint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenewKind {
+    /// `presented` is the live current secret: a renewal would mint.
+    Mintable,
+    /// `presented`+`nonce` match the last rotation: a renewal would replay.
+    Replayable,
+    /// `presented` is recognised (current, or the replay pair) but expired.
+    Expired,
+    /// `presented` is not recognised.
+    Mismatch,
+}
+
+/// The record of the LAST rotation, kept so a lost renewal reply can be
+/// recovered by an idempotent REPLAY rather than by minting a second credential.
+///
+/// When [`TournamentCredential::renew`] rotates the current secret to a fresh
+/// one, it records the secret it *superseded* alongside the client-minted
+/// `nonce` that drove the rotation. If that rotation's reply is lost, the client
+/// retries with the SAME `nonce` and the SAME (now-superseded) secret; the
+/// broker recognises the pair and returns the already-committed current secret
+/// again — no second mint, no change of authority.
+///
+/// **This is what makes recovery safe against takeover.** A superseded secret
+/// can NEVER mint a new primary; it can only replay the one rotation it was the
+/// input to, and only when accompanied by that rotation's nonce. A holder of a
+/// merely-stolen superseded secret (without the nonce, or with a fresh one)
+/// gets [`CredentialVerdict::Mismatch`] — it cannot obtain a fresh credential
+/// and cannot invalidate the legitimate holder's current one. The nonce is
+/// compared in constant time, like the secret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RotationRecord {
+    superseded_secret: String,
+    nonce: String,
+}
+
 /// One tournament bearer credential: the secret, and the instant it stops
 /// being accepted.
 ///
@@ -142,23 +200,32 @@ pub struct MintedCredential {
 /// injected [`BrokerEnv`] clock, never `SystemTime`, so the identical logic
 /// runs in the native shell and the Durable Object.
 ///
-/// **Both fields are private and neither has an accessor.** The plaintext
-/// secret and the expiry leave this type exactly once, in the
-/// [`MintedCredential`] that [`Self::mint`] returns; afterwards the only
-/// question anyone may ask is [`Self::verdict`] (or its
-/// [`Self::accepts`] shorthand). That is what makes this a single authority
-/// rather than a struct with a policy bolted beside it: no call site can spell
-/// a plaintext `==` against the secret, and none can forget the expiry
-/// conjunct.
+/// **All fields are private and none has an accessor.** The plaintext secret
+/// and the expiry leave this type exactly twice — in the [`MintedCredential`]
+/// that [`Self::mint`] and [`Self::renew`] return; afterwards the only question
+/// anyone may ask is [`Self::verdict`] (or its [`Self::accepts`] shorthand).
+/// That is what makes this a single authority rather than a struct with a policy
+/// bolted beside it: no call site can spell a plaintext `==` against the secret,
+/// and none can forget the expiry conjunct.
 ///
 /// **The expiry boundary is EXCLUSIVE.** [`Self::accepts`] is `true` while
 /// `now_ms < expires_at_ms` and `false` at `now_ms == expires_at_ms`: the
 /// instant named by `expires_at_ms` is the first instant the credential is
 /// refused, not the last it is accepted.
+///
+/// **Only the current secret authorizes.** [`Self::verdict`] accepts the current
+/// secret alone. A superseded secret is NOT accepted for actions; its sole
+/// remaining power is to REPLAY the one rotation it fed, via [`Self::renew`] with
+/// the matching nonce — see [`RotationRecord`]. That is what makes a lost-reply
+/// recovery safe: it can never become a fresh authority.
 #[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 pub struct TournamentCredential {
     secret: String,
     expires_at_ms: u64,
+    /// The last rotation's record, enabling idempotent replay of a lost renewal
+    /// reply. `None` until the first [`Self::renew`] rotation; overwritten by
+    /// each subsequent one (only the most recent rotation is replayable).
+    last_rotation: Option<RotationRecord>,
 }
 
 impl TournamentCredential {
@@ -175,12 +242,116 @@ impl TournamentCredential {
             Self {
                 secret: secret.clone(),
                 expires_at_ms,
+                last_rotation: None,
             },
             MintedCredential {
                 secret,
                 expires_at_ms,
             },
         )
+    }
+
+    /// Renew the credential, either MINTING a fresh secret (when `presented` is
+    /// the live current secret) or idempotently REPLAYING the last rotation (when
+    /// `presented` is the secret that rotation superseded and `nonce` matches it).
+    ///
+    /// The two paths are what make a lost renewal reply recoverable WITHOUT
+    /// letting a superseded secret become a fresh authority:
+    ///
+    /// - **Mint** — `presented` is the current secret and not expired. A new
+    ///   secret is minted, the outgoing secret is recorded in [`RotationRecord`]
+    ///   beside `nonce`, and the credential advances. Returns
+    ///   [`RenewOutcome::Minted`]. This is the only path that changes the
+    ///   authority, and it requires the CURRENT secret.
+    /// - **Replay** — `presented` matches the recorded superseded secret AND
+    ///   `nonce` matches the recorded nonce. The already-committed current secret
+    ///   is returned unchanged ([`RenewOutcome::Replayed`]); nothing is minted and
+    ///   the authority does not move. This is the retry a client runs when its
+    ///   first rotation's reply was lost: same nonce, same (now-superseded) token,
+    ///   same secret back.
+    /// - Anything else — a superseded secret with a wrong/absent nonce, an
+    ///   unrelated secret, or an expired credential — mints nothing and returns
+    ///   [`RenewOutcome::Mismatch`]/[`RenewOutcome::Expired`]. A merely-stolen
+    ///   superseded secret therefore can neither mint nor receive a credential.
+    ///
+    /// Both secret and nonce are compared in constant time.
+    pub fn renew(&mut self, presented: &str, nonce: &str, env: &impl BrokerEnv) -> RenewOutcome {
+        let now_ms = env.now_ms();
+        match self.renew_kind(presented, nonce, now_ms) {
+            // Mint path: only the live current secret rotates the authority.
+            RenewKind::Mintable => {
+                let secret = env.new_token();
+                let expires_at_ms = now_ms + TOURNAMENT_CREDENTIAL_TTL_MS;
+                let superseded = std::mem::replace(&mut self.secret, secret.clone());
+                self.expires_at_ms = expires_at_ms;
+                // Only a NON-EMPTY nonce yields a replayable record. An empty
+                // nonce (an omitted/`#[serde(default)]` field, or a nonce-less
+                // client) mints but records nothing — otherwise the record would
+                // be `(superseded, "")` and anyone holding the superseded secret
+                // could recover the new one by omitting the nonce, which is the
+                // very takeover the nonce exists to prevent. A prior record is
+                // cleared so a superseded secret cannot replay across this mint.
+                self.last_rotation = if nonce.is_empty() {
+                    None
+                } else {
+                    Some(RotationRecord {
+                        superseded_secret: superseded,
+                        nonce: nonce.to_owned(),
+                    })
+                };
+                RenewOutcome::Minted(MintedCredential {
+                    secret,
+                    expires_at_ms,
+                })
+            }
+            // Replay path: the superseded input to the last rotation, with its
+            // nonce, recovers the already-committed current secret. No mint, no
+            // advance — the returned secret IS the current one.
+            RenewKind::Replayable => RenewOutcome::Replayed(MintedCredential {
+                secret: self.secret.clone(),
+                expires_at_ms: self.expires_at_ms,
+            }),
+            RenewKind::Expired => RenewOutcome::Expired,
+            RenewKind::Mismatch => RenewOutcome::Mismatch,
+        }
+    }
+
+    /// Read-only classification of what [`Self::renew`] would do for
+    /// `(presented, nonce)` at `now_ms`, WITHOUT minting or mutating.
+    ///
+    /// Its reason for existing is the player-credential scan in
+    /// [`TournamentManager::renew_credential`]: resolving which entrant owns a
+    /// presented token needs a read-only probe before taking the `&mut` borrow to
+    /// actually renew, and — critically — a REPLAY presents a superseded secret,
+    /// which [`Self::verdict`] reports as [`CredentialVerdict::Mismatch`], so the
+    /// scan cannot use `verdict` alone or it would fail to attribute a lost-reply
+    /// retry to its owner. Both secret and nonce are compared in constant time.
+    pub fn renew_kind(&self, presented: &str, nonce: &str, now_ms: u64) -> RenewKind {
+        match self.verdict(presented, now_ms) {
+            CredentialVerdict::Accepted => return RenewKind::Mintable,
+            CredentialVerdict::Expired => return RenewKind::Expired,
+            // Not the current secret — consider the replay record.
+            CredentialVerdict::Mismatch => {}
+        }
+        // An empty nonce never replays. A non-empty-nonce mint is the only thing
+        // that records a replay record (see `renew`), so `record.nonce` is always
+        // non-empty; this guard is the belt-and-suspenders half that makes the
+        // "empty nonce cannot recover a bearer" invariant hold at BOTH the record
+        // and the match, independent of how the record was written.
+        if !nonce.is_empty() {
+            if let Some(record) = &self.last_rotation {
+                if constant_time_eq(record.superseded_secret.as_bytes(), presented.as_bytes())
+                    && constant_time_eq(record.nonce.as_bytes(), nonce.as_bytes())
+                {
+                    return if now_ms >= self.expires_at_ms {
+                        RenewKind::Expired
+                    } else {
+                        RenewKind::Replayable
+                    };
+                }
+            }
+        }
+        RenewKind::Mismatch
     }
 
     /// Compare `presented` against the stored secret and the expiry, in that
@@ -203,6 +374,9 @@ impl TournamentCredential {
         if self.secret.is_empty() || presented.is_empty() {
             return CredentialVerdict::Mismatch;
         }
+        // Only the CURRENT secret authorizes. A superseded secret is never
+        // accepted here — its sole residual power is an idempotent replay through
+        // [`Self::renew`] with the matching nonce, which mints nothing.
         if !constant_time_eq(self.secret.as_bytes(), presented.as_bytes()) {
             return CredentialVerdict::Mismatch;
         }
@@ -234,6 +408,7 @@ impl TournamentCredential {
         Self {
             secret: secret.into(),
             expires_at_ms,
+            last_rotation: None,
         }
     }
 }
@@ -247,6 +422,8 @@ impl TournamentCredential {
 /// so the derive would exist whether or not anyone meant it to.
 impl PartialEq for TournamentCredential {
     fn eq(&self, other: &Self) -> bool {
+        // Equality is over the current secret and its expiry — a credential's
+        // identity — not the transient replay record beside it.
         self.expires_at_ms == other.expires_at_ms
             && constant_time_eq(self.secret.as_bytes(), other.secret.as_bytes())
     }
@@ -560,6 +737,52 @@ pub enum ReportGate {
     /// Server-assigned forfeit, from [`TournamentManager::drop_player`]'s
     /// auto-settlement. Permanent once assigned.
     Forfeit,
+    /// The pairing is being played on a server-hosted, server-authoritative
+    /// table (see [`TournamentMeta::hosted`]). A client `ReportMatchResult` is
+    /// **refused** — the only writer is the server's own game-over handoff via
+    /// [`TournamentManager::report_result_system`], because a seated player must
+    /// not be able to assert a hosted outcome (a UI that merely hides the report
+    /// button is not an authorization control). Viewer-independent like every
+    /// other arm: the wire `PairingView` carries it, so the client knows to
+    /// expect an auto-launched game and hide manual reporting.
+    Hosted,
+}
+
+/// Who is asking [`TournamentManager::report_result`] to write an outcome.
+///
+/// The gate itself ([`TournamentMeta::report_gate`]) stays viewer-independent —
+/// it answers "is this pairing reportable?", not "may this caller report?". This
+/// enum is the one WHO-dependent conjunct, and it exists so a
+/// [`ReportGate::Hosted`] pairing can admit the server while refusing every
+/// client: `System` is chosen only by the server's own code path and is not
+/// constructible from a wire frame, so an RPC can never present it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportAuthority {
+    /// A seated player's `ReportMatchResult` RPC (the client path). Refused on a
+    /// `Hosted` pairing.
+    SeatedPlayer,
+    /// The server's own hosted-game terminal handoff. Admitted on a `Hosted`
+    /// pairing; the only writer of a hosted outcome.
+    System,
+}
+
+/// Durable per-pairing hosting authority (see [`TournamentMeta::hosted`]).
+///
+/// Presence in the map marks a pairing as server-hosted (driving
+/// [`ReportGate::Hosted`]) and is **durable provenance — never removed once
+/// set**: a server-hosted pairing stays `Hosted` for the life of the tournament,
+/// so a client can never overwrite the server's verified result even after the
+/// game is torn down. The `generation` is a monotonic epoch bumped on every
+/// (re)host, so a stale terminal from a superseded game can be fenced out by the
+/// server before it publishes (the "current-game fence"); because the marker is
+/// never reset, the generation cannot repeat. This core only *stores* the
+/// generation; the atomic validate→publish and the receipt that carries it
+/// across a restart are the server layer's responsibility (as is freeing the
+/// live game) — the core never touches `GameState` or a `game_code`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostedMatch {
+    /// Monotonic host epoch, incremented on each (re)host of this pairing.
+    pub generation: u32,
 }
 
 /// Which bracket shape the same [`TournamentManager`] runs for a tournament.
@@ -831,6 +1054,14 @@ pub struct TournamentMeta {
     /// Durable pairing history — the single source of truth every derived
     /// view reads fresh.
     pub pairings: Vec<TournamentPairing>,
+    /// Server-hosted pairings, keyed by [`PairingId`]. Presence marks a pairing
+    /// as being played on a server-authoritative table ([`ReportGate::Hosted`]);
+    /// the [`HostedMatch`] carries the current host generation. Empty for a
+    /// manual (self-reported) tournament, and for every pairing not currently
+    /// hosted. A [`BTreeMap`] for deterministic serialization. `#[serde(default)]`
+    /// so a tournament persisted before hosting existed deserializes cleanly.
+    #[serde(default)]
+    pub hosted: BTreeMap<PairingId, HostedMatch>,
     /// Unix seconds, matching [`crate::lobby::LobbyManager`]'s own convention.
     pub created_at: u64,
     /// Bumped on every mutation *and* on every status transition, so it
@@ -969,6 +1200,21 @@ impl TournamentMeta {
     /// **`Open`**, not refused: `report_result` is a single `outcome` write and
     /// every derived view recomputes from the corrected history, so
     /// re-reporting is how a correction is made.
+    /// Is this pairing eligible to be served on a server-authoritative hosted
+    /// table? The hosted vertical is scoped to **Swiss + head-to-head + Bo3** —
+    /// the one configuration whose every terminal is representable and covered by
+    /// an existing trusted primitive (a Bo3 match forfeit for a disconnect; a
+    /// legal [`PodOutcome::Draw`] for a drawn game). Single-elimination, pods, and
+    /// Bo1 head-to-head are excluded (later chains). A bye (one seat) is never
+    /// hostable. Whether both seats are *ready* (decks submitted) is a separate
+    /// server-layer gate, not checked here.
+    pub fn is_hosted_eligible(&self, pairing: &TournamentPairing) -> bool {
+        self.bracket == BracketShape::Swiss
+            && self.arity == MatchArity::HEAD_TO_HEAD
+            && self.match_type == MatchType::Bo3
+            && pairing.players.len() == 2
+    }
+
     pub fn report_gate(&self, pairing: &TournamentPairing) -> ReportGate {
         if self.status.is_terminal() {
             return ReportGate::TournamentNotRunning;
@@ -976,7 +1222,18 @@ impl TournamentMeta {
         match pairing.outcome {
             Some(PairingOutcome::Bye) => ReportGate::Bye,
             Some(PairingOutcome::Forfeit { .. }) => ReportGate::Forfeit,
-            Some(PairingOutcome::Reported(_)) | None => ReportGate::Open,
+            // A hosted pairing (pending or already server-reported) stays
+            // `Hosted`, so a client report is refused and a re-report is only
+            // ever the server's own correction. Bye/Forfeit still win — the
+            // hosting layer never spawns a game for a pre-resolved pairing, but
+            // were one somehow marked hosted, it remains unreportable.
+            Some(PairingOutcome::Reported(_)) | None => {
+                if self.hosted.contains_key(&pairing.id) {
+                    ReportGate::Hosted
+                } else {
+                    ReportGate::Open
+                }
+            }
         }
     }
 }
@@ -1977,6 +2234,7 @@ impl TournamentManager {
                 status: TournamentStatus::Registration,
                 players: Vec::new(),
                 pairings: Vec::new(),
+                hosted: BTreeMap::new(),
                 created_at: now,
                 last_activity_at: now,
             },
@@ -2017,15 +2275,19 @@ impl TournamentManager {
         Ok(minted)
     }
 
-    /// Rotate one credential: refuse `presented` unless it is currently
-    /// accepted, then replace it with a freshly minted secret and return that.
+    /// Renew one credential: either MINT a fresh secret from the presented
+    /// current one, or idempotently REPLAY the last rotation when `presented` is
+    /// that rotation's superseded secret and `nonce` matches. Delegates the
+    /// decision to [`TournamentCredential::renew`] / [`TournamentCredential::renew_kind`].
     ///
-    /// **Rotation, not extension.** Re-minting the secret bounds a stolen
-    /// credential even against a thief who keeps renewing, because the
-    /// legitimate holder's next renewal locks the thief out — and vice versa,
-    /// which turns silent indefinite shared access into a detectable,
-    /// reportable failure. Extending the expiry in place would give a thief
-    /// exactly the indefinite access this whole mechanism exists to bound.
+    /// **Recoverable, but never a takeover.** A minting rotation requires the
+    /// live CURRENT secret; presenting a superseded secret can only replay the
+    /// one rotation it fed (returning the already-committed current secret,
+    /// minting nothing) and only with that rotation's nonce. So a lost renewal
+    /// reply is recovered by the client retrying with the same token+nonce, while
+    /// a holder of a merely-stolen superseded secret can neither mint a new
+    /// credential nor obtain the current one — the legitimate holder's authority
+    /// stays put. The client mints `nonce`; see the client renew path.
     ///
     /// `role` is the [`TournamentRole`] axis rather than two sibling methods,
     /// per "parameterize, don't proliferate".
@@ -2050,43 +2312,33 @@ impl TournamentManager {
         code: &str,
         role: TournamentRole,
         presented: &str,
+        nonce: &str,
         env: &impl BrokerEnv,
     ) -> Result<MintedCredential, String> {
         let now_ms = env.now_ms();
-        let (credential, minted) = TournamentCredential::mint(env);
         let meta = self.meta_mut(code)?;
-        match role {
-            TournamentRole::Organizer => {
-                match meta.organizer_token.verdict(presented, now_ms) {
-                    CredentialVerdict::Accepted => {}
-                    CredentialVerdict::Expired => {
-                        return Err(format!(
-                            "Organizer credential for tournament {code} has expired and can no longer be renewed"
-                        ))
-                    }
-                    CredentialVerdict::Mismatch => {
-                        return Err(format!("Invalid organizer token for tournament {code}"))
-                    }
-                }
-                meta.organizer_token = credential;
-            }
+        let outcome = match role {
+            TournamentRole::Organizer => meta.organizer_token.renew(presented, nonce, env),
             TournamentRole::Player => {
-                // The scan resolves the token to its owner rather than merely
-                // testing it, exactly as the broker's player authority does:
-                // "some valid token exists" is the check that would let one
-                // entrant rotate another's credential.
+                // Resolve which entrant owns the presented token BEFORE taking the
+                // &mut borrow to renew it. The probe recognises both a current
+                // secret (a fresh rotation) and a superseded-secret + nonce pair
+                // (a lost-reply replay), so a retry is attributed to its owner
+                // rather than read as a mismatch. Resolving to an owner — not just
+                // "some valid token exists" — is what stops one entrant renewing
+                // another's credential.
                 let mut expired = false;
-                let player = meta.players.iter_mut().find(|p| {
-                    match p.player_token.verdict(presented, now_ms) {
-                        CredentialVerdict::Accepted => true,
-                        CredentialVerdict::Expired => {
+                let idx = meta.players.iter().position(|p| {
+                    match p.player_token.renew_kind(presented, nonce, now_ms) {
+                        RenewKind::Mintable | RenewKind::Replayable => true,
+                        RenewKind::Expired => {
                             expired = true;
                             false
                         }
-                        CredentialVerdict::Mismatch => false,
+                        RenewKind::Mismatch => false,
                     }
                 });
-                let Some(player) = player else {
+                let Some(idx) = idx else {
                     return Err(if expired {
                         format!(
                             "Player credential for tournament {code} has expired and can no longer be renewed"
@@ -2095,13 +2347,29 @@ impl TournamentManager {
                         format!("Invalid player token for tournament {code}")
                     });
                 };
-                if player.dropped {
+                if meta.players[idx].dropped {
                     return Err(format!("Player has dropped from tournament {code}"));
                 }
-                player.player_token = credential;
+                meta.players[idx].player_token.renew(presented, nonce, env)
             }
+        };
+        match outcome {
+            RenewOutcome::Minted(minted) | RenewOutcome::Replayed(minted) => Ok(minted),
+            RenewOutcome::Expired => Err(match role {
+                TournamentRole::Organizer => format!(
+                    "Organizer credential for tournament {code} has expired and can no longer be renewed"
+                ),
+                TournamentRole::Player => format!(
+                    "Player credential for tournament {code} has expired and can no longer be renewed"
+                ),
+            }),
+            RenewOutcome::Mismatch => Err(match role {
+                TournamentRole::Organizer => {
+                    format!("Invalid organizer token for tournament {code}")
+                }
+                TournamentRole::Player => format!("Invalid player token for tournament {code}"),
+            }),
         }
-        Ok(minted)
     }
 
     /// Generates the next round's pairings and returns their ids.
@@ -2234,7 +2502,8 @@ impl TournamentManager {
         Ok(ids)
     }
 
-    /// Records a reported result for one pairing.
+    /// Records a **seated player's** reported result — the client
+    /// `ReportMatchResult` path.
     ///
     /// Replay-safe by construction: this is a single `outcome` write, so a
     /// correction simply overwrites the prior value and every derived view
@@ -2243,12 +2512,52 @@ impl TournamentManager {
     /// no-op rather than an error.
     ///
     /// A [`PairingOutcome::Bye`] or [`PairingOutcome::Forfeit`] is
-    /// server-assigned and permanent: a client report cannot overwrite one.
+    /// server-assigned and permanent: a client report cannot overwrite one. A
+    /// [`ReportGate::Hosted`] pairing is likewise refused here — its result is
+    /// written only by [`Self::report_result_system`].
     pub fn report_result(
         &mut self,
         code: &str,
         pairing_id: PairingId,
         outcome: PodOutcome,
+        env: &impl BrokerEnv,
+    ) -> Result<(), String> {
+        self.report_result_with_authority(
+            code,
+            pairing_id,
+            outcome,
+            ReportAuthority::SeatedPlayer,
+            env,
+        )
+    }
+
+    /// Records the **server's** verified outcome for a hosted pairing — the
+    /// game-over handoff. This is the only writer admitted through
+    /// [`ReportGate::Hosted`]; [`ReportAuthority::System`] is not
+    /// wire-constructible, so no client `ReportMatchResult` can reach it.
+    /// Otherwise identical to [`Self::report_result`]: same validation, same
+    /// replay-safe single write (a re-report is the server's own correction),
+    /// same single-elimination draw rule.
+    pub fn report_result_system(
+        &mut self,
+        code: &str,
+        pairing_id: PairingId,
+        outcome: PodOutcome,
+        env: &impl BrokerEnv,
+    ) -> Result<(), String> {
+        self.report_result_with_authority(code, pairing_id, outcome, ReportAuthority::System, env)
+    }
+
+    /// Shared body of [`Self::report_result`] / [`Self::report_result_system`].
+    /// The gate ([`TournamentMeta::report_gate`]) is WHO-independent; the one
+    /// WHO-dependent conjunct is the `Hosted` arm, which admits `System` and
+    /// refuses `SeatedPlayer`.
+    fn report_result_with_authority(
+        &mut self,
+        code: &str,
+        pairing_id: PairingId,
+        outcome: PodOutcome,
+        authority: ReportAuthority,
         env: &impl BrokerEnv,
     ) -> Result<(), String> {
         let now = env.now_ms() / 1000;
@@ -2271,8 +2580,30 @@ impl TournamentManager {
         // "pairing not found" rather than "no longer running". Every id a
         // terminal tournament actually holds still answers the latter, because
         // pairings are never pruned.
+        // The gate is WHO-independent; authority is the one WHO-dependent
+        // conjunct, and it partitions the two reportable gates exactly: a seated
+        // player (`SeatedPlayer`) may write only a non-hosted (`Open`) pairing,
+        // and the server (`System`) may write only a `Hosted` one. Cross pairs
+        // are refused — a client cannot assert a hosted outcome (hiding its
+        // report button is a display choice, not an authorization control), and
+        // a mistaken `System` handoff cannot write a manual pairing.
         match meta.report_gate(&meta.pairings[index]) {
-            ReportGate::Open => {}
+            ReportGate::Open => {
+                if authority == ReportAuthority::System {
+                    return Err(format!(
+                        "Pairing {pairing_id} is not server-hosted; a system report applies only \
+                         to a hosted pairing"
+                    ));
+                }
+            }
+            ReportGate::Hosted => {
+                if authority == ReportAuthority::SeatedPlayer {
+                    return Err(format!(
+                        "Pairing {pairing_id} is server-hosted; its result is reported by the \
+                         server when the game ends, not by a client"
+                    ));
+                }
+            }
             ReportGate::TournamentNotRunning => {
                 return Err(format!(
                     "Tournament {code} is no longer running (status {:?})",
@@ -2313,6 +2644,83 @@ impl TournamentManager {
         meta.pairings[index].outcome = Some(PairingOutcome::Reported(outcome));
         meta.last_activity_at = now;
         Ok(())
+    }
+
+    /// Marks `pairing_id` as server-hosted and returns its new host generation,
+    /// bumping the generation on a re-host. Refuses a pairing that is not
+    /// [`TournamentMeta::is_hosted_eligible`] (wrong bracket/arity/match-type, or
+    /// a bye). The server calls this when it spawns (or re-spawns) the pairing's
+    /// game; the returned generation is the fence a later, possibly stale,
+    /// terminal is checked against. Pure bookkeeping — no `GameState`, no
+    /// `game_code` crosses into this core.
+    pub fn begin_hosting(
+        &mut self,
+        code: &str,
+        pairing_id: PairingId,
+        env: &impl BrokerEnv,
+    ) -> Result<u32, String> {
+        let now = env.now_ms() / 1000;
+        let meta = self.meta_mut(code)?;
+        let pairing = meta
+            .pairings
+            .iter()
+            .find(|p| p.id == pairing_id)
+            .ok_or_else(|| format!("Pairing {pairing_id} not found in {code}"))?;
+        if !meta.is_hosted_eligible(pairing) {
+            return Err(format!(
+                "Pairing {pairing_id} is not eligible for hosted play \
+                 (hosted v1 is Swiss + head-to-head + Bo3)"
+            ));
+        }
+        // Only a reportable pairing may be hosted: reuse the same gate a report
+        // goes through, so a bye/forfeit pairing — or any pairing in a terminal
+        // tournament — cannot be marked hosted (which would also bump
+        // `last_activity_at` and extend a finished event's retention). `Open` is
+        // a first host; `Hosted` is a re-host that bumps the generation below.
+        match meta.report_gate(pairing) {
+            ReportGate::Open | ReportGate::Hosted => {}
+            ReportGate::TournamentNotRunning => {
+                return Err(format!(
+                    "Tournament {code} is no longer running (status {:?})",
+                    meta.status
+                ))
+            }
+            ReportGate::Bye => {
+                return Err(format!(
+                    "Pairing {pairing_id} is a bye and cannot be hosted"
+                ))
+            }
+            ReportGate::Forfeit => {
+                return Err(format!(
+                    "Pairing {pairing_id} was resolved by forfeit and cannot be hosted"
+                ))
+            }
+        }
+        // The hosted marker is durable provenance — never removed once set. A
+        // pairing that is (or has been) server-hosted stays `ReportGate::Hosted`
+        // for the life of the tournament, so a client can never overwrite the
+        // server's verified result even after the game is torn down, and the
+        // generation is monotonic across re-hosts: there is no teardown that
+        // could reset it and let a stale terminal from an earlier game match a
+        // later host. Freeing the live game is the server layer's concern (its
+        // own `active_matches`), separate from this provenance.
+        let generation = meta
+            .hosted
+            .get(&pairing_id)
+            .map_or(1, |h| h.generation.saturating_add(1));
+        meta.hosted.insert(pairing_id, HostedMatch { generation });
+        meta.last_activity_at = now;
+        Ok(generation)
+    }
+
+    /// The current host generation for `pairing_id`, or `None` if it is not
+    /// hosted. The server compares a terminal's generation against this to fence
+    /// out a stale game (the current-game fence).
+    pub fn hosting_generation(&self, code: &str, pairing_id: PairingId) -> Option<u32> {
+        self.tournaments
+            .get(code)
+            .and_then(|meta| meta.hosted.get(&pairing_id))
+            .map(|h| h.generation)
     }
 
     /// Marks a player dropped and auto-settles any pending pairing the drop
@@ -3432,6 +3840,247 @@ mod tests {
             None
         );
         assert_eq!(head_to_head_pairing("a", "b").winner(), None);
+    }
+
+    // -- unit 6b: hosted-match core ------------------------------------------
+
+    /// `report_gate` is `Hosted` for a pairing carrying hosting authority and
+    /// `Open` otherwise — viewer-independent, so the wire value a client reads
+    /// and the write-path refusal cannot disagree. A hosted pairing that has
+    /// already been (server-)reported stays `Hosted`, so a client can never
+    /// report or overwrite it.
+    #[test]
+    fn report_gate_returns_hosted_for_a_hosted_pairing() {
+        let mut meta = meta_in(TournamentStatus::InProgress);
+        let pairing = meta.pairings[0].clone();
+        assert_eq!(meta.report_gate(&pairing), ReportGate::Open);
+
+        meta.hosted
+            .insert(pairing.id, HostedMatch { generation: 1 });
+        assert_eq!(meta.report_gate(&pairing), ReportGate::Hosted);
+
+        let mut reported = pairing.clone();
+        reported.outcome = Some(PairingOutcome::Reported(PodOutcome::Draw));
+        assert_eq!(meta.report_gate(&reported), ReportGate::Hosted);
+    }
+
+    /// A client `ReportMatchResult` is refused on a hosted pairing (CWE-863:
+    /// hiding the report button is not an authorization control); only the
+    /// server's `report_result_system` may write it, and a re-report is the
+    /// server's own correction.
+    #[test]
+    fn a_hosted_pairing_refuses_a_client_report_but_the_server_writes() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(2, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        let id = mgr.get("T").expect("t").pairings[0].id;
+        assert_eq!(mgr.begin_hosting("T", id, &env).expect("host"), 1);
+
+        let bo3 = || PodOutcome::Decisive {
+            winner: key(0),
+            game_wins: HashMap::from([(key(0), 2), (key(1), 1)]),
+        };
+        // Seated-player (client) path: refused, no outcome written.
+        assert!(mgr.report_result("T", id, bo3(), &env).is_err());
+        assert_eq!(
+            mgr.get("T").expect("t").pairing(id).expect("p").outcome,
+            None
+        );
+        // System (server) path: writes the verified outcome.
+        mgr.report_result_system("T", id, bo3(), &env)
+            .expect("system report");
+        assert_eq!(
+            mgr.get("T").expect("t").pairing(id).expect("p").outcome,
+            Some(PairingOutcome::Reported(bo3()))
+        );
+    }
+
+    /// `begin_hosting` returns a monotonic generation that bumps on re-host and
+    /// never resets — the marker is durable provenance, so a stale terminal from
+    /// an earlier game can never match a later host's generation.
+    #[test]
+    fn begin_hosting_generation_is_monotonic_and_durable() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(2, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        let id = mgr.get("T").expect("t").pairings[0].id;
+
+        assert_eq!(mgr.hosting_generation("T", id), None);
+        assert_eq!(mgr.begin_hosting("T", id, &env).expect("host"), 1);
+        assert_eq!(mgr.hosting_generation("T", id), Some(1));
+        assert_eq!(mgr.begin_hosting("T", id, &env).expect("rehost"), 2);
+        assert_eq!(mgr.begin_hosting("T", id, &env).expect("rehost"), 3);
+        assert_eq!(mgr.hosting_generation("T", id), Some(3));
+    }
+
+    /// Server provenance is permanent: once a hosted pairing has a server-written
+    /// result, a client report still cannot overwrite it — the marker is not
+    /// torn down, so `report_gate` stays `Hosted`. (HIGH regression: a teardown
+    /// that reverted the gate to `Open` would let a seated player replace the
+    /// server result.)
+    #[test]
+    fn a_server_reported_hosted_pairing_stays_locked_against_clients() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(2, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        let id = mgr.get("T").expect("t").pairings[0].id;
+        mgr.begin_hosting("T", id, &env).expect("host");
+
+        let server = PodOutcome::Decisive {
+            winner: key(0),
+            game_wins: HashMap::from([(key(0), 2), (key(1), 1)]),
+        };
+        mgr.report_result_system("T", id, server.clone(), &env)
+            .expect("system report");
+        let meta = mgr.get("T").expect("t");
+        assert_eq!(
+            meta.report_gate(meta.pairing(id).expect("p")),
+            ReportGate::Hosted
+        );
+
+        // A seated player cannot overwrite the server's verified result.
+        let forged = PodOutcome::Decisive {
+            winner: key(1),
+            game_wins: HashMap::from([(key(1), 2), (key(0), 0)]),
+        };
+        assert!(mgr.report_result("T", id, forged, &env).is_err());
+        assert_eq!(
+            mgr.get("T").expect("t").pairing(id).expect("p").outcome,
+            Some(PairingOutcome::Reported(server))
+        );
+    }
+
+    /// A `System` report is admitted ONLY on a hosted pairing: reporting to an
+    /// unhosted (manual) pairing through the server path is rejected, so a
+    /// mistaken future handoff cannot write a manual result.
+    #[test]
+    fn report_result_system_rejects_an_unhosted_pairing() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(2, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        let id = mgr.get("T").expect("t").pairings[0].id;
+        // Not hosted → the server path is refused.
+        assert!(mgr
+            .report_result_system("T", id, PodOutcome::Draw, &env)
+            .is_err());
+        assert_eq!(
+            mgr.get("T").expect("t").pairing(id).expect("p").outcome,
+            None
+        );
+    }
+
+    /// `begin_hosting` reuses `report_gate`: a forfeited pairing and a terminal
+    /// tournament are both refused (the latter would otherwise bump
+    /// `last_activity_at` and extend a finished event's retention).
+    #[test]
+    fn begin_hosting_refuses_forfeit_and_terminal_pairings() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(2, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        let id = mgr.get("T").expect("t").pairings[0].id;
+
+        // Drop one seat → the pairing auto-settles as a forfeit → not hostable.
+        mgr.drop_player("T", &key(0), &env).expect("drop");
+        assert!(mgr.begin_hosting("T", id, &env).is_err());
+
+        // A terminal tournament refuses hosting, and does not touch retention.
+        let mut done = swiss(2, 2, &env);
+        done.generate_pairings("T", &env).expect("round 1");
+        let done_id = done.get("T").expect("t").pairings[0].id;
+        done.report_result(
+            "T",
+            done_id,
+            PodOutcome::Decisive {
+                winner: key(0),
+                game_wins: HashMap::from([(key(0), 2), (key(1), 1)]),
+            },
+            &env,
+        )
+        .expect("report round 1");
+        done.complete_tournament("T", &env).expect("complete");
+        let before = done.get("T").expect("t").last_activity_at;
+        assert!(done.begin_hosting("T", done_id, &env).is_err());
+        assert_eq!(done.get("T").expect("t").last_activity_at, before);
+    }
+
+    /// Hosting admission is scoped to Swiss + head-to-head + Bo3. A pod, a
+    /// *Bo1* head-to-head event, a single-elimination bracket, and a bye are all
+    /// refused — the Bo1 case closes the gap where "Swiss H2H" alone would still
+    /// admit an organizer-selected Bo1.
+    #[test]
+    fn begin_hosting_refuses_ineligible_pairings() {
+        let env = FakeEnv::new();
+
+        // Pod (arity 4) — not head-to-head.
+        let mut pods = swiss(4, 4, &env);
+        pods.generate_pairings("T", &env).expect("pod round");
+        let pod_id = pods.get("T").expect("t").pairings[0].id;
+        assert!(pods.begin_hosting("T", pod_id, &env).is_err());
+
+        // Bo1 head-to-head — organizer-selected Bo1, unsupported by the vertical.
+        let mut bo1 = TournamentManager::new();
+        bo1.create_tournament(
+            "B",
+            CreateTournamentRequest {
+                name: "Bo1".into(),
+                arity: arity(2),
+                scoring: ScoringPolicy::default_for_arity(arity(2)),
+                bracket: BracketShape::Swiss,
+                total_rounds: None,
+                plus_rounds: None,
+                format: None,
+                match_type: Some(MatchType::Bo1),
+            },
+            &env,
+        )
+        .expect("create bo1");
+        join_n(&mut bo1, "B", 2, &env);
+        bo1.generate_pairings("B", &env).expect("bo1 round");
+        let bo1_id = bo1.get("B").expect("t").pairings[0].id;
+        assert!(bo1.begin_hosting("B", bo1_id, &env).is_err());
+
+        // Single-elimination — excluded from the vertical.
+        let mut se = TournamentManager::new();
+        create(
+            &mut se,
+            "S",
+            arity(2),
+            BracketShape::SingleElimination,
+            &env,
+        );
+        join_n(&mut se, "S", 2, &env);
+        se.generate_pairings("S", &env).expect("se round");
+        let se_id = se.get("S").expect("t").pairings[0].id;
+        assert!(se.begin_hosting("S", se_id, &env).is_err());
+
+        // A bye (one seat) is never hostable; a real 2-seat Swiss/H2H/Bo3
+        // pairing is.
+        let meta = meta_in(TournamentStatus::InProgress);
+        let bye = TournamentPairing {
+            id: 7,
+            round: 1,
+            players: vec!["a".into()],
+            outcome: None,
+        };
+        assert!(!meta.is_hosted_eligible(&bye));
+        assert!(meta.is_hosted_eligible(&meta.pairings[0]));
+    }
+
+    /// A drawn hosted game (the engine's `winner: None`) is reportable by the
+    /// server for Swiss — `PodOutcome::Draw` is legal there.
+    #[test]
+    fn a_hosted_swiss_draw_is_reportable_by_the_server() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(2, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        let id = mgr.get("T").expect("t").pairings[0].id;
+        mgr.begin_hosting("T", id, &env).expect("host");
+        mgr.report_result_system("T", id, PodOutcome::Draw, &env)
+            .expect("draw");
+        assert_eq!(
+            mgr.get("T").expect("t").pairing(id).expect("p").outcome,
+            Some(PairingOutcome::Reported(PodOutcome::Draw))
+        );
     }
 
     // -- unit 7: drops --------------------------------------------------------
@@ -5109,6 +5758,7 @@ mod tests {
             status,
             players: undropped(&["a", "b"]),
             pairings: vec![head_to_head_pairing("a", "b")],
+            hosted: BTreeMap::new(),
             created_at: 1_000,
             last_activity_at: 1_000,
         }
@@ -5400,11 +6050,13 @@ mod tests {
         assert!(!credential.accepts("", env.now_ms()));
     }
 
-    /// V10, hostile. A rotated-away secret is refused afterwards even while it
-    /// is still inside its original TTL — rotation, not expiry, is what
-    /// invalidates it.
+    /// V10. Only the CURRENT secret authorizes an action. A rotated-away secret
+    /// stops being accepted the instant it is superseded — there is no overlap
+    /// window for actions; its sole residual power is an idempotent replay
+    /// through `renew` (covered separately). The freshly minted secret
+    /// authorizes in its place.
     #[test]
-    fn a_rotated_away_secret_is_refused_while_still_inside_its_original_ttl() {
+    fn a_rotated_away_secret_stops_authorizing_immediately() {
         let env = FakeEnv::new();
         let mut mgr = TournamentManager::new();
         let original = mgr
@@ -5425,7 +6077,7 @@ mod tests {
             .expect("create");
 
         let rotated = mgr
-            .renew_credential("T", TournamentRole::Organizer, &original.secret, &env)
+            .renew_credential("T", TournamentRole::Organizer, &original.secret, "n1", &env)
             .expect("renew");
 
         let now = env.now_ms();
@@ -5434,16 +6086,22 @@ mod tests {
             "the fixture must still be inside the original TTL, or this proves nothing"
         );
         let stored = &mgr.get("T").expect("event").organizer_token;
-        assert!(
-            !stored.accepts(&original.secret, now),
-            "the presented secret must stop being accepted the instant it is rotated"
+
+        // The superseded secret no longer authorizes — instantly, not after any
+        // window. `verdict` accepts the current secret alone.
+        assert_eq!(
+            stored.verdict(&original.secret, now),
+            CredentialVerdict::Mismatch,
+            "a superseded secret must not authorize an action, even for an instant"
         );
+        // The freshly minted secret authorizes in its place.
         assert!(stored.accepts(&rotated.secret, now));
     }
 
-    /// V11. Renewal ROTATES: the presented secret is refused afterwards and the
-    /// returned one is accepted. Extension in place would leave both live,
-    /// which is exactly the indefinite shared access this mechanism bounds.
+    /// V11. Renewal from the CURRENT secret MINTS a NEW secret whose expiry is
+    /// re-derived from the clock, and that new secret authorizes. An
+    /// *already-expired* credential is refused — renewal recovers a live
+    /// credential, it does not resurrect a dead one.
     #[test]
     fn renewal_rotates_both_roles_and_refuses_an_already_expired_credential() {
         let env = FakeEnv::new();
@@ -5476,7 +6134,7 @@ mod tests {
             (TournamentRole::Player, player.secret.clone()),
         ] {
             let fresh = mgr
-                .renew_credential("T", role, &presented, &env)
+                .renew_credential("T", role, &presented, "n1", &env)
                 .expect("renew");
             assert_ne!(fresh.secret, presented, "renewal must mint a NEW secret");
             assert!(
@@ -5485,12 +6143,8 @@ mod tests {
             );
             assert_eq!(fresh.expires_at_ms, now + TOURNAMENT_CREDENTIAL_TTL_MS);
 
-            // The presented secret is dead; only the returned one authorizes.
-            assert!(
-                mgr.renew_credential("T", role, &presented, &env).is_err(),
-                "the rotated-away secret must not renew again"
-            );
-            mgr.renew_credential("T", role, &fresh.secret, &env)
+            // The freshly returned (current) secret authorizes a further renewal.
+            mgr.renew_credential("T", role, &fresh.secret, "n2", &env)
                 .expect("the freshly returned secret still authorizes");
         }
 
@@ -5515,12 +6169,279 @@ mod tests {
             .expect("create");
         env.advance_secs(TOURNAMENT_CREDENTIAL_TTL_MS / 1000);
         let err = mgr
-            .renew_credential("U", TournamentRole::Organizer, &stale.secret, &env)
+            .renew_credential("U", TournamentRole::Organizer, &stale.secret, "n1", &env)
             .expect_err("an expired credential cannot be renewed");
         assert!(
             err.contains("expired"),
             "expected the expiry message, got: {err}"
         );
+    }
+
+    /// V11, replay mechanics, at the type level. A mint from the current secret
+    /// records the superseded secret + nonce; presenting that pair again REPLAYS
+    /// the already-committed secret (no second mint), while a wrong/absent nonce
+    /// or an unrelated secret is a `Mismatch`. This is the whole recovery-without-
+    /// takeover contract, pinned independent of the manager.
+    #[test]
+    fn renew_mints_from_current_then_idempotently_replays_the_same_secret() {
+        let env = FakeEnv::new();
+        let (mut cred, first) = TournamentCredential::mint(&env);
+
+        // Minting rotation from the current secret.
+        let minted = match cred.renew(&first.secret, "nonce-1", &env) {
+            RenewOutcome::Minted(m) => m,
+            other => panic!("expected Minted, got {other:?}"),
+        };
+        assert_ne!(minted.secret, first.secret, "a mint produces a NEW secret");
+        let now = env.now_ms();
+
+        // The superseded secret no longer authorizes an action; the new one does.
+        assert_eq!(
+            cred.verdict(&first.secret, now),
+            CredentialVerdict::Mismatch
+        );
+        assert_eq!(
+            cred.verdict(&minted.secret, now),
+            CredentialVerdict::Accepted
+        );
+
+        // REPLAY: the superseded secret + the SAME nonce returns the
+        // already-committed secret, minting nothing.
+        match cred.renew(&first.secret, "nonce-1", &env) {
+            RenewOutcome::Replayed(m) => {
+                assert_eq!(
+                    m.secret, minted.secret,
+                    "replay returns the committed secret, not a fresh one"
+                );
+                assert_eq!(m.expires_at_ms, minted.expires_at_ms);
+            }
+            other => panic!("expected Replayed, got {other:?}"),
+        }
+        // The current secret is unchanged by the replay.
+        assert_eq!(
+            cred.verdict(&minted.secret, now),
+            CredentialVerdict::Accepted
+        );
+
+        // A superseded secret with a WRONG nonce can neither mint nor replay, and
+        // an unrelated secret is a mismatch regardless of nonce.
+        assert_eq!(
+            cred.renew(&first.secret, "wrong-nonce", &env),
+            RenewOutcome::Mismatch
+        );
+        assert_eq!(
+            cred.renew("never-issued", "nonce-1", &env),
+            RenewOutcome::Mismatch
+        );
+    }
+
+    /// Maintainer [HIGH] #2: an EMPTY nonce must never be replayable. An
+    /// omitted/`#[serde(default)]` nonce would otherwise record `(superseded, "")`
+    /// and let anyone holding the superseded secret recover the new one by
+    /// omitting the nonce. An empty-nonce rotation still mints, but records no
+    /// replay record, and an empty nonce never replays.
+    #[test]
+    fn an_empty_nonce_mints_but_leaves_nothing_replayable() {
+        let env = FakeEnv::new();
+        let (mut cred, first) = TournamentCredential::mint(&env);
+
+        // Minting with an EMPTY nonce succeeds (a nonce-less client can still
+        // rotate) but must leave no replayable record.
+        let minted = match cred.renew(&first.secret, "", &env) {
+            RenewOutcome::Minted(m) => m,
+            other => panic!("expected Minted, got {other:?}"),
+        };
+        let now = env.now_ms();
+
+        // The superseded secret with an empty nonce CANNOT replay — this is the
+        // takeover path the guard closes.
+        assert_eq!(
+            cred.renew(&first.secret, "", &env),
+            RenewOutcome::Mismatch,
+            "a superseded secret + empty nonce must not recover the new secret"
+        );
+        // Nor with any other nonce (no record was kept at all).
+        assert_eq!(
+            cred.renew(&first.secret, "guessed", &env),
+            RenewOutcome::Mismatch
+        );
+        // The minted secret is the sole authority.
+        assert_eq!(
+            cred.verdict(&minted.secret, now),
+            CredentialVerdict::Accepted
+        );
+        assert_eq!(
+            cred.verdict(&first.secret, now),
+            CredentialVerdict::Mismatch
+        );
+    }
+
+    /// The regression the maintainer's [HIGH] asked for: an accepted overlap
+    /// credential must NOT be able to mint or receive a fresh primary. After the
+    /// owner rotates A→B, a holder of the stale A — presenting a fresh nonce, as a
+    /// thief without the original rotation's nonce must — can neither mint a new
+    /// credential nor obtain B. B stays authoritative, and the owner can still
+    /// advance it. This is what the idempotent-replay redesign buys over the
+    /// earlier bounded-overlap model, which permitted exactly this takeover.
+    #[test]
+    fn a_stolen_superseded_secret_cannot_take_over_the_authority() {
+        let env = FakeEnv::new();
+        let mut mgr = TournamentManager::new();
+        let created = mgr
+            .create_tournament(
+                "T",
+                CreateTournamentRequest {
+                    name: "Test Event".to_string(),
+                    arity: MatchArity::HEAD_TO_HEAD,
+                    scoring: ScoringPolicy::default_for_arity(MatchArity::HEAD_TO_HEAD),
+                    bracket: BracketShape::Swiss,
+                    total_rounds: None,
+                    plus_rounds: None,
+                    format: None,
+                    match_type: None,
+                },
+                &env,
+            )
+            .expect("create");
+
+        // Owner rotates A → B with nonce N1; the reply is received, so B is the
+        // authority the owner holds. A is now a stale superseded secret.
+        let a = created.secret;
+        let b = mgr
+            .renew_credential("T", TournamentRole::Organizer, &a, "N1", &env)
+            .expect("owner rotates A -> B");
+        let now = env.now_ms();
+        assert!(mgr
+            .get("T")
+            .unwrap()
+            .organizer_token
+            .accepts(&b.secret, now));
+        assert!(
+            !mgr.get("T").unwrap().organizer_token.accepts(&a, now),
+            "the superseded secret stops authorizing"
+        );
+
+        // Attacker holds only the stale A. With a FRESH nonce (they never had
+        // N1) it can neither mint (A is not current) nor replay (nonce mismatch).
+        let err = mgr
+            .renew_credential("T", TournamentRole::Organizer, &a, "attacker-nonce", &env)
+            .expect_err("a stale superseded secret with a fresh nonce cannot renew");
+        assert!(
+            err.contains("Invalid"),
+            "expected an invalid-token refusal, got: {err}"
+        );
+
+        // B is untouched by the attempt, and the owner can still advance it —
+        // proving the authority never moved to the attacker.
+        assert!(mgr
+            .get("T")
+            .unwrap()
+            .organizer_token
+            .accepts(&b.secret, now));
+        let c = mgr
+            .renew_credential("T", TournamentRole::Organizer, &b.secret, "N2", &env)
+            .expect("owner rotates B -> C");
+        assert_ne!(c.secret, b.secret);
+        assert!(mgr
+            .get("T")
+            .unwrap()
+            .organizer_token
+            .accepts(&c.secret, env.now_ms()));
+    }
+
+    /// The regression the #8782 review asked for, at the server layer: a renewal
+    /// reply lost in transit must not strand the authority. The client retries
+    /// the rotation with the SAME (now-superseded) secret and the SAME nonce, and
+    /// the broker REPLAYS the already-committed secret rather than minting a
+    /// second one — so the holder recovers the exact authority the server holds,
+    /// with no fork and no strand. A retry with a different nonce is refused.
+    #[test]
+    fn a_lost_renewal_reply_is_recovered_by_replaying_the_same_nonce() {
+        let env = FakeEnv::new();
+        let mut mgr = TournamentManager::new();
+        let created = mgr
+            .create_tournament(
+                "T",
+                CreateTournamentRequest {
+                    name: "Test Event".to_string(),
+                    arity: MatchArity::HEAD_TO_HEAD,
+                    scoring: ScoringPolicy::default_for_arity(MatchArity::HEAD_TO_HEAD),
+                    bracket: BracketShape::Swiss,
+                    total_rounds: None,
+                    plus_rounds: None,
+                    format: None,
+                    match_type: None,
+                },
+                &env,
+            )
+            .expect("create");
+        let held = created.secret;
+
+        // Renew: the server commits a new secret, but the reply is LOST — the
+        // organizer never learns it and keeps holding `held` and its nonce `N`.
+        env.advance_secs(60);
+        let committed = mgr
+            .renew_credential("T", TournamentRole::Organizer, &held, "N", &env)
+            .expect("a live credential renews");
+
+        // The retry with the SAME (held, N) REPLAYS the committed secret rather
+        // than minting a second one — the holder recovers the real authority.
+        let recovered = mgr
+            .renew_credential("T", TournamentRole::Organizer, &held, "N", &env)
+            .expect("the retry replays the committed secret");
+        assert_eq!(
+            recovered.secret, committed.secret,
+            "replay recovers the SAME secret, not a fresh one"
+        );
+        assert_eq!(recovered.expires_at_ms, committed.expires_at_ms);
+        assert!(mgr
+            .get("T")
+            .unwrap()
+            .organizer_token
+            .accepts(&recovered.secret, env.now_ms()));
+
+        // A retry with a DIFFERENT nonce is refused: recovery is bound to the
+        // client's own nonce, not to mere possession of the superseded secret.
+        let err = mgr
+            .renew_credential("T", TournamentRole::Organizer, &held, "other-nonce", &env)
+            .expect_err("a different nonce cannot recover");
+        assert!(
+            err.contains("Invalid"),
+            "expected an invalid-token refusal, got: {err}"
+        );
+    }
+
+    /// The same replay recovery holds on the player path, which carries the
+    /// extra owner-scan and drop guard the organizer path lacks: the scan
+    /// attributes a superseded-secret + nonce retry to its owning entrant (a
+    /// replay presents a secret `verdict` alone would call a mismatch), so a
+    /// seated player whose renewal reply was lost recovers the committed secret.
+    #[test]
+    fn a_lost_renewal_reply_is_recovered_by_replay_on_the_player_path() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(4, 2, &env);
+        let joined = mgr.join_tournament("T", "p99", "Zoe", &env).expect("join");
+        let held = joined.secret;
+
+        // Renewal commits, reply lost — the player keeps `held` and its nonce.
+        env.advance_secs(60);
+        let committed = mgr
+            .renew_credential("T", TournamentRole::Player, &held, "N", &env)
+            .expect("a seated player renews");
+
+        // The retry with the same (held, N) replays the committed secret, and the
+        // scan still resolves it to this entrant even though `held` is superseded.
+        let recovered = mgr
+            .renew_credential("T", TournamentRole::Player, &held, "N", &env)
+            .expect("the retry replays the committed secret");
+        assert_eq!(recovered.secret, committed.secret);
+        let now = env.now_ms();
+        assert!(mgr
+            .get("T")
+            .unwrap()
+            .players
+            .iter()
+            .any(|p| p.player_token.accepts(&recovered.secret, now)));
     }
 
     /// A credential survives a realistic multi-day between-round gap. The former
@@ -5563,7 +6484,7 @@ mod tests {
                 .accepts(&org.secret, now),
             "a day-old credential must still authorize a live event's actions",
         );
-        mgr.renew_credential("T", TournamentRole::Organizer, &org.secret, &env)
+        mgr.renew_credential("T", TournamentRole::Organizer, &org.secret, "n1", &env)
             .expect("a day-old credential must still be renewable");
     }
 
@@ -5578,12 +6499,12 @@ mod tests {
 
         // Reach-guard: it renews fine while the entrant is still seated.
         let fresh = mgr
-            .renew_credential("T", TournamentRole::Player, &joined.secret, &env)
+            .renew_credential("T", TournamentRole::Player, &joined.secret, "n1", &env)
             .expect("a seated entrant may rotate");
 
         mgr.drop_player("T", "p99", &env).expect("drop");
         let err = mgr
-            .renew_credential("T", TournamentRole::Player, &fresh.secret, &env)
+            .renew_credential("T", TournamentRole::Player, &fresh.secret, "n2", &env)
             .expect_err("a dropped entrant may not rotate");
         assert!(
             err.contains("dropped"),
@@ -5616,7 +6537,7 @@ mod tests {
         let before = mgr.get("T").expect("event").last_activity_at;
 
         env.advance_secs(60);
-        mgr.renew_credential("T", TournamentRole::Organizer, &org.secret, &env)
+        mgr.renew_credential("T", TournamentRole::Organizer, &org.secret, "n1", &env)
             .expect("renew");
 
         assert_eq!(

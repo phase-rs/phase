@@ -10,7 +10,14 @@ interface JoinErrorDialogProps {
    * this label and fires the callback. Used for recoverable errors like
    * build-commit mismatch where the user can refresh to resolve. */
   primaryAction?: { label: string; onClick: () => void };
-  onDismiss: () => void;
+  /** Omitted for a dialog the user cannot close (no dismiss button, and the
+   * backdrop does nothing); the page closes it itself. */
+  onDismiss?: () => void;
+  /** Label of the dismiss button. Defaults to "Dismiss". */
+  dismissLabel?: string;
+  /** Whether a backdrop click also fires `onDismiss`. Defaults to true; false
+   * when dismissing is a decision the user must make with the button. */
+  dismissOnBackdrop?: boolean;
 }
 
 /**
@@ -18,18 +25,25 @@ interface JoinErrorDialogProps {
  * than a toast — in particular `build_mismatch`, which requires the user
  * to refresh the page to pick up a new client build. Kept deliberately
  * small and parameterized so one component covers the category rather
- * than spawning a dialog per error reason.
+ * than spawning a dialog per error reason. It also carries the Discord-link
+ * version gate's progress and fallback dialogs.
  */
 export function JoinErrorDialog({
   title,
   message,
   primaryAction,
   onDismiss,
+  dismissLabel,
+  dismissOnBackdrop = true,
 }: JoinErrorDialogProps) {
   const { t } = useTranslation("multiplayer");
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/70" onClick={onDismiss} />
+      <div
+        data-testid="join-error-dialog-backdrop"
+        className="absolute inset-0 bg-black/70"
+        onClick={dismissOnBackdrop ? onDismiss : undefined}
+      />
       <motion.div
         initial={{ opacity: 0, scale: 0.96 }}
         animate={{ opacity: 1, scale: 1 }}
@@ -39,13 +53,15 @@ export function JoinErrorDialog({
         <h2 className="text-base font-semibold text-white">{title}</h2>
         <p className="mt-3 text-sm leading-6 text-slate-300">{message}</p>
         <div className="mt-5 flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={onDismiss}
-            className={menuButtonClass({ tone: "neutral", size: "sm" })}
-          >
-            {t("joinErrorDialog.dismiss")}
-          </button>
+          {onDismiss && (
+            <button
+              type="button"
+              onClick={onDismiss}
+              className={menuButtonClass({ tone: "neutral", size: "sm" })}
+            >
+              {dismissLabel ?? t("joinErrorDialog.dismiss")}
+            </button>
+          )}
           {primaryAction && (
             <button
               type="button"

@@ -25,21 +25,33 @@ slow-timeout = { period = "60s", terminate-after = 4 }
 # Commander dump with a large stack through production `apply()` until the loop-detect ring
 # evicts, stopping at that first evicting beat rather than at its 120-beat cap. Profiled: the
 # test-side work (the per-beat snapshot clone and the ring-membership scans) is negligible, and
-# the cost is overwhelmingly the CR 732.2a shortcut detector's per-beat sampling and reconcile
-# inside `apply()` — not the driver, and not the surviving per-viewer enumeration on the
-# non-priority windows. Re-derive that attribution rather than trusting this sentence: drive the
-# same fixture under `LoopDetectionMode::Off` and compare against `Interactive` over the same
-# beat sequence.
+# the cost is the CR 732.2a shortcut detector's reconcile seam inside `apply()` — essentially
+# all of it, with both sampler halves together under a third of one percent. Re-derive that
+# attribution rather than trusting this sentence, with the instrument that measures it. The
+# instrument PRINTS its attribution, so `--no-capture` is part of the command, not a taste:
+# without it the run is a green PASS and no attribution at all.
+#   cargo nextest run -p phase-engine --cargo-profile server-release --run-ignored all \
+#     --no-capture -E 'test(=loop_shortcut::the_detector_cost_attributes_to_its_named_parts)'
 # No cheaper stand-in exists among the tracked fixtures: driven to 120 beats under a forced
 # `LoopDetectionMode::Interactive`, no other dump in `crates/engine/tests/fixtures` that
 # `restore_dump` accepts reaches `LOOP_DETECT_RING_CAP` — forced because several of those dumps
 # carry `loop_detection: Off`. Re-derive over that same population and beat bound: drive each
 # accepted dump through `dump_drive_one_beat` and print its maximum ring.
-# Alone on an idle machine it runs about 112s; a CI shard runs it beside three other test
-# threads, and there it landed past the 240s kill (PR #8301, shard 2/4). Re-time it alone before
-# assuming this override is still earned:
-#   cargo nextest run -p phase-engine \
-#     -E 'test(=loop_shortcut::an_evicting_beat_mints_without_growing_the_ring)'
+#
+# THE MEASURED RESIDUE THIS OVERRIDE EXISTS FOR, read off THIS ROW's own runtime rather than
+# off a shard aggregate: in full local `--profile ci` suite runs the row has measured 233-243s
+# against the 240s kill. It straddles the kill, so on this machine the override is already
+# what keeps the row green — never mind that a CI runner is slower still, which is where it
+# was first observed (PR #8301). Re-read the number off the row's own PASS line in such a run;
+# the default status level prints it and CI's `--status-level fail` is what hides it. A
+# single-test or single-shard run reads far lower and will make this override look unearned:
+# the full suite is the leg that decides. WHICH SHARD carries the row is not a constant and no
+# number here would stay true — partition assignment depends on the WHOLE test list, so a
+# listing over any other population, an `-E` filter or a different feature set alike, names a
+# different shard. Derive it unfiltered over the population CI archives:
+#   cargo nextest list --profile ci --workspace --exclude phase-tauri \
+#     --features engine/proptest --partition count:N/4
+# Re-measure before assuming this override is still earned.
 #
 # What this override does and nothing more: it raises the hard kill for this one test to ten
 # 60s periods. The test stays in the 60s slow-warn population, which is the signal to keep.

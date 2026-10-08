@@ -80,8 +80,9 @@ fn necrodominance_pay_prompt_is_not_misclassified_as_life_loss_deferral() {
                             event,
                             engine::types::events::GameEvent::LifeChanged {
                                 player_id: P0,
-                                amount: -3
-                            }
+                                amount: -3,
+    ..
+}
                         ))
                         .count(),
                     1,

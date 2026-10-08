@@ -47,6 +47,25 @@ use crate::spectator_wire_guard::{guard_spectate_draft, guard_spectator_join};
 use engine::game::interaction::MAX_INTERACTION_STRING_LEN;
 use engine::types::action_rejection::{ActionRejection, ActionRejectionCode};
 use engine::types::interaction::{InteractionPreviewRequest, InteractionSubmission};
+use lobby_broker::inbound_guard::validate_deck_list;
+
+/// A Cube source is larger than a constructed deck but still must be bounded
+/// before the Full-mode handler persists it. Order and duplicates are data.
+pub const MAX_BOOSTER_PACK_POOL_ENTRIES: usize = 8_192;
+
+/// The creating client names the pool, and with it every card an in-game pack
+/// can contain. A casual Cube match accepts that; a rated game must not let one
+/// participant choose what a pack opener finds, so a ranked room refuses any
+/// supplied pool, an empty one included.
+fn guard_booster_pack_pool(pool: &Option<Vec<String>>, ranked: bool) -> Result<(), String> {
+    let Some(pool) = pool else {
+        return Ok(());
+    };
+    if ranked {
+        return Err("booster_pack_pool is not accepted for a ranked game".to_string());
+    }
+    validate_deck_list("booster_pack_pool", pool, MAX_BOOSTER_PACK_POOL_ENTRIES)
+}
 
 /// Validate wire fields for any inbound `ClientMessage` before handler work.
 ///
@@ -130,6 +149,9 @@ pub fn guard_client_message_before_dispatch(
             room_name,
             host_peer_id,
             draft_metadata,
+            ranked,
+            booster_pack_pool,
+            requested_code,
             ..
         } => {
             guard_create_game_settings_inbound(CreateGameSettingsInbound {
@@ -142,8 +164,10 @@ pub fn guard_client_message_before_dispatch(
                 room_name: room_name.as_deref(),
                 host_peer_id: host_peer_id.as_deref(),
                 draft_metadata: draft_metadata.as_ref(),
+                requested_code: requested_code.as_deref(),
             })?;
-            guard_create_ai_seats(ai_seats, *player_count)
+            guard_create_ai_seats(ai_seats, *player_count)?;
+            guard_booster_pack_pool(booster_pack_pool, *ranked)
         }
         ClientMessage::JoinGameWithPassword {
             game_code,
@@ -255,9 +279,11 @@ pub fn guard_client_message_before_dispatch(
             code,
             role: _,
             token,
+            rotation_nonce,
         } => validate_renew_tournament_credential_fields(RenewTournamentCredentialFields {
             code,
             token,
+            rotation_nonce,
         }),
         ClientMessage::CreateDraftWithSettings {
             display_name,
@@ -413,6 +439,7 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
             room_name,
             host_peer_id,
             draft_metadata,
+            requested_code,
             ..
         } => guard_create_game_settings_inbound(CreateGameSettingsInbound {
             deck,
@@ -424,6 +451,7 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
             room_name: room_name.as_deref(),
             host_peer_id: host_peer_id.as_deref(),
             draft_metadata: draft_metadata.as_ref(),
+            requested_code: requested_code.as_deref(),
         }),
         ClientMessage::JoinGameWithPassword {
             game_code,
@@ -527,9 +555,11 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
             code,
             role: _,
             token,
+            rotation_nonce,
         } => validate_renew_tournament_credential_fields(RenewTournamentCredentialFields {
             code,
             token,
+            rotation_nonce,
         }),
         ClientMessage::CreateGame { .. }
         | ClientMessage::JoinGame { .. }
@@ -607,7 +637,8 @@ mod tests {
         PreviewRequestId, MAX_INTERACTION_LIST_LEN,
     };
     use engine::types::mana::{
-        ManaRestriction, ManaSourcePenalty, ManaSourceSelection, ManaType, TapsForManaSelection,
+        ManaRestriction, ManaSourceOutput, ManaSourcePenalty, ManaSourceQuantity,
+        ManaSourceSelection, ManaType, TapsForManaSelection,
     };
     use engine::types::{GameAction, ObjectId};
     use lobby_broker::validation::MAX_CONSUMED_TOKENS;
@@ -617,6 +648,109 @@ mod tests {
         assert!(guard_client_message_before_dispatch(
             &ClientMessage::SubscribeLobby,
             ServerMode::Full
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn booster_pack_pool_guard_preserves_duplicates_and_rejects_oversize_or_bad_names() {
+        assert!(guard_booster_pack_pool(
+            &Some(vec![
+                "Cube Card".into(),
+                "Cube Card".into(),
+                "Undealt sentinel".into(),
+            ]),
+            false,
+        )
+        .is_ok());
+        assert!(guard_booster_pack_pool(
+            &Some(vec!["Card".into(); MAX_BOOSTER_PACK_POOL_ENTRIES + 1]),
+            false,
+        )
+        .unwrap_err()
+        .contains("booster_pack_pool"));
+        assert!(
+            guard_booster_pack_pool(&Some(vec!["bad\nname".into()]), false)
+                .unwrap_err()
+                .contains("booster_pack_pool")
+        );
+    }
+
+    /// A settings-create frame as the dispatch guard sees it: a two-seat duel
+    /// that passes every other bound, varying only `ranked`, the pool and the
+    /// requested room code.
+    fn create_game_with_settings(
+        ranked: bool,
+        booster_pack_pool: Option<Vec<String>>,
+        requested_code: Option<&str>,
+    ) -> ClientMessage {
+        ClientMessage::CreateGameWithSettings {
+            deck: crate::protocol::DeckData {
+                main_deck: vec!["Forest".to_string()],
+                ..Default::default()
+            },
+            display_name: "Alice".to_string(),
+            public: false,
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            match_config: engine::types::match_config::MatchConfig::default(),
+            ai_seats: vec![],
+            format_config: None,
+            room_name: None,
+            host_peer_id: None,
+            draft_metadata: None,
+            start_when_full: true,
+            ranked,
+            requested_code: requested_code.map(str::to_string),
+            booster_pack_pool,
+        }
+    }
+
+    /// Both native dispatch guards carry the requested-code shape rule, in
+    /// either server mode.
+    #[test]
+    fn dispatch_guards_refuse_a_malformed_requested_code() {
+        let malformed = create_game_with_settings(false, None, Some("ab12cd"));
+        let valid = create_game_with_settings(false, None, Some("AB12CD"));
+        for mode in [ServerMode::Full, ServerMode::LobbyOnly] {
+            let err = guard_client_message_before_dispatch(&malformed, mode).unwrap_err();
+            assert!(err.contains("requested_code"), "{mode:?}: {err}");
+            assert!(
+                guard_client_message_before_dispatch(&valid, mode).is_ok(),
+                "{mode:?}"
+            );
+        }
+        let err = guard_broker_projection_inbound(&malformed).unwrap_err();
+        assert!(err.contains("requested_code"), "{err}");
+        assert!(guard_broker_projection_inbound(&valid).is_ok());
+    }
+
+    /// A rated game must not let its creator choose every card a pack opener
+    /// can find, so any supplied pool, empty included, refuses a ranked room.
+    ///
+    /// REVERT-PROBE: drop the `ranked` refusal from `guard_booster_pack_pool`
+    /// and both ranked frames pass. The unranked and pool-less ranked frames are
+    /// the reach-guards: the refusal is the pool on a ranked room, not either
+    /// field alone.
+    #[test]
+    fn dispatch_guard_refuses_a_booster_pack_pool_on_a_ranked_game() {
+        for pool in [vec!["Cube Card".to_string()], Vec::new()] {
+            let err = guard_client_message_before_dispatch(
+                &create_game_with_settings(true, Some(pool.clone()), None),
+                ServerMode::Full,
+            )
+            .unwrap_err();
+            assert!(err.contains("booster_pack_pool"), "{pool:?}: {err}");
+            assert!(guard_client_message_before_dispatch(
+                &create_game_with_settings(false, Some(pool), None),
+                ServerMode::Full,
+            )
+            .is_ok());
+        }
+        assert!(guard_client_message_before_dispatch(
+            &create_game_with_settings(true, None, None),
+            ServerMode::Full,
         )
         .is_ok());
     }
@@ -664,6 +798,27 @@ mod tests {
 
         let err = guard_client_message_before_dispatch(&msg, ServerMode::Full).unwrap_err();
         assert!(err.contains("TapLandForMana.selection.restrictions.OnlyForAny"));
+    }
+
+    #[test]
+    fn dispatch_guard_accepts_deferred_mana_quantity_at_action_boundary() {
+        let msg = ClientMessage::Action {
+            action: GameAction::ActivateManaSource {
+                selection: ManaSourceSelection {
+                    source: ObjectIncarnationRef::of(ObjectId(1), 1),
+                    ability_index: Some(0),
+                    mana_type: ManaType::Colorless,
+                    output: ManaSourceOutput::DeferredColorChoice {
+                        quantity: ManaSourceQuantity::Fixed(3),
+                    },
+                    atomic_combination: None,
+                    restrictions: Vec::new(),
+                    penalty: ManaSourcePenalty::Sacrifices,
+                    taps_for_mana: Vec::new(),
+                },
+            },
+        };
+        assert!(guard_client_message_before_dispatch(&msg, ServerMode::Full).is_ok());
     }
 
     #[test]
@@ -915,6 +1070,7 @@ mod tests {
                     code: "TOUR01".into(),
                     role: TournamentRole::Organizer,
                     token: long_token,
+                    rotation_nonce: "n".into(),
                 },
             ),
             (
@@ -923,6 +1079,7 @@ mod tests {
                     code: long_code,
                     role: TournamentRole::Player,
                     token: "tok".into(),
+                    rotation_nonce: "n".into(),
                 },
             ),
         ]
@@ -974,11 +1131,13 @@ mod tests {
                 code: "TOUR01".into(),
                 role: TournamentRole::Organizer,
                 token: "tok".into(),
+                rotation_nonce: "nonce".into(),
             },
             ClientMessage::RenewTournamentCredential {
                 code: "TOUR01".into(),
                 role: TournamentRole::Player,
                 token: "tok".into(),
+                rotation_nonce: String::new(),
             },
         ]
     }

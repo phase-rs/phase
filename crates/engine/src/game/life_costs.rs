@@ -169,7 +169,7 @@ pub fn pay_life_as_cost(
                 choice_player: *choice_player,
             }
         }
-        Err(ReplacementDeferred::SubstitutionContinuation) => {
+        Err(ReplacementDeferred::SubstitutionContinuation { .. }) => {
             PayLifeCostResult::PaidWithDeferredSubstitution { amount }
         }
     }

@@ -6,13 +6,13 @@
 
 use serde::Serialize;
 
-use super::ast::parsed_clause;
+use super::ast::{parsed_clause, ModalOptionality};
 use super::context::ParseContext;
 use super::effect_chain::{DieResultBranchIr, EffectChainIr, ModalModeIr};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ControllerRef,
-    Effect, ModalChoice, TargetFilter, TargetSelectionMode, TriggerCondition, TriggerConstraint,
-    TriggerDefinition, UnlessPayModifier,
+    Effect, IllegalTargetsDisposition, ModalChoice, TargetFilter, TargetSelectionMode,
+    TriggerCondition, TriggerConstraint, TriggerDefinition, UnlessPayModifier,
 };
 use crate::types::triggers::TriggerMode;
 
@@ -204,6 +204,12 @@ pub(crate) struct ModalIr {
     pub(crate) marker: EffectChainIr,
     pub(crate) choice: ModalChoice,
     pub(crate) modes: Vec<ModalModeIr>,
+    /// CR 603.3c + CR 700.2b: whether the header lets the controller choose no
+    /// mode ("you may choose one —"); the modal choice, including choosing none,
+    /// is made as the ability is put on the stack. The engine models the decline
+    /// as `optional` on the ability that resolves, as the block-level modal
+    /// lowering does, so `ModalChoice.min_choices` stays 1 either way.
+    pub(crate) optionality: ModalOptionality,
 }
 
 /// CR 701.38: Typed vote trigger body.
@@ -362,6 +368,11 @@ pub(crate) struct TriggerModifiers {
     pub(crate) constraint: Option<TriggerConstraint>,
     /// Whether effect text contains "up to one".
     pub(crate) has_up_to: bool,
+    /// CR 101.1 + CR 608.2b: the trailing "This ability still resolves if its target
+    /// becomes illegal" sentence. Set only for a plain effect-chain body; stamped on
+    /// the execute root by `lower_trigger_ir`.
+    #[serde(skip_serializing_if = "IllegalTargetsDisposition::is_does_not_resolve")]
+    pub(crate) illegal_targets_disposition: IllegalTargetsDisposition,
     /// Lowered effect text (after comma split), for `effect_adds_mana_to_triggering_player`.
     pub(crate) effect_lower: String,
     /// CR 109.4: The relative-player scope the trigger condition

@@ -8,17 +8,21 @@ import { describe, expect, it } from "vitest";
 import type {
   PairingOutcome,
   PlayerSummary,
+  TournamentAction,
+  TournamentPairingView,
+  TournamentSummary,
   TournamentView,
 } from "../../adapter/types";
 import type { TournamentCredential } from "../../stores/multiplayerStore";
 import {
   arityLabel,
   decisiveGameWins,
-  defaultScoringForArity,
   failureLabel,
   formatTiebreakValue,
   gameWinsEntries,
+  isActionOpen,
   isActiveEntrant,
+  isPairingReportable,
   isReportable,
   myPairing,
   outcomeLabelKey,
@@ -111,6 +115,76 @@ describe("isReportable", () => {
 
   it.each(cases)("%s", (_label, outcome, expected) => {
     expect(isReportable(outcome)).toBe(expected);
+  });
+});
+
+// The v6 authority: consumes the broker's per-pairing `report_gate` when
+// present and falls back to the status-blind `isReportable` only when it is
+// absent (a pre-v6 broker).
+describe("isPairingReportable", () => {
+  const pairing = (
+    report_gate: TournamentPairingView["report_gate"],
+    outcome: PairingOutcome | null,
+  ): TournamentPairingView => ({
+    id: 1,
+    round: 1,
+    players: [...seats],
+    outcome,
+    report_gate,
+  });
+
+  // Present `report_gate` is authoritative — gate strictly on `"Open"`.
+  it.each([
+    ["Open", true],
+    ["TournamentNotRunning", false],
+    ["Bye", false],
+    ["Forfeit", false],
+  ] as const)("consumes report_gate %s", (gate, expected) => {
+    expect(isPairingReportable(pairing(gate, null))).toBe(expected);
+  });
+
+  // The bug fix: an already-`Reported` pairing on a finished event is refused
+  // via `TournamentNotRunning`, though its outcome alone still looks
+  // re-reportable.
+  it("refuses a reported pairing once the tournament is not running", () => {
+    const reported: PairingOutcome = { Reported: "Draw" };
+    expect(isPairingReportable(pairing("TournamentNotRunning", reported))).toBe(
+      false,
+    );
+    // Same outcome, still running → the broker keeps it open for corrections.
+    expect(isPairingReportable(pairing("Open", reported))).toBe(true);
+  });
+
+  // Absent `report_gate` (pre-v6 broker) degrades to the outcome-only fallback.
+  it.each([
+    ["pending", null, true],
+    ["bye", "Bye", false],
+  ] as const)("falls back to isReportable when absent: %s", (_l, outcome, expected) => {
+    expect(isPairingReportable(pairing(undefined, outcome))).toBe(expected);
+  });
+});
+
+// Consumes the broker's `open_actions`; treats an absent set (pre-v6 broker)
+// as OPEN so an older server keeps the credential-only behaviour.
+describe("isActionOpen", () => {
+  const summary = (open_actions?: TournamentAction[]): TournamentSummary =>
+    ({ open_actions }) as TournamentSummary;
+
+  it("is true for an action present in the set", () => {
+    expect(isActionOpen(summary(["StartRound", "Drop"]), "StartRound")).toBe(true);
+  });
+
+  it("is false for an action absent from a present set", () => {
+    // A running event withholds nothing here, but a Registration event omits
+    // EndTournament and a terminal event omits everything.
+    expect(isActionOpen(summary(["StartRound", "Drop"]), "EndTournament")).toBe(
+      false,
+    );
+    expect(isActionOpen(summary([]), "StartRound")).toBe(false);
+  });
+
+  it("defaults to open when the set is absent (pre-v6 broker)", () => {
+    expect(isActionOpen(summary(undefined), "EndTournament")).toBe(true);
   });
 });
 
@@ -382,22 +456,6 @@ describe("viewerRoles", () => {
     expect(roles.size).toBe(2);
     expect(roles.has("organizer")).toBe(true);
     expect(roles.has("player")).toBe(true);
-  });
-});
-
-// V12 — mirrors `ScoringPolicy::default_for_arity`'s `2n-1 / 1 / 0`. A
-// hardcoded 3/1/0 reds the arity-4 case.
-describe("defaultScoringForArity", () => {
-  it.each([
-    [2, 3],
-    [4, 7],
-    [128, 255],
-  ])("arity %i prefills %i win points", (arity, winPoints) => {
-    expect(defaultScoringForArity(arity)).toEqual({
-      win_points: winPoints,
-      draw_points: 1,
-      loss_points: 0,
-    });
   });
 });
 

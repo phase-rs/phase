@@ -200,6 +200,7 @@ const TEST_VIEW: BuilderView = {
   status: "Deckbuilding",
   kind: "Quick",
   launch_capability: "None",
+  distribution: "PickAndPass",
   commanders_required: 0,
   current_pack_number: 1,
   pick_number: 1,
@@ -517,7 +518,9 @@ describe("LimitedDeckBuilder", () => {
 
       const actions = container.querySelector<HTMLElement>("[data-tablet-builder-actions]")!;
       expect(actions).toHaveClass("grid-cols-2");
-      fireEvent.click(within(actions).getByRole("button", { name: "Submit Deck" }));
+      const submit = within(actions).getByRole("button", { name: "Submit Deck" });
+      await waitFor(() => expect(submit).toBeEnabled());
+      fireEvent.click(submit);
       expect(await screen.findByRole("alert")).toHaveTextContent("submission rejected");
       expect(container.querySelector("[data-tablet-builder-actions]")).toBe(actions);
       expect(container.querySelector("[data-tablet-landscape-builder-row]")).not.toBeInTheDocument();
@@ -617,6 +620,7 @@ describe("LimitedDeckBuilder", () => {
     expect(suggestDeck).toHaveBeenCalledOnce();
     const submit = within(row).getByRole("button", { name: "Submit Deck" });
     expect(submit).toHaveClass("min-h-11", "px-4", "py-2", "text-sm");
+    await waitFor(() => expect(submit).toBeEnabled());
     fireEvent.click(submit);
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("submission rejected");
@@ -651,6 +655,7 @@ describe("LimitedDeckBuilder", () => {
     );
 
     const submit = screen.getByRole("button", { name: "Submit Deck" });
+    await waitFor(() => expect(submit).toBeEnabled());
     fireEvent.click(submit);
     expect(submitDeck).toHaveBeenCalledOnce();
     expect(submit).toBeDisabled();
@@ -794,7 +799,7 @@ describe("LimitedDeckBuilder", () => {
     }
   });
 
-  it("places normal desktop Suggest Deck and Submit Deck beside their deck controls", () => {
+  it("places normal desktop Suggest Deck and Submit Deck beside their deck controls", async () => {
     const suggestDeck = vi.fn();
     const submitDeck = vi.fn();
     const { container } = render(
@@ -836,13 +841,14 @@ describe("LimitedDeckBuilder", () => {
       "gap-[clamp(4px,1vw,16px)]",
     );
     expect(deckStatus).toHaveClass("w-full");
-    expect(submit).toHaveClass("w-full", "bg-emerald-950/56");
+    await waitFor(() => expect(submit).toHaveClass("w-full", "bg-emerald-950/56"));
     expect(within(deckControls).getByRole("button", { name: "Suggest Deck" }))
       .toHaveClass("w-full", "bg-emerald-950/56");
     expect(deckStatus.compareDocumentPosition(submit) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
     expect(container.querySelector("[data-desktop-builder-analysis]")).not.toBeInTheDocument();
 
     fireEvent.click(within(deckControls).getByRole("button", { name: "Suggest Deck" }));
+    await waitFor(() => expect(submit).toBeEnabled());
     fireEvent.click(submit);
     expect(suggestDeck).toHaveBeenCalledOnce();
     expect(submitDeck).toHaveBeenCalledWith([]);
@@ -955,12 +961,155 @@ describe("LimitedDeckBuilder", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Submit Deck" }));
+    const submit = screen.getByRole("button", { name: "Submit Deck" });
+    await waitFor(() => expect(submit).toBeEnabled());
+    fireEvent.click(submit);
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Deck needs attention: card 'Watery Grave' is not in the drafted pool",
     );
   });
+
+  it.each(["desktop", "tablet-portrait", "phone-portrait"] as const)(
+    "passes a 40-card Limited workspace through a rejected engine verdict in %s",
+    async (responsiveLayout) => {
+      const reason = "Can't be in a deck or sideboard unless the game is played for ante: Contract from Below";
+      const submit = vi.fn();
+      const local = (ante: boolean) => {
+        const cards = Array.from({ length: 40 }, (_, index) => ({
+          ...TEST_VIEW.pool[0],
+          instance_id: `limited-${index}`,
+          name: ante && index === 39 ? "Contract from Below" : "Wind Drake",
+        }));
+        return {
+          view: { ...TEST_VIEW, pool: cards, draft_set_codes: ["TST"] },
+          workspace: {
+            schemaVersion: 1 as const,
+            placements: Object.fromEntries(cards.map((card, index) => [
+              card.instance_id,
+              { zone: "deck" as const, row: 0, column: 0, order: index },
+            ])),
+            virtualBasics: [],
+          },
+          preferences: createDefaultDraftWorkspacePreferences(),
+          interactionLocked: false,
+          onWorkspaceChange: () => {},
+          onPreferencesChange: () => {},
+          onSubmitDeck: submit,
+          onAddBasicLand: () => {},
+          onRemoveBasicLand: () => {},
+        };
+      };
+      compatibilityHarness.evaluate.mockResolvedValue({
+        ...compatibleResult(), selected_format_compatible: false, selected_format_reasons: [reason],
+      });
+      const { rerender } = render(
+        <LimitedDeckBuilder local={local(true)} responsiveLayout={responsiveLayout} showSuggestions={false} />,
+      );
+
+      await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenCalledWith(
+        {
+          main: [{ name: "Wind Drake", count: 39 }, { name: "Contract from Below", count: 1 }],
+          sideboard: [],
+          commander: [],
+        },
+        { selectedFormat: null, draftSetCodes: ["TST"] },
+      ));
+      const button = screen.getByRole("button", { name: "Submit Deck" });
+      expect(button).toBeEnabled();
+      fireEvent.click(button);
+      await waitFor(() => expect(submit).toHaveBeenCalledWith([]));
+
+      rerender(<LimitedDeckBuilder local={local(false)} responsiveLayout={responsiveLayout} showSuggestions={false} />);
+      await waitFor(() => expect(button).toBeEnabled());
+      fireEvent.click(button);
+      await waitFor(() => expect(submit).toHaveBeenCalledTimes(2));
+    },
+  );
+
+  it.each(["pending", "rejected", "null", "false", "true"] as const)(
+    "passes a 40-card Set-backed controlled deck through compatibility %s",
+    async (outcome) => {
+      if (outcome === "pending") compatibilityHarness.evaluate.mockImplementation(() => new Promise(() => {}));
+      if (outcome === "rejected") compatibilityHarness.evaluate.mockRejectedValue(new Error("CARD_DB worker rejected request"));
+      if (outcome === "null") compatibilityHarness.evaluate.mockResolvedValue({
+        ...compatibleResult(), selected_format_compatible: null,
+      });
+      if (outcome === "false") compatibilityHarness.evaluate.mockResolvedValue({
+        ...compatibleResult(), selected_format_compatible: false,
+      });
+      const submit = vi.fn();
+      render(<LimitedDeckBuilder
+        view={{ ...TEST_VIEW, draft_set_codes: ["TST"] }}
+        mainDeck={Array.from({ length: 40 }, () => "Wind Drake")}
+        landCounts={{}}
+        onSubmitDeck={submit}
+        showSuggestions={false}
+      />);
+
+      await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenCalledWith(
+        { main: [{ name: "Wind Drake", count: 40 }], sideboard: [], commander: [] },
+        { selectedFormat: null, draftSetCodes: ["TST"] },
+      ));
+      const [, options] = compatibilityHarness.evaluate.mock.calls[
+        compatibilityHarness.evaluate.mock.calls.length - 1
+      ]!;
+      expect(options).not.toHaveProperty("selectedMatchType");
+      const button = screen.getByRole("button", { name: "Submit Deck" });
+      expect(button).toBeEnabled();
+      fireEvent.click(button);
+      await waitFor(() => expect(submit).toHaveBeenCalledWith([]));
+    },
+  );
+
+  it.each(["pending", "rejected", "null", "true"] as const)(
+    "passes a 40-card Set-backed editable workspace through compatibility %s",
+    async (outcome) => {
+      if (outcome === "pending") compatibilityHarness.evaluate.mockImplementation(() => new Promise(() => {}));
+      if (outcome === "rejected") compatibilityHarness.evaluate.mockRejectedValue(new Error("CARD_DB worker rejected request"));
+      if (outcome === "null") compatibilityHarness.evaluate.mockResolvedValue({
+        ...compatibleResult(), selected_format_compatible: null,
+      });
+      const submit = vi.fn();
+      const cards = Array.from({ length: 40 }, (_, index) => ({
+        ...TEST_VIEW.pool[0], instance_id: `editable-${index}`, set_code: "TST",
+      }));
+      render(<LimitedDeckBuilder
+        local={{
+          view: { ...TEST_VIEW, pool: cards, draft_set_codes: ["TST"] },
+          workspace: {
+            schemaVersion: 1,
+            placements: Object.fromEntries(cards.map((card, index) => [
+              card.instance_id, { zone: "deck" as const, row: 0, column: 0, order: index },
+            ])),
+            virtualBasics: [],
+          },
+          preferences: createDefaultDraftWorkspacePreferences(),
+          interactionLocked: false,
+          onWorkspaceChange: () => {},
+          onPreferencesChange: () => {},
+          onSubmitDeck: submit,
+          onAddBasicLand: () => {},
+          onRemoveBasicLand: () => {},
+        }}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />);
+
+      await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenCalledWith(
+        { main: [{ name: "Wind Drake", count: 40 }], sideboard: [], commander: [] },
+        { selectedFormat: null, draftSetCodes: ["TST"] },
+      ));
+      const [, options] = compatibilityHarness.evaluate.mock.calls[
+        compatibilityHarness.evaluate.mock.calls.length - 1
+      ]!;
+      expect(options).not.toHaveProperty("selectedMatchType");
+      const button = screen.getByRole("button", { name: "Submit Deck" });
+      expect(button).toBeEnabled();
+      fireEvent.click(button);
+      await waitFor(() => expect(submit).toHaveBeenCalledWith([]));
+    },
+  );
 });
 
 // ── #7507: pool filter row ──────────────────────────────────────────────
@@ -1457,7 +1606,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
         sideboard: [],
         commander: ["Vehicle Commander"],
       },
-      { selectedFormat: "CommanderDraft" },
+      { selectedFormat: "CommanderDraft", draftSetCodes: ["CMM"] },
     ));
 
     expect(await screen.findByText(reason)).toBeInTheDocument();
@@ -1538,7 +1687,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
   });
 
   it.each(["Quick", "Sealed", "Premier", "Traditional"] as const)(
-    "keeps %s submission neutral while requesting engine-owned analysis",
+    "passes non-Commander %s submission through the compatibility evaluator",
     async (kind) => {
       const submitSpy = vi.fn();
       render(
@@ -1555,12 +1704,12 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
       );
 
       const submit = screen.getByRole("button", { name: "Submit Deck" });
-      expect(submit).not.toBeDisabled();
+      await waitFor(() => expect(submit).not.toBeDisabled());
       fireEvent.click(submit);
       await waitFor(() => expect(submitSpy).toHaveBeenCalledWith([]));
       expect(compatibilityHarness.evaluate).toHaveBeenCalledWith(
         expect.objectContaining({ main: [{ count: 1, name: "Wind Drake" }] }),
-        { selectedFormat: null },
+        { selectedFormat: null, draftSetCodes: [] },
       );
     },
   );
@@ -1655,7 +1804,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
         sideboard: [],
         commander: ["Vehicle Commander"],
       },
-      { selectedFormat: "CommanderDraft" },
+      { selectedFormat: "CommanderDraft", draftSetCodes: ["CMM"] },
     ));
     expect(await screen.findByText(reason)).toBeInTheDocument();
     const submits = within(container).getAllByRole("button", { name: "Submit Deck" });
@@ -1694,26 +1843,37 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     await waitFor(() => expect(submitSpy).toHaveBeenCalledWith(["Vehicle Commander"]));
   });
 
-  it("keeps workspace submission neutral when the engine requires no commanders", async () => {
-    const submitSpy = vi.fn();
-    const fixture = workspaceDeckFixture();
+  it.each(["rejected", "false"] as const)("passes a 40-card Set-backed fixed-pool workspace through compatibility %s", async (outcome) => {
+    if (outcome === "rejected") compatibilityHarness.evaluate.mockRejectedValue(new Error("CARD_DB worker rejected request"));
+    if (outcome === "false") compatibilityHarness.evaluate.mockResolvedValue({
+      ...compatibleResult(), selected_format_compatible: false,
+    });
+    const submitSideboard = vi.fn();
+    const cards = Array.from({ length: 40 }, (_, index) => ({
+      ...TEST_VIEW.pool[0], instance_id: `fixed-pool-${index}`, set_code: "TST",
+    }));
     render(
       <LimitedDeckBuilder
         local={{
           view: {
-            ...COMMANDER_VIEW,
+            ...TEST_VIEW,
             commanders_required: 0,
-            min_deck_size: 1,
-            pool: fixture.cards,
+            draft_set_codes: ["TST"],
+            pool: cards,
           },
-          workspace: fixture.workspace,
+          workspace: {
+            schemaVersion: 1,
+            placements: Object.fromEntries(cards.map((card, index) => [
+              card.instance_id, { zone: "deck" as const, row: 0, column: 0, order: index },
+            ])),
+            virtualBasics: [],
+          },
           preferences: createDefaultDraftWorkspacePreferences(),
           interactionLocked: false,
+          capabilities: { kind: "fixed-pool" },
           onWorkspaceChange: () => {},
           onPreferencesChange: () => {},
-          onSubmitDeck: submitSpy,
-          onAddBasicLand: () => {},
-          onRemoveBasicLand: () => {},
+          onSubmitDeck: submitSideboard,
         }}
         responsiveLayout="desktop"
         showSuggestions={false}
@@ -1721,18 +1881,17 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     );
 
     const submit = screen.getByRole("button", { name: "Submit Deck" });
-    expect(submit).not.toBeDisabled();
+    await waitFor(() => expect(submit).not.toBeDisabled());
     fireEvent.click(submit);
-    await waitFor(() => expect(submitSpy).toHaveBeenCalledWith([]));
+    await waitFor(() => expect(submitSideboard).toHaveBeenCalledWith([]));
     expect(compatibilityHarness.evaluate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        main: [
-          { count: 59, name: "Wind Drake" },
-          { count: 1, name: "Vehicle Commander" },
-        ],
-      }),
-      { selectedFormat: null },
+      { main: [{ count: 40, name: "Wind Drake" }], sideboard: [], commander: [] },
+      { selectedFormat: null, draftSetCodes: ["TST"] },
     );
+    const [, options] = compatibilityHarness.evaluate.mock.calls[
+      compatibilityHarness.evaluate.mock.calls.length - 1
+    ]!;
+    expect(options).not.toHaveProperty("selectedMatchType");
   });
 
   it.each(["resolve", "reject"] as const)(
@@ -2132,6 +2291,255 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
   });
 
   /**
+   * CR 903.13f(3) at the DECK-COMPATIBILITY gate. Crowning a second commander
+   * and submitting the deck are two different engine calls off the same latched
+   * value: the partner-candidate query already received the drafted set codes
+   * and the compatibility request did not, which is the reported bug.
+   *
+   * This pair renders `view=`, which reaches the TEST-ONLY
+   * ControlledDeckBuilder arm: every `<LimitedDeckBuilder>` render in
+   * client/src outside __tests__ passes `local`, so ControlledDeckBuilder is
+   * test-only today. Regenerate with
+   * `grep -rn -A2 "<LimitedDeckBuilder" client/src --include=*.tsx | grep -v __tests__`.
+   * Neither row of this pair discriminates alone: with only the granting row, a
+   * client that hard-coded ["CMM"] would pass.
+   */
+  it("sends the drafted set codes with the controlled compatibility request", async () => {
+    render(
+      <LimitedDeckBuilder
+        view={COMMANDER_VIEW}
+        mainDeck={SIXTY_CARD_DECK}
+        landCounts={NO_LANDS}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenLastCalledWith(
+      expect.objectContaining({ commander: [] }),
+      { selectedFormat: "CommanderDraft", draftSetCodes: ["CMM"] },
+    ));
+  });
+
+  /** The paired sibling: a draft that latched no set codes sends none. */
+  it("sends no set codes when the controlled view latched none", async () => {
+    render(
+      <LimitedDeckBuilder
+        view={{ ...COMMANDER_VIEW, draft_set_codes: [] }}
+        mainDeck={SIXTY_CARD_DECK}
+        landCounts={NO_LANDS}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenLastCalledWith(
+      expect.objectContaining({ commander: [] }),
+      { selectedFormat: "CommanderDraft", draftSetCodes: [] },
+    ));
+  });
+
+  /**
+   * The new production-arm row for the reported bug. `local=` reaches
+   * WorkspaceDeckBuilder, and DraftPodPage — the server-hosted pod the bug was
+   * reported from — renders `<LimitedDeckBuilder>` with `local`. Regenerate the
+   * render list with
+   * `grep -rn -A2 "<LimitedDeckBuilder" client/src --include=*.tsx | grep -v __tests__`.
+   */
+  it("sends the drafted set codes from the workspace arm", async () => {
+    const fixture = workspaceDeckFixture();
+    render(
+      <LimitedDeckBuilder
+        local={{
+          view: { ...COMMANDER_VIEW, pool: fixture.cards },
+          workspace: fixture.workspace,
+          preferences: createDefaultDraftWorkspacePreferences(),
+          interactionLocked: false,
+          onWorkspaceChange: () => {},
+          onPreferencesChange: () => {},
+          onSubmitDeck: () => {},
+          onAddBasicLand: () => {},
+          onRemoveBasicLand: () => {},
+        }}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+
+    await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenLastCalledWith(
+      expect.objectContaining({ commander: [] }),
+      { selectedFormat: "CommanderDraft", draftSetCodes: ["CMM"] },
+    ));
+  });
+
+  /**
+   * CR 903.13f(3) conditions on what the draft CONTAINED, and the engine takes
+   * the union over every set it contained — the `draft_set_codes` field doc on
+   * the engine's `DeckCompatibilityRequest` says so ("a mixed-set draft carries
+   * every set it contained and `commander_draft_partner_grant` takes the
+   * union"). So the client forwards the whole array as published: one that
+   * reduced it to the code it recognised, or lower-cased it, would send
+   * something other than the literal asserted here.
+   */
+  it("forwards a mixed-set draft's codes whole from the workspace arm", async () => {
+    const fixture = workspaceDeckFixture();
+    render(
+      <LimitedDeckBuilder
+        local={{
+          view: { ...COMMANDER_VIEW, pool: fixture.cards, draft_set_codes: ["CLB", "CMM"] },
+          workspace: fixture.workspace,
+          preferences: createDefaultDraftWorkspacePreferences(),
+          interactionLocked: false,
+          onWorkspaceChange: () => {},
+          onPreferencesChange: () => {},
+          onSubmitDeck: () => {},
+          onAddBasicLand: () => {},
+          onRemoveBasicLand: () => {},
+        }}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+
+    await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenLastCalledWith(
+      expect.objectContaining({ commander: [] }),
+      { selectedFormat: "CommanderDraft", draftSetCodes: ["CLB", "CMM"] },
+    ));
+  });
+
+  /**
+   * Both re-render rows keep the SAME `workspace` and `preferences` references
+   * and build the next view by spreading the first, so `view.pool` keeps its
+   * identity and the compatibility `key` memo in useCommanderDraftCompatibility
+   * is what decides whether the effect re-fires: dropping `draftSetCodes` from
+   * that memo and its dependency array reds both rows. A row that rebuilt
+   * `workspace` or `pool` would move the call count for an unrelated reason.
+   */
+  function commanderDraftWorkspaceController(
+    view: BuilderView,
+    fixture: ReturnType<typeof workspaceDeckFixture>,
+    preferences: ReturnType<typeof createDefaultDraftWorkspacePreferences>,
+  ) {
+    return {
+      view,
+      workspace: fixture.workspace,
+      preferences,
+      interactionLocked: false,
+      onWorkspaceChange: () => {},
+      onPreferencesChange: () => {},
+      onSubmitDeck: () => {},
+      onAddBasicLand: () => {},
+      onRemoveBasicLand: () => {},
+    };
+  }
+
+  /**
+   * The compatibility `key` memo in useCommanderDraftCompatibility fingerprints
+   * the arguments of the call it guards, so changing the drafted set codes must
+   * re-fire the evaluator and the NEW codes must reach it. The mount's 0 -> 1
+   * transition is this test's positive reach guard.
+   */
+  it("re-evaluates compatibility when the drafted set codes change", async () => {
+    const fixture = workspaceDeckFixture();
+    const preferences = createDefaultDraftWorkspacePreferences();
+    const firstView: BuilderView = { ...COMMANDER_VIEW, pool: fixture.cards };
+    const { rerender } = render(
+      <LimitedDeckBuilder
+        local={commanderDraftWorkspaceController(firstView, fixture, preferences)}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+
+    await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenCalledTimes(1));
+
+    rerender(
+      <LimitedDeckBuilder
+        local={commanderDraftWorkspaceController(
+          { ...firstView, draft_set_codes: ["CLB", "CMM"] },
+          fixture,
+          preferences,
+        )}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+
+    await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenCalledTimes(2));
+    expect(compatibilityHarness.evaluate).toHaveBeenLastCalledWith(
+      expect.objectContaining({ commander: [] }),
+      { selectedFormat: "CommanderDraft", draftSetCodes: ["CLB", "CMM"] },
+    );
+  });
+
+  /**
+   * The sibling negative: a re-render carrying a DIFFERENT array of EQUAL
+   * content must not re-fire the evaluator, because the codes ride in
+   * useCommanderDraftCompatibility's `key` memo — a JSON.stringify result,
+   * which React compares with Object.is, by value for strings — rather than in
+   * the effect's own dependency array. Adding `draftSetCodes` to that
+   * dependency array makes step (2) read 2 calls instead of 1.
+   *
+   * Step 3 is the reach guard for step 2's negative, and its POSITION AFTER the
+   * negative is what makes it one: React commits updates to one root in the
+   * order they are issued, so an observable commit from step 3 proves step 2's
+   * re-render was delivered and flushed. Do not tidy it above the negative.
+   * The three expectations opening step 2 are about the test's own fixtures:
+   * they are what makes "a new array of equal content" a fact of this test
+   * rather than an intention of its author.
+   */
+  it("does not re-evaluate for a new set-code array of equal content", async () => {
+    const fixture = workspaceDeckFixture();
+    const preferences = createDefaultDraftWorkspacePreferences();
+    const firstView: BuilderView = { ...COMMANDER_VIEW, pool: fixture.cards };
+
+    // (1) Mount.
+    const { rerender } = render(
+      <LimitedDeckBuilder
+        local={commanderDraftWorkspaceController(firstView, fixture, preferences)}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+    await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenCalledTimes(1));
+
+    // (2) THE NEGATIVE — a different array of equal content.
+    const nextView: BuilderView = { ...firstView, draft_set_codes: ["CMM"] };
+    expect(nextView).not.toBe(firstView);
+    expect(nextView.draft_set_codes).not.toBe(firstView.draft_set_codes);
+    expect(nextView.draft_set_codes).toEqual(firstView.draft_set_codes);
+    rerender(
+      <LimitedDeckBuilder
+        local={commanderDraftWorkspaceController(nextView, fixture, preferences)}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+    await act(async () => {});
+    expect(compatibilityHarness.evaluate).toHaveBeenCalledTimes(1);
+
+    // (3) THE REACH GUARD — different content on the same mounted component.
+    rerender(
+      <LimitedDeckBuilder
+        local={commanderDraftWorkspaceController(
+          { ...firstView, draft_set_codes: ["CLB", "CMM"] },
+          fixture,
+          preferences,
+        )}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+    await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenCalledTimes(2));
+  });
+
+  /**
   * V6 — green tree: a view whose engine-published commander requirement is
   * zero renders without designation controls. Reach-guarded by asserting the
   * pool tile still renders, so a component that crashed could not satisfy the
@@ -2141,7 +2549,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
    * about cards-per-pick (CR 905.1a: "drafts one card"), which is not what this
    * row asserts, and CR 905 is the Conspiracy Draft section.
    */
-  it("shows no commander section for a non-Commander draft", () => {
+  it("shows no commander section for a non-Commander draft", async () => {
     onlyVehicleIsEligible();
     render(
       <LimitedDeckBuilder
@@ -2158,7 +2566,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
 
     expect(screen.getByRole("button", { name: /wind drake/i })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Commander", level: 4 })).toBeNull();
-    expect(screen.getByRole("button", { name: "Submit Deck" })).not.toBeDisabled();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Submit Deck" })).not.toBeDisabled());
     expect(engineEligible).not.toHaveBeenCalled();
   });
 
@@ -2755,7 +3163,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     fireEvent.click(await commanderPanelScope().findByRole("button", { name: "The Prismatic Piper" }));
     await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenLastCalledWith(
       expect.objectContaining({ commander: ["The Prismatic Piper"] }),
-      { selectedFormat: "CommanderDraft" },
+      { selectedFormat: "CommanderDraft", draftSetCodes: ["CMM"] },
     ));
     await act(async () => {
       compatibilityResolvers[compatibilityResolvers.length - 1](compatibleResult());
@@ -2767,7 +3175,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
       expect.objectContaining({
         commander: ["The Prismatic Piper", "The Prismatic Piper"],
       }),
-      { selectedFormat: "CommanderDraft" },
+      { selectedFormat: "CommanderDraft", draftSetCodes: ["CMM"] },
     ));
     await act(async () => {
       compatibilityResolvers[compatibilityResolvers.length - 1](compatibleResult());
@@ -2845,7 +3253,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
         expect.objectContaining({
           commander: ["The Prismatic Piper", "The Prismatic Piper"],
         }),
-        { selectedFormat: "CommanderDraft" },
+        { selectedFormat: "CommanderDraft", draftSetCodes: ["CMM"] },
       ));
       await act(async () => {
         compatibilityResolvers[compatibilityResolvers.length - 1](compatibleResult());

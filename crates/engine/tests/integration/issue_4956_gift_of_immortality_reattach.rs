@@ -91,6 +91,7 @@ fn event_subject_return_attach_host(
         Effect::Attach {
             attachment: TargetFilter::SelfRef,
             target,
+            ..
         } => target,
         other => panic!("expected Attach SelfRef→host, got {other:?}"),
     }
@@ -190,6 +191,7 @@ fn gift_delayed_attach_host(parsed: &engine::parser::oracle::ParsedAbilities) ->
             Effect::Attach {
                 attachment: TargetFilter::SelfRef,
                 target,
+                ..
             },
         ) => target,
         other => panic!("unexpected Gift delayed body shape: {other:?}"),
@@ -472,6 +474,7 @@ fn next_of_kin_delayed_reattach_shape() {
         Effect::Attach {
             attachment,
             target: TargetFilter::ParentTarget,
+            ..
         } => {
             assert_eq!(
                 attachment,
@@ -531,6 +534,7 @@ fn lynde_delayed_reattach_shape() {
             Effect::Attach {
                 attachment: TargetFilter::SelfRef,
                 target: TargetFilter::Controller,
+                ..
             },
         ) => {}
         other => panic!("Lynde delayed body shape wrong: {other:?}"),
@@ -879,6 +883,7 @@ fn cass_preserves_equipment_reattach_continuation() {
             Effect::Attach {
                 attachment: TargetFilter::Typed(tf),
                 target,
+                ..
             } if tf.type_filters.iter().any(
                 |f| matches!(f, engine::types::ability::TypeFilter::Subtype(s) if s == "Equipment"),
             ) =>

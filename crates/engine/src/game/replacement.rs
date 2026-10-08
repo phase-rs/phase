@@ -1,16 +1,18 @@
 use indexmap::IndexMap;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, CastingPermission, CombatDamageScope, ControllerRef,
     DamageModification, DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope,
-    Duration, Effect, EffectScope, ManaSpendPermission, PermissionGrantee,
+    DrawReplacementScope, Duration, Effect, EffectScope, ManaSpendPermission, PermissionGrantee,
     PostReplacementContinuation, PreventionAmount, PreventionFormula, QuantityExpr,
     QuantityModification, RedirectionLifetime, ReplacementChoiceAuthority, ReplacementCondition,
     ReplacementDefinition, ReplacementMode, ResolvedAbility, RoundingMode, ShieldKind,
     TapStateChange, TargetFilter, TargetRef,
 };
+use crate::types::actions::ReplacementAutoChoice;
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 
@@ -21,21 +23,25 @@ use super::filter::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    DrainStatus, GameState, PendingReplacement, PostReplacementDrain, ReplacementCandidateSummary,
-    ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy, WaitingFor,
+    DrainStatus, GameState, LiminalEntry, LiminalEntryKind, PendingReplacement,
+    PostReplacementDrain, ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity,
+    ReplacementAutoChoiceKey, ReplacementAutoChoiceRecord, ReplacementAutoChoiceTail,
+    ReplacementCandidateSummary, ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy,
+    WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::{StepEndManaAction, UnitDisposition};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
     AppliedReplacementKey, BoundSearchFoundCandidate, BoundSearchFoundDisposition,
-    BoundSearchFoundGrant, CopyTokenSpec, CounterMoveStage, CounterPlacement, EtbTapState,
-    ProposedEvent, ReplacementId, SearchFoundDisposition,
+    BoundSearchFoundGrant, CopyTokenSpec, CounterMoveStage, CounterPlacement, DrawEventStage,
+    EtbTapState, ProposedEvent, ReplacementId, SearchFoundDisposition,
 };
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
 use super::ability_utils::build_resolved_from_def;
+use super::arithmetic::u32_to_i32_saturating;
 use super::game_object::GameObject;
 
 // CR 122.1c shield-counter effects are intrinsic to counters, not stored
@@ -98,6 +104,18 @@ const GRANTED_SUNBURST_INDEX: usize = usize::MAX - 7;
 /// form is CONDITIONAL (an opponent must have been dealt damage this turn), so the
 /// shared applier honors each granted instance's carried `condition`.
 const GRANTED_BLOODTHIRST_INDEX: usize = usize::MAX - 8;
+/// CR 702.52a: Granted Dredge — a virtual Draw replacement keyed on a
+/// graveyard card that has Dredge only via a runtime grant (e.g. The
+/// Necrobloom's "Land cards in your graveyard have dredge 2"), not a printed
+/// keyword. Printed Dredge is synthesized into an object-carried
+/// `ReplacementDefinition` at database-build time
+/// (`database::synthesis::synthesize_dredge`); a runtime grant adds only the
+/// keyword (no stored definition), so this reserved candidate id lets the
+/// existing CR 616 replacement-ordering pipeline offer, label, and apply it
+/// exactly like the object-carried definitions it mirrors — the SAME
+/// definition shape, built by `database::synthesis::dredge_replacement_definition`
+/// (extracted from `synthesize_dredge` for this reuse).
+const GRANTED_DREDGE_INDEX: usize = usize::MAX - 9;
 
 /// CR 109.4 + CR 108.4a: Cards outside the battlefield/stack have no
 /// controller; if an effect asks for a card's controller, use its owner
@@ -332,6 +350,102 @@ fn is_granted_etb_keyword_replacement(rid: ReplacementId) -> bool {
     GrantedEtbKeyword::from_index(rid.index).is_some()
 }
 
+fn granted_dredge_replacement_id(object_id: ObjectId) -> ReplacementId {
+    ReplacementId {
+        source: object_id,
+        index: GRANTED_DREDGE_INDEX,
+    }
+}
+
+fn is_granted_dredge_replacement(rid: ReplacementId) -> bool {
+    rid.index == GRANTED_DREDGE_INDEX
+}
+
+/// The PRINTED Dredge value carried by `obj`'s base (unmodified)
+/// characteristics, or `None` if Dredge is not printed on this card. Used
+/// only by `granted_dredge_value`'s redundancy comparison — see there for
+/// why equality with the resolved effective value means there is nothing
+/// distinct to offer, while a genuine difference means two distinct Dredge
+/// instances exist and both must surface.
+fn printed_dredge_value(obj: &GameObject) -> Option<u32> {
+    obj.base_keywords.iter().find_map(|kw| match kw {
+        crate::types::keywords::Keyword::Dredge(n) => Some(*n),
+        _ => None,
+    })
+}
+
+/// CR 702.52a + CR 613.1f: The GRANTED effective Dredge value for a
+/// graveyard object, usable as a replacement candidate DISTINCT from any
+/// printed Dredge the same object carries — or `None` when there is nothing
+/// distinct to offer.
+///
+/// `None` covers three cases: the object has no Dredge at all (printed or
+/// granted); it is not currently in a graveyard (CR 113.6b: Dredge functions
+/// only from the graveyard); or the resolved effective value is REDUNDANT
+/// with the object's own printed Dredge — either no grant is currently
+/// active (the resolved value is simply the printed one) or an active grant
+/// happens to carry the identical N. The redundant cases are already
+/// offered by the object-carried candidate `synthesize_dredge` installs, so
+/// a second virtual copy of the same number would only double-prompt for
+/// nothing.
+///
+/// When a grant's value DIFFERS from the printed N — some other effect
+/// granting dredge 3 to a card printed with dredge 2, say — printed and
+/// granted are two distinct instances of the ability, so both must surface
+/// for the existing CR 616.1 ordering machinery to offer a real choice
+/// between them (each labeled with its own N by
+/// `replacement_choice_label_for_rid`). Every granted-Dredge source shipped
+/// today (The Necrobloom) happens to grant the same value Dakmor Salvage
+/// already prints, so this differing-value branch is not exercised by any
+/// real card yet — it exists so a future differently-valued grant does not
+/// silently lose the granted option.
+///
+/// A card CAN carry a printed Dredge and a separately granted one at the same
+/// time — Dakmor Salvage (printed dredge 2) sitting in a graveyard while The
+/// Necrobloom's "Land cards in your graveyard have dredge 2" is on the
+/// battlefield is exactly that case. Neither CR 702.52a (Dredge) nor
+/// CR 702.52b (insufficient library) says anything about multiple instances;
+/// neither collapses two differently-sourced Dredge abilities on one card into a
+/// single value. The printed-value comparison below is therefore only a
+/// REDUNDANCY test, never by itself a reason to suppress the granted
+/// candidate.
+///
+/// Known limitation: two Dredge grants SIMULTANEOUSLY active on one graveyard
+/// card with DIFFERENT values collapse to a single virtual candidate.
+/// `effective_dredge_value` resolves one value — `upsert_keyword_contribution`
+/// (`off_zone_characteristics.rs`) replaces a same-kind contribution, since
+/// `Keyword::Dredge` is not in `instances_must_coexist` (`types/keywords.rs`) —
+/// and this family reserves one `GRANTED_DREDGE_INDEX` per object, so only the
+/// last-applied grant is offered. Unreachable today: The Necrobloom is the only
+/// shipped source that grants Dredge; a second differently-valued granter would
+/// need per-contribution candidate keying, not built speculatively.
+///
+/// The cheap zone check on the already-fetched `obj` gates the expensive
+/// `effective_dredge_value` resolve (a whole-game off-zone continuous-effect
+/// sweep, `off_zone_characteristics::effective_off_zone_keyword_contributions`).
+/// It is no longer the only thing standing in front of that sweep: the
+/// granted-dredge registration block in `find_applicable_replacements` now
+/// pre-gates the whole per-card call behind a hoisted, recipient-independent
+/// "can anything grant this keyword kind off-zone" query (see the
+/// cost-discipline comment at that site), so the zone check is the inner of
+/// two gates rather than the outer one. The printed-value comparison itself
+/// costs no extra state traversal — it reads `obj.base_keywords` on the
+/// object already in hand.
+fn granted_dredge_value(state: &GameState, object_id: ObjectId) -> Option<u32> {
+    let obj = state.objects.get(&object_id)?;
+    if obj.zone != Zone::Graveyard {
+        return None;
+    }
+    let effective = crate::game::keywords::effective_dredge_value(state, object_id)?;
+    // `printed_dredge_value` returns `None` when Dredge is not printed, and
+    // `None == Some(_)` is `false`, so this single comparison is the whole
+    // redundancy test — no separate "has printed dredge" pre-check is needed.
+    if printed_dredge_value(obj) == Some(effective) {
+        return None;
+    }
+    Some(effective)
+}
+
 /// CR 604.1 + CR 613.1f: The count of GRANTED instances of `keyword` on
 /// `object_id` matching `predicate` — the object's EFFECTIVE matching-keyword
 /// count minus its printed (base) matching count.
@@ -498,33 +612,20 @@ fn umbra_armor_attachments(
 /// CR 122.1c: Remove one shield counter from the permanent, emitting
 /// `CounterRemoved`. Returns `true` if a shield counter was present and removed
 /// (so the caller should treat the destruction/damage as replaced/prevented),
-/// `false` otherwise. Mirrors the CR 122.1d stun-counter removal model in
-/// `turns.rs`: decrement, drop the map entry at zero, and emit one
-/// `CounterRemoved { count: 1 }` event so counter-removal triggers observe it.
+/// `false` otherwise. The accepted edit journals one counter command and emits
+/// one `CounterRemoved { count: 1 }` event for counter-removal triggers.
 pub(crate) fn consume_shield_counter(
     state: &mut GameState,
     object_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> bool {
-    let Some(obj) = state.objects.get_mut(&object_id) else {
-        return false;
-    };
-    let Some(entry) = obj.counters.get_mut(&CounterType::Shield) else {
-        return false;
-    };
-    if *entry == 0 {
-        return false;
-    }
-    *entry -= 1;
-    if *entry == 0 {
-        obj.counters.remove(&CounterType::Shield);
-    }
-    events.push(GameEvent::CounterRemoved {
+    crate::game::effects::counters::apply_counter_removal(
+        state,
         object_id,
-        counter_type: CounterType::Shield,
-        count: 1,
-    });
-    true
+        CounterType::Shield,
+        1,
+        events,
+    ) == 1
 }
 
 fn apply_compleated_replacement(
@@ -731,6 +832,56 @@ fn apply_granted_keyword_etb_replacement(
     event
 }
 
+/// CR 702.52a + CR 614.6: Apply a granted-Dredge virtual Draw replacement.
+/// This candidate has no object-carried `ReplacementDefinition` (see
+/// [`granted_dredge_value`]), so unlike printed dredge it cannot run through
+/// the generic `execute`-branch dispatch further down in
+/// `apply_single_replacement` (that dispatch's `repl_def_ref` lookup — an
+/// object's stored `replacement_definitions` indexed by `rid.index` — always
+/// misses for `GRANTED_DREDGE_INDEX`); this early dispatch stands in for it.
+///
+/// On accept, the draw is fully replaced (CR 614.6): zero the proposed draw's
+/// count so `draw_applier`/the draw-delivery path sees a no-op draw, mirroring
+/// `draw_is_substituted_away`'s identical zeroing for a printed dredge card's
+/// `Effect::Mill` execute chain. The mill + return-to-hand work itself is
+/// delivered by the post-replacement continuation `continue_replacement_impl`
+/// stashes from `dredge_replacement_definition`'s `execute` — this applier
+/// only owns the count-zeroing half. On decline, the draw proceeds unmodified.
+///
+/// The candidate id is already recorded in `applied` by the pipeline's
+/// `mark_applied(rid)` before this applier runs (the optional accept/decline
+/// path in `continue_replacement_impl`), so no manual re-insert is needed —
+/// mirrors the comment just above on `apply_granted_keyword_etb_replacement`.
+fn apply_granted_dredge_replacement(
+    mut event: ProposedEvent,
+    rid: ReplacementId,
+    branch: ReplacementBranch,
+    events: &mut Vec<GameEvent>,
+) -> ProposedEvent {
+    // The `ReplacementApplied` push below is ACCEPT-ONLY, mirroring the closest
+    // optional-virtual precedent, `apply_commander_hand_or_library_return_replacement`,
+    // whose entire body (its own push included) is gated on
+    // `ReplacementBranch::Execute`. The generic object-carried path is the
+    // divergent one: its declined-optional early return covers only
+    // `QuantityModification::Prevent` and damage-shaped definitions, so a
+    // declined optional DRAW replacement (printed dredge) falls through to the
+    // applier and reaches an unconditional push — i.e. it reports "applied" for
+    // a replacement that replaced nothing. That divergence is deliberately not
+    // changed here; it is unobservable today because `log.rs` classifies
+    // `ReplacementApplied` as engine bookkeeping and filters it out of the
+    // narrative log, and `trigger_index.rs` indexes no trigger key for it.
+    if branch == ReplacementBranch::Execute {
+        if let ProposedEvent::Draw { count, .. } = &mut event {
+            *count = 0;
+        }
+        events.push(GameEvent::ReplacementApplied {
+            source_id: rid.source,
+            event_type: ReplacementEvent::Draw.to_string(),
+        });
+    }
+    event
+}
+
 /// CR 614.1: Replacement effects modify events as they would occur.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReplacementResult {
@@ -756,13 +907,18 @@ pub enum ApplyResult {
 /// continuation runs, so it is not "pending work" and the inner stash installs
 /// above it.
 ///
-/// The discard only fires for **sibling** events (two combat-damage instances in one
+/// The discard fires for **sibling** events (two combat-damage instances in one
 /// batch, CR 510.2; two coin flips of one instruction), where the same definition is
 /// applied once to each — which CR 614.5 licenses, since it grants one opportunity
 /// *per event*. Those sibling continuations are never dispatched today, so nothing
-/// observable is lost; the discard keeps an un-dispatchable drain from pinning
-/// `has_ready()` true forever. That they are stashed at all is the real defect
-/// (issue #5676). See [`ResidentDrainPolicy`] for the measured census.
+/// observable is lost there. It also fires for same-event collisions outside the
+/// measured census: two Blood Scriveners on one empty-hand draw (by trace, not run),
+/// or A → declined optional B → C on one event, where C's stash meets A's kept Ready
+/// rider. Those drop a real rider: the stack holds at most one Ready entry, which is
+/// recorded in the accept-side follow-up on PR #9235. For siblings, the discard
+/// keeps an un-dispatchable drain from pinning `has_ready()` true forever. That they
+/// are stashed at all is the real defect (issue #5676). See [`ResidentDrainPolicy`]
+/// for the measured census.
 fn stash_post_replacement_continuation(
     state: &mut GameState,
     continuation: PostReplacementContinuation,
@@ -1128,12 +1284,14 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
             && replacement_last_applied_decides(state, &p.candidates, &p.proposed)
     });
 
+    let remember_identity = replacement_auto_choice_key(state);
     WaitingFor::ReplacementChoice {
         player,
         candidate_count,
         candidates,
         kind,
         last_applied_decides,
+        remember_identity,
     }
 }
 
@@ -1178,6 +1336,20 @@ fn optional_replacement_choice_labels(
             ),
             _ => ("Accept".to_string(), "Decline".to_string()),
         };
+    }
+
+    if is_granted_dredge_replacement(replacement_id) {
+        // CR 702.52a + CR 616.1: granted dredge has no object-carried
+        // `ReplacementDefinition` for `replacement_definition_for_id` to read
+        // a mode from, so this candidate would otherwise fall straight to the
+        // generic `unwrap_or_else` default below. That default happens to
+        // already equal this branch's answer for a Draw replacement (the
+        // `ReplacementMode::Optional` Draw special case just below always
+        // yields "Accept" regardless of definition) — stated explicitly here,
+        // rather than relied on as a coincidence, so a future non-Draw
+        // granted-replacement family built from this one does not silently
+        // inherit unlabeled behavior.
+        return ("Accept".to_string(), "Decline".to_string());
     }
 
     replacement_definition_for_id(state, replacement_id)
@@ -1408,19 +1580,20 @@ fn replacement_choice_label(repl: &ReplacementDefinition) -> String {
 }
 
 /// CR 616.1 (issue #8485): sentinel-aware definition lookup for the CR 616.1
-/// replacement-choice PROMPT. **Display only.**
+/// replacement-choice PROMPT and for `replacement_precedence` (CR 616.1 steps).
 ///
 /// Mirrors the `rid.source == ObjectId(0)` dispatch that every runtime shield
 /// reader in this file already performs (`shield_kind_for_rid`,
 /// `consume_prevention_shield`, `update_redirection_shield`, ...): the sentinel
 /// selects `state.pending_damage_replacements`, anything else selects that
-/// object's own `replacement_definitions`. `rid.index` indexes whichever store
+/// object's own `replacement_definitions` (its liminal projection's while one
+/// is resident). `rid.index` indexes whichever store
 /// `rid.source` selected — that pairing is NOT changed here or anywhere else.
 ///
-/// `replacement_definition_for_id` (the rules-side authority, which also runs the
-/// CR 121.2 draw-scope `debug_assert!`) deliberately keeps its object-only lookup;
-/// this is a separate, narrower question asked only while building a
-/// `WaitingFor::ReplacementChoice` payload.
+/// `replacement_definition_for_id` is the rules-side authority (liminal
+/// projection first, then the object, plus the CR 121.2 draw-scope
+/// `debug_assert!`). The non-sentinel branch delegates to it, so a CR 616.1
+/// prompt describes the same definition the pipeline applies (CR 614.12).
 fn replacement_choice_definition(
     state: &GameState,
     rid: ReplacementId,
@@ -1428,10 +1601,7 @@ fn replacement_choice_definition(
     if rid.source == ObjectId(0) {
         state.pending_damage_replacements.get(rid.index)
     } else {
-        state
-            .objects
-            .get(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        replacement_definition_for_id(state, rid)
     }
 }
 
@@ -1492,6 +1662,32 @@ fn replacement_choice_label_for_rid(state: &GameState, rid: ReplacementId) -> St
             .map(|aura| format!("Umbra armor: destroy {} instead", aura.name))
             .unwrap_or_else(|| "Umbra armor: destroy the Aura instead".to_string());
     }
+    if is_granted_dredge_replacement(rid) {
+        // CR 702.52a + CR 616.1: granted dredge has no object-carried
+        // `ReplacementDefinition` to read a description from (see
+        // `granted_dredge_value`), so this label is built directly from the
+        // resolved value, interpolating the OBJECT'S OWN effective (granted)
+        // N — matching printed dredge's `repl.description`
+        // (`database::synthesis::dredge_replacement_definition`), which
+        // interpolates its own N too, so two dredge candidates with different
+        // values still read distinctly in a CR 616.1 ordering prompt.
+        //
+        // `None` means the grant vanished between registration and this
+        // display read (e.g. the granting effect ended) — a display-only
+        // seam, so a neutral placeholder is fine here. Never fabricate a
+        // value: `continue_replacement_impl`'s accept path is the one that
+        // must not synthesize a "Dredge 0" definition from this same `None`.
+        return match granted_dredge_value(state, rid.source) {
+            Some(n) => {
+                let cards = if n == 1 { "card" } else { "cards" };
+                format!(
+                    "Dredge {n}: mill {n} {cards} and return this card from graveyard to hand instead of drawing"
+                )
+            }
+            None => "Dredge: mill and return this card from graveyard to hand instead of drawing"
+                .to_string(),
+        };
+    }
     match shield_counter_replacement_kind(rid) {
         Some(ShieldCounterReplacementKind::Destroy) => "Remove a shield counter".to_string(),
         Some(ShieldCounterReplacementKind::Damage) => {
@@ -1519,6 +1715,10 @@ pub(crate) fn replacement_mode_is_optional(mode: &ReplacementMode) -> bool {
 /// replacements use the same prompt seam as optional card definitions.
 fn replacement_is_optional(state: &GameState, rid: ReplacementId) -> bool {
     is_commander_hand_or_library_return_replacement(rid)
+        // CR 702.52a: granted dredge is always `ReplacementMode::Optional`
+        // ("you may instead..."), but it has no object-carried definition for
+        // `replacement_definition_for_id` to read that mode from.
+        || is_granted_dredge_replacement(rid)
         || replacement_definition_for_id(state, rid)
             .is_some_and(|repl| replacement_mode_is_optional(&repl.mode))
 }
@@ -1536,6 +1736,13 @@ fn replacement_choice_player(
                 .map(|obj| obj.owner)
                 .unwrap_or_else(|| proposed.affected_player(state)),
         );
+    }
+    if is_granted_dredge_replacement(rid) {
+        // CR 702.52a: mirrors printed dredge's default `choice_authority`
+        // (`ReplacementChoiceAuthority::AffectedPlayer`, `synthesize_dredge` /
+        // `dredge_replacement_definition` never override it) — the drawing
+        // player decides whether to dredge instead of drawing.
+        return Some(proposed.affected_player(state));
     }
     let definition = replacement_definition_for_id(state, rid)?;
     match definition.choice_authority {
@@ -1896,9 +2103,11 @@ fn discard_applier(
             controller_override: None,
             enter_transformed: false,
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             enter_as_copy: None,
             discard_frame,
+            performed_by: None,
             applied,
         }),
         other => ApplyResult::Modified(other),
@@ -2062,10 +2271,11 @@ fn shield_rider_reflects_per_event(state: &GameState, rid: ReplacementId) -> boo
         .is_some_and(rider_reflects_per_event_damage_source)
 }
 
-/// CR 614.9: Read back the captured chosen-object recipient stashed in the
-/// matched replacement's `redirect_target` field (set at resolution time for
-/// `DamageRedirectTarget::ChosenObjectTarget` — "to target creature").
-fn redirect_chosen_object_for_rid(state: &GameState, rid: ReplacementId) -> Option<ObjectId> {
+/// CR 614.9: Read back the captured concrete recipient (an object or a player)
+/// stashed in the matched replacement's `redirect_target` field (set at
+/// resolution time for `DamageRedirectTarget::ChosenTarget` — "to target
+/// creature" / "to any target", or the creating ability's implicit "you").
+fn redirect_chosen_target_for_rid(state: &GameState, rid: ReplacementId) -> Option<TargetRef> {
     let repl = if rid.source == ObjectId(0) {
         state.pending_damage_replacements.get(rid.index)
     } else {
@@ -2075,7 +2285,8 @@ fn redirect_chosen_object_for_rid(state: &GameState, rid: ReplacementId) -> Opti
             .and_then(|obj| obj.replacement_definitions.get(rid.index))
     };
     match repl.and_then(|r| r.redirect_target.as_ref()) {
-        Some(TargetFilter::SpecificObject { id }) => Some(*id),
+        Some(TargetFilter::SpecificObject { id }) => Some(TargetRef::Object(*id)),
+        Some(TargetFilter::SpecificPlayer { id }) => Some(TargetRef::Player(*id)),
         _ => None,
     }
 }
@@ -2136,11 +2347,15 @@ fn durable_redirect_route_for_filter(filter: &TargetFilter) -> PreventionShieldR
         // CR 614.9: a concrete object recipient belongs exclusively to the
         // EFFECT-CREATED path — `create_damage_replacement::resolve` writes
         // `SpecificObject { id }` alongside a `ShieldKind::Redirection` (of
-        // either `RedirectionLifetime`), and `redirect_chosen_object_for_rid` is
+        // either `RedirectionLifetime`), and `redirect_chosen_target_for_rid` is
         // its reader. Such a shield is claimed by Branch 1b and never reaches
         // this Prevention-shield gate; routing it to `Redirect` here would
         // resurrect a consumed one-shot as a durable shield.
         TargetFilter::SpecificObject { .. } => PreventionShieldRoute::Prevent,
+        // CR 614.9: the same effect-created path latches a chosen PLAYER
+        // recipient ("…is dealt to any target instead") as `SpecificPlayer`;
+        // it is likewise claimed by Branch 1b and never reaches this gate.
+        TargetFilter::SpecificPlayer { .. } => PreventionShieldRoute::Prevent,
         _ => PreventionShieldRoute::Unmapped,
     }
 }
@@ -2251,9 +2466,9 @@ fn redirect_damage_event(
         });
     }
 
-    let chosen = redirect_chosen_object_for_rid(state, rid);
+    let chosen = redirect_chosen_target_for_rid(state, rid);
     let new_recipient = super::effects::create_damage_replacement::resolve_redirect_recipient(
-        state, recipient, rid.source, chosen,
+        state, recipient, rid.source, source_id, chosen,
     )
     .filter(|new_target| {
         super::effects::create_damage_replacement::redirect_recipient_is_legal(state, new_target)
@@ -3282,7 +3497,7 @@ fn draw_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) ->
 }
 
 fn draw_applier(
-    event: ProposedEvent,
+    mut event: ProposedEvent,
     rid: ReplacementId,
     state: &mut GameState,
     _events: &mut Vec<GameEvent>,
@@ -3309,19 +3524,68 @@ fn draw_applier(
     // are pre-zeroed in `apply_single_replacement` so the original draw is a
     // no-op (CR 614.6 — the replaced event never happens), and the substitute
     // runs via the `post_replacement_continuation` drain.
-    if let Some(new_count) = draw_replacement_count(state, rid, &event) {
+    if has_draw_count_replacement_life_rider(state, rid, &event) {
+        // CR 121.6b: replace this individual event and run the replacement's
+        // complete Draw-plus-rider ability as a nested continuation. The child
+        // draw frame owns its count and applied set. Only that child's actual
+        // delivery contributes to the interrupted unit in this parent frame;
+        // its rider and the parent's remaining units stay separately owned.
         if let ProposedEvent::Draw {
-            player_id, applied, ..
-        } = event
+            player_id, count, ..
+        } = &mut event
         {
-            return ApplyResult::Modified(ProposedEvent::Draw {
-                player_id,
-                count: new_count,
-                applied,
-            });
+            if let Some(parent) = state.active_draw_sequence_mut() {
+                if parent.player == *player_id {
+                    parent.capture_next_child_delivery = true;
+                }
+            }
+            *count = 0;
+        }
+    } else if draw_count_replacement_requires_child_sequence(state, rid, &event) {
+        if let ProposedEvent::Draw {
+            player_id, count, ..
+        } = &mut event
+        {
+            // CR 121.2 + CR 616.1g: the count replacement turns this individual
+            // event into its own sequence of individual draws. The current unit
+            // is replaced by that child sequence; later replacements then see
+            // each child card separately, and the child result returns only to
+            // this same-player parent instruction. Defer starting the child to
+            // the replacement's resident continuation below so a child prompt
+            // cannot be mistaken for a completed replacement while this applier
+            // is still on the stack.
+            if let Some(parent) = state.active_draw_sequence_mut() {
+                if parent.player == *player_id {
+                    parent.capture_next_child_delivery = true;
+                }
+            }
+            *count = 0;
+        }
+    } else if let Some(new_count) = draw_replacement_count(state, rid, &event) {
+        if let ProposedEvent::Draw { count, .. } = &mut event {
+            *count = new_count;
         }
     }
     ApplyResult::Modified(event)
+}
+
+/// CR 614.6 + CR 109.5: does a `Draw`-headed replacement draw for a player other
+/// than the one whose draw it replaces? "You" in a replacement is its
+/// controller, so a head drawing for the controller while an opponent draws
+/// (Alms Collector: "If an opponent would draw two or more cards, instead you
+/// and that player each draw a card") substitutes that draw — the opponent's
+/// draw never happens — rather than rescaling it. A head drawing for the drawer
+/// ("you draw two cards instead" on your own draw, or an event anaphor such as
+/// "they draw") is a count modification of the same draw.
+fn draw_head_draws_for_other_player(
+    head_recipient: &TargetFilter,
+    replacement_controller: PlayerId,
+    drawer: PlayerId,
+) -> bool {
+    matches!(
+        head_recipient,
+        TargetFilter::Controller | TargetFilter::OriginalController
+    ) && replacement_controller != drawer
 }
 
 fn draw_replacement_count(
@@ -3329,19 +3593,30 @@ fn draw_replacement_count(
     rid: ReplacementId,
     event: &ProposedEvent,
 ) -> Option<u32> {
-    let ProposedEvent::Draw { count, .. } = event else {
+    let ProposedEvent::Draw {
+        player_id, count, ..
+    } = event
+    else {
         return None;
     };
 
-    let execute = state
+    let repl_def = state
         .objects
         .get(&rid.source)?
         .replacement_definitions
-        .get(rid.index)?
-        .execute
-        .as_deref()?;
+        .get(rid.index)?;
+    let execute = repl_def.execute.as_deref()?;
 
     match &*execute.effect {
+        Effect::Draw { target, .. }
+            if draw_head_draws_for_other_player(
+                target,
+                replacement_ability_controller(state, rid, repl_def),
+                *player_id,
+            ) =>
+        {
+            None
+        }
         Effect::Draw { count: qty, .. } => {
             // CR 121.2 + CR 614.11a: "draw N cards instead" replacements
             // (Teferi's Ageless Insight: Fixed(2)) apply to each card draw
@@ -3359,9 +3634,77 @@ fn draw_replacement_count(
     }
 }
 
+/// Whether an individual count replacement must run its full Draw ability
+/// through the post-replacement continuation so child draws can park safely.
+fn draw_count_replacement_requires_child_sequence(
+    state: &GameState,
+    rid: ReplacementId,
+    event: &ProposedEvent,
+) -> bool {
+    let ProposedEvent::Draw {
+        player_id,
+        count,
+        stage: DrawEventStage::Individual,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    let Some(replacement_count) = draw_replacement_count(state, rid, event) else {
+        return false;
+    };
+    replacement_count > 0
+        && replacement_count != *count
+        && state
+            .active_draw_sequence()
+            .is_some_and(|frame| frame.player == *player_id)
+}
+
+/// Find a mandatory individual-draw count replacement with an independent
+/// LoseLife rider. Its complete Draw ability is dispatched as a nested
+/// continuation, keeping both the rider's completion point and the child
+/// instruction's replacement history separate from the parent draw.
+fn has_draw_count_replacement_life_rider(
+    state: &GameState,
+    rid: ReplacementId,
+    event: &ProposedEvent,
+) -> bool {
+    let ProposedEvent::Draw {
+        count,
+        stage: DrawEventStage::Individual,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    let Some(repl_def) = replacement_definition_for_id(state, rid) else {
+        return false;
+    };
+    if !matches!(&repl_def.mode, ReplacementMode::Mandatory) {
+        return false;
+    }
+    let Some(execute) = repl_def.execute.as_deref() else {
+        return false;
+    };
+    if !matches!(execute.effect.as_ref(), Effect::Draw { .. })
+        || !matches!(
+            execute
+                .sub_ability
+                .as_deref()
+                .map(|rider| rider.effect.as_ref()),
+            Some(Effect::LoseLife { .. })
+        )
+    {
+        return false;
+    }
+    draw_replacement_count(state, rid, event)
+        .is_some_and(|replacement_count| replacement_count != *count)
+}
+
 /// CR 614.6 + CR 614.11: does the branch being applied substitute the proposed
-/// draw with a NON-draw chain, so the original draw never happens and no
-/// `GameEvent::CardDrawn` is emitted?
+/// draw with a NON-draw chain — or with a draw for another player
+/// ([`draw_head_draws_for_other_player`]) — so the original draw never happens
+/// and no `GameEvent::CardDrawn` is emitted for it?
 ///
 /// `branch_ability` is the AST of the branch the pipeline is applying (`execute`
 /// on mandatory/accept, `decline` on decline), so an optional replacement's
@@ -3390,15 +3733,23 @@ fn draw_is_substituted_away(
     branch_ability: Option<&AbilityDefinition>,
     proposed: &ProposedEvent,
 ) -> bool {
-    if !matches!(proposed, ProposedEvent::Draw { .. }) {
+    let ProposedEvent::Draw { player_id, .. } = proposed else {
         return false;
-    }
+    };
     match branch_ability {
-        Some(def) => {
-            !matches!(*def.effect, Effect::Draw { .. })
-                && !EventModifiers::has_only_event_modifier(Some(def))
-                && draw_replacement_count(state, rid, proposed).is_none()
-        }
+        Some(def) => match &*def.effect {
+            // CR 614.6: a Draw head substitutes the draw only when it draws for
+            // another player (Alms Collector); otherwise it rescales it.
+            Effect::Draw { target, .. } => draw_head_draws_for_other_player(
+                target,
+                replacement_ability_controller(state, rid, repl_def),
+                *player_id,
+            ),
+            _ => {
+                !EventModifiers::has_only_event_modifier(Some(def))
+                    && draw_replacement_count(state, rid, proposed).is_none()
+            }
+        },
         None => repl_def.runtime_execute.as_deref().is_some_and(|runtime| {
             !matches!(runtime.effect, Effect::Draw { .. })
                 && !EventModifiers::is_event_modifier_effect(&runtime.effect)
@@ -3442,9 +3793,15 @@ fn scry_applier(
                 let new_count = resolve_event_replacement_quantity(qty, count)
                     .map(|resolved| resolved.max(0) as u32)
                     .unwrap_or(count);
+                // CR 121.2a: only a draw sequence mints instruction-stage events,
+                // so every one has a frame to settle into. This substitute stays at
+                // the individual stage it has always been consulted at here;
+                // `scry::apply_scry_after_replacement` hands its survivor to a draw
+                // sequence, which proposes the instruction.
                 ApplyResult::Modified(ProposedEvent::Draw {
                     player_id,
                     count: new_count,
+                    stage: DrawEventStage::Individual,
                     applied,
                 })
             }
@@ -4378,8 +4735,8 @@ fn create_token_applier(
             // existing `execute` field (Approach A, no new field).
             def.execute
                 .as_deref()
-                .map(|ability| (*ability.effect).clone())
-                .filter(|effect| matches!(effect, Effect::Token { .. })),
+                .filter(|ability| matches!(*ability.effect, Effect::Token { .. }))
+                .cloned(),
             def.execute
                 .as_deref()
                 .is_some_and(is_choose_token_substitution),
@@ -4391,7 +4748,7 @@ fn create_token_applier(
         additional_spec,
         ensure_specs,
         owner_redirect,
-        substitute_effect,
+        substitute,
         choose_token_substitution,
         source_controller,
     ) = if rid.source == ObjectId(0) {
@@ -4495,13 +4852,9 @@ fn create_token_applier(
         // `new_count` ("that many" — same count) and `owner`. The creature-type
         // gate (`TokenCoreTypeMatches`) already passed in
         // `find_applicable_replacements`, so non-creature tokens never reach here.
-        if let Some(token_effect) = substitute_effect {
-            let ability = crate::types::ability::ResolvedAbility::new(
-                token_effect,
-                Vec::new(),
-                rid.source,
-                source_controller,
-            );
+        if let Some(substitute) = substitute {
+            // CR 201.5a: the funnel carries a granted substitute's granter stamp.
+            let ability = build_resolved_from_def(&substitute, rid.source, source_controller);
             if let Some((substitute_spec, _, _, _)) =
                 crate::game::effects::token::resolve_token_spec(state, &ability)
             {
@@ -4652,13 +5005,14 @@ fn create_entry_copy_spec_for_replacement(
     else {
         return None;
     };
-    let (values, display_source, printed_ref, token_image_ref) =
+    let (values, display_source, printed_ref, token_image_ref, token_art) =
         if let Some(source) = state.objects.get(copy_source) {
             (
                 crate::game::layers::compute_current_copiable_values(state, *copy_source)?,
                 source.display_source,
                 source.printed_ref.clone(),
                 source.token_image_ref.clone(),
+                source.token_art.clone(),
             )
         } else {
             let values = state.lki_copiable_values.get(copy_source)?.clone();
@@ -4675,6 +5029,9 @@ fn create_entry_copy_spec_for_replacement(
                 },
                 None,
                 lki.and_then(|snapshot| snapshot.token_image_ref.clone()),
+                // `LKISnapshot` is filter-shaped and carries no descriptor;
+                // the recipient falls back to its live (copied) fields.
+                None,
             )
         };
     Some(CopyTokenSpec {
@@ -4682,6 +5039,7 @@ fn create_entry_copy_spec_for_replacement(
         display_source,
         printed_ref,
         token_image_ref,
+        token_art,
         extra_keywords: Vec::new(),
         additional_modifications: additional_modifications.clone(),
         tapped: false,
@@ -5399,7 +5757,7 @@ fn bind_search_found_definition(
                         card_filter: None,
                         single_use_group: None,
                         single_use: false,
-                        cast_cost_raise: None,
+                        cast_cost_modifier: None,
                         alt_ability_cost: None,
                         land_enter_tapped,
                         invalidation: None,
@@ -6084,13 +6442,20 @@ fn replacement_condition_quantity_ctx(
             .and_then(|id| state.objects.get(&id))
             .map(replacement_source_player),
     };
+    // CR 121.2a: a count-form draw antecedent ("If an opponent would draw two or
+    // more cards") refers to the number of cards the proposed draw instruction
+    // draws — its `EventContextAmount` is this event's own count.
+    let event_amount = match event {
+        ProposedEvent::Draw { count, .. } => Some(u32_to_i32_saturating(*count)),
+        // CR 120.4b + CR 616.1f: damage thresholds read the current proposal,
+        // including changes made by a previously applied replacement.
+        ProposedEvent::Damage { amount, .. } => Some(u32_to_i32_saturating(*amount)),
+        _ => None,
+    };
     crate::game::quantity::QuantityContext {
-        entering: None,
-        source: source_id,
-        trigger_source: None,
-        recipient: None,
         scoped_player,
-        damage_source: None,
+        event_amount,
+        ..crate::game::quantity::QuantityContext::new(source_id)
     }
 }
 
@@ -6102,8 +6467,10 @@ fn replacement_valid_card_matches(
     event: &ProposedEvent,
     state: &GameState,
     filter: &TargetFilter,
-    ctx: &FilterContext<'_>,
+    source_id: ObjectId,
+    controller: Option<PlayerId>,
 ) -> bool {
+    let ctx = &repl_def.valid_card_context(state, source_id, controller);
     if let ProposedEvent::Connive { subject, .. } = event {
         return matches_target_filter_on_event_snapshot(state, subject, filter, ctx);
     }
@@ -6112,6 +6479,31 @@ fn replacement_valid_card_matches(
             && repl_def.event == ReplacementEvent::Moved)
     {
         return matches_target_filter_on_battlefield_entry(state, event, filter, ctx);
+    }
+    // CR 109.2 + CR 110.1: a counter replacement whose `valid_card` describes
+    // the object by a card type or subtype without naming a zone — "a creature
+    // you control" (Hardened Scales, CR 109.2) — or as "a permanent" (Doubling
+    // Season, CR 110.1) means a permanent on the battlefield. Counters an effect puts
+    // on a card in another zone — the time counters of a suspended card
+    // (Delay, Jhoira of the Ghitu), Darigaaz Reincarnated's egg counters — are
+    // not counters on a permanent, so the replacement does not apply. The type
+    // reading alone cannot tell (`TypeFilter::Permanent` reads the card's types
+    // so that "a permanent spell" matches on the stack); the zone is read here,
+    // on the event's object. MEASURED before this gate: Delay under an opposing
+    // Doubling Season exiled the countered card with six time counters (issue
+    // #8795). A `valid_card` that names a zone (`population_zones`, the union
+    // of both zone readers, so a stack reference counts as one), or names no
+    // type (`SelfRef`, a "card" filter), is not touched; a placement on a
+    // player has no object and fails the filter as before.
+    if repl_def.event == ReplacementEvent::AddCounter
+        && filter.population_zones().is_empty()
+        && super::filter::filter_implies_battlefield_permanent(filter)
+        && !event
+            .affected_object_id()
+            .and_then(|oid| state.objects.get(&oid))
+            .is_some_and(|obj| obj.zone == Zone::Battlefield)
+    {
+        return false;
     }
     event
         .affected_object_id()
@@ -6144,6 +6536,8 @@ fn replacement_active_player_matches(
         Some(ControllerRef::ScopedPlayer) => false,
         Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
         Some(ControllerRef::ParentTargetController) => false,
+        // CR 120.1 + CR 109.4: the damage recipient's controller.
+        Some(ControllerRef::EventTargetController) => false,
         Some(ControllerRef::ParentTargetOwner) => false,
         Some(ControllerRef::DefendingPlayer) => false,
         Some(ControllerRef::SourceChosenPlayer) => false,
@@ -6280,6 +6674,8 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::ScopedPlayer) => false,
                 Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
                 Some(ControllerRef::ParentTargetController) => false,
+                // CR 120.1 + CR 109.4: the damage recipient's controller.
+                Some(ControllerRef::EventTargetController) => false,
                 Some(ControllerRef::ParentTargetOwner) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
                 // CR 613.1: "the chosen player" is undefined at replacement-check
@@ -6334,6 +6730,8 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::ScopedPlayer) => false,
                 Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
                 Some(ControllerRef::ParentTargetController) => false,
+                // CR 120.1 + CR 109.4: the damage recipient's controller.
+                Some(ControllerRef::EventTargetController) => false,
                 Some(ControllerRef::ParentTargetOwner) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
                 // CR 613.1: "the chosen player" is undefined at replacement-check
@@ -6526,6 +6924,7 @@ fn evaluate_replacement_condition(
                 | ControllerRef::TargetPlayer
                 | ControllerRef::TargetOpponent
                 | ControllerRef::ParentTargetController
+                | ControllerRef::EventTargetController
                 | ControllerRef::ParentTargetOwner
                 | ControllerRef::DefendingPlayer
                 | ControllerRef::SourceChosenPlayer
@@ -6707,10 +7106,16 @@ fn apply_state_level_gates(
     source_controller: PlayerId,
     state: &GameState,
 ) -> bool {
-    // CR 614.1d: valid_card filter — the event's affected object must match.
+    // CR 614.1: valid_card filter — the event's affected object must match.
     if let Some(ref filter) = repl_def.valid_card {
-        let ctx = FilterContext::from_source_with_controller(source, source_controller);
-        let matches = replacement_valid_card_matches(repl_def, event, state, filter, &ctx);
+        let matches = replacement_valid_card_matches(
+            repl_def,
+            event,
+            state,
+            filter,
+            source,
+            Some(source_controller),
+        );
         if !matches {
             return false;
         }
@@ -6762,6 +7167,10 @@ fn apply_state_level_gates(
                 | crate::types::ability::ControllerRef::TargetPlayer
                 | crate::types::ability::ControllerRef::TargetOpponent
                 | crate::types::ability::ControllerRef::ParentTargetController
+                // Engine constraint: resolving the damage recipient's
+                // controller needs a trigger event window, which a replacement
+                // check does not have. Fails closed like the parent-target refs.
+                | crate::types::ability::ControllerRef::EventTargetController
                 | crate::types::ability::ControllerRef::ParentTargetOwner
                 | crate::types::ability::ControllerRef::DefendingPlayer
                 | crate::types::ability::ControllerRef::SourceChosenPlayer
@@ -6882,6 +7291,49 @@ fn replacement_event_keys_for_event(event: &ProposedEvent) -> Vec<ReplacementEve
     keys
 }
 
+/// CR 121.2 + CR 121.2a: a `Draw` definition matches only the draw stage it
+/// watches — an `InstructionCount` definition the whole instruction, an
+/// `IndividualDraw` definition each individual draw. The stage is the event's
+/// own [`DrawEventStage`]; any printed threshold ("two or more cards") is the
+/// definition's `condition`, not this check. Non-draw events, and definitions
+/// without a draw scope, are not restricted here —
+/// `ReplacementDefinition::validate_draw_scope` owns the invariant that every
+/// `Draw` definition declares one.
+fn draw_scope_matches_event_stage(repl_def: &ReplacementDefinition, event: &ProposedEvent) -> bool {
+    let ProposedEvent::Draw { stage, .. } = event else {
+        return true;
+    };
+    draw_scope_admits_stage(repl_def.draw_scope, *stage)
+}
+
+fn draw_scope_admits_stage(scope: Option<DrawReplacementScope>, stage: DrawEventStage) -> bool {
+    match scope {
+        None => true,
+        Some(DrawReplacementScope::InstructionCount) => stage == DrawEventStage::Instruction,
+        Some(DrawReplacementScope::IndividualDraw) => stage == DrawEventStage::Individual,
+    }
+}
+
+/// CR 121.2a: could any replacement in the game apply to a draw instruction?
+/// A conservative superset of the candidate scan: every object-hosted `Draw`
+/// definition the pipeline's index is rebuilt from, and every floating one,
+/// that the stage matcher admits at the instruction stage — before player
+/// scope, conditions, or thresholds. When none does, proposing the instruction
+/// cannot change it, so the draw sequence skips that consult (and the index
+/// rebuild it costs) and owes the full count directly.
+pub(crate) fn draw_instruction_may_be_replaced(state: &GameState) -> bool {
+    let admits_instruction = |repl_def: &ReplacementDefinition| {
+        repl_def.event == ReplacementEvent::Draw
+            && draw_scope_admits_stage(repl_def.draw_scope, DrawEventStage::Instruction)
+    };
+    super::functioning_abilities::active_replacements(state)
+        .any(|(_, _, repl_def)| admits_instruction(repl_def))
+        || state
+            .pending_damage_replacements
+            .iter()
+            .any(admits_instruction)
+}
+
 fn object_replacement_candidate_applies(
     state: &GameState,
     event: &ProposedEvent,
@@ -6924,33 +7376,92 @@ fn object_replacement_candidate_applies(
         _ => None,
     };
 
-    let zones_to_scan = [Zone::Battlefield, Zone::Command];
     let is_liminal_source = state.liminal_entries.contains_key(&obj.id);
-    let in_scanned_zone = !is_liminal_source && zones_to_scan.contains(&obj.zone);
+    let declares_zones = !repl_def.active_zones.is_empty();
     let is_entering = entering_object_id == Some(obj.id);
     let is_being_discarded = discarding_object_id == Some(obj.id);
     let is_stack_self_move = stack_self_moving_object_id == Some(obj.id);
     let replacement_player = replacement_source_player(obj);
-    // CR 702.52a + CR 702.52b: Dredge functions from the graveyard on that
-    // card's owner's draw while the library has enough cards.
-    let is_applicable_dredge = matches!(repl_def.event, ReplacementEvent::Draw)
-        && obj.zone == Zone::Graveyard
-        && matches!(event, ProposedEvent::Draw { player_id, .. } if *player_id == replacement_player)
-        && crate::game::keywords::effective_dredge_value(state, obj.id).is_some_and(|dredge| {
-            state
+
+    // "Is this definition functioning from the zone its source is in RIGHT NOW?"
+    // Strictly present-tense, and deliberately not the whole zone-of-function
+    // answer: the three self-replacement carve-outs below are about an object
+    // that is mid-move, and the CR 614.12 restrictions further down read this
+    // flag to tell "found by the ordinary scan" apart from "reached only
+    // because it is the object moving".
+    let in_scanned_zone = !is_liminal_source
+        && crate::game::functioning_abilities::replacement_functions_in_zone(obj, repl_def);
+
+    // CR 113.6h + CR 614.12: "an object's ability that modifies how that
+    // particular object enters the battlefield functions as that object is
+    // entering the battlefield," checked against "the characteristics of the
+    // permanent as it would exist on the battlefield." As it enters, the object
+    // is still in the zone it is LEAVING — hand, library, graveyard, or stack —
+    // so a self-replacement that DECLARES the battlefield has to be matched
+    // against the zone it is entering, or the declaration would suppress the
+    // very entry it exists to modify.
+    //
+    // Scoped to the entering object's OWN definition (`is_entering` is true only
+    // when this candidate's source IS the entrant). `Zone::Battlefield` IS the
+    // destination here rather than an assumption about it: `entering_object_id`
+    // is `Some` only for a `ZoneChange` whose `to` is the battlefield, or a
+    // `TokenEntry`, which enters it. Discard (CR 702.35a) and stack self-moves
+    // (CR 608.2n) keep present-tense evaluation on purpose: those abilities
+    // function from the zone the object is IN (hand, stack), not one it is
+    // heading to, and both already match that way through `obj.zone`.
+    //
+    // A liminal source is admitted here only through its own entry, mirroring
+    // the `!is_liminal_source` term above — a not-yet-committed token must not
+    // become visible to the ordinary scan, but it is still the object entering.
+    let declared_zone_admits_own_entry = declares_zones
+        && is_entering
+        && crate::game::functioning_abilities::replacement_functions_from_zone(
+            repl_def,
+            Zone::Battlefield,
+        );
+
+    // CR 614.12 / CR 702.35a / CR 608.2n: an object outside the scanned zones
+    // still applies its OWN self-replacement as it enters, as it is discarded,
+    // or as it leaves the stack. These carve-outs extend the CR 113.6 DEFAULT
+    // only — a definition that has stated its zones gets them solely through the
+    // CR 113.6h entry match above, never on the strength of being mid-move.
+    if !in_scanned_zone
+        && !declared_zone_admits_own_entry
+        && (declares_zones || (!is_entering && !is_being_discarded && !is_stack_self_move))
+    {
+        return false;
+    }
+
+    // CR 702.52b: "A player with fewer cards in their library than the number
+    // required by a dredge ability can't mill any of them this way" — with too
+    // small a library the replacement is not applicable at all. The CR 702.52a
+    // zone half is declared on the definition (`active_zones = [Graveyard]`);
+    // only this threshold depends on live library size, so only this half is
+    // evaluated here.
+    //
+    // Deliberately `printed_dredge_value`, not `effective_dredge_value`: this
+    // `repl_def` was read from `obj.replacement_definitions` above, which is
+    // populated ONLY by build-time `synthesize_dredge` for a PRINTED Dredge
+    // keyword with the printed N baked into its mill effect (a granted-only
+    // Dredge card, e.g. a Necrobloom-animated land, never gets an entry there
+    // — `find_applicable_replacements`'s separate granted-dredge registration
+    // block surfaces that virtual candidate and applies its own CR 702.52b
+    // gate against the granted value). Gating THIS candidate's legality with
+    // the effective (grant-overridden) value would compare the wrong number
+    // when a grant is simultaneously active with a different N than the
+    // printed one — CR 702.52b judges each dredge ability by ITS OWN N, not a
+    // sibling ability's.
+    if repl_def.event == ReplacementEvent::Draw && obj.zone == Zone::Graveyard {
+        if let Some(dredge) = printed_dredge_value(obj) {
+            let library_size = state
                 .players
                 .iter()
                 .find(|p| p.id == replacement_player)
-                .is_some_and(|p| p.library.len() as u32 >= dredge)
-        });
-
-    if !in_scanned_zone
-        && !is_entering
-        && !is_being_discarded
-        && !is_applicable_dredge
-        && !is_stack_self_move
-    {
-        return false;
+                .map_or(0, |p| state.library_of(p.id).len() as u32);
+            if library_size < dredge {
+                return false;
+            }
+        }
     }
 
     // CR 701.19: skip consumed one-shot replacements such as used regeneration.
@@ -6971,41 +7482,6 @@ fn object_replacement_candidate_applies(
                 face_down_profile: Some(_),
                 ..
             }
-        )
-    {
-        return false;
-    }
-    // CR 712.14a + CR 714.3a: A Saga exiled by its final chapter and returned
-    // transformed enters showing its creature back face. Its front-face
-    // intrinsic lore replacement must not apply to that entry; otherwise NEO
-    // transforming Sagas such as Fable and Kumano return with a stray lore
-    // counter. A transformed back face that actually is a Saga still receives
-    // its intrinsic lore counter through the entry pipeline.
-    if is_entering
-        && matches!(
-            event,
-            ProposedEvent::ZoneChange {
-                enter_transformed: true,
-                ..
-            }
-        )
-        && obj.back_face.as_ref().is_some_and(|back| {
-            !back
-                .card_types
-                .subtypes
-                .iter()
-                .any(|subtype| subtype == "Saga")
-        })
-        && repl_def.event == ReplacementEvent::Moved
-        && repl_def.destination_zone == Some(Zone::Battlefield)
-        && matches!(repl_def.valid_card, Some(TargetFilter::SelfRef))
-        && matches!(
-            repl_def.execute.as_ref().map(|execute| &*execute.effect),
-            Some(Effect::PutCounter {
-                counter_type: CounterType::Lore,
-                target: TargetFilter::SelfRef,
-                ..
-            })
         )
     {
         return false;
@@ -7080,8 +7556,14 @@ fn object_replacement_candidate_applies(
     }
 
     if let Some(ref filter) = repl_def.valid_card {
-        let ctx = FilterContext::from_source_with_controller(obj.id, replacement_player);
-        let matches = replacement_valid_card_matches(repl_def, event, state, filter, &ctx);
+        let matches = replacement_valid_card_matches(
+            repl_def,
+            event,
+            state,
+            filter,
+            obj.id,
+            Some(replacement_player),
+        );
         if !matches {
             return false;
         }
@@ -7178,6 +7660,10 @@ fn object_replacement_candidate_applies(
                 // replacement-check time — fails closed identically to TargetPlayer.
                 | crate::types::ability::ControllerRef::TargetOpponent
                 | crate::types::ability::ControllerRef::ParentTargetController
+                // Engine constraint: no trigger event window at
+                // replacement-check time; fails closed like the parent-target
+                // refs.
+                | crate::types::ability::ControllerRef::EventTargetController
                 | crate::types::ability::ControllerRef::ParentTargetOwner
                 | crate::types::ability::ControllerRef::DefendingPlayer
                 | crate::types::ability::ControllerRef::SourceChosenPlayer
@@ -7239,7 +7725,30 @@ fn object_replacement_candidate_applies(
             return false;
         }
     }
+    if !draw_scope_matches_event_stage(repl_def, event) {
+        return false;
+    }
     if let ProposedEvent::AddCounter { placement, .. } = event {
+        // CR 109.2 + CR 110.1 (issue #8795): a counter replacement that carries
+        // no `valid_card` describes its object as a permanent — "on a permanent
+        // or player" (Vorinclex, Halving Season, Innkeeper's Talent), "a
+        // permanent you control" (Doc Samson), "a permanent your team controls"
+        // (Pir), "on ~" (Mowu); MEASURED over `card-data.json`, every corpus
+        // `AddCounter` replacement without a `valid_card` that names an object
+        // reads so (Solemnity's "Players can't get counters" names none). Like the
+        // typed-`valid_card` gate in `replacement_valid_card_matches`, it does
+        // not reach a card outside the battlefield: Delay's three time counters
+        // under the countered spell's controller's Vorinclex stay three, not
+        // six (or one under the counter's controller's). A placement on a
+        // player has no object and is untouched.
+        if repl_def.valid_card.is_none()
+            && placement
+                .object_id()
+                .and_then(|id| state.objects.get(&id))
+                .is_some_and(|affected| affected.zone != Zone::Battlefield)
+        {
+            return false;
+        }
         // CR 614.1a: `valid_player` is a *relative* scope; the subject axis selects
         // whom it is relative to. Actor-scoped replacements (Vorinclex/Halving
         // Season — "If you/an opponent would put …") compare against
@@ -7420,6 +7929,221 @@ fn liminal_entry_ref(event: &ProposedEvent) -> Option<ObjectId> {
     }
 }
 
+/// CR 614.12 + CR 712.8c + CR 712.11a + CR 712.13 + CR 712.14a: the object whose battlefield
+/// entry puts it back face up while it is still front face up now.
+fn transformed_entry_entrant(state: &GameState, event: &ProposedEvent) -> Option<ObjectId> {
+    let ProposedEvent::ZoneChange {
+        object_id,
+        to: Zone::Battlefield,
+        enter_transformed: true,
+        face_down_profile: None,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    let obj = state.objects.get(object_id)?;
+    if obj.back_face.is_none() || obj.transformed {
+        return None;
+    }
+    match state
+        .liminal_entries
+        .get(object_id)
+        .map(|entry| &entry.kind)
+    {
+        None => Some(*object_id),
+        Some(LiminalEntryKind::TransformedEntry) => Some(*object_id),
+        Some(_) => None,
+    }
+}
+
+/// CR 614.12: whether `source`'s stored definitions are superseded, for the
+/// entry `event` proposes, by a resident liminal projection (`TransformedEntry`
+/// or meld) of the same object — the
+/// projection is that entrant's authority for its own definitions, so offering
+/// the stored object's indices as well would evaluate them against the
+/// projection a second time.
+fn stored_entrant_superseded_by_projection(
+    state: &GameState,
+    event: &ProposedEvent,
+    source: ObjectId,
+) -> bool {
+    liminal_entry_ref(event) == Some(source) && state.liminal_entries.contains_key(&source)
+}
+
+/// CR 614.12 + CR 712.8c + CR 712.11a + CR 712.13 + CR 712.14a: stage the
+/// back-face projection for a transformed battlefield entry so the
+/// replacement pipeline consults the face the permanent will have on the
+/// battlefield, not the face it is leaving. Returns `Some(entrant)` whenever
+/// `event` is a transformed entry; the projection is always rebuilt from the
+/// stored object (a resident `TransformedEntry` projection reaching this
+/// function can only be left over from an abandoned pause, and is
+/// overwritten — a live pause resumes through `continue_replacement`, which
+/// reuses a resident projection without calling this function).
+fn stage_transformed_entry_projection(
+    state: &mut GameState,
+    event: &ProposedEvent,
+) -> Option<ObjectId> {
+    // Stale-guard: an untransformed battlefield entry of X must not reuse a
+    // `TransformedEntry` projection left resident by a replacement pause that
+    // was abandoned elsewhere (e.g. a player leaving the game mid-pause) —
+    // this seam is the entrant's next battlefield-entry proposal, so it is
+    // where any such stale projection would otherwise linger.
+    if let ProposedEvent::ZoneChange {
+        object_id,
+        to: Zone::Battlefield,
+        enter_transformed: false,
+        ..
+    } = event
+    {
+        if matches!(
+            state
+                .liminal_entries
+                .get(object_id)
+                .map(|entry| &entry.kind),
+            Some(LiminalEntryKind::TransformedEntry)
+        ) {
+            state.liminal_entries.remove(object_id);
+        }
+    }
+
+    let entrant = transformed_entry_entrant(state, event)?;
+    let (controller_override, enters_attacking) = match event {
+        ProposedEvent::ZoneChange {
+            controller_override,
+            enters_attacking,
+            ..
+        } => (*controller_override, *enters_attacking),
+        _ => unreachable!("transformed_entry_entrant only returns Some for a ZoneChange"),
+    };
+
+    let mut projected = state.objects.get(&entrant)?.clone();
+    // CR 712.8c + CR 712.14a (#7565): give the projection its back face's
+    // characteristics through the single symmetric face-swap authority,
+    // which also preserves the stored slot's `layout_kind` — the same call
+    // `stack.rs`, `zones.rs` and `casting.rs` make on live objects.
+    crate::game::printed_cards::swap_object_faces(&mut projected);
+    projected.transformed = true;
+    // CR 614.12: replacement effects check "the permanent as it would exist
+    // on the battlefield", so the projection IS that entering object — in
+    // `Zone::Battlefield`, as `reserve_liminal_token_object` stages a
+    // liminal token — and every `controller_or_owner()` reader
+    // (`replacement_source_player`) answers its controller, not the
+    // CR 108.4a owner fallback of the zone it is leaving.
+    // CR 110.2 + CR 110.2a + CR 110.2b: that controller mirrors delivery
+    // exactly — `GameObject::reset_for_battlefield_entry` resets it to the
+    // owner and `zones::apply_battlefield_entry_controller_override` installs
+    // the event's override (always `Some(caster)` on the cast route).
+    // allow-raw-zone: sets the zone of a detached projection clone staged in `liminal_entries`; the stored object and zone containers are untouched, so no zone change occurs (CR 614.12).
+    projected.zone = Zone::Battlefield;
+    projected.controller = controller_override.unwrap_or(projected.owner);
+    let name = projected.name.clone();
+    let controller = projected.controller;
+
+    state.liminal_entries.insert(
+        entrant,
+        LiminalEntry {
+            object: crate::types::game_state::LiminalEntrant::Card(projected),
+            name,
+            source_id: entrant,
+            controller,
+            enters_attacking,
+            attach_to: None,
+            sacrifice_at: None,
+            remaining_count: 0,
+            created_ids: Vec::new(),
+            copy_resume: None,
+            spec_resume: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            enter_with_counters: Vec::new(),
+            kind: LiminalEntryKind::TransformedEntry,
+            replacement_applied: HashSet::new(),
+        },
+    );
+    Some(entrant)
+}
+
+/// CR 614.12: release a staged `TransformedEntry` projection once the
+/// replacement pipeline has settled the event. `NeedsChoice` keeps it — the
+/// pause owns it until it resumes through `continue_replacement`.
+fn release_transformed_entry_projection(
+    state: &mut GameState,
+    staged: Option<ObjectId>,
+    result: &ReplacementResult,
+) {
+    let Some(entrant) = staged else {
+        return;
+    };
+    if matches!(result, ReplacementResult::NeedsChoice(_)) {
+        return;
+    }
+    if matches!(
+        state.liminal_entries.get(&entrant).map(|entry| &entry.kind),
+        Some(LiminalEntryKind::TransformedEntry)
+    ) {
+        state.liminal_entries.remove(&entrant);
+    }
+}
+
+/// CR 614.12: an object whose pending `ZoneChange` no longer proposes a
+/// transformed battlefield entry (a replacement redirected it off the
+/// battlefield during an earlier pause) but whose
+/// `TransformedEntry` projection is still resident. `continue_replacement`
+/// hands this object to `release_transformed_entry_projection` so the
+/// projection is removed by the same resume that finally delivers the event,
+/// instead of staying resident because the event it was built for no longer
+/// matches `transformed_entry_entrant`.
+fn stranded_transformed_entry_projection(
+    state: &GameState,
+    event: &ProposedEvent,
+) -> Option<ObjectId> {
+    let ProposedEvent::ZoneChange { object_id, .. } = event else {
+        return None;
+    };
+    if matches!(
+        state
+            .liminal_entries
+            .get(object_id)
+            .map(|entry| &entry.kind),
+        Some(LiminalEntryKind::TransformedEntry)
+    ) {
+        return Some(*object_id);
+    }
+    None
+}
+
+/// CR 614.12 + CR 616.1f: re-derive a resident `TransformedEntry` projection's
+/// controller from the entry event as it now stands. Replacement effects check
+/// the permanent as it would exist on the battlefield, "taking into account
+/// replacement effects that have already modified how it enters", and the
+/// choice process repeats after each applied effect, so an applied
+/// entry-controller replacement (CR 110.2a) must be visible to the ones that
+/// apply after it. Same derivation as `stage_transformed_entry_projection`.
+fn align_transformed_entry_projection_controller(state: &mut GameState, event: &ProposedEvent) {
+    let Some(entrant) = transformed_entry_entrant(state, event) else {
+        return;
+    };
+    let ProposedEvent::ZoneChange {
+        controller_override,
+        ..
+    } = event
+    else {
+        return;
+    };
+    let Some(entry) = state.liminal_entries.get_mut(&entrant) else {
+        return;
+    };
+    if !matches!(entry.kind, LiminalEntryKind::TransformedEntry) {
+        return;
+    }
+    let crate::types::game_state::LiminalEntrant::Card(projected) = &mut entry.object else {
+        return;
+    };
+    let controller = controller_override.unwrap_or(projected.owner);
+    projected.controller = controller;
+    entry.controller = controller;
+}
+
 fn legacy_object_replacement_candidates(
     state: &GameState,
     event: &ProposedEvent,
@@ -7427,6 +8151,12 @@ fn legacy_object_replacement_candidates(
 ) -> Vec<ReplacementId> {
     let mut candidates: Vec<_> = super::functioning_abilities::active_replacements(state)
         .filter_map(|(index, obj, _)| {
+            // CR 614.12: the projection below is the entrant's authority for
+            // its own definitions; offering the stored object's indices as
+            // well would evaluate them against the projection a second time.
+            if stored_entrant_superseded_by_projection(state, event, obj.id) {
+                return None;
+            }
             let rid = ReplacementId {
                 source: obj.id,
                 index,
@@ -7479,6 +8209,12 @@ fn indexed_object_replacement_candidates_from_index(
     let mut candidates: Vec<ReplacementId> = entries
         .into_iter()
         .filter_map(|entry| {
+            // CR 614.12: the projection below is the entrant's authority for
+            // its own definitions; offering the stored object's indices as
+            // well would evaluate them against the projection a second time.
+            if stored_entrant_superseded_by_projection(state, event, entry.id.source) {
+                return None;
+            }
             object_replacement_candidate_applies(state, event, registry, entry.id)
                 .then_some(entry.id)
         })
@@ -7722,6 +8458,169 @@ pub fn find_applicable_replacements(
         }
     }
 
+    // CR 702.52a + CR 613.1f + CR 121.2a: Granted Dredge — "[X] cards in your
+    // graveyard have dredge N" (The Necrobloom) grants Dredge to a graveyard
+    // card via a runtime continuous effect rather than printing it, so the
+    // card's `replacement_definitions` is empty and the ordinary
+    // object-carried scan (`object_replacement_candidate_applies`, which reads
+    // `obj.replacement_definitions.get(rid.index)`) never offers it. Surface
+    // one virtual Draw-replacement candidate per graveyard card with an
+    // effective GRANTED (non-printed) Dredge value.
+    //
+    // Restricted to the individual-draw stage: Dredge's `draw_scope` is always
+    // `IndividualDraw` (CR 121.2a — it modifies one draw, not the whole
+    // instruction), and there is no object-carried definition here for
+    // `draw_scope_matches_event_stage` to consult, so the stage is checked
+    // directly in the event pattern.
+    //
+    // Cheapest term first, mirroring the `GrantedEtbKeyword` block above, with
+    // the terms ordered by what they cost per graveyard card:
+    //
+    // 1. `event.already_applied` — a set lookup with no state access.
+    // 2. the registry's `ReplacementEvent::Draw` matcher — a `matches!` on the
+    //    event.
+    // 3. the HOISTED grant query below, which stands in front of the expensive
+    //    term. `granted_dredge_value`'s off-zone `effective_dredge_value`
+    //    resolve is a whole-game continuous-effect sweep
+    //    (`collect_shared_active_continuous_effects`), and this loop's candidate
+    //    set is a whole ZONE, so at HEAD the sweep was paid once per graveyard
+    //    card per individual draw. `shared_effects_can_grant_off_zone_keyword_kind`
+    //    answers the recipient-INDEPENDENT half of that question — CR 613.1f:
+    //    could any live Layer-6 effect add a keyword of this kind at all;
+    //    CR 611.3b: a battlefield source's grant does reach graveyard
+    //    recipients — so ONE sweep answers it for the whole zone. It is
+    //    memoized lazily, exactly like the `GrantedEtbKeyword` block's
+    //    `live_keywords`, so a CR 616.1f re-scan whose Draw matcher rejects
+    //    every card still pays zero sweeps. The recipient-DEPENDENT half is
+    //    `base_statics_can_grant_off_zone_keyword_kind`, which reads only this
+    //    object's own `base_static_definitions` (CR 113.6b) and never sweeps.
+    // 4. `granted_dredge_value` itself, reached only when some grant of the kind
+    //    could exist.
+    //
+    // Skipping on a `false` from BOTH halves is EXACT, not heuristic. Those two
+    // halves pre-filter precisely the two effect sources
+    // `collect_applicable_off_zone_keyword_effects` draws from, so a `false`
+    // from both means no live effect can ADD Dredge to this card; the remaining
+    // admitted arms only remove, so the resolved contribution list can only
+    // shrink from the card's printed keywords. Two exhaustive cases follow:
+    // the card ends with no Dredge, and `granted_dredge_value` returns `None`
+    // because `effective_dredge_value` is `None`; or it ends with exactly its
+    // printed Dredge, and `granted_dredge_value` returns `None` from its
+    // redundancy comparison against `printed_dredge_value` (which assumes a
+    // single printed instance of the kind, as every real card has). Either way
+    // the loop would have `continue`d, so the guard changes cost, never
+    // behavior.
+    //
+    // Cost when a Dredge grant IS live: one hoisted sweep plus
+    // `granted_dredge_value`'s per-card off-zone resolve, which MATCHES the
+    // engine-wide off-zone keyword cost model rather than being inherent to
+    // this block — the same per-recipient `effective_off_zone_keywords` resolve
+    // is paid, unguarded, by keyword-predicate filter evaluation (`filter.rs`),
+    // off-zone casting/activation enumeration (`casting.rs`), and off-zone
+    // trigger reconciliation (`triggers.rs`). A cross-cutting change that lets
+    // the off-zone authority accept a pre-collected shared effect list would
+    // lower all of those together and is the right home for removing the
+    // per-card term here; it is deliberately not special-cased for this one
+    // consumer.
+    //
+    // Once resolved, `granted_dredge_value` compares the effective value
+    // against any printed Dredge on the same object and returns `None` only
+    // when the two are identical (redundant with the object-carried
+    // candidate); a printed N and a differently-valued granted N both surface
+    // as distinct candidates.
+    if let ProposedEvent::Draw {
+        player_id,
+        stage: DrawEventStage::Individual,
+        ..
+    } = event
+    {
+        // A missing `ReplacementEvent::Draw` handler means the engine cannot apply
+        // a Draw replacement at all, so this family offers nothing — mirroring
+        // `object_replacement_candidate_applies`'s
+        // `let Some(handler) = registry.get(..) else { return false };`. This
+        // `else` is scoped to THIS block only: the object-carried scan and the
+        // state-level scan below perform their own handler lookups and must not be
+        // short-circuited by this one.
+        if let (Some(draw_handler), Some(player)) = (
+            registry.get(&ReplacementEvent::Draw),
+            state.players.iter().find(|p| p.id == *player_id),
+        ) {
+            let library_size = state.library_of(player.id).len() as u32;
+            // The hoisted, recipient-independent half of the grant query,
+            // filled at most ONCE per event and shared by every graveyard card
+            // — the same `Option<_>` + `get_or_insert_with` idiom the
+            // `GrantedEtbKeyword` block above uses for `live_keywords`.
+            let mut dredge_grant_live: Option<bool> = None;
+            for object_id in state.graveyard_of(player.id).iter().copied() {
+                let rid = granted_dredge_replacement_id(object_id);
+                if event.already_applied(&rid) {
+                    continue;
+                }
+                // CR 616.1f: the CR 616.1 repetition takes "into account only
+                // replacement or prevention effects that would now be
+                // applicable", and CR 614.6: a replaced event never happens.
+                // The registry's `ReplacementEvent::Draw` matcher (`draw_matcher`:
+                // `count > 0`) is this engine's single authority for "is there
+                // still a draw here to replace", and BOTH other candidate sources
+                // consult it — the object-carried scan via
+                // `object_replacement_candidate_applies` and the state-level scan
+                // before its own `candidates.push`. This virtual family must pass
+                // through the SAME gate or the paths disagree: once an accepted
+                // dredge has substituted the draw away — `apply_granted_dredge_replacement`
+                // zeroes the count, exactly as `apply_single_replacement` pre-zeroes
+                // it for the printed path when `draw_is_substituted_away` classifies
+                // the accept as a substitution — no further dredge is applicable
+                // to it. Without this gate the CR 616.1f re-scan re-offered every
+                // OTHER granted-dredge graveyard card against the replaced draw —
+                // a prompt CR 614.6 + CR 616.1f forbid, since no dredge "would
+                // now be applicable". Accepting that stray prompt overwrote the
+                // chosen dredge's continuation with the sibling's
+                // (`ResidentDrainPolicy::Replace`: the chosen card lost, the
+                // sibling dredged); declining it leaves the chosen continuation
+                // resident, so the stray prompt itself is the violation.
+                //
+                // Called PER CANDIDATE with that candidate's own source, exactly as
+                // the two sibling scans call it with `obj.id` / `source_host` (see
+                // the parity rule stated on the state-level scan). It is a
+                // `matches!` on the event — far cheaper than `granted_dredge_value`'s
+                // off-zone continuous-effect sweep below — so the block's
+                // cheap-before-expensive ordering is preserved.
+                if !(draw_handler.matcher)(event, object_id, state) {
+                    continue;
+                }
+                // CR 613.1f + CR 611.3b + CR 113.6b: memo-first — the shared
+                // sweep short-circuits the per-card base-static build on a
+                // grant-live board, and on a no-grant board the per-card term
+                // runs only after the single shared sweep has answered `false`.
+                // See the cost-discipline comment above for why skipping here
+                // is exact.
+                if !*dredge_grant_live.get_or_insert_with(|| {
+                    crate::game::off_zone_characteristics::shared_effects_can_grant_off_zone_keyword_kind(
+                        state,
+                        crate::types::keywords::KeywordKind::Dredge,
+                    )
+                }) && !crate::game::off_zone_characteristics::base_statics_can_grant_off_zone_keyword_kind(
+                    state,
+                    object_id,
+                    crate::types::keywords::KeywordKind::Dredge,
+                ) {
+                    continue;
+                }
+                let Some(dredge) = granted_dredge_value(state, object_id) else {
+                    continue;
+                };
+                // CR 702.52b: "A player with fewer cards in their library than
+                // the number required by a dredge ability can't mill any of
+                // them this way" — mirrors the object-carried gate at
+                // `object_replacement_candidate_applies` above.
+                if library_size < dredge {
+                    continue;
+                }
+                candidates.push(rid);
+            }
+        }
+    }
+
     // CR 702.89a: Umbra armor — a destroy of a permanent enchanted by an Umbra is
     // a candidate for the virtual umbra-armor replacement. Offered independently of
     // the shield-counter match above so a permanent carrying both a shield counter
@@ -7882,13 +8781,14 @@ pub fn find_applicable_replacements(
                     // divergence in both directions and inherits its Connive / ChangeZone /
                     // TokenEntry handling.
                     if let Some(ref vc) = repl_def.valid_card {
-                        let ctx = match repl_def.source_controller {
-                            Some(pid) => {
-                                FilterContext::from_source_with_controller(source_host, pid)
-                            }
-                            None => FilterContext::from_source(state, source_host),
-                        };
-                        if !replacement_valid_card_matches(repl_def, event, state, vc, &ctx) {
+                        if !replacement_valid_card_matches(
+                            repl_def,
+                            event,
+                            state,
+                            vc,
+                            source_host,
+                            repl_def.source_controller,
+                        ) {
                             continue;
                         }
                     }
@@ -7919,6 +8819,9 @@ pub fn find_applicable_replacements(
                     // it).
                     let source_controller =
                         repl_def.source_controller.unwrap_or(state.active_player);
+                    if !draw_scope_matches_event_stage(repl_def, event) {
+                        continue;
+                    }
                     // CR 614.1a: Draw replacements hosted in pending state
                     // (Words of Worship/Wilding) scope by the installing player
                     // captured at resolution, not the source permanent's live
@@ -8186,7 +9089,9 @@ pub(crate) fn event_is_accounted(event: &ProposedEvent) -> bool {
         // guard: the shield-damage virtual candidate is drawn under `amount > 0`.
         ProposedEvent::Damage { amount, .. } => *amount > 0,
         // CR 121.1: DELEGATES every card to `zone_pipeline::move_object`, but
-        // keeps `player.cards_drawn_this_turn`.
+        // keeps `player.cards_drawn_this_turn`. CR 121.2a: an instruction-stage
+        // event writes that ledger through the individual draws it is split
+        // into, so both stages are accounted.
         ProposedEvent::Draw { count, .. } => *count > 0,
         // ---- unaccounted: no axis of its own ⇒ the probe refuses. Named, not
         //      wildcarded, so a new variant is a compile error here. ----
@@ -8361,19 +9266,17 @@ fn extract_etb_counters_from_effect(
             };
             let ctx = crate::game::quantity::QuantityContext {
                 entering,
-                source: source_id,
-                trigger_source: None,
-                recipient: None,
-                scoped_player: None,
-                damage_source: None,
+                ..crate::game::quantity::QuantityContext::new(source_id)
             };
             let n = match count {
                 QuantityExpr::Fixed { value } => (*value).max(0) as u32,
                 other => {
+                    // CR 614.12 + CR 109.5: "you" in an entering object's own counter replacement
+                    // is the controller of the permanent as it would exist on the battlefield — the
+                    // resident liminal projection when one is staged.
                     let controller = state
-                        .objects
-                        .get(&source_id)
-                        .map(|obj| obj.controller)
+                        .entering_or_live_object(source_id)
+                        .map(replacement_source_player)
                         .unwrap_or(PlayerId(0));
                     crate::game::quantity::resolve_quantity_with_ctx(state, other, controller, ctx)
                         .max(0) as u32
@@ -8387,18 +9290,16 @@ fn extract_etb_counters_from_effect(
         } => enter_with_counters
             .iter()
             .map(|(counter_type, count)| {
+                // CR 614.12 + CR 109.5: "you" in an entering object's own counter replacement
+                // is the controller of the permanent as it would exist on the battlefield — the
+                // resident liminal projection when one is staged.
                 let controller = state
-                    .objects
-                    .get(&source_id)
-                    .map(|obj| obj.controller)
+                    .entering_or_live_object(source_id)
+                    .map(replacement_source_player)
                     .unwrap_or(PlayerId(0));
                 let ctx = crate::game::quantity::QuantityContext {
                     entering: event.affected_object_id(),
-                    source: source_id,
-                    trigger_source: None,
-                    recipient: None,
-                    scoped_player: None,
-                    damage_source: None,
+                    ..crate::game::quantity::QuantityContext::new(source_id)
                 };
                 let n =
                     crate::game::quantity::resolve_quantity_with_ctx(state, count, controller, ctx)
@@ -8757,6 +9658,22 @@ fn apply_single_replacement(
         ));
     }
 
+    if is_granted_dredge_replacement(rid) {
+        // CR 702.52a: mirror the generic vanished-definition fallback the
+        // `repl_def_ref` lookup below takes (`None => return Ok(proposed)`)
+        // — if the grant has disappeared since this candidate was
+        // registered/parked, there is no real Dredge value left to act on.
+        // Treat the event as unaffected rather than unconditionally zeroing
+        // the draw for a value that no longer exists; `continue_replacement_
+        // impl` mirrors the same `None` degrade on the accept/continuation
+        // side (no post-effect stashed), so together the pair never leaves a
+        // zeroed draw with no compensating mill+return.
+        return Ok(match granted_dredge_value(state, rid.source) {
+            Some(_) => apply_granted_dredge_replacement(proposed, rid, branch, events),
+            None => proposed,
+        });
+    }
+
     if let Some(kind) = shield_counter_replacement_kind(rid) {
         return apply_shield_counter_replacement(state, proposed, rid, kind, events);
     }
@@ -8911,10 +9828,27 @@ fn apply_single_replacement(
                             Some(PostReplacementContinuation::Resolved(runtime))
                         } else {
                             repl_def.execute.as_deref().and_then(|def| {
-                                // CR 608.2c + CR 614.11: Draw-count replacements with
-                                // chained riders (Blood Scrivener: draw two, then lose
-                                // 1 life) modify the draw via `draw_replacement_count`
-                                // and stash only the rider chain for post-draw drain.
+                                // CR 608.2c + CR 121.6b: the applier replaces the
+                                // current individual event with count zero. Run the
+                                // full Draw-plus-rider ability as a nested child so
+                                // its draw units finish before the rider and the
+                                // parent frame resumes with its own applied set.
+                                if has_draw_count_replacement_life_rider(state, rid, &proposed) {
+                                    return Some(PostReplacementContinuation::Template(Box::new(
+                                        def.clone(),
+                                    )));
+                                }
+                                // CR 121.6b: complete a count-changing replacement's
+                                // full Draw ability as a nested child before its
+                                // follow-up runs. Keeping the whole ability here
+                                // lets a paused child delivery retain its suffix.
+                                if draw_count_replacement_requires_child_sequence(
+                                    state, rid, &proposed,
+                                ) {
+                                    return Some(PostReplacementContinuation::Template(Box::new(
+                                        def.clone(),
+                                    )));
+                                }
                                 if matches!(*def.effect, Effect::Draw { .. })
                                     && def.sub_ability.is_some()
                                     && matches!(proposed, ProposedEvent::Draw { .. })
@@ -9021,6 +9955,20 @@ fn apply_single_replacement(
                         return true;
                     };
                     if def.sub_ability.is_some() {
+                        return true;
+                    }
+                    // CR 121.6b: an individual count replacement delegated to
+                    // the nested draw-sequence path still needs its full Draw
+                    // ability as a continuation. The modified event is zeroed
+                    // by `draw_applier`, so treating this as an already-folded
+                    // Draw would discard the only pause-aware child dispatcher.
+                    if draw_count_replacement_requires_child_sequence(state, rid, &proposed) {
+                        return true;
+                    }
+                    // CR 614.6: a draw for another player was not folded into the
+                    // replaced draw (it was zeroed above), so the continuation is
+                    // the whole substitute.
+                    if draw_is_substituted_away(state, rid, repl_def, ability, &proposed) {
                         return true;
                     }
                     !matches!(
@@ -9471,6 +10419,11 @@ fn apply_single_replacement_and_dirty(
             }
         }
     }
+    // CR 614.12 + CR 616.1f: every applied replacement passes here, so this is
+    // where a rewritten entry controller reaches the staged projection.
+    if let Ok(after) = &result {
+        align_transformed_entry_projection_controller(state, after);
+    }
     dirty_replacement_index(state);
     result
 }
@@ -9785,6 +10738,23 @@ fn candidate_materiality(
         };
     }
 
+    // CR 702.52a + CR 616.1: granted dredge has no object-carried definition
+    // to walk via the generic execute-chain classifier below (that walk reads
+    // `state.objects...replacement_definitions.get(rid.index)`, which always
+    // misses for `GRANTED_DREDGE_INDEX`), so mirror here what that walk would
+    // find for PRINTED dredge: the execute chain's head (`Effect::Mill`)
+    // matches no specific arm in the walk and falls to its conservative
+    // default, `Unconditional` (verified by trace: `Effect::Mill` is not
+    // `ChangeZone`/`BecomeCopy`/`SetTapState`/`PutCounter`/`Choose`/
+    // `ChoosePermanent`/CreateToken-`Token`, so it hits the `_ =>` catch-all).
+    // Both paths already agree — this branch is a defensive
+    // architectural-consistency addition (matching every other virtual
+    // family's practice of never relying on the conservative fallback), not a
+    // correctness-load-bearing fix.
+    if is_granted_dredge_replacement(rid) {
+        return CandidateMateriality::Unconditional;
+    }
+
     // CR 614.10: the turn-scoped combat skip fully prevents the BeginPhase event,
     // so it is unconditional like the umbra-armor / shield-counter destroy.
     if is_turn_scoped_combat_skip_replacement(rid) {
@@ -9816,14 +10786,22 @@ fn candidate_materiality(
         return CandidateMateriality::Unconditional;
     }
 
-    let repl_def = state
-        .objects
-        .get(&rid.source)
-        .and_then(|obj| obj.replacement_definitions.get(rid.index));
+    // CR 614.12: honour any liminal projection (a transformed entry's back
+    // face, or a meld result) so ordering-material classification reads the
+    // definition the pipeline will actually apply, not a stale stored one.
+    let repl_def = replacement_definition_for_id(state, rid);
     let Some(repl_def) = repl_def else {
         // Unknown definition — be conservative.
         return CandidateMateriality::Unconditional;
     };
+    // CR 616.1b + CR 614.12: a definition-level entry-controller override rewrites the
+    // `ZoneChange`'s `controller_override`, which every later-applied entry replacement
+    // reads, and another override rewrites it again (last applied wins).
+    // `choosable_replacement_candidates` limits its competitors to other CR 616.1b
+    // candidates, so this arm decides that two such overrides are offered as a choice.
+    if repl_def.enters_under.is_some() {
+        return CandidateMateriality::Unconditional;
+    }
     // CR 615 + CR 616.1: A damage prevention shield modifies the damage amount,
     // so it writes the `Damage` field and is order-material against any other
     // `Damage` writer — a doubler (Furnace of Rath `Double`), Torbran (`Plus`),
@@ -10209,6 +11187,388 @@ fn park_entry_controller_choice(
     ReplacementResult::NeedsChoice(player)
 }
 
+/// CR 616.1a-e: the step of the CR 616.1 procedure at which an applicable
+/// replacement/prevention candidate may be chosen. Declared in CR order, so the
+/// derived `Ord` ranks the step that must be chosen from first as the least.
+///
+/// CR 616.1a (self-replacement effects, CR 614.15) has no variant: the parser folds
+/// each one into its own ability (`AbilityCondition::ConditionInstead`, see
+/// `parser/oracle.rs::apply_self_replacement_override`), so it is applied while that
+/// ability resolves, before the event it modifies is proposed. CR 616.1d (a card
+/// entering with its back face up) has no variant: no applier writes
+/// `ProposedEvent::ZoneChange::enter_transformed`, which is fixed when the event is
+/// built. A recognizer for either belongs here if that ever changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ReplacementPrecedence {
+    /// CR 616.1b: modifies under whose control an object enters the battlefield.
+    EntryController,
+    /// CR 616.1c: causes an object to become a copy of another object as it enters.
+    EntryCopy,
+    /// CR 616.1e: any other applicable effect.
+    Unrestricted,
+}
+
+/// CR 616.1b + CR 616.1c: the CR 616.1 step `rid` belongs to for `proposed`. Reads
+/// exactly what the appliers write: `enters_under` onto a battlefield `ZoneChange`
+/// (`apply_single_replacement`), `token_owner_redirect` onto a `CreateToken`
+/// (`create_token_applier`; CR 111.2), and an `execute` whose work is `BecomeCopy`.
+fn replacement_precedence(
+    state: &GameState,
+    rid: ReplacementId,
+    proposed: &ProposedEvent,
+) -> ReplacementPrecedence {
+    // Virtual candidates (commander return, finality, shield/umbra, granted keywords,
+    // dredge, combat skip) carry no definition and write neither controller nor copy.
+    let Some(def) = replacement_choice_definition(state, rid) else {
+        return ReplacementPrecedence::Unrestricted;
+    };
+    let rewrites_entry_controller = match proposed {
+        ProposedEvent::ZoneChange {
+            to: Zone::Battlefield,
+            ..
+        } => def.enters_under.is_some(),
+        ProposedEvent::CreateToken { .. } => def.token_owner_redirect.is_some(),
+        _ => false,
+    };
+    if rewrites_entry_controller {
+        return ReplacementPrecedence::EntryController;
+    }
+    // CR 111.1: a created or entering token enters the battlefield too.
+    let enters_battlefield = matches!(
+        proposed,
+        ProposedEvent::ZoneChange {
+            to: Zone::Battlefield,
+            ..
+        } | ProposedEvent::CreateToken { .. }
+            | ProposedEvent::TokenEntry { .. }
+    );
+    if enters_battlefield && def.execute.as_deref().is_some_and(ability_becomes_copy) {
+        return ReplacementPrecedence::EntryCopy;
+    }
+    ReplacementPrecedence::Unrestricted
+}
+
+/// CR 616.1 + CR 616.1f: the candidates the affected player may choose among now:
+/// every candidate of the earliest CR 616.1 step present (all of them when none is
+/// restricted). The single authority for CR 616.1 precedence: `pipeline_loop` parks and
+/// applies only this subset, so a `ChooseReplacement` index can never name a withheld
+/// candidate; withheld candidates are rediscovered on the next pass.
+fn choosable_replacement_candidates(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    candidates: Vec<ReplacementId>,
+) -> Vec<ReplacementId> {
+    let tiered: Vec<(ReplacementId, ReplacementPrecedence)> = candidates
+        .into_iter()
+        .map(|rid| (rid, replacement_precedence(state, rid, proposed)))
+        .collect();
+    let Some(first) = tiered.iter().map(|(_, tier)| *tier).min() else {
+        return Vec::new();
+    };
+    tiered
+        .into_iter()
+        .filter_map(|(rid, tier)| (tier == first).then_some(rid))
+        .collect()
+}
+
+/// Reuse the registry's typed event vocabulary; mana-loss handlers bypass that registry.
+fn auto_choice_event(proposed: &ProposedEvent) -> Option<ReplacementEvent> {
+    if matches!(proposed, ProposedEvent::EmptyManaPool { .. }) {
+        Some(ReplacementEvent::LoseMana)
+    } else {
+        replacement_event_keys_for_event(proposed)
+            .into_iter()
+            .next()
+    }
+}
+
+fn auto_choice_identities(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    candidates: &[ReplacementId],
+) -> Option<Vec<ReplacementAutoChoiceIdentity>> {
+    if matches!(proposed, ProposedEvent::SearchFound { .. }) {
+        return None;
+    }
+    let identities: Vec<_> = candidates
+        .iter()
+        .map(|rid| {
+            if matches!(proposed, ProposedEvent::EmptyManaPool { .. }) {
+                let entry = state.pending_step_end_mana_handlers.get(rid.index)?;
+                let object = state.objects.get(&entry.source)?;
+                return Some(ReplacementAutoChoiceIdentity::Mana {
+                    source: ObjectIncarnationRef::from_object(object),
+                    controller: entry.controller,
+                    filter: entry.filter,
+                    action: entry.action,
+                });
+            }
+            // CR 400.7: floating and synthetic IDs have no exact definition identity.
+            if rid.source == ObjectId(0) {
+                return None;
+            }
+            let object = state
+                .liminal_entries
+                .get(&rid.source)
+                .map(|entry| entry.object.projected())
+                .or_else(|| state.objects.get(&rid.source))?;
+            let definition = replacement_definition_for_id(state, *rid)?;
+            if matches!(definition.mode, ReplacementMode::MayCost { .. }) {
+                return None;
+            }
+            // Remember only branches without intrinsic payment or selection prompts.
+            // The ordinary delivery pipeline still owns noninteractive post-effects.
+            let branch_can_prompt = |branch: Option<&AbilityDefinition>| {
+                branch.is_some_and(|ability| {
+                    let resolved =
+                        build_resolved_from_def(ability, rid.source, object.controller_or_owner());
+                    super::resolution_prompt::chain_offers_choice(&resolved)
+                })
+            };
+            let decline = match &definition.mode {
+                ReplacementMode::Optional { decline } => decline.as_deref(),
+                ReplacementMode::Mandatory => None,
+                ReplacementMode::MayCost { .. } => unreachable!(),
+            };
+            let (execute, decline) = if matches!(proposed, ProposedEvent::Damage { .. }) {
+                // CR 615.5: damage delivery resolves the full continuation, including
+                // ChangeZone prefixes that modify other event kinds instead.
+                (definition.execute.as_deref(), decline)
+            } else {
+                // Match ordinary delivery: accept skips applied modifier prefixes,
+                // while mixed decline retains its full root; pure modifiers do not run.
+                (
+                    EventModifiers::first_non_modifier_ability(definition.execute.as_deref()),
+                    if EventModifiers::has_only_event_modifier(decline) {
+                        None
+                    } else {
+                        decline
+                    },
+                )
+            };
+            if entry_controller_choice(state, proposed, *rid).is_some()
+                || branch_can_prompt(execute)
+                || branch_can_prompt(decline)
+                || definition
+                    .runtime_execute
+                    .as_deref()
+                    .is_some_and(super::resolution_prompt::chain_offers_choice)
+            {
+                return None;
+            }
+            Some(ReplacementAutoChoiceIdentity::Definition {
+                source: ObjectIncarnationRef::from_object(object),
+                index: rid.index,
+                definition: Box::new(definition.clone()),
+            })
+        })
+        .collect::<Option<_>>()?;
+    if identities
+        .iter()
+        .enumerate()
+        .any(|(i, identity)| identities[..i].contains(identity))
+    {
+        return None;
+    }
+    Some(identities)
+}
+
+pub(crate) fn replacement_auto_choice_key(state: &GameState) -> Option<ReplacementAutoChoiceKey> {
+    let pending = state.pending_replacement.as_ref()?;
+    if pending.may_cost_paid || pending.may_cost_remaining.is_some() {
+        return None;
+    }
+    let player = pending
+        .choice_player
+        .unwrap_or_else(|| pending.proposed.affected_player(state));
+    // CR 723.5b: saved preferences are not decisions called for by the rules
+    // or an object, so another player's controller cannot set or replay them.
+    if super::turn_control::authorized_submitter_for_player(state, player) != player {
+        return None;
+    }
+    Some(ReplacementAutoChoiceKey {
+        player,
+        event: auto_choice_event(&pending.proposed)?,
+        kind: if pending.is_optional {
+            ReplacementChoiceKind::OptionalBranch
+        } else {
+            ReplacementChoiceKind::Order
+        },
+        candidates: auto_choice_identities(state, &pending.proposed, &pending.candidates)?,
+    })
+}
+
+fn same_identity_set(
+    a: &[ReplacementAutoChoiceIdentity],
+    b: &[ReplacementAutoChoiceIdentity],
+) -> bool {
+    a.len() == b.len() && a.iter().all(|identity| b.contains(identity))
+}
+
+pub(crate) fn validate_remembered_replacement(
+    state: &GameState,
+    choice: &ReplacementAutoChoice,
+) -> bool {
+    let Some(key) = replacement_auto_choice_key(state) else {
+        return false;
+    };
+    match choice {
+        ReplacementAutoChoice::Order { order } => {
+            key.kind == ReplacementChoiceKind::Order
+                && crate::game::triggers::is_valid_permutation(order, key.candidates.len())
+        }
+        ReplacementAutoChoice::Optional { index } => {
+            key.kind == ReplacementChoiceKind::OptionalBranch && *index < 2
+        }
+    }
+}
+
+/// Validate before storing; the ordinary replacement handler owns event delivery.
+pub(crate) fn remember_replacement_choice(
+    state: &mut GameState,
+    choice: ReplacementAutoChoice,
+) -> usize {
+    let key = replacement_auto_choice_key(state).expect("validated replacement identity");
+    let summaries = replacement_choice_waiting_for(key.player, state);
+    let WaitingFor::ReplacementChoice { candidates, .. } = summaries else {
+        unreachable!()
+    };
+    let description = |index: usize| {
+        let candidate = &candidates[index];
+        format!("{} — {}", candidate.source_name, candidate.description)
+    };
+    let (first, descriptions) = match &choice {
+        ReplacementAutoChoice::Order { order } => {
+            let mut remaining: Vec<_> = order
+                .iter()
+                .map(|index| key.candidates[*index].clone())
+                .collect();
+            remaining.remove(0);
+            // CR 616.1f + CR 616.2: exhaustion ends the saved sequence; a
+            // newly applicable replacement is handled by the ordinary rescan.
+            state.replacement_auto_choice_tail =
+                (!remaining.is_empty()).then_some(ReplacementAutoChoiceTail {
+                    player: key.player,
+                    event: key.event.clone(),
+                    remaining,
+                });
+            (
+                order[0],
+                order.iter().map(|index| description(*index)).collect(),
+            )
+        }
+        ReplacementAutoChoice::Optional { index } => (*index, vec![description(*index)]),
+    };
+    state.replacement_auto_choices.retain(|record| {
+        !(record.key.player == key.player
+            && record.key.event == key.event
+            && record.key.kind == key.kind
+            && same_identity_set(&record.key.candidates, &key.candidates))
+    });
+    let encoded = serde_json::to_vec(&key).expect("replacement key serializes");
+    let id = ReplacementAutoChoiceId(format!("r{:x}", Sha256::digest(encoded)));
+    state
+        .replacement_auto_choices
+        .push(ReplacementAutoChoiceRecord {
+            id,
+            key,
+            choice,
+            descriptions,
+        });
+    first
+}
+
+/// CR 616.1f: replay exactly one choice, then let the ordinary pipeline rescan.
+fn replay_pending_replacement(
+    state: &mut GameState,
+    player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> ReplacementResult {
+    // CR 616.1: choosing an optional effect's turn is separate from its may
+    // decision. Discard ordering automation before looking up that saved decision.
+    if state
+        .pending_replacement
+        .as_ref()
+        .is_some_and(|pending| pending.is_optional)
+    {
+        state.replacement_auto_choice_tail = None;
+    }
+    let had_tail = state.replacement_auto_choice_tail.is_some();
+    let key = replacement_auto_choice_key(state);
+    let index = if let Some(tail) = state.replacement_auto_choice_tail.take() {
+        match key.as_ref() {
+            Some(key)
+                if key.kind == ReplacementChoiceKind::Order
+                    && key.player == tail.player
+                    && key.event == tail.event
+                    && same_identity_set(&key.candidates, &tail.remaining) =>
+            {
+                let index = key
+                    .candidates
+                    .iter()
+                    .position(|identity| Some(identity) == tail.remaining.first());
+                if index.is_some() {
+                    let remaining: Vec<_> = tail.remaining.into_iter().skip(1).collect();
+                    state.replacement_auto_choice_tail = (!remaining.is_empty())
+                        .then_some(ReplacementAutoChoiceTail { remaining, ..tail });
+                }
+                index
+            }
+            _ => None,
+        }
+    } else if let Some(key) = key {
+        let record = state
+            .replacement_auto_choices
+            .iter()
+            .find(|record| {
+                record.key.player == key.player
+                    && record.key.event == key.event
+                    && record.key.kind == key.kind
+                    && same_identity_set(&record.key.candidates, &key.candidates)
+            })
+            .cloned();
+        record.and_then(|record| match record.choice {
+            ReplacementAutoChoice::Optional { index } => (index < 2).then_some(index),
+            ReplacementAutoChoice::Order { order } => {
+                if !crate::game::triggers::is_valid_permutation(&order, record.key.candidates.len())
+                {
+                    return None;
+                }
+                let mut remaining: Vec<_> = order
+                    .iter()
+                    .map(|index| record.key.candidates[*index].clone())
+                    .collect();
+                let first = remaining.remove(0);
+                let index = key
+                    .candidates
+                    .iter()
+                    .position(|identity| *identity == first)?;
+                state.replacement_auto_choice_tail =
+                    (!remaining.is_empty()).then_some(ReplacementAutoChoiceTail {
+                        player,
+                        event: key.event,
+                        remaining,
+                    });
+                Some(index)
+            }
+        })
+    } else {
+        None
+    };
+    let Some(index) = index else {
+        // A nested optional prompt never inherits acceptance from an order.
+        if had_tail {
+            state.replacement_auto_choice_tail = None;
+        }
+        return ReplacementResult::NeedsChoice(player);
+    };
+    let result = continue_replacement_impl(state, index, events);
+    if !matches!(result, ReplacementResult::Execute(_)) {
+        state.replacement_auto_choice_tail = None;
+    }
+    result
+}
+
 fn pipeline_loop(
     state: &mut GameState,
     mut proposed: ProposedEvent,
@@ -10229,6 +11589,7 @@ fn pipeline_loop(
         let candidates = find_applicable_replacements(state, &proposed, registry);
 
         if candidates.is_empty() {
+            state.replacement_auto_choice_tail = None;
             break;
         }
 
@@ -10243,12 +11604,45 @@ fn pipeline_loop(
             return ReplacementResult::Prevented;
         }
 
-        if candidates.len() == 1 {
+        // CR 616.1a-e: only the earliest CR 616.1 step present may be chosen now;
+        // the rest are rediscovered once the chosen effect applies (CR 616.1f).
+        let candidates = choosable_replacement_candidates(state, &proposed, candidates);
+
+        // CR 616.1f: a changed remaining set stops a remembered sequence even
+        // when only one mandatory replacement remains; park it for confirmation.
+        let singleton_matches_tail =
+            state
+                .replacement_auto_choice_tail
+                .as_ref()
+                .is_none_or(|tail| {
+                    auto_choice_event(&proposed).as_ref() == Some(&tail.event)
+                        && proposed.affected_player(state) == tail.player
+                        && auto_choice_identities(state, &proposed, &candidates).is_some_and(
+                            |identities| same_identity_set(&identities, &tail.remaining),
+                        )
+                });
+        if candidates.len() == 1
+            && (singleton_matches_tail || replacement_is_optional(state, candidates[0]))
+        {
             let rid = candidates[0];
 
             // Check if this single candidate is Optional — if so, present as a choice
             let is_optional = replacement_is_optional(state, rid);
 
+            if !is_optional {
+                if let Some(tail) = state.replacement_auto_choice_tail.take() {
+                    let matches = auto_choice_event(&proposed).as_ref() == Some(&tail.event)
+                        && proposed.affected_player(state) == tail.player
+                        && auto_choice_identities(state, &proposed, &candidates).is_some_and(
+                            |identities| same_identity_set(&identities, &tail.remaining),
+                        );
+                    if matches {
+                        let remaining: Vec<_> = tail.remaining.into_iter().skip(1).collect();
+                        state.replacement_auto_choice_tail = (!remaining.is_empty())
+                            .then_some(ReplacementAutoChoiceTail { remaining, ..tail });
+                    }
+                }
+            }
             if is_optional {
                 let Some(affected) = replacement_choice_player(state, &proposed, rid) else {
                     // An optional replacement with no authorized chooser is
@@ -10282,7 +11676,7 @@ fn pipeline_loop(
                     may_cost_paid: false,
                     may_cost_remaining: None,
                 });
-                return ReplacementResult::NeedsChoice(affected);
+                return replay_pending_replacement(state, affected, events);
             }
 
             if let Some((player, entry_candidates)) = entry_controller_choice(state, &proposed, rid)
@@ -10310,7 +11704,9 @@ fn pipeline_loop(
                 Err(ApplyResult::Prevented) => return ReplacementResult::Prevented,
                 Err(ApplyResult::Modified(_)) => unreachable!(),
             }
-        } else if replacement_ordering_is_material(state, &candidates, &proposed) {
+        } else if state.replacement_auto_choice_tail.is_some()
+            || replacement_ordering_is_material(state, &candidates, &proposed)
+        {
             // CR 616.1: If multiple replacement effects apply, the affected player
             // or controller of the affected object chooses which one to apply first,
             // even when every candidate is mandatory.
@@ -10338,7 +11734,7 @@ fn pipeline_loop(
                 may_cost_paid: false,
                 may_cost_remaining: None,
             });
-            return ReplacementResult::NeedsChoice(affected);
+            return replay_pending_replacement(state, affected, events);
         } else {
             // CR 616.1: the choice is degenerate here — every candidate ordering
             // yields an observationally identical outcome — so the prompt is
@@ -10365,6 +11761,7 @@ fn pipeline_loop(
         depth += 1;
     }
 
+    state.replacement_auto_choice_tail = None;
     ReplacementResult::Execute(proposed)
 }
 
@@ -10373,10 +11770,18 @@ pub fn replace_event(
     proposed: ProposedEvent,
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
+    // A newly proposed (possibly nested) event cannot inherit another event's tail.
+    state.replacement_auto_choice_tail = None;
     let registry = replacement_registry();
+    // CR 614.12: stage the back-face projection of a transformed battlefield
+    // entry before the pipeline runs, and release it once the pipeline
+    // settles — a pause (`NeedsChoice`) keeps it resident for
+    // `continue_replacement` to resume.
+    let staged = stage_transformed_entry_projection(state, &proposed);
     prepare_replacement_index_for_pipeline(state);
     let result = pipeline_loop(state, proposed, 0, registry, events);
     clear_replacement_index_pipeline(state);
+    release_transformed_entry_projection(state, staged, &result);
     result
 }
 
@@ -10531,6 +11936,7 @@ fn continue_replacement_impl(
             return ReplacementResult::Execute(ProposedEvent::Draw {
                 player_id: PlayerId(0),
                 count: 0,
+                stage: DrawEventStage::Individual,
                 applied: std::collections::HashSet::new(),
             });
         }
@@ -10623,21 +12029,55 @@ fn continue_replacement_impl(
         // continuation installed below is text on THIS object, so its "you" is
         // this object's controller, not the affected object's.
         let (accept_effect, decline_effect, may_cost, branch_controller) =
-            replacement_definition_for_id(state, rid)
-                .map(|repl| {
-                    let accept = repl.execute.clone();
-                    let decline = replacement_mode_decline_cloned(&repl.mode);
-                    let may_cost = match &repl.mode {
-                        ReplacementMode::MayCost { cost, .. } => Some(cost.clone()),
-                        ReplacementMode::Mandatory | ReplacementMode::Optional { .. } => None,
-                    };
-                    // Same authority the mandatory path uses, so an optional
-                    // replacement's accept/decline rider and a mandatory one's
-                    // execute rider can never disagree about who "you" is.
-                    let controller = replacement_ability_controller(state, rid, repl);
-                    (accept, decline, may_cost, Some(controller))
-                })
-                .unwrap_or((None, None, None, None));
+            if is_granted_dredge_replacement(rid) {
+                // CR 702.52a: granted dredge has no object-carried
+                // `ReplacementDefinition` for `replacement_definition_for_id`
+                // to read — synthesize the SAME shape printed dredge uses
+                // (`database::synthesis::dredge_replacement_definition`),
+                // interpolating this object's own resolved (granted) N, then
+                // extract accept/decline/may_cost/controller identically to
+                // the object-carried path below.
+                //
+                // If the grant has vanished since this candidate was parked
+                // (e.g. the granting effect ended before the player answered
+                // the accept/decline prompt), there is no real N left to
+                // synthesize a definition from. Degrade exactly like the
+                // object-carried path's `.unwrap_or((None, None, None,
+                // None))` fallback just below: no accept/decline/continuation
+                // — never fabricate a "Dredge 0" definition (mill 0 cards,
+                // return the card for free) out of a value that no longer
+                // exists.
+                match granted_dredge_value(state, rid.source) {
+                    Some(n) => {
+                        let repl = crate::database::synthesis::dredge_replacement_definition(n);
+                        let accept = repl.execute.clone();
+                        let decline = replacement_mode_decline_cloned(&repl.mode);
+                        let may_cost = match &repl.mode {
+                            ReplacementMode::MayCost { cost, .. } => Some(cost.clone()),
+                            ReplacementMode::Mandatory | ReplacementMode::Optional { .. } => None,
+                        };
+                        let controller = replacement_ability_controller(state, rid, &repl);
+                        (accept, decline, may_cost, Some(controller))
+                    }
+                    None => (None, None, None, None),
+                }
+            } else {
+                replacement_definition_for_id(state, rid)
+                    .map(|repl| {
+                        let accept = repl.execute.clone();
+                        let decline = replacement_mode_decline_cloned(&repl.mode);
+                        let may_cost = match &repl.mode {
+                            ReplacementMode::MayCost { cost, .. } => Some(cost.clone()),
+                            ReplacementMode::Mandatory | ReplacementMode::Optional { .. } => None,
+                        };
+                        // Same authority the mandatory path uses, so an optional
+                        // replacement's accept/decline rider and a mandatory one's
+                        // execute rider can never disagree about who "you" is.
+                        let controller = replacement_ability_controller(state, rid, repl);
+                        (accept, decline, may_cost, Some(controller))
+                    })
+                    .unwrap_or((None, None, None, None))
+            };
 
         // CR 614.12a: on accept, pay the MayCost (skipped on a paid resume). A
         // `PausedForChoice` outcome means the payment surfaced an interactive
@@ -10755,10 +12195,9 @@ fn continue_replacement_impl(
         // CR 614.12a: Optional accept/decline branches always derive a Template
         // continuation — the post-effect is built from the ReplacementDefinition's
         // `execute`/`decline` AST, never from a captured runtime resolution.
-        // Set BEFORE `apply_single_replacement` so per-event appliers (e.g.,
-        // `draw_applier`) can see the continuation slot and suppress the
-        // original event when its replacement is a non-modifier chain
-        // (CR 614.6: the draw never happens when fully replaced).
+        // No applier reads the drain stack (production `replacement.rs` reads it
+        // only in `replace_combat_damage_batch`); draw substitution is classified
+        // from the branch AST by `draw_is_substituted_away`.
         // CR 614.12a + CR 616.1: Seed the inherited replacement-applied set ONLY
         // when this replacement originates a token-choice continuation (Jinnie
         // Fay-class `CreateToken -> ChooseOneOf(Token, Token)`). The seed is
@@ -10787,20 +12226,30 @@ fn continue_replacement_impl(
                 state.post_replacement_token_substitution_count = Some(*count as i32);
             }
         }
-        // CR 614.6: install (or clear) the optional branch's continuation — the
-        // replacement's own actions for the branch that was taken.
+        // CR 614.6: install the optional branch's continuation (the replacement's
+        // own actions for the branch that was taken); a no-post-effect ACCEPT
+        // clears the resident drains, a no-post-effect DECLINE leaves them
+        // untouched.
         //
         // Policy is `Replace`: unlike `stash_post_replacement_continuation`, this
         // path has always OVERWRITTEN a resident continuation rather than
         // discarding the incoming one. The two policies genuinely disagree; both
-        // are preserved exactly here, and naming them is the point.
+        // are preserved exactly here, and naming them is the point. `Replace`
+        // evicts a Ready resident — on the same event that drops an earlier
+        // replacement's rider (the accept-side follow-up recorded on PR #9235);
+        // on a DECLINE this arm loses a drain only when the decline branch has a
+        // post-effect.
+        //
+        // #5686/#6269 ported the single slot's `continuation = post_effect` +
+        // `applied.clear()` into this stack; the `None` half of that plain
+        // assignment was never a designed cleanup.
         //
         // CR 615.5 + CR 609.7: an optional/decline post-effect carries no
         // prevention-event-source semantics, so `event_source`/`event_target` are
         // empty — a prior prevention must not leak into a non-prevention drain.
         // The drain owns those fields, so replacing it clears them by construction.
-        match post_effect {
-            Some(def) => {
+        match (branch, post_effect) {
+            (ReplacementBranch::Execute | ReplacementBranch::Decline, Some(def)) => {
                 state.install_post_replacement_drain(
                     PostReplacementDrain {
                         status: DrainStatus::Ready(PostReplacementContinuation::Template(def)),
@@ -10816,10 +12265,35 @@ fn continue_replacement_impl(
                     ResidentDrainPolicy::Replace,
                 );
             }
-            // No post-effect: this branch produces no continuation, so any resident
-            // one (and the `applied` set that rode with it) is dropped — exactly
-            // what `continuation = None` + `applied.clear()` did before.
-            None => state.abandon_active_post_replacement_drains(),
+            // CR 614.6 + CR 616.1f: a declined optional — or a MayCost left
+            // unpaid — whose branch has no post-effect replaces nothing, so every
+            // resident drain stays exactly as found. An earlier replacement
+            // already applied to this event keeps its rider: its modified event
+            // still happens (e.g. Blood Scrivener's "lose 1 life" after a
+            // declined dredge — CR 702.52a's "may"). An outer paused
+            // continuation keeps its event context (CR 616.1g). This matches
+            // `pipeline_loop`'s chooser-less decline, the no-payer arm above,
+            // `continue_search_found_after_decline`, and the mandatory ordering
+            // pick below, none of which touch the drain stack. A kept Ready
+            // drain is dispatched as this event completes, exactly like one
+            // left by a mandatory ordering pick: for a draw at the first drawn
+            // card's zone-delivery tail, or at the resume epilogue if no card is
+            // delivered; for a zone change at `handle_replacement_choice`'s
+            // `CallerEpilogue` drain; a Paused one is retired by its own
+            // dispatch lifecycle.
+            (ReplacementBranch::Decline, None) => {}
+            // Accept with no post-effect (Obstinate Familiar's skip, a shock
+            // land's paid life): unchanged, it still abandons the resident
+            // drains. (A MayCost life payment first runs
+            // `drain_substitution_continuation`, which dispatches any Ready
+            // resident as the payment's own substitute before this arm is
+            // reached — or instead of it, re-parking this record, when that
+            // dispatch prompts.) Whether an earlier rider survives an accepted
+            // substitution depends on the rider (CR 614.11b + CR 121.6c: an
+            // additional action on a replaced draw's card is not performed;
+            // Blood Scrivener's life loss is not such an action), so both are
+            // the accept-side follow-up recorded on PR #9235.
+            (ReplacementBranch::Execute, None) => state.abandon_active_post_replacement_drains(),
         }
 
         match apply_single_replacement_and_dirty(state, proposed, rid, branch, registry, events) {
@@ -10893,6 +12367,7 @@ fn continue_replacement_impl(
     // Re-park it through the same optional seam used for a lone candidate, then
     // re-scan the modified event so the other candidates remain available.
     if replacement_is_optional(state, rid) {
+        state.replacement_auto_choice_tail = None;
         let Some(affected) = replacement_choice_player(state, &pending.proposed, rid) else {
             let mut proposed = pending.proposed;
             proposed.mark_applied(rid);
@@ -10902,7 +12377,7 @@ fn continue_replacement_impl(
         pending.is_optional = true;
         pending.choice_player = Some(affected);
         state.pending_replacement = Some(pending);
-        return ReplacementResult::NeedsChoice(affected);
+        return replay_pending_replacement(state, affected, events);
     }
 
     let mut proposed = pending.proposed.clone();
@@ -10941,8 +12416,44 @@ pub fn continue_replacement(
     chosen_index: usize,
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
+    // CR 614.12: a resumed pause reuses its own resident `TransformedEntry`
+    // projection (staged when the pause first parked, still needed by the
+    // resume's label/choice reads) rather than rebuilding it. Any pending
+    // event that is still a transformed battlefield entry but has no resident
+    // projection runs the ordinary stage/stale-guard path instead — this is
+    // how a projection released during a MayCost `PausedForChoice` pause
+    // (`continue_replacement_impl`'s re-park through `pending_replacement`)
+    // gets restaged. A pending event that no longer proposes a transformed
+    // battlefield entry at all (an earlier pause redirected its destination
+    // off the battlefield) still hands a
+    // resident projection to `stranded_transformed_entry_projection`, so the
+    // terminal result below releases it instead of leaving it resident past
+    // this event's delivery. The reused projection's controller already follows
+    // the pending event: every applied replacement realigns it in
+    // `apply_single_replacement_and_dirty`, and an entry-controller answer
+    // written onto the pending event is applied through that same seam before
+    // anything reads the projection.
+    let pending_event = state
+        .pending_replacement
+        .as_ref()
+        .map(|pending| pending.proposed.clone());
+    let staged = pending_event.as_ref().and_then(|proposed| {
+        if let Some(entrant) = transformed_entry_entrant(state, proposed) {
+            if matches!(
+                state.liminal_entries.get(&entrant).map(|entry| &entry.kind),
+                Some(LiminalEntryKind::TransformedEntry)
+            ) {
+                return Some(entrant);
+            }
+        }
+        stage_transformed_entry_projection(state, proposed)
+            .or_else(|| stranded_transformed_entry_projection(state, proposed))
+    });
     let result = continue_replacement_impl(state, chosen_index, events);
+    // A remaining prompt belongs to a nested decision, not the chosen ordering.
+    state.replacement_auto_choice_tail = None;
     clear_replacement_index_pipeline(state);
+    release_transformed_entry_projection(state, staged, &result);
     result
 }
 
@@ -10975,6 +12486,156 @@ mod tests {
 
     fn make_repl(event: ReplacementEvent) -> ReplacementDefinition {
         ReplacementDefinition::new(event)
+    }
+
+    fn shield_removal_commands(state: &GameState, object_id: ObjectId) -> usize {
+        state.resolved_rules_journal.entries().iter().filter(|entry| matches!(
+            &entry.command,
+            Some(crate::types::resolved_commands::ResolvedRulesCommand::ObjectCounter(command))
+                if command.object.object_id == object_id
+                    && command.counter_type == CounterType::Shield
+                    && matches!(command.edit, crate::types::resolved_commands::ResolvedObjectCounterEdit::Remove { count: 1 })
+        )).count()
+    }
+
+    #[test]
+    fn shield_damage_and_destroy_each_journal_one_accepted_removal() {
+        for destroy in [false, true] {
+            let mut state = GameState::new_two_player(42);
+            let object_id = ObjectId(30);
+            let mut target = GameObject::new(
+                object_id,
+                CardId(3),
+                PlayerId(1),
+                "Shielded Bear".into(),
+                Zone::Battlefield,
+            );
+            target.counters.insert(CounterType::Shield, 1);
+            state.objects.insert(object_id, target);
+            state.battlefield.push_back(object_id);
+            let proposed = if destroy {
+                ProposedEvent::Destroy {
+                    object_id,
+                    source: Some(ObjectId(50)),
+                    cant_regenerate: false,
+                    applied: HashSet::new(),
+                }
+            } else {
+                ProposedEvent::Damage {
+                    source_id: ObjectId(50),
+                    target: TargetRef::Object(object_id),
+                    amount: 2,
+                    is_combat: false,
+                    applied: HashSet::new(),
+                }
+            };
+            let mut events = Vec::new();
+            let result = replace_event(&mut state, proposed, &mut events);
+            assert!(
+                matches!(result, ReplacementResult::Prevented),
+                "shield must replace the {:?} event",
+                if destroy { "destroy" } else { "damage" }
+            );
+            assert_eq!(
+                state.objects[&object_id].counters.get(&CounterType::Shield),
+                None
+            );
+            assert_eq!(
+                shield_removal_commands(&state, object_id),
+                1,
+                "accepted shield consumption must record one command"
+            );
+            assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterRemoved { object_id: id, counter_type: CounterType::Shield, count: 1 } if *id == object_id)).count(), 1, "one accepted edit emits one removal event");
+            if !destroy {
+                let removed_at = events.iter().position(|event| matches!(event, GameEvent::CounterRemoved { object_id: id, counter_type: CounterType::Shield, .. } if *id == object_id)).unwrap();
+                let prevented_at = events
+                    .iter()
+                    .position(|event| matches!(event, GameEvent::DamagePrevented { .. }))
+                    .unwrap();
+                assert!(
+                    removed_at < prevented_at,
+                    "damage prevention follows the accepted shield removal event"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn batched_combat_shield_consumption_journals_once() {
+        use crate::game::combat::{DamageAssignment, DamageTarget};
+        use crate::game::combat_damage::{apply_combat_damage, CombatDamageBatch};
+        use crate::game::zones::create_object;
+        use crate::types::game_state::CombatDamageSubStep;
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        let shielded = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Shielded Bear".into(),
+            Zone::Battlefield,
+        );
+        let attacker_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Attacker A".into(),
+            Zone::Battlefield,
+        );
+        let attacker_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Attacker B".into(),
+            Zone::Battlefield,
+        );
+        for (id, power, toughness) in [(shielded, 2, 2), (attacker_a, 3, 3), (attacker_b, 3, 3)] {
+            let object = state.objects.get_mut(&id).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.power = Some(power);
+            object.toughness = Some(toughness);
+            object.entered_battlefield_turn = Some(1);
+        }
+        state
+            .objects
+            .get_mut(&shielded)
+            .unwrap()
+            .counters
+            .insert(CounterType::Shield, 1);
+        let assignments = vec![
+            (
+                attacker_a,
+                DamageAssignment {
+                    target: DamageTarget::Object(shielded),
+                    amount: 3,
+                },
+            ),
+            (
+                attacker_b,
+                DamageAssignment {
+                    target: DamageTarget::Object(shielded),
+                    amount: 3,
+                },
+            ),
+        ];
+        let CombatDamageBatch::Complete(events) =
+            apply_combat_damage(&mut state, &assignments, CombatDamageSubStep::Regular)
+        else {
+            panic!("the simultaneous damage batch must complete");
+        };
+        assert_eq!(state.objects[&shielded].damage_marked, 0);
+        assert_eq!(
+            state.objects[&shielded].counters.get(&CounterType::Shield),
+            None
+        );
+        assert_eq!(
+            shield_removal_commands(&state, shielded),
+            1,
+            "the post-batch shield consumption records one accepted removal"
+        );
+        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterRemoved { object_id, counter_type: CounterType::Shield, count: 1 } if *object_id == shielded)).count(), 1);
     }
 
     /// V14 — `ability_tree_copies_tokens` walks the substitution's OWN tree and
@@ -11092,13 +12753,20 @@ mod tests {
             );
         }
 
-        // Owned by the ONE-SHOT path (`redirect_chosen_object_for_rid`), which
+        // Owned by the ONE-SHOT path (`redirect_chosen_target_for_rid`), which
         // reads it off a `ShieldKind::Redirection` shield — never this gate. Not
         // parser-producible here, so it is asserted directly.
         assert_eq!(
             durable_redirect_route_for_filter(&TargetFilter::SpecificObject { id: ObjectId(7) }),
             PreventionShieldRoute::Prevent,
             "a captured chosen object belongs to the one-shot redirection shield"
+        );
+        // CR 614.9: a captured chosen PLAYER ("…is dealt to any target instead")
+        // belongs to the same one-shot path.
+        assert_eq!(
+            durable_redirect_route_for_filter(&TargetFilter::SpecificPlayer { id: PlayerId(1) }),
+            PreventionShieldRoute::Prevent,
+            "a captured chosen player belongs to the one-shot redirection shield"
         );
 
         // The fail-closed residual arm, asserted rather than assumed: an
@@ -11141,7 +12809,7 @@ mod tests {
         state.pending_damage_replacements.push(
             ReplacementDefinition::new(ReplacementEvent::DamageDone)
                 .redirection_shield(
-                    DamageRedirectTarget::ChosenObjectTarget,
+                    DamageRedirectTarget::ChosenTarget,
                     PreventionAmount::Next(2),
                     RedirectionLifetime::Continuous,
                 )
@@ -11757,6 +13425,7 @@ mod tests {
             ProposedEvent::Draw {
                 player_id: PlayerId(0),
                 count: 1,
+                stage: DrawEventStage::Individual,
                 applied: HashSet::new(),
             },
             &mut events,
@@ -11826,6 +13495,165 @@ mod tests {
             "accepted optional replacement must dirty the derived index"
         );
         assert!(!state.replacement_index.pipeline_active);
+    }
+
+    /// CR 614.12: a `TransformedEntry` projection staged for an entrant's
+    /// transformed battlefield entry must not survive past the event that
+    /// finally delivers it, even when the entry is redirected off the
+    /// battlefield across more than one `continue_replacement` resume before
+    /// the pipeline reaches a terminal result. Mirrors
+    /// `finality_competes_by_identity_and_resumes_through_the_cr_616_choice`'s
+    /// use of a cross-object `redirect_repl` and hand-driven
+    /// `replace_event`/`continue_replacement` resumes.
+    #[test]
+    fn continue_replacement_releases_stranded_transformed_entry_projection() {
+        let entrant = ObjectId(70);
+        let mut state = test_state_with_object(entrant, Zone::Exile, vec![]);
+        let back_face = crate::game::game_object::BackFaceData {
+            is_swap_snapshot: false,
+            trigger_printed_origins: Vec::new(),
+            name: "Test Back".to_string(),
+            power: Some(2),
+            toughness: Some(2),
+            loyalty: None,
+            printed_loyalty: None,
+            defense: None,
+            card_types: crate::types::card_type::CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![],
+            },
+            mana_cost: crate::types::mana::ManaCost::default(),
+            keywords: vec![],
+            abilities: vec![],
+            trigger_definitions: Default::default(),
+            replacement_definitions: Default::default(),
+            static_definitions: Default::default(),
+            color: vec![],
+            printed_ref: None,
+            modal: None,
+            additional_cost: None,
+            strive_cost: None,
+            casting_restrictions: vec![],
+            casting_options: vec![],
+            layout_kind: None,
+            parse_warnings: vec![],
+        };
+        state.objects.get_mut(&entrant).unwrap().back_face = Some(back_face);
+
+        // Another source offers to redirect the entrant's battlefield entry
+        // to exile instead, as an optional "may" so the pipeline pauses
+        // before applying it (mirrors `redirect_repl`'s cross-object use
+        // above: the definition's bearer is not the object being moved).
+        let redirect_to_exile = ObjectId(71);
+        let mut redirect_to_exile_obj = GameObject::new(
+            redirect_to_exile,
+            CardId(2),
+            PlayerId(0),
+            "Redirect To Exile".to_string(),
+            Zone::Battlefield,
+        );
+        redirect_to_exile_obj.replacement_definitions = vec![redirect_repl(Zone::Exile)
+            .destination_zone(Zone::Battlefield)
+            .mode(ReplacementMode::Optional { decline: None })]
+        .into();
+        state
+            .objects
+            .insert(redirect_to_exile, redirect_to_exile_obj);
+        state.battlefield.push_back(redirect_to_exile);
+
+        // A second source offers a further optional redirect once the entry
+        // is headed to exile, so accepting the first redirect parks a SECOND
+        // pause instead of resolving straight to a terminal result.
+        let redirect_from_exile = ObjectId(72);
+        let mut redirect_from_exile_obj = GameObject::new(
+            redirect_from_exile,
+            CardId(3),
+            PlayerId(0),
+            "Redirect From Exile".to_string(),
+            Zone::Battlefield,
+        );
+        redirect_from_exile_obj.replacement_definitions = vec![redirect_repl(Zone::Hand)
+            .destination_zone(Zone::Exile)
+            .mode(ReplacementMode::Optional { decline: None })]
+        .into();
+        state
+            .objects
+            .insert(redirect_from_exile, redirect_from_exile_obj);
+        state.battlefield.push_back(redirect_from_exile);
+
+        let mut proposed =
+            ProposedEvent::zone_change(entrant, Zone::Exile, Zone::Battlefield, None);
+        if let ProposedEvent::ZoneChange {
+            enter_transformed, ..
+        } = &mut proposed
+        {
+            *enter_transformed = true;
+        }
+
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+        assert_eq!(
+            result,
+            ReplacementResult::NeedsChoice(PlayerId(0)),
+            "the first redirect must pause for its accept/decline choice"
+        );
+        // Positive reach guard: the projection is resident going into the
+        // park — otherwise the final negative assertion below would be
+        // vacuous.
+        assert!(
+            matches!(
+                state.liminal_entries.get(&entrant).map(|entry| &entry.kind),
+                Some(LiminalEntryKind::TransformedEntry)
+            ),
+            "staging must have projected the entrant's back face while paused"
+        );
+
+        let result = continue_replacement(&mut state, 0, &mut events);
+        assert_eq!(
+            result,
+            ReplacementResult::NeedsChoice(PlayerId(0)),
+            "accepting the first redirect must immediately hit the second pause"
+        );
+        assert!(
+            matches!(
+                state.liminal_entries.get(&entrant).map(|entry| &entry.kind),
+                Some(LiminalEntryKind::TransformedEntry)
+            ),
+            "the projection must still be resident through the second pause"
+        );
+        let ProposedEvent::ZoneChange { to, .. } = &state
+            .pending_replacement
+            .as_ref()
+            .expect("second redirect choice must still be parked")
+            .proposed
+        else {
+            panic!("expected a parked ZoneChange after the first redirect");
+        };
+        assert_eq!(
+            *to,
+            Zone::Exile,
+            "the first redirect must already have rewritten the destination off the battlefield"
+        );
+
+        // Decline the second redirect: the entry stays in exile, off the
+        // battlefield, and the pipeline reaches a terminal Execute.
+        let result = continue_replacement(&mut state, 1, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::ZoneChange { to, .. }) = result else {
+            panic!(
+                "expected a terminal Execute once both redirect choices resolve, got {result:?}"
+            );
+        };
+        assert_eq!(
+            to,
+            Zone::Exile,
+            "the resumed event's destination is off the battlefield when delivery is imminent"
+        );
+        assert!(
+            !state.liminal_entries.contains_key(&entrant),
+            "CR 614.12: a TransformedEntry projection must not survive delivery of an event \
+             that no longer proposes a transformed battlefield entry for its entrant"
+        );
     }
 
     #[test]
@@ -12047,6 +13875,7 @@ mod tests {
                 ProposedEvent::Draw {
                     player_id: PlayerId(0),
                     count: 1,
+                    stage: DrawEventStage::Individual,
                     applied: HashSet::new(),
                 },
                 vec![ReplacementEvent::Draw],
@@ -12476,8 +14305,10 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             discard_frame: None,
+            performed_by: None,
             applied: HashSet::new(),
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let result = replace_event(&mut state, proposed, &mut events);
@@ -13353,6 +15184,11 @@ mod tests {
                 .get(&CounterType::Shield),
             None
         );
+        assert_eq!(
+            shield_removal_commands(&state, ObjectId(30)),
+            1,
+            "unpreventable damage still journals its accepted shield removal"
+        );
         assert!(
             !events
                 .iter()
@@ -13879,6 +15715,7 @@ mod tests {
         let proposed = ProposedEvent::Draw {
             player_id: PlayerId(0),
             count: 3,
+            stage: DrawEventStage::Individual,
             applied: HashSet::new(),
         };
 
@@ -14021,6 +15858,169 @@ mod tests {
         assert!(find_applicable_replacements(&state, &opponent_event, &registry).is_empty());
     }
 
+    #[test]
+    fn fixed_damage_threshold_reads_current_event_before_ambient_amounts() {
+        let replacement = crate::parser::oracle_replacement::parse_replacement_line(
+            "If a source would deal 4 or more damage to a permanent or player, that source deals 3 damage to that permanent or player instead.",
+            "Divine Presence",
+        )
+        .expect("the printed fixed damage replacement must parse");
+        assert_eq!(
+            replacement.damage_modification,
+            Some(DamageModification::SetTo { value: 3 })
+        );
+        let registry = build_replacement_registry();
+        for (amount, ambient, expected) in [(3, 20, 0), (4, 0, 1), (u32::MAX, 0, 1)] {
+            let mut state =
+                test_state_with_object(ObjectId(10), Zone::Battlefield, vec![replacement.clone()]);
+            state.last_effect_count = Some(ambient);
+            state.last_effect_amount = Some(ambient);
+            state.current_trigger_event = Some(GameEvent::DamageDealt {
+                source_id: ObjectId(11),
+                target: TargetRef::Player(PlayerId(1)),
+                amount: ambient as u32,
+                is_combat: false,
+                excess: 0,
+            });
+            let event = ProposedEvent::Damage {
+                source_id: ObjectId(11),
+                target: TargetRef::Player(PlayerId(1)),
+                amount,
+                is_combat: false,
+                applied: HashSet::new(),
+            };
+            // CR 120.4b + CR 616.1f: only the current proposed damage amount
+            // determines applicability, including after other replacements.
+            assert_eq!(
+                find_applicable_replacements(&state, &event, &registry).len(),
+                expected
+            );
+            assert_eq!(
+                replacement_condition_quantity_ctx(&state, ObjectId(10), None, &event).event_amount,
+                Some(i32::try_from(amount).unwrap_or(i32::MAX)),
+            );
+        }
+    }
+
+    #[test]
+    fn draw_scope_matches_only_its_stage_and_threshold_reads_the_event_count() {
+        // CR 121.2 + CR 121.2a: an instruction-scoped definition is a candidate
+        // only for the draw instruction and an individual-draw definition only
+        // for an individual draw; a count-form threshold is the definition's own
+        // `OnlyIfQuantity` over the proposed event's count.
+        let mut count_form = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(DrawReplacementScope::InstructionCount)
+            .condition(ReplacementCondition::OnlyIfQuantity {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+                active_player_req: None,
+            })
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::OriginalController,
+                },
+            ));
+        count_form.valid_player = Some(ReplacementPlayerScope::Opponent);
+        let individual = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(DrawReplacementScope::IndividualDraw)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![count_form]);
+        let mut individual_source = GameObject::new(
+            ObjectId(11),
+            CardId(2),
+            PlayerId(1),
+            "Individual".to_string(),
+            Zone::Battlefield,
+        );
+        individual_source.replacement_definitions = vec![individual].into();
+        state.objects.insert(ObjectId(11), individual_source);
+        state.battlefield.push_back(ObjectId(11));
+        let registry = build_replacement_registry();
+        let opponent_draw = |count, stage| ProposedEvent::Draw {
+            player_id: PlayerId(1),
+            count,
+            stage,
+            applied: HashSet::new(),
+        };
+        let sources = |event: &ProposedEvent| -> Vec<ObjectId> {
+            find_applicable_replacements(&state, event, &registry)
+                .into_iter()
+                .map(|rid| rid.source)
+                .collect()
+        };
+
+        assert_eq!(
+            sources(&opponent_draw(2, DrawEventStage::Instruction)),
+            vec![ObjectId(10)],
+            "a two-card instruction meets the threshold; the individual-draw \
+             replacement is not consulted for an instruction"
+        );
+        assert!(
+            sources(&opponent_draw(1, DrawEventStage::Instruction)).is_empty(),
+            "a one-card instruction is below the count-form threshold"
+        );
+        assert_eq!(
+            sources(&opponent_draw(2, DrawEventStage::Individual)),
+            vec![ObjectId(11)],
+            "only the individual-draw replacement is consulted for an individual draw"
+        );
+    }
+
+    #[test]
+    fn draw_instruction_may_be_replaced_only_with_an_instruction_scoped_definition() {
+        // CR 121.2a: the draw sequence skips the instruction consult only when no
+        // object-hosted or floating definition is admitted at the instruction stage.
+        let draw_def = |scope| {
+            ReplacementDefinition::new(ReplacementEvent::Draw)
+                .draw_scope(scope)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 2 },
+                        target: TargetFilter::Controller,
+                    },
+                ))
+        };
+
+        let mut state = test_state_with_object(
+            ObjectId(10),
+            Zone::Battlefield,
+            vec![draw_def(DrawReplacementScope::IndividualDraw)],
+        );
+        assert!(
+            !draw_instruction_may_be_replaced(&state),
+            "an individual-draw definition cannot replace an instruction"
+        );
+        state
+            .pending_damage_replacements
+            .push(draw_def(DrawReplacementScope::InstructionCount));
+        assert!(
+            draw_instruction_may_be_replaced(&state),
+            "a floating instruction-scoped definition must keep the consult"
+        );
+
+        let object_hosted = test_state_with_object(
+            ObjectId(10),
+            Zone::Battlefield,
+            vec![draw_def(DrawReplacementScope::InstructionCount)],
+        );
+        assert!(
+            draw_instruction_may_be_replaced(&object_hosted),
+            "an object-hosted instruction-scoped definition must keep the consult"
+        );
+    }
+
     // CR 702.52a: a Dredge draw-replacement shaped like `synthesize_dredge`'s.
     fn dredge_draw_replacement_def() -> ReplacementDefinition {
         let return_to_hand = AbilityDefinition::new(
@@ -14050,8 +16050,11 @@ mod tests {
             },
         );
         mill.sub_ability = Some(Box::new(return_to_hand));
+        // CR 702.52a + CR 113.6b: mirrors `synthesize_dredge`'s declared
+        // graveyard-only zone of function.
         let mut repl = ReplacementDefinition::new(ReplacementEvent::Draw)
-            .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw);
+            .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
+            .active_zones(vec![Zone::Graveyard]);
         repl.mode = ReplacementMode::Optional { decline: None };
         repl.execute = Some(Box::new(mill));
         repl
@@ -14103,6 +16106,7 @@ mod tests {
         let owner_draw = ProposedEvent::Draw {
             player_id: PlayerId(0),
             count: 1,
+            stage: DrawEventStage::Individual,
             applied: HashSet::new(),
         };
         assert_eq!(
@@ -14115,11 +16119,243 @@ mod tests {
         let opponent_draw = ProposedEvent::Draw {
             player_id: PlayerId(1),
             count: 1,
+            stage: DrawEventStage::Individual,
             applied: HashSet::new(),
         };
         assert!(
             find_applicable_replacements(&state, &opponent_draw, &registry).is_empty(),
             "dredge must not apply to an opponent's draw"
+        );
+    }
+
+    /// CR 113.6h + CR 614.12: RUNTIME regression for a declared `[Battlefield]`
+    /// zone on the source's OWN entry, driven through `replace_event`.
+    ///
+    /// "An object's ability that modifies how that particular object enters the
+    /// battlefield functions as that object is entering the battlefield"
+    /// (CR 113.6h), checked against the permanent "as it would exist on the
+    /// battlefield" (CR 614.12). As it enters, the object is still in the zone
+    /// it is LEAVING — here the hand — so evaluating a declared zone list
+    /// against where the source currently IS would reject an enters-tapped
+    /// self-replacement that declares the battlefield, suppressing the very
+    /// entry it exists to modify.
+    ///
+    /// Three arms, because the fix has to be narrow in both directions: the
+    /// declared `[Battlefield]` applies; a declared sibling naming a DIFFERENT
+    /// zone does not (the destination match is real, not a blanket entry pass);
+    /// and an undeclared definition is untouched.
+    #[test]
+    fn declared_battlefield_zone_applies_to_the_sources_own_entry() {
+        fn enters_tapped_from_hand(active_zones: Option<Vec<Zone>>) -> bool {
+            let mut repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::SetTapState {
+                        target: TargetFilter::SelfRef,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
+                    },
+                ))
+                .valid_card(TargetFilter::SelfRef)
+                .destination_zone(Zone::Battlefield);
+            if let Some(zones) = active_zones {
+                repl = repl.active_zones(zones);
+            }
+
+            // Hand, not battlefield: the object's zone as it enters is the one
+            // it is leaving, which is the whole point of the regression.
+            let mut state = test_state_with_object(ObjectId(10), Zone::Hand, vec![repl]);
+            let mut events = Vec::new();
+            let proposed =
+                ProposedEvent::zone_change(ObjectId(10), Zone::Hand, Zone::Battlefield, None);
+            let result = replace_event(&mut state, proposed, &mut events);
+            let ReplacementResult::Execute(ProposedEvent::ZoneChange { enter_tapped, .. }) = result
+            else {
+                panic!("expected Execute with ZoneChange, got {result:?}");
+            };
+            enter_tapped.resolve(false)
+        }
+
+        assert!(
+            enters_tapped_from_hand(Some(vec![Zone::Battlefield])),
+            "CR 113.6h + CR 614.12: a self-replacement declaring [Battlefield] must \
+             apply as its source enters, even though the source is still in hand"
+        );
+        assert!(
+            !enters_tapped_from_hand(Some(vec![Zone::Graveyard])),
+            "CR 113.6b: a declared zone that is NOT the entry destination must not \
+             ride in on the entry — the destination match has to be real"
+        );
+        assert!(
+            enters_tapped_from_hand(None),
+            "baseline: an undeclared self-replacement keeps the CR 614.12 carve-out \
+             it always had"
+        );
+    }
+
+    /// CR 113.6b + CR 114.4: RUNTIME regression for the declared-Command zone
+    /// of function, driven through the real `replace_event` pipeline rather
+    /// than the candidate scan alone.
+    ///
+    /// `ReplacementDefinition::active_zones` is a general per-definition axis,
+    /// so a definition naming `Zone::Command` must actually be offered and
+    /// applied from the command zone on a NON-emblem source. CR 114.4's
+    /// object-level "only emblems function" default used to swallow that source
+    /// whole inside `active_replacements`, one step before the declared-zone
+    /// branch could admit it — leaving the Command declaration inert with no
+    /// test able to see it.
+    ///
+    /// The negative half is the point of the pairing: the identical source and
+    /// definition WITHOUT the declaration must still be refused, so this proves
+    /// the opt-in is what admits it and that the emblem default is preserved.
+    #[test]
+    fn declared_command_zone_replacement_applies_through_the_real_pipeline() {
+        use crate::types::ability::QuantityModification;
+        use crate::types::proposed_event::{TokenCharacteristics, TokenSpec};
+
+        fn run(declare_command: bool) -> u32 {
+            let host = ObjectId(10);
+            let mut doubler = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                .quantity_modification(QuantityModification::DOUBLE)
+                .token_owner_scope(ControllerRef::You);
+            if declare_command {
+                doubler = doubler.active_zones(vec![Zone::Command]);
+            }
+
+            let mut state = GameState::new_two_player(42);
+            let mut obj = GameObject::new(
+                host,
+                CardId(1),
+                PlayerId(0),
+                "Command Doubler".to_string(),
+                Zone::Command,
+            );
+            // The whole point: NOT an emblem. CR 114.4's default refuses this
+            // source, and only the per-definition opt-in lets it through.
+            assert!(!obj.is_emblem);
+            obj.replacement_definitions = vec![doubler].into();
+            state.objects.insert(host, obj);
+            state.command_zone.push_back(host);
+
+            let spec = TokenSpec {
+                characteristics: TokenCharacteristics {
+                    display_name: "Soldier".to_string(),
+                    power: Some(1),
+                    toughness: Some(1),
+                    loyalty: None,
+                    core_types: vec![crate::types::card_type::CoreType::Creature],
+                    subtypes: vec!["Soldier".to_string()],
+                    supertypes: Vec::new(),
+                    colors: Vec::new(),
+                    keywords: Vec::new(),
+                },
+                script_name: "Soldier".to_string(),
+                static_abilities: Vec::new(),
+                enter_with_counters: Vec::new(),
+                tapped: false,
+                enters_attacking: false,
+                sacrifice_at: None,
+                source_id: ObjectId(0),
+                controller: PlayerId(0),
+                attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
+            };
+            let proposed = ProposedEvent::CreateToken {
+                owner: PlayerId(0),
+                spec: Box::new(spec),
+                copy: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                count: 3,
+                applied: HashSet::new(),
+            };
+
+            let mut events = Vec::new();
+            let result = replace_event(&mut state, proposed, &mut events);
+            let ReplacementResult::Execute(primary) = result else {
+                panic!("expected Execute, got {result:?}");
+            };
+            let ProposedEvent::CreateToken { count, .. } = primary else {
+                panic!("expected CreateToken");
+            };
+            count
+        }
+
+        assert_eq!(
+            run(true),
+            6,
+            "CR 113.6b: a replacement declaring Zone::Command must be offered and \
+             applied from the command zone — three tokens doubled to six"
+        );
+        assert_eq!(
+            run(false),
+            3,
+            "CR 114.4: the same definition without the declaration must NOT \
+             function from the command zone on a non-emblem source — the count \
+             is untouched"
+        );
+    }
+
+    /// CR 702.52a + CR 113.6b: "Dredge is a static ability that functions only
+    /// while the card with dredge is in a player's graveyard." A dredge creature
+    /// on the BATTLEFIELD must not offer dredge on its controller's draw — the
+    /// reported bug, and the reason `synthesize_dredge` declares `active_zones`.
+    /// Battlefield is the scanner's default zone, so without the declaration the
+    /// definition sails through the zone gate.
+    #[test]
+    fn dredge_does_not_apply_from_the_battlefield() {
+        let mut state = dredge_state(10);
+        state.objects.get_mut(&ObjectId(10)).unwrap().zone = Zone::Battlefield;
+        state.battlefield.push_back(ObjectId(10));
+        let registry = build_replacement_registry();
+        let owner_draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            stage: DrawEventStage::Individual,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &owner_draw, &registry).is_empty(),
+            "CR 702.52a: dredge functions only from the graveyard — a dredge \
+             creature in play must not replace its controller's draw"
+        );
+    }
+
+    /// CR 113.6b: the zone declaration is a general building block, not a dredge
+    /// special case — any replacement naming its zones functions only from them,
+    /// and gets none of the default scan zones. Same definition, same object,
+    /// only the declared zone differs.
+    #[test]
+    fn declared_active_zones_replace_the_default_scan_zones() {
+        use crate::game::functioning_abilities::replacement_functions_in_zone;
+
+        let obj = GameObject::new(
+            ObjectId(10),
+            CardId(10),
+            PlayerId(0),
+            "Zone Probe".to_string(),
+            Zone::Battlefield,
+        );
+        let mut undeclared = ReplacementDefinition::new(ReplacementEvent::DamageDone);
+        assert!(
+            replacement_functions_in_zone(&obj, &undeclared),
+            "an undeclared replacement keeps the CR 113.6 battlefield default"
+        );
+
+        undeclared.active_zones = vec![Zone::Graveyard];
+        assert!(
+            !replacement_functions_in_zone(&obj, &undeclared),
+            "CR 113.6b: declaring [Graveyard] must REMOVE the battlefield default"
+        );
+
+        let graveyard_obj = GameObject::new(
+            ObjectId(11),
+            CardId(11),
+            PlayerId(0),
+            "Zone Probe".to_string(),
+            Zone::Graveyard,
+        );
+        assert!(
+            replacement_functions_in_zone(&graveyard_obj, &undeclared),
+            "CR 113.6b: a declared zone must admit the definition from that zone"
         );
     }
 
@@ -14131,6 +16367,7 @@ mod tests {
         let owner_draw = ProposedEvent::Draw {
             player_id: PlayerId(0),
             count: 1,
+            stage: DrawEventStage::Individual,
             applied: HashSet::new(),
         };
         assert!(
@@ -14151,6 +16388,7 @@ mod tests {
         let owner_draw = ProposedEvent::Draw {
             player_id: PlayerId(0),
             count: 1,
+            stage: DrawEventStage::Individual,
             applied: HashSet::new(),
         };
         assert_eq!(
@@ -14162,6 +16400,7 @@ mod tests {
         let stale_controller_draw = ProposedEvent::Draw {
             player_id: PlayerId(1),
             count: 1,
+            stage: DrawEventStage::Individual,
             applied: HashSet::new(),
         };
         assert!(
@@ -14318,6 +16557,7 @@ mod tests {
             ProposedEvent::Draw {
                 player_id: PlayerId(0),
                 count: 1,
+                stage: DrawEventStage::Individual,
                 applied: HashSet::new(),
             },
             &mut events,
@@ -14351,6 +16591,7 @@ mod tests {
             ProposedEvent::Draw {
                 player_id: PlayerId(1),
                 count: 1,
+                stage: DrawEventStage::Individual,
                 applied: HashSet::new(),
             },
             &mut events,
@@ -14372,6 +16613,7 @@ mod tests {
             ProposedEvent::Draw {
                 player_id: PlayerId(0),
                 count: 1,
+                stage: DrawEventStage::Individual,
                 applied: HashSet::new(),
             },
             &mut events,
@@ -14383,6 +16625,729 @@ mod tests {
         assert!(
             indexed_replacement_consults() > 0,
             "small-library draw still proves the indexed path was consulted"
+        );
+    }
+
+    /// CR 616.1: `candidate_materiality`'s explicit granted-dredge branch
+    /// (Unit B item 11) must classify identically to PRINTED dredge's
+    /// generic execute-chain walk — both land on `Unconditional`, since a
+    /// dredge execute chain's head is `Effect::Mill`, which matches no
+    /// specific arm in the walk. This is a defensive architectural-
+    /// consistency assertion, not a revert-discriminating one: the walk's
+    /// own conservative "unknown definition" default already agrees with
+    /// this branch for a `GRANTED_DREDGE_INDEX` rid, so removing the
+    /// explicit branch would not flip this assertion (see the comment on
+    /// the branch itself for the verified trace).
+    #[test]
+    fn candidate_materiality_agrees_for_printed_and_granted_dredge() {
+        let state = dredge_state(2);
+        let proposed = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            stage: DrawEventStage::Individual,
+            applied: HashSet::new(),
+        };
+        let printed_rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+        let granted_rid = granted_dredge_replacement_id(ObjectId(20));
+        assert!(
+            matches!(
+                candidate_materiality(&state, printed_rid, &proposed),
+                CandidateMateriality::Unconditional
+            ),
+            "printed dredge's Mill-headed execute chain must classify Unconditional"
+        );
+        assert!(
+            matches!(
+                candidate_materiality(&state, granted_rid, &proposed),
+                CandidateMateriality::Unconditional
+            ),
+            "granted dredge must classify Unconditional, matching printed dredge"
+        );
+    }
+
+    /// CR 702.52a (review finding: granted dredge over-suppressed when
+    /// printed dredge exists): `granted_dredge_value`'s redundancy check must
+    /// distinguish a GRANTED Dredge from a DIFFERENTLY-valued PRINTED Dredge
+    /// on the same graveyard card. Printed dredge 2 (Dakmor Salvage-shaped,
+    /// from `dredge_state`) plus an independent grant of dredge 5 are two
+    /// distinct instances of the ability, and both must surface so the
+    /// existing CR 616.1 ordering machinery can offer a real choice between
+    /// them. Before the fix, `granted_dredge_value` returned `None` whenever
+    /// ANY printed Dredge existed on the object, regardless of value —
+    /// silently dropping the granted-5 option every time.
+    #[test]
+    fn granted_dredge_with_differing_value_surfaces_alongside_printed() {
+        let mut state = dredge_state(10);
+        // The granted-dredge registration loop in `find_applicable_
+        // replacements` walks `player.graveyard`, unlike the object-carried
+        // scan (which reads `state.objects` directly and needs no such
+        // push — see every printed-only dredge test above).
+        state.players[0].graveyard.push_back(ObjectId(10));
+
+        let granter = ObjectId(99);
+        state.objects.insert(
+            granter,
+            GameObject::new(
+                granter,
+                CardId(99),
+                PlayerId(0),
+                "Test Granter".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        state.battlefield.push_back(granter);
+        state.add_transient_continuous_effect(
+            granter,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: ObjectId(10) },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Dredge(5),
+            }],
+            None,
+        );
+
+        let registry = build_replacement_registry();
+        let owner_draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            stage: DrawEventStage::Individual,
+            applied: HashSet::new(),
+        };
+        let candidates = find_applicable_replacements(&state, &owner_draw, &registry);
+        assert_eq!(
+            candidates.len(),
+            2,
+            "printed dredge 2 and a differently-valued granted dredge 5 must \
+             BOTH surface as distinct candidates, got {candidates:?}"
+        );
+
+        let granted_rid = granted_dredge_replacement_id(ObjectId(10));
+        let printed_rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+        assert!(
+            candidates.contains(&granted_rid),
+            "the granted-dredge virtual candidate must be one of the two"
+        );
+        assert!(
+            candidates.contains(&printed_rid),
+            "the printed object-carried candidate must still be offered"
+        );
+
+        let granted_label = replacement_choice_label_for_rid(&state, granted_rid);
+        let printed_label = replacement_choice_label_for_rid(&state, printed_rid);
+        assert_ne!(
+            granted_label, printed_label,
+            "the two candidates must read distinctly in a CR 616.1 ordering prompt"
+        );
+        assert!(
+            granted_label.contains("Dredge 5"),
+            "the granted candidate's label must interpolate its OWN (granted) \
+             value, not the printed one: {granted_label}"
+        );
+    }
+
+    /// Sibling to the test above, and the real-world grounding for issues
+    /// #9040/#8396: The Necrobloom grants dredge 2, and Dakmor Salvage
+    /// already prints dredge 2, so the two values coincide. In that shape —
+    /// today's only shipped granted-dredge source — the granted candidate is
+    /// REDUNDANT with the printed one and must still collapse to a single
+    /// candidate, exactly as it did before this fix.
+    #[test]
+    fn granted_dredge_with_identical_value_still_collapses_to_one() {
+        let mut state = dredge_state(10);
+        state.players[0].graveyard.push_back(ObjectId(10));
+
+        let granter = ObjectId(99);
+        state.objects.insert(
+            granter,
+            GameObject::new(
+                granter,
+                CardId(99),
+                PlayerId(0),
+                "Test Granter".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        state.battlefield.push_back(granter);
+        state.add_transient_continuous_effect(
+            granter,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: ObjectId(10) },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Dredge(2),
+            }],
+            None,
+        );
+
+        let registry = build_replacement_registry();
+        let owner_draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            stage: DrawEventStage::Individual,
+            applied: HashSet::new(),
+        };
+        let candidates = find_applicable_replacements(&state, &owner_draw, &registry);
+        assert_eq!(
+            candidates.len(),
+            1,
+            "a grant matching the printed value must collapse to the single \
+             object-carried candidate, got {candidates:?}"
+        );
+    }
+
+    /// Matrix row 9 — F1's cost invariant, made falsifiable. The granted-dredge
+    /// registration block must pay a number of whole-game continuous-effect
+    /// sweeps that does NOT scale with the drawing player's graveyard size when
+    /// no Dredge grant is live, and exactly one extra sweep per graveyard card
+    /// when one is.
+    ///
+    /// Instrument: `layers::{reset_active_effect_collection_count,
+    /// active_effect_collection_count}`, a `#[cfg(test)]` thread-local counter
+    /// incremented on every entry to `collect_shared_active_continuous_effects`
+    /// — precisely the sweep `granted_dredge_value`'s off-zone resolve performs
+    /// per card. Thread-local, so parallel libtest threads cannot interfere, and
+    /// the counter is reset immediately before each measured call. This test
+    /// must live in the lib `mod tests`: that counter pair is `#[cfg(test)]
+    /// pub(crate)` and is invisible from `crates/engine/tests/`.
+    ///
+    /// This is F1's ONLY revert-failing assertion: remove the hoisted guard from
+    /// the registration block and the size-invariance pair below reads 5 vs 20.
+    /// Deliberately NO absolute upper bound — an absolute would couple this row
+    /// to every other sweep the Draw path may legitimately perform.
+    #[test]
+    fn granted_dredge_registration_sweeps_do_not_scale_with_graveyard_size() {
+        // (sweeps, candidate count, granted-rid-present) for ONE individual draw
+        // against a graveyard holding exactly `graveyard_size` cards.
+        fn sweeps_for(graveyard_size: usize, with_grant: bool) -> (usize, usize, bool) {
+            let mut state = dredge_state(10);
+            // `dredge_state`'s printed-dredge card is the first graveyard
+            // member; the rest is granted-free filler, so the registration loop
+            // really iterates `graveyard_size` candidates.
+            state.players[0].graveyard.push_back(ObjectId(10));
+            for i in 0..(graveyard_size - 1) {
+                let object_id = ObjectId(500 + i as u64);
+                state.objects.insert(
+                    object_id,
+                    GameObject::new(
+                        object_id,
+                        CardId(500 + i as u64),
+                        PlayerId(0),
+                        format!("Graveyard Filler {i}"),
+                        Zone::Graveyard,
+                    ),
+                );
+                state.players[0].graveyard.push_back(object_id);
+            }
+            if with_grant {
+                // A real battlefield TRANSIENT (not a `static_definitions`
+                // source): the shape a `static_definitions`-only guard would
+                // miss. Dredge 3 differs from the printed 2, so the granted
+                // virtual candidate is non-redundant and really registers.
+                let granter = ObjectId(99);
+                state.objects.insert(
+                    granter,
+                    GameObject::new(
+                        granter,
+                        CardId(99),
+                        PlayerId(0),
+                        "Test Granter".to_string(),
+                        Zone::Battlefield,
+                    ),
+                );
+                state.battlefield.push_back(granter);
+                state.add_transient_continuous_effect(
+                    granter,
+                    PlayerId(0),
+                    Duration::UntilEndOfTurn,
+                    TargetFilter::SpecificObject { id: ObjectId(10) },
+                    vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Dredge(3),
+                    }],
+                    None,
+                );
+            }
+            // Fixture reach-guard: a silently-empty graveyard would leave the
+            // invariance pair comparing 0 == 0 and disarm the tripwire.
+            assert_eq!(
+                state.players[0].graveyard.len(),
+                graveyard_size,
+                "fixture reach-guard: the graveyard must really hold {graveyard_size} cards"
+            );
+
+            let registry = build_replacement_registry();
+            let owner_draw = ProposedEvent::Draw {
+                player_id: PlayerId(0),
+                count: 1,
+                stage: DrawEventStage::Individual,
+                applied: HashSet::new(),
+            };
+            crate::game::layers::reset_active_effect_collection_count();
+            let candidates = find_applicable_replacements(&state, &owner_draw, &registry);
+            let sweeps = crate::game::layers::active_effect_collection_count();
+            let granted_present = candidates.contains(&granted_dredge_replacement_id(ObjectId(10)));
+            (sweeps, candidates.len(), granted_present)
+        }
+
+        let (sweeps_5, candidates_5, granted_5) = sweeps_for(5, false);
+        let (sweeps_20, candidates_20, granted_20) = sweeps_for(20, false);
+        let (sweeps_grant_20, candidates_grant_20, granted_grant_20) = sweeps_for(20, true);
+
+        // Positive control: the instrument fired at all (the invariance pair
+        // alone bounds only from below).
+        assert!(
+            sweeps_20 > 0,
+            "instrument reach-guard: the Draw path must perform at least one \
+             continuous-effect collection, got {sweeps_20}"
+        );
+        // THE revert-failing assertion for F1.
+        assert_eq!(
+            sweeps_5, sweeps_20,
+            "the no-grant sweep count must not scale with graveyard size \
+             (5 cards: {sweeps_5}, 20 cards: {sweeps_20}) — without the hoisted \
+             guard in the granted-dredge registration block these read 5 and 20"
+        );
+        // The honest cost of the hoist, stated relative to the no-grant figure
+        // rather than as an absolute.
+        assert_eq!(
+            sweeps_grant_20,
+            sweeps_20 + 20,
+            "with one Dredge grant live, each of the 20 graveyard cards pays its \
+             own per-recipient resolve on top of the single hoisted sweep, got \
+             {sweeps_grant_20}"
+        );
+
+        // Behavior pairing (matrix row 6, measured on these same boards): the
+        // guard moves cost, never candidates.
+        assert_eq!(
+            (candidates_5, candidates_20),
+            (1, 1),
+            "with no grant, only the printed object-carried candidate may surface"
+        );
+        assert!(
+            !granted_5 && !granted_20,
+            "no granted-dredge virtual candidate may exist without a live grant"
+        );
+        assert_eq!(
+            candidates_grant_20, 2,
+            "with a differently-valued grant live, printed and granted must both \
+             surface, got {candidates_grant_20}"
+        );
+        assert!(
+            granted_grant_20,
+            "positive reach-guard: the granted-dredge virtual candidate must really \
+             be registered, or the instrument never reached the registration block"
+        );
+    }
+
+    /// CR 702.52b boundary regression: `object_replacement_candidate_applies`'s
+    /// library-size gate on the PRINTED candidate must compare against the
+    /// PRINTED N, not the grant-overridden effective value. `dredge_state`
+    /// bakes in printed dredge 2 (Dakmor Salvage-shaped). Here an independent
+    /// effect additionally grants dredge 5 to the same graveyard object, and
+    /// the library sits strictly between the two values (3: `>= 2`, `< 5`).
+    ///
+    /// CR 702.52b judges each dredge ability by its own N: the printed
+    /// dredge-2 ability is legal (library 3 >= 2) and the granted dredge-5
+    /// ability is illegal (3 < 5). Before the fix, the printed candidate's
+    /// gate read `effective_dredge_value` — which resolves to the GRANTED 5
+    /// whenever a grant is active, because `upsert_keyword_contribution`
+    /// overwrites same-kind contributions for non-summing keywords (Dredge is
+    /// not in `instances_must_coexist`) — so `3 < 5` wrongly excluded the
+    /// legal printed-2 candidate too. This asserts the fixed behavior: the
+    /// printed candidate survives and the granted candidate is correctly
+    /// gated out, so exactly one candidate remains.
+    #[test]
+    fn printed_dredge_gate_uses_printed_value_not_grant_overridden_effective_value() {
+        let mut state = dredge_state(3);
+        state.players[0].graveyard.push_back(ObjectId(10));
+
+        let granter = ObjectId(99);
+        state.objects.insert(
+            granter,
+            GameObject::new(
+                granter,
+                CardId(99),
+                PlayerId(0),
+                "Test Granter".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        state.battlefield.push_back(granter);
+        state.add_transient_continuous_effect(
+            granter,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: ObjectId(10) },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Dredge(5),
+            }],
+            None,
+        );
+
+        let registry = build_replacement_registry();
+        let owner_draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            stage: DrawEventStage::Individual,
+            applied: HashSet::new(),
+        };
+        let candidates = find_applicable_replacements(&state, &owner_draw, &registry);
+
+        let printed_rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+        let granted_rid = granted_dredge_replacement_id(ObjectId(10));
+
+        assert!(
+            candidates.contains(&printed_rid),
+            "printed dredge 2 must remain legal at library size 3 (3 >= 2), \
+             got {candidates:?}"
+        );
+        assert!(
+            !candidates.contains(&granted_rid),
+            "granted dredge 5 must be gated out at library size 3 (3 < 5), \
+             got {candidates:?}"
+        );
+        assert_eq!(
+            candidates.len(),
+            1,
+            "exactly the printed candidate should survive this boundary, \
+             got {candidates:?}"
+        );
+    }
+
+    /// CR 614.6 + CR 616.1f: once an accepted dredge has substituted the draw
+    /// away, the draw "never happens", so the CR 616.1 repetition may consider
+    /// only effects that "would now be applicable" — and no dredge is
+    /// applicable to a `count: 0` draw. The granted-dredge registration block
+    /// must therefore consult the registry's `ReplacementEvent::Draw` matcher
+    /// (`draw_matcher`: `count > 0`) exactly as the object-carried and
+    /// state-level scans do.
+    ///
+    /// The fixture carries TWO granted-only graveyard cards on purpose: with a
+    /// single card the empty-candidate assertion would be satisfied by the CR
+    /// 614.5 `already_applied` guard alone once that card had been accepted,
+    /// so a one-card fixture proves nothing about the event-payload gate.
+    #[test]
+    fn granted_dredge_not_offered_once_the_draw_is_substituted_away() {
+        let mut state = dredge_state(10);
+
+        // Two granted-ONLY graveyard cards (no printed `Keyword::Dredge`).
+        // `granted_dredge_value` starts from `state.objects.get(&object_id)?`
+        // and then gates on `obj.zone != Zone::Graveyard`, so each card must be
+        // inserted into `state.objects` as well as pushed into the player's
+        // graveyard — mirroring `dredge_state`'s own create-and-insert pattern.
+        let granted_a = ObjectId(50);
+        let granted_b = ObjectId(51);
+        for (id, name) in [(granted_a, "Granted Land A"), (granted_b, "Granted Land B")] {
+            state.objects.insert(
+                id,
+                GameObject::new(
+                    id,
+                    CardId(id.0),
+                    PlayerId(0),
+                    name.to_string(),
+                    Zone::Graveyard,
+                ),
+            );
+            state.players[0].graveyard.push_back(id);
+        }
+
+        let granter = ObjectId(99);
+        state.objects.insert(
+            granter,
+            GameObject::new(
+                granter,
+                CardId(99),
+                PlayerId(0),
+                "Test Granter".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        state.battlefield.push_back(granter);
+        for id in [granted_a, granted_b] {
+            state.add_transient_continuous_effect(
+                granter,
+                PlayerId(0),
+                Duration::UntilEndOfTurn,
+                TargetFilter::SpecificObject { id },
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Dredge(2),
+                }],
+                None,
+            );
+        }
+
+        let registry = build_replacement_registry();
+
+        // Positive reach-guard FIRST: on a live draw both granted candidates
+        // are registered, so the fixture demonstrably reaches the block's
+        // `candidates.push` for two distinct sources.
+        let live_draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            stage: DrawEventStage::Individual,
+            applied: HashSet::new(),
+        };
+        let live_candidates = find_applicable_replacements(&state, &live_draw, &registry);
+        assert!(
+            live_candidates.contains(&granted_dredge_replacement_id(granted_a))
+                && live_candidates.contains(&granted_dredge_replacement_id(granted_b)),
+            "fixture precondition: both granted-dredge cards must be offered \
+             against a live (count 1) draw, got {live_candidates:?}"
+        );
+
+        // CR 614.6: the identical board, with the draw already substituted
+        // away, must offer nothing at all.
+        let spent_draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 0,
+            stage: DrawEventStage::Individual,
+            applied: HashSet::new(),
+        };
+        let spent_candidates = find_applicable_replacements(&state, &spent_draw, &registry);
+        assert!(
+            spent_candidates.is_empty(),
+            "CR 614.6 + CR 616.1f: a draw that was replaced never happens, so no \
+             dredge candidate may be registered against it, got {spent_candidates:?}"
+        );
+    }
+
+    /// The seam of the no-post-effect decline, driven through
+    /// `replace_event` / `continue_replacement` with a Ready LoseLife drain
+    /// seeded as a Blood Scrivener-shaped earlier rider (its `event_target`
+    /// names the drawer).
+    ///
+    /// Decline half: CR 614.6 + CR 616.1f — declining the dredge (CR 702.52a's
+    /// "may") replaces nothing, so the resident rider must still be there.
+    ///
+    /// Accept half: a characterization of the unchanged `Some` arm, not a rules
+    /// claim. Accepting installs the dredge's Mill continuation with
+    /// `ResidentDrainPolicy::Replace`, which evicts the seed (the accept-side
+    /// follow-up recorded on PR #9235). It runs first so a failing decline half
+    /// cannot hide it.
+    #[test]
+    fn optional_decline_without_post_effect_keeps_resident_drain_and_accept_still_replaces_it() {
+        use crate::types::game_state::PostReplacementDrainStack;
+
+        fn lose_one_life() -> AbilityDefinition {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: None,
+                },
+            )
+        }
+
+        fn seeded_dredge_prompt() -> GameState {
+            let mut state = dredge_state(3);
+            let mut events = Vec::new();
+            let result = replace_event(
+                &mut state,
+                ProposedEvent::Draw {
+                    player_id: PlayerId(0),
+                    count: 1,
+                    stage: DrawEventStage::Individual,
+                    applied: HashSet::new(),
+                },
+                &mut events,
+            );
+            assert_eq!(
+                result,
+                ReplacementResult::NeedsChoice(PlayerId(0)),
+                "reach-guard: the lone printed dredge must park its accept/decline choice"
+            );
+            let installed = state.install_post_replacement_drain(
+                PostReplacementDrain {
+                    status: DrainStatus::Ready(PostReplacementContinuation::Template(Box::new(
+                        lose_one_life(),
+                    ))),
+                    source: None,
+                    applied: HashSet::new(),
+                    event_source: None,
+                    event_target: Some(TargetRef::Player(PlayerId(0))),
+                    controller: Some(PlayerId(0)),
+                },
+                ResidentDrainPolicy::KeepResident,
+            );
+            assert!(installed, "reach-guard: the seed rider must be resident");
+            state
+        }
+
+        // Accept half (unchanged `Some` arm).
+        let mut state = seeded_dredge_prompt();
+        let mut events = Vec::new();
+        let result = continue_replacement(&mut state, 0, &mut events);
+        assert!(
+            matches!(
+                result,
+                ReplacementResult::Execute(ProposedEvent::Draw { count: 0, .. })
+            ),
+            "CR 702.52a: an accepted dredge substitutes the draw away, got {result:?}"
+        );
+        let drains = state
+            .active_post_replacement_drains_mut()
+            .expect("the accepted dredge installs its continuation");
+        assert!(
+            matches!(
+                drains.resident().and_then(PostReplacementDrain::ready_continuation),
+                Some(PostReplacementContinuation::Template(def))
+                    if matches!(*def.effect, Effect::Mill { .. })
+            ),
+            "the accepted dredge's Mill continuation must be resident"
+        );
+        assert!(
+            drains.begin_dispatch().is_some(),
+            "reach-guard: the Mill continuation is Ready"
+        );
+        assert!(
+            !drains.has_ready(),
+            "ResidentDrainPolicy::Replace evicts the Ready seed on an accept with a \
+             post-effect"
+        );
+
+        // Decline half (the fix).
+        let mut state = seeded_dredge_prompt();
+        let mut events = Vec::new();
+        let result = continue_replacement(&mut state, 1, &mut events);
+        assert!(
+            matches!(
+                result,
+                ReplacementResult::Execute(ProposedEvent::Draw { count: 1, .. })
+            ),
+            "a declined dredge leaves the draw to happen, got {result:?}"
+        );
+        assert_eq!(
+            state
+                .active_post_replacement_drains()
+                .and_then(PostReplacementDrainStack::resident)
+                .and_then(PostReplacementDrain::ready_continuation),
+            Some(&PostReplacementContinuation::Template(Box::new(
+                lose_one_life()
+            ))),
+            "CR 614.6 + CR 616.1f: a declined optional with no post-effect must keep \
+             the resident rider"
+        );
+    }
+
+    /// A graveyard card whose OWN base static grants it Dredge `n` — the
+    /// fixture of `base_statics_half_sees_a_self_granting_graveyard_card`
+    /// (`off_zone_characteristics.rs`) — with three library cards for P0.
+    fn self_granting_dredge_state(n: u32) -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let card = crate::game::zones::create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Dredging Spawn".to_string(),
+            Zone::Graveyard,
+        );
+        for i in 0..3 {
+            crate::game::zones::create_object(
+                &mut state,
+                CardId(901 + i),
+                PlayerId(0),
+                format!("Library Card {i}"),
+                Zone::Library,
+            );
+        }
+        let obj = state.objects.get_mut(&card).unwrap();
+        std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(
+            crate::types::ability::StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Dredge(n),
+                }]),
+        );
+        let base_static_definitions = obj.base_static_definitions.clone();
+        obj.static_definitions = (*base_static_definitions).clone().into();
+        (state, card)
+    }
+
+    /// F4 — CR 613.1f + CR 113.6b: the base-statics half of the granted-dredge
+    /// registration guard. The only Dredge grant on the board is the card's
+    /// own base static, which the shared half cannot see, so only
+    /// `base_statics_can_grant_off_zone_keyword_kind` lets the candidate
+    /// register.
+    #[test]
+    fn granted_dredge_registration_offers_a_card_whose_own_base_static_grants_dredge() {
+        use crate::game::off_zone_characteristics::{
+            base_statics_can_grant_off_zone_keyword_kind,
+            shared_effects_can_grant_off_zone_keyword_kind,
+        };
+        use crate::types::keywords::KeywordKind;
+
+        let (state, card) = self_granting_dredge_state(2);
+        assert!(
+            !shared_effects_can_grant_off_zone_keyword_kind(&state, KeywordKind::Dredge),
+            "reach-guard: the shared half must not see the self-grant"
+        );
+        assert!(
+            base_statics_can_grant_off_zone_keyword_kind(&state, card, KeywordKind::Dredge),
+            "reach-guard: the base-statics half must see the self-grant"
+        );
+
+        let registry = build_replacement_registry();
+        let draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            stage: DrawEventStage::Individual,
+            applied: HashSet::new(),
+        };
+        let candidates = find_applicable_replacements(&state, &draw, &registry);
+        assert!(
+            candidates.contains(&granted_dredge_replacement_id(card)),
+            "CR 702.52a: a card whose own base static grants Dredge must be offered, \
+             got {candidates:?}"
+        );
+
+        // Negative sibling: the same card with no static offers nothing.
+        let mut bare = GameState::new_two_player(42);
+        let bare_card = crate::game::zones::create_object(
+            &mut bare,
+            CardId(900),
+            PlayerId(0),
+            "Plain Card".to_string(),
+            Zone::Graveyard,
+        );
+        for i in 0..3 {
+            crate::game::zones::create_object(
+                &mut bare,
+                CardId(901 + i),
+                PlayerId(0),
+                format!("Library Card {i}"),
+                Zone::Library,
+            );
+        }
+        let bare_candidates = find_applicable_replacements(&bare, &draw, &registry);
+        assert!(
+            !bare_candidates.contains(&granted_dredge_replacement_id(bare_card)),
+            "a graveyard card with no grant must not be offered, got {bare_candidates:?}"
+        );
+    }
+
+    /// F1 — the granted label pluralizes its own count: "mill 1 card", never
+    /// "mill 1 cards".
+    #[test]
+    fn granted_dredge_label_pluralizes_a_count_of_one() {
+        let (state, card) = self_granting_dredge_state(1);
+        let label = replacement_choice_label_for_rid(&state, granted_dredge_replacement_id(card));
+        assert!(
+            label.contains("Dredge 1"),
+            "reach-guard: the label must come from the live granted value, got {label:?}"
+        );
+        assert!(
+            label.contains("mill 1 card and") && !label.contains("1 cards"),
+            "a count of one must read \"mill 1 card\", got {label:?}"
         );
     }
 
@@ -14502,6 +17467,7 @@ mod tests {
         let proposed = ProposedEvent::Draw {
             player_id: PlayerId(0),
             count: 3,
+            stage: DrawEventStage::Individual,
             applied: HashSet::new(),
         };
 
@@ -14534,6 +17500,7 @@ mod tests {
         let proposed = ProposedEvent::Draw {
             player_id: PlayerId(0),
             count: 0,
+            stage: DrawEventStage::Individual,
             applied: HashSet::new(),
         };
         let registry = build_replacement_registry();
@@ -14814,8 +17781,10 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             discard_frame: None,
+            performed_by: None,
             applied: HashSet::new(),
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
 
@@ -15214,6 +18183,7 @@ mod tests {
                 display_name: "Test Token".to_string(),
                 power: Some(1),
                 toughness: Some(1),
+                loyalty: None,
                 core_types: vec![core_type],
                 subtypes: vec!["Soldier".to_string()],
                 supertypes: Vec::new(),
@@ -15230,6 +18200,150 @@ mod tests {
             controller: owner_controller,
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         }
+    }
+
+    /// CR 616.1b + CR 616.1c + CR 616.1e: of the applicable candidates only the earliest
+    /// CR 616.1 step present is choosable, off-entry events are unrestricted, and a
+    /// floating (`ObjectId(0)`) token-controller redirect is tiered (CR 111.2).
+    #[test]
+    fn replacement_precedence_restricts_choosable_candidates_to_earliest_cr_616_1_step() {
+        use crate::types::ability::{CopyRecipient, QuantityModification};
+
+        let entry_moved = || {
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .valid_card(TargetFilter::SelfRef)
+                .destination_zone(Zone::Battlefield)
+        };
+        let copy_effect = Effect::BecomeCopy {
+            target: TargetFilter::Any,
+            recipient: CopyRecipient::Source,
+            duration: None,
+            mana_value_limit: None,
+            additional_modifications: Vec::new(),
+        };
+        let defs = vec![
+            entry_moved().execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                },
+            )),
+            entry_moved().enters_under(ControllerRef::Opponent),
+            entry_moved().execute(AbilityDefinition::new(AbilityKind::Spell, copy_effect)),
+            entry_moved().enters_under(ControllerRef::You),
+        ];
+        let mut state = test_state_with_object(ObjectId(10), Zone::Hand, defs);
+        let mut doubler = GameObject::new(
+            ObjectId(11),
+            CardId(2),
+            PlayerId(0),
+            "Doubler".to_string(),
+            Zone::Battlefield,
+        );
+        doubler.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                .quantity_modification(QuantityModification::DOUBLE)]
+            .into();
+        state.objects.insert(ObjectId(11), doubler);
+        state.battlefield.push_back(ObjectId(11));
+        state.pending_damage_replacements.push(
+            ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                .token_owner_scope(ControllerRef::Opponent)
+                .token_owner_redirect(ControllerRef::You),
+        );
+
+        let on_object = |index: usize| ReplacementId {
+            source: ObjectId(10),
+            index,
+        };
+        let floating_redirect = ReplacementId {
+            source: ObjectId(0),
+            index: 0,
+        };
+        let doubler_rid = ReplacementId {
+            source: ObjectId(11),
+            index: 0,
+        };
+        let entry = ProposedEvent::zone_change(ObjectId(10), Zone::Hand, Zone::Battlefield, None);
+        let dies =
+            ProposedEvent::zone_change(ObjectId(10), Zone::Battlefield, Zone::Graveyard, None);
+        let token = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(test_token_spec(PlayerId(0), CoreType::Creature)),
+            copy: None,
+            enter_tapped: EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        // Each tier is recognized from what the appliers write.
+        assert_eq!(
+            replacement_precedence(&state, on_object(0), &entry),
+            ReplacementPrecedence::Unrestricted
+        );
+        assert_eq!(
+            replacement_precedence(&state, on_object(1), &entry),
+            ReplacementPrecedence::EntryController
+        );
+        assert_eq!(
+            replacement_precedence(&state, on_object(2), &entry),
+            ReplacementPrecedence::EntryCopy
+        );
+        assert_eq!(
+            replacement_precedence(&state, floating_redirect, &token),
+            ReplacementPrecedence::EntryController
+        );
+        assert_eq!(
+            replacement_precedence(&state, doubler_rid, &token),
+            ReplacementPrecedence::Unrestricted
+        );
+
+        let choosable = |event: &ProposedEvent, candidates: Vec<ReplacementId>| {
+            choosable_replacement_candidates(&state, event, candidates)
+        };
+        assert_eq!(
+            choosable(&entry, vec![on_object(0), on_object(1), on_object(2)]),
+            vec![on_object(1)],
+            "CR 616.1b: the controller override is chosen before the copy and the tap"
+        );
+        assert_eq!(
+            choosable(&entry, vec![on_object(0), on_object(2)]),
+            vec![on_object(2)],
+            "CR 616.1c: the copy is chosen before an unrestricted effect"
+        );
+        assert_eq!(
+            choosable(
+                &entry,
+                vec![on_object(0), on_object(1), on_object(2), on_object(3)]
+            ),
+            vec![on_object(1), on_object(3)],
+            "CR 616.1b: equally eligible candidates all remain choosable, in order"
+        );
+        assert_eq!(
+            choosable(
+                &entry,
+                vec![
+                    on_object(0),
+                    commander_hand_or_library_return_replacement_id(ObjectId(10)),
+                ]
+            )
+            .len(),
+            2,
+            "CR 616.1e: a virtual candidate carries no definition and is unrestricted"
+        );
+        assert_eq!(
+            choosable(&dies, vec![on_object(0), on_object(1), on_object(2)]),
+            vec![on_object(0), on_object(1), on_object(2)],
+            "an event that is not a battlefield entry restricts nothing"
+        );
+        assert_eq!(
+            choosable(&token, vec![doubler_rid, floating_redirect]),
+            vec![floating_redirect],
+            "CR 616.1b + CR 111.2: the token-controller redirect precedes the doubler"
+        );
+        assert!(choosable(&entry, Vec::new()).is_empty());
     }
 
     #[test]
@@ -16034,8 +19148,10 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             discard_frame: None,
+            performed_by: None,
             applied: HashSet::new(),
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
 
@@ -17907,6 +21023,7 @@ mod tests {
         let proposed = ProposedEvent::Draw {
             player_id: PlayerId(1),
             count: 2,
+            stage: DrawEventStage::Individual,
             applied: HashSet::new(),
         };
         let registry = build_replacement_registry();
@@ -18102,6 +21219,7 @@ mod tests {
         let draw = ProposedEvent::Draw {
             player_id: PlayerId(0),
             count: 1,
+            stage: DrawEventStage::Individual,
             applied: HashSet::new(),
         };
         assert!(begin_turn_matcher(&begin_turn, ObjectId(1), &state));
@@ -18527,6 +21645,7 @@ mod tests {
                 display_name: "Squirrel".to_string(),
                 power: Some(1),
                 toughness: Some(1),
+                loyalty: None,
                 core_types: vec![crate::types::card_type::CoreType::Creature],
                 subtypes: vec!["Squirrel".to_string()],
                 supertypes: Vec::new(),
@@ -18554,6 +21673,7 @@ mod tests {
                 display_name: "Plant".to_string(),
                 power: Some(0),
                 toughness: Some(2),
+                loyalty: None,
                 core_types: vec![crate::types::card_type::CoreType::Creature],
                 subtypes: vec!["Plant".to_string()],
                 supertypes: Vec::new(),
@@ -18626,6 +21746,7 @@ mod tests {
                     display_name: name.to_string(),
                     power: None,
                     toughness: None,
+                    loyalty: None,
                     core_types: vec![crate::types::card_type::CoreType::Artifact],
                     subtypes: vec![name.to_string()],
                     supertypes: Vec::new(),
@@ -18760,6 +21881,7 @@ mod tests {
                 display_name: "Food".to_string(),
                 power: None,
                 toughness: None,
+                loyalty: None,
                 core_types: vec![crate::types::card_type::CoreType::Artifact],
                 subtypes: vec!["Food".to_string()],
                 supertypes: Vec::new(),
@@ -19058,6 +22180,7 @@ mod tests {
         let proposed = ProposedEvent::Draw {
             player_id: PlayerId(0),
             count: 1,
+            stage: DrawEventStage::Individual,
             applied: HashSet::new(),
         };
         let registry = build_replacement_registry();
@@ -19088,6 +22211,7 @@ mod tests {
                 display_name: name.to_string(),
                 power: (core == CoreType::Creature).then_some(1),
                 toughness: (core == CoreType::Creature).then_some(1),
+                loyalty: None,
                 core_types: vec![core],
                 subtypes: vec![subtype.to_string()],
                 supertypes: Vec::new(),
@@ -19230,8 +22354,10 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             discard_frame: None,
+            performed_by: None,
             applied: HashSet::new(),
         };
         let cast_matches = find_applicable_replacements(&state, &cast_event, &registry);
@@ -19278,8 +22404,10 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             discard_frame: None,
+            performed_by: None,
             applied: HashSet::new(),
         };
         let put_matches = find_applicable_replacements(&state, &put_event, &registry);
@@ -19317,6 +22445,7 @@ mod tests {
                 display_name: "Soldier".to_string(),
                 power: Some(1),
                 toughness: Some(1),
+                loyalty: None,
                 core_types: vec![crate::types::card_type::CoreType::Creature],
                 subtypes: vec!["Soldier".to_string()],
                 supertypes: Vec::new(),
@@ -19845,6 +22974,7 @@ mod tests {
                     display_name: name.to_string(),
                     power: None,
                     toughness: None,
+                    loyalty: None,
                     core_types: vec![crate::types::card_type::CoreType::Artifact],
                     subtypes: vec![name.to_string()],
                     supertypes: Vec::new(),
@@ -19963,6 +23093,7 @@ mod tests {
                     display_name: name.to_string(),
                     power: None,
                     toughness: None,
+                    loyalty: None,
                     core_types: vec![crate::types::card_type::CoreType::Artifact],
                     subtypes: vec![name.to_string()],
                     supertypes: Vec::new(),
@@ -20143,6 +23274,7 @@ mod tests {
                     display_name: "Token".to_string(),
                     power: None,
                     toughness: None,
+                    loyalty: None,
                     core_types: vec![crate::types::card_type::CoreType::Creature],
                     subtypes: Vec::new(),
                     supertypes: Vec::new(),
@@ -20201,6 +23333,7 @@ mod tests {
         let draw_event = |player_id: PlayerId| ProposedEvent::Draw {
             player_id,
             count: 1,
+            stage: DrawEventStage::Individual,
             applied: HashSet::new(),
         };
 
@@ -20701,6 +23834,7 @@ mod tests {
         let draw_event = |player_id: PlayerId| ProposedEvent::Draw {
             player_id,
             count: 1,
+            stage: DrawEventStage::Individual,
             applied: HashSet::new(),
         };
 
@@ -20763,6 +23897,7 @@ mod tests {
         let draw = ProposedEvent::Draw {
             player_id: PlayerId(0),
             count: 1,
+            stage: DrawEventStage::Individual,
             applied: HashSet::new(),
         };
         let mut events = Vec::new();
@@ -20802,6 +23937,7 @@ mod tests {
         let draw = ProposedEvent::Draw {
             player_id: PlayerId(0),
             count: 1,
+            stage: DrawEventStage::Individual,
             applied: HashSet::new(),
         };
         let mut events = Vec::new();
@@ -20858,6 +23994,7 @@ mod tests {
         let draw = ProposedEvent::Draw {
             player_id: PlayerId(0),
             count: 1,
+            stage: DrawEventStage::Individual,
             applied: HashSet::new(),
         };
         let mut events = Vec::new();

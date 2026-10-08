@@ -253,16 +253,16 @@ impl ThresholdParser<'_> {
         let static_text = normalize_self_refs_for_static(body, self.card_name);
         let multi = parse_static_line_multi(&static_text);
         if !multi.is_empty() {
-            for mut sd in multi {
-                sd.condition = Some(self.static_cond.clone());
+            for sd in multi {
+                let sd = self.gate_static(sd);
                 output
                     .statics
                     .push((line_idx, StaticIr::from_definition(&static_text, sd)));
             }
             return true;
         }
-        if let Some(mut sd) = parse_static_line(&static_text) {
-            sd.condition = Some(self.static_cond.clone());
+        if let Some(sd) = parse_static_line(&static_text) {
+            let sd = self.gate_static(sd);
             output
                 .statics
                 .push((line_idx, StaticIr::from_definition(&static_text, sd)));
@@ -270,6 +270,21 @@ impl ThresholdParser<'_> {
         }
 
         false
+    }
+
+    /// CR 721 + CR 604.2: gate a threshold-line static on the station counter
+    /// threshold, composing with any condition the body already parsed. That
+    /// includes the "during each of your turns" `DuringYourTurn` a graveyard cast
+    /// permission carries (Exploration Broodship). Overwriting it would drop the
+    /// printed restriction. Mirrors `oracle_class::wrap_static_with_class_level`.
+    fn gate_static(&self, mut sd: StaticDefinition) -> StaticDefinition {
+        sd.condition = Some(match sd.condition.take() {
+            Some(existing) => StaticCondition::And {
+                conditions: vec![self.static_cond.clone(), existing],
+            },
+            None => self.static_cond.clone(),
+        });
+        sd
     }
 }
 

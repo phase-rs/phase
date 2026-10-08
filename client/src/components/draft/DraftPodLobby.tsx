@@ -34,7 +34,15 @@ interface SeatCardProps {
   seat: SeatPublicView;
   isHost: boolean;
   isLocalSeat: boolean;
-  botFillEnabled: boolean;
+  /**
+   * Will an empty seat actually receive a bot? NOT the host's checkbox, which
+   * is only a request: the answer also needs the engine to have published a
+   * procedure at all, so a seat is never labelled "Bot" on the strength of a
+   * request whose effect is still unknown. Labelling an empty seat "Bot" when
+   * none arrives promises the host a player that never comes, and tells them a
+   * short pod is accounted for when it is not.
+   */
+  botFillWillSeatBots: boolean;
   canKick: boolean;
   onKick: () => void;
 }
@@ -43,14 +51,14 @@ function SeatCard({
   seat,
   isHost,
   isLocalSeat,
-  botFillEnabled,
+  botFillWillSeatBots,
   canKick,
   onKick,
 }: SeatCardProps) {
   const { t } = useTranslation("draft");
   const isEmpty = !seat.display_name;
   const seatLabel = isEmpty
-    ? botFillEnabled
+    ? botFillWillSeatBots
       ? t("lobby.botSeat")
       : t("lobby.waitingSeat")
     : seat.display_name;
@@ -87,7 +95,7 @@ function SeatCard({
           className={`h-2 w-2 rounded-full ${
             seat.connected
               ? "bg-emerald-400"
-              : isEmpty && botFillEnabled
+              : isEmpty && botFillWillSeatBots
                 ? "bg-blue-400/60"
                 : isEmpty
                   ? "bg-white/20"
@@ -151,6 +159,7 @@ export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
   const poolMode = useDraftPodStore((s) => s.poolMode);
   const cubeForm = useDraftPodStore((s) => s.cubeForm);
   const allowedPodSizes = useDraftPodStore((s) => s.allowedPodSizes);
+  const packDistribution = useDraftPodStore((s) => s.packDistribution);
 
   // `lobby.draftKind` interpolates the kind into a sentence, so a raw enum reads
   // "CommanderDraft Draft" once Commander is selectable. `draftKindLabels` is the
@@ -166,6 +175,24 @@ export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
 
   const isHost = role === "host";
   const filledSeats = seats.filter((s) => s.display_name).length;
+  // Will bot fill actually pad this pod? The host's checkbox is a REQUEST; this
+  // is the answer, and the two are not the same value. Every distribution the
+  // engine ships now seats bots — a shared-stack pod included, where
+  // `resolve_shared_stack_bot_turns` drives the seat the reducer used to refuse
+  // — so the only thing standing between the request and the answer is whether
+  // the engine has published a procedure yet.
+  //
+  // `null` distribution — the procedure has not loaded — is the conservative
+  // side deliberately: assume no padding, so Start stays gated on the humans'
+  // own seat count and no empty seat is labelled "Bot" on a promise the engine
+  // has not yet made. It fails CLOSED for both consumers, the `canStart` gate
+  // below and `SeatCard`'s label.
+  //
+  // Read from the DISTRIBUTION the engine published, never from `config.kind`
+  // and never from a `human_seats` scalar — that scalar is a per-kind constant
+  // that merely correlates with the question anyone actually wants answered,
+  // and `startDraftInner` carries the same rule for the same reason.
+  const botFillPadsThePod = botFillEnabled && packDistribution !== null;
   // The engine publishes the exact legal seat counts for this procedure and
   // tournament format. No client-side floor or fallback: `null` disables the
   // button until the engine answers, while bot fill remains an explicit path
@@ -173,7 +200,7 @@ export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
   const canStart =
     !effectiveOffline
     && isHost
-    && (botFillEnabled || (allowedPodSizes?.includes(filledSeats) ?? false));
+    && (botFillPadsThePod || (allowedPodSizes?.includes(filledSeats) ?? false));
   const errorMessage = error === DRAFT_OFFLINE_ERROR ? t("offline.startUnavailable") : error;
 
   // Build a full 8-seat grid (pad with empty seats if the adapter
@@ -254,7 +281,7 @@ export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
             seat={seat}
             isHost={isHost}
             isLocalSeat={seat.seat_index === seatIndex}
-            botFillEnabled={botFillEnabled}
+            botFillWillSeatBots={botFillPadsThePod}
             canKick={isHost && seat.seat_index !== 0}
             onKick={() => kickPlayer(seat.seat_index)}
           />
@@ -277,7 +304,14 @@ export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
       {/* Host controls */}
       {isHost && (
         <div className="flex items-center gap-4">
-          {/* Bot-fill toggle */}
+          {/* Bot-fill toggle, rendered for EVERY procedure. It was once hidden
+              for a shared-stack pod, on the correct reading of an engine that
+              refused a bot seat there; that refusal is gone and a Winston pod
+              now seats and drives a bot like any other, so hiding the control
+              would be the mirror of the old defect — withholding a capability
+              the engine does have. Nothing per-kind is asked here at all, which
+              is why there is no predicate left to keep in step with
+              `botFillPadsThePod`. */}
           <label className="flex cursor-pointer items-center gap-2 text-sm text-white/70">
             <input
               type="checkbox"

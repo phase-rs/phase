@@ -408,6 +408,7 @@ fn locale_code(language: &str) -> Option<&'static str> {
         "French" => Some("fr"),
         "German" => Some("de"),
         "Italian" => Some("it"),
+        "Japanese" => Some("ja"),
         "Portuguese (Brazil)" => Some("pt"),
         _ => None,
     }
@@ -2770,6 +2771,58 @@ mod tests {
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/mtgjson/AtomicCards.json");
             load_atomic_cards(&path).expect("AtomicCards.json should load")
         })
+    }
+
+    /// CR 712.4 + CR 712.4b: a meld pair exports as two `meld` double-faced
+    /// fronts, each grouped (by its own oracle id) with a copy of the combined
+    /// back under a hidden per-front key, while the combined back's standalone
+    /// entry — its own printed identity — keeps the visible name key.
+    #[test]
+    fn meld_pair_exports_fronts_with_hidden_combined_back_copies() {
+        let atomic = load_atomic_fixture();
+        let filter_names = Vec::new();
+        let token_source_metadata = HashMap::new();
+        let rarity_map = HashMap::new();
+        let bracket_lists = BracketLists::default();
+        let ctx = CardWorkCtx {
+            filter_names: &filter_names,
+            token_source_metadata: &token_source_metadata,
+            rarity_map: &rarity_map,
+            bracket_lists: &bracket_lists,
+            trace_enabled: false,
+            #[cfg(feature = "forge")]
+            forge_index: None,
+        };
+        let mut keys = [
+            "Brisela, Voice of Nightmares",
+            "Bruna, the Fading Light // Brisela, Voice of Nightmares",
+            "Gisela, the Broken Blade // Brisela, Voice of Nightmares",
+        ];
+        keys.sort_unstable();
+        let mut face_index = BTreeMap::new();
+        for key in keys {
+            let work = build_card_work(&ctx, key, &atomic.data[key]).expect("meld card exports");
+            for (face_key, entry, _) in work.entries {
+                insert_face(&mut face_index, work.mtgjson_key, face_key, entry);
+            }
+        }
+
+        let oracle = |key: &str| face_index[key].face.scryfall_oracle_id.clone().unwrap();
+        let back = &face_index["brisela, voice of nightmares"];
+        assert_eq!(
+            back.layout, None,
+            "the combined back keeps its own identity"
+        );
+        for front in ["gisela, the broken blade", "bruna, the fading light"] {
+            let entry = &face_index[front];
+            assert_eq!(entry.layout.as_deref(), Some("meld"));
+            assert_eq!(entry.face_index, Some(0));
+            let copy = &face_index[&format!("brisela, voice of nightmares [{}]", oracle(front))];
+            assert_eq!(copy.layout.as_deref(), Some("meld"));
+            assert_eq!(copy.face_index, Some(1));
+            assert_eq!(copy.face.scryfall_oracle_id, Some(oracle(front)));
+            assert_ne!(oracle(front), oracle("brisela, voice of nightmares"));
+        }
     }
 
     #[test]

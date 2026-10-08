@@ -5,9 +5,10 @@
 
 use super::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    ControllerRef, MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr, QuantityRef, TargetFilter,
-    TargetSelectionMode,
+    ControllerRef, Duration, MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr, QuantityRef,
+    TargetChoiceTiming, TargetFilter, TargetSelectionMode, ZoneChoiceCandidateSource,
 };
+use crate::types::card_type::CoreType;
 use crate::types::zones::Zone;
 
 /// Parser-only lookahead for token body clauses split across adjacent sentences.
@@ -92,6 +93,77 @@ pub(crate) enum ChosenColorQualifierScope {
     ChainBound,
 }
 
+/// CR 608.2c + CR 608.2d: The nearest EARLIER single-card zone-choice
+/// partition in this same effect chain, and where its candidate pile came
+/// from.
+///
+/// A clause of the shape `Effect::ChooseFromZone { count: 1, zone: Exile,
+/// selection: Chosen, .. }` splits a pile into a chosen half and an unchosen
+/// complement, which is what lets the very next instruction say "the other".
+/// Which binding that complement lowers to depends on the pile's PROVENANCE,
+/// so the provenance — not a yes/no flag — is what this carries: a bare bool
+/// would collapse "no prior partition at all" and "a prior partition from a
+/// different [`ZoneChoiceCandidateSource`]" into the same `false`, and a
+/// newly added candidate source would then be silently indistinguishable from
+/// the one shape this gate is keyed to.
+///
+/// `None` means the chain has no earlier single-card exile partition at all
+/// (including the case where its nearest zone choice is some other shape).
+/// Consumers must match the carried source EXPLICITLY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PriorZoneChoicePartition {
+    /// The `candidate_source` of that `ChooseFromZone` clause — i.e. where the
+    /// partitioned pile came from (`CostPaidObjects` for Coin of Fate's
+    /// cost-exiled pair, `Legacy` for Wake to Slaughter's, …).
+    pub candidate_source: ZoneChoiceCandidateSource,
+}
+
+/// Parser-only provenance: the enclosing trigger body is resolving a PROVEN
+/// zone-change event, and the pair it pins.
+///
+// CR 603.10 + CR 400.7 + CR 122.2: a trigger-body past-tense predicate ("… if
+// it had a death counter on it") reads the zone-change event object's
+// last-known information, because CR 122.2 makes the counters cease to exist
+// the moment the object changes zones. Only a trigger head whose shape PROVES
+// the pair (today: the dies head, battlefield → graveyard) may establish it.
+//
+/// SAFE BY CONTRACT, NOT BY `Clone`. Ordinary `Clone` PRESERVES this value,
+/// because `ParseContext` has an established clone-and-commit idiom: a
+/// speculative parse clones the context, and on success writes it back with
+/// `*ctx = <derived>` (`try_parse_radiance_color_fanout_damage`'s
+/// `tentative_ctx`, the `body_ctx`/`candidate_ctx` token paths). A `Clone` that
+/// silently dropped state would make every one of those commits erase the
+/// enclosing trigger's authority — the same defect
+/// [`ParseContext::clone_throwaway`] was written to avoid for
+/// `ChosenColorQualifierScope`.
+///
+/// Entering an INDEPENDENT body is therefore spelled by NAME, never implied by
+/// a clone: [`ParseContext::clone_for_independent_body`] for a body that is kept
+/// (a CR 603.12 reflexive trigger, a CR 603.1 nested printed trigger line), and
+/// [`ParseContext::clone_throwaway`] for a sub-parse whose context is discarded
+/// (a speculative probe, a branch alternative). Both reset this field; a plain
+/// `.clone()` continues the same body.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TriggerZoneChangeProvenance(Option<(Zone, Zone)>);
+
+impl TriggerZoneChangeProvenance {
+    /// No enclosing zone-change authority.
+    pub(crate) fn none() -> Self {
+        Self(None)
+    }
+
+    /// The enclosing trigger head PROVED this origin → destination pair.
+    pub(crate) fn established(origin: Zone, destination: Zone) -> Self {
+        Self(Some((origin, destination)))
+    }
+
+    /// The proven `(origin, destination)` pair, or `None` when this parse has no
+    /// enclosing zone-change authority.
+    pub(crate) fn as_pair(&self) -> Option<(Zone, Zone)> {
+        self.0
+    }
+}
+
 /// Unified parsing context — threaded through all parser branches for
 /// pronoun/reference resolution ("it", "that creature", "that many").
 ///
@@ -126,6 +198,42 @@ pub(crate) struct ParseContext {
     /// Set per effect-chain chunk from the nearest typed producer, or from a
     /// proven trigger subject batch when no compatible chain producer wins.
     pub bare_card_aggregate_source: Option<crate::types::ability::TrackedAnaphorSource>,
+    /// CR 611.2a: the durational scope the clause currently being lowered stated
+    /// at a printed position the clause BODY can no longer see, because the
+    /// positional strip seams peel it before the body parser runs.
+    ///
+    /// Both printed positions are peeled: a leading "Until end of turn, …" by
+    /// `strip_leading_duration` (either the chunk expansion in
+    /// `sequence::expand_leading_duration_chunks` or the dispatch in
+    /// `parse_effect_clause_inner`), and a trailing "… this turn" by
+    /// `strip_trailing_duration` in `lower_imperative_clause`. MEASURED, not
+    /// assumed: Locke, Treasure Hunter ("Until end of turn, you may cast a spell
+    /// from among those cards") and Chiss-Goria, Forge Tyrant ("… from among them
+    /// this turn") reach the `from among` mechanism decision as
+    /// `"a spell from among those cards"` and `"an artifact spell from among them"`
+    /// — byte-identical to the NO-duration siblings Nathan Drake and Sanwell,
+    /// whose CR 608.2g resolution window must not become a lingering permission.
+    /// The fact is therefore unavailable in the fragment at any position, and the
+    /// only honest channel is to carry it.
+    ///
+    /// Third printed position, for completeness: a duration stated MID-clause
+    /// ("… from among them this turn without paying their mana costs" — Ral,
+    /// Leyline Prodigy) is never peeled and is read straight off the fragment by
+    /// `oracle_effect::clause_states_a_duration`. This field is the other two.
+    ///
+    /// LIFECYCLE — save/restore, never set/clear. Each strip seam swaps its own
+    /// value in around the body parse and restores the previous one afterwards,
+    /// and a seam that peeled nothing leaves the enclosing value intact (a
+    /// trailing seam that found no duration must not clobber the leading one its
+    /// own caller set). A set/clear lifecycle would fail OPEN: a duration stated
+    /// by clause N could promote a capped clause N+1 that states none, granting a
+    /// lingering permission the card never printed. `a_stated_duration_does_not_leak_into_the_next_clause`
+    /// is the pin.
+    ///
+    /// Consumed by `oracle_effect::from_among_batch_cast_driver` to promote a
+    /// paid, duration-scoped, capped-at-one `from among` batch grant to the
+    /// `GrantCastingPermission { PlayFromExile { single_use: true } }` shape.
+    pub stated_clause_duration: Option<Duration>,
     /// CR 608.2c + CR 400.7: the REST-partition destination zone of the
     /// nearest preceding `Effect::Dig` in this chain whose kept and rest
     /// destinations differ (a genuine reveal/split, e.g. Dihada, Binder of
@@ -166,6 +274,20 @@ pub(crate) struct ParseContext {
     /// "choose one of them at random. You may cast IT" — "it" is the chosen card,
     /// not the pool).
     pub plural_object_pronoun_ref: Option<TargetFilter>,
+    /// CR 608.2k: Antecedent for a singular DEMONSTRATIVE ("that creature" /
+    /// "that permanent" / "that card" / "that token") in the current trigger
+    /// body. Deliberately separate from — and narrower than —
+    /// `object_pronoun_ref`, on the same principle that separates
+    /// `plural_object_pronoun_ref` from it: which references may capture a given
+    /// antecedent is a property of the surface grammar, not of the antecedent.
+    ///
+    /// Set only for the damage-RECIPIENT provenance (a demonstrative names an
+    /// object the condition acted upon), by
+    /// `oracle_trigger::trigger_demonstrative_object_ref_for_condition`. The
+    /// spell-cast provenance is excluded: "exile THAT CARD ... instead of putting
+    /// it into your graveyard as it resolves" is a replacement clause whose
+    /// demonstrative belongs to its own grammar.
+    pub demonstrative_object_ref: Option<TargetFilter>,
     /// Accumulated diagnostics for the current card parse (Phase 52, D-07).
     /// Replaces thread-local oracle_warnings accumulator.
     pub diagnostics: Vec<OracleDiagnostic>,
@@ -280,6 +402,44 @@ pub(crate) struct ParseContext {
     /// host (Springheart Nantuko's landfall copy-token). `None` for non-Aura
     /// cards, so `ParentTarget` keeps its chosen-target semantics (Twinflame).
     pub host_self_reference: Option<TargetFilter>,
+    /// CR 109.1 + CR 205.2: The printed core card types of the object whose
+    /// Oracle text is being parsed. Set once per card by `parse_oracle_ir` from
+    /// the same MTGJSON type list the pipeline already receives, and propagated
+    /// into per-trigger / per-line effect contexts alongside
+    /// `host_self_reference`.
+    ///
+    /// Needed by any keyword action whose CR-defined expansion is conditioned on
+    /// the card type of its source rather than on anything in the ability's own
+    /// text. `support N` (CR 701.41a) is the incumbent consumer, via
+    /// [`ParseContext::source_is_instant_or_sorcery`]: the expansion says "other
+    /// target creatures" on a permanent and "target creatures" on an instant or
+    /// sorcery, and no amount of reading the clause "support 2" can tell those
+    /// apart.
+    ///
+    /// Deliberately the full typed type list rather than the single derived
+    /// `is_spell` boolean `parse_normalized_oracle_ir` computes for its own use:
+    /// a `bool` on a long-lived context states one consumer's question instead
+    /// of the fact that answers it, and the next keyword action conditioned on a
+    /// different type axis would have to add a second boolean beside it.
+    pub source_core_types: Vec<CoreType>,
+    /// CR 115.10a + CR 701.41a: Producer-declared target-choice timing for the
+    /// current chunk, snapshotted into `ClauseIr.declared_target_choice_timing`
+    /// by the chain chunk loop and consumed by
+    /// `lower::target_choice_timing_for_clause` ahead of its text-scan ladder.
+    ///
+    /// That ladder decides "targeted or described" by scanning the clause's
+    /// PRINTED fragment for the literal word "target" (CR 115.10a). The scan is
+    /// right for printed prose and wrong for a keyword-action SHORTHAND, whose
+    /// printed fragment is not the ability's rules text: "support 2" contains no
+    /// "target", yet CR 701.41a defines it to mean "… up to two other target
+    /// creatures". A producer that performs such an expansion knows the answer
+    /// the scan is trying to guess, so it states it here and the statement
+    /// outranks the scan. `None` (the default) leaves the ladder in charge, so
+    /// every incumbent clause is unaffected.
+    ///
+    /// Set and consumed within a single chunk parse; never serialized. A
+    /// speculative sub-parse that discards its cloned context discards this too.
+    pub declared_target_choice_timing: Option<TargetChoiceTiming>,
     /// CR 603.4: Transient relative-clause filter parsed from a
     /// trigger subject ("an opponent **who controls F** draws a card"). Set by
     /// `parse_single_subject` when it consumes a "who controls <filter>"
@@ -473,9 +633,79 @@ pub(crate) struct ParseContext {
     /// lingering path. Mirrors `chain_has_prior_exile_producer`.
     // CR 608.2g + CR 701.20e
     pub chain_prior_self_library_peek: bool,
+    /// CR 608.2c: the stop filter of the most recent earlier same-chain
+    /// `ExileFromTopUntil { NextMatches }` loop. The loop ends on its last
+    /// match, so the cards it exiled that match this filter are exactly the
+    /// ones it found, and "the other cards exiled this way" are the rest
+    /// (Invasion of Alara). `None` when the chain has no such loop.
+    pub chain_prior_exile_until_match: Option<TargetFilter>,
+    /// CR 608.2c: the candidate source for cards the `NextMatches` loop found.
+    /// `Some(ParentTargets)` only when every
+    /// clause after the loop is the one-cast window over its batch (Invasion
+    /// of Alara's "You may cast one of those two cards …"), which hands those
+    /// targets on unchanged. Any other clause in between may target or choose
+    /// its own objects, so "put one of them into your hand" stays unbound.
+    pub chain_exile_until_hits_source: Option<ZoneChoiceCandidateSource>,
+    /// CR 400.7j + CR 608.2c + CR 608.2d: the NEAREST earlier single-card exile
+    /// partition in this same effect chain, carrying that pile's
+    /// [`ZoneChoiceCandidateSource`] — `None` when the chain has none.
+    ///
+    /// `Some(CostPaidObjects)` is the source-bound cost-paid exile choice
+    /// (`Effect::ChooseFromZone { count: 1, zone: Exile, candidate_source:
+    /// CostPaidObjects, selection: Chosen }`) that Coin of Fate's "An opponent
+    /// chooses one of the exiled cards" lowers to. That choice partitions a
+    /// two-card pile, so the very next instruction's "the other" names the
+    /// UNCHOSEN card — which the runtime forwards on the continuation's
+    /// immediate `sub_ability` targets, i.e. `TargetFilter::ParentTarget`, NOT
+    /// the chain tracked set (the tracked set, when republished at all, carries
+    /// the CHOSEN cards).
+    ///
+    /// Consumers must match that source EXPLICITLY rather than testing for
+    /// "some partition exists": a `Legacy`/`Tracked`/`Direct` partition (Wake to
+    /// Slaughter's "An opponent chooses one of them. … Return the other …")
+    /// keeps its existing `TrackedSet` binding, and a future candidate source
+    /// must not inherit the `CostPaidObjects` rewrite by default. Carrying the
+    /// source instead of a bare bool is what keeps those cases distinguishable.
+    ///
+    /// Seeded per chunk in `parse_effect_chain_ir` from the clauses already
+    /// built; `None` via `derive(Default)` on every standalone parse, and never
+    /// serialized.
+    pub prior_zone_choice_partition: Option<PriorZoneChoicePartition>,
+    /// CR 603.10 + CR 400.7 + CR 122.2: the enclosing trigger body's PROVEN
+    /// zone-change event pair, when this parse continues that body. Consumed by
+    /// the trigger-body past-tense counter grammar in
+    /// `oracle_effect::conditions::strip_counter_conditional`, which may only
+    /// emit an `AbilityCondition::ZoneChangeObjectMatchesFilter` while the pair
+    /// is present. Ordinary `Clone` PRESERVES it (the clone-and-commit idiom
+    /// depends on that); entering an independent body is spelled by name via
+    /// [`Self::clone_for_independent_body`] or [`Self::clone_throwaway`]. See
+    /// [`TriggerZoneChangeProvenance`].
+    pub trigger_zone_change: TriggerZoneChangeProvenance,
 }
 
 impl ParseContext {
+    /// CR 110.1 + CR 701.41a: is the object whose text is being parsed an
+    /// instant or sorcery — i.e. NOT a permanent card? A permanent is a card on
+    /// the battlefield (CR 110.1), and instants and sorceries are the card types
+    /// that never become one, so this is the permanent-vs-spell axis CR 701.41a
+    /// turns on, stated as the negative because "instant or sorcery" is the
+    /// closed, enumerable side of it.
+    ///
+    /// The single authority for the source-type question, so a keyword action
+    /// whose expansion turns on it never re-derives the answer from a proxy (an
+    /// enclosing trigger subject, say) that only correlates with it.
+    ///
+    /// An empty type list — the test-facing `parse_effect` entry points, which
+    /// parse a fragment with no card behind it — reads as a permanent. That is
+    /// the fail-safe direction: on the permanent branch `support` adds
+    /// `FilterProp::Another`, which can only ever REMOVE the source from its own
+    /// target set, and a fragment with no source object has nothing to remove.
+    pub fn source_is_instant_or_sorcery(&self) -> bool {
+        self.source_core_types
+            .iter()
+            .any(|t| matches!(t, CoreType::Instant | CoreType::Sorcery))
+    }
+
     /// Resolve third-person player pronouns ("they", "their") against the
     /// nearest parser context that introduced a player referent.
     pub fn third_person_player_controller_ref(&self) -> Option<ControllerRef> {
@@ -517,6 +747,27 @@ impl ParseContext {
     pub fn clone_throwaway(&self) -> Self {
         Self {
             chosen_color_qualifier: ChosenColorQualifierScope::Unbound,
+            // CR 603.7 + CR 603.12: a discarded sub-parse still KEEPS its parsed
+            // value, so a probe or branch alternative must not be able to emit a
+            // `ZoneChangeObjectMatchesFilter` on authority it does not own. The
+            // context is independent for the same reason it is throwaway.
+            trigger_zone_change: TriggerZoneChangeProvenance::none(),
+            ..self.clone()
+        }
+    }
+
+    /// CR 603.1 + CR 603.7 + CR 603.12: clone this context for an INDEPENDENT
+    /// trigger body whose context IS kept — a reflexive "when you do" body, a
+    /// nested printed trigger line inside a modal block, an anchor mode that
+    /// spawns its own triggered ability.
+    ///
+    /// Such a body establishes its own event authority, so the enclosing
+    /// trigger's proven zone-change pair would be unrelated to it. This is the
+    /// named counterpart to a plain `.clone()`, which continues the SAME body
+    /// and therefore keeps that authority (see [`TriggerZoneChangeProvenance`]).
+    pub fn clone_for_independent_body(&self) -> Self {
+        Self {
+            trigger_zone_change: TriggerZoneChangeProvenance::none(),
             ..self.clone()
         }
     }
@@ -572,5 +823,68 @@ mod tests {
         });
 
         assert_eq!(ctx.diagnostics.len(), 2);
+    }
+
+    /// CR 603.10: a fresh context carries no zone-change authority.
+    #[test]
+    fn trigger_zone_change_provenance_defaults_to_empty() {
+        assert_eq!(ParseContext::default().trigger_zone_change.as_pair(), None);
+        assert_eq!(TriggerZoneChangeProvenance::none().as_pair(), None);
+    }
+
+    /// The clone-and-commit idiom (`*ctx = <derived>`) depends on ordinary
+    /// `Clone` PRESERVING state, so a successful speculative parse inside the
+    /// same trigger body must not erase the enclosing event's authority.
+    #[test]
+    fn trigger_zone_change_provenance_survives_ordinary_clone() {
+        let ctx = ParseContext {
+            trigger_zone_change: TriggerZoneChangeProvenance::established(
+                Zone::Battlefield,
+                Zone::Graveyard,
+            ),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            ctx.clone().trigger_zone_change.as_pair(),
+            Some((Zone::Battlefield, Zone::Graveyard)),
+            "a same-body speculative parse that commits must retain provenance"
+        );
+        assert_eq!(
+            ctx.trigger_zone_change.as_pair(),
+            Some((Zone::Battlefield, Zone::Graveyard)),
+            "cloning must not disturb the source context"
+        );
+    }
+
+    /// CR 603.7 + CR 603.12 + CR 603.1: entering an INDEPENDENT body is spelled
+    /// by name, and both named operations refuse to inherit the outer event.
+    #[test]
+    fn trigger_zone_change_provenance_resets_for_independent_bodies() {
+        let ctx = ParseContext {
+            trigger_zone_change: TriggerZoneChangeProvenance::established(
+                Zone::Battlefield,
+                Zone::Graveyard,
+            ),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            ctx.clone_for_independent_body()
+                .trigger_zone_change
+                .as_pair(),
+            None,
+            "a reflexive / nested-trigger body establishes its own authority"
+        );
+        assert_eq!(
+            ctx.clone_throwaway().trigger_zone_change.as_pair(),
+            None,
+            "a discarded sub-parse keeps its value, so it must not borrow authority"
+        );
+        assert_eq!(
+            ctx.trigger_zone_change.as_pair(),
+            Some((Zone::Battlefield, Zone::Graveyard)),
+            "neither named operation may disturb the source context"
+        );
     }
 }

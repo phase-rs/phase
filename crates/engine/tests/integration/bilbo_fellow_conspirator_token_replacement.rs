@@ -52,6 +52,7 @@ fn artifact_token_spec(subtype: &str, controller: PlayerId) -> TokenSpec {
             display_name: subtype.to_string(),
             power: None,
             toughness: None,
+            loyalty: None,
             core_types: vec![CoreType::Artifact],
             subtypes: vec![subtype.to_string()],
             supertypes: Vec::new(),

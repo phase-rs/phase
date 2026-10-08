@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use rand::Rng;
 
-use crate::game::quantity::resolve_quantity;
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     AbilityDefinition, CoinFlipResult, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,
@@ -109,14 +109,19 @@ fn run_flip_branch(
     source_id: ObjectId,
     controller: PlayerId,
     targets: &[TargetRef],
+    chain_root_targets: &[TargetRef],
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     if let Some(def) = branch {
-        let sub = crate::game::ability_utils::build_resolved_from_def_with_targets(
+        // CR 608.2h: propagate so a counter-gated "that many" nested in the
+        // branch still resolves against the live chain-root target (see
+        // `build_resolved_from_def_with_chain_root`'s doc).
+        let sub = crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root(
             def,
             source_id,
             controller,
             targets.to_vec(),
+            chain_root_targets.to_vec(),
         );
         resolve_ability_chain(state, &sub, events, 0)?;
     }
@@ -175,6 +180,7 @@ pub fn resolve(
                 win_effect: win_effect.map(|d| Box::new(d.clone())),
                 lose_effect: lose_effect.map(|d| Box::new(d.clone())),
                 kind: PendingCoinFlipKind::Single,
+                chain_root_targets: ability.context.chain_root_targets.clone(),
             });
             return Ok(());
         }
@@ -193,6 +199,7 @@ pub fn resolve(
         ability.source_id,
         ability.controller,
         &ability.targets,
+        &ability.context.chain_root_targets,
         events,
     )?;
 
@@ -243,8 +250,7 @@ pub fn resolve_flip_coins(
     let flipper = super::resolve_player_for_context_ref(state, ability, flipper);
 
     // CR 107.1: resolve `count` in the ability's context; clamp at zero.
-    let n =
-        resolve_quantity(state, count_expr, ability.controller, ability.source_id).max(0) as u32;
+    let n = resolve_quantity_with_targets(state, count_expr, ability).max(0) as u32;
 
     // CR 705.1 + CR 614.1a: Flip each coin through the replacement pipeline (so
     // Krark's Thumb can double it), routing each outcome through the appropriate
@@ -267,6 +273,7 @@ pub fn resolve_flip_coins(
                     kind: PendingCoinFlipKind::FlipN {
                         remaining: n - i - 1,
                     },
+                    chain_root_targets: ability.context.chain_root_targets.clone(),
                 });
                 return Ok(());
             }
@@ -278,6 +285,7 @@ pub fn resolve_flip_coins(
             ability.source_id,
             ability.controller,
             &ability.targets,
+            &ability.context.chain_root_targets,
             events,
         )?;
         // CR 608.2c: stop only for an interactive resolution choice. A token
@@ -321,6 +329,7 @@ pub fn resolve_until_lose(
         &ability.targets,
         ability.source_id,
         0,
+        &ability.context.chain_root_targets,
         events,
     )? {
         Some(count) => count,
@@ -336,6 +345,7 @@ pub fn resolve_until_lose(
         &ability.targets,
         ability.source_id,
         ability.controller,
+        &ability.context.chain_root_targets,
         events,
     )
 }
@@ -344,6 +354,7 @@ pub fn resolve_until_lose(
 /// when the losing flip was reached, or `None` if a flip suspended for a keep
 /// choice (in which case the coin-flip frame is parked). `wins_so_far` seeds
 /// the win count when re-entered from `resume_after_keep`.
+#[allow(clippy::too_many_arguments)]
 fn flip_until_lose_loop(
     state: &mut GameState,
     controller: PlayerId,
@@ -351,6 +362,7 @@ fn flip_until_lose_loop(
     targets: &[TargetRef],
     source_id: ObjectId,
     wins_so_far: u32,
+    chain_root_targets: &[TargetRef],
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<u32>, EffectError> {
     // Safety cap prevents infinite loops with pathological RNG seeds.
@@ -374,6 +386,7 @@ fn flip_until_lose_loop(
                     kind: PendingCoinFlipKind::UntilLose {
                         wins_so_far: win_count,
                     },
+                    chain_root_targets: chain_root_targets.to_vec(),
                 });
                 return Ok(None);
             }
@@ -384,6 +397,7 @@ fn flip_until_lose_loop(
 
 /// CR 705.2: Run the win effect once per win, then emit `EffectResolved` unless a
 /// win effect suspended for a player choice.
+#[allow(clippy::too_many_arguments)]
 fn finish_until_lose(
     state: &mut GameState,
     win_count: u32,
@@ -391,6 +405,7 @@ fn finish_until_lose(
     targets: &[TargetRef],
     source_id: ObjectId,
     controller: PlayerId,
+    chain_root_targets: &[TargetRef],
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     for _ in 0..win_count {
@@ -400,6 +415,7 @@ fn finish_until_lose(
             source_id,
             controller,
             targets,
+            chain_root_targets,
             events,
         )?;
         // CR 608.2c: stop only if the win effect suspended for an INTERACTIVE
@@ -458,6 +474,7 @@ pub fn resume_after_keep(
         win_effect,
         lose_effect,
         kind,
+        chain_root_targets,
     } = pending;
 
     // CR 705.1 + CR 614.1a + CR 705.2: the single surviving flip is recorded for
@@ -493,7 +510,15 @@ pub fn resume_after_keep(
             } else {
                 lose_effect.as_deref()
             };
-            run_flip_branch(state, branch, source_id, controller, &targets, events)?;
+            run_flip_branch(
+                state,
+                branch,
+                source_id,
+                controller,
+                &targets,
+                &chain_root_targets,
+                events,
+            )?;
             if suspended(state) {
                 return Ok(Some(state.waiting_for.clone()));
             }
@@ -511,7 +536,15 @@ pub fn resume_after_keep(
             } else {
                 lose_effect.as_deref()
             };
-            run_flip_branch(state, branch, source_id, controller, &targets, events)?;
+            run_flip_branch(
+                state,
+                branch,
+                source_id,
+                controller,
+                &targets,
+                &chain_root_targets,
+                events,
+            )?;
             if suspended(state) {
                 return Ok(Some(state.waiting_for.clone()));
             }
@@ -525,7 +558,15 @@ pub fn resume_after_keep(
                         } else {
                             lose_effect.as_deref()
                         };
-                        run_flip_branch(state, branch, source_id, controller, &targets, events)?;
+                        run_flip_branch(
+                            state,
+                            branch,
+                            source_id,
+                            controller,
+                            &targets,
+                            &chain_root_targets,
+                            events,
+                        )?;
                         if suspended(state) {
                             return Ok(Some(state.waiting_for.clone()));
                         }
@@ -542,6 +583,7 @@ pub fn resume_after_keep(
                             kind: PendingCoinFlipKind::FlipN {
                                 remaining: remaining - i - 1,
                             },
+                            chain_root_targets: chain_root_targets.clone(),
                         });
                         return Ok(Some(state.waiting_for.clone()));
                     }
@@ -568,6 +610,7 @@ pub fn resume_after_keep(
                     &targets,
                     source_id,
                     seed,
+                    &chain_root_targets,
                     events,
                 )? {
                     Some(win_count) => {
@@ -578,6 +621,7 @@ pub fn resume_after_keep(
                             &targets,
                             source_id,
                             controller,
+                            &chain_root_targets,
                             events,
                         )?;
                         if suspended(state) {
@@ -598,6 +642,7 @@ pub fn resume_after_keep(
                     &targets,
                     source_id,
                     controller,
+                    &chain_root_targets,
                     events,
                 )?;
                 if suspended(state) {
@@ -910,6 +955,7 @@ mod tests {
         obj.base_toughness = Some(3);
         obj.back_face = Some(BackFaceData {
             is_swap_snapshot: false,
+            trigger_printed_origins: Vec::new(),
             name: "Ral, Leyline Prodigy".to_string(),
             power: None,
             toughness: None,

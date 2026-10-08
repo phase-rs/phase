@@ -1,4 +1,5 @@
 use crate::types::ability::{AbilityKind, TargetFilter};
+use crate::types::card_type::CoreType;
 
 use super::oracle::has_unimplemented;
 use super::oracle_classifier::{
@@ -23,10 +24,16 @@ pub(super) enum NomDispatchIr {
 /// through this nom path remaps to the enchanted host. `None` for non-Aura
 /// cards leaves `ParentTarget` semantics intact.
 ///
+/// CR 109.1 + CR 205.2: `source_core_types` carries the same card's printed core
+/// types, for keyword actions whose CR expansion turns on them (`support N`,
+/// CR 701.41a). Passed alongside `host_self_reference` because this function
+/// mints a fresh context rather than inheriting the card-level one, so anything
+/// card-scoped it is not handed is silently lost.
 pub(super) fn dispatch_line_nom(
     line: &str,
     card_name: &str,
     host_self_reference: Option<TargetFilter>,
+    source_core_types: Vec<CoreType>,
 ) -> NomDispatchIr {
     let lower = line.to_lowercase();
     let mut ctx = ParseContext {
@@ -34,6 +41,7 @@ pub(super) fn dispatch_line_nom(
         card_name: Some(card_name.to_string()),
         actor: None,
         host_self_reference,
+        source_core_types,
         ..Default::default()
     };
 
@@ -62,6 +70,13 @@ pub(super) fn dispatch_line_nom(
     }
 
     if is_replacement_pattern(&lower) {
+        // CR 604.2 + CR 611.2a: a replacement definition that states its own
+        // window is created by a resolving spell or ability rather than printed
+        // as a static, so the printed-static route declines it. Install it at
+        // resolution instead of recording a gap the parser can represent.
+        if let Some(ir) = super::oracle_effect::parse_windowed_replacement_install_ir(line) {
+            return NomDispatchIr::Spell(ir);
+        }
         return NomDispatchIr::Unsupported(UnsupportedAbilityIr::new(
             UnsupportedAbilityCategory::ReplacementStructure,
             format!("Replacement pattern matched but line failed replacement parser: {line}"),
@@ -101,6 +116,7 @@ mod tests {
             "~ deals 2 damage divided as you choose among one or two targets.",
             "Forked Bolt",
             None,
+            vec![CoreType::Instant],
         ) else {
             panic!("Forked Bolt must dispatch as an IR-native spell");
         };
@@ -120,7 +136,8 @@ mod tests {
     #[test]
     fn dispatch_line_nom_preserves_structural_residual_payload() {
         let line = "Whenever unsupported trigger structure";
-        let NomDispatchIr::Unsupported(unsupported) = dispatch_line_nom(line, "Test Card", None)
+        let NomDispatchIr::Unsupported(unsupported) =
+            dispatch_line_nom(line, "Test Card", None, Vec::new())
         else {
             panic!("unsupported trigger must retain its structural category");
         };

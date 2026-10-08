@@ -343,7 +343,12 @@ fn legacy_willie_planeswalker_only_restriction_snapshots_selected_player() {
             engine::types::game_state::WaitingFor::OptionalEffectChoice { .. } => {
                 runner
                     .act(engine::types::actions::GameAction::DecideOptionalEffect { accept: true })
-                    .expect("the damaged player accepts the legacy draw offer");
+                    // CR 608.2c + CR 608.2d: this loop answers whichever seat the engine is
+                    // waiting on, matched with `..` so it discriminates nothing about WHO is
+                    // asked — that claim is pinned by
+                    // `willie_damaged_opponent_announces_the_optional_draw`, which asserts the
+                    // seat BEFORE acting.
+                    .expect("the prompted seat accepts the optional draw offer");
             }
             engine::types::game_state::WaitingFor::Priority { .. }
                 if runner.state().stack.is_empty() =>
@@ -475,6 +480,187 @@ fn unscoped_cant_attack_still_rejects_all_targets() {
         assert!(
             declare_attackers(&mut s, &[(attacker, target)], &mut events).is_err(),
             "CR 508.1c: an unscoped CantAttack must reject attacking {target:?}"
+        );
+    }
+}
+
+/// CR 608.2c + CR 608.2d + CR 109.5: Willie's "that player may draw a card" is a
+/// subject-anchored may — "that player" is bound to the damaged opponent, not
+/// to Willie's controller ("you"). This is the REVERT-FAILING runtime test for
+/// the whole change: `apply_as_current_with_mode` (`engine.rs:8110`) drives
+/// whichever seat `waiting_for` names, so the seat must be asserted BEFORE
+/// acting or the assertion is vacuous (P3).
+#[test]
+fn willie_damaged_opponent_announces_the_optional_draw() {
+    fn hand_len(runner: &engine::game::scenario::GameRunner, player: PlayerId) -> usize {
+        runner
+            .state()
+            .players
+            .iter()
+            .find(|p| p.id == player)
+            .map(|p| p.hand.len())
+            .unwrap_or(0)
+    }
+
+    // ── Accept path ──
+    {
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        let source = scenario
+            .add_creature_from_oracle(PROTECTED, "Willie Lumpkin, Postman", 1, 3, WILLIE_ORACLE)
+            .id();
+        scenario.add_card_to_library_top(PROTECTED, "P0 draw fixture");
+        scenario.add_card_to_library_top(RESTRICTED, "P1 draw fixture");
+        let mut runner = scenario.build();
+
+        assert_ne!(PROTECTED, RESTRICTED, "reach-guard: distinct seats");
+        let protected_hand_before = hand_len(&runner, PROTECTED);
+        let restricted_hand_before = hand_len(&runner, RESTRICTED);
+
+        process_triggers(
+            runner.state_mut(),
+            &[engine::types::events::GameEvent::DamageDealt {
+                source_id: source,
+                target: TargetRef::Player(RESTRICTED),
+                amount: 1,
+                is_combat: true,
+                excess: 0,
+            }],
+        );
+
+        let mut prompts_seen = 0usize;
+        loop {
+            match runner.state().waiting_for.clone() {
+                engine::types::game_state::WaitingFor::OptionalEffectChoice { player, .. } => {
+                    prompts_seen += 1;
+                    assert_eq!(
+                        player, RESTRICTED,
+                        "CR 608.2c + CR 608.2d + CR 109.5: 'that player may draw' is announced \
+                         by the damaged opponent, not by Willie's controller"
+                    );
+                    runner
+                        .act(engine::types::actions::GameAction::DecideOptionalEffect {
+                            accept: true,
+                        })
+                        .expect("the damaged player accepts the optional draw");
+                }
+                engine::types::game_state::WaitingFor::Priority { .. }
+                    if runner.state().stack.is_empty() =>
+                {
+                    break;
+                }
+                engine::types::game_state::WaitingFor::Priority { .. } => {
+                    runner
+                        .act(engine::types::actions::GameAction::PassPriority)
+                        .expect("priority resolves the trigger chain");
+                }
+                other => panic!("unexpected Willie prompt: {other:?}"),
+            }
+        }
+
+        assert_eq!(
+            prompts_seen, 1,
+            "two-authority guard: exactly one optional-effect prompt is minted across the whole \
+             resolution"
+        );
+        assert_eq!(
+            hand_len(&runner, PROTECTED),
+            protected_hand_before + 1,
+            "the head `Draw{{Controller}}` clause still draws for Willie's controller"
+        );
+        assert_eq!(
+            hand_len(&runner, RESTRICTED),
+            restricted_hand_before + 1,
+            "the damaged opponent accepted and drew their optional card"
+        );
+        assert!(
+            matches!(
+                runner.state().restrictions.as_slice(),
+                [GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::SpecificPlayer(RESTRICTED),
+                    expiry: RestrictionExpiry::UntilEndOfNextTurnOf { player: RESTRICTED },
+                    activity: ProhibitedActivity::Attack {
+                        defended: AttackTargetFilter::PlayerOrPermanents,
+                        protected_player: Some(PROTECTED),
+                    },
+                    ..
+                }]
+            ),
+            "CR 608.2d: accepting drives the 'if they do' restriction, got {:?}",
+            runner.state().restrictions
+        );
+    }
+
+    // ── Decline path ──
+    {
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        let source = scenario
+            .add_creature_from_oracle(PROTECTED, "Willie Lumpkin, Postman", 1, 3, WILLIE_ORACLE)
+            .id();
+        scenario.add_card_to_library_top(PROTECTED, "P0 draw fixture");
+        scenario.add_card_to_library_top(RESTRICTED, "P1 draw fixture");
+        let mut runner = scenario.build();
+
+        let protected_hand_before = hand_len(&runner, PROTECTED);
+        let restricted_hand_before = hand_len(&runner, RESTRICTED);
+
+        process_triggers(
+            runner.state_mut(),
+            &[engine::types::events::GameEvent::DamageDealt {
+                source_id: source,
+                target: TargetRef::Player(RESTRICTED),
+                amount: 1,
+                is_combat: true,
+                excess: 0,
+            }],
+        );
+
+        let mut prompts_seen = 0usize;
+        loop {
+            match runner.state().waiting_for.clone() {
+                engine::types::game_state::WaitingFor::OptionalEffectChoice { player, .. } => {
+                    prompts_seen += 1;
+                    assert_eq!(player, RESTRICTED);
+                    runner
+                        .act(engine::types::actions::GameAction::DecideOptionalEffect {
+                            accept: false,
+                        })
+                        .expect("the damaged player declines the optional draw");
+                }
+                engine::types::game_state::WaitingFor::Priority { .. }
+                    if runner.state().stack.is_empty() =>
+                {
+                    break;
+                }
+                engine::types::game_state::WaitingFor::Priority { .. } => {
+                    runner
+                        .act(engine::types::actions::GameAction::PassPriority)
+                        .expect("priority resolves the trigger chain");
+                }
+                other => panic!("unexpected Willie prompt: {other:?}"),
+            }
+        }
+
+        // Positive reach-guard for the two negatives below: without it, a prompt
+        // that was never minted would break the loop immediately on empty-stack
+        // Priority, the mandatory `Draw{Controller}` head would still fire, and
+        // both negatives would pass for the wrong reason.
+        assert_eq!(
+            prompts_seen, 1,
+            "reach-guard: the decline path actually reached the optional gate"
+        );
+        assert!(
+            runner.state().restrictions.is_empty(),
+            "declining must not install the 'if they do' restriction"
+        );
+        assert_eq!(
+            hand_len(&runner, RESTRICTED),
+            restricted_hand_before,
+            "declining draws no card for the damaged opponent"
+        );
+        assert_eq!(
+            hand_len(&runner, PROTECTED),
+            protected_hand_before + 1,
+            "the head `Draw{{Controller}}` clause still draws for Willie's controller"
         );
     }
 }

@@ -53,6 +53,7 @@ fn stolen_goodies_can_be_cast_with_no_targets() {
         .unwrap()
         .back_face = Some(BackFaceData {
         is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: "Stolen Goodies".to_string(),
         power: None,
         toughness: None,

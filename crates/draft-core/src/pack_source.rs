@@ -3,6 +3,11 @@ use crate::types::{DraftCardInstance, DraftConfig, DraftError, DraftPack};
 /// Abstraction for pack generation. Phase 53 provides FixturePackSource for testing.
 /// Phase 54 provides MtgjsonPackSource backed by draft-pools.json.
 pub trait PackSource {
+    /// Original source entries available to in-game pack openers, before dealing.
+    fn booster_pack_pool(&self) -> Option<Vec<String>> {
+        None
+    }
+
     fn generate_pack(&self, rng: &mut dyn rand::RngCore, seat: u8, pack_number: u8) -> DraftPack;
 
     fn generate_packs(

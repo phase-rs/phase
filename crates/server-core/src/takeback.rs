@@ -33,7 +33,7 @@ use engine::types::player::PlayerId;
 use phase_ai::session::AiSession;
 use serde::{Deserialize, Serialize};
 
-use crate::session::{GameSession, HostingMode};
+use crate::session::{bind_fresh_interaction_session, GameSession, HostingMode};
 
 /// How many prior authoritative snapshots a session retains for takeback
 /// purposes. Bounded so a long game session can't accumulate unbounded
@@ -275,6 +275,7 @@ impl GameSession {
         let pending = self.pending_takeback.take().expect("checked above");
         self.state = pending.target_state;
         engine::game::rekey_after_trusted_restore(&mut self.state);
+        bind_fresh_interaction_session(&mut self.state, &self.game_code);
         // The rolled-back state is the new baseline. Snapshots *after* the
         // restored one belong to the branch the table just discarded, and
         // taking another takeback back through them would resurrect actions

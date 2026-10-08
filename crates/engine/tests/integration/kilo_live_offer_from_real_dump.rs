@@ -387,9 +387,10 @@ fn drive_all_accept(state: &mut GameState) {
 }
 
 /// Drive the APNAP accept at `n`: P0 (the proposer) declares `Fixed(n)`, then every prompted
-/// opponent accepts in turn order until the protocol closes back to ordinary priority (CR
-/// 800.4a). `template: None` skips declare-time pin validation; the materialize re-derives from
-/// the intact `last_loop_action_sequence`. CR 732.2c: `n` bounds the CR 500.5 collapse prompt.
+/// opponent accepts in turn order until the protocol closes at its CR 732.2a ending point — a
+/// place where a player has priority. `template: None` skips declare-time pin validation; the
+/// materialize re-derives from the intact `last_loop_action_sequence`. CR 732.2c: `n` bounds
+/// the CR 500.5 collapse prompt.
 fn drive_all_accept_n(state: &mut GameState, n: u32) {
     use engine::analysis::decision_template::IterationCount;
     use engine::analysis::loop_check::ShortcutResponse;
@@ -516,7 +517,7 @@ fn kilo_accept_marks_pentad_charge_as_unbounded_display_target() {
 
     drive_all_accept(&mut state);
 
-    // The protocol closed cleanly back to ordinary priority (CR 800.4a).
+    // CR 732.2a: the protocol closed at its ending point — a place where a player has priority.
     assert!(
         matches!(state.waiting_for, WaitingFor::Priority { .. }),
         "after all accept, materialize hands priority back, got {:?}",
@@ -1023,7 +1024,8 @@ fn kilo_accept_collapses_at_boundary_to_exactly_n_counters() {
         "the collapsed pair renders as EXACTLY one FINITE row carrying the real collapsed count"
     );
 
-    // (6) The boundary protocol closed cleanly back to ordinary priority (CR 800.4a).
+    // (6) CR 732.2a: the boundary protocol closed at its ending point — a place where a player
+    //     has priority.
     assert!(
         matches!(state.waiting_for, WaitingFor::Priority { .. }),
         "after the collapse submit, priority is restored, got {:?}",

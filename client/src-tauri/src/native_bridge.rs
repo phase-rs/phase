@@ -17,7 +17,7 @@ use tokio_tungstenite::{
     tungstenite::{
         client::IntoClientRequest,
         http::{header::ORIGIN, HeaderValue, Request},
-        protocol::Message,
+        protocol::{frame::coding::CloseCode, CloseFrame, Message},
     },
     MaybeTlsStream, WebSocketStream,
 };
@@ -28,6 +28,10 @@ use crate::native_engine_contract::{BridgeEvent, NativeEngineBridgeError};
 /// phase-server's WebSocket route. Kept as a named constant so the one place
 /// that dials it reads as a contract rather than an incidental URL suffix.
 const SERVER_WEBSOCKET_PATH: &str = "/ws";
+
+/// How long a graceful close may spend delivering queued frames and its Close
+/// frame before the forwarder is aborted.
+const CLOSE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl NativeEngineBridgeError {
     fn internal(detail: impl Into<String>) -> Self {
@@ -49,6 +53,17 @@ impl BridgeHandle {
 
     pub(crate) fn abort(&self) {
         self.abort.abort();
+    }
+
+    /// Drops the queue's last long-lived sender, so the forwarder sends what is
+    /// already queued and then a Close frame; the watchdog bounds that drain.
+    pub(crate) fn close(self) {
+        let Self { abort, outbound } = self;
+        drop(outbound);
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(CLOSE_DRAIN_TIMEOUT).await;
+            abort.abort();
+        });
     }
 
     pub(crate) fn outbound(&self) -> UnboundedSender<Message> {
@@ -188,17 +203,26 @@ async fn run_bridge(
     let (mut write, mut read) = socket.split();
     let mut error = None;
     let mut close = None;
+    let mut closing = false;
 
     loop {
         tokio::select! {
-            outgoing = outbound.recv() => match outgoing {
+            outgoing = outbound.recv(), if !closing => match outgoing {
                 Some(message) => {
                     if let Err(send_error) = write.send(message).await {
                         error = Some(send_error.to_string());
                         break;
                     }
                 }
-                None => break,
+                None => {
+                    let normal = CloseFrame { code: CloseCode::Normal, reason: "".into() };
+                    if let Err(close_error) = write.send(Message::Close(Some(normal))).await {
+                        error = Some(close_error.to_string());
+                        break;
+                    }
+                    // RFC 6455 §7.1.5: the close code is the one the peer's Close reply carries, read below; no reply is 1006.
+                    closing = true;
+                }
             },
             incoming = read.next() => match incoming {
                 Some(Ok(Message::Text(text))) => {
@@ -218,11 +242,18 @@ async fn run_bridge(
                 }
                 Some(Ok(Message::Pong(_))) => {}
                 Some(Ok(Message::Close(frame))) => {
-                    close = frame.map(|frame| (u16::from(frame.code), frame.reason.to_string()));
+                    // RFC 6455 §7.1.5: a Close without a status code is 1005.
+                    close = Some(frame.map_or((1005, String::new()), |frame| {
+                        (u16::from(frame.code), frame.reason.to_string())
+                    }));
                     if let Err(flush_error) = write.flush().await {
                         error = Some(flush_error.to_string());
+                        break;
                     }
-                    break;
+                    // RFC 6455 §7.1.1: once our own Close is answered, the server closes TCP first.
+                    if !closing {
+                        break;
+                    }
                 }
                 Some(Ok(Message::Frame(_))) => {}
                 Some(Err(read_error)) => {
@@ -588,7 +619,7 @@ impl LanBridges {
     fn close(&mut self, id: u64, client: &LanClient) -> Result<(), NativeEngineBridgeError> {
         self.owned_bridge(id, client)?;
         if let Some(bridge) = self.bridges.remove(&id) {
-            bridge.handle.abort();
+            bridge.handle.close();
         }
         Ok(())
     }
@@ -627,6 +658,8 @@ pub(crate) fn abort_lan_bridges() {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::AsyncWriteExt;
+
     use super::*;
 
     fn test_client() -> LanClient {
@@ -772,7 +805,173 @@ mod tests {
         );
         state.close(1, &test_client()).unwrap();
         assert!(state.bridges.is_empty());
-        assert!(abort.is_aborted());
+        assert!(!abort.is_aborted());
+        assert_eq!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        );
+    }
+
+    #[test]
+    fn a_graceful_close_is_aborted_once_it_outlasts_the_watchdog() {
+        let (outbound, _receiver) = mpsc::unbounded_channel();
+        let (abort, registration) = AbortHandle::new_pair();
+        BridgeHandle::new(abort, outbound).close();
+        let drain = tauri::async_runtime::block_on(async {
+            tokio::time::timeout(
+                CLOSE_DRAIN_TIMEOUT * 2,
+                Abortable::new(std::future::pending::<()>(), registration),
+            )
+            .await
+        });
+        assert!(matches!(drain, Ok(Err(_))));
+    }
+
+    /// Accepts one connection and reads it through the client's Close.
+    async fn accept_until_close(
+        listener: tokio::net::TcpListener,
+    ) -> (Vec<Message>, WebSocketStream<tokio::net::TcpStream>) {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let mut received = Vec::new();
+        while let Some(Ok(message)) = socket.next().await {
+            let close = message.is_close();
+            received.push(message);
+            if close {
+                break;
+            }
+        }
+        (received, socket)
+    }
+
+    /// Queues a frame on an owned LAN bridge to `port`, closes the bridge, and forwards it.
+    async fn close_bridge_to(
+        port: u16,
+    ) -> (
+        tauri::async_runtime::JoinHandle<()>,
+        mpsc::UnboundedReceiver<serde_json::Value>,
+    ) {
+        let (socket, _) = connect_async(format!("ws://127.0.0.1:{port}/"))
+            .await
+            .unwrap();
+        let (outbound, receiver) = mpsc::unbounded_channel();
+        let (abort, registration) = AbortHandle::new_pair();
+        let mut state = LanBridges::default();
+        state.bridges.insert(
+            1,
+            LanBridge {
+                client: test_client(),
+                handle: BridgeHandle::new(abort, outbound),
+            },
+        );
+        state.send(1, &test_client(), "frame".into()).unwrap();
+        state.close(1, &test_client()).unwrap();
+
+        let (events_sender, events) = mpsc::unbounded_channel();
+        let on_event = Channel::new(move |body: tauri::ipc::InvokeResponseBody| {
+            let _ = events_sender.send(body.deserialize::<serde_json::Value>().unwrap());
+            Ok(())
+        });
+        let forwarder = tauri::async_runtime::spawn(forward_bridge(
+            1,
+            socket,
+            receiver,
+            registration,
+            on_event,
+            |_| {},
+        ));
+        (forwarder, events)
+    }
+
+    async fn bound_listener() -> (tokio::net::TcpListener, u16) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        (listener, port)
+    }
+
+    #[test]
+    fn closing_a_bridge_delivers_queued_frames_then_a_close_frame() {
+        tauri::async_runtime::block_on(async {
+            let (listener, port) = bound_listener().await;
+            let peer = tauri::async_runtime::spawn(accept_until_close(listener));
+            let (forwarder, mut events) = close_bridge_to(port).await;
+            let (received, mut peer_socket) = peer.await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(events.try_recv().is_err());
+            // The next read sends the peer's queued Close reply; the peer keeps TCP open until dropped.
+            assert!(peer_socket.next().await.is_none());
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(events.try_recv().is_err());
+            drop(peer_socket);
+            tokio::time::timeout(Duration::from_secs(4), forwarder)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                events.try_recv().unwrap(),
+                serde_json::json!({ "type": "closed", "code": 1000, "reason": "" })
+            );
+            let normal = CloseFrame {
+                code: CloseCode::Normal,
+                reason: "".into(),
+            };
+            assert_eq!(
+                received,
+                [Message::Text("frame".into()), Message::Close(Some(normal))]
+            );
+        });
+    }
+
+    #[test]
+    fn a_close_the_peer_never_answers_reports_an_error_then_an_abnormal_closure() {
+        tauri::async_runtime::block_on(async {
+            let (listener, port) = bound_listener().await;
+            let peer = tauri::async_runtime::spawn(accept_until_close(listener));
+            let (forwarder, mut events) = close_bridge_to(port).await;
+            let (received, peer_socket) = peer.await.unwrap();
+            assert!(received.last().is_some_and(Message::is_close));
+            drop(peer_socket);
+            tokio::time::timeout(Duration::from_secs(4), forwarder)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(events.try_recv().unwrap()["type"], "error");
+            assert_eq!(
+                events.try_recv().unwrap(),
+                serde_json::json!({ "type": "closed", "code": 1006, "reason": "" })
+            );
+        });
+    }
+
+    #[test]
+    fn a_peer_close_reply_sets_the_close_code() {
+        // Raw replies: tungstenite's own reply would echo the client's code.
+        let cases: [(&[u8], serde_json::Value); 2] = [
+            (
+                &[0x88, 5, 0x0F, 0xA1, b'b', b'y', b'e'],
+                serde_json::json!({ "type": "closed", "code": 4001, "reason": "bye" }),
+            ),
+            (
+                &[0x88, 0],
+                serde_json::json!({ "type": "closed", "code": 1005, "reason": "" }),
+            ),
+        ];
+        tauri::async_runtime::block_on(async {
+            for (reply, expected) in cases {
+                let (listener, port) = bound_listener().await;
+                let peer = tauri::async_runtime::spawn(accept_until_close(listener));
+                let (forwarder, mut events) = close_bridge_to(port).await;
+                let (received, mut peer_socket) = peer.await.unwrap();
+                assert!(received.last().is_some_and(Message::is_close));
+                peer_socket.get_mut().write_all(reply).await.unwrap();
+                drop(peer_socket);
+                tokio::time::timeout(Duration::from_secs(4), forwarder)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(events.try_recv().unwrap(), expected);
+            }
+        });
     }
 
     #[test]
@@ -826,7 +1025,7 @@ mod tests {
                 id,
                 LanBridge {
                     client: test_client(),
-                    handle: BridgeHandle::new(abort, outbound),
+                    handle: BridgeHandle::new(abort.clone(), outbound),
                 },
             );
             id
@@ -841,11 +1040,8 @@ mod tests {
             receiver.try_recv().unwrap(),
             Message::Text("still open".into())
         );
-        lan_bridges()
-            .lock()
-            .unwrap()
-            .close(id, &test_client())
-            .unwrap();
+        abort_lan_bridges();
+        assert!(abort.is_aborted());
         assert!(lan_bridges()
             .lock()
             .unwrap()

@@ -10,9 +10,10 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::visibility::filter_state_for_viewer;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, CastFromZoneDriver, CastPermissionConstraint, ChoiceType, Comparator,
-    ControllerRef, Duration, Effect, FilterProp, ObjectScope, QuantityExpr, QuantityRef,
-    ResolutionCastWindow, ResolvedAbility, TargetFilter, TypeFilter, TypedFilter,
+    AbilityDefinition, CastFromZoneDriver, CastPermissionConstraint, CastingPermission, ChoiceType,
+    Comparator, ContinuousModification, ControllerRef, Duration, Effect, FilterProp, ObjectScope,
+    QuantityExpr, QuantityRef, ResolutionCastWindow, ResolvedAbility, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -21,6 +22,7 @@ use engine::types::game_state::{CastOfferKind, ExileLinkKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
 const KIORA: &str = "Vigilance, ward {3}\nWhenever you cast a Kraken, Leviathan, Octopus, or Serpent spell from your hand, look at the top X cards of your library, where X is that spell's mana value. You may cast a spell with mana value less than X from among them without paying its mana cost. Put the rest on the bottom of your library in a random order.";
@@ -366,11 +368,25 @@ fn ral_leyline_prodigy_mid_clause_duration_is_detected_but_not_yet_stamped() {
 #[test]
 fn coordinated_leading_durations_bind_to_the_cast_half() {
     for (name, oracle, types) in [
-        // "Until end of turn, you may play lands and cast spells from your
-        // graveyard." — the canonical coordinated pair.
-        ("Yawgmoth's Will", YAWGMOTHS_WILL, &["Sorcery"][..]),
-        ("Gaea's Will", GAEAS_WILL, &["Sorcery"][..]),
-        ("Magus of the Will", MAGUS_OF_THE_WILL, &["Creature"][..]),
+        // NOTE: the three Will-cycle cards that used to head this list
+        // ("Until end of turn, you may play lands and cast spells from your
+        // graveyard.") no longer lower to `Effect::CastFromZone` at all. The
+        // delivery seam lowers that whole coordinated sentence to ONE
+        // `Effect::GenericEffect` installing a `GraveyardCastPermission`,
+        // because `CastFromZone` was never a channel any land-permission
+        // consumer reads — it parsed green and delivered nothing.
+        //
+        // The guard this row exists for is NOT lost: the identical
+        // "an unbounded Yawgmoth's Will is the failure mode" assertion now lives
+        // in `will_cycle_delivery.rs`, which pins the window on the recovered
+        // grant AND proves at runtime that the permission ends at cleanup
+        // (CR 514.2) rather than only that a duration token was stamped.
+        //
+        // The remaining rows below are the ones that still lower to
+        // `CastFromZone`, and they are why this row stays: the sentence-grouping
+        // pass (`compute_sentence_leading_duration`) is SHARED, so a regression
+        // in it would still silently unbind their permissions.
+        //
         // The same shape with a three-way coordination and a top-of-library
         // pool instead of a graveyard.
         ("The Belligerent", THE_BELLIGERENT, &["Artifact"][..]),
@@ -395,6 +411,94 @@ fn coordinated_leading_durations_bind_to_the_cast_half() {
              graveyard/library cast permission is the failure mode"
         );
     }
+}
+
+/// CR 611.2a: the Will cycle's window, pinned where it now lives.
+///
+/// These three used to sit in `coordinated_leading_durations_bind_to_the_cast_half`
+/// above, asserting `Effect::CastFromZone { duration: Some(UntilEndOfTurn) }`.
+/// They no longer lower to a `CastFromZone` at all — the delivery seam lowers the
+/// whole coordinated sentence to one `Effect::GenericEffect` that installs a
+/// `GraveyardCastPermission`, because `CastFromZone` was never a channel any
+/// land-permission consumer reads.
+///
+/// The GUARD is unchanged and is the reason this row exists rather than being
+/// deleted with the fixtures: the sentence-leading "Until end of turn" must still
+/// reach the grant. CR 611.2a makes an unstated duration last until the end of the
+/// GAME, so an unbound Yawgmoth's Will is the failure mode — the same one the
+/// sibling row above protects for the cards that still lower to `CastFromZone`.
+///
+/// `will_cycle_delivery.rs` owns the runtime half (that the permission actually
+/// reaches a player, and that it ends at cleanup per CR 514.2). This row keeps the
+/// PARSE-side window assertion in the file whose shared sentence-grouping pass
+/// (`compute_sentence_leading_duration`) produces it.
+#[test]
+fn the_will_cycle_window_rides_the_delivered_permission() {
+    for (name, oracle, types) in [
+        ("Yawgmoth's Will", YAWGMOTHS_WILL, &["Sorcery"][..]),
+        ("Gaea's Will", GAEAS_WILL, &["Sorcery"][..]),
+        ("Magus of the Will", MAGUS_OF_THE_WILL, &["Creature"][..]),
+    ] {
+        let parsed = parse(oracle, name, types);
+        let duration = parsed
+            .abilities
+            .iter()
+            .filter_map(generic_effect_duration_in)
+            .chain(
+                parsed
+                    .triggers
+                    .iter()
+                    .filter_map(|trigger| trigger.execute.as_deref())
+                    .filter_map(generic_effect_duration_in),
+            )
+            .next()
+            .expect("the coordinated sentence must lower to a windowed GenericEffect");
+
+        assert_eq!(
+            duration,
+            Some(Duration::UntilEndOfTurn),
+            "{name}: the sentence-leading \"Until end of turn\" must reach the \
+             delivered permission — CR 611.2a makes an unstated duration last until \
+             end of GAME, so an unbound graveyard permission is the failure mode"
+        );
+    }
+}
+
+/// Depth-first search for the first `GenericEffect`'s duration in a chain.
+fn generic_effect_duration_in(definition: &AbilityDefinition) -> Option<Option<Duration>> {
+    // PIN THE GRANT BY ITS MODE, not by "the first `GenericEffect` in ability
+    // order". Every fixture on this row carries a second printed sentence, and
+    // Gaea's Will additionally carries a Suspend line, so an unrelated windowed
+    // `GenericEffect` can sit ahead of the one under test. Matching positionally
+    // would let this row stay green even if the delivery pass stopped emitting
+    // the `GraveyardCastPermission` entirely — the exact regression it exists to
+    // catch.
+    if let Effect::GenericEffect {
+        duration,
+        static_abilities,
+        ..
+    } = definition.effect.as_ref()
+    {
+        let grants_graveyard_permission = static_abilities.iter().any(|static_def| {
+            static_def.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::GrantStaticAbility { definition }
+                        if matches!(
+                            definition.mode,
+                            StaticMode::GraveyardCastPermission { .. }
+                        )
+                )
+            })
+        });
+        if grants_graveyard_permission {
+            return Some(duration.clone());
+        }
+    }
+    definition
+        .sub_ability
+        .as_deref()
+        .and_then(generic_effect_duration_in)
 }
 
 /// The paired positive for the Magus of the Mind row above: Gix, Yawgmoth
@@ -3442,8 +3546,9 @@ fn all_gap_names(oracle: &str, name: &str, types: &[&str]) -> Vec<String> {
     names
 }
 
-/// CR 608.2c: every `from among` route whose selected mechanism cannot carry the
-/// printed bound refuses the clause, on REAL cards.
+/// CR 611.2a: every `from among` route whose selected mechanism
+/// cannot carry the printed bound refuses the clause, on REAL cards — and the
+/// duration-bearing members of the same family now have a mechanism that can.
 ///
 /// This is the general form of the defect. The earlier rounds fixed the loudest
 /// case — a bound the representation could not express at all (`up to 300`,
@@ -3454,24 +3559,31 @@ fn all_gap_names(oracle: &str, name: &str, types: &[&str]) -> Vec<String> {
 /// per object with no grant-scoped ledger, so "cast **a** Vehicle or artifact
 /// creature spell from among them" over a batch of six granted all six.
 ///
-/// These four are the entire real-card fallout of the fix, taken from the
-/// regenerated corpus diff: every one of them printed a cap the engine ignored.
-/// Each row asserts the EXACT gap name, so an unrelated upstream parse loss
-/// cannot satisfy it.
+/// THE TABLE SPLIT IS THE RULE, not bookkeeping. A cap of one is representable
+/// after all — `CastingPermission::PlayFromExile { single_use: true }` is a
+/// grant-scoped budget of exactly one — but ONLY for a clause that states a
+/// durational scope. CR 608.2g: a resolving object "continues to resolve, which
+/// may include casting other spells this way" and "no other spells can normally
+/// be cast … during resolution", so a clause with no stated duration has no later
+/// priority window in which a lingering permission could ever be exercised.
+/// Granting one would be strictly more permissive than the card.
+///
+/// So the four real cards divide by the ONE axis that distinguishes them — and by
+/// nothing else, because at the mechanism decision Locke and Nathan Drake are
+/// byte-identical (`"a spell from among those cards"`). Keeping both halves in one
+/// test is deliberate: each half is the other's discriminating control, and a
+/// future change that collapsed the distinction would have to break one of them.
+/// Each refusing row asserts the EXACT gap name, so an unrelated upstream parse
+/// loss cannot satisfy it.
 #[test]
 fn real_cards_whose_printed_cap_no_mechanism_can_carry_are_refused() {
+    // CR 608.2g: no stated duration → no later window → still refused.
     for (name, oracle, types, axis) in [
         (
             "Sanwell, Avenger Ace",
             SANWELL,
             &["Creature", "Legendary"][..],
-            "paid, cap of one over a batch of six",
-        ),
-        (
-            "Chiss-Goria, Forge Tyrant",
-            CHISS_GORIA_FORGE_TYRANT,
-            &["Creature", "Legendary", "Artifact"][..],
-            "paid + duration, cap of one over a batch of five",
+            "paid, cap of one over a batch of six, no duration",
         ),
         (
             "Nathan Drake, Treasure Hunter",
@@ -3479,21 +3591,108 @@ fn real_cards_whose_printed_cap_no_mechanism_can_carry_are_refused() {
             &["Creature", "Legendary"][..],
             "paid, no duration",
         ),
-        (
-            "Locke, Treasure Hunter",
-            LOCKE_TREASURE_HUNTER,
-            &["Creature", "Legendary"][..],
-            "paid + leading duration",
-        ),
     ] {
         let gaps = all_gap_names(oracle, name, types);
         assert!(
             gaps.iter().any(|gap| gap == "unrepresentable_cast_cap"),
             "{name} ({axis}): the printed cap must refuse the clause outright — \
              granting an uncapped permission over the whole batch is strictly \
-             more permissive than the printed instruction (CR 608.2c). gaps = {gaps:?}"
+             more permissive than the printed instruction. gaps = {gaps:?}"
         );
     }
+
+    // CR 611.2a: a stated duration IS the later priority window, so the cap of one
+    // has a faithful home. Locke's duration is printed at the head of its sentence.
+    let (name, oracle, types, axis) = (
+        "Locke, Treasure Hunter",
+        LOCKE_TREASURE_HUNTER,
+        &["Creature", "Legendary"][..],
+        "paid + leading duration, cap of one over a milled batch",
+    );
+    let gaps = all_gap_names(oracle, name, types);
+    assert!(
+        !gaps.iter().any(|gap| gap == "unrepresentable_cast_cap"),
+        "{name} ({axis}): a stated duration gives the printed cap of one a \
+         faithful home in `PlayFromExile {{ single_use: true }}`, so the clause \
+         must no longer refuse. gaps = {gaps:?}"
+    );
+    assert_eq!(
+        single_use_cast_grant_durations(oracle, name, types),
+        vec![Duration::UntilEndOfTurn],
+        "{name} ({axis}): exactly one single-use cast grant must be installed, \
+         carrying the PRINTED window — a `Duration::Permanent` here means the \
+         placeholder was never patched and the grant outlives the card's text"
+    );
+
+    // CR 611.2a: Chiss-Goria's CAP is representable — its trailing "this turn" is
+    // the later window, exactly like Locke's leading one — but its "If you do, it
+    // has affinity for artifacts" rider is not. That rider runs during the grant's
+    // own resolution, before any spell has been cast, so it would silently do
+    // nothing. The card is therefore refused on a DIFFERENT, more precise gap than
+    // the cap refusal above: it is the rider, not the cap, that this engine cannot
+    // yet carry. Asserting the specific gap name keeps the two reasons from being
+    // conflated in coverage.
+    let gaps = all_gap_names(
+        CHISS_GORIA_FORGE_TYRANT,
+        "Chiss-Goria, Forge Tyrant",
+        &["Creature", "Legendary", "Artifact"],
+    );
+    assert!(
+        gaps.iter()
+            .any(|gap| gap == "cast_rider_on_lingering_grant"),
+        "Chiss-Goria (paid + trailing duration, with an \"if you do\" rider): the rider \
+         cannot reach the spell cast through a lingering grant, so the card must be \
+         refused on the rider gap rather than counted as supported. gaps = {gaps:?}"
+    );
+    assert!(
+        !gaps.iter().any(|gap| gap == "unrepresentable_cast_cap"),
+        "Chiss-Goria's cap of one is representable; only the rider is refused. gaps = {gaps:?}"
+    );
+    assert!(
+        single_use_cast_grant_durations(
+            CHISS_GORIA_FORGE_TYRANT,
+            "Chiss-Goria, Forge Tyrant",
+            &["Creature", "Legendary", "Artifact"],
+        )
+        .is_empty(),
+        "no grant may be installed for Chiss-Goria while its rider would be inert"
+    );
+}
+
+/// The durations of every `single_use` `PlayFromExile` grant on a parsed card's
+/// ability spine. Asserting the GRANT rather than the absence of a gap is what
+/// keeps the promoting half of the table above non-vacuous: "no longer refuses"
+/// would also be satisfied by the clause silently disappearing.
+fn single_use_cast_grant_durations(oracle: &str, name: &str, types: &[&str]) -> Vec<Duration> {
+    fn walk(definition: &AbilityDefinition, out: &mut Vec<Duration>) {
+        if let Effect::GrantCastingPermission {
+            permission:
+                CastingPermission::PlayFromExile {
+                    duration,
+                    single_use: true,
+                    ..
+                },
+            ..
+        } = definition.effect.as_ref()
+        {
+            out.push(duration.clone());
+        }
+        if let Some(sub) = definition.sub_ability.as_deref() {
+            walk(sub, out);
+        }
+        if let Some(alt) = definition.else_ability.as_deref() {
+            walk(alt, out);
+        }
+    }
+    let parsed = parse(oracle, name, types);
+    let mut found = Vec::new();
+    for definition in &parsed.abilities {
+        walk(definition, &mut found);
+    }
+    for execute in parsed.triggers.iter().filter_map(|t| t.execute.as_deref()) {
+        walk(execute, &mut found);
+    }
+    found
 }
 
 /// CR 305.1: the plural land-play sibling is NOT refused.

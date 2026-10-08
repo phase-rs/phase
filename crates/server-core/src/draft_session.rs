@@ -1,10 +1,9 @@
 use std::collections::HashMap;
-use std::time::Duration;
 
 use draft_core::pack_source::PackSource;
 use draft_core::types::{
     DraftAction, DraftConfig, DraftDeckSubmission, DraftPairing, DraftSeat, DraftStatus,
-    PairingStatus,
+    PackDistribution, PairingStatus,
 };
 use draft_core::view::DraftPlayerView;
 use engine::types::player::PlayerId;
@@ -18,7 +17,7 @@ use crate::deck_resolve::deck_data_from_payload;
 use crate::persist::{PersistedDraftSession, PersistedLobbyMeta};
 use crate::protocol::DeckData;
 use crate::reconnect::ReconnectManager;
-use crate::session::{generate_player_token, SessionManager};
+use crate::session::{generate_player_token, SessionManager, HOST_AWAY_REFUSAL};
 
 /// Server-side draft session, mirroring `GameSession` for game play.
 /// Wraps `draft_core::types::DraftSession` (the pure reducer state) with
@@ -165,16 +164,34 @@ pub fn draft_seats_needing_auto_pick(
     session
         .seats_picked_this_round
         .ensure_len(pod_size_u8, false);
-    (0..pod_size)
-        .filter(|&seat_idx| {
-            if session.seats_picked_this_round.get(seat_idx as u8) {
-                return false;
-            }
-            session.current_pack[seat_idx]
-                .as_ref()
-                .is_some_and(|pack| !pack.0.is_empty())
-        })
-        .collect()
+    // Dispatched on the distribution rather than filtered by a pick-and-pass
+    // conjunct. The `current_pack` filter below DOMINATES: a shared-stack
+    // session leaves `current_pack` all-`None`, so it returns an empty sweep
+    // for every such session and any arm placed below it would be dead code.
+    match session.kind.procedure().distribution {
+        PackDistribution::PickAndPass => (0..pod_size)
+            .filter(|&seat_idx| {
+                if session.seats_picked_this_round.get(seat_idx as u8) {
+                    return false;
+                }
+                session.current_pack[seat_idx]
+                    .as_ref()
+                    .is_some_and(|pack| !pack.0.is_empty())
+            })
+            .collect(),
+        // Exactly one seat owes a decision at a time, and it is the engine's
+        // `active_seat`. No stack means no session-owed decision at all.
+        PackDistribution::SharedStackPiles { .. } => session
+            .shared_stack
+            .as_ref()
+            .map(|state| usize::from(state.active_seat))
+            .filter(|seat| *seat < pod_size)
+            .into_iter()
+            .collect(),
+        // An all-at-once kind opens directly in deckbuilding: it has no
+        // decision window for a timer to expire on.
+        PackDistribution::AllAtOnce => Vec::new(),
+    }
 }
 
 pub struct DraftSessionManager {
@@ -289,6 +306,9 @@ impl DraftSessionManager {
 
         if session.session.status != DraftStatus::Lobby {
             return Err("Draft has already started".to_string());
+        }
+        if !session.connected[DRAFT_HOST_SEAT] {
+            return Err(HOST_AWAY_REFUSAL.to_string());
         }
 
         let seat = session
@@ -485,14 +505,102 @@ impl DraftSessionManager {
     pub fn restore_persisted_session(&mut self, ps: PersistedDraftSession) -> Result<(), String> {
         let session = DraftSession::try_from_persisted(ps)?;
         let draft_code = session.draft_code.clone();
-        for token in &session.player_tokens {
+        let mut claimed = Vec::new();
+        for (seat, token) in session.player_tokens.iter().enumerate() {
             if !token.is_empty() {
                 self.token_to_draft
                     .insert(token.clone(), draft_code.clone());
+                claimed.push(PlayerId(seat as u8));
             }
         }
-        self.sessions.insert(draft_code, session);
+        self.sessions.insert(draft_code.clone(), session);
+        // A restored seat starts disconnected, so its grace starts now.
+        let grace = self.reconnect.grace_period;
+        for player in claimed {
+            self.reconnect.record_disconnect(&draft_code, player, grace);
+        }
         Ok(())
+    }
+
+    /// Whether an unstarted pod's host is connected or inside reconnect grace.
+    pub fn is_live_lobby_pod(&self, draft_code: &str) -> bool {
+        self.sessions.get(draft_code).is_some_and(|session| {
+            session.session.status == DraftStatus::Lobby
+                && (session.connected[DRAFT_HOST_SEAT]
+                    || self
+                        .reconnect
+                        .is_disconnected(draft_code, PlayerId(DRAFT_HOST_SEAT as u8)))
+        })
+    }
+
+    /// Acts on every lapsed seat: a `Lobby` host's pod is removed, a `Lobby`
+    /// guest's seat is freed, a `Drafting` seat is auto-picked. Consumes each
+    /// lapse in the critical section that acts on it.
+    pub fn sweep_expired_seats(&mut self) -> DraftSeatSweep {
+        let mut sweep = DraftSeatSweep::default();
+        for (draft_code, player) in self.reconnect.check_expired_with_players() {
+            let seat = usize::from(player.0);
+            if !sweep.affected.contains(&draft_code) {
+                sweep.affected.push(draft_code.clone());
+            }
+            let Some(session) = self.sessions.get(&draft_code) else {
+                continue;
+            };
+            if session.connected[seat] {
+                continue;
+            }
+            match session.session.status {
+                DraftStatus::Drafting => {
+                    match self.pick_random_for_seat(&draft_code, player.0, None) {
+                        Ok(()) => {
+                            info!(draft = %draft_code, seat, "auto-picked for disconnected seat (grace expired)");
+                        }
+                        Err(error) => {
+                            warn!(draft = %draft_code, seat, %error, "auto-pick on grace expiry failed");
+                        }
+                    }
+                }
+                DraftStatus::Lobby if seat == DRAFT_HOST_SEAT => {
+                    if let Some(removed) = self.remove_draft(&draft_code) {
+                        info!(draft = %draft_code, "reaped a lobby pod whose host's grace expired");
+                        sweep.reaped.push((draft_code, removed));
+                    }
+                }
+                DraftStatus::Lobby => {
+                    self.free_seat(&draft_code, seat);
+                    if !sweep.freed.contains(&draft_code) {
+                        sweep.freed.push(draft_code);
+                    }
+                }
+                DraftStatus::Deckbuilding
+                | DraftStatus::Pairing
+                | DraftStatus::MatchInProgress
+                | DraftStatus::RoundComplete
+                | DraftStatus::Paused
+                | DraftStatus::Complete
+                | DraftStatus::Abandoned => {}
+            }
+        }
+        sweep
+            .affected
+            .retain(|code| self.sessions.contains_key(code));
+        sweep.freed.retain(|code| self.sessions.contains_key(code));
+        sweep
+    }
+
+    /// Releases an unstarted pod's guest seat so its token no longer resolves.
+    fn free_seat(&mut self, draft_code: &str, seat: usize) {
+        let Some(session) = self.sessions.get_mut(draft_code) else {
+            return;
+        };
+        let token = std::mem::take(&mut session.player_tokens[seat]);
+        self.token_to_draft.remove(&token);
+        session.display_names[seat].clear();
+        session.session.seats[seat] = DraftSeat::Human {
+            player_id: PlayerId(seat as u8),
+            display_name: String::new(),
+        };
+        info!(draft = %draft_code, seat, "freed a lobby seat whose grace expired");
     }
 
     /// Auto-pick a random card for a disconnected seat whose grace period expired.
@@ -514,6 +622,54 @@ impl DraftSessionManager {
             return Err("draft not in Drafting status".into());
         }
 
+        // THE DISPATCH SITS ABOVE the `view.current_pack` read below, which is
+        // this function's own dominating conjunct: a shared-stack session
+        // leaves `current_pack` all-`None`, so an arm placed BELOW it would be
+        // dead and would silently return "no pending pack" instead of driving
+        // the turn.
+        match session.session.kind.procedure().distribution {
+            PackDistribution::SharedStackPiles { .. } => {
+                // `forced_decision` is asked of the ONE legality authority; it
+                // is not an AI and not a pile evaluation. `None` here is the
+                // REACHABLE case, not an impossibility: the disconnect-expiry
+                // caller passes the DISCONNECTED seat, which for a shared-stack
+                // pod need not be the active one. Refusing is the only right
+                // answer -- driving the ACTIVE seat's turn because a DIFFERENT
+                // seat disconnected would be a rules violation dressed as
+                // robustness -- and it must mutate nothing.
+                let (decision, pile) = {
+                    let state = session
+                        .session
+                        .shared_stack
+                        .as_ref()
+                        .ok_or_else(|| format!("draft {draft_code} has no shared stack"))?;
+                    let decision = draft_core::shared_stack::forced_decision(state, seat)
+                        .ok_or_else(|| {
+                            format!("seat {seat} is not the active shared-stack seat")
+                        })?;
+                    // The cursor is read from the SAME state `forced_decision`
+                    // was asked about. Any other value is refused
+                    // `SharedStackRefusal::PileNotActive` -- correct behaviour,
+                    // but a silently no-op timeout path -- so the cursor is the
+                    // contract here and not an implementation detail.
+                    (decision, state.cursor)
+                };
+                let action = DraftAction::SharedStackDecision {
+                    seat,
+                    pile,
+                    decision,
+                };
+                draft_core::session::apply(&mut session.session, action, pack_source)
+                    .map_err(|e| format!("auto-pick failed: {e}"))?;
+                info!(draft = %draft_code, seat, ?decision, "drove a shared-stack turn for a stalled seat");
+                return Ok(());
+            }
+            // `PickAndPass` keeps today's body verbatim below. `AllAtOnce`
+            // reaches the same body and lands on its existing "no pending pack"
+            // refusal, which is the right answer: it has no pick step.
+            PackDistribution::PickAndPass | PackDistribution::AllAtOnce => {}
+        }
+
         let view = draft_core::view::filter_for_player(&session.session, seat);
         let pack = view
             .current_pack
@@ -525,7 +681,10 @@ impl DraftSessionManager {
 
         // CR 903.13b: a seat's pick step takes its kind's whole card count —
         // one for the four CR 905.1a kinds, two for CommanderDraft — dropping
-        // to the remainder on an odd final pick. Reading the count from the
+        // to the remainder on an odd final pick. `Winston` reports `1` on that
+        // axis but takes no pick step at all and never reaches this line: the
+        // `SharedStackPiles` arm above returned before it. Reading the count
+        // from the
         // procedure is what keeps the disconnected-seat auto-pick and the
         // reducer's `expected` in agreement by construction rather than by
         // coincidence. Was a hardcoded single id, which stalled a Commander pod
@@ -661,20 +820,21 @@ impl DraftSessionManager {
                 match_config,
                 Some(format_config.clone()),
             )?;
-            let (_token1, _) = game_mgr.join_game_with_name_and_reservation(
-                &game_code,
-                decks[1].clone(),
-                Some(choice1),
-                name1,
-                None,
-            )?;
-
-            game_mgr
-                .sessions
-                .get_mut(&game_code)
-                .ok_or_else(|| format!("spawned game missing: {game_code}"))?
-                .start_game(db)
-                .map_err(|e| format!("start_game failed for {game_code}: {e:?}"))?;
+            // The manager created this game two statements ago and nothing has
+            // handed out a handle, so the synchronous exclusive accessor is the
+            // right one — `server-core` stays free of `async`.
+            let token1 = {
+                let session = game_mgr
+                    .session_exclusive(&game_code)
+                    .ok_or_else(|| format!("spawned game missing: {game_code}"))?;
+                let (token, _) =
+                    session.join_with_reservation(decks[1].clone(), Some(choice1), name1, None)?;
+                session
+                    .start_game(db)
+                    .map_err(|e| format!("start_game failed for {game_code}: {e:?}"))?;
+                token
+            };
+            game_mgr.index_token(token1, &game_code);
 
             session
                 .active_matches
@@ -727,8 +887,20 @@ impl DraftSessionManager {
                 self.token_to_draft.remove(token);
             }
         }
+        self.reconnect.remove_game(draft_code);
         Some(session)
     }
+}
+
+/// What one [`DraftSessionManager::sweep_expired_seats`] call did, by pod.
+#[derive(Default)]
+pub struct DraftSeatSweep {
+    /// Resident pods with a lapsed seat, whose views and rows are now stale.
+    pub affected: Vec<String>,
+    /// Resident pods that freed a guest seat, whose listed count is now stale.
+    pub freed: Vec<String>,
+    /// Pods removed because their host lapsed, owed the shell's teardown.
+    pub reaped: Vec<(String, DraftSession)>,
 }
 
 /// A spawned draft match game session.
@@ -798,30 +970,8 @@ pub fn generate_draft_code() -> String {
         .collect()
 }
 
-/// Returns the appropriate reconnect grace period for the given draft phase.
-///
-/// Longer than the 10s game reconnect because tournaments span hours.
-/// - Lobby: 30 min (gathering players)
-/// - Drafting: 5 min (picks in progress, auto-pick kicks in after)
-/// - Deckbuilding: 15 min (building takes time)
-/// - MatchInProgress / BetweenRounds: 10 min
-/// - Complete / Abandoned: 1 min (draft is over)
-/// - Paused / Pairing / RoundComplete: 10 min (transient states)
-pub fn draft_grace_period(status: &DraftStatus) -> Duration {
-    match status {
-        DraftStatus::Lobby => Duration::from_secs(1800),
-        DraftStatus::Drafting => Duration::from_secs(300),
-        DraftStatus::Deckbuilding => Duration::from_secs(900),
-        DraftStatus::MatchInProgress => Duration::from_secs(600),
-        DraftStatus::RoundComplete => Duration::from_secs(600),
-        DraftStatus::Paused => Duration::from_secs(600),
-        DraftStatus::Pairing => Duration::from_secs(600),
-        DraftStatus::Complete | DraftStatus::Abandoned => Duration::from_secs(60),
-    }
-}
-
 /// The draft host occupies seat 0 (`create_draft` assigns the creator seat 0).
-const DRAFT_HOST_SEAT: usize = 0;
+pub const DRAFT_HOST_SEAT: usize = 0;
 
 /// Authorize a client-originated draft action against the authenticated seat.
 ///
@@ -862,6 +1012,19 @@ fn authorize_client_draft_action(seat: usize, action: DraftAction) -> Result<Dra
             main_deck,
             commanders,
         }),
+        // The seat is table authority and is overwritten with the
+        // authenticated one; the pile and the decision are player data and are
+        // carried through untouched. EXACTLY `Pick`'s contract above. The
+        // host-only arm below would let ONLY seat 0 ever decide, and it
+        // compiles -- which is why this arm is named rather than left to the
+        // compiler.
+        DraftAction::SharedStackDecision { pile, decision, .. } => {
+            Ok(DraftAction::SharedStackDecision {
+                seat: seat as u8,
+                pile,
+                decision,
+            })
+        }
         // Table authority: only the host may start the draft, advance rounds,
         // generate pairings, report results, or replace a seat with a bot.
         DraftAction::StartDraft
@@ -933,6 +1096,192 @@ mod tests {
         mgr.apply_system_action(&code, DraftAction::StartDraft, Some(&source))
             .unwrap();
         code
+    }
+
+    /// A 2-seat Winston pod. Every seat here is human because `start_pod`
+    /// joins human players, not because the engine requires it -- a
+    /// shared-stack pod admits bot seats. `server-core` deliberately seats no
+    /// Winston bot of its own: `pick_random_for_seat` is the timeout/disconnect
+    /// default and stays exactly that.
+    fn winston_test_config() -> DraftConfig {
+        let procedure = DraftKind::Winston.procedure();
+        DraftConfig {
+            kind: DraftKind::Winston,
+            pod_size: procedure.pod_size,
+            pack_count: procedure.packs_per_player,
+            min_deck_size: procedure.min_deck_size,
+            ..test_config()
+        }
+    }
+
+    /// V17(a). REACH, asserted AT `draft_seats_needing_auto_pick` — above the
+    /// `current_pack` conjunct that used to dominate every arm below it.
+    ///
+    /// The mutation this catches: leaving the pick-and-pass filter in place.
+    /// A Winston session leaves `current_pack` all-`None`, so the unfiltered
+    /// function returns an EMPTY sweep and every timeout arm below it is dead.
+    #[test]
+    fn draft_seats_needing_auto_pick_reaches_the_active_winston_seat() {
+        let mut mgr = DraftSessionManager::new();
+        let code = start_pod(&mut mgr, winston_test_config());
+        let session = &mut mgr.sessions.get_mut(&code).unwrap().session;
+        assert_eq!(session.status, DraftStatus::Drafting);
+        // The dominating conjunct is genuinely empty here, which is what makes
+        // this a measurement and not a coincidence.
+        assert!(session.current_pack.iter().all(Option::is_none));
+        let active = usize::from(session.shared_stack().unwrap().active_seat);
+
+        assert_eq!(draft_seats_needing_auto_pick(session, 2), vec![active]);
+
+        // Paired positive: a pick-and-pass pod still yields its seats.
+        let mut premier_mgr = DraftSessionManager::new();
+        let premier_code = start_pod(&mut premier_mgr, test_config());
+        let premier = &mut premier_mgr.sessions.get_mut(&premier_code).unwrap().session;
+        assert_eq!(
+            draft_seats_needing_auto_pick(premier, 8),
+            (0..8).collect::<Vec<_>>()
+        );
+    }
+
+    /// V17(b). The timeout path drives the ACTIVE seat's turn legally, from the
+    /// hostile turn-start state where `Take` is refused `PileEmpty` and
+    /// `Decline` is the only legal move -- `stack == 0, cursor == 0,
+    /// piles[0].is_empty()` with a later pile non-empty.
+    ///
+    /// This is the leg that discriminates WHERE the distribution `match` sits
+    /// in `pick_random_for_seat`: below the `view.current_pack` read the arm is
+    /// dead, and this test reds.
+    ///
+    /// It is also the leg that would fail if the forced decision were derived
+    /// from stack emptiness instead of from `refusal_for`.
+    #[test]
+    fn timeout_advances_a_winston_turn() {
+        let mut mgr = DraftSessionManager::new();
+        let code = start_pod(&mut mgr, winston_test_config());
+        let session = &mut mgr.sessions.get_mut(&code).unwrap().session;
+
+        // Build the hostile fixture, conserving every card into a pool rather
+        // than dropping it.
+        let (active, expected_pool_before) = {
+            let state = session.shared_stack.as_mut().unwrap();
+            let mut orphaned: Vec<_> = state.main_stack.drain(..).collect();
+            orphaned.append(&mut state.piles[0]);
+            state.inspected[0] = 0;
+            assert!(state.piles[0].is_empty());
+            assert!(
+                state.piles.iter().skip(1).any(|pile| !pile.is_empty()),
+                "a later pile is still non-empty"
+            );
+            let active = state.active_seat;
+            session.pools[0].extend(orphaned);
+            (active, session.pools[usize::from(active)].len())
+        };
+
+        mgr.pick_random_for_seat(&code, active, None)
+            .expect("the timeout path drives the active seat");
+
+        let session = &mgr.sessions[&code].session;
+        let state = session.shared_stack().unwrap();
+        // At the fixture's turn-start state `Take` is refused `PileEmpty`, so
+        // the only legal move is `Decline` on pile 0 — which ADVANCES THE
+        // CURSOR rather than ending the turn. Assert that something moved
+        // before driving the rest of the turn below.
+        assert!(
+            state.cursor == 1 || state.active_seat != active,
+            "the turn advanced in some direction"
+        );
+
+        // Drive the rest of this seat's turn through the same entry point.
+        let mut guard = 0;
+        while mgr.sessions[&code]
+            .session
+            .shared_stack()
+            .unwrap()
+            .active_seat
+            == active
+            && mgr.sessions[&code].session.status == DraftStatus::Drafting
+        {
+            mgr.pick_random_for_seat(&code, active, None)
+                .expect("the timeout path keeps driving the active seat");
+            guard += 1;
+            assert!(guard < 8, "the turn did not end");
+        }
+        let session = &mgr.sessions[&code].session;
+        assert_ne!(
+            session.shared_stack().unwrap().active_seat,
+            active,
+            "the turn passed to the other seat"
+        );
+        assert!(
+            session.pools[usize::from(active)].len() > expected_pool_before,
+            "the timed-out seat's pool grew by at least one card"
+        );
+    }
+
+    /// V17(c). MULTI-AUTHORITY HOSTILE FIXTURE: the disconnect-expiry caller
+    /// passes the DISCONNECTED seat, which need not be the active one.
+    ///
+    /// The mutation it catches is an arm that falls back to "drive the active
+    /// seat instead" -- so the assertion is that NOTHING moved.
+    #[test]
+    fn disconnect_expiry_refuses_a_non_active_winston_seat() {
+        let mut mgr = DraftSessionManager::new();
+        let code = start_pod(&mut mgr, winston_test_config());
+        let active = mgr.sessions[&code]
+            .session
+            .shared_stack()
+            .unwrap()
+            .active_seat;
+        let idle = (active + 1) % 2;
+        let before = mgr.sessions[&code].session.shared_stack.clone();
+        let pools_before = mgr.sessions[&code].session.pools.clone();
+
+        let error = mgr
+            .pick_random_for_seat(&code, idle, None)
+            .expect_err("a non-active seat has no turn to advance");
+        assert!(
+            error.contains("not the active shared-stack seat"),
+            "{error}"
+        );
+        let session = &mgr.sessions[&code].session;
+        assert_eq!(session.shared_stack, before, "nothing moved");
+        assert_eq!(session.pools, pools_before, "no pool moved");
+
+        // Paired positive IN THE SAME TEST: the identical call for the ACTIVE
+        // seat succeeds, so the refusal is about the seat and not about the
+        // kind.
+        mgr.pick_random_for_seat(&code, active, None)
+            .expect("the active seat's turn is driveable");
+        assert_ne!(mgr.sessions[&code].session.shared_stack, before);
+    }
+
+    /// V29. The payload seat is TABLE authority and is overwritten with the
+    /// authenticated one; `pile` and `decision` are player data and survive
+    /// untouched -- exactly `Pick`'s contract.
+    #[test]
+    fn shared_stack_decision_is_rescoped_to_the_authenticated_seat() {
+        use draft_core::types::SharedStackPileDecision;
+
+        let action = authorize_client_draft_action(
+            2,
+            DraftAction::SharedStackDecision {
+                seat: 1,
+                pile: 2,
+                decision: SharedStackPileDecision::Decline,
+            },
+        )
+        .expect("a shared-stack decision is allowed for any seat");
+        assert_eq!(
+            action,
+            DraftAction::SharedStackDecision {
+                seat: 2,
+                pile: 2,
+                decision: SharedStackPileDecision::Decline,
+            }
+        );
+        // Paired positive: a host-only action from seat 1 is still refused, so
+        // this arm did not land in the host-only group.
+        assert!(authorize_client_draft_action(1, DraftAction::StartDraft).is_err());
     }
 
     /// CR 903.13b: the disconnected-seat auto-pick takes the kind's WHOLE pick
@@ -1372,7 +1721,7 @@ mod tests {
             .expect("missing deck submissions should skip only the incomplete pairing");
 
         assert!(spawns.is_empty());
-        assert!(game_mgr.sessions.is_empty());
+        assert_eq!(game_mgr.game_count(), 0);
     }
 
     #[test]
@@ -1532,26 +1881,120 @@ mod tests {
     }
 
     #[test]
-    fn draft_grace_period_returns_correct_durations() {
+    fn join_draft_is_refused_while_the_host_is_away() {
+        let mut mgr = DraftSessionManager::new();
+        let (code, host_token, _) = mgr.create_draft(test_config(), "Alice".to_string());
+        mgr.handle_disconnect(&code, DRAFT_HOST_SEAT);
+        let tokens = mgr.sessions[&code].player_tokens.clone();
+        let connected = mgr.sessions[&code].connected.clone();
+        let indexed = mgr.token_to_draft.len();
+
         assert_eq!(
-            draft_grace_period(&DraftStatus::Lobby),
-            Duration::from_secs(1800)
+            mgr.join_draft(&code, "Bob".to_string(), None).map(|_| ()),
+            Err(HOST_AWAY_REFUSAL.to_string())
         );
+        assert_eq!(mgr.sessions[&code].player_tokens, tokens);
+        assert_eq!(mgr.sessions[&code].connected, connected);
+        assert_eq!(mgr.token_to_draft.len(), indexed);
+
+        mgr.handle_reconnect(&code, &host_token)
+            .expect("host returns");
+        let (_, seat, _) = mgr
+            .join_draft(&code, "Bob".to_string(), None)
+            .expect("admitted once the host is back");
+        assert_eq!(seat, 1);
+    }
+
+    #[test]
+    fn a_lobby_pod_is_live_while_its_host_is_connected_or_in_grace() {
+        let mut mgr = DraftSessionManager::new();
+        let (code, host_token, _) = mgr.create_draft(test_config(), "Alice".to_string());
+        assert!(mgr.is_live_lobby_pod(&code));
+        mgr.handle_disconnect(&code, DRAFT_HOST_SEAT);
+        assert!(mgr.is_live_lobby_pod(&code));
+
+        mgr.handle_reconnect(&code, &host_token)
+            .expect("host returns");
+        mgr.reconnect.grace_period = std::time::Duration::ZERO;
+        mgr.handle_disconnect(&code, DRAFT_HOST_SEAT);
+        std::thread::sleep(std::time::Duration::from_millis(2));
         assert_eq!(
-            draft_grace_period(&DraftStatus::Drafting),
-            Duration::from_secs(300)
+            mgr.reconnect.check_expired_with_players(),
+            vec![(code.clone(), PlayerId(0))]
         );
+        assert!(!mgr.is_live_lobby_pod(&code));
+
+        let drafting = start_pod(&mut mgr, test_config());
+        assert!(!mgr.is_live_lobby_pod(&drafting));
+    }
+
+    #[test]
+    fn sweep_expired_seats_reaps_frees_and_auto_picks_by_status() {
+        let mut mgr = DraftSessionManager::new();
+        let (reaped, _, _) = mgr.create_draft(test_config(), "Alice".to_string());
+        mgr.join_draft(&reaped, "Bob".to_string(), None).unwrap();
+        let (freed, _, _) = mgr.create_draft(test_config(), "Carol".to_string());
+        let (lapsed_guest, _, _) = mgr.join_draft(&freed, "Dan".to_string(), None).unwrap();
+        let (waiting, _, _) = mgr.create_draft(test_config(), "Erin".to_string());
+        let (waiting_guest, _, _) = mgr.join_draft(&waiting, "Finn".to_string(), None).unwrap();
+        let drafting = start_pod(&mut mgr, test_config());
+
+        mgr.handle_disconnect(&reaped, 1);
+        mgr.handle_disconnect(&waiting, 1);
+        mgr.reconnect.grace_period = std::time::Duration::ZERO;
+        mgr.handle_disconnect(&reaped, DRAFT_HOST_SEAT);
+        mgr.handle_disconnect(&freed, 1);
+        mgr.handle_disconnect(&drafting, DRAFT_HOST_SEAT);
+        let pool_before = mgr.sessions[&drafting].session.pools[0].len();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        let sweep = mgr.sweep_expired_seats();
+
+        let reaped_codes: Vec<&str> = sweep.reaped.iter().map(|(c, _)| c.as_str()).collect();
+        assert_eq!(reaped_codes, [reaped.as_str()]);
+        assert!(!mgr.sessions.contains_key(&reaped));
+        assert!(!mgr.reconnect.is_disconnected(&reaped, PlayerId(1)));
+
+        assert_eq!(sweep.freed, [freed.as_str()]);
+        let pod = &mgr.sessions[&freed];
+        assert_eq!(pod.first_open_seat(), Some(1));
+        assert!(pod.display_names[1].is_empty());
+        assert_eq!(mgr.draft_for_token(&lapsed_guest), None);
+
         assert_eq!(
-            draft_grace_period(&DraftStatus::Deckbuilding),
-            Duration::from_secs(900)
+            mgr.sessions[&waiting].seat_for_token(&waiting_guest),
+            Some(1)
         );
+        assert!(mgr.reconnect.is_disconnected(&waiting, PlayerId(1)));
+
+        assert!(mgr.sessions.contains_key(&drafting));
         assert_eq!(
-            draft_grace_period(&DraftStatus::MatchInProgress),
-            Duration::from_secs(600)
+            mgr.sessions[&drafting].session.pools[0].len(),
+            pool_before + 1
         );
+        assert!(sweep.affected.contains(&drafting));
+        assert!(sweep.affected.contains(&freed));
+        assert!(!sweep.affected.contains(&reaped));
+    }
+
+    #[test]
+    fn restore_persisted_session_records_every_claimed_seat() {
+        let mut mgr = DraftSessionManager::new();
+        let (code, _, _) = mgr.create_draft(test_config(), "Alice".to_string());
+        for i in 1..4 {
+            mgr.join_draft(&code, format!("Player {i}"), None).unwrap();
+        }
+        let persisted = mgr.sessions[&code].to_persisted();
+
+        let mut restored = DraftSessionManager::new();
+        restored.restore_persisted_session(persisted).unwrap();
+
+        let recorded: Vec<bool> = (0..8u8)
+            .map(|seat| restored.reconnect.is_disconnected(&code, PlayerId(seat)))
+            .collect();
         assert_eq!(
-            draft_grace_period(&DraftStatus::Complete),
-            Duration::from_secs(60)
+            recorded,
+            [true, true, true, true, false, false, false, false]
         );
     }
 

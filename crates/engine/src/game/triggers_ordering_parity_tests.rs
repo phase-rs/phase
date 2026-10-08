@@ -132,6 +132,11 @@ const CATEGORY_1_ROWS: &[&str] = &[
 /// Grouped by class; each entry carries its one-line safety argument (§7 ledger
 /// source of truth).
 const DOCUMENTED_OVER_PROMPT: &[&str] = &[
+    // Adaptive Training Post: its source-local charge-counter intervening-if
+    // and the corresponding TriggeringSource counter write are disjoint for
+    // same-event sibling triggers, so they commute. The conservative prompt
+    // remains fail-closed until that per-source proof is structural.
+    "adaptive training post",
     // ---- L8-held: a self-scoped write can flip a sibling's re-checked
     // intervening-if (CR 603.4), but the flip is monotone/self-limiting, so
     // identical siblings still commute semantically. The L8 idempotence recognizer
@@ -274,6 +279,16 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // assertion names the consumed set directly, so the next maintainer need not
     // re-derive it.
     "biowaste blob",
+    // ---- dynamic P/T read of frozen or per-source objects (CR 603.10a) ----
+    // Token P/T = total power of the co-departed batch: a frozen LKI read no sibling's
+    // token creation changes, so the copies' tokens are identical in either order.
+    "the skullspore nexus",
+    // -X/-X where X is the mana value of the card THIS source exiled: each member reads
+    // its own exile pile and writes only to it, so the members commute.
+    "cemetery desecrator",
+    // Slime counter on SelfRef, then a token whose P/T reads the granter-named source's counters
+    // (member-bound, fail-closed): each member touches only its own source's counters, so they commute (#9682).
+    "gutter grime",
 ];
 
 /// Batch-depth GENUINE order-dependence (kept SEPARATE from the same-event

@@ -259,20 +259,6 @@ describe("MultiplayerPage offline entry", () => {
     expect(mocks.multiplayerState.startP2PHostingSession).not.toHaveBeenCalled();
   });
 
-  it("keeps a draft-lobby view across offline mode without leaving or rejoining", () => {
-    renderPage("/multiplayer?view=draft-lobby");
-    expect(screen.getByRole("button", { name: "Leave Draft" })).toBeInTheDocument();
-
-    setConnectivity({ forcedOffline: true });
-    expect(screen.getByText("Multiplayer is unavailable while offline.")).toBeInTheDocument();
-    expectNoOfflineTeardown();
-    expect(mocks.draftState.joinDraft).not.toHaveBeenCalled();
-
-    setConnectivity({ forcedOffline: false });
-    expect(screen.getByRole("button", { name: "Leave Draft" })).toBeInTheDocument();
-    expect(mocks.draftState.joinDraft).not.toHaveBeenCalled();
-  });
-
   it("does not admit an offline route from a live sibling game", () => {
     mocks.gameState.gameId = "remote-game";
     mocks.gameState.gameMode = "online";

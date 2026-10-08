@@ -6,7 +6,7 @@ import {
   GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS,
   type AnimationStep,
 } from "../../../animation/types.ts";
-import { useAnimationStore } from "../../../stores/animationStore.ts";
+import { type QueuedStep, useAnimationStore } from "../../../stores/animationStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { buildGameState } from "../../../test/factories/gameStateFactory.ts";
@@ -21,9 +21,10 @@ function setLife(playerId: number, life: number) {
 }
 
 // A combat step that damages `playerId` for `amount` (LifeChanged + DamageDealt).
-function combatDamageStep(playerId: number, amount: number): AnimationStep {
+function combatDamageStep(playerId: number, amount: number): QueuedStep {
   return {
     duration: 900,
+    snapshotSeq: 1,
     effects: [
       {
         event: { type: "LifeChanged", data: { player_id: playerId, amount } },
@@ -45,9 +46,10 @@ function combatDamageStep(playerId: number, amount: number): AnimationStep {
   };
 }
 
-function groupedDamageStep(playerId: number, lifeAmount?: number, lifePlayerId = playerId): AnimationStep {
+function groupedDamageStep(playerId: number, lifeAmount?: number, lifePlayerId = playerId): QueuedStep {
   return {
     duration: 900,
+    snapshotSeq: 1,
     effects: [
       {
         event: {

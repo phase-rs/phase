@@ -101,6 +101,7 @@ pub(crate) fn empty_back_face() -> BackFaceData {
         parse_warnings: vec![],
         layout_kind: None,
         is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
     }
 }
 

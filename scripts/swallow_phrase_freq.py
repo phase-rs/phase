@@ -21,12 +21,11 @@ Normalization rules (aggressive — we want shape, not specifics):
   * collapse whitespace
   * trim trailing/leading filler
 """
+import argparse
 import json
 import re
-import sys
 from collections import Counter, defaultdict
-
-CARDS = json.load(open("client/public/card-data.json"))
+from pathlib import Path
 
 PARENS = re.compile(r"\([^)]*\)")
 MANA   = re.compile(r"(?:\{[^}]+\})+")
@@ -72,12 +71,40 @@ def sentence_around(text: str, start: int, end: int) -> str:
         e = len(text)
     return text[s:e].strip()
 
-target_class = sys.argv[1] if len(sys.argv) > 1 else None
-top_n        = int(sys.argv[2]) if len(sys.argv) > 2 else 30
+def gap_phrase(w):
+    """The engine's own rejected phrase, or None.
+
+    Read with `.get`, never `w["gap"]`: the key is omitted whenever the axis named no
+    phrase — the same `skip_serializing_if` treatment `items` already gets, which is
+    why some records serialize with no `items` key either.
+
+    The value is joined across every field except the tag, so this needs no copy of
+    the ClauseGap field-name table: `{"kind":"unparsed_condition","guard":"X"}` yields
+    "X" and `{"kind":"unparsed_verb_arguments","verb":"deal","arguments":"Y"}` yields
+    "deal Y", both in serde's declaration order.
+    """
+    g = w.get("gap")
+    if not g:
+        return None
+    return " ".join(str(v) for k, v in g.items() if k != "kind")
+
+
+ap = argparse.ArgumentParser(description=__doc__,
+                             formatter_class=argparse.RawDescriptionHelpFormatter)
+ap.add_argument("--card-data", type=Path, default=Path("client/public/card-data.json"),
+                help="path to card-data.json")
+ap.add_argument("target_class", nargs="?", default=None)
+ap.add_argument("top_n", nargs="?", type=int, default=30)
+args = ap.parse_args()
+
+CARDS        = json.load(open(args.card_data))
+target_class = args.target_class
+top_n        = args.top_n
 
 freq    = defaultdict(Counter)
 samples = defaultdict(lambda: defaultdict(list))
-cls_re  = re.compile(r"^Swallow:([A-Za-z_]+)\s+—")
+n_gap   = 0
+n_total = 0
 
 for cname, card in CARDS.items():
     warnings = card.get("parse_warnings") or []
@@ -87,28 +114,37 @@ for cname, card in CARDS.items():
     cleaned = PARENS.sub("", raw).lower()
     seen_classes = set()
     for w in warnings:
-        m = cls_re.match(w)
-        if not m:
+        # The detector is a real field now; TargetFallback / IgnoredRemainder carry none.
+        if not isinstance(w, dict) or w.get("type") != "SwallowedClause":
             continue
-        cls = m.group(1)
+        cls = w["detector"]
         if cls in seen_classes:
             continue  # don't double-count the same class for one card
         seen_classes.add(cls)
         if target_class and cls != target_class:
             continue
-        regex = TRIGGERS.get(cls)
-        if not regex:
-            continue
-        rm = regex.search(cleaned)
-        if not rm:
-            continue
-        sent = sentence_around(cleaned, rm.start(), rm.end())
+        # Prefer the engine's own typed phrase; fall back to the regex locator so this
+        # still runs against an export written before the field existed.
+        phrase = gap_phrase(w)
+        if phrase is not None:
+            sent = phrase
+            n_gap += 1
+        else:
+            regex = TRIGGERS.get(cls)
+            if not regex:
+                continue
+            rm = regex.search(cleaned)
+            if not rm:
+                continue
+            sent = sentence_around(cleaned, rm.start(), rm.end())
+        n_total += 1
         norm = normalize(sent, card["name"])
         freq[cls][norm] += 1
         if len(samples[cls][norm]) < 3:
             samples[cls][norm].append(card["name"])
 
 order = sorted(freq.keys(), key=lambda k: -sum(freq[k].values()))
+print(f"\n({n_gap} of {n_total} rows from engine gap phrases)")
 for cls in order:
     total = sum(freq[cls].values())
     distinct = len(freq[cls])

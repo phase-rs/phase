@@ -1945,9 +1945,11 @@ fn earthbend_return_skips_shock_land_pay_life_prompt() {
         controller_override: Some(P0),
         enter_transformed: false,
         face_down_profile: None,
+        face_down_in_exile: engine::types::ability::ExileConcealment::Public,
         chain_referent: engine::types::zones::ChainReferentIntent::Silent,
         enter_as_copy: None,
         discard_frame: None,
+        performed_by: None,
         applied: std::collections::HashSet::new(),
     };
 
@@ -2024,9 +2026,11 @@ fn plain_shock_land_etb_still_prompts_for_life_payment() {
         controller_override: None,
         enter_transformed: false,
         face_down_profile: None,
+        face_down_in_exile: engine::types::ability::ExileConcealment::Public,
         chain_referent: engine::types::zones::ChainReferentIntent::Silent,
         enter_as_copy: None,
         discard_frame: None,
+        performed_by: None,
         applied: std::collections::HashSet::new(),
     };
 

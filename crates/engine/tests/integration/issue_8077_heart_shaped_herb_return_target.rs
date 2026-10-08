@@ -37,6 +37,12 @@ use engine::types::zones::Zone;
 
 use crate::support::shared_card_db as load_db;
 
+/// CR 613: power/toughness after the layer pipeline has been applied.
+fn power_toughness(runner: &GameRunner, id: ObjectId) -> (i32, i32) {
+    let obj = runner.state().objects.get(&id).expect("object present");
+    (obj.power.unwrap_or(0), obj.toughness.unwrap_or(0))
+}
+
 fn mana(kind: ManaType, n: usize) -> Vec<ManaUnit> {
     vec![ManaUnit::new(kind, ObjectId(0), false, vec![]); n]
 }
@@ -243,4 +249,123 @@ fn heart_shaped_herb_returns_whichever_creature_was_chosen() {
     assert_eq!(plus1plus1_counters(runner.state(), solemn), 0);
 
     assert_eq!(runner.state().monarch, Some(P0));
+}
+
+/// The Equipment case from the Discord report: a creature wearing an Equipment
+/// is sacrificed and returned by Heart-Shaped Herb, both inside ONE resolution.
+///
+/// CR 704.3 + CR 704.4: state-based actions are checked only when a player
+/// would receive priority and "pay no attention to what happens during the
+/// resolution of a spell or ability", so the CR 704.5n unattach SBA never
+/// observes the host as absent. `ObjectId` is storage identity in this engine,
+/// so a back-pointer left dangling by the host's exit re-validates against the
+/// RETURNED permanent — which CR 400.7 makes a new object with no relation to
+/// the one that left. Observed symptoms, both asserted below: the Equipment
+/// rendered nowhere (its `attached_to` was set but no host listed it), and the
+/// returned creature kept the Equipment's continuous bonus.
+///
+/// CR 301.5c: the Equipment itself remains on the battlefield, unattached.
+#[test]
+fn equipment_unattaches_when_heart_shaped_herb_returns_its_host() {
+    let db = load_db().expect("integration card fixture must load");
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let herb = scenario.add_real_card(P0, "Heart-Shaped Herb", Zone::Battlefield, db);
+    let creature = scenario.add_creature(P0, "Solemn Simulacrum", 2, 2).id();
+    // A second creature keeps the sacrifice genuinely interactive — with a sole
+    // eligible creature the engine auto-selects and never surfaces
+    // `EffectZoneChoice`, so the equipped creature would be sacrificed by
+    // default rather than by the player's choice.
+    let bystander = scenario
+        .add_creature(P1, "Bystander Bear", 2, 2)
+        .controlled_by(P0)
+        .id();
+    // Bonesplitter: "Equipped creature gets +2/+0." A real card, so the bonus
+    // travels through the production parser and layer pipeline rather than a
+    // hand-built modification.
+    let bonesplitter = scenario.add_real_card(P0, "Bonesplitter", Zone::Battlefield, db);
+    scenario.with_mana_pool(P0, mana(ManaType::Colorless, 2));
+
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    engine::game::effects::attach::attach_to(runner.state_mut(), bonesplitter, creature);
+    engine::game::layers::evaluate_layers(runner.state_mut());
+
+    // REACH GUARD: prove the fixture actually built the equipped state and that
+    // the bonus is live. Without this, every post-resolution assertion below
+    // could pass for the trivial reason that the Equipment never applied.
+    assert_eq!(
+        runner.state().objects[&bonesplitter].attached_to,
+        Some(engine::game::game_object::AttachTarget::Object(creature)),
+        "precondition: Bonesplitter must be attached to the creature"
+    );
+    assert!(
+        runner.state().objects[&creature]
+            .attachments
+            .contains(&bonesplitter),
+        "precondition: the host must list the Equipment (symmetric edge)"
+    );
+    assert_eq!(
+        power_toughness(&runner, creature),
+        (4, 2),
+        "precondition: Bonesplitter's +2/+0 must be live on the 2/2 host"
+    );
+
+    activate_and_choose(&mut runner, herb, creature);
+
+    // The unchosen creature is untouched — it keeps no Equipment it never had.
+    assert!(
+        runner.state().battlefield.contains(&bystander),
+        "the non-chosen creature must remain on the battlefield"
+    );
+    assert!(
+        runner.state().objects[&bystander].attachments.is_empty(),
+        "the Equipment must not migrate to the untouched creature"
+    );
+
+    // The creature came back (that is issue #8077's behavior, re-asserted here
+    // as a reach guard so the assertions below are about the RETURNED object).
+    assert_eq!(
+        runner.state().objects[&creature].zone,
+        Zone::Battlefield,
+        "the sacrificed creature must return to the battlefield"
+    );
+    assert_eq!(
+        plus1plus1_counters(runner.state(), creature),
+        3,
+        "the returned creature must carry three +1/+1 counters"
+    );
+
+    // CR 704.5n / CR 301.5c: the Equipment stays on the battlefield...
+    assert_eq!(
+        runner.state().objects[&bonesplitter].zone,
+        Zone::Battlefield,
+        "the Equipment must remain on the battlefield, not vanish"
+    );
+    // ...unattached, in BOTH directions. A one-sided sever is exactly what made
+    // it invisible: the client drops an attachment whose `attached_to` is set
+    // from the battlefield rows, expecting the host surface to render it.
+    assert_eq!(
+        runner.state().objects[&bonesplitter].attached_to,
+        None,
+        "CR 704.5n: the Equipment must be unattached once its host left the battlefield"
+    );
+    assert!(
+        !runner.state().objects[&creature]
+            .attachments
+            .contains(&bonesplitter),
+        "CR 400.7: the returned permanent is a new object and must not inherit the attachment"
+    );
+
+    // CR 400.7: no memory of, or relation to, its previous existence — so the
+    // Equipment's +2/+0 must be gone. 2/2 base + three +1/+1 counters = 5/5;
+    // with the stale edge re-validating it was 7/5.
+    assert_eq!(
+        power_toughness(&runner, creature),
+        (5, 5),
+        "the returned creature must be base 2/2 plus three +1/+1 counters, with NO \
+         Bonesplitter bonus — a 7/5 here means the stale attachment re-applied"
+    );
 }

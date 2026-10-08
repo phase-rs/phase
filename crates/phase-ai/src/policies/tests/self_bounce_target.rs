@@ -9,7 +9,7 @@
 
 use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
 use engine::game::zones::create_object;
-use engine::types::ability::EffectKind;
+use engine::types::ability::{EffectKind, ExileConcealment};
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::format::FormatConfig;
@@ -209,6 +209,7 @@ fn eval(
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: ExileConcealment::Public,
             face_down_profile: None,
             enter_with_counters: Vec::new(),
             conditional_enter_with_counters: Vec::new(),

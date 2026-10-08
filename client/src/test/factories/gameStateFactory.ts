@@ -8,6 +8,8 @@ import type {
   GameState,
   LegalActionsResult,
   LoopCertificate,
+  ManaSourceSelection,
+  ManaType,
   ObjectId,
   PendingCast,
   Phase,
@@ -31,6 +33,7 @@ type TriggerTargetSelectionWaitingFor = Extract<
 >;
 type ChooseXValueWaitingFor = Extract<WaitingFor, { type: "ChooseXValue" }>;
 type PayAmountChoiceWaitingFor = Extract<WaitingFor, { type: "PayAmountChoice" }>;
+type ManaSourceSelectionWaitingFor = Extract<WaitingFor, { type: "ManaSourceSelection" }>;
 type UntapChoiceWaitingFor = Extract<WaitingFor, { type: "UntapChoice" }>;
 type AssistPaymentWaitingFor = Extract<WaitingFor, { type: "AssistPayment" }>;
 type CastOfferWaitingFor = Extract<WaitingFor, { type: "CastOffer" }>;
@@ -46,6 +49,11 @@ type ResolutionOptionalPaymentWaitingFor = Extract<
   WaitingFor,
   { type: "ResolutionOptionalPaymentChoice" }
 >;
+type OptionalEffectChoiceWaitingFor = Extract<
+  WaitingFor,
+  { type: "OptionalEffectChoice" }
+>;
+type OpponentMayChoiceWaitingFor = Extract<WaitingFor, { type: "OpponentMayChoice" }>;
 type WaitingForWithData = Extract<WaitingFor, { data: object }>;
 
 /**
@@ -207,6 +215,33 @@ export const resolutionOptionalPaymentWaitingForFactory =
       },
     }),
   );
+
+export class OptionalEffectChoiceWaitingForFactory extends PlayerWaitingForFactory<OptionalEffectChoiceWaitingFor> {}
+
+export const optionalEffectChoiceWaitingForFactory =
+  OptionalEffectChoiceWaitingForFactory.define((): OptionalEffectChoiceWaitingFor => ({
+    type: "OptionalEffectChoice",
+    data: {
+      player: 0,
+      source_id: 1,
+      description: undefined,
+      may_trigger_key: undefined,
+      same_card_may_trigger_choice_available: false,
+    },
+  }));
+
+export class OpponentMayChoiceWaitingForFactory extends PlayerWaitingForFactory<OpponentMayChoiceWaitingFor> {}
+
+export const opponentMayChoiceWaitingForFactory =
+  OpponentMayChoiceWaitingForFactory.define((): OpponentMayChoiceWaitingFor => ({
+    type: "OpponentMayChoice",
+    data: {
+      player: 0,
+      source_id: 1,
+      description: undefined,
+      remaining: [],
+    },
+  }));
 
 export class UntapChoiceWaitingForFactory extends PlayerWaitingForFactory<UntapChoiceWaitingFor> {}
 
@@ -448,6 +483,71 @@ export const buildPayAmountChoiceWaitingFor = (
   return payAmountChoiceWaitingForFactory.withData(overrides.data ?? {}).build();
 };
 
+export class ManaSourceOptionFactory extends Factory<ManaSourceSelection> {
+  forSource(objectId: ObjectId, incarnation = 0) {
+    return this.params({ source: { object_id: objectId, incarnation } });
+  }
+
+  abilityIndex(n: number) {
+    return this.params({ ability_index: n });
+  }
+
+  concrete(manaType: ManaType) {
+    return this.afterBuild((selection) => {
+      selection.mana_type = manaType;
+      selection.output = { type: "Concrete", data: manaType };
+      return selection;
+    });
+  }
+
+  deferred(quantity: number | "Variable" = 1) {
+    return this.afterBuild((selection) => {
+      selection.mana_type = "Colorless";
+      selection.output = {
+        type: "DeferredColorChoice",
+        data: { quantity: quantity === "Variable" ? { type: "Variable" } : { type: "Fixed", data: quantity } },
+      };
+      selection.atomic_combination = null;
+      return selection;
+    });
+  }
+
+  withCombination(types: ManaType[]) {
+    return this.afterBuild((selection) => {
+      selection.atomic_combination = types;
+      return selection;
+    });
+  }
+
+}
+
+export const manaSourceOptionFactory = ManaSourceOptionFactory.define(
+  (): ManaSourceSelection => ({
+    source: { object_id: 1, incarnation: 0 },
+    ability_index: 0,
+    mana_type: "Black",
+    output: { type: "Concrete", data: "Black" },
+    atomic_combination: null,
+    restrictions: [],
+    penalty: "Sacrifices",
+    taps_for_mana: [],
+  }),
+);
+
+export class ManaSourceSelectionWaitingForFactory extends PlayerWaitingForFactory<ManaSourceSelectionWaitingFor> {}
+
+export const manaSourceSelectionWaitingForFactory =
+  ManaSourceSelectionWaitingForFactory.define((): ManaSourceSelectionWaitingFor => ({
+    type: "ManaSourceSelection",
+    data: { player: 0, options: [] },
+  }));
+
+export const buildManaSourceSelectionWaitingFor = (
+  overrides: Partial<ManaSourceSelectionWaitingFor> = {},
+): ManaSourceSelectionWaitingFor => {
+  return manaSourceSelectionWaitingForFactory.withData(overrides.data ?? {}).build();
+};
+
 export class AssistPaymentWaitingForFactory extends WaitingForFactory<AssistPaymentWaitingFor> {
   withCaster(caster: PlayerId) {
     return this.withData({ caster });
@@ -546,6 +646,14 @@ export class WaitingForVariantFactory extends Factory<WaitingFor, WaitingForTran
     );
   }
 
+  optionalEffectChoice(data: Partial<OptionalEffectChoiceWaitingFor["data"]> = {}) {
+    return this.variant(optionalEffectChoiceWaitingForFactory.withData(data).build());
+  }
+
+  opponentMayChoice(data: Partial<OpponentMayChoiceWaitingFor["data"]> = {}) {
+    return this.variant(opponentMayChoiceWaitingForFactory.withData(data).build());
+  }
+
   untapChoice(data: Partial<UntapChoiceWaitingFor["data"]> = {}) {
     return this.variant(untapChoiceWaitingForFactory.withData(data).build());
   }
@@ -578,6 +686,10 @@ export class WaitingForVariantFactory extends Factory<WaitingFor, WaitingForTran
 
   payAmountChoice(data: Partial<PayAmountChoiceWaitingFor["data"]> = {}) {
     return this.variant(payAmountChoiceWaitingForFactory.withData(data).build());
+  }
+
+  manaSourceSelection(data: Partial<ManaSourceSelectionWaitingFor["data"]> = {}) {
+    return this.variant(manaSourceSelectionWaitingForFactory.withData(data).build());
   }
 
   assistPayment(data: Partial<AssistPaymentWaitingFor["data"]> = {}) {
@@ -811,6 +923,14 @@ export class GameStateFactory extends Factory<GameState> {
     return this.waitingFor(waitingForFactory.resolutionOptionalPayment(data).build());
   }
 
+  optionalEffectChoice(data: Partial<OptionalEffectChoiceWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.optionalEffectChoice(data).build());
+  }
+
+  opponentMayChoice(data: Partial<OpponentMayChoiceWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.opponentMayChoice(data).build());
+  }
+
   untapChoice(data: Partial<UntapChoiceWaitingFor["data"]> = {}) {
     return this.waitingFor(waitingForFactory.untapChoice(data).build());
   }
@@ -843,6 +963,10 @@ export class GameStateFactory extends Factory<GameState> {
 
   payAmountChoice(data: Partial<PayAmountChoiceWaitingFor["data"]> = {}) {
     return this.waitingFor(waitingForFactory.payAmountChoice(data).build());
+  }
+
+  manaSourceSelection(data: Partial<ManaSourceSelectionWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.manaSourceSelection(data).build());
   }
 
   assistPayment(data: Partial<AssistPaymentWaitingFor["data"]> = {}) {

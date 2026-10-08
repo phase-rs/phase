@@ -93,11 +93,16 @@ fn continuation_search_exile_then_shuffle() {
     let Some(change_zone) = def.sub_ability.as_ref() else {
         panic!("search should chain into the exile destination");
     };
+    assert!(
+        change_zone.face_down_in_exile.is_face_down(),
+        "face-down SearchLibrary exile must use the typed intent carrier"
+    );
     match &*change_zone.effect {
         Effect::ChangeZone {
             origin: Some(Zone::Library),
             destination: Zone::Exile,
             target: TargetFilter::Any,
+            face_down_profile: None,
             ..
         } => {}
         other => panic!("expected library-to-exile search destination, got {other:?}"),
@@ -441,6 +446,149 @@ fn assembly_create_token_and_pump() {
         AbilityKind::Spell,
     );
     assert_json_snapshot!("assembly_create_token_put_counter", def);
+}
+
+/// CR 400.1 + CR 201.2: the same-name graveyard-return tail must follow the
+/// DESTINATION the card names, not one baked into the recognizer.
+///
+/// Echoing Return — "Return target creature card and all other cards with the
+/// same name as that card from your graveyard to your hand." — is the card this
+/// fixes. The recognizer matched a literal marker ending "... to the
+/// battlefield", so a hand destination failed the match outright and the entire
+/// same-name clause was dropped: the spell returned its single target and left
+/// every other copy in the graveyard, with no parse warning to show for it.
+///
+/// Revert-failing: restore "to the battlefield" into the marker string and the
+/// `to your hand` case below loses its tail (`sub_ability` is `None`).
+///
+/// The `to your hand tapped` case is the paired negative. CR 110.5b + CR 110.5d:
+/// 110.5b sets the default entry state, and 110.5d is the rule that actually makes
+/// status battlefield-only ("cards not on the battlefield are neither tapped nor
+/// untapped"), so "tapped" is admitted only on the battlefield arm. The repo pairs
+/// these two for exactly this proposition at
+/// `game/conditions.rs::eval_source_is_tapped_on_battlefield` (the zone-guarded tap
+/// predicate) and its scope-parameterized sibling `StaticCondition::IsTapped` in
+/// `types/ability.rs`.
+#[test]
+fn same_name_graveyard_return_follows_the_named_destination() {
+    let to_hand = parse_effect_chain(
+        "Return target creature card and all other cards with the same name as that card from your graveyard to your hand.",
+        AbilityKind::Spell,
+    );
+    let Effect::ChangeZone { destination, .. } = &*to_hand.effect else {
+        panic!("expected a primary ChangeZone, got {:?}", to_hand.effect);
+    };
+    assert_eq!(
+        *destination,
+        Zone::Hand,
+        "primary must follow the card's text"
+    );
+
+    let tail = to_hand
+        .sub_ability
+        .as_ref()
+        .expect("the same-name tail must survive a hand destination");
+    let Effect::ChangeZoneAll {
+        origin,
+        destination,
+        target,
+        enter_tapped,
+        ..
+    } = &*tail.effect
+    else {
+        panic!("expected a ChangeZoneAll tail, got {:?}", tail.effect);
+    };
+    assert_eq!(*origin, Some(Zone::Graveyard));
+    assert_eq!(
+        *destination,
+        Zone::Hand,
+        "the tail must land where the target does"
+    );
+    // CR 110.5d: a card in hand has no tapped status, so the hand arm must carry
+    // no entry state at all — neither Tapped nor an explicit Untapped.
+    assert!(
+        enter_tapped.is_unspecified(),
+        "a hand destination has no entry tap state, got {enter_tapped:?}"
+    );
+    let TargetFilter::Typed(tf) = target else {
+        panic!("expected a typed tail filter, got {target:?}");
+    };
+    assert!(
+        tf.properties.contains(&FilterProp::SameNameAsParentTarget),
+        "the tail is the same-NAME group, got {:?}",
+        tf.properties
+    );
+
+    // Reach-guard: the battlefield destination this recognizer already served
+    // (Rat King, Verminister) must be untouched, so the assertions above are
+    // about the DESTINATION and not about the tail being broken outright.
+    let to_battlefield = parse_effect_chain(
+        "Return target creature card and all other cards with the same name as that card from your graveyard to the battlefield tapped.",
+        AbilityKind::Spell,
+    );
+    let Effect::ChangeZoneAll {
+        destination,
+        enter_tapped,
+        ..
+    } = &*to_battlefield
+        .sub_ability
+        .as_ref()
+        .expect("battlefield tail must still be built")
+        .effect
+    else {
+        panic!("expected a ChangeZoneAll tail for the battlefield case");
+    };
+    assert_eq!(*destination, Zone::Battlefield);
+    assert!(enter_tapped.is_tapped(), "tapped must still reach the tail");
+
+    // Paired negative, CR 110.5b + CR 110.5d: status is battlefield-only, so this
+    // recognizer must decline rather than invent a tapped hand entry.
+    let nonsense = parse_effect_chain(
+        "Return target creature card and all other cards with the same name as that card from your graveyard to your hand tapped.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        nonsense.sub_ability.is_none(),
+        "a tapped hand destination must not parse through this recognizer, got {:?}",
+        nonsense.sub_ability
+    );
+
+    // ...and the refusal must come from the DESTINATION ARM itself, not from the
+    // caller's `all_consuming` rejecting leftover residue. Those are different
+    // failures: the second would still accept "to your hand tapped" anywhere the
+    // caller happened to be laxer about the tail.
+    assert!(
+        super::parse_same_name_return_destination("your hand tapped.").is_err(),
+        "the pairing match must refuse a tapped hand destination on its own"
+    );
+    assert!(
+        super::parse_same_name_return_destination("the battlefield tapped.").is_ok(),
+        "reach-guard: the battlefield arm must still admit tapped"
+    );
+    // CR 110.5b: without "tapped" the battlefield arm sets no entry override.
+    assert_eq!(
+        super::parse_same_name_return_destination("the battlefield.")
+            .ok()
+            .map(|(_, parsed)| parsed),
+        Some((
+            Zone::Battlefield,
+            crate::types::zones::EtbTapState::Unspecified
+        )),
+        "an unqualified battlefield destination enters with no tap override"
+    );
+    // Bounded on purpose: zones this recognizer does not model must decline here
+    // rather than receive a confidently wrong ChangeZoneAll.
+    for unmodelled in [
+        "your library.",
+        "exile.",
+        "your graveyard.",
+        "the command zone.",
+    ] {
+        assert!(
+            super::parse_same_name_return_destination(unmodelled).is_err(),
+            "{unmodelled:?} is outside the modelled destinations and must decline"
+        );
+    }
 }
 
 #[test]
@@ -1478,4 +1626,87 @@ fn named_choice_enumeration_does_not_misfire() {
         try_parse_named_choice("choose a creature type"),
         Some(ChoiceType::CreatureType { .. })
     ));
+}
+
+fn chain_effects(def: &AbilityDefinition) -> Vec<&Effect> {
+    std::iter::successors(Some(def), |def| def.sub_ability.as_deref())
+        .map(|def| def.effect.as_ref())
+        .collect()
+}
+
+fn chain_shuffle_target(def: &AbilityDefinition) -> &TargetFilter {
+    chain_effects(def)
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::Shuffle { target } => Some(target),
+            _ => None,
+        })
+        .expect("chain carries a shuffle")
+}
+
+fn parse_card(
+    oracle: &str,
+    name: &str,
+    keywords: &[&str],
+    types: &[&str],
+) -> crate::parser::oracle::ParsedAbilities {
+    let owned = |items: &[&str]| {
+        items
+            .iter()
+            .map(|item| item.to_string())
+            .collect::<Vec<_>>()
+    };
+    crate::parser::oracle::parse_oracle_text(oracle, name, &owned(keywords), &owned(types), &[])
+}
+
+/// CR 608.2c + CR 701.24a: "that player shuffles" names the searched opponent.
+#[test]
+fn search_target_opponent_then_that_player_shuffles_binds_the_search_slot() {
+    let parsed = parse_card(
+        "Search target opponent's library for a card and exile it face down. Then that player shuffles. You may play that card for as long as it remains exiled.",
+        "Praetor's Grasp",
+        &[],
+        &["Sorcery"],
+    );
+    assert_eq!(
+        chain_shuffle_target(&parsed.abilities[0]),
+        &TargetFilter::ParentTargetSlot { index: 0 }
+    );
+}
+
+/// CR 608.2c + CR 701.24a: a trigger's "that player shuffles" names the searched opponent,
+/// not the triggering player.
+#[test]
+fn trigger_search_then_that_player_shuffles_binds_the_search_slot() {
+    let parsed = parse_card(
+        "Prowl {2}{B} (You may cast this for its prowl cost if you dealt combat damage to a player this turn with a Goblin or Rogue.)\nWhen this creature enters, if its prowl cost was paid, search target opponent's library for three cards and exile them. Then that player shuffles.",
+        "Earwig Squad",
+        &["Prowl"],
+        &["Creature"],
+    );
+    let execute = parsed.triggers[0].execute.as_deref().expect("trigger body");
+    assert_eq!(
+        chain_shuffle_target(execute),
+        &TargetFilter::ParentTargetSlot { index: 0 }
+    );
+}
+
+/// CR 608.2c: a search of a scoped player, not a declared target, keeps its shuffle on that player.
+#[test]
+fn scoped_player_search_then_shuffles_keeps_the_scoped_player() {
+    let parsed = parse_card(
+        "Players can't draw cards or gain life.\nAt the beginning of each player's draw step, that player loses 3 life, searches their library for a card, puts it into their hand, then shuffles.",
+        "Mornsong Aria",
+        &[],
+        &["Enchantment"],
+    );
+    let execute = parsed.triggers[0].execute.as_deref().expect("trigger body");
+    assert!(chain_effects(execute).into_iter().any(|effect| matches!(
+        effect,
+        Effect::SearchLibrary {
+            target_player: Some(TargetFilter::ScopedPlayer),
+            ..
+        }
+    )));
+    assert_eq!(chain_shuffle_target(execute), &TargetFilter::ScopedPlayer);
 }

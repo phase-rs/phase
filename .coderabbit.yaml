@@ -2,7 +2,7 @@
 # CodeRabbit config for phase.rs — the free external review pass on this public repo.
 # See .claude/skills/pr-contribution-handler/SKILL.md "Independent review pass".
 #
-# Rules distilled from CLAUDE.md, .gemini/styleguide.md, and the /review-impl
+# Rules distilled from CLAUDE.md, .gemini/styleguide.md, and the /review-engine-impl
 # skill lenses. Path instructions are ADDITIVE: a file receives every instruction
 # whose glob matches it, so these layer broad -> narrow, each adding only its
 # increment. This repo's .coderabbit.yaml overrides the web UI, so keep the UI

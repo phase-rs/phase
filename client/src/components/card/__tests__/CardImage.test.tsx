@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { useCardImage } from "../../../hooks/useCardImage.ts";
 import { CardImage } from "../CardImage.tsx";
 
-const mockUseEngineCardData = vi.hoisted(() => vi.fn(() => null));
+const mockUseEngineCardData = vi.hoisted(() => vi.fn<() => { name: string; oracle_text?: string } | null>(() => null));
 
 vi.mock("../../../hooks/useCardImage.ts", () => ({
   useCardBackImage: vi.fn(() => ({ src: "card-back.png", isLoading: false })),
@@ -70,6 +70,16 @@ describe("CardImage art fallback (issue #6156)", () => {
     // No <img> element is emitted for the artless case, so nothing can render as
     // a broken/black square.
     expect(document.querySelector("img")).toBeNull();
+  });
+
+  it("uses the localized name alongside localized text when art is unavailable", () => {
+    mockUseCardImage.mockReturnValue({ src: null, isLoading: false, isRotated: false, isFlip: false });
+    mockUseEngineCardData.mockReturnValueOnce({ name: "機能不全ダニ", oracle_text: "日本語の印刷本文" });
+
+    render(<CardImage cardName="Haywire Mite" />);
+
+    expect(screen.getByRole("img", { name: "機能不全ダニ" })).toHaveTextContent("日本語の印刷本文");
+    expect(mockUseEngineCardData).toHaveBeenCalledWith("Haywire Mite");
   });
 
   it("includes the Oracle text in the fallback tile when it is known", () => {

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, useState } from "react";
 import i18n from "i18next";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 // A real `localStorage` for the store's `persist` middleware and for the
@@ -84,6 +84,14 @@ vi.mock("../../../adapter/wasm-adapter", () => ({
   }),
 }));
 
+const { ceilingMock } = vi.hoisted(() => ({ ceilingMock: vi.fn() }));
+vi.mock("../../../services/engineRuntime", async () => ({
+  ...(await vi.importActual<typeof import("../../../services/engineRuntime")>(
+    "../../../services/engineRuntime",
+  )),
+  bestOfThreeCeilingForFormat: ceilingMock,
+}));
+
 import { HostSetup } from "../HostSetup";
 import * as serverDirectory from "../../../services/serverDirectory";
 import type { ConnectionMode, LobbySourceStatus } from "../../../stores/multiplayerStore";
@@ -105,9 +113,15 @@ import {
   DEFAULT_MULTIPLAYER_SERVER_URL,
   OFFICIAL_MULTIPLAYER_SERVER_URL,
 } from "../../../config/multiplayerServer";
+import { refuseRealWebSockets } from "../../../test/helpers/refusingWebSocket";
 
 describe("HostSetup", () => {
+  let socketUrls: string[] = [];
+
   beforeEach(() => {
+    ceilingMock.mockReset();
+    ceilingMock.mockImplementation(async (format: string) => (format === "Dandan" ? "Bo1" : "Bo3"));
+    socketUrls = refuseRealWebSockets();
     vi.spyOn(serverDirectory, "refreshServerDirectory").mockResolvedValue(undefined);
     vi.spyOn(useMultiplayerStore.getState(), "ensureSubscriptionSocket").mockResolvedValue(null);
     localStorageItems.clear();
@@ -481,9 +495,12 @@ describe("HostSetup", () => {
   });
 
   afterEach(async () => {
+    const opened = [...socketUrls];
     cleanup();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     await i18n.changeLanguage("en");
+    expect(opened).toEqual([]);
   });
 
   it("keeps P2P usable through discovery, disconnect and recovery without switching back automatically", async () => {
@@ -607,6 +624,16 @@ describe("HostSetup", () => {
           expect(control).not.toHaveAccessibleDescription();
         }
       }
+    });
+
+    it("gives the password field an accessible name", async () => {
+      const user = userEvent.setup();
+      render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode={connectionMode} onConnectionModeChange={vi.fn()} />);
+
+      await user.click(screen.getByRole("switch", { name: "Set password" }));
+
+      const passwordInput = screen.getByLabelText("Game password");
+      expect(passwordInput).toHaveAttribute("type", "password");
     });
 
     it("keeps the compact track inside a non-shrinking touch target", async () => {
@@ -1346,5 +1373,304 @@ describe("HostSetup", () => {
       }),
       null,
     );
+  });
+
+  describe("Discord link seed", () => {
+    const standardRemembered = {
+      format: "Standard" as const,
+      formatConfig: FORMAT_DEFAULTS.Standard,
+      savedCustomFormatId: null,
+      playerCount: 2,
+      matchType: "Bo1" as const,
+      // Remembered values no other seed rule overrides, so the submission
+      // below shows whether the remembered config was read at all.
+      loopDetection: { type: "Interactive" as const },
+      isPublic: true,
+      startWhenFull: false,
+      ranked: false,
+      aiSeats: [{ seatIndex: 1, difficulty: "Hard" as const, deckName: null }],
+    };
+    const p2pSeed = {
+      code: "AB12CD",
+      format: "Commander",
+      playerCount: 4,
+      roomName: "Friday",
+      serverUrl: null,
+    };
+
+    it("fixes a P2P Discord game's settings and submits the requested code", async () => {
+      const user = userEvent.setup();
+      const onHost = vi.fn().mockResolvedValue(false);
+      useMultiplayerStore.setState({ lastHostConfig: standardRemembered });
+
+      render(
+        <HostSetup
+          onHost={onHost}
+          onBack={vi.fn()}
+          connectionMode="server"
+          onConnectionModeChange={vi.fn()}
+          seed={p2pSeed}
+        />,
+      );
+
+      expect(
+        screen.getByText(i18n.t("multiplayer:hostSetup.botGameNotice", { code: "AB12CD" })),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(enMultiplayer.hostSetup.botSeedIgnored)).not.toBeInTheDocument();
+      // The Discord post lists the game, so the copy omits the lobby sentence.
+      expect(screen.getByText(enMultiplayer.hostSetup.botP2PNotice)).toBeInTheDocument();
+      expect(screen.queryByText(enMultiplayer.hostSetup.p2pNotice)).not.toBeInTheDocument();
+      // Mode, listing and password are fixed by the Discord post.
+      expect(screen.queryByRole("button", { name: "Dedicated server" })).not.toBeInTheDocument();
+      expect(screen.queryByText("List in lobby")).not.toBeInTheDocument();
+      expect(screen.queryByText("Set password")).not.toBeInTheDocument();
+      // No AI seats: the seats belong to the Discord players.
+      expect(screen.queryByRole("button", { name: "Human" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "AI" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "AI difficulty" })).not.toBeInTheDocument();
+
+      await user.click(screen.getByRole("button", { name: "Host P2P Game" }));
+
+      expect(onHost).toHaveBeenCalledWith(
+        expect.objectContaining({
+          requestedCode: "AB12CD",
+          public: false,
+          password: "",
+          formatConfig: expect.objectContaining({ format: "Commander", max_players: 4 }),
+          roomName: "Friday",
+          aiSeats: [],
+          loopDetection: { type: "Off" },
+          startWhenFull: true,
+        }),
+        null,
+      );
+      // A Discord game's settings do not become the remembered defaults.
+      expect(useMultiplayerStore.getState().lastHostConfig).toEqual(standardRemembered);
+    });
+
+    it("offers AI seats for the same unseeded P2P Commander table", () => {
+      useMultiplayerStore.setState({
+        lastHostConfig: {
+          ...standardRemembered,
+          format: "Commander",
+          formatConfig: FORMAT_DEFAULTS.Commander,
+          playerCount: 4,
+          aiSeats: [],
+        },
+      });
+
+      render(
+        <HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" onConnectionModeChange={vi.fn()} />,
+      );
+
+      // Reach guard for the seeded case: Commander at 4 seats over P2P does
+      // support AI seats, so their absence there comes from the seed.
+      expect(screen.getAllByRole("button", { name: "Human" })).toHaveLength(3);
+      // Likewise the unseeded copy keeps the lobby sentence.
+      expect(screen.getByText(enMultiplayer.hostSetup.p2pNotice)).toBeInTheDocument();
+    });
+
+    it("submits the seeded dedicated server over a better-scored candidate", async () => {
+      const user = userEvent.setup();
+      const onHost = vi.fn().mockResolvedValue(false);
+      seedCandidates();
+
+      render(
+        <HostSetup
+          onHost={onHost}
+          onBack={vi.fn()}
+          connectionMode="server"
+          onConnectionModeChange={vi.fn()}
+          seed={{ ...p2pSeed, serverUrl: "wss://seed.example/ws" }}
+        />,
+      );
+
+      expect(screen.queryByText("Host on")).not.toBeInTheDocument();
+      expect(screen.getByText(enMultiplayer.hostSetup.botServerNotice)).toBeInTheDocument();
+      expect(screen.queryByText(enMultiplayer.hostSetup.hostServerHelp)).not.toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Host Game" }));
+
+      expect(onHost).toHaveBeenCalledWith(
+        expect.objectContaining({ requestedCode: "AB12CD" }),
+        "wss://seed.example/ws",
+      );
+    });
+
+    it("falls back to the default format when the seed names an unknown one", async () => {
+      const user = userEvent.setup();
+      const onHost = vi.fn().mockResolvedValue(false);
+      useMultiplayerStore.setState({ formatConfig: FORMAT_DEFAULTS.Standard });
+
+      render(
+        <HostSetup
+          onHost={onHost}
+          onBack={vi.fn()}
+          connectionMode="p2p"
+          onConnectionModeChange={vi.fn()}
+          seed={{ ...p2pSeed, format: "Nope", playerCount: null }}
+        />,
+      );
+
+      expect(screen.getByText(enMultiplayer.hostSetup.botSeedIgnored)).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Host P2P Game" }));
+      expect(onHost).toHaveBeenCalledWith(
+        expect.objectContaining({
+          formatConfig: expect.objectContaining({ format: "Standard" }),
+        }),
+        null,
+      );
+    });
+
+    it("drops a seat count the seeded format cannot hold", async () => {
+      const user = userEvent.setup();
+      const onHost = vi.fn().mockResolvedValue(false);
+
+      render(
+        <HostSetup
+          onHost={onHost}
+          onBack={vi.fn()}
+          connectionMode="p2p"
+          onConnectionModeChange={vi.fn()}
+          seed={{ ...p2pSeed, playerCount: 8 }}
+        />,
+      );
+
+      expect(screen.getByText(enMultiplayer.hostSetup.botSeedIgnored)).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Host P2P Game" }));
+      expect(onHost).toHaveBeenCalledWith(
+        expect.objectContaining({
+          formatConfig: expect.objectContaining({
+            format: "Commander",
+            max_players: FORMAT_DEFAULTS.Commander.min_players,
+          }),
+        }),
+        null,
+      );
+    });
+  });
+  describe("best-of-three ceiling", () => {
+    function seedRemembered(format: "Dandan" | "Standard") {
+      useMultiplayerStore.setState({
+        lastHostConfig: {
+          format,
+          formatConfig: FORMAT_DEFAULTS[format],
+          savedCustomFormatId: null,
+          playerCount: 2,
+          matchType: "Bo3",
+          loopDetection: { type: "Off" },
+          isPublic: true,
+          startWhenFull: true,
+          ranked: false,
+          aiSeats: [],
+        },
+      });
+    }
+
+    function renderHost(onHost = vi.fn().mockResolvedValue(false)) {
+      render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
+      return onHost;
+    }
+
+    const bo3 = () => screen.getByRole("button", { name: "BO3" });
+    const bo1 = () => screen.getByRole("button", { name: "BO1" });
+
+    it("H2: a format whose ceiling admits Bo3 leaves it enabled and submits it", async () => {
+      const user = userEvent.setup();
+      seedRemembered("Standard");
+      const onHost = renderHost();
+
+      await waitFor(() => expect(bo3()).toBeEnabled());
+      expect(bo3()).toHaveClass("bg-white/10");
+      await user.click(screen.getByRole("button", { name: "Host Game" }));
+
+      expect(onHost).toHaveBeenCalledWith(expect.objectContaining({ matchType: "Bo3" }), expect.any(String));
+      expect(useMultiplayerStore.getState().lastHostConfig?.matchType).toBe("Bo3");
+    });
+
+    it("H1: a remembered Bo3 on Dandan is disabled, submitted as Bo1, and stays remembered", async () => {
+      const user = userEvent.setup();
+      seedRemembered("Dandan");
+      const onHost = renderHost();
+
+      await waitFor(() => expect(ceilingMock).toHaveBeenCalledWith("Dandan"));
+      await act(async () => {
+        await ceilingMock.mock.results[0].value;
+      });
+      expect(bo3()).toBeDisabled();
+      expect(bo1()).toHaveClass("bg-white/10");
+      expect(bo3()).not.toHaveClass("bg-white/10");
+      await user.click(screen.getByRole("button", { name: "Host Game" }));
+
+      expect(onHost).toHaveBeenCalledWith(expect.objectContaining({ matchType: "Bo1" }), expect.any(String));
+      expect(useMultiplayerStore.getState().lastHostConfig?.matchType).toBe("Bo3");
+    });
+
+    it("H3: an unresolved or failed lookup offers no Bo3", async () => {
+      const user = userEvent.setup();
+      seedRemembered("Standard");
+      ceilingMock.mockImplementation(() => new Promise(() => {}));
+      const onHost = renderHost();
+
+      expect(bo3()).toBeDisabled();
+      await user.click(screen.getByRole("button", { name: "Host Game" }));
+      expect(onHost).toHaveBeenCalledWith(expect.objectContaining({ matchType: "Bo1" }), expect.any(String));
+      expect(useMultiplayerStore.getState().lastHostConfig?.matchType).toBe("Bo3");
+
+      cleanup();
+      ceilingMock.mockImplementation(async () => {
+        throw new Error("engine unavailable");
+      });
+      const onHostRejected = renderHost();
+      await waitFor(() => expect(ceilingMock).toHaveBeenCalledTimes(2));
+      await act(async () => {});
+      expect(bo3()).toBeDisabled();
+      await user.click(screen.getByRole("button", { name: "Host Game" }));
+      expect(onHostRejected).toHaveBeenCalledWith(expect.objectContaining({ matchType: "Bo1" }), expect.any(String));
+    });
+
+    it("H4: switching format never reuses the previous format's answer", async () => {
+      const user = userEvent.setup();
+      seedRemembered("Standard");
+      const settle: Array<() => void> = [];
+      ceilingMock.mockImplementation(
+        (format: string) =>
+          new Promise((resolve) => {
+            settle.push(() => resolve(format === "Dandan" ? "Bo1" : "Bo3"));
+          }),
+      );
+      renderHost();
+
+      await act(async () => settle.shift()?.());
+      await waitFor(() => expect(bo3()).toBeEnabled());
+      expect(bo3()).toHaveClass("bg-white/10");
+
+      await user.click(screen.getByRole("button", { name: "Format" }));
+      await user.click(screen.getByRole("option", { name: "Dandân" }));
+      expect(bo3()).toBeDisabled();
+      await act(async () => settle.shift()?.());
+      expect(bo3()).toBeDisabled();
+
+      await user.click(screen.getByRole("button", { name: "Format" }));
+      await user.click(screen.getByRole("option", { name: "Standard" }));
+      expect(bo3()).toBeDisabled();
+      await act(async () => settle.shift()?.());
+      await waitFor(() => expect(bo3()).toBeEnabled());
+      expect(bo3()).toHaveClass("bg-white/10");
+    });
+
+    it("H5: a lookup that throws synchronously fails closed", async () => {
+      const user = userEvent.setup();
+      seedRemembered("Standard");
+      ceilingMock.mockImplementation(() => {
+        throw new Error("missing export");
+      });
+      const onHost = renderHost();
+
+      await waitFor(() => expect(ceilingMock).toHaveBeenCalled());
+      await act(async () => {});
+      expect(bo3()).toBeDisabled();
+      await user.click(screen.getByRole("button", { name: "Host Game" }));
+      expect(onHost).toHaveBeenCalledWith(expect.objectContaining({ matchType: "Bo1" }), expect.any(String));
+    });
   });
 });
