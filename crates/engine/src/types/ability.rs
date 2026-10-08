@@ -29331,6 +29331,11 @@ pub enum TriggerCondition {
     /// "Whenever two or more <subject> attack" (Argent Dais) compares the number
     /// of attacking objects of the subject class when attackers are declared
     /// (CR 508.1a + CR 603.2); there is no intervening "if" to recheck.
+    /// CR 603.8: a state trigger's own condition ("When there are four or more
+    /// page counters on ~", "When you control no other creatures") is likewise
+    /// its trigger event, read when the game state matches it and not rechecked
+    /// on resolution — Plague Boiler's ruling: removing a counter in response
+    /// won't stop the effect. An intervening "if" beside it is still rechecked.
     EventTime { condition: Box<TriggerCondition> },
 }
 

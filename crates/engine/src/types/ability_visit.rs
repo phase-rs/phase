@@ -1328,7 +1328,13 @@ fn trigger_condition(condition: &$($mut_)? TriggerCondition, v: &mut impl FnMut(
             quantity(lhs, v);
             quantity(rhs, v);
         }
-        TriggerCondition::Not { condition: c } => trigger_condition(c, v),
+        // CR 201.5a: an `EventTime` condition (a state trigger's head, CR 603.8,
+        // or an event trigger's "while" gate, CR 508.1m) is the wrapped
+        // condition read only when the trigger fires, so its granter symbols
+        // are the wrapped condition's.
+        TriggerCondition::Not { condition: c } | TriggerCondition::EventTime { condition: c } => {
+            trigger_condition(c, v)
+        }
         TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
             for c in conditions {
                 trigger_condition(c, v);

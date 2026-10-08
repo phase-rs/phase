@@ -2253,10 +2253,25 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     }
     def.unless_pay = modifiers.unless_pay.clone();
 
+    // CR 603.8 + CR 603.4: a state trigger's condition is its trigger event — it
+    // is checked when the game state matches it and never again on resolution
+    // (the CR 603.4 recheck applies only to an "if" that immediately follows a
+    // trigger condition). Wrap it as `EventTime` so `stack_condition_for_trigger`
+    // drops it from the stacked condition, while an intervening "if" composed
+    // beside it below is still rechecked as the ability resolves.
+    let head_condition = def.condition.take().map(|head| {
+        if def.mode == TriggerMode::StateCondition {
+            TriggerCondition::EventTime {
+                condition: Box::new(head),
+            }
+        } else {
+            head
+        }
+    });
     // CR 603.4: Compose intervening-if with existing condition via And.
     def.condition = match modifiers.intervening_if.clone() {
-        Some(if_cond) => Some(and_trigger_conditions(def.condition.take(), if_cond)),
-        None => def.condition.take(),
+        Some(if_cond) => Some(and_trigger_conditions(head_condition, if_cond)),
+        None => head_condition,
     };
 
     // CR 603.4 + CR 608.2c + CR 122.1: a source-counter intervening-if
@@ -12325,6 +12340,20 @@ fn trigger_object_pronoun_ref_for_condition(
         return Some(recipient);
     }
 
+    // CR 608.2k + CR 603.8: a source-counter state-trigger condition ("there
+    // are four or more page counters on ~" / "~ has no ice counters on it")
+    // refers to the ability's own source, so a bare "it" in the effect body
+    // ("exile it", Mazemind Tome / Nine Lives) names that source — `SelfRef`,
+    // whose resolver applies the CR 400.7 new-object guard. Without this pin
+    // the anaphor fell through to `ParentTarget`, whose untargeted fallback is
+    // the raw source id with no zone-change check, so a source bounced or
+    // flickered in response was still exiled from its new zone. Recognition is
+    // delegated to the same authority the state-trigger arm uses, so the pin
+    // and trigger acceptance can never disagree.
+    if parse_source_counter_state_condition(after_keyword).is_some() {
+        return Some(TargetFilter::SelfRef);
+    }
+
     None
 }
 
@@ -16689,16 +16718,38 @@ fn try_parse_source_counter_state_trigger(lower: &str) -> Option<(TriggerMode, T
     let (rest, _) = alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when ")))
         .parse(lower)
         .ok()?;
-    // CR 603.8 / CR 122.1: two surface grammars yield the same source
-    // counter-threshold state condition:
-    //   possessive  "~ has [N or more] [type] counters on it"    (Darksteel Reactor)
-    //   existential "there are [N or more] [type] counters on ~" (Mazemind Tome)
-    let (_, static_cond) = alt((parse_source_has_counters, parse_source_counters_exist))
-        .parse(rest)
-        .ok()?;
-    // CR 603.8: accept depletion form (minimum: 0, maximum: Some(0)) and
-    // threshold form (minimum > 0, maximum: None). Reject mixed/range forms.
-    if !matches!(
+    let static_cond = parse_source_counter_state_condition(rest)?;
+    let condition = static_condition_to_trigger_condition(&static_cond)?;
+    let mut def = make_base();
+    def.mode = TriggerMode::StateCondition;
+    def.condition = Some(condition);
+    def.valid_card = Some(TargetFilter::SelfRef);
+    Some((TriggerMode::StateCondition, def))
+}
+
+/// CR 603.8 + CR 122.1: Single authority for the source-counter state-trigger
+/// condition — the text after the "when"/"whenever" keyword. Two surface
+/// grammars yield the same source counter-threshold condition:
+///   possessive  "~ has [N or more] [type] counters on it"    (Darksteel Reactor)
+///   existential "there are [N or more] [type] counters on ~" (Mazemind Tome)
+///
+/// Accepts only the depletion form (`minimum: 0, maximum: Some(0)`) and the
+/// threshold form (`minimum > 0, maximum: None`) of `HasCounters`; mixed/range
+/// forms are rejected, and so is a granted body's "counters on <granter>"
+/// (CR 201.5a), which the existential grammar reads as a `QuantityComparison`
+/// over the granting object rather than the source. All-consuming: the counter
+/// phrase must be the entire condition, so the state-trigger arm
+/// (`try_parse_source_counter_state_trigger`) and the effect-body pronoun pin
+/// (`trigger_object_pronoun_ref_for_condition`) recognize exactly the same
+/// conditions.
+fn parse_source_counter_state_condition(after_keyword: &str) -> Option<StaticCondition> {
+    let (_, static_cond) = all_consuming(terminated(
+        alt((parse_source_has_counters, parse_source_counters_exist)),
+        multispace0,
+    ))
+    .parse(after_keyword)
+    .ok()?;
+    matches!(
         static_cond,
         StaticCondition::HasCounters {
             minimum: 0,
@@ -16709,15 +16760,8 @@ fn try_parse_source_counter_state_trigger(lower: &str) -> Option<(TriggerMode, T
             maximum: None,
             ..
         }
-    ) {
-        return None;
-    }
-    let condition = static_condition_to_trigger_condition(&static_cond)?;
-    let mut def = make_base();
-    def.mode = TriggerMode::StateCondition;
-    def.condition = Some(condition);
-    def.valid_card = Some(TargetFilter::SelfRef);
-    Some((TriggerMode::StateCondition, def))
+    )
+    .then_some(static_cond)
 }
 
 /// CR 303.4 + CR 301.5: Detect a trailing "that are enchanted/equipped by an

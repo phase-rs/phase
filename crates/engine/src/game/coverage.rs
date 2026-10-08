@@ -4544,7 +4544,7 @@ fn trigger_details(trig: &TriggerDefinition) -> Vec<(String, String)> {
         d.push(("constraint".into(), fmt_trigger_constraint(constraint)));
     }
     if let Some(cond) = &trig.condition {
-        d.push(("condition".into(), fmt_trigger_condition(cond)));
+        d.push(("condition".into(), fmt_trigger_condition(cond, &trig.mode)));
     }
     d
 }
@@ -4750,8 +4750,15 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
 }
 
 /// Format a `TriggerCondition` as a human-readable string for the parse-details overlay.
-fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> String {
+/// `mode` is the owning trigger's mode: it decides how an `EventTime` read is labelled.
+fn fmt_trigger_condition(
+    cond: &crate::types::ability::TriggerCondition,
+    mode: &TriggerMode,
+) -> String {
     use crate::types::ability::TriggerCondition as TC;
+    let fmt_nested = |condition: &crate::types::ability::TriggerCondition| {
+        fmt_trigger_condition(condition, mode)
+    };
     match cond {
         TC::GainedLife { minimum } => format!("gained {minimum}+ life this turn"),
         TC::LostLife => "lost life this turn".into(),
@@ -4889,17 +4896,20 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
             format!("triggering spell is {}", fmt_target(filter))
         }
         TC::And { conditions } => {
-            let parts: Vec<String> = conditions.iter().map(fmt_trigger_condition).collect();
+            let parts: Vec<String> = conditions.iter().map(fmt_nested).collect();
             parts.join(" and ")
         }
         TC::Or { conditions } => {
-            let parts: Vec<String> = conditions.iter().map(fmt_trigger_condition).collect();
+            let parts: Vec<String> = conditions.iter().map(fmt_nested).collect();
             parts.join(" or ")
         }
-        TC::Not { condition } => format!("not ({})", fmt_trigger_condition(condition)),
-        TC::EventTime { condition } => {
-            format!("at the event: {}", fmt_trigger_condition(condition))
+        TC::Not { condition } => format!("not ({})", fmt_nested(condition)),
+        // CR 603.8: a state trigger has no triggering event — its `EventTime`
+        // head is the game state read when the ability triggers.
+        TC::EventTime { condition } if *mode == TriggerMode::StateCondition => {
+            format!("when it triggers: {}", fmt_nested(condition))
         }
+        TC::EventTime { condition } => format!("at the event: {}", fmt_nested(condition)),
     }
 }
 
@@ -15407,6 +15417,23 @@ mod tests {
         }
     }
 
+    /// CR 603.8: a state trigger has no triggering event, so its `EventTime`
+    /// head must not be labelled as an event read; an event trigger's must.
+    #[test]
+    fn event_time_condition_label_follows_trigger_mode() {
+        let condition = crate::types::ability::TriggerCondition::EventTime {
+            condition: Box::new(crate::types::ability::TriggerCondition::LostLife),
+        };
+        assert_eq!(
+            fmt_trigger_condition(&condition, &TriggerMode::StateCondition),
+            "when it triggers: lost life this turn"
+        );
+        assert_eq!(
+            fmt_trigger_condition(&condition, &TriggerMode::Phase),
+            "at the event: lost life this turn"
+        );
+    }
+
     /// CR 903.3 vs CR 903.3d: the parse-details label is what bug triage reads,
     /// so the two ownership arms must never print the same string — in ANY of
     /// the condition-vocabulary formatters.
@@ -15421,6 +15448,7 @@ mod tests {
                     &crate::types::ability::TriggerCondition::ControlsCommander {
                         ownership: CommanderOwnership::Own,
                     },
+                    &TriggerMode::Phase,
                 ),
                 fmt_static_condition(&StaticCondition::ControlsCommander {
                     ownership: CommanderOwnership::Own,
@@ -15434,6 +15462,7 @@ mod tests {
                     &crate::types::ability::TriggerCondition::ControlsCommander {
                         ownership: CommanderOwnership::Any,
                     },
+                    &TriggerMode::Phase,
                 ),
                 fmt_static_condition(&StaticCondition::ControlsCommander {
                     ownership: CommanderOwnership::Any,

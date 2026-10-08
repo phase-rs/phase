@@ -11291,6 +11291,10 @@ mod tests {
             "{T}: Put a +1/+1 counter on this creature for each artifact you control other than Foo Bar.",
             "{T}: This creature gets +X/+0 until end of turn, where X is the number of +1/+1 counters on Foo Bar.",
             "Whenever this creature attacks, put a +1/+1 counter on it for each artifact you control other than Foo Bar.",
+            // CR 603.8: a state trigger's head is lowered under `EventTime`; the
+            // granter it names must still be seen through that wrapper.
+            "When there are no charge counters on Foo Bar, draw a card.",
+            "When you control no artifacts other than Foo Bar, sacrifice this creature.",
         ] {
             assert_eq!(grants(body), vec![true], "{body}");
         }
