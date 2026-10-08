@@ -432,11 +432,31 @@ function clusterVerifyPrompt(mechanic, cards) {
     `order, fixing in-loop on failure (max ${MAX_VERIFY_RETRIES} retries per ` +
     `command):\n` +
     `1. cargo fmt --all\n` +
-    `2. ./scripts/check-parser-combinators.sh "$(git merge-base upstream/main HEAD)" (Gate A) — ` +
+    `2. Before EVERY Gate A invocation, including after cargo fmt and every in-loop fix, inspect ` +
+    `\`git status --short\`, \`git diff\`, and \`git diff --cached\`. Reconcile the exact owned ` +
+    `parser paths for this unit, including added, modified, deleted, and renamed paths from all ` +
+    `implementation and fix rounds; inspect new files too. Stop with passed=false and record the ` +
+    `failure if ownership is ambiguous or an owned path contains any unowned working-tree or ` +
+    `staged hunks. Preserve all foreign files and index entries; never discard or unstage them.\n` +
+    `Stage only those wholly owned parser files with \`git add -- <OWNED_PARSER_PATHS>\`: replace ` +
+    `the placeholder with one explicit repo-relative literal pathspec per file, single-quoted for ` +
+    `the shell, e.g. ':(literal)crates/engine/src/parser/oracle.rs'. Escape embedded apostrophes by ` +
+    `closing the quote, backslash-escaping the apostrophe, and reopening the quote. No directory, ` +
+    `glob, broad staging, or JSON.stringify shell quoting. Inspect the cached name-status and diff ` +
+    `for those exact paths; require \`git diff --exit-code -- <OWNED_PARSER_PATHS>\` to be empty ` +
+    `and exit 0, with every owned new file present in the index and foreign cached entries unchanged. ` +
+    `If no owned parser paths exist, do not stage unrelated paths to manufacture a scan.\n` +
+    `Then run ./scripts/check-parser-combinators.sh "$(git merge-base upstream/main HEAD)" (Gate A) — ` +
     `pass the upstream/main merge-base explicitly. The script's DEFAULT base is the stale fork ` +
     `origin/main, which diffs the whole tree and false-flags pre-existing nom-combinator debt in ` +
     `files this change never touched. The explicit base scopes the diff checks to THIS change's lines; ` +
     `whole-file gates still run. ` +
+    `When that merge-base equals HEAD, the diff checks read the staged index, so the owned parser ` +
+    `snapshot must match the current working-tree contents. Foreign staged parser changes remain ` +
+    `in the gate's scan: their violations also fail verification; do not edit or unstage them to ` +
+    `obtain a PASS. If any later command or fix changes parser source, repeat ownership checks, ` +
+    `owned staging, and Gate A on the final contents before passed=true; an earlier PASS does not ` +
+    `cover later edits. ` +
     `treat any non-zero exit as a verification failure.\n` +
     `3. If \`tilt get uiresource clippy >/dev/null 2>&1\` succeeds: ` +
     `./scripts/tilt-wait.sh --timeout 240 clippy test-engine test-ai wasm card-data ; else ` +
@@ -548,7 +568,7 @@ async function implementMechanicCluster(mechanic, cards, heterogeneous) {
     cards,
     branch: branch && branch.branch ? branch.branch : null,
     prUrl: pr && pr.prUrl ? pr.prUrl : null,
-    status: partial ? 'partial' : 'success',
+    status: pr.opened === false ? 'aborted' : partial ? 'partial' : 'success',
   }
 }
 
@@ -643,6 +663,8 @@ for (const unit of toRun) {
       const r = await implementMechanicCluster(unit.mechanic, unit.cards, unit.heterogeneous)
       results.push(r)
       log(`${name}: ${r.status}${r.prUrl ? ' -> ' + r.prUrl : ''}`)
+      // Preserve a declined unit's tree and index before any next reset.
+      if (r.status === 'aborted') break
     } else {
       const summary = await workflow({ scriptPath: CONTRIBUTE_CARD }, unit.card)
       const entry = Array.isArray(summary) && summary[0] ? summary[0] : { card: unit.card, status: 'unknown' }
