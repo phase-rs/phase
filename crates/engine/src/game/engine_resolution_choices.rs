@@ -932,6 +932,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::ChooseFromZoneChoice { .. }
             | WaitingFor::BeholdChoice { .. }
             | WaitingFor::EmpowerJaceChoice { .. }
+            | WaitingFor::SpellCopyOrderChoice { .. }
             | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::DiscardToHandSize { .. }
             | WaitingFor::ConniveDiscard { .. }
@@ -3897,6 +3898,27 @@ pub(super) fn handle_resolution_choice(
                     .pending
                     .chain
                     .set_optional_effect_performed_recursive(true);
+            }
+            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+        }
+        (
+            WaitingFor::SpellCopyOrderChoice {
+                player, choices, ..
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            // CR 405.3 + CR 707.10: the chosen spell supplies the batch's next
+            // copy, above the copies already on the stack.
+            let [spell] = chosen.as_slice() else {
+                return Err(EngineError::InvalidAction(format!(
+                    "Choose exactly one spell to copy next, got {}",
+                    chosen.len()
+                )));
+            };
+            if !choices.contains(spell) || !effects::order_next_spell_copy(state, *spell) {
+                return Err(EngineError::InvalidAction(
+                    "That spell has no copy left to make".to_string(),
+                ));
             }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }

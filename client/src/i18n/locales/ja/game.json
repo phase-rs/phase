@@ -1742,6 +1742,10 @@
       "title": "ジェイスを強化する",
       "subtitle": "あなたがコントロールするジェイス・トークンを1つ選び、忠誠度を+{{count}}する"
     },
+    "spellCopyOrder": {
+      "title": "コピーの順番",
+      "subtitle": "次にコピーをスタックに置く呪文を選ぶ"
+    },
     "collectEvidence": {
       "title": "証拠収集",
       "subtitle": "あなたの墓地から、マナ総量の合計が{{minimum}}以上になるようにカードを追放"

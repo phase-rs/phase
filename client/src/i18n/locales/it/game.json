@@ -1699,6 +1699,10 @@
       "title": "Potenziare Jace",
       "subtitle": "Scegli una pedina Jace che controlli perché ottenga +{{count}} fedeltà"
     },
+    "spellCopyOrder": {
+      "title": "Ordina le copie",
+      "subtitle": "Scegli la magia la cui copia va successivamente in pila"
+    },
     "collectEvidence": {
       "title": "Raccogli prove",
       "subtitle": "Esilia carte dal tuo cimitero con valore di mana totale {{minimum}} o superiore"

@@ -1737,6 +1737,10 @@
       "title": "Empower Jace",
       "subtitle": "Choose a Jace token you control to gain +{{count}} loyalty"
     },
+    "spellCopyOrder": {
+      "title": "Order the copies",
+      "subtitle": "Choose the spell whose copy goes on the stack next"
+    },
     "collectEvidence": {
       "title": "Collect Evidence",
       "subtitle": "Exile cards from your graveyard with total mana value {{minimum}} or greater"

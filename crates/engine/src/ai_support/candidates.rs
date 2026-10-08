@@ -1644,6 +1644,20 @@ pub fn candidate_actions_broad_with_probe(
                 )
             })
             .collect(),
+        // CR 405.3 + CR 707.10: the next copy of a batch may be of any spell
+        // that still has copies to make; every offered spell is a legal pick.
+        WaitingFor::SpellCopyOrderChoice {
+            player, choices, ..
+        } => choices
+            .iter()
+            .map(|&id| {
+                candidate(
+                    GameAction::SelectCards { cards: vec![id] },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::ChooseOneOfBranch {
             player, branches, ..
         } => (0..branches.len())

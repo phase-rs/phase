@@ -7441,6 +7441,7 @@ mod tests {
                 iterated_counter_kinds: Vec::new(),
                 next_iteration: 0,
                 total_iterations: 0,
+                copy_order_fixed: None,
             },
         ));
         assert!(repeat_for.active_repeat_for().is_none());

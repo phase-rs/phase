@@ -3347,8 +3347,14 @@ mod tests {
     }
 
     /// `TargetFilter::DeclaredPlayer` is new in serialized full-game state
-    /// (CR 608.2c + CR 115.1a); a v109 peer cannot deserialize it, so it must be
-    /// refused before it receives v110 state.
+    /// (CR 608.2c + CR 115.1a); a v110 peer cannot deserialize it, so it must be
+    /// refused before it receives v111 state.
+    /// `GameState.deferred_spell_delivery` (CR 608.2n + CR 608.2g) is new in
+    /// serialized state. A v109 peer would leave a spell paused on its own
+    /// free-cast window on the stack in no zone, so the handshake must refuse
+    /// the mismatch before it receives v110 state. The same version adds
+    /// `WaitingFor::SpellCopyOrderChoice` and
+    /// `PendingRepeatIteration.copy_order_fixed` (CR 405.3).
     /// The CR 201.5a granter binding adds `ObjectScope::GrantingObject` /
     /// `ObjectScope::SpecificObject`, `TargetFilter::GrantingObject { bound }`,
     /// `PlayerFilter::GrantingObjectCaster` and the `granting_object` stamp; v108 state
@@ -3424,8 +3430,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_110_for_declared_player_reference() {
-        assert_eq!(PROTOCOL_VERSION, 110);
+    fn protocol_version_is_111_for_declared_player_reference() {
+        assert_eq!(PROTOCOL_VERSION, 111);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3436,7 +3442,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_110_for_declared_player_reference` stays
+    /// `protocol_version_is_111_for_declared_player_reference` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

@@ -578,6 +578,13 @@ pub fn resolve(
         return Ok(());
     }
 
+    // CR 601.2c + CR 608.2g: the head slot of a multi-slot free cast (Finale of
+    // Promise) resolves every slot of its instruction as one cast window.
+    let slot_links = cast_slot_group(ability);
+    if !slot_links.is_empty() {
+        return resolve_cast_slot_group(state, ability, target_ids, &slot_links, events);
+    }
+
     // CR 701.20e + CR 608.2c: Look-then-cast chains (Kiora) inject the legal
     // looked-at library cards as targets at the chain seam
     // (`inject_last_revealed_targets`), already filtered through this cast
@@ -1120,6 +1127,127 @@ pub fn resolve(
     }
 
     Ok(())
+}
+
+/// CR 601.2c + CR 608.2g: the further target slots of one "you may cast up to
+/// one target A and/or up to one target B … without paying their mana costs"
+/// instruction (Finale of Promise), in printed order, when `ability` is that
+/// instruction's head slot; empty otherwise.
+///
+/// The parser lowers each slot as its own free `CastFromZone` link so every slot
+/// keeps its own filter and target count (CR 601.2c: each "target" is a separate
+/// instance). They are still one instruction: the player casts the chosen cards
+/// during the resolution, in either order, or declines any of them — so the head
+/// resolves all of them through one cast window and the chain skips the slot
+/// links that follow it.
+pub(crate) fn cast_slot_group(ability: &ResolvedAbility) -> Vec<&ResolvedAbility> {
+    fn is_free_cast_slot(link: &ResolvedAbility) -> bool {
+        link.multi_target.is_some()
+            && matches!(
+                link.effect,
+                Effect::CastFromZone {
+                    without_paying_mana_cost: true,
+                    alt_ability_cost: None,
+                    duration: None,
+                    ..
+                }
+            )
+    }
+    if !is_free_cast_slot(ability) {
+        return Vec::new();
+    }
+    std::iter::successors(ability.sub_ability.as_deref(), |link| {
+        link.sub_ability.as_deref()
+    })
+    .take_while(|link| is_free_cast_slot(link))
+    .collect()
+}
+
+/// CR 608.2g + CR 601.2c: resolve a multi-slot free cast (see
+/// [`cast_slot_group`]) as one free-cast window over exactly the cards chosen
+/// for its slots. A card chosen for two slots (a split card that is both an
+/// instant and a sorcery) is offered once: once cast, it can't be cast again.
+/// Each candidate must still satisfy the filter of a slot it was chosen for,
+/// frozen as the effect is applied (CR 608.2h), and the graveyard rider after
+/// the last slot travels with every cast. The chosen cards are published as
+/// the chain's tracked set, which is what a following "those spells" reads.
+fn resolve_cast_slot_group(
+    state: &mut GameState,
+    head: &ResolvedAbility,
+    head_targets: Vec<ObjectId>,
+    slot_links: &[&ResolvedAbility],
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let mut pool = head_targets;
+    for link in slot_links {
+        for target in link.live_object_targets(state) {
+            if let TargetRef::Object(id) = target {
+                if !pool.contains(&id) {
+                    pool.push(id);
+                }
+            }
+        }
+    }
+    let filters = std::iter::once(head)
+        .chain(slot_links.iter().copied())
+        .filter_map(|link| match &link.effect {
+            Effect::CastFromZone { target, .. } => Some(freeze_resolution_cast_filter(
+                state,
+                link,
+                target.clone(),
+                None,
+            )),
+            _ => None,
+        })
+        .collect();
+    let filter = TargetFilter::Or { filters };
+    super::publish_tracked_set(state, pool.clone());
+
+    let mut zones: Vec<Zone> = Vec::new();
+    for zone in pool
+        .iter()
+        .filter_map(|id| state.objects.get(id).map(|obj| obj.zone))
+    {
+        if !zones.contains(&zone) {
+            zones.push(zone);
+        }
+    }
+    let count = u8::try_from(pool.len()).ok();
+    let graveyard_replacement = slot_links
+        .last()
+        .and_then(|last| cast_from_zone_graveyard_destination(last));
+    let constraint = match &head.effect {
+        Effect::CastFromZone { constraint, .. } => constraint.clone(),
+        _ => None,
+    };
+    let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+        filter.clone(),
+        head.source_id,
+        head.controller,
+        freeze_cast_permission_constraint(state, head, constraint),
+    );
+    let mut window = head.clone();
+    window.effect = Effect::FreeCastFromZones {
+        count,
+        max_total_mv: None,
+        filter,
+        zones: zones.clone(),
+        graveyard_replacement: graveyard_replacement.clone(),
+    };
+    window.sub_ability = None;
+    window.targets = pool.into_iter().map(TargetRef::Object).collect();
+    super::free_cast_from_zones::resolve_with_face_policy(
+        state,
+        &window,
+        super::free_cast_from_zones::FreeCastWindowRequest {
+            count,
+            max_total_mv: None,
+            zones,
+            graveyard_replacement,
+            face_policy,
+        },
+        events,
+    )
 }
 
 /// CR 400.1 + CR 601.2a: The zones a resolution-scoped batch window may cast
