@@ -111,6 +111,24 @@
     "grant": "承認",
     "decline": "優先権を保持"
   },
+  "sandboxLifeCorrection": {
+    "open": "ライフを修正",
+    "title": "Sandboxのライフ修正",
+    "description": "通常の手札・スタック操作でクリーチャーを唱えて解決してください。このパネルは既存のゲームアダプター経由でSandboxのSetLife操作を送信します。",
+    "scopeNote": "エンジンのプレイヤー編集経路でライフを修正します。ダメージやカード効果ではありません。手札公開、ルールに沿った捨てる処理、事前合意による唱える前のUndoはこの試作に含みません。",
+    "target": "対象プレイヤー",
+    "player": "{{name}}（プレイヤー{{seat}}）",
+    "you": "あなた",
+    "opponent": "対戦相手",
+    "currentLife": "現在のライフ",
+    "newLife": "修正後のライフ",
+    "submit": "修正を適用",
+    "submitting": "修正を送信しました。このパネルを閉じても処理は取り消されません。",
+    "applied": "反映済みの現在のライフ（{{player}}）：{{life}}。",
+    "notApplied": "エンジンが修正を確認できませんでした。再試行する前に現在のスナップショットを確認してください。",
+    "failed": "修正を送信できませんでした。",
+    "stale": "編集中にゲームが更新されました。現在のスナップショットからやり直すには、パネルを閉じて開き直してください。"
+  },
   "debugCreate": {
     "copies": "枚数",
     "asToken": "トークンとして生成",
@@ -883,6 +901,7 @@
     "chooseNewTarget": "呪文の新しい対象を選択",
     "chooseNewTargetForSpell": "{{spell}}の新しい対象を選択",
     "chooseCreatureToExplore": "次に探検するクリーチャーを選択",
+    "chooseCreatureToEquip": "装備するクリーチャーを選択",
     "chooseCreatureTokenToPopulate": "居住でコピーするクリーチャー・トークンを選択",
     "chooseReturnAsAuraTarget": "エンチャントするパーマネントを選択",
     "tapUntappedCreatures_one": "アンタップ状態のクリーチャー{{count}}体をタップ",

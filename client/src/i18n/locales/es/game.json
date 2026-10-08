@@ -106,6 +106,24 @@
     "grant": "Aprobar",
     "decline": "Conservar prioridad"
   },
+  "sandboxLifeCorrection": {
+    "open": "Corregir vidas",
+    "title": "Corrección de vidas de Sandbox",
+    "description": "Usa los controles normales de la mano y la pila para lanzar y resolver una criatura. Este panel envía la acción SetLife de Sandbox mediante el adaptador de juego existente.",
+    "scopeNote": "Corrige las vidas mediante la ruta de edición de jugadores del motor; no representa daño ni un efecto de carta. Esta versión no incluye revelar manos ocultas, descartar según las reglas ni deshacer antes de lanzar con acuerdo previo.",
+    "target": "Jugador",
+    "player": "{{name}} (jugador {{seat}})",
+    "you": "Tú",
+    "opponent": "Oponente",
+    "currentLife": "Vidas actuales",
+    "newLife": "Nuevas vidas",
+    "submit": "Aplicar corrección",
+    "submitting": "Corrección enviada; cerrar este panel no la cancela.",
+    "applied": "Vidas actuales confirmadas para {{player}}: {{life}}.",
+    "notApplied": "El motor no confirmó esta corrección. Comprueba el snapshot actual antes de volver a intentarlo.",
+    "failed": "No se pudo enviar la corrección.",
+    "stale": "La partida cambió durante la edición. Cierra y vuelve a abrir este panel para empezar desde el snapshot actual."
+  },
   "debugCreate": {
     "copies": "Copias",
     "asToken": "Crear como ficha",
@@ -843,6 +861,7 @@
     "chooseNewTargetForCopy": "Elige un nuevo objetivo para la copia",
     "chooseTargetForCopy": "Elige objetivo para la copia",
     "chooseCreatureToExplore": "Elige qué criatura explora a continuación",
+    "chooseCreatureToEquip": "Elige una criatura para equipar",
     "chooseCreatureTokenToPopulate": "Elige una ficha de criatura para poblar",
     "chooseReturnAsAuraTarget": "Elige un permanente para encantar",
     "tapUntappedCreatures_one": "Gira {{count}} criatura sin girar",

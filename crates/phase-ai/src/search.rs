@@ -1270,8 +1270,13 @@ pub fn fallback_action(
     // Pending-cast states can always be escaped with CancelCast (CR 601.2).
     // Check this before the exhaustive match so every pending-cast variant
     // is covered without repeating CancelCast per-arm.
-    if state.waiting_for.allows_cancel_cast()
-        || state.allows_cancel_cast
+    //
+    // Pending-cast-only by construction (`has`, not `allows`): pre-cost
+    // keyword-activation announcements (CR 602.2b) allow cancel without a
+    // pending cast and fall through to the dedicated silent arms below. This
+    // keeps the gap-error signal pure for genuine castability dead-ends.
+    if state.waiting_for.has_pending_cast()
+        || state.has_pending_cast
         || (matches!(state.waiting_for, WaitingFor::DistributeAmong { .. })
             && state.pending_cast.is_some())
     {
@@ -6284,6 +6289,146 @@ mod tests {
             applied.waiting_for,
             WaitingFor::Priority { player: P0 }
         ));
+    }
+
+    /// Cancel-01: `fallback_action` in a keyword-activation selection state
+    /// returns the engine-issued `CancelCast` WITHOUT the pending-cast gap
+    /// error — the dead-end branch is pending-cast-only, so keyword states
+    /// fall through to their dedicated silent arms. The paired positive
+    /// control proves the capture instrument fires on a genuine dead-end.
+    /// Fails if the branch still keys on `allows_cancel_cast` (the keyword
+    /// case then routes through the gap-error log) or if the harness is
+    /// vacuous (the control captures nothing).
+    #[test]
+    fn fallback_keyword_cancel_stays_silent_while_dead_end_logs_gap() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone, Default)]
+        struct EventSink(Arc<Mutex<Vec<String>>>);
+        impl<S> tracing_subscriber::Layer<S> for EventSink
+        where
+            S: tracing::Subscriber,
+        {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                struct Visitor<'a>(&'a mut String);
+                impl tracing::field::Visit for Visitor<'_> {
+                    fn record_debug(
+                        &mut self,
+                        _field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        use std::fmt::Write;
+                        let _ = write!(self.0, "{value:?} ");
+                    }
+                }
+                let mut text = String::new();
+                event.record(&mut Visitor(&mut text));
+                self.0.lock().expect("sink lock").push(text);
+            }
+        }
+
+        fn captured_events(f: impl FnOnce()) -> Vec<String> {
+            let sink = EventSink::default();
+            let subscriber = tracing_subscriber::registry().with(sink.clone());
+            tracing::subscriber::with_default(subscriber, f);
+            let events = sink.0.lock().expect("sink lock").clone();
+            events
+        }
+
+        // Keyword case: a real CrewVehicle prompt reached through production.
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let vehicle = {
+            let mut builder = scenario.add_creature(P0, "Silent Test Vehicle", 6, 5);
+            builder
+                .as_artifact()
+                .with_subtypes(vec!["Vehicle"])
+                .with_keyword(Keyword::Crew {
+                    power: 3,
+                    once_per_turn: None,
+                });
+            builder.id()
+        };
+        scenario.add_creature(P0, "Pilot A", 2, 2);
+        scenario.add_creature(P0, "Pilot B", 2, 2);
+        let mut runner = scenario.build();
+        runner
+            .act(GameAction::CrewVehicle {
+                vehicle_id: vehicle,
+                creature_ids: vec![],
+            })
+            .expect("crew entry must reach its selection prompt");
+        let state = runner.state().clone();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::CrewVehicle { .. }),
+            "reach guard: the real prompt must be pending, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            test_contract(&state).contains_action(&state, &GameAction::CancelCast),
+            "reach guard: the contract domain must contain the CancelCast exit"
+        );
+
+        let events = captured_events(|| {
+            let action = fallback_action_default(&state).expect("keyword fallback must be issued");
+            assert_eq!(
+                action,
+                GameAction::CancelCast,
+                "keyword fallback must take the CancelCast exit"
+            );
+        });
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.contains("can_cast_object_now has a gap")),
+            "keyword fallback must not log the pending-cast gap error; got {events:?}"
+        );
+
+        // Positive control: a genuine pending-cast dead-end MUST log the gap.
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = scenario
+            .add_spell_to_hand(P0, "Control Spell", true)
+            .with_mana_cost(ManaCost::generic(1))
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            )],
+        );
+        let mut runner = scenario.build();
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(spell.0),
+                targets: vec![],
+                payment_mode: CastPaymentMode::Manual,
+            })
+            .expect("manual cast must enter its mana-payment step");
+        let state = runner.state().clone();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ManaPayment { .. }),
+            "reach guard: the control must park in a pending-cast state, got {:?}",
+            state.waiting_for
+        );
+        let events = captured_events(|| {
+            let _ = fallback_action_default(&state);
+        });
+        assert!(
+            events
+                .iter()
+                .any(|event| event.contains("can_cast_object_now has a gap")),
+            "positive control must capture the gap error; got {events:?}"
+        );
     }
 
     #[test]

@@ -1131,12 +1131,10 @@ pub fn candidate_actions_broad_with_probe(
             valid_targets,
         } => {
             if valid_targets.is_empty() {
-                // No legal targets — CancelCast backs out the activation.
-                vec![candidate(
-                    GameAction::CancelCast,
-                    TacticalClass::Pass,
-                    Some(*player),
-                )]
+                // No legal targets — the engine entry rejects this before the
+                // prompt exists, and the generic CancelCast push below owns the
+                // back-out offer.
+                Vec::new()
             } else {
                 valid_targets
                     .iter()
@@ -1161,22 +1159,10 @@ pub fn candidate_actions_broad_with_probe(
             eligible_creatures,
             ..
         } => {
-            let mut actions = crew_vehicle_candidates(
-                state,
-                *player,
-                *vehicle_id,
-                *crew_power,
-                eligible_creatures,
-            );
-            // CR 602.2b + CR 601.2h: no crew cost is paid until the selected
-            // creatures are tapped, so the pre-payment selection step can be
-            // cancelled back to priority.
-            actions.push(candidate(
-                GameAction::CancelCast,
-                TacticalClass::Pass,
-                Some(*player),
-            ));
-            actions
+            // The generic CancelCast push below owns the back-out offer
+            // (CR 602.2b + CR 601.2h: no crew cost is paid until the selected
+            // creatures are tapped).
+            crew_vehicle_candidates(state, *player, *vehicle_id, *crew_power, eligible_creatures)
         }
         // CR 702.184a: Offer each eligible creature as the station cost payer.
         WaitingFor::StationTarget {
@@ -3892,16 +3878,14 @@ fn semantic_candidate_actions_with_probe(
         actions.extend(candidate_actions_broad_with_probe(state, probe));
     }
 
-    let has_pending_cast = state.waiting_for.has_pending_cast()
-        || (matches!(state.waiting_for, WaitingFor::DistributeAmong { .. })
-            && state.pending_cast.is_some());
     let allows_cancel_cast = state.waiting_for.allows_cancel_cast()
         || (matches!(state.waiting_for, WaitingFor::DistributeAmong { .. })
             && state.pending_cast.is_some());
-    if has_pending_cast
-        && allows_cancel_cast
-        && !matches!(state.waiting_for, WaitingFor::TargetSelection { .. })
-    {
+    // `allows ⟹ has` for every cast state, so a `has_pending_cast` conjunct
+    // here would be redundant; keyword-activation announcements (CR 602.2b)
+    // allow cancel without a pending cast, and this generic push is their
+    // single offer site.
+    if allows_cancel_cast && !matches!(state.waiting_for, WaitingFor::TargetSelection { .. }) {
         if let Some(player) = state.waiting_for.acting_player() {
             actions.push(candidate(
                 GameAction::CancelCast,

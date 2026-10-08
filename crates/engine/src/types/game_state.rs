@@ -17417,11 +17417,25 @@ impl WaitingFor {
             )
     }
 
-    /// CR 601.2i: Whether the current prompt permits withdrawing the pending
-    /// spell. Kept distinct from `has_pending_cast`: a cast can be pending at
-    /// a mandatory choice without granting a cancellation action.
+    /// CR 601.2i + CR 602.2b: Whether the current prompt permits withdrawing
+    /// the pending spell-cast or a pre-cost keyword-activation announcement.
+    /// Spell casts complete only after CR 601.2a-h, so an in-flight cast can
+    /// still be withdrawn; keyword activations follow CR 601.2b-i (CR 602.2b),
+    /// so their pre-cost target/crew-choice steps (Equip CR 702.6a, Crew
+    /// CR 702.122a, Saddle CR 702.171a, Station CR 702.184a) can likewise be
+    /// backed out of with nothing to unwind. Kept distinct from
+    /// `has_pending_cast`: a cast can be pending at a mandatory choice without
+    /// granting a cancellation action, and keyword states allow cancel without
+    /// carrying a `PendingCast` at all.
     pub fn allows_cancel_cast(&self) -> bool {
-        self.has_pending_cast() && !matches!(self, WaitingFor::ManaSourceSelection { .. })
+        (self.has_pending_cast() && !matches!(self, WaitingFor::ManaSourceSelection { .. }))
+            || matches!(
+                self,
+                WaitingFor::EquipTarget { .. }
+                    | WaitingFor::CrewVehicle { .. }
+                    | WaitingFor::StationTarget { .. }
+                    | WaitingFor::SaddleMount { .. }
+            )
     }
 
     /// CR 605.3a + CR 605.3b: Whether this state continues a mana ability's
@@ -41267,6 +41281,89 @@ mod tests {
         };
         assert!(!tap_mana.has_pending_cast());
         assert!(tap_mana.pending_cast_ref().is_none());
+    }
+
+    /// CR 602.2b: pre-cost keyword-activation announcements allow cancel
+    /// without carrying a `PendingCast` — `has_pending_cast` stays false for
+    /// all four (the `derived.rs` invariant guard), while
+    /// `allows_cancel_cast` is true.
+    #[test]
+    fn allows_cancel_cast_covers_pre_cost_keyword_announcements() {
+        let equip = WaitingFor::EquipTarget {
+            player: PlayerId(0),
+            equipment_id: ObjectId(1),
+            valid_targets: vec![ObjectId(2), ObjectId(3)],
+        };
+        let crew = WaitingFor::CrewVehicle {
+            player: PlayerId(0),
+            vehicle_id: ObjectId(1),
+            crew_power: 3,
+            eligible_creatures: vec![ObjectId(2)],
+            contributions: vec![3],
+        };
+        let station = WaitingFor::StationTarget {
+            player: PlayerId(0),
+            spacecraft_id: ObjectId(1),
+            eligible_creatures: vec![ObjectId(2)],
+        };
+        let saddle = WaitingFor::SaddleMount {
+            player: PlayerId(0),
+            mount_id: ObjectId(1),
+            saddle_power: 2,
+            eligible_creatures: vec![ObjectId(2)],
+            contributions: vec![3],
+        };
+        for state in [&equip, &crew, &station, &saddle] {
+            assert!(
+                state.allows_cancel_cast(),
+                "{state:?} must allow withdrawing the pre-cost announcement"
+            );
+            assert!(
+                !state.has_pending_cast(),
+                "{state:?} carries no PendingCast — the derived invariant must keep holding"
+            );
+            assert!(state.pending_cast_ref().is_none());
+        }
+    }
+
+    /// The broadening flips exactly the four keyword states: Priority,
+    /// ManaSourceSelection, and the modal shapes (which own their own
+    /// CancelCast pushes) still report false.
+    #[test]
+    fn allows_cancel_cast_stays_false_outside_keyword_announcements() {
+        let priority = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert!(!priority.allows_cancel_cast());
+
+        let source_selection = WaitingFor::ManaSourceSelection {
+            player: PlayerId(0),
+            options: Vec::new(),
+            convoke_mode: None,
+        };
+        assert!(!source_selection.allows_cancel_cast());
+
+        let ability_modes = WaitingFor::AbilityModeChoice {
+            player: PlayerId(0),
+            modal: ModalChoice::default(),
+            source_id: ObjectId(1),
+            mode_abilities: Vec::new(),
+            is_activated: false,
+            ability_index: None,
+            ability_cost: None,
+            activation_cost_snapshot: None,
+            unavailable_modes: Vec::new(),
+        };
+        assert!(!ability_modes.allows_cancel_cast());
+
+        let modal_face = WaitingFor::ModalFaceChoice {
+            player: PlayerId(0),
+            object_id: ObjectId(1),
+            card_id: CardId(1),
+            payment_mode: CastPaymentMode::Auto,
+            resolution_additional_cost: None,
+        };
+        assert!(!modal_face.allows_cancel_cast());
     }
 
     /// CR 605.3b + CR 704.3: a mana ability's own prompts are part of its

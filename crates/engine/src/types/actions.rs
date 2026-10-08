@@ -378,6 +378,9 @@ pub enum GameAction {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         hybrid_announcement: Vec<crate::types::mana::ManaCostShard>,
     },
+    /// CR 601.2 + CR 602.2b: withdraw a pending spell cast or a pre-cost
+    /// keyword-activation announcement (Equip/Crew/Station/Saddle selection),
+    /// restoring priority with nothing to unwind.
     CancelCast,
     Equip {
         equipment_id: ObjectId,
