@@ -41,7 +41,7 @@ fn graveyard_size(state: &GameState, player: PlayerId) -> usize {
     state
         .players
         .get(player.0 as usize)
-        .map(|p| p.graveyard.len())
+        .map(|p| state.graveyard_of(p.id).len())
         .unwrap_or(0)
 }
 

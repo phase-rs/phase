@@ -571,14 +571,15 @@ fn runtime_granted_top_of_library_plot_abilities(
     if obj.zone != Zone::Library {
         return Vec::new();
     }
-    // CR 702.170d: the plot grant belongs to the library's owner — the player
-    // who may later cast the plotted card. Delegate authorization to the
-    // single-authority predicate; it must return exactly this top card.
-    let player = obj.owner;
-    let Some((top_id, _src_id)) = top_of_library_plot_source(state, player) else {
-        return Vec::new();
-    };
-    if top_id != source_id {
+    // CR 702.170f + CR 400.1: "your library" is the library each seat reads, so the
+    // grant belongs to whichever seat reading this card's library is authorized by
+    // `top_of_library_plot_source`, not to the card's owner.
+    let authorized = state.players.iter().any(|p| {
+        object_in_players_library(state, obj, p.id)
+            && top_of_library_plot_source(state, p.id)
+                .is_some_and(|(top_id, _)| top_id == source_id)
+    });
+    if !authorized {
         return Vec::new();
     }
     // CR 702.170a: plot cost = the card's mana cost, computed live from the top
@@ -1507,7 +1508,7 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
     objects.extend(graveyard_spell_objects_available_to_cast(
         state,
         player,
-        &player_data.graveyard,
+        state.graveyard_of(player_data.id),
         &permission_sources,
     ));
 
@@ -1608,31 +1609,47 @@ fn non_owner_graveyard_play_from_exile_grants(
     mode: CardPlayMode,
 ) -> Vec<(ObjectId, ObjectId)> {
     let mut results = Vec::new();
-    for other in state.players.iter().filter(|p| p.id != player) {
-        for &obj_id in &other.graveyard {
-            let Some(obj) = state.objects.get(&obj_id) else {
-                continue;
-            };
-            // CR 305.1: a land is played and a spell is cast; the caller's `mode`
-            // decides which surface this is, and the object has to match it.
-            let admitted = match mode {
-                CardPlayMode::Cast => play_from_exile_object_in_cast_path(obj),
-                CardPlayMode::Play => obj
-                    .card_types
-                    .core_types
-                    .contains(&crate::types::card_type::CoreType::Land),
-            };
-            if !admitted {
-                continue;
-            }
-            if let Some((source, _)) =
-                play_from_exile_permission_source(state, obj, player, state.turn_number, Some(mode))
-            {
-                results.push((obj_id, source));
-            }
+    for obj_id in non_owner_graveyard_ids(state, player) {
+        let Some(obj) = state.objects.get(&obj_id) else {
+            continue;
+        };
+        // CR 305.1: a land is played and a spell is cast; the caller's `mode`
+        // decides which surface this is, and the object has to match it.
+        let admitted = match mode {
+            CardPlayMode::Cast => play_from_exile_object_in_cast_path(obj),
+            CardPlayMode::Play => obj
+                .card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Land),
+        };
+        if !admitted {
+            continue;
+        }
+        if let Some((source, _)) =
+            play_from_exile_permission_source(state, obj, player, state.turn_number, Some(mode))
+        {
+            results.push((obj_id, source));
         }
     }
     results
+}
+
+/// CR 400.1 + CR 404.1 as modified by a shared-graveyard format: graveyard
+/// cards owned by someone other than `player`. Each storage seat is visited
+/// once, so a shared pile is not repeated per seat.
+fn non_owner_graveyard_ids(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
+    let mut seats: Vec<PlayerId> = Vec::new();
+    for p in &state.players {
+        let seat = state.zone_storage_seat(Zone::Graveyard, p.id);
+        if !seats.contains(&seat) {
+            seats.push(seat);
+        }
+    }
+    seats
+        .into_iter()
+        .flat_map(|seat| state.graveyard_of(seat).iter().copied())
+        .filter(|id| state.objects.get(id).is_some_and(|obj| obj.owner != player))
+        .collect()
 }
 
 /// CR 601.3 + CR 404.1: cards in OTHER players' graveyards that a
@@ -1651,11 +1668,8 @@ fn non_owner_graveyard_permission_objects(
     if sources.iter().all(|source| source.pool.is_own_graveyard()) {
         return Vec::new();
     }
-    state
-        .players
-        .iter()
-        .filter(|other| other.id != player)
-        .flat_map(|other| other.graveyard.iter().copied())
+    non_owner_graveyard_ids(state, player)
+        .into_iter()
         .filter(|&obj_id| {
             state.objects.get(&obj_id).is_some_and(|obj| {
                 graveyard_object_castable_by_permission_sources(state, player, obj_id, obj, sources)
@@ -3885,29 +3899,29 @@ pub(crate) fn castable_from_current_zone(
                 || (((obj.zone == Zone::Graveyard
                     && has_effective_graveyard_cast_keyword(state, obj.id, obj))
                     || has_graveyard_timed_alt_cost_permission(state, obj, player))
-                    && normal_cost_route())
-                // CR 401.5 + CR 118.9 + CR 601.2a: Top-of-library cast via static
-                // permission (Realmwalker, Future Sight, Bolas's Citadel, etc.). The card
-                // must be the current top of `player`'s library AND match the static's
-                // `affected` filter.
-                //
-                // The `library.front()` test reproduces
-                // `top_of_library_permission_source`'s own first two steps, against the
-                // same `player` rather than the object's owner. It is verdict-identical:
-                // that callee binds its returned `top_id` from this same `front()`, so a
-                // non-top object could never satisfy the `top_id == obj.id` comparison
-                // below, and an absent player or an empty library makes callee and test
-                // answer no alike. It skips only a call whose answer that comparison
-                // discards.
-                || (obj.zone == Zone::Library
-                    && state
-                        .players
-                        .iter()
-                        .find(|p| p.id == player)
-                        .and_then(|p| p.library.front())
-                        == Some(&obj.id)
-                    && top_of_library_permission_source(state, player, Some(CardPlayMode::Cast))
-                        .is_some_and(|(top_id, _, _, _)| top_id == obj.id))))
+                    && normal_cost_route())))
+        // CR 401.5 + CR 118.9 + CR 601.2a: Top-of-library cast via static
+        // permission (Realmwalker, Future Sight, Bolas's Citadel, etc.). The card
+        // must be the current top of the library `player` reads — whoever owns
+        // it — AND match the static's `affected` filter, so it sits outside the
+        // owner block above.
+        //
+        // The `library.front()` test reproduces
+        // `top_of_library_permission_source`'s own first two steps. It is
+        // verdict-identical: that callee binds its returned `top_id` from this same
+        // `front()`, so a non-top object could never satisfy the `top_id == obj.id`
+        // comparison below, and an absent player or an empty library makes callee
+        // and test answer no alike. It skips only a call whose answer that
+        // comparison discards.
+        || (obj.zone == Zone::Library
+            && state
+                .players
+                .iter()
+                .find(|p| p.id == player)
+                .and_then(|p| state.library_of(p.id).front())
+                == Some(&obj.id)
+            && top_of_library_permission_source(state, player, Some(CardPlayMode::Cast))
+                .is_some_and(|(top_id, _, _, _)| top_id == obj.id))
         )
 }
 
@@ -5593,7 +5607,7 @@ fn graveyard_permission_sources(
     let mut source_ids: Vec<ObjectId> = state.battlefield.iter().copied().collect();
     source_ids.extend(command_zone_emblems(state));
     if let Some(player_data) = state.players.iter().find(|p| p.id == player) {
-        source_ids.extend(player_data.graveyard.iter().copied());
+        source_ids.extend(state.graveyard_of(player_data.id).iter().copied());
     }
 
     source_ids
@@ -6476,7 +6490,7 @@ pub(crate) fn top_of_library_permission_source(
     Option<crate::types::ability::AbilityCost>,
 )> {
     let player_data = state.players.iter().find(|p| p.id == player)?;
-    let &top_id = player_data.library.front()?;
+    let &top_id = state.library_of(player_data.id).front()?;
     // CR 601.2a: Collect every permission that can authorize this cast, then
     // prefer an `Unlimited` authorizer so a bounded `OncePerTurn` slot is only
     // spent when nothing else authorizes the cast.
@@ -6594,7 +6608,7 @@ pub(crate) fn top_of_library_plot_source(
     player: PlayerId,
 ) -> Option<(ObjectId, ObjectId)> {
     let player_data = state.players.iter().find(|p| p.id == player)?;
-    let &top_id = player_data.library.front()?;
+    let &top_id = state.library_of(player_data.id).front()?;
 
     // Scan the player's battlefield once, classifying active plot statics into
     // the two CR roles and UNION-matching each role's `affected` filter against
@@ -6670,6 +6684,18 @@ pub fn top_of_library_land_playable_by_permission(
     Some((top_id, src_id))
 }
 
+/// CR 400.1 + CR 401.1: `obj` sits in the library `player` reads — its owner's own
+/// library, or the one shared pile when the format shares libraries.
+pub(crate) fn object_in_players_library(
+    state: &GameState,
+    obj: &GameObject,
+    player: PlayerId,
+) -> bool {
+    obj.zone == Zone::Library
+        && state.zone_storage_seat(Zone::Library, obj.owner)
+            == state.zone_storage_seat(Zone::Library, player)
+}
+
 /// CR 118.9 + CR 401.5: When `object_id` is the current top of `player`'s library
 /// and a `TopOfLibraryCastPermission` static grants an alt-cost rider (Bolas's
 /// Citadel: pay life equal to mana value), return that cost for castability
@@ -6680,7 +6706,7 @@ pub(crate) fn top_of_library_alt_ability_cost_for_object(
     object_id: ObjectId,
 ) -> Option<crate::types::ability::AbilityCost> {
     let obj = state.objects.get(&object_id)?;
-    if obj.zone != Zone::Library || obj.owner != player {
+    if !object_in_players_library(state, obj, player) {
         return None;
     }
     top_of_library_permission_source(state, player, Some(CardPlayMode::Cast)).and_then(
@@ -6741,7 +6767,7 @@ pub fn graveyard_lands_playable_by_permission(
     // CR 701.17d: Object-tagged `PlayFromExile` on a milled land in the
     // graveyard. Mirrors the object-tagged branch of
     // `exile_lands_playable_by_permission`.
-    for &gy_obj_id in &player_data.graveyard {
+    for &gy_obj_id in state.graveyard_of(player_data.id) {
         let Some(obj) = state.objects.get(&gy_obj_id) else {
             continue;
         };
@@ -6816,7 +6842,7 @@ fn graveyard_land_play_grants(
     }
     let mut grants = Vec::new();
     for source_id in source_ids {
-        for &land in &player_data.graveyard {
+        for &land in state.graveyard_of(player_data.id) {
             // CR 305.1: only lands can be "played" (non-land cards are cast).
             if !state.objects.get(&land).is_some_and(|obj| {
                 obj.card_types
@@ -7427,7 +7453,7 @@ pub fn graveyard_slot_demand(
         .players
         .iter()
         .find(|p| p.id == player)
-        .map(|p| &p.graveyard)
+        .map(|p| state.graveyard_of(p.id))
     else {
         return 0;
     };
@@ -8920,7 +8946,7 @@ fn prepare_spell_cast_announced(
     // current top of `player`'s library AND match the static's `affected`
     // filter. The optional `alt_cost` flows through to `prepare_spell_cast`'s
     // alt-cost branch below, mirroring `ExileWithAltAbilityCost` semantics.
-    let top_of_library_permission_src = if obj.zone == Zone::Library && obj.owner == player {
+    let top_of_library_permission_src = if object_in_players_library(state, obj, player) {
         top_of_library_permission_source(state, player, Some(CardPlayMode::Cast))
             .filter(|(top_id, _, _, _)| *top_id == object_id)
     } else {
@@ -24031,7 +24057,8 @@ pub(crate) fn find_eligible_exile_for_cost_targets(
                 .players
                 .get(player.0 as usize)
                 .map(|p| {
-                    p.graveyard
+                    state
+                        .graveyard_of(p.id)
                         .iter()
                         .copied()
                         .filter(|&id| {
@@ -25188,12 +25215,20 @@ fn activation_structural_eligibility(
 
     // CR 602.2 + CR 108.4a: use controller_or_owner so off-zone cards and
     // command-zone emblems retain their respective activation authorities.
-    if !player_may_begin_activating(
-        state,
-        player,
-        obj.controller_or_owner(),
-        ability_def.activator_filter.as_ref(),
-    ) {
+    // CR 702.170b + CR 702.170f: plot is a special action of the seat the grant authorizes,
+    // whoever owns the library card.
+    let may_begin =
+        if obj.zone == Zone::Library && ability_def.activation_zone == Some(Zone::Library) {
+            top_of_library_plot_source(state, player).is_some_and(|(top_id, _)| top_id == source_id)
+        } else {
+            player_may_begin_activating(
+                state,
+                player,
+                obj.controller_or_owner(),
+                ability_def.activator_filter.as_ref(),
+            )
+        };
+    if !may_begin {
         return ActivationStructuralEligibility::WrongActivator;
     }
     // CR 702.49a: Ninjutsu is an activated ability with a dedicated
@@ -33341,5 +33376,153 @@ mod sacrifice_cost_context_identity_tests {
             find_eligible_sacrifice_targets(runner.state(), P1, source, None, &source_controller),
             vec![defender_fodder]
         );
+    }
+}
+
+#[cfg(test)]
+mod dandan_read_sweep_tests {
+    use super::*;
+    use crate::game::scenario::GameScenario;
+    use crate::game::scenario_db::GameScenarioDbExt;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{CastingPermission, Duration, PlayFromExileProvenance};
+    use crate::types::format::FormatConfig;
+    use crate::types::game_state::AnnouncedGraveyardPermission;
+    use crate::types::identifiers::CardId;
+    use crate::types::phase::Phase;
+
+    const P0: PlayerId = PlayerId(0);
+    const P1: PlayerId = PlayerId(1);
+
+    /// A graveyard card `owner` owns whose exile-play grant names `to`.
+    fn granted_card(state: &mut GameState, owner: PlayerId, to: PlayerId, card: u64) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card),
+            owner,
+            format!("Granted {card}"),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .casting_permissions
+            .push(CastingPermission::PlayFromExile {
+                provenance: PlayFromExileProvenance::Impulse,
+                mode: CardPlayMode::Cast,
+                duration: Duration::Permanent,
+                granted_to: to,
+                frequency: CastFrequency::Unlimited,
+                source_id: None,
+                invalidation: None,
+                exiled_by_ability_controller: None,
+                mana_spend_permission: None,
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
+                cast_cost_modifier: None,
+                alt_ability_cost: None,
+                land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            });
+        id
+    }
+
+    fn grants(state: &GameState, caller: PlayerId) -> Vec<ObjectId> {
+        non_owner_graveyard_play_from_exile_grants(state, caller, CardPlayMode::Cast)
+            .into_iter()
+            .map(|(id, _source)| id)
+            .collect()
+    }
+
+    /// CR 601.2a + CR 400.1: the pass lists a granted card someone else owns
+    /// once, whichever seat reads a shared pile, and never the caller's own.
+    #[test]
+    fn non_owner_grants_list_each_pile_card_once() {
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 1);
+        let theirs = granted_card(&mut state, P1, P0, 1);
+        assert_eq!(
+            grants(&state, P0),
+            vec![theirs],
+            "caller P0 sees P1's pile card"
+        );
+
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 1);
+        let other = granted_card(&mut state, P0, P1, 1);
+        let own = granted_card(&mut state, P1, P1, 2);
+        assert_eq!(
+            grants(&state, P1),
+            vec![other],
+            "caller P1 sees P0's pile card once and not its own ({own:?})"
+        );
+    }
+
+    #[test]
+    fn non_owner_grants_in_a_per_seat_format_read_the_other_seats_graveyard() {
+        let mut state = GameState::new_two_player(1);
+        let theirs = granted_card(&mut state, P1, P0, 1);
+        granted_card(&mut state, P0, P0, 2);
+
+        assert_eq!(grants(&state, P0), vec![theirs]);
+    }
+
+    /// CR 404.1 + CR 400.1: the cards "in another player's graveyard" of a
+    /// shared pile are the other-owned ones, each listed once.
+    #[test]
+    fn non_owner_graveyard_ids_dedup_the_shared_pile() {
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 1);
+        let a = create_object(&mut state, CardId(1), P0, "A".into(), Zone::Graveyard);
+        let b = create_object(&mut state, CardId(2), P1, "B".into(), Zone::Graveyard);
+        let c = create_object(&mut state, CardId(3), P1, "C".into(), Zone::Graveyard);
+
+        assert_eq!(non_owner_graveyard_ids(&state, P0), vec![b, c]);
+        assert_eq!(non_owner_graveyard_ids(&state, P1), vec![a]);
+
+        let mut standard = GameState::new_two_player(1);
+        let theirs = create_object(&mut standard, CardId(1), P1, "T".into(), Zone::Graveyard);
+        create_object(&mut standard, CardId(2), P0, "M".into(), Zone::Graveyard);
+        assert_eq!(non_owner_graveyard_ids(&standard, P0), vec![theirs]);
+    }
+
+    /// CR 601.2a: Lurrus's once-per-turn graveyard permission is
+    /// offered to the non-canonical seat for each eligible pile card, and the
+    /// slot demand counts the other eligible card.
+    #[test]
+    fn graveyard_permission_slot_demand_counts_the_shared_pile() {
+        let db = crate::test_support::shared_card_db();
+        for (cards, demand) in [
+            (&["Llanowar Elves", "Memnite"][..], 1),
+            (&["Llanowar Elves"][..], 0),
+        ] {
+            let mut scenario = GameScenario::new_with_format(FormatConfig::dandan(), 2, 11);
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.add_real_card(P1, "Lurrus of the Dream-Den", Zone::Battlefield, db);
+            let ids: Vec<ObjectId> = cards
+                .iter()
+                .map(|name| scenario.add_real_card(P1, name, Zone::Graveyard, db))
+                .collect();
+            let mut state = scenario.build().state().clone();
+            state.active_player = P1;
+
+            let offered = spell_objects_available_to_cast(&state, P1);
+            for id in &ids {
+                assert!(offered.contains(id), "{cards:?}: {id:?} is offered");
+            }
+            let candidate = graveyard_permission_candidates(&state, P1, ids[0])
+                .into_iter()
+                .next()
+                .expect("Lurrus authorizes the card");
+            let announcement = AnnouncedGraveyardPermission {
+                permission: candidate.permission,
+                grant_digest: grant_digest(candidate.definition).expect("digest"),
+                slot_type: None,
+            };
+
+            assert_eq!(
+                graveyard_slot_demand(&state, P1, ids[0], &announcement),
+                demand,
+                "{cards:?}"
+            );
+        }
     }
 }

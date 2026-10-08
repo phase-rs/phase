@@ -66,6 +66,8 @@ pub enum CastChoice {
 ///   Only available when `object_id` references a card named "Serum Powder" in
 ///   the actor's hand (CR 103.5b and Serum Powder Oracle text). The player
 ///   remains pending and may keep, mulligan, or use another Serum Powder next.
+/// - `FreeReveal` — reveal the hand, return it and redraw without taking a
+///   regular mulligan (the Dandan free-reveal rule).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum MulliganChoice {
@@ -76,6 +78,11 @@ pub enum MulliganChoice {
     UseSerumPowder {
         object_id: ObjectId,
     },
+    /// CR 103.5 as modified by the Dandan free-reveal rule: reveal the hand,
+    /// return it and redraw; the mulligan count is unchanged and nothing is
+    /// bottomed. Legal only where `GameFormat::free_reveal_mulligan()` offers
+    /// it, before this player's first regular mulligan, while the hand qualifies.
+    FreeReveal,
 }
 
 /// CR 118.9: Player decision at a `WaitingFor::AlternativeCastChoice` prompt —

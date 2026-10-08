@@ -10,6 +10,7 @@ use engine::types::game_state::{
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::resolution::RESOLUTION_STATE_WIRE_VERSION;
 use engine::types::zones::Zone;
 use serde_json::Value;
 
@@ -501,9 +502,12 @@ fn canonical_raw_and_trusted_saves_require_draw_result_owners() {
     assert_eq!(
         wire.pointer("/state/resolution_state_version")
             .and_then(Value::as_u64),
-        Some(4)
+        Some(RESOLUTION_STATE_WIRE_VERSION)
     );
-    assert_eq!(raw_wire["resolution_state_version"], Value::from(4_u64));
+    assert_eq!(
+        raw_wire["resolution_state_version"],
+        Value::from(RESOLUTION_STATE_WIRE_VERSION)
+    );
     assert!(
         contains_non_null(&wire, "delivery_owner"),
         "the paused save must carry the child owner"

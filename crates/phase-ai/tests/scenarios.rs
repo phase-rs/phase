@@ -2449,3 +2449,102 @@ fn ai_tax_decision_counts_a_tapped_sick_tapless_mana_source() {
         "another legal mana source remains after paying the tax"
     );
 }
+
+/// Both seats AI over the one shared Dandan pile: each seat acts and draws from
+/// it, and the session carries analysis for both seats.
+#[test]
+fn dandan_shared_pile_ai_pair_both_act_and_draw() {
+    use engine::game::deck_loading::{
+        load_deck_into_state, DeckEntry, DeckPayload, PlayerDeckPayload,
+    };
+    use engine::types::card::CardFace;
+    use engine::types::card_type::CardType;
+    use engine::types::format::FormatConfig;
+
+    let forests = || {
+        vec![DeckEntry {
+            card: CardFace {
+                name: "Forest".to_string(),
+                card_type: CardType {
+                    core_types: vec![CoreType::Land],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            count: 60,
+        }]
+    };
+    let mut scenario = GameScenario::new_with_format(FormatConfig::dandan(), 2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut runner = scenario.build();
+    load_deck_into_state(
+        runner.state_mut(),
+        &DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: forests(),
+                ..Default::default()
+            },
+            opponent: PlayerDeckPayload {
+                main_deck: forests(),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    let state = runner.state();
+    assert_eq!(state.deck_pools.len(), 1, "reach: one pool for the pile");
+    assert!(state.players[1].library.is_empty());
+    assert_eq!(state.library_of(P1).len(), 60);
+    assert_eq!(state.library_of(P0), state.library_of(P1));
+
+    let session = phase_ai::session::AiSession::arc_from_game(state);
+    assert!(
+        session.features.contains_key(&P0) && session.features.contains_key(&P1),
+        "reach: the session analyses both seats"
+    );
+    let start_turn = state.turn_number;
+    let pile_before = state.library_of(P0).len();
+    let mut actor = state.waiting_for.acting_players();
+
+    let ai_players = HashSet::from([P0, P1]);
+    let ai_configs = HashMap::from([
+        (P0, create_config(AiDifficulty::VeryHard, Platform::Native)),
+        (P1, create_config(AiDifficulty::VeryHard, Platform::Native)),
+    ]);
+    let mut ai_rng = SmallRng::seed_from_u64(42);
+    let run = run_ai_actions_bounded(
+        runner.state_mut(),
+        &ai_players,
+        &ai_configs,
+        &mut ai_rng,
+        &session,
+        400,
+    );
+
+    let mut acted = HashSet::new();
+    let mut drew: HashMap<PlayerId, usize> = HashMap::new();
+    for result in &run.results {
+        acted.extend(actor.iter().copied());
+        actor = result.state.waiting_for.acting_players();
+        for event in &result.events {
+            if let GameEvent::CardDrawn { player_id, .. } = event {
+                *drew.entry(*player_id).or_default() += 1;
+            }
+        }
+    }
+    let state = runner.state();
+    assert!(state.turn_number >= start_turn + 3, "the game advanced");
+    assert!(
+        acted.contains(&P0) && acted.contains(&P1),
+        "both seats acted: {acted:?}"
+    );
+    assert!(
+        drew.get(&P0).copied().unwrap_or(0) > 0 && drew.get(&P1).copied().unwrap_or(0) > 0,
+        "each seat drew from the pile: {drew:?}"
+    );
+    assert_eq!(
+        state.library_of(P0).len(),
+        pile_before - drew.values().sum::<usize>(),
+        "every draw came out of the one pile"
+    );
+}

@@ -20,7 +20,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import userEvent from "@testing-library/user-event";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter, Route, Routes } from "react-router";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX } from "../../constants/storage";
 import { usePreferencesStore } from "../../stores/preferencesStore";
@@ -46,6 +46,13 @@ vi.mock("../../hooks/useBracketEstimate", () => ({
 
 vi.mock("../../adapter/wasm-adapter", () => ({
   getSharedAdapter: () => ({ warmCardDatabase: () => Promise.resolve() }),
+}));
+
+vi.mock("../../services/engineRuntime", async () => ({
+  ...(await vi.importActual<typeof import("../../services/engineRuntime")>(
+    "../../services/engineRuntime",
+  )),
+  bestOfThreeCeilingForFormat: vi.fn(async (format: string) => (format === "Dandan" ? "Bo1" : "Bo3")),
 }));
 
 vi.mock("../../audio/useAudioContext", () => ({
@@ -107,13 +114,18 @@ function setActiveDeck(deckName: string): void {
   localStorage.setItem(ACTIVE_DECK_KEY, deckName);
 }
 
+function LocationProbe() {
+  const { search } = useLocation();
+  return <div data-testid="game-route">{search}</div>;
+}
+
 function renderGameSetupPage(initialEntry = "/game-setup") {
   return render(
     <MemoryRouter initialEntries={[initialEntry]}>
       <Routes>
         <Route path="/game-setup" element={<GameSetupPage />} />
         <Route path="/" element={<div>Home</div>} />
-        <Route path="/game/:id" element={<div>Game</div>} />
+        <Route path="/game/:id" element={<LocationProbe />} />
         <Route path="/deck-builder" element={<div>Deck Builder</div>} />
       </Routes>
     </MemoryRouter>,
@@ -247,5 +259,42 @@ describe("GameSetupPage — cEDH bracket warning chip", () => {
 
     // No warning chip.
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+  describe("best-of-three ceiling", () => {
+    async function startMatchAndReadSearch(): Promise<string> {
+      const user = userEvent.setup();
+      await user.click(await screen.findByRole("button", { name: /^Start Match/ }));
+      return (await screen.findByTestId("game-route")).textContent ?? "";
+    }
+
+    it("G1: Dandan disables Bo3, navigates match=bo1, and keeps the remembered Bo3", async () => {
+      act(() => {
+        usePreferencesStore.setState({ lastFormat: "Dandan", lastPlayerCount: 2, lastMatchType: "Bo3" });
+      });
+      renderGameSetupPage();
+
+      await waitFor(() => expect(screen.getByRole("button", { name: "BO1" })).toHaveClass("bg-indigo-600"));
+      expect(screen.getByRole("button", { name: "BO3" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "BO3" })).not.toHaveClass("bg-indigo-600");
+
+      const search = await startMatchAndReadSearch();
+      expect(search).toContain("format=Dandan");
+      expect(search).toContain("match=bo1");
+      expect(usePreferencesStore.getState().lastMatchType).toBe("Bo3");
+    });
+
+    it("G2: a format whose ceiling admits Bo3 leaves it enabled and navigates match=bo3", async () => {
+      act(() => {
+        usePreferencesStore.setState({ lastFormat: "Momir", lastPlayerCount: 2, lastMatchType: "Bo3" });
+      });
+      renderGameSetupPage();
+
+      await waitFor(() => expect(screen.getByRole("button", { name: "BO3" })).toBeEnabled());
+      expect(screen.getByRole("button", { name: "BO3" })).toHaveClass("bg-indigo-600");
+
+      const search = await startMatchAndReadSearch();
+      expect(search).toContain("format=Momir");
+      expect(search).toContain("match=bo3");
+    });
   });
 });

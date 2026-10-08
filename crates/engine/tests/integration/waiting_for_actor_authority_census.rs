@@ -789,9 +789,15 @@ fn every_waiting_for_arm_declares_its_acting_authority() {
     // classified by `WaitingFor::acting_authority` as
     // `ActingAuthority::One(player)`. Not actorless: the prompt cannot advance
     // without that player's `GameAction::SelectCards`.
-    if declared.len() != 140 {
+    // 140 -> 141 is adjudicated: CR 405.3's relative stack order for a batch
+    // of spell copies (CR 707.10) added `SpellCopyOrderChoice`. It names one
+    // acting `player` — CR 405.3 gives the order to the player who controls
+    // the copies — and is classified by `WaitingFor::acting_authority` as
+    // `ActingAuthority::One(player)`. Not actorless: the prompt cannot advance
+    // without that player's `GameAction::SelectCards`.
+    if declared.len() != 141 {
         failures.push(format!(
-            "PIN declared.len()={} != 140.\n\
+            "PIN declared.len()={} != 141.\n\
              \n\
              Adding a `WaitingFor` variant IS the counted event this gate exists to make loud. \
              Repair it by ADJUDICATING, not by bumping the number:\n\
@@ -854,6 +860,7 @@ fn mulligan_adapters_preserve_the_single_pending_actor_rule() {
             })
             .collect(),
         free_first_mulligan: false,
+        declared: Vec::new(),
     };
     let bottoming = |n: u8| WaitingFor::OpeningHandBottomCards {
         pending: (0..n)

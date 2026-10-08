@@ -7457,7 +7457,7 @@ fn object_replacement_candidate_applies(
                 .players
                 .iter()
                 .find(|p| p.id == replacement_player)
-                .map_or(0, |p| p.library.len() as u32);
+                .map_or(0, |p| state.library_of(p.id).len() as u32);
             if library_size < dredge {
                 return false;
             }
@@ -8545,13 +8545,13 @@ pub fn find_applicable_replacements(
             registry.get(&ReplacementEvent::Draw),
             state.players.iter().find(|p| p.id == *player_id),
         ) {
-            let library_size = player.library.len() as u32;
+            let library_size = state.library_of(player.id).len() as u32;
             // The hoisted, recipient-independent half of the grant query,
             // filled at most ONCE per event and shared by every graveyard card
             // — the same `Option<_>` + `get_or_insert_with` idiom the
             // `GrantedEtbKeyword` block above uses for `live_keywords`.
             let mut dredge_grant_live: Option<bool> = None;
-            for object_id in player.graveyard.iter().copied() {
+            for object_id in state.graveyard_of(player.id).iter().copied() {
                 let rid = granted_dredge_replacement_id(object_id);
                 if event.already_applied(&rid) {
                     continue;

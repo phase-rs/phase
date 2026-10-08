@@ -11130,7 +11130,11 @@ pub fn check_state_triggers(state: &mut GameState) {
         // phased-out / command-zone gate. We clone the yielded triggers to a
         // local Vec so the mutable-state pass below (push_pending_trigger_to_stack)
         // doesn't collide with the shared borrow on `state.objects`.
-        let (controller, timestamp, trigger_defs): (PlayerId, u32, Vec<TriggerDefinition>) = {
+        let (controller, timestamp, trigger_defs): (
+            PlayerId,
+            u32,
+            Vec<(TriggerDefinitionRef, TriggerDefinition)>,
+        ) = {
             let Some(obj) = state.objects.get(&obj_id) else {
                 continue;
             };
@@ -11141,20 +11145,27 @@ pub fn check_state_triggers(state: &mut GameState) {
                 obj.controller,
                 obj.entered_battlefield_turn.unwrap_or(0),
                 super::functioning_abilities::active_trigger_definitions(state, obj)
-                    .map(|active| active.definition.clone())
+                    .filter(|active| active.definition.mode == TriggerMode::StateCondition)
+                    .map(|active| (active.definition_ref, active.definition.clone()))
                     .collect(),
             )
         };
 
-        for trigger in &trigger_defs {
-            if trigger.mode != TriggerMode::StateCondition {
-                continue;
-            }
-
-            // CR 603.8: Don't re-trigger if this state trigger is already on the stack.
+        for (definition_ref, trigger) in &trigger_defs {
+            // CR 603.8: "A state-triggered ability doesn't trigger again until
+            // the ability has resolved, has been countered, or has otherwise
+            // left the stack." Only an instance of THIS ability suppresses it:
+            // another triggered ability of the same source on the stack does
+            // not. (A copy of the ability carries the same definition ref and
+            // holds it back too, as before.) The ref's source pins the source
+            // incarnation, so a pending trigger of an object that left the
+            // battlefield never suppresses the new object it became (CR 400.7).
             let already_on_stack = state.stack.iter().any(|entry| {
-                entry.source_id == obj_id
-                    && matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. })
+                matches!(
+                    &entry.kind,
+                    StackEntryKind::TriggeredAbility { ability, .. }
+                        if ability.trigger_definition_ref.as_ref() == Some(definition_ref)
+                )
             });
             if already_on_stack {
                 continue;
@@ -11190,12 +11201,25 @@ pub fn check_state_triggers(state: &mut GameState) {
                 });
 
                 let target_constraints = execute.target_constraints.clone();
-                let ability =
-                    build_triggered_ability_from_context(state, trigger, &source_context, None);
+                // The exact occurrence rides on the stacked ability; it is the
+                // identity the CR 603.8 self-suppression check above reads.
+                let ability = build_triggered_ability_from_context(
+                    state,
+                    trigger,
+                    &source_context,
+                    Some(definition_ref),
+                );
                 pending.push(PendingTrigger {
                     source_id: obj_id,
                     controller,
-                    condition: trigger.condition.clone(),
+                    // CR 603.8 + CR 603.4: the state condition was read above as
+                    // the trigger event (an `EventTime` wrapper, stripped here) and
+                    // is not rechecked on resolution; only an intervening "if"
+                    // beside it reaches the stacked condition.
+                    condition: trigger
+                        .condition
+                        .as_ref()
+                        .and_then(|condition| stack_condition_for_trigger(trigger, condition)),
                     ability: Box::new(ability),
                     timestamp,
                     target_constraints,
@@ -15364,7 +15388,11 @@ fn evaluate_trigger_condition_with_source(
         // Reads the per-color tally recorded in casting::pay_mana_cost.
         TriggerCondition::ManaColorSpent { color, minimum } => {
             source_context.is_some_and(|source| {
-                source.source_read(state).colors_spent_to_cast().get(*color) >= *minimum
+                source
+                    .source_read(state)
+                    .colors_spent_to_cast()
+                    .get(color.color())
+                    >= *minimum
             })
         }
         // CR 601.2h: "if no mana was spent to cast it/them" — check the cast or
@@ -15507,9 +15535,10 @@ fn evaluate_trigger_condition_with_source(
             source_context,
             trigger_event,
         ),
-        // CR 508.1m + CR 603.4: an event-time gate evaluates its wrapped
-        // condition when the trigger event occurs; it never reaches the
-        // resolution recheck (`stack_condition_for_trigger` drops it).
+        // CR 508.1m + CR 603.4 / CR 603.8: an event-time gate ("while" gates, and
+        // a state trigger's own condition) evaluates its wrapped condition when
+        // the ability triggers; it never reaches the resolution recheck
+        // (`stack_condition_for_trigger` drops it).
         TriggerCondition::EventTime { condition } => evaluate_trigger_condition_with_source(
             state,
             condition,
@@ -15964,8 +15993,9 @@ fn stack_condition_for_trigger(
     }
 
     match condition {
-        // CR 508.1m + CR 603.4: a "while" gate was read at the trigger event and
-        // is not an intervening `if`, so it never becomes a resolution recheck.
+        // CR 508.1m + CR 603.4 / CR 603.8: a "while" gate, or a state trigger's
+        // own condition, was read when the ability triggered and is not an
+        // intervening `if`, so it never becomes a resolution recheck.
         TriggerCondition::EventTime { .. } => None,
         TriggerCondition::And { conditions } => {
             let mut remaining: Vec<TriggerCondition> = conditions
@@ -16899,9 +16929,9 @@ pub mod tests {
         FilterProp, GuessSubject, KickerVariant, ModalChoice, MultiTargetSpec, PlayerFilter,
         PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
         ReplacementDefinition, ReplacementMode, ResolvedAbility, SearchSelectionConstraint,
-        SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter,
-        TargetRef, TargetSelectionMode, TriggerCondition, TriggerConstraint, TriggerDefinition,
-        TriggerGrantInstanceRef, TypeFilter, TypedFilter,
+        SharedQuality, SharedQualityRelation, SpentColor, StaticCondition, StaticDefinition,
+        TargetFilter, TargetRef, TargetSelectionMode, TriggerCondition, TriggerConstraint,
+        TriggerDefinition, TriggerGrantInstanceRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::LayoutKind;
@@ -19306,6 +19336,61 @@ pub mod tests {
                 "{mode:?}: the intervening-if beside it must stay on the stack"
             );
         }
+    }
+
+    /// CR 603.8 + CR 603.4: a parsed state trigger stacks exactly its intervening
+    /// "if" — the state condition itself is the trigger event (lowered as
+    /// `EventTime`) and is never rechecked on resolution. A state trigger with no
+    /// intervening "if" stacks no condition at all. Verbatim Oracle text (MTGJSON).
+    #[test]
+    fn parsed_state_trigger_stacks_only_its_intervening_if() {
+        let state_trigger = |oracle: &str, name: &str, core_type: &str| {
+            crate::parser::oracle::parse_oracle_text(
+                oracle,
+                name,
+                &[],
+                &[core_type.to_string()],
+                &[],
+            )
+            .triggers
+            .into_iter()
+            .find(|t| t.mode == TriggerMode::StateCondition)
+            .unwrap_or_else(|| panic!("{name} must parse a StateCondition trigger"))
+        };
+
+        let hidden_predators = state_trigger(
+            "When an opponent controls a creature with power 4 or greater, if this permanent is an enchantment, it becomes a 4/4 Beast creature.",
+            "Hidden Predators",
+            "Enchantment",
+        );
+        let condition = hidden_predators
+            .condition
+            .as_ref()
+            .expect("Hidden Predators' state trigger must carry a condition");
+        assert!(
+            matches!(
+                stack_condition_for_trigger(&hidden_predators, condition),
+                Some(TriggerCondition::SourceMatchesFilter { .. })
+            ),
+            "only the intervening \"if this permanent is an enchantment\" may be \
+             rechecked on resolution; stacked {:?} from {condition:?}",
+            stack_condition_for_trigger(&hidden_predators, condition),
+        );
+
+        let emperor_crocodile = state_trigger(
+            "When you control no other creatures, sacrifice this creature.",
+            "Emperor Crocodile",
+            "Creature",
+        );
+        let condition = emperor_crocodile
+            .condition
+            .as_ref()
+            .expect("Emperor Crocodile's state trigger must carry a condition");
+        assert_eq!(
+            stack_condition_for_trigger(&emperor_crocodile, condition),
+            None,
+            "a state trigger without an intervening \"if\" stacks no recheck"
+        );
     }
 
     #[test]
@@ -31801,7 +31886,9 @@ pub mod tests {
     fn test_adamant_true_when_enough_color_spent() {
         let (state, src) = setup_with_colored_cast(ManaColor::Red, 3);
         let cond = TriggerCondition::ManaColorSpent {
-            color: ManaColor::Red,
+            color: SpentColor::ColorWord {
+                color: ManaColor::Red,
+            },
             minimum: 3,
         };
         assert!(check_trigger_condition(
@@ -31817,7 +31904,9 @@ pub mod tests {
     fn test_adamant_false_when_not_enough() {
         let (state, src) = setup_with_colored_cast(ManaColor::Red, 3);
         let cond = TriggerCondition::ManaColorSpent {
-            color: ManaColor::Red,
+            color: SpentColor::ColorWord {
+                color: ManaColor::Red,
+            },
             minimum: 4,
         };
         assert!(!check_trigger_condition(
@@ -31833,7 +31922,9 @@ pub mod tests {
     fn test_adamant_false_when_wrong_color() {
         let (state, src) = setup_with_colored_cast(ManaColor::Green, 3);
         let cond = TriggerCondition::ManaColorSpent {
-            color: ManaColor::Red,
+            color: SpentColor::ColorWord {
+                color: ManaColor::Red,
+            },
             minimum: 3,
         };
         assert!(!check_trigger_condition(
@@ -31850,7 +31941,9 @@ pub mod tests {
         // minimum: 1 with one red spent → true
         let (state, src) = setup_with_colored_cast(ManaColor::Red, 1);
         let cond = TriggerCondition::ManaColorSpent {
-            color: ManaColor::Red,
+            color: SpentColor::ColorWord {
+                color: ManaColor::Red,
+            },
             minimum: 1,
         };
         assert!(check_trigger_condition(
@@ -31864,7 +31957,9 @@ pub mod tests {
         // minimum: 1 with zero red spent → false
         let (state, src) = setup_with_colored_cast(ManaColor::Green, 5);
         let cond = TriggerCondition::ManaColorSpent {
-            color: ManaColor::Red,
+            color: SpentColor::ColorWord {
+                color: ManaColor::Red,
+            },
             minimum: 1,
         };
         assert!(!check_trigger_condition(
@@ -37339,7 +37434,9 @@ pub mod tests {
         clear_post_collection_transients(&mut state);
 
         let cond = TriggerCondition::ManaColorSpent {
-            color: ManaColor::White,
+            color: SpentColor::ManaSymbol {
+                color: ManaColor::White,
+            },
             minimum: 2,
         };
         assert!(

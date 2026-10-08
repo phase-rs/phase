@@ -1173,6 +1173,8 @@
       "usePowder": "{{name}}を使う",
       "powderDescription": "手札をすべて追放して同じ枚数を引く（マリガンではない）",
       "powderTooltip": "手札をすべて追放し、同じ枚数を引きます。マリガンではないため、回数や一番下に置く枚数は変わりません。",
+      "freeReveal": "公開して引き直す（無料）",
+      "freeRevealDescription": "手札を公開して切り直し、7枚引く — 無料、ライブラリーの下に置くカードなし、マリガンではない",
       "eyebrowMulligan": "マリガン{{count}}回目・ロンドン方式",
       "eyebrowOpening": "初手・ロンドン・マリガン",
       "reviewTitle": "初手を確認",
@@ -1742,6 +1744,10 @@
     "empowerJace": {
       "title": "ジェイスを強化する",
       "subtitle": "あなたがコントロールするジェイス・トークンを1つ選び、忠誠度を+{{count}}する"
+    },
+    "spellCopyOrder": {
+      "title": "コピーの順番",
+      "subtitle": "次にコピーをスタックに置く呪文を選ぶ"
     },
     "collectEvidence": {
       "title": "証拠収集",

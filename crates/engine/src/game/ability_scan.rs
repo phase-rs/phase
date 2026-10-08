@@ -6003,6 +6003,7 @@ fn scan_continuous_modification(m: &ContinuousModification, mode: ScanMode) -> A
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
+        | ContinuousModification::SubstituteTextWord { .. }
         // CR 612.8 / CR 613.1c: a literal-name text-changing effect reads no board
         // aggregate or projected resource (sibling of `SetChosenName`).
         | ContinuousModification::SetTextName { .. }
@@ -9392,7 +9393,9 @@ mod tests {
         // Pin the legacy shape's classification so the delta is explicit and a
         // future retirement of `ManaColorSpent` cannot silently change it.
         let legacy = AbilityCondition::ManaColorSpent {
-            color: ManaColor::Red,
+            color: crate::types::ability::SpentColor::ColorWord {
+                color: ManaColor::Red,
+            },
             minimum: 3,
         };
         let legacy_axes = scan_ability_condition(&legacy, ScanMode::Conservative);

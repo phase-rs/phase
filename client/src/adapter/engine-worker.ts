@@ -24,7 +24,6 @@ import init, {
   buildLlmDecisionRequest,
   getAiActionProposalFromLlmResponse,
   llmProviderCatalog,
-  get_legal_actions_js,
   get_legal_actions_for_viewer_js,
   get_viewer_snapshot_js,
   get_viewer_transition_snapshot_js,
@@ -103,8 +102,8 @@ type EngineRequest =
   | { type: "previewInteraction"; id: number; actor: number; request: InteractionPreviewRequest }
   | { type: "getState"; id: number }
   | { type: "getFilteredState"; id: number; viewerId: number }
-  | { type: "getLegalActions"; id: number }
-  | { type: "getSnapshot"; id: number }
+  | { type: "getLegalActions"; id: number; viewerId: number }
+  | { type: "getSnapshot"; id: number; viewerId: number }
   | { type: "getLegalActionsForViewer"; id: number; viewerId: number }
   | { type: "getViewerSnapshot"; id: number; viewerId: number }
   | { type: "getViewerTransitionSnapshot"; id: number; viewerId: number; events: GameEvent[] }
@@ -135,8 +134,8 @@ type EngineRequest =
     }
   | { type: "llmProviderCatalog"; id: number }
   | { type: "restoreState"; id: number; stateJson: string }
-  | { type: "resumeRestoredGameState"; id: number }
-  | { type: "resumeMultiplayerHostState"; id: number; stateJson: string }
+  | { type: "resumeRestoredGameState"; id: number; viewerId: number }
+  | { type: "resumeMultiplayerHostState"; id: number; viewerId: number; stateJson: string }
   | { type: "exportState"; id: number }
   | { type: "loadCardDbFromUrl"; id: number }
   | { type: "buildAiCardSubset"; id: number }
@@ -497,9 +496,9 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       }
 
       case "getLegalActions": {
-        const r = get_legal_actions_js();
+        const r = get_legal_actions_for_viewer_js(msg.viewerId);
         if (r === null) {
-          error(msg.id, "NOT_INITIALIZED: get_legal_actions_js returned null");
+          error(msg.id, "NOT_INITIALIZED: get_legal_actions_for_viewer_js returned null");
           break;
         }
         result(msg.id, r);
@@ -516,9 +515,9 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         // atomic: a snapshot can never observe a half-applied action, nor
         // straddle two engine versions.
         const state = get_game_state();
-        const legalResult = get_legal_actions_js();
+        const legalResult = get_legal_actions_for_viewer_js(msg.viewerId);
         if (state === null || legalResult === null) {
-          error(msg.id, "NOT_INITIALIZED: get_game_state/get_legal_actions_js returned null");
+          error(msg.id, "NOT_INITIALIZED: get_game_state/get_legal_actions_for_viewer_js returned null");
           break;
         }
         result(msg.id, { state, legalResult });
@@ -657,7 +656,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           presentation,
           snapshot: {
             state: get_game_state(),
-            legalResult: get_legal_actions_js(),
+            legalResult: get_legal_actions_for_viewer_js(msg.viewerId),
           },
         });
         break;
@@ -669,7 +668,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           presentation,
           snapshot: {
             state: get_game_state(),
-            legalResult: get_legal_actions_js(),
+            legalResult: get_legal_actions_for_viewer_js(msg.viewerId),
           },
         });
         break;

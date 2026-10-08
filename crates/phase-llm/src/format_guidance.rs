@@ -24,7 +24,7 @@
 //!
 //! # Freeform
 //!
-//! `Freeform`, `FreeformCommander`, and `Custom` receive [`GENERIC_STRATEGY`]
+//! `Freeform`, `FreeformCommander`, `Dandan`, and `Custom` receive [`GENERIC_STRATEGY`]
 //! for opponents whose decks are unknown, plus their configured facts. A custom format may
 //! still impose specific deck and card-pool rules.
 
@@ -211,7 +211,10 @@ fn format_strategy(format: GameFormat) -> Option<&'static [&'static str]> {
         GameFormat::Planechase => &[PLANECHASE],
         GameFormat::Momir => &[MOMIR],
         // No format-specific approach to teach; configured facts still apply.
-        GameFormat::Freeform | GameFormat::FreeformCommander | GameFormat::Custom(_) => {
+        GameFormat::Freeform
+        | GameFormat::FreeformCommander
+        | GameFormat::Dandan
+        | GameFormat::Custom(_) => {
             return None;
         }
     };
@@ -422,7 +425,7 @@ mod tests {
             let generic = brief.contains(GENERIC_STRATEGY);
             let expects_generic = matches!(
                 config.format,
-                GameFormat::Freeform | GameFormat::FreeformCommander
+                GameFormat::Freeform | GameFormat::FreeformCommander | GameFormat::Dandan
             );
             assert_eq!(
                 generic, expects_generic,

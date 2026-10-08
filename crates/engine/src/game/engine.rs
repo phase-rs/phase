@@ -2555,8 +2555,11 @@ fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
                 if !(recurs
                     && delta.is_net_progress()
                     && has_no_loss_axis(&delta)
-                    && crate::analysis::loop_check::classify_win_kind(controller, &delta)
-                        == crate::analysis::loop_check::WinKind::Advantage)
+                    && crate::analysis::loop_check::classify_win_kind(
+                        controller,
+                        &delta,
+                        Some(state),
+                    ) == crate::analysis::loop_check::WinKind::Advantage)
                 {
                     return None;
                 }
@@ -2660,7 +2663,11 @@ fn build_cert(
     };
     crate::analysis::loop_check::LoopCertificate {
         unbounded: delta.unbounded_axes_for(winner),
-        win_kind: crate::analysis::loop_check::classify_win_kind(winner, &win_kind_delta),
+        win_kind: crate::analysis::loop_check::classify_win_kind(
+            winner,
+            &win_kind_delta,
+            Some(state),
+        ),
         // The offer is only reached for an OPTIONAL loop.
         mandatory: false,
         residual_board_delta: crate::analysis::resource::board_delta(prior, state),
@@ -3189,7 +3196,7 @@ fn certified_bounded_cycle_offer<'a>(
     // (5) CR 732.2a: the conjunct that proves this class is DISJOINT from Path C's
     // revocable-∞ advantage mark. An `Advantage` cycle drives nobody toward a CR 704
     // threshold, so it has no bound to state and belongs to the other seam.
-    if crate::analysis::loop_check::classify_win_kind(proposer, &periodic.delta)
+    if crate::analysis::loop_check::classify_win_kind(proposer, &periodic.delta, Some(state))
         == crate::analysis::loop_check::WinKind::Advantage
     {
         return Err(BoundedOfferRefusal::AdvantageOnlyCycle);
@@ -6754,10 +6761,17 @@ fn normalize_recast_frame(
         for id in &ids {
             s.objects.remove(id);
         }
-        if let Some(p) = s.players.iter_mut().find(|p| p.id == ctx.controller) {
-            p.hand.retain(|id| !ids.contains(id)); // allow-raw-zone: prunes a discarded recast comparison-frame CLONE (fn takes &GameState, returns a normalized clone) - not a gameplay zone event
-            p.graveyard.retain(|id| !ids.contains(id)); // allow-raw-zone: prunes a discarded recast comparison-frame CLONE (fn takes &GameState, returns a normalized clone) - not a gameplay zone event
-            p.library.retain(|id| !ids.contains(id)); // allow-raw-zone: prunes a discarded recast comparison-frame CLONE (fn takes &GameState, returns a normalized clone) - not a gameplay zone event
+        let pruned_seat = s
+            .players
+            .iter_mut()
+            .find(|p| p.id == ctx.controller)
+            .map(|p| {
+                p.hand.retain(|id| !ids.contains(id)); // allow-raw-zone: prunes a discarded recast comparison-frame CLONE (fn takes &GameState, returns a normalized clone) - not a gameplay zone event
+                p.id
+            });
+        if let Some(seat) = pruned_seat {
+            s.graveyard_of_mut(seat).retain(|id| !ids.contains(id));
+            s.library_of_mut(seat).retain(|id| !ids.contains(id));
         }
     }
     // CR 608.2 anaphora / display bookkeeping: the "last created token / revealed /
@@ -8700,6 +8714,14 @@ pub(super) fn resume_pending_continuation_if_priority(
             }
         }
     }
+    // CR 608.2n + CR 608.2g: a spell held on the stack by its own free-cast
+    // window is put into its zone as the final part of its resolution, now
+    // that the window and everything parked behind it are done.
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && resolution_instructions_are_done(state)
+    {
+        super::stack::deliver_deferred_spell(state, events);
+    }
     settle_resolving_stack_entry_after_continuation_resume(state);
     Ok(())
 }
@@ -8741,6 +8763,15 @@ pub(super) fn settle_resolving_stack_entry_before_trigger_selection(state: &mut 
 /// by `resolving_carrier_parity_is_coherent` and reported on the settle path
 /// rather than gating it.
 fn resolving_stack_entry_can_settle(state: &GameState) -> bool {
+    resolution_instructions_are_done(state) && state.deferred_spell_delivery.is_none()
+}
+
+/// CR 608.2c + CR 608.2n: whether the carrier's resolution has followed all of
+/// its instructions. Its carrier still may not settle while a spell paused on
+/// its own free-cast window owes its final move (`deferred_spell_delivery`):
+/// only a site that can deliver that move (`stack::deliver_deferred_spell`,
+/// which needs the event stream) may do so first.
+pub(super) fn resolution_instructions_are_done(state: &GameState) -> bool {
     state.resolving_stack_entry.is_some()
         && state.active_ability_continuation().is_none()
         && state.active_spell_resolution().is_none()
@@ -11138,6 +11169,9 @@ fn apply_non_priority_pass_action(
             (identity, cleared)
         });
 
+    // CR 608.2g: whether this action answers a step of a spell being cast or
+    // an ability being activated — see the resolution settle below the match.
+    let answers_a_cast_step = state.waiting_for.has_pending_cast();
     // Validate and process action against current WaitingFor
     let waiting_for = match (&state.waiting_for.clone(), action) {
         (
@@ -15728,6 +15762,31 @@ fn apply_non_priority_pass_action(
         }
     };
 
+    // CR 608.2g: a spell an effect lets a player cast during a resolution is
+    // cast "except no player receives priority after it's cast" — the
+    // resolving object finishes first. When an answer to a cast or activation
+    // step (target, mode, X, cost or mana payment) leaves a Priority window
+    // while an object is still resolving, the resolution is finished here,
+    // not at the next pass: a free-cast window whose last chosen spell needs a
+    // target (Invoke Calamity, Finale of Promise) otherwise handed its caster
+    // priority with the parent half-resolved — the state persistence rejects
+    // as `UnsettledPriorityResolution`. Scoped to answers of a cast or
+    // activation step, so an answer that leaves a provisional window on
+    // purpose (the untap choice of a deferred untap-step leave) keeps it;
+    // handlers that already resumed leave nothing parked, so this is a no-op
+    // for them.
+    let waiting_for = if answers_a_cast_step
+        && matches!(waiting_for, WaitingFor::Priority { .. })
+        && state.resolving_stack_entry.is_some()
+        && state.stack_resolution_session.is_none()
+    {
+        state.waiting_for = waiting_for;
+        resume_pending_continuation_if_priority(state, &mut events)?;
+        state.waiting_for.clone()
+    } else {
+        waiting_for
+    };
+
     if let Some(((player, source_id, ability_index), cleared)) = target_settlement_acceptance {
         if activation_cost_still_open(state, &waiting_for) {
             restore_non_mana_activation(state, player, cleared);
@@ -18532,6 +18591,16 @@ pub fn start_game(state: &mut GameState) -> ActionResult {
     result
 }
 
+/// The structure actually played: the configured one, never longer than the format's `ceiling` (CR 100.6a: a two-player match is usually two wins; CR 100.4: sideboarding happens between games).
+fn match_type_within(configured: MatchType, ceiling: MatchType) -> MatchType {
+    match (configured, ceiling) {
+        (MatchType::Bo3, MatchType::Bo3) => MatchType::Bo3,
+        (MatchType::Bo3, MatchType::Bo1) | (MatchType::Bo1, MatchType::Bo1 | MatchType::Bo3) => {
+            MatchType::Bo1
+        }
+    }
+}
+
 /// Start game with a specific player taking the first turn.
 pub fn start_game_with_starting_player(
     state: &mut GameState,
@@ -18548,6 +18617,11 @@ pub fn start_game_with_starting_player(
     {
         state.match_config.match_type = MatchType::Bo1;
     }
+    // The ceiling is read from the format, so no host-supplied match config can raise it.
+    state.match_config.match_type = match_type_within(
+        state.match_config.match_type,
+        state.format_config.format.best_of_three_ceiling(),
+    );
 
     events.push(GameEvent::GameStarted);
 
@@ -26285,5 +26359,54 @@ mod minted_battlefield_set_tests {
             .for_each(|p| p.library.retain(|x| *x != arrival));
         let (_, k2) = derived_fodder_class(&minted_both, &after).expect("one minted class");
         assert_eq!(k2, 2, "two MINTED members of one class report k = 2");
+    }
+}
+
+#[cfg(test)]
+mod dandan_read_sweep_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::format::FormatConfig;
+    use crate::types::game_state::{BuybackUsage, LoopAction, LoopActionContext};
+    use crate::types::identifiers::CardId;
+
+    /// CR 400.1: stripping the self-returning recast card from a
+    /// comparison frame also removes its id from the shared pile it sat in.
+    #[test]
+    fn recast_frame_prunes_the_shared_pile_graveyard() {
+        for (format, shared) in [
+            (FormatConfig::dandan(), true),
+            (FormatConfig::standard(), false),
+        ] {
+            let mut state = GameState::new(format, 2, 7);
+            let seat = PlayerId(1);
+            let recast = create_object(
+                &mut state,
+                CardId(5),
+                seat,
+                "Recast".into(),
+                Zone::Graveyard,
+            );
+            let kept = create_object(&mut state, CardId(6), seat, "Kept".into(), Zone::Graveyard);
+            let ctx = LoopActionContext {
+                card_id: CardId(5),
+                controller: seat,
+                action: LoopAction::Recast {
+                    from_zone: Zone::Graveyard,
+                    uses_buyback: BuybackUsage::NotUsed,
+                },
+                convoke: None,
+                pins: Vec::new(),
+            };
+
+            let frame = normalize_recast_frame(&state, &ctx);
+
+            assert!(!frame.objects.contains_key(&recast), "shared={shared}");
+            assert_eq!(
+                frame.graveyard_of(seat).iter().copied().collect::<Vec<_>>(),
+                vec![kept],
+                "shared={shared}: the pile no longer holds the stripped id"
+            );
+        }
     }
 }

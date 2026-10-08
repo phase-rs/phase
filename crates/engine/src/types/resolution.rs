@@ -3687,7 +3687,8 @@ impl ResolutionStack {
 /// Version 3 distinguishes the current exploited-trigger source/victim roles
 /// from the legacy actor fallback stored in `valid_card`. Version 4 requires
 /// every draw frame to carry its result owner explicitly, including `null`.
-pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 4;
+/// Version 5 adds the simultaneous-draw dealer to the draw frame.
+pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 5;
 
 /// Historical full-state resolution wire version accepted only for migration.
 ///
@@ -3701,6 +3702,10 @@ const LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION: u64 = 2;
 /// Last typed-frame wire version written before draw result ownership became
 /// part of the required persisted shape.
 const LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION: u64 = 3;
+
+/// Last wire version written before a draw frame could carry a simultaneous-draw
+/// dealer. It is also the first version that requires `delivery_owner`.
+const LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION: u64 = 4;
 
 /// The `GameState` fields whose serialized form is UNCONDITIONAL: each carries
 /// `#[serde(default …)]` but NO `skip_serializing_if`, so the derived
@@ -3879,14 +3884,14 @@ fn validate_draw_sequence_delivery_owner_fields(
             frame.delivery_owner,
             DrawSequenceDeliveryOwnerPresence::Present(_)
         );
-        if version == RESOLUTION_STATE_WIRE_VERSION && !has_delivery_owner {
+        if version >= LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION && !has_delivery_owner {
             return Err(format!(
                 "resolution_state_version {version} draw sequence frame is missing required delivery_owner"
             ));
         }
-        if version < RESOLUTION_STATE_WIRE_VERSION && has_delivery_owner {
+        if version < LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION && has_delivery_owner {
             return Err(format!(
-                "draw sequence delivery_owner requires resolution_state_version {RESOLUTION_STATE_WIRE_VERSION}; found {version}"
+                "draw sequence delivery_owner requires resolution_state_version {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}; found {version}"
             ));
         }
     }
@@ -4138,7 +4143,7 @@ pub(crate) fn declare_raw_resolution_wire(value: &mut Value) -> Result<(), Strin
             object.insert(
                 "resolution_state_version".to_string(),
                 Value::from(if unversioned_stack_has_delivery_owner {
-                    RESOLUTION_STATE_WIRE_VERSION
+                    LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION
                 } else {
                     LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION
                 }),
@@ -4235,8 +4240,9 @@ impl ResolutionStateWire {
     /// Decodes persisted full-game state at the resolution compatibility boundary.
     ///
     /// Version 1 is read only through the legacy migration path below. Versions
-    /// 2 and 3 share the typed-frame reader; version 4 uses the same frame layout
-    /// with an explicit draw-result-owner presence check.
+    /// 2 and 3 share the typed-frame reader; versions 4 and 5 use the same frame
+    /// layout with an explicit draw-result-owner presence check, and a version-4
+    /// draw frame simply has no dealer.
     fn from_value(mut value: Value) -> Result<Self, String> {
         let version = {
             let object = value
@@ -4259,10 +4265,12 @@ impl ResolutionStateWire {
             LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION => {
                 GameStateDecodeMode::ResolutionWireV3
             }
-            RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV4,
+            LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION | RESOLUTION_STATE_WIRE_VERSION => {
+                GameStateDecodeMode::ResolutionWireV4
+            }
             _ => {
                 return Err(format!(
-                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
+                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
                 ));
             }
         };
@@ -6894,11 +6902,12 @@ mod tests {
     }
 
     #[test]
-    fn resolution_wire_contract_pins_v4_and_the_legacy_readers() {
-        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 4);
+    fn resolution_wire_contract_pins_v5_and_the_legacy_readers() {
+        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 5);
         assert_eq!(LEGACY_RESOLUTION_STATE_WIRE_VERSION, 1);
         assert_eq!(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION, 2);
         assert_eq!(LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION, 3);
+        assert_eq!(LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION, 4);
 
         let mut v1 =
             serde_json::to_value(GameState::new_two_player(57)).expect("legacy state serializes");
@@ -7441,6 +7450,7 @@ mod tests {
                 iterated_counter_kinds: Vec::new(),
                 next_iteration: 0,
                 total_iterations: 0,
+                copy_order_fixed: None,
             },
         ));
         assert!(repeat_for.active_repeat_for().is_none());
@@ -8837,5 +8847,95 @@ mod tests {
             ))
             .is_err()
         );
+    }
+
+    fn state_with_dealer_frame(dealer: bool) -> GameState {
+        use crate::types::game_state::{
+            DrawDealer, DrawDealerSeat, DrawDealerStage, DrawSequenceOrigin,
+        };
+        let mut state = GameState::new_two_player(42);
+        let id = state.push_draw_sequence_with_origin(
+            PlayerId(0),
+            2,
+            std::collections::HashSet::new(),
+            DrawSequenceOrigin::Plain,
+        );
+        if dealer {
+            let seat = |player, accumulated| DrawDealerSeat {
+                player: PlayerId(player),
+                count: 2,
+                applied: std::collections::HashSet::new(),
+                accumulated,
+            };
+            state.draw_sequence_frame_mut(id).expect("frame").dealer = Some(DrawDealer {
+                stage: DrawDealerStage::Dealing {
+                    schedule: vec![PlayerId(0), PlayerId(1)],
+                },
+                seats: vec![seat(0, 0), seat(1, 1)],
+            });
+        }
+        state
+    }
+
+    #[test]
+    fn a_parked_dealer_frame_survives_the_resolution_wire() {
+        let state = state_with_dealer_frame(true);
+        let wire = serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+            .expect("wire serializes");
+        assert_eq!(
+            wire["resolution_state_version"],
+            Value::from(RESOLUTION_STATE_WIRE_VERSION)
+        );
+        assert!(wire.to_string().contains("\"dealer\""), "reach: written");
+
+        let restored = serde_json::from_value::<ResolutionStateWire>(wire)
+            .expect("current wire restores")
+            .into_game_state();
+        assert_eq!(
+            restored.active_draw_sequence().map(|frame| &frame.dealer),
+            state.active_draw_sequence().map(|frame| &frame.dealer),
+            "the dealer's stage, schedule and seats round-trip"
+        );
+        assert!(restored
+            .active_draw_sequence()
+            .is_some_and(|frame| frame.dealer.is_some()));
+    }
+
+    #[test]
+    fn a_frame_without_a_dealer_writes_no_dealer_key() {
+        let wire = serde_json::to_value(ResolutionStateWire::from_game_state(
+            state_with_dealer_frame(false),
+        ))
+        .expect("wire serializes");
+        assert!(
+            wire.to_string().contains("delivery_owner"),
+            "reach: a draw frame"
+        );
+        assert!(!wire.to_string().contains("\"dealer\""));
+    }
+
+    #[test]
+    fn the_dealerless_version_still_decodes_and_the_next_one_is_refused() {
+        let current = serde_json::to_value(ResolutionStateWire::from_game_state(
+            state_with_dealer_frame(false),
+        ))
+        .expect("wire serializes");
+
+        let mut dealerless = current.clone();
+        dealerless["resolution_state_version"] =
+            Value::from(LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION);
+        let restored = serde_json::from_value::<ResolutionStateWire>(dealerless)
+            .expect("a version-4 payload decodes")
+            .into_game_state();
+        assert!(restored
+            .active_draw_sequence()
+            .is_some_and(|frame| frame.dealer.is_none()));
+
+        let mut future = current;
+        future["resolution_state_version"] = Value::from(RESOLUTION_STATE_WIRE_VERSION + 1);
+        let error = serde_json::from_value::<ResolutionStateWire>(future)
+            .expect_err("an unknown version is refused")
+            .to_string();
+        assert!(error.contains("1, 2, 3, 4, or 5"), "{error}");
     }
 }

@@ -33,7 +33,7 @@ use super::events::{
     EventAttachmentSnapshot, EventCombatSnapshot, EventObjectHistorySnapshot,
     EventObjectRelationSnapshot, EventObjectSnapshot, GameEvent, PlayerActionKind,
 };
-use super::format::FormatConfig;
+use super::format::{FormatConfig, ZoneScope};
 use super::identifiers::{
     CardId, DelayedInstallIdentity, DelayedTriggerOrigin, ExtraPhaseId, LogicalZoneChangeGroupId,
     ObjectId, ObjectIdentityBinding, ObjectIncarnationRef, ResolutionCastOfferId, TrackedSetId,
@@ -2784,6 +2784,13 @@ pub struct PendingRepeatIteration {
     pub iterated_counter_kinds: Vec<crate::types::counter::CounterType>,
     pub next_iteration: usize,
     pub total_iterations: usize,
+    /// CR 405.3 + CR 707.10: set on a loop that puts copies of several spells
+    /// on the stack as one batch. `Some(n)`: the controller has already fixed
+    /// the order of `tracked_members[..n]`, and picks the spell for iteration
+    /// `n` before it runs (`WaitingFor::SpellCopyOrderChoice`). `None` for
+    /// every other loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_order_fixed: Option<usize>,
 }
 
 /// CR 705.2: The controller-relevant result of the most recent coin flip
@@ -6624,6 +6631,18 @@ pub enum BatchCompletion {
 /// the terminal batch belongs to the still-stashed resolving Ripple ability;
 /// the post-announcement boundary then combines this cast's triggers with the
 /// earlier accepted casts' parked observers before ordering the one batch.
+/// CR 608.2n + CR 608.2g: the move of a resolving instant or sorcery to the
+/// zone it goes to "as the final part" of its resolution, held back while the
+/// spell is paused on its own during-resolution free-cast window (Finale of
+/// Promise, Collected Conjuring). The spell stays on the stack until the window
+/// and the rest of its instructions are done; the destination is the one
+/// `resolve_top` selected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeferredSpellDelivery {
+    pub object_id: ObjectId,
+    pub destination: crate::types::zones::Zone,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingResolutionCompletion {
     pub player: PlayerId,
@@ -8175,6 +8194,99 @@ impl PendingCast {
 }
 
 impl GameState {
+    /// CR 400.1 as modified by a format's shared-zone axis: the seat whose
+    /// container holds every shared-zone card. The lowest `PlayerId`; the seat
+    /// set never shrinks, so it is fixed for the life of the game.
+    pub fn canonical_seat(&self) -> PlayerId {
+        self.players
+            .iter()
+            .map(|player| player.id)
+            .min()
+            .expect("a game has at least one seat")
+    }
+
+    /// The seat holding `zone`'s shared container, or `None` when each seat
+    /// keeps its own. Exhaustive over `Zone`: only library and graveyard can
+    /// be shared.
+    pub(crate) fn shared_zone_holder(&self, zone: Zone) -> Option<PlayerId> {
+        let shared = self.format_config.format.shared_zones();
+        let scope = match zone {
+            Zone::Library => shared.library,
+            Zone::Graveyard => shared.graveyard,
+            Zone::Hand | Zone::Battlefield | Zone::Stack | Zone::Exile | Zone::Command => {
+                ZoneScope::PerPlayer
+            }
+        };
+        match scope {
+            ZoneScope::Shared => Some(self.canonical_seat()),
+            ZoneScope::PerPlayer => None,
+        }
+    }
+
+    /// CR 400.1 + CR 400.3: the seat whose container stores `seat`'s `zone`
+    /// cards. Identity unless the format shares that zone.
+    pub fn zone_storage_seat(&self, zone: Zone, seat: PlayerId) -> PlayerId {
+        self.shared_zone_holder(zone).unwrap_or(seat)
+    }
+
+    fn player_at_seat(&self, seat: PlayerId) -> &Player {
+        self.players
+            .iter()
+            .find(|player| player.id == seat)
+            .expect("seat exists")
+    }
+
+    fn player_at_seat_mut(&mut self, seat: PlayerId) -> &mut Player {
+        self.players
+            .iter_mut()
+            .find(|player| player.id == seat)
+            .expect("seat exists")
+    }
+
+    /// CR 400.1: `seat`'s library, resolved through the format's shared-zone axis.
+    pub fn library_of(&self, seat: PlayerId) -> &im::Vector<ObjectId> {
+        &self
+            .player_at_seat(self.zone_storage_seat(Zone::Library, seat))
+            .library
+    }
+
+    pub fn library_of_mut(&mut self, seat: PlayerId) -> &mut im::Vector<ObjectId> {
+        let holder = self.zone_storage_seat(Zone::Library, seat);
+        // allow-raw-zone: the storage accessor itself; callers own the zone semantics (CR 400.1).
+        &mut self.player_at_seat_mut(holder).library
+    }
+
+    /// CR 400.1: `seat`'s graveyard, resolved through the format's shared-zone axis.
+    pub fn graveyard_of(&self, seat: PlayerId) -> &im::Vector<ObjectId> {
+        &self
+            .player_at_seat(self.zone_storage_seat(Zone::Graveyard, seat))
+            .graveyard
+    }
+
+    pub fn graveyard_of_mut(&mut self, seat: PlayerId) -> &mut im::Vector<ObjectId> {
+        let holder = self.zone_storage_seat(Zone::Graveyard, seat);
+        // allow-raw-zone: the storage accessor itself; callers own the zone semantics (CR 400.1).
+        &mut self.player_at_seat_mut(holder).graveyard
+    }
+
+    /// The deck pool backing `seat`'s library: the pile holder's pool when the
+    /// format shares the library, the seat's own otherwise.
+    pub fn deck_pool_of(&self, seat: PlayerId) -> Option<&PlayerDeckPool> {
+        let holder = self.zone_storage_seat(Zone::Library, seat);
+        self.deck_pools.iter().find(|pool| pool.player == holder)
+    }
+
+    /// Seats whose library is empty after deck load.
+    pub fn seats_with_empty_library(&self) -> Vec<PlayerId> {
+        self.players
+            .iter()
+            .map(|player| player.id)
+            .filter(|&seat| self.library_of(seat).is_empty())
+            .collect()
+    }
+}
+
+impl GameState {
     /// Mint the nonzero producer identity for one paid resolution-cast offer.
     /// The allocator is persisted so a restored offer never shares authority
     /// with a later one, even when their card/source fields collide.
@@ -8252,6 +8364,10 @@ impl GameState {
     }
 
     pub(crate) fn advance_library_knowledge_epoch(&mut self, owner: PlayerId) {
+        // CR 400.1: knowledge is keyed by the library's storage seat, so a
+        // shared pile has one epoch whichever seat reorders it.
+        let holder = self.shared_zone_holder(Zone::Library);
+        let owner = holder.unwrap_or(owner);
         let index = owner.0 as usize;
         if self
             .product_knowledge_state
@@ -8285,11 +8401,12 @@ impl GameState {
         // rather than retaining stale generations in authoritative state.
         self.product_knowledge_state
             .facts
-            .retain(|fact| !(fact.owner == owner && fact.zone == Zone::Library));
+            .retain(|fact| !(holder.unwrap_or(fact.owner) == owner && fact.zone == Zone::Library));
         self.canonicalize_library_knowledge_epoch(owner);
     }
 
     pub(crate) fn library_knowledge_epoch(&self, owner: PlayerId) -> u64 {
+        let owner = self.zone_storage_seat(Zone::Library, owner);
         self.product_knowledge_state
             .library_epochs
             .get(owner.0 as usize)
@@ -8298,6 +8415,7 @@ impl GameState {
     }
 
     pub(crate) fn library_knowledge_boundary_generation(&self, owner: PlayerId) -> u64 {
+        let owner = self.zone_storage_seat(Zone::Library, owner);
         self.product_knowledge_state
             .action_library_knowledge_generations
             .get(owner.0 as usize)
@@ -8308,9 +8426,11 @@ impl GameState {
     /// Removes an epoch once no current library fact relies on it, keeping
     /// equivalent product-knowledge states equal and serialized identically.
     fn canonicalize_library_knowledge_epoch(&mut self, owner: PlayerId) {
+        let holder = self.shared_zone_holder(Zone::Library);
+        let owner = holder.unwrap_or(owner);
         let current_epoch = self.library_knowledge_epoch(owner);
         let has_live_library_fact = self.product_knowledge_state.facts.iter().any(|fact| {
-            fact.owner == owner
+            holder.unwrap_or(fact.owner) == owner
                 && fact.zone == Zone::Library
                 && fact.library_epoch == Some(current_epoch)
         });
@@ -9395,8 +9515,29 @@ pub enum MulliganDecisionPhase {
     },
 }
 
+/// CR 103.5: what a held mulligan does when the declare round closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum MulliganDeclarationKind {
+    /// A regular mulligan: the redraw counts and owes a bottom.
+    #[default]
+    Regular,
+    /// The Dandan free reveal: the hand is revealed, then redrawn at the same count.
+    FreeReveal,
+}
+
+/// CR 103.5: a mulligan this player has declared, carried out once every player has declared.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MulliganDeclaration {
+    pub player: PlayerId,
+    /// Mulligans taken before this declaration (a `Regular` redraw makes it one more).
+    pub mulligan_count: u8,
+    #[serde(default)]
+    pub kind: MulliganDeclarationKind,
+}
+
 /// CR 103.5: Per-player state during the simultaneous mulligan decision phase.
-/// One entry per player who has not yet declared "keep".
+/// One entry per player who owes an action (a declaration or owed bottoms).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MulliganDecisionEntry {
     pub player: PlayerId,
@@ -13873,6 +14014,11 @@ pub enum WaitingFor {
     /// empties, the flow advances directly to `finish_mulligans`; there is no
     /// separate batch bottoms phase.
     ///
+    /// CR 103.5: when the library is shared, the redraws would be observable
+    /// between seats, so `Mulligan` is held in `declared` (and the player leaves
+    /// `pending`) until every player has declared; the held mulligans are then
+    /// carried out together.
+    ///
     /// CR 103.5d + CR 805.3a + CR 810.2: shared-team-turn mulligans are
     /// represented in the same simultaneous-decision model; every player
     /// remains independently pending until their own keep/mulligan decision.
@@ -13884,6 +14030,11 @@ pub enum WaitingFor {
         /// Surfaced so display layers can render "Free Mulligan" labelling
         /// without re-deriving format/seat rules.
         free_first_mulligan: bool,
+        /// CR 103.5: in a format whose library is shared, `Mulligan` is recorded
+        /// here and carried out only once every player has declared; a declared
+        /// player is not in `pending`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        declared: Vec<MulliganDeclaration>,
     },
     /// TL:R 906.6a/e: A player with more than one Tiny Leader performs a
     /// forced first mulligan before any player may make a normal mulligan
@@ -14653,6 +14804,18 @@ pub enum WaitingFor {
         source_id: ObjectId,
         choices: Vec<ObjectId>,
         count: u32,
+    },
+    /// CR 405.3 + CR 707.10: an effect that puts copies of several spells on
+    /// the stack at once ("copy each of those spells twice" — Finale of
+    /// Promise) lets their controller choose the copies' relative order. Asked
+    /// one copy at a time: `choices` are the distinct spells that still have a
+    /// copy to make, and the chosen spell's next copy goes on the stack next,
+    /// above the copies already made. Raised only while two or more spells
+    /// remain; the answer is a single-object `SelectCards`.
+    SpellCopyOrderChoice {
+        player: PlayerId,
+        source_id: ObjectId,
+        choices: Vec<ObjectId>,
     },
     /// CR 701.55a: Player chooses one branch while facing a villainous choice,
     /// or another inline resolution-time "choose A or B" effect.
@@ -16824,6 +16987,7 @@ impl WaitingFor {
             WaitingFor::ChooseFromZoneChoice { .. } => "ChooseFromZoneChoice",
             WaitingFor::BeholdChoice { .. } => "BeholdChoice",
             WaitingFor::EmpowerJaceChoice { .. } => "EmpowerJaceChoice",
+            WaitingFor::SpellCopyOrderChoice { .. } => "SpellCopyOrderChoice",
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
@@ -16988,6 +17152,7 @@ impl WaitingFor {
             | WaitingFor::ChooseFromZoneChoice { player, .. }
             | WaitingFor::BeholdChoice { player, .. }
             | WaitingFor::EmpowerJaceChoice { player, .. }
+            | WaitingFor::SpellCopyOrderChoice { player, .. }
             | WaitingFor::ChooseOneOfBranch { player, .. }
             | WaitingFor::LearnChoice { player, .. }
             | WaitingFor::ManifestDreadChoice { player, .. }
@@ -17355,6 +17520,7 @@ impl WaitingFor {
             | WaitingFor::ChooseFromZoneChoice { .. }
             | WaitingFor::BeholdChoice { .. }
             | WaitingFor::EmpowerJaceChoice { .. }
+            | WaitingFor::SpellCopyOrderChoice { .. }
             | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::ConniveDiscard { .. }
             | WaitingFor::DiscardChoice { .. }
@@ -21995,6 +22161,9 @@ declare_game_state! {
     /// that spell's cast triggers into the same deferred ordering batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_resolution_completion: Option<PendingResolutionCompletion>,
+    /// CR 608.2n + CR 608.2g: see [`DeferredSpellDelivery`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_spell_delivery: Option<DeferredSpellDelivery>,
     /// CR 107.3i: the X announced for an in-flight COST, keyed by the object whose cost
     /// it is. CR 107.3i: "Normally, all instances of X on an object have the same value
     /// at any given time" — so a triggered ability of that SAME object which fires
@@ -23595,6 +23764,103 @@ pub struct DrawSequenceFrame {
     /// (Dredge) contributes 0; a unit doubled by a count modifier contributes its
     /// post-replacement count.
     pub accumulated: u32,
+    /// Set when this frame serves several players drawing at once from a shared
+    /// library. `player`, `applied`, `accumulated` and `pending_delivery` are then
+    /// the working copy of the seat `player`; the dealer holds the others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dealer: Option<DrawDealer>,
+}
+
+/// CR 121.2 + the format's `DealOrder`: the seats of one simultaneous draw
+/// instruction, settled in dealing order and then dealt one card at a time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DrawDealer {
+    pub stage: DrawDealerStage,
+    pub seats: Vec<DrawDealerSeat>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DrawDealerStage {
+    /// CR 121.2a: instruction counts settle in dealing order; `next` is the seat
+    /// whose instruction the frame holds.
+    Settling { next: usize },
+    /// The recipient of each individual draw still owed, next first.
+    Dealing { schedule: Vec<PlayerId> },
+}
+
+/// One player's share of a simultaneous draw instruction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DrawDealerSeat {
+    pub player: PlayerId,
+    /// The instruction count, replaced by the settled count once the seat settles.
+    pub count: u32,
+    #[serde(
+        default,
+        serialize_with = "crate::types::deterministic_serde::hash_set"
+    )]
+    pub applied: HashSet<AppliedReplacementKey>,
+    pub accumulated: u32,
+}
+
+impl DrawSequenceFrame {
+    /// The seat whose instruction this frame is settling, if the dealer is in
+    /// the settling stage.
+    pub(crate) fn settling_seat(&self) -> Option<usize> {
+        match self.dealer.as_ref()?.stage {
+            DrawDealerStage::Settling { next } => Some(next),
+            DrawDealerStage::Dealing { .. } => None,
+        }
+    }
+
+    /// Take the next owed unit's recipient and its applied set, making that
+    /// recipient the working seat. A frame without a dealer draws for `player`.
+    pub(crate) fn begin_next_unit(&mut self) -> (PlayerId, HashSet<AppliedReplacementKey>) {
+        debug_assert!(
+            self.pending_delivery.is_none(),
+            "a seat switch never happens at a parked unit"
+        );
+        if let Some(DrawDealer {
+            stage: DrawDealerStage::Dealing { schedule },
+            seats,
+        }) = self.dealer.as_mut()
+        {
+            if !schedule.is_empty() {
+                let recipient = schedule.remove(0);
+                if recipient != self.player {
+                    if let Some(held) = seats.iter_mut().find(|seat| seat.player == self.player) {
+                        held.accumulated = self.accumulated;
+                        held.applied = std::mem::take(&mut self.applied);
+                    }
+                    if let Some(next) = seats.iter().find(|seat| seat.player == recipient) {
+                        self.player = recipient;
+                        self.applied = next.applied.clone();
+                        self.accumulated = next.accumulated;
+                    }
+                }
+            }
+        }
+        (self.player, self.applied.clone())
+    }
+
+    /// Each seat's delivered count in dealing order, with the working seat written
+    /// back; `None` for a frame without a dealer.
+    pub(crate) fn dealer_deliveries(&mut self) -> Option<Vec<(PlayerId, u32)>> {
+        let dealer = self.dealer.as_mut()?;
+        if let Some(held) = dealer
+            .seats
+            .iter_mut()
+            .find(|seat| seat.player == self.player)
+        {
+            held.accumulated = self.accumulated;
+        }
+        Some(
+            dealer
+                .seats
+                .iter()
+                .map(|seat| (seat.player, seat.accumulated))
+                .collect(),
+        )
+    }
 }
 
 /// CR 121.2 + CR 616.1g: the stack of draw instructions in flight.
@@ -23709,6 +23975,7 @@ impl DrawSequenceStack {
             delivery_owner: None,
             capture_next_child_delivery: false,
             accumulated: 0,
+            dealer: None,
         });
         debug_assert!(
             self.validate().is_ok(),
@@ -23761,6 +24028,7 @@ impl DrawSequenceStack {
                     && a.pending_delivery == b.pending_delivery
                     && a.delivery_owner.is_some() == b.delivery_owner.is_some()
                     && a.capture_next_child_delivery == b.capture_next_child_delivery
+                    && a.dealer == b.dealer
             })
     }
 
@@ -23806,8 +24074,51 @@ impl DrawSequenceStack {
                     frame.frame_id
                 ));
             }
+            if let Some(dealer) = &frame.dealer {
+                validate_draw_dealer(frame, dealer)?;
+            }
         }
         Ok(())
+    }
+}
+
+fn validate_draw_dealer(frame: &DrawSequenceFrame, dealer: &DrawDealer) -> Result<(), String> {
+    let id = frame.frame_id;
+    let mut players = HashSet::new();
+    if !dealer.seats.iter().all(|seat| players.insert(seat.player)) {
+        return Err(format!("draw frame {id:?} deals to a seat twice"));
+    }
+    if !players.contains(&frame.player) {
+        return Err(format!(
+            "draw frame {id:?} holds a player outside its seats"
+        ));
+    }
+    if frame.origin != DrawSequenceOrigin::Plain {
+        return Err(format!(
+            "draw frame {id:?} is a dealer frame with a tail origin"
+        ));
+    }
+    match &dealer.stage {
+        DrawDealerStage::Settling { next } if *next >= dealer.seats.len() => Err(format!(
+            "draw frame {id:?} settles seat {next} of {}",
+            dealer.seats.len()
+        )),
+        DrawDealerStage::Settling { .. } => Ok(()),
+        DrawDealerStage::Dealing { schedule } => {
+            if !schedule.iter().all(|player| players.contains(player)) {
+                return Err(format!(
+                    "draw frame {id:?} schedules a player outside its seats"
+                ));
+            }
+            if frame.remaining as usize != schedule.len() {
+                return Err(format!(
+                    "draw frame {id:?} owes {} draws against a schedule of {}",
+                    frame.remaining,
+                    schedule.len()
+                ));
+            }
+            Ok(())
+        }
     }
 }
 
@@ -26127,12 +26438,13 @@ impl GameState {
     /// at one exact zone-change occurrence. The record has already received its
     /// stable `(turn, index)` key when this is called.
     pub(crate) fn record_zone_change_library_knowledge_stamp(&mut self, record: &ZoneChangeRecord) {
+        let library_owner = self.zone_storage_seat(Zone::Library, record.owner);
         let source = (record.from_zone == Some(Zone::Library)).then(|| LibraryKnowledgeStamp {
-            library_owner: record.owner,
+            library_owner,
             boundary_generation: self.library_knowledge_boundary_generation(record.owner),
         });
         let destination = (record.to_zone == Zone::Library).then(|| LibraryKnowledgeStamp {
-            library_owner: record.owner,
+            library_owner,
             boundary_generation: self.library_knowledge_boundary_generation(record.owner),
         });
         if source.is_none() && destination.is_none() {
@@ -27744,6 +28056,7 @@ impl GameState {
             resolving_stack_entry: None,
             resolving_trigger_firing: None,
             pending_resolution_completion: None,
+            deferred_spell_delivery: None,
             resolution_source_relatch: None,
             last_loop_action_sequence: Vec::new(),
             current_trigger_events: Vec::new(),
@@ -30277,6 +30590,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolving_stack_entry: _,
         resolving_trigger_firing: _,
         pending_resolution_completion: _,
+        deferred_spell_delivery: _,
         current_trigger_events: _,
         stack_trigger_event_batches: _,
         stack_trigger_firings: _,
@@ -30574,6 +30888,7 @@ impl PartialEq for GameState {
             && self.resolution_stack.game_state_eq(&other.resolution_stack)
             && self.payment_transaction == other.payment_transaction
             && self.pending_resolution_completion == other.pending_resolution_completion
+            && self.deferred_spell_delivery == other.deferred_spell_delivery
             // CR 104.4b: volatile resolution-scoped flip result. A flip already
             // advances `state.rng`, so iterations differ regardless; comparing
             // this field never masks a real repeat (safe to include).
@@ -39859,6 +40174,141 @@ mod tests {
         );
     }
 
+    fn dealer_frame(
+        state: &mut GameState,
+        stage: DrawDealerStage,
+        remaining: u32,
+    ) -> DrawSequenceFrameId {
+        let marker = |index| HashSet::from([AppliedReplacementKey::Floating { index }]);
+        let id = state.push_draw_sequence_with_origin(
+            PlayerId(0),
+            0,
+            marker(10),
+            DrawSequenceOrigin::Plain,
+        );
+        let frame = state.draw_sequence_frame_mut(id).expect("frame");
+        frame.remaining = remaining;
+        frame.dealer = Some(DrawDealer {
+            stage,
+            seats: vec![
+                DrawDealerSeat {
+                    player: PlayerId(0),
+                    count: 2,
+                    applied: marker(10),
+                    accumulated: 0,
+                },
+                DrawDealerSeat {
+                    player: PlayerId(1),
+                    count: 2,
+                    applied: marker(11),
+                    accumulated: 5,
+                },
+            ],
+        });
+        id
+    }
+
+    #[test]
+    fn begin_next_unit_saves_the_held_seat_and_loads_the_recipient() {
+        let mut state = GameState::new_two_player(42);
+        let id = dealer_frame(
+            &mut state,
+            DrawDealerStage::Dealing {
+                schedule: vec![PlayerId(0), PlayerId(1), PlayerId(1)],
+            },
+            3,
+        );
+        let frame = state.draw_sequence_frame_mut(id).expect("frame");
+        frame.accumulated = 3;
+
+        let (player, applied) = frame.begin_next_unit();
+        assert_eq!(player, PlayerId(0), "same seat keeps the working copy");
+        assert_eq!(frame.accumulated, 3);
+        assert!(applied.contains(&AppliedReplacementKey::Floating { index: 10 }));
+
+        let (player, applied) = frame.begin_next_unit();
+        assert_eq!(player, PlayerId(1), "a seat switch loads the recipient");
+        assert_eq!(frame.player, PlayerId(1));
+        assert_eq!(frame.accumulated, 5, "the recipient's own count");
+        assert!(applied.contains(&AppliedReplacementKey::Floating { index: 11 }));
+        let held = &frame.dealer.as_ref().expect("dealer").seats[0];
+        assert_eq!(held.accumulated, 3, "the held seat's count was saved");
+        assert!(held
+            .applied
+            .contains(&AppliedReplacementKey::Floating { index: 10 }));
+    }
+
+    #[test]
+    fn begin_next_unit_without_a_dealer_draws_for_the_frame_player() {
+        let mut state = GameState::new_two_player(42);
+        let id = state.push_draw_sequence_with_origin(
+            PlayerId(1),
+            2,
+            HashSet::new(),
+            DrawSequenceOrigin::Plain,
+        );
+        let frame = state.draw_sequence_frame_mut(id).expect("frame");
+        assert_eq!(frame.begin_next_unit().0, PlayerId(1));
+        assert!(frame.dealer_deliveries().is_none());
+    }
+
+    #[test]
+    fn draw_dealer_frames_validate_their_seats_and_schedule() {
+        let mut state = GameState::new_two_player(42);
+        let id = dealer_frame(
+            &mut state,
+            DrawDealerStage::Dealing {
+                schedule: vec![PlayerId(0), PlayerId(1)],
+            },
+            2,
+        );
+        let valid = |state: &GameState| {
+            state
+                .active_multi_draw_frame()
+                .expect("multi draw")
+                .draw_sequences
+                .validate()
+        };
+        assert!(valid(&state).is_ok(), "reach: the fixture is valid");
+
+        let frame = state.draw_sequence_frame_mut(id).expect("frame");
+        frame.remaining = 1;
+        assert!(valid(&state).is_err(), "remaining must equal the schedule");
+
+        let frame = state.draw_sequence_frame_mut(id).expect("frame");
+        frame.remaining = 2;
+        frame.dealer.as_mut().expect("dealer").seats[1].player = PlayerId(0);
+        assert!(valid(&state).is_err(), "a seat appears twice");
+
+        let frame = state.draw_sequence_frame_mut(id).expect("frame");
+        frame.dealer.as_mut().expect("dealer").seats[1].player = PlayerId(1);
+        frame.dealer.as_mut().expect("dealer").stage = DrawDealerStage::Settling { next: 2 };
+        assert!(valid(&state).is_err(), "settling past the last seat");
+    }
+
+    #[test]
+    fn loop_equality_distinguishes_dealer_stages() {
+        let mut state = GameState::new_two_player(42);
+        dealer_frame(&mut state, DrawDealerStage::Settling { next: 0 }, 0);
+        let mut other = GameState::new_two_player(42);
+        dealer_frame(
+            &mut other,
+            DrawDealerStage::Dealing {
+                schedule: vec![PlayerId(0)],
+            },
+            1,
+        );
+        let stack = |state: &GameState| {
+            state
+                .active_multi_draw_frame()
+                .expect("multi draw")
+                .draw_sequences
+                .clone()
+        };
+        assert!(stack(&state).loop_equal(&stack(&state)), "reach: reflexive");
+        assert!(!stack(&state).loop_equal(&stack(&other)));
+    }
+
     /// CR 614.6 + CR 615.5: abandoning a paused general replacement dispatch
     /// clears its one exact active child before clearing the resident parent.
     #[test]
@@ -40242,6 +40692,7 @@ mod tests {
                 phase: MulliganDecisionPhase::Declare,
             }],
             free_first_mulligan: false,
+            declared: Vec::new(),
         }));
         variants.push(Box::new(WaitingFor::MulliganDecision {
             pending: vec![MulliganDecisionEntry {
@@ -40253,6 +40704,7 @@ mod tests {
                 },
             }],
             free_first_mulligan: false,
+            declared: Vec::new(),
         }));
         variants.push(Box::new(WaitingFor::MulliganDecision {
             pending: vec![MulliganDecisionEntry {
@@ -40266,6 +40718,20 @@ mod tests {
                 },
             }],
             free_first_mulligan: false,
+            declared: Vec::new(),
+        }));
+        variants.push(Box::new(WaitingFor::MulliganDecision {
+            pending: vec![MulliganDecisionEntry {
+                player: PlayerId(0),
+                mulligan_count: 0,
+                phase: MulliganDecisionPhase::Declare,
+            }],
+            free_first_mulligan: false,
+            declared: vec![MulliganDeclaration {
+                player: PlayerId(1),
+                mulligan_count: 0,
+                kind: MulliganDeclarationKind::FreeReveal,
+            }],
         }));
         variants.push(Box::new(WaitingFor::OpeningHandBottomCards {
             pending: vec![MulliganBottomEntry {
@@ -40597,7 +41063,68 @@ mod tests {
             outcomes: Vec::new(),
             pending_cast: dummy_pending(),
         }));
-        assert_eq!(variants.len(), 41);
+        assert_eq!(variants.len(), 42);
+    }
+
+    #[test]
+    fn mulligan_decision_declared_round_trips_and_is_omitted_when_empty() {
+        let entry = MulliganDecisionEntry {
+            player: PlayerId(0),
+            mulligan_count: 0,
+            phase: MulliganDecisionPhase::Declare,
+        };
+        let held = WaitingFor::MulliganDecision {
+            pending: vec![entry.clone()],
+            free_first_mulligan: false,
+            declared: vec![MulliganDeclaration {
+                player: PlayerId(1),
+                mulligan_count: 2,
+                kind: MulliganDeclarationKind::Regular,
+            }],
+        };
+        let json = serde_json::to_string(&held).unwrap();
+        assert!(json.contains("\"declared\""));
+        let back: WaitingFor = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, held);
+
+        let open = WaitingFor::MulliganDecision {
+            pending: vec![entry],
+            free_first_mulligan: false,
+            declared: Vec::new(),
+        };
+        let json = serde_json::to_string(&open).unwrap();
+        assert!(!json.contains("declared"));
+        let back: WaitingFor = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, open);
+    }
+
+    #[test]
+    fn mulligan_declaration_kind_round_trips_and_defaults_to_regular() {
+        use crate::types::actions::MulliganChoice;
+
+        for kind in [
+            MulliganDeclarationKind::Regular,
+            MulliganDeclarationKind::FreeReveal,
+        ] {
+            let declaration = MulliganDeclaration {
+                player: PlayerId(1),
+                mulligan_count: 0,
+                kind,
+            };
+            let json = serde_json::to_string(&declaration).unwrap();
+            let back: MulliganDeclaration = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, declaration);
+        }
+        let legacy: MulliganDeclaration =
+            serde_json::from_str(r#"{"player":1,"mulligan_count":2}"#).unwrap();
+        assert_eq!(legacy.kind, MulliganDeclarationKind::Regular);
+
+        assert_eq!(
+            serde_json::to_string(&MulliganChoice::FreeReveal).unwrap(),
+            r#"{"type":"FreeReveal"}"#
+        );
+        let back: MulliganChoice = serde_json::from_str(r#"{"type":"FreeReveal"}"#).unwrap();
+        assert_eq!(back, MulliganChoice::FreeReveal);
     }
 
     #[test]
@@ -44201,6 +44728,105 @@ mod stack_bound_reveal_tests {
         assert!(
             state != leased,
             "a lease difference alone makes states unequal"
+        );
+    }
+}
+
+#[cfg(test)]
+mod shared_zone_storage_tests {
+    use super::{GameState, ZoneChangeRecord};
+    use crate::types::format::FormatConfig;
+    use crate::types::identifiers::ObjectId;
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    const P0: PlayerId = PlayerId(0);
+    const P1: PlayerId = PlayerId(1);
+
+    #[test]
+    fn storage_seat_resolves_only_the_shared_zones() {
+        let dandan = GameState::new(FormatConfig::dandan(), 2, 1);
+        let standard = GameState::new_two_player(1);
+        for (zone, shared) in [
+            (Zone::Library, true),
+            (Zone::Graveyard, true),
+            (Zone::Hand, false),
+            (Zone::Battlefield, false),
+            (Zone::Stack, false),
+            (Zone::Exile, false),
+            (Zone::Command, false),
+        ] {
+            assert_eq!(
+                dandan.zone_storage_seat(zone, P1),
+                if shared { P0 } else { P1 },
+                "{zone:?}"
+            );
+            assert_eq!(standard.zone_storage_seat(zone, P1), P1, "{zone:?}");
+        }
+    }
+
+    #[test]
+    fn library_stamp_names_the_storage_seat() {
+        let record = ZoneChangeRecord {
+            owner: P1,
+            ..ZoneChangeRecord::test_minimal(ObjectId(1), Some(Zone::Hand), Zone::Library)
+        };
+        for (state, expected) in [
+            (GameState::new(FormatConfig::dandan(), 2, 1), P0),
+            (GameState::new_two_player(1), P1),
+        ] {
+            let mut state = state;
+            state.record_zone_change_library_knowledge_stamp(&record);
+            let stamp = state
+                .library_knowledge_stamp_for_zone_change(&record, false)
+                .expect("destination stamp recorded");
+            assert_eq!(stamp.library_owner, expected);
+        }
+    }
+
+    /// `loop_fingerprint` hashes the stored containers, so a pile in the canonical
+    /// seat's container is folded once under the shared-zone axis, not once per seat.
+    #[test]
+    fn loop_fingerprint_folds_the_shared_pile_once() {
+        let mut standard = GameState::new_two_player(5);
+        for id in [1, 2, 3] {
+            standard.players[0].library.push_back(ObjectId(id));
+        }
+        standard.players[0].graveyard.push_back(ObjectId(4));
+        let mut dandan = standard.clone();
+        dandan.format_config = FormatConfig::dandan();
+
+        assert_eq!(
+            standard.loop_fingerprint(),
+            dandan.loop_fingerprint(),
+            "the pile is folded once under the shared axis"
+        );
+
+        let mut grown = dandan.clone();
+        grown.players[0].library.push_back(ObjectId(5));
+        assert_ne!(
+            dandan.loop_fingerprint(),
+            grown.loop_fingerprint(),
+            "reach: the pile's library length is hashed"
+        );
+        let mut buried = dandan.clone();
+        buried.players[0].graveyard.push_back(ObjectId(6));
+        assert_ne!(
+            dandan.loop_fingerprint(),
+            buried.loop_fingerprint(),
+            "reach: the pile's graveyard length is hashed"
+        );
+        assert_eq!(
+            dandan.library_of(P1).len(),
+            3,
+            "the pile reads through seat 1"
+        );
+        let mut stray = dandan.clone();
+        stray.players[1].library.push_back(ObjectId(7));
+        assert_ne!(
+            dandan.loop_fingerprint(),
+            stray.loop_fingerprint(),
+            "the non-canonical seat's own container is hashed too"
         );
     }
 }

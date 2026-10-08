@@ -5304,7 +5304,7 @@ pub(crate) fn handle_exile_for_cost(
                 .get(player.0 as usize)
                 .is_some_and(|p| match zone {
                     ExileCostSourceZone::Hand => p.hand.contains(&id),
-                    ExileCostSourceZone::Graveyard => p.graveyard.contains(&id),
+                    ExileCostSourceZone::Graveyard => state.graveyard_of(p.id).contains(&id),
                 });
             if !still_in_zone {
                 return Err(EngineError::InvalidAction(format!(
@@ -5348,7 +5348,7 @@ pub(crate) fn handle_exile_any_number_for_cost(
                 .get(player.0 as usize)
                 .is_some_and(|p| match zone {
                     ExileCostSourceZone::Hand => p.hand.contains(&id),
-                    ExileCostSourceZone::Graveyard => p.graveyard.contains(&id),
+                    ExileCostSourceZone::Graveyard => state.graveyard_of(p.id).contains(&id),
                 });
             if !still_in_zone {
                 return Err(EngineError::InvalidAction(format!(
@@ -8394,7 +8394,7 @@ fn check_additional_cost_or_pay_with_kept_cost(
                         .map(|extra| extra.cost)
                     })
                 })
-        } else if obj.zone == Zone::Library && obj.owner == player {
+        } else if super::casting::object_in_players_library(state, obj, player) {
             // CR 401.5 + CR 118.9 + CR 601.2a: Top-of-library cast with an
             // alt-cost rider (Bolas's Citadel: "pay life equal to its mana
             // value rather than paying its mana cost").

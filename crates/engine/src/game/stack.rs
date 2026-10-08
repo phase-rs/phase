@@ -122,6 +122,8 @@ pub(super) fn abandon_active_resolution_carrier(
         .expect("resolution abandonment cannot clear a buried ability continuation");
     finish_resolving_stack_entry(state, disposition);
     state.resolution_source_relatch = None;
+    // CR 608.2n: an abandoned resolution owes no final move any more.
+    state.deferred_spell_delivery = None;
     state.deferred_entry_events.clear();
     state.pending_token_battlefield_entry = None;
 }
@@ -913,6 +915,175 @@ pub(crate) fn restore_alternative_spell_normal_face(
     }
 }
 
+/// CR 608.2n + CR 614.6: put a resolved instant or sorcery that is still on the
+/// stack into `dest` through the zone-change pipeline, so self-scoped `Moved`
+/// redirects (the Invoke Calamity rider) and board-wide RIP/Leyline redirects
+/// fire, then record a Rod of Absorption link and apply an exile-instead
+/// consequence rider when the spell landed in exile. Shared by `resolve_top`
+/// and the deferred delivery after a free-cast window
+/// (`deliver_deferred_spell`). A `NeedsChoice` result means the move is parked
+/// for a CR 616.1 ordering choice.
+fn deliver_resolved_spell_off_stack(
+    state: &mut GameState,
+    spell_id: ObjectId,
+    spell_controller: PlayerId,
+    dest: Zone,
+    events: &mut Vec<GameEvent>,
+) -> ZoneMoveResult {
+    let stack_exile_link_source = stack_exile_linked_source(state, spell_id);
+    // CR 603.7a + CR 702.170c: snapshot the exile-instead
+    // consequence rider BEFORE the move — every zone exit clears the
+    // transient rider fields (zones.rs), so the post-move apply site
+    // below must read the pre-move value.
+    let exile_rider = state
+        .objects
+        .get(&spell_id)
+        .and_then(|o| o.exile_from_stack_rider.clone());
+    let req = ZoneMoveRequest::spell_resolution_default(spell_id, dest);
+    let result = zone_pipeline::move_object(state, req, events);
+    if matches!(result, ZoneMoveResult::Done) {
+        // CR 607.2b + CR 406.6: a spell exiled by Rod of
+        // Absorption's per-object linked-source rider is "exiled
+        // with" the trigger source that stamped it. Now that the
+        // pipeline has delivered the move, record the linked-exile
+        // association so the source's linked ability ("cast any
+        // number of cards exiled with this artifact") sees the
+        // accumulating set.
+        // Gate on the object's ACTUAL post-move zone (not the
+        // requested `dest`) so a redirect that diverted the card
+        // away from exile never records a spurious link, while a
+        // redirect INTO exile still records correctly.
+        if spell_in_zone(state, spell_id, Zone::Exile) {
+            if let Some(link_source) = stack_exile_link_source {
+                super::exile_links::push_tracked_by_source(state, spell_id, link_source);
+            }
+            // CR 603.7a + CR 702.170c: the exile-instead
+            // replacement has now actually been APPLIED (the
+            // spell landed in exile), so this is the moment the
+            // "If you do, ..." consequence is applied — Feather's
+            // return-to-hand delayed trigger, or Lilah's plotted
+            // grant — never earlier (a countered or fizzled
+            // spell's marker was cleared on its stack exit and
+            // never reaches here).
+            // CR 603.7a + CR 603.7e (r5: was 603.7d — the rider is created
+            // by a TRIGGERED ability's replacement, so CR 603.7e is the
+            // rule and CR 603.7d, the spell-created case, is not;
+            // `exile_resolving_spell::arm_return_to` already cites CR
+            // 603.7e, and this annotation now agrees with it rather than
+            // contradicting it three frames away). Chooser: the controller
+            // of the REPLACEMENT EFFECT'S SOURCE (Feather, Lilah) — whose
+            // id this call already carries as the fourth argument — NOT
+            // the resolving spell's controller. `spell_controller`
+            // approximates it correctly, because those sources trigger on
+            // "whenever YOU cast", so the caster IS the source's
+            // controller. Routing this to `live_controller` would hand a
+            // stolen spell's Feather-return to the THIEF, which is wrong.
+            // KNOWN LIMITATION (CR 603.7e): the exact authority is that
+            // source's controller; deriving it here means resolving the
+            // link source's controller at rider-apply time.
+            if let Some(rider) = exile_rider {
+                effects::exile_resolving_spell::apply_exile_rider(
+                    state,
+                    spell_id,
+                    spell_controller,
+                    stack_exile_link_source.unwrap_or(spell_id),
+                    rider,
+                    events,
+                );
+            }
+        }
+    }
+    result
+}
+
+/// CR 400.7 + CR 712.11a + CR 715.3d + CR 720.3d: the bookkeeping a spell's
+/// stack exit owes by how it was cast: a face-swapped spell reverts to its
+/// front face unless it resolved onto the battlefield, an Adventure exiled
+/// this way may be cast as its creature, and an Omen's owner shuffles.
+fn finish_spell_stack_exit(
+    state: &mut GameState,
+    spell_id: ObjectId,
+    casting_variant: CastingVariant,
+    events: &mut Vec<GameEvent>,
+) {
+    // CR 400.7 + CR 712.11a: face-swapped stack spells revert to front
+    // face when leaving the stack unless they resolved as that face onto
+    // the battlefield.
+    if casting_variant.restores_front_face_after_stack_exit()
+        && !spell_in_zone(state, spell_id, Zone::Battlefield)
+    {
+        restore_alternative_spell_normal_face(state, spell_id, casting_variant);
+    }
+
+    // CR 715.3d: When an Adventure spell resolves to exile, grant
+    // AdventureCreature permission so it can be cast from exile.
+    if casting_variant == CastingVariant::Adventure {
+        if let Some(obj) = state.objects.get_mut(&spell_id) {
+            obj.casting_permissions
+                .push(crate::types::ability::CastingPermission::AdventureCreature);
+        }
+    }
+    if casting_variant == CastingVariant::Omen {
+        if let Some(owner) = state
+            .objects
+            .get(&spell_id)
+            .filter(|obj| obj.zone == Zone::Library)
+            .map(|obj| obj.owner)
+        {
+            effects::change_zone::shuffle_library(state, owner, events);
+        }
+    }
+}
+
+/// CR 608.2n + CR 608.2g: deliver a spell whose move was held back while it was
+/// paused on its own free-cast window (`DeferredSpellDelivery`), once that
+/// window and the instructions behind it are done and its carrier is about to
+/// settle. A spell its own instructions already moved off the stack ("Exile
+/// Invoke Calamity") stays where they put it; its stack-exit bookkeeping still
+/// runs, as in `resolve_top`.
+pub(super) fn deliver_deferred_spell(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    let Some(pending) = state.deferred_spell_delivery.clone() else {
+        return;
+    };
+    // Only the deferring spell's own carrier consumes the record; any other
+    // carrier leaves it in place.
+    let Some((controller, casting_variant)) = state
+        .resolving_stack_entry
+        .as_ref()
+        .filter(|entry| entry.id == pending.object_id)
+        .and_then(|entry| match &entry.kind {
+            StackEntryKind::Spell {
+                casting_variant, ..
+            } => Some((entry.controller, *casting_variant)),
+            StackEntryKind::ActivatedAbility { .. }
+            | StackEntryKind::TriggeredAbility { .. }
+            | StackEntryKind::KeywordAction { .. }
+            | StackEntryKind::CombatDamage { .. } => None,
+        })
+    else {
+        return;
+    };
+    state.deferred_spell_delivery = None;
+    // As in `resolve_top`: the default move is skipped for a spell its own
+    // instructions already moved, and a parked move returns before the
+    // stack-exit bookkeeping.
+    if spell_still_on_stack(state, pending.object_id)
+        && !matches!(
+            deliver_resolved_spell_off_stack(
+                state,
+                pending.object_id,
+                controller,
+                pending.destination,
+                events,
+            ),
+            ZoneMoveResult::Done
+        )
+    {
+        return;
+    }
+    finish_spell_stack_exit(state, pending.object_id, casting_variant, events);
+}
+
 /// CR 608.2n / CR 608.3 / CR 608.3e: Predicate guard for post-resolution
 /// default-zone moves on a resolving spell.
 ///
@@ -1479,6 +1650,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // boundary must settle its exact carrier before another stack object can
     // begin resolving. A parked continuation remains live and therefore still
     // fails the invariant below rather than being silently cleared.
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && super::engine::resolution_instructions_are_done(state)
+    {
+        deliver_deferred_spell(state, events);
+    }
     super::engine::settle_resolving_stack_entry_after_continuation_resume(state);
     // CR 608.2c + CR 608.2m: A prior resolution must finish its instructions
     // before another stack object begins resolving. A parked continuation owns
@@ -1650,6 +1826,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             if ability.controller != live_controller {
                 ability.set_controller_recursive(live_controller);
             }
+        }
+    }
+
+    // CR 612.1 + CR 608.2b + CR 113.1c: a text change on a spell applies before the legality recheck and target binding below, and an ability on the stack is not a spell so only spell entries are rewritten.
+    if is_spell {
+        if let Some(ability) = ability.as_mut() {
+            super::text_substitution::restamp_resolving_spell_text(state, entry.id, ability);
         }
     }
 
@@ -2073,15 +2256,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
     // CR 608.2g + CR 608.3: A spell paused on a during-resolution free-cast
     // window remains on the stack and targetable until its continuation ends.
-    if is_spell
-        && !matches!(
-            state.waiting_for,
-            WaitingFor::CastOffer {
-                kind: CastOfferKind::FreeCastWindow { .. },
-                ..
-            }
-        )
-    {
+    let paused_on_free_cast_window = matches!(
+        state.waiting_for,
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::FreeCastWindow { .. },
+            ..
+        }
+    );
+    if is_spell {
         let end_procedure_exiles_resolving_object = ability.as_ref().is_some_and(|ability| {
             matches!(ability.effect, Effect::EndTheTurn)
                 || (matches!(ability.effect, Effect::EndCombatPhase)
@@ -2162,7 +2344,19 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // CR 608.2n: Non-permanent spells are put into owner's graveyard.
             Zone::Graveyard
         };
-        if dest == Zone::Battlefield {
+        // CR 608.2n + CR 608.2g: the spell is put into its zone "as the final
+        // part" of its resolution, which its open free-cast window and the
+        // instructions parked behind it have not reached. Record the
+        // destination selected above; the continuation's completion delivers
+        // it (`deliver_deferred_spell`). A permanent spell keeps its earlier
+        // handling: it stays where it is.
+        if paused_on_free_cast_window && dest != Zone::Battlefield {
+            state.deferred_spell_delivery = Some(crate::types::game_state::DeferredSpellDelivery {
+                object_id: entry.id,
+                destination: dest,
+            });
+        }
+        if dest == Zone::Battlefield && !paused_on_free_cast_window {
             // CR 707.10f + CR 608.3f: A copy of a permanent spell becomes a token
             // permanent AS it resolves onto the battlefield — BEFORE the ETB
             // replacement pipeline matches the ZoneChange and before the
@@ -2687,89 +2881,18 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // the source via `SelfRef`), the post-resolution default move must
             // be skipped — otherwise the spell card travels exile→graveyard
             // and undoes its own self-exile clause (issue #323).
-            if spell_still_on_stack(state, entry.id) {
+            if !paused_on_free_cast_window && spell_still_on_stack(state, entry.id) {
                 // CR 608.2n + CR 614.6: route the spell's stack → graveyard/exile
-                // default move through the pipeline so self-scoped `Moved`
-                // redirects (the Invoke Calamity rider) and board-wide
-                // RIP/Leyline redirects fire (PLAN §8 Risk #2 — confirmed bug on
-                // the old raw-move path). A redirect only matches a Graveyard
-                // destination, so flashback/adventure/omen spells (dest already
-                // Exile/Library) never engage it. On a CR 616.1 ordering choice
-                // (two simultaneous Graveyard→Exile redirects on the same spell),
-                // `move_object` parks the prompt; the spell is already off the
-                // stack and the dest is Graveyard, so every post-move bookkeeping
-                // step below is a no-op (front-face restore / Adventure / Omen /
-                // battlefield-entry tail all gate on non-graveyard zones). Mirror
-                // the permanent-spell NeedsChoice arm: emit StackResolved + clear
-                // trigger context, then bail so the replacement-choice resume
-                // path delivers the redirected move.
-                let stack_exile_link_source = stack_exile_linked_source(state, entry.id);
-                // CR 603.7a + CR 702.170c: snapshot the exile-instead
-                // consequence rider BEFORE the move — every zone exit clears the
-                // transient rider fields (zones.rs), so the post-move apply site
-                // below must read the pre-move value.
-                let exile_rider = state
-                    .objects
-                    .get(&entry.id)
-                    .and_then(|o| o.exile_from_stack_rider.clone());
-                let req = ZoneMoveRequest::spell_resolution_default(entry.id, dest);
-                match zone_pipeline::move_object(state, req, events) {
-                    ZoneMoveResult::Done => {
-                        // CR 607.2b + CR 406.6: a spell exiled by Rod of
-                        // Absorption's per-object linked-source rider is "exiled
-                        // with" the trigger source that stamped it. Now that the
-                        // pipeline has delivered the move, record the linked-exile
-                        // association so the source's linked ability ("cast any
-                        // number of cards exiled with this artifact") sees the
-                        // accumulating set.
-                        // Gate on the object's ACTUAL post-move zone (not the
-                        // requested `dest`) so a redirect that diverted the card
-                        // away from exile never records a spurious link, while a
-                        // redirect INTO exile still records correctly.
-                        if spell_in_zone(state, entry.id, Zone::Exile) {
-                            if let Some(link_source) = stack_exile_link_source {
-                                super::exile_links::push_tracked_by_source(
-                                    state,
-                                    entry.id,
-                                    link_source,
-                                );
-                            }
-                            // CR 603.7a + CR 702.170c: the exile-instead
-                            // replacement has now actually been APPLIED (the
-                            // spell landed in exile), so this is the moment the
-                            // "If you do, ..." consequence is applied — Feather's
-                            // return-to-hand delayed trigger, or Lilah's plotted
-                            // grant — never earlier (a countered or fizzled
-                            // spell's marker was cleared on its stack exit and
-                            // never reaches here).
-                            // CR 603.7a + CR 603.7e (r5: was 603.7d — the rider is created
-                            // by a TRIGGERED ability's replacement, so CR 603.7e is the
-                            // rule and CR 603.7d, the spell-created case, is not;
-                            // `exile_resolving_spell::arm_return_to` already cites CR
-                            // 603.7e, and this annotation now agrees with it rather than
-                            // contradicting it three frames away). Chooser: the controller
-                            // of the REPLACEMENT EFFECT'S SOURCE (Feather, Lilah) — whose
-                            // id this call already carries as the fourth argument — NOT
-                            // the resolving spell's controller. `entry.controller`
-                            // approximates it correctly, because those sources trigger on
-                            // "whenever YOU cast", so the caster IS the source's
-                            // controller. Routing this to `live_controller` would hand a
-                            // stolen spell's Feather-return to the THIEF, which is wrong.
-                            // KNOWN LIMITATION (CR 603.7e): the exact authority is that
-                            // source's controller; deriving it here means resolving the
-                            // link source's controller at rider-apply time.
-                            if let Some(rider) = exile_rider {
-                                effects::exile_resolving_spell::apply_exile_rider(
-                                    state,
-                                    entry.id,
-                                    entry.controller,
-                                    stack_exile_link_source.unwrap_or(entry.id),
-                                    rider,
-                                    events,
-                                );
-                            }
-                        }
-                    }
+                // default move through the pipeline — see
+                // `deliver_resolved_spell_off_stack`.
+                match deliver_resolved_spell_off_stack(
+                    state,
+                    entry.id,
+                    entry.controller,
+                    dest,
+                    events,
+                ) {
+                    ZoneMoveResult::Done => {}
                     ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
                         // NOTE: the `exile_rider` snapshot is intentionally
                         // dropped on this bail — a parked move here can only be
@@ -2792,32 +2915,8 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             }
         }
 
-        // CR 400.7 + CR 712.11a: face-swapped stack spells revert to front
-        // face when leaving the stack unless they resolved as that face onto
-        // the battlefield.
-        if casting_variant.restores_front_face_after_stack_exit()
-            && !spell_in_zone(state, entry.id, Zone::Battlefield)
-        {
-            restore_alternative_spell_normal_face(state, entry.id, casting_variant);
-        }
-
-        // CR 715.3d: When an Adventure spell resolves to exile, grant
-        // AdventureCreature permission so it can be cast from exile.
-        if casting_variant == CastingVariant::Adventure {
-            if let Some(obj) = state.objects.get_mut(&entry.id) {
-                obj.casting_permissions
-                    .push(crate::types::ability::CastingPermission::AdventureCreature);
-            }
-        }
-        if casting_variant == CastingVariant::Omen {
-            if let Some(owner) = state
-                .objects
-                .get(&entry.id)
-                .filter(|obj| obj.zone == Zone::Library)
-                .map(|obj| obj.owner)
-            {
-                effects::change_zone::shuffle_library(state, owner, events);
-            }
+        if !paused_on_free_cast_window {
+            finish_spell_stack_exit(state, entry.id, casting_variant, events);
         }
 
         // CR 608.3c: An Aura spell resolving becomes a permanent put onto the
@@ -5821,6 +5920,47 @@ mod tests {
                 actual_mana_spent: 0,
             },
         }
+    }
+
+    /// CR 608.2n + CR 608.2g: a spell held on the stack by its own free-cast
+    /// window owes its final move. A settle site without the event stream
+    /// cannot retire its carrier while that move is owed; the next resolution
+    /// delivers it first, and only then is the carrier retired.
+    #[test]
+    fn an_owed_spell_move_blocks_settling_until_it_is_delivered() {
+        let mut state = setup();
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Window Sorcery".to_string(),
+            Zone::Stack,
+        );
+        state.resolving_stack_entry = Some(pending_spell_entry(spell));
+        state.deferred_spell_delivery = Some(crate::types::game_state::DeferredSpellDelivery {
+            object_id: spell,
+            destination: Zone::Graveyard,
+        });
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        super::super::engine::settle_resolving_stack_entry_after_continuation_resume(&mut state);
+        assert!(
+            state.resolving_stack_entry.is_some(),
+            "the carrier stays while its spell's move is owed"
+        );
+        assert_eq!(state.objects[&spell].zone, Zone::Stack);
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+        assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+        assert!(state.players[0].graveyard.contains(&spell));
+        assert!(state.deferred_spell_delivery.is_none());
+        assert!(
+            state.resolving_stack_entry.is_none(),
+            "then the carrier settles"
+        );
     }
 
     #[test]

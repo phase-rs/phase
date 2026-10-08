@@ -1633,6 +1633,122 @@ impl std::str::FromStr for BasicLandType {
     }
 }
 
+/// CR 612.2: the word classes a text-changing effect can name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TextWordDomain {
+    ColorWord,
+    BasicLandType,
+}
+
+/// CR 612.2: one concrete from-to word replacement; both words are of one class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum TextSubstitution {
+    Color {
+        from: ManaColor,
+        to: ManaColor,
+    },
+    BasicLandType {
+        from: BasicLandType,
+        to: BasicLandType,
+    },
+}
+
+/// `Fixed` is what the text layer applies, while `Chosen` is the parse-time form latched to `Fixed` when the effect installs (CR 608.2d + CR 611.2c) and inert if it reaches the layer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum TextSubstitutionSpec {
+    Fixed(TextSubstitution),
+    Chosen { domains: Vec<TextWordDomain> },
+}
+
+impl TextSubstitution {
+    /// CR 612.2: a color word as printed in Oracle text.
+    fn color_word(color: ManaColor) -> &'static str {
+        match color {
+            ManaColor::White => "White",
+            ManaColor::Blue => "Blue",
+            ManaColor::Black => "Black",
+            ManaColor::Red => "Red",
+            ManaColor::Green => "Green",
+        }
+    }
+
+    /// Builds a color substitution; "it can't change a word to the same word" so
+    /// `from == to` is rejected.
+    pub fn color(from: ManaColor, to: ManaColor) -> Option<Self> {
+        (from != to).then_some(Self::Color { from, to })
+    }
+
+    /// Builds a basic-land-type substitution; `from == to` is rejected.
+    pub fn basic_land_type(from: BasicLandType, to: BasicLandType) -> Option<Self> {
+        (from != to).then_some(Self::BasicLandType { from, to })
+    }
+
+    /// The word class this substitution acts on.
+    pub fn domain(&self) -> TextWordDomain {
+        match self {
+            Self::Color { .. } => TextWordDomain::ColorWord,
+            Self::BasicLandType { .. } => TextWordDomain::BasicLandType,
+        }
+    }
+
+    /// CR 608.2d: every ordered pair the controller may name for `domains`
+    /// (domain order, then WUBRG / Plains-to-Forest order, `from != to`).
+    pub fn options(domains: &[TextWordDomain]) -> Vec<String> {
+        let mut out = Vec::new();
+        for domain in domains {
+            match domain {
+                TextWordDomain::ColorWord => {
+                    for from in ManaColor::ALL {
+                        for to in ManaColor::ALL {
+                            out.extend(Self::color(from, to).map(|s| s.label()));
+                        }
+                    }
+                }
+                TextWordDomain::BasicLandType => {
+                    for from in BasicLandType::all() {
+                        for to in BasicLandType::all() {
+                            out.extend(Self::basic_land_type(*from, *to).map(|s| s.label()));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The (from, to) words as the serialized carriers and the type line spell them.
+    pub fn words(&self) -> (&'static str, &'static str) {
+        match self {
+            Self::Color { from, to } => (Self::color_word(*from), Self::color_word(*to)),
+            Self::BasicLandType { from, to } => (from.as_subtype_str(), to.as_subtype_str()),
+        }
+    }
+
+    /// Prompt label, e.g. `"Black -> Blue"`; the inverse of [`Self::from_label`].
+    pub fn label(&self) -> String {
+        let (from, to) = self.words();
+        format!("{from} -> {to}")
+    }
+
+    /// Parses a prompt label back into a substitution, rejecting `from == to`
+    /// and any pair whose class is outside `domains`.
+    pub fn from_label(label: &str, domains: &[TextWordDomain]) -> Option<Self> {
+        let (from, to) = label.split_once(" -> ")?;
+        domains.iter().find_map(|domain| match domain {
+            TextWordDomain::ColorWord => Self::color(
+                from.parse::<ManaColor>().ok()?,
+                to.parse::<ManaColor>().ok()?,
+            ),
+            TextWordDomain::BasicLandType => Self::basic_land_type(
+                from.parse::<BasicLandType>().ok()?,
+                to.parse::<BasicLandType>().ok()?,
+            ),
+        })
+    }
+}
+
 /// Odd or even — used by cards like "choose odd or even."
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Parity {
@@ -8784,6 +8900,26 @@ pub enum CastManaSpentMetric {
     FromSource { source_filter: TargetFilter },
 }
 
+/// CR 612.2 + CR 107.4: How a mana-spent condition's color was written. A
+/// text-changing effect changes only color WORDS, so a `ManaSymbol` color is
+/// never rewritten while a `ColorWord` color is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum SpentColor {
+    /// The color word of "at least three red mana was spent to cast this spell".
+    ColorWord { color: ManaColor },
+    /// The printed mana symbol of "{R} was spent to cast this spell".
+    ManaSymbol { color: ManaColor },
+}
+
+impl SpentColor {
+    pub fn color(self) -> ManaColor {
+        match self {
+            SpentColor::ColorWord { color } | SpentColor::ManaSymbol { color } => color,
+        }
+    }
+}
+
 /// A validated numeric reduction over one characteristic-bearing population.
 ///
 /// CR 202.3 + CR 208.1 + CR 209.1: the source must carry enough snapshot data
@@ -9385,7 +9521,8 @@ pub enum QuantityRef {
     ///
     /// - [`DamageChannel::Total`] (default): the total amount, via
     ///   `GameState::last_effect_amount`. Every non-damage producer (life lost,
-    ///   counters removed, cards drawn) stamps only this channel.
+    ///   counters removed, cards drawn) stamps only this channel; a shared-library
+    ///   simultaneous draw also fills the per-player table.
     /// - [`DamageChannel::Excess`]: the EXCESS amount (CR 120.10) — damage dealt
     ///   beyond lethal — via `GameState::last_effect_excess_amount`. Reads "the
     ///   amount of excess damage dealt to that creature this way" (Goblin
@@ -27422,12 +27559,13 @@ pub enum AbilityCondition {
     /// `QuantityCheck { lhs: ManaSpentToCast { scope, OfColor { color } }, GE, Fixed(minimum) }`,
     /// which carries the CR 400.7d subject anaphora as an explicit
     /// `CastManaObjectScope` that this variant cannot express. The leading-word
-    /// Adamant grammar already emits the generic form; this variant survives
-    /// only for the symbolic `{W}{W}` phrasing, which has no
-    /// `parse_inner_condition` grammar and fans into `And`/`Not` compositions.
+    /// Adamant grammar lowers to that generic form, so this variant is the
+    /// symbolic `{W}{W}` phrasing (no `parse_inner_condition` grammar; it fans
+    /// into `And`/`Not` compositions) plus the shadowed word fallback, and
+    /// `SpentColor` is how CR 612.2 tells the two apart.
     /// Retiring it is a semantic migration (per-card scope decision), not a
     /// rename — see `TriggerCondition::ManaColorSpent` for the sibling case.
-    ManaColorSpent { color: ManaColor, minimum: u32 },
+    ManaColorSpent { color: SpentColor, minimum: u32 },
     /// CR 608.2c: "If it's a [type] card" — gates sub_ability on the last
     /// revealed card's type, or on the just-moved card when the parent effect
     /// changed zones without revealing.
@@ -29029,13 +29167,14 @@ pub enum TriggerCondition {
     /// CR 207.2c: "if at least N mana of [color] was spent to cast this spell" — Adamant.
     ///
     /// LEGACY SHAPE, produced by the independent trigger-side grammar in
-    /// `parser::oracle_trigger`. The canonical generic form is
+    /// `parser::oracle_trigger`: the word form by `try_extract_adamant_condition`,
+    /// the symbol form by `SymbolicManaSpentIntro`. The canonical generic form is
     /// `QuantityCheck { lhs: ManaSpentToCast { scope, OfColor { color } }, GE, Fixed(minimum) }`
     /// (see `AbilityCondition::ManaColorSpent`). Converging this one is a
     /// SEMANTIC migration, not a rename: the producer accepts both "this spell"
     /// and "that spell" and records neither, so lowering requires a per-card
     /// CR 400.7d `CastManaObjectScope` decision.
-    ManaColorSpent { color: ManaColor, minimum: u32 },
+    ManaColorSpent { color: SpentColor, minimum: u32 },
     /// CR 601.2b: "if no mana was spent to cast it" / "if mana from a [source] was spent"
     ManaSpentCondition { text: String },
     /// CR 400.7: "if it had a +1/+1 counter on it" / "if it had counters on it"
@@ -29214,6 +29353,11 @@ pub enum TriggerCondition {
     /// "Whenever two or more <subject> attack" (Argent Dais) compares the number
     /// of attacking objects of the subject class when attackers are declared
     /// (CR 508.1a + CR 603.2); there is no intervening "if" to recheck.
+    /// CR 603.8: a state trigger's own condition ("When there are four or more
+    /// page counters on ~", "When you control no other creatures") is likewise
+    /// its trigger event, read when the game state matches it and not rechecked
+    /// on resolution — Plague Boiler's ruling: removing a counter in response
+    /// won't stop the effect. An intervening "if" beside it is still rechecked.
     EventTime { condition: Box<TriggerCondition> },
 }
 
@@ -32500,6 +32644,12 @@ pub enum ContinuousModification {
     /// (Witness Protection). Applied in Layer 3.
     SetTextName {
         name: String,
+    },
+    /// CR 612.1 + CR 612.2 + CR 613.1c: replaces every instance of one word with
+    /// another in the recipient's rules text and type line (Layer 3). Applied by
+    /// the Text pre-pass in `game::layers`, never by the per-modification apply loop.
+    SubstituteTextWord {
+        substitution: TextSubstitutionSpec,
     },
     AddPower {
         value: i32,

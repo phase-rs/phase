@@ -1053,6 +1053,11 @@ pub struct ResolvedZoneChangeCommand {
     /// Zero-based position after the source occurrence has been removed.
     pub destination_position: usize,
     pub owner: PlayerId,
+    /// The owner the object had before this transition rebound it to `owner`
+    /// (Hand entry from a shared zone under `HandEntryOwnership::ReceiverOwns`);
+    /// `None` when ownership is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebound_from: Option<PlayerId>,
     pub entry_timestamp: Option<u64>,
     pub turn_zone_change_index: usize,
     pub zone_change_record: ZoneChangeRecord,
@@ -3432,6 +3437,13 @@ fn zone_change_command_is_invalid(command: &ResolvedZoneChangeCommand) -> bool {
         || (command.to == Zone::Battlefield
             && record.entered_incarnation != Some(command.resulting_incarnation))
         || (command.to != Zone::Battlefield && record.entered_incarnation.is_some())
+        || command.rebound_from.is_some_and(|previous| {
+            // The rebind is a Hand entry out of one of the two zones a format
+            // can share, and it changes the owner.
+            previous == command.owner
+                || command.to != Zone::Hand
+                || !matches!(command.from, Zone::Library | Zone::Graveyard)
+        })
 }
 
 pub(crate) fn ledger_edit_is_invalid(edit: &ResolvedLedgerEdit) -> bool {

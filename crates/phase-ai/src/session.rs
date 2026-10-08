@@ -20,6 +20,7 @@ use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 use engine::util::Deadline;
 
+use crate::deck_knowledge::{pool_holder, pool_seats};
 use crate::deck_profile::DeckProfile;
 use crate::features::DeckFeatures;
 use crate::plan::{derive_snapshot, PlanSnapshot};
@@ -109,7 +110,8 @@ impl AiSession {
 
     /// Build a session from the current game state — populates per-player
     /// `synergy`, `features`, and `plan` maps from each player's deck pool.
-    /// Decks not present in `state.deck_pools` get default (empty) entries.
+    /// Decks not present in `state.deck_pools` get default (empty) entries; every seat that
+    /// shares a pool's library shares its entries.
     pub fn from_game(state: &GameState) -> Self {
         let mut features = HashMap::new();
         let mut deck_profile = HashMap::new();
@@ -124,11 +126,13 @@ impl AiSession {
             let snapshot = derive_snapshot(&player_features);
             let player_strategy = StrategyProfile::for_profile(&player_profile);
             let graph = SynergyGraph::build(&deck);
-            deck_profile.insert(pool.player, player_profile);
-            features.insert(pool.player, player_features);
-            plan.insert(pool.player, snapshot);
-            strategy.insert(pool.player, player_strategy);
-            synergy.insert(pool.player, graph);
+            for seat in std::iter::once(pool.player).chain(pool_seats(state, pool.player)) {
+                deck_profile.insert(seat, player_profile.clone());
+                features.insert(seat, player_features.clone());
+                plan.insert(seat, snapshot.clone());
+                strategy.insert(seat, player_strategy.clone());
+                synergy.insert(seat, graph.clone());
+            }
         }
 
         Self {
@@ -303,7 +307,7 @@ impl AiSession {
 
 /// Digest of exactly the inputs `AiSession::from_game` reads: each pool's
 /// player id, bracket tier, and (name, count) of every main-deck and
-/// commander entry. Sideboard/planar/scheme/signature and all board/hand
+/// commander entry, plus which pool backs each seat. Sideboard/planar/scheme/signature and all board/hand
 /// state are deliberately excluded — equal fingerprint ⇒ byte-identical
 /// session analysis, so a session keyed on this value is safe to reuse.
 /// Stable across serde round-trips (hashes content, not Arc identity).
@@ -322,6 +326,11 @@ pub fn deck_pools_fingerprint(state: &GameState) -> u64 {
             entry.card.name.hash(&mut h);
             entry.count.hash(&mut h);
         }
+    }
+    for seat in &state.players {
+        pool_holder(state, seat.id)
+            .map(|holder| holder.0)
+            .hash(&mut h);
     }
     h.finish()
 }
@@ -904,6 +913,125 @@ mod tests {
         assert!(
             Arc::ptr_eq(&first, &second),
             "empty deck_pools must still reuse the cached session"
+        );
+    }
+
+    fn payload_with(
+        main: Vec<DeckEntry>,
+        opponent: Vec<DeckEntry>,
+    ) -> engine::game::deck_loading::DeckPayload {
+        engine::game::deck_loading::DeckPayload {
+            player: engine::game::deck_loading::PlayerDeckPayload {
+                main_deck: main,
+                ..Default::default()
+            },
+            opponent: engine::game::deck_loading::PlayerDeckPayload {
+                main_deck: opponent,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn aggro_list() -> Vec<DeckEntry> {
+        let mut bear = face("Raging Bear", vec![CoreType::Creature], vec!["Bear"]);
+        bear.mana_cost = engine::types::mana::ManaCost::generic(2);
+        vec![
+            deck_entry(bear, 24),
+            deck_entry(face("Mountain", vec![CoreType::Land], vec![]), 16),
+        ]
+    }
+
+    fn control_list() -> Vec<DeckEntry> {
+        let mut counter = face("Counterspell", vec![CoreType::Instant], vec![]);
+        counter.mana_cost = engine::types::mana::ManaCost::generic(2);
+        vec![
+            deck_entry(counter, 24),
+            deck_entry(face("Island", vec![CoreType::Land], vec![]), 16),
+        ]
+    }
+
+    fn dandan_loaded(main: Vec<DeckEntry>, opponent: Vec<DeckEntry>) -> GameState {
+        let mut state = GameState::new(engine::types::format::FormatConfig::dandan(), 2, 7);
+        engine::game::deck_loading::load_deck_into_state(&mut state, &payload_with(main, opponent));
+        assert_eq!(
+            state.deck_pools.len(),
+            1,
+            "reach: one pool for the one pile"
+        );
+        assert_eq!(state.deck_pools[0].player, PlayerId(0));
+        assert!(state.players[1].library.is_empty());
+        assert_eq!(state.library_of(PlayerId(1)), state.library_of(PlayerId(0)));
+        state
+    }
+
+    #[test]
+    fn shared_pile_session_analyses_the_pile_for_both_seats() {
+        let state = dandan_loaded(aggro_list(), control_list());
+        let session = AiSession::from_game(&state);
+        let (p0, p1) = (PlayerId(0), PlayerId(1));
+        let expected = crate::deck_profile::DeckProfile::analyze(&super::analysis_deck(
+            &state.deck_pools[0].current_main,
+            &state.deck_pools[0].current_commander,
+        ));
+        assert_eq!(
+            format!("{:?}", session.deck_profile[&p0]),
+            format!("{expected:?}")
+        );
+        assert_eq!(
+            format!("{:?}", session.deck_profile[&p1]),
+            format!("{:?}", session.deck_profile[&p0])
+        );
+        assert_eq!(
+            format!("{:?}", session.features[&p1]),
+            format!("{:?}", session.features[&p0])
+        );
+        assert_eq!(
+            format!("{:?}", session.plan[&p1]),
+            format!("{:?}", session.plan[&p0])
+        );
+        assert_eq!(
+            format!("{:?}", session.strategy[&p1]),
+            format!("{:?}", session.strategy[&p0])
+        );
+        assert_eq!(
+            format!("{:?}", session.synergy[&p1]),
+            format!("{:?}", session.synergy[&p0])
+        );
+    }
+
+    #[test]
+    fn separate_libraries_keep_each_seats_own_analysis() {
+        let mut state = GameState::new_two_player(7);
+        engine::game::deck_loading::load_deck_into_state(
+            &mut state,
+            &payload_with(aggro_list(), control_list()),
+        );
+        let session = AiSession::from_game(&state);
+        assert_eq!(state.deck_pools.len(), 2, "reach: two pools");
+        assert_ne!(
+            format!("{:?}", session.deck_profile[&PlayerId(0)]),
+            format!("{:?}", session.deck_profile[&PlayerId(1)]),
+        );
+
+        let mut lone = GameState::new_two_player(7);
+        lone.deck_pools.clear();
+        lone.deck_pools
+            .push(make_pool_with_tier(PlayerId(0), CommanderBracketTier::Core));
+        assert!(!AiSession::from_game(&lone)
+            .features
+            .contains_key(&PlayerId(1)));
+    }
+
+    #[test]
+    fn fingerprint_covers_which_pool_backs_each_seat() {
+        let shared = dandan_loaded(aggro_list(), control_list());
+        let mut unshared = shared.clone();
+        unshared.format_config = engine::types::format::FormatConfig::standard();
+        assert_ne!(
+            deck_pools_fingerprint(&shared),
+            deck_pools_fingerprint(&unshared),
+            "the seat-to-pool resolution is a from_game input"
         );
     }
 }

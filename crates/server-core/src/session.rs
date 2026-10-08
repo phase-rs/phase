@@ -5248,6 +5248,7 @@ mod tests {
                 phase: engine::types::game_state::MulliganDecisionPhase::Declare,
             }],
             free_first_mulligan: true,
+            declared: Vec::new(),
         };
 
         // Player 0 requests a takeback; with two human seats (0 and 1) it
@@ -7671,6 +7672,7 @@ mod tests {
                 },
             }],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
 
         let token = token.to_string();
@@ -7755,6 +7757,7 @@ mod tests {
         session.state.waiting_for = WaitingFor::MulliganDecision {
             pending: pending_before.clone(),
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
 
         let token = token.to_string();
@@ -7774,6 +7777,7 @@ mod tests {
             WaitingFor::MulliganDecision {
                 pending: pending_before,
                 free_first_mulligan: false,
+                declared: Vec::new(),
             },
             "pending obligation must be unchanged after a rejected selection"
         );

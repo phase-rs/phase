@@ -13,6 +13,7 @@ mod per_opponent_choice;
 mod search;
 pub(crate) mod sequence;
 pub(crate) mod subject;
+mod text_change;
 pub(crate) mod token;
 
 pub(crate) use search::parse_search_name_reference_suffix;
@@ -8409,6 +8410,16 @@ pub(crate) fn is_for_each_opponent_choose_controlled(lower: &str) -> bool {
 }
 
 pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
+    // CR 612.1: "Change the text of <target> by replacing all instances of ..." owns its
+    // own duration, so it must run before the clause shell peels a trailing one.
+    {
+        let text_change_lower = text.to_lowercase();
+        if let Some(clause) =
+            text_change::try_parse_text_change_clause(TextPair::new(text, &text_change_lower))
+        {
+            return clause;
+        }
+    }
     // CR 611.2a + CR 611.2c + CR 701.26a + CR 508.1f: "Until your next turn, those
     // creatures can't become tapped unless they're being declared as attackers."
     // Must run BEFORE the unless-suffix stripper below, which would otherwise
@@ -30061,6 +30072,116 @@ enum CastAnaphor {
     Other,
 }
 
+/// CR 707.10 + CR 608.2c: "copy each of those spells [twice]" (Finale of
+/// Promise) copies every spell of the set an earlier instruction of this
+/// resolution published, each the printed number of times. The target parser
+/// reads "each of those spells" as the chain's tracked-set anaphor, but a copy
+/// resolves one source at a time, so the clause becomes a member-driven loop
+/// over the set (`Multiply` over `TrackedSetSize`): each member, bound as the
+/// copy's parent target, is copied the printed number of times. The rulings
+/// let those copies go on the stack in any order.
+///
+/// Only the distributive "each of those" reads this way: "copy the other" /
+/// "copy the exiled card" name one card of the set and stay with their own
+/// copy-then-cast lowering.
+fn lower_copy_each_tracked_spell(
+    text: &str,
+    mut clause: ParsedEffectClause,
+    repeat_for: Option<QuantityExpr>,
+) -> (ParsedEffectClause, Option<QuantityExpr>) {
+    let lower = text.to_lowercase();
+    let distributive = preceded(
+        opt(tag::<_, _, OracleError<'_>>("you may ")),
+        tag("copy each of those "),
+    )
+    .parse(lower.as_str())
+    .is_ok();
+    let Effect::CopySpell { target, .. } = &mut clause.effect else {
+        return (clause, repeat_for);
+    };
+    if !distributive {
+        return (clause, repeat_for);
+    }
+    if !matches!(
+        target,
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0)
+        } | TargetFilter::TrackedSetFiltered {
+            id: TrackedSetId(0),
+            ..
+        }
+    ) {
+        return (clause, repeat_for);
+    }
+    let factor = match repeat_for {
+        None => 1,
+        Some(QuantityExpr::Fixed { value }) if value > 0 => value,
+        other => return (clause, other),
+    };
+    *target = TargetFilter::ParentTarget;
+    let members = QuantityExpr::Ref {
+        qty: QuantityRef::TrackedSetSize,
+    };
+    let count = if factor == 1 {
+        members
+    } else {
+        QuantityExpr::Multiply {
+            factor,
+            inner: Box::new(members),
+        }
+    };
+    (clause, Some(count))
+}
+
+/// CR 115.6 + CR 601.2c: "cast up to one target <card> …" (Finale of Promise,
+/// Gale, Waterdeep Prodigy). "Up to one" is the variable target count of a
+/// single targeted cast — announced as zero or one object — not a cast budget,
+/// so it is stripped and carried as the clause's `MultiTargetSpec` while the
+/// remaining "cast target <card> …" goes through the ordinary cast parser.
+/// It only fills that gap: a clause the cast parser already lowers (the
+/// per-opponent fanout's "up to one target … from that player's graveyard" —
+/// Diluvian Primordial) keeps its own lowering, and only a cast that keeps a
+/// typed target is accepted; anything else keeps the refusal.
+fn try_parse_up_to_one_target_cast(lower: &str, ctx: &ParseContext) -> Option<ParsedEffectClause> {
+    type E<'a> = OracleError<'a>;
+    if !matches!(
+        try_parse_cast_effect(lower, ctx),
+        Some(Effect::Unimplemented { ref name, .. }) if name == CAST_TARGET_UNTYPED_GAP
+    ) {
+        return None;
+    }
+    let (after_verb, _) = preceded(opt(tag::<_, _, E>("you may ")), tag("cast "))
+        .parse(lower)
+        .ok()?;
+    let (rest, spec) = strip_optional_target_prefix(after_verb);
+    let spec = spec.filter(|spec| {
+        spec.min_is_fixed_zero() && matches!(spec.max, Some(QuantityExpr::Fixed { value: 1 }))
+    })?;
+    // The target phrase must be read whole: a qualifier the target reader
+    // leaves behind ("card of the other type" — Gale, Waterdeep Prodigy) or a
+    // further slot ("… and/or up to one target sorcery card") would otherwise
+    // be dropped from the cast. Only the cast riders may follow it.
+    let (_, after_target) = crate::parser::oracle_target::parse_target(rest);
+    preceded(
+        multispace0::<_, E>,
+        alt((
+            value((), eof),
+            value((), tag(".")),
+            value((), tag("without paying ")),
+            value((), preceded(opt(tag("each ")), tag("with mana value "))),
+        )),
+    )
+    .parse(after_target)
+    .ok()?;
+    let effect = try_parse_cast_effect(&format!("cast {rest}"), ctx)?;
+    if !matches!(&effect, Effect::CastFromZone { target, .. } if *target != TargetFilter::Any) {
+        return None;
+    }
+    let mut clause = parsed_clause(effect);
+    clause.multi_target = Some(spec);
+    Some(clause)
+}
+
 /// 1. Anaphoric — "cast it", "cast that spell", "cast those cards" — target is
 ///    `ParentTarget` (refers to the cards exiled / chosen by a prior effect).
 /// 2. Constrained — "cast a [type-phrase] [from <zone>] [with mana value <bound>]
@@ -32043,6 +32164,10 @@ fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> Parsed
     // "up to N" cap and the copies anaphor onto a `CastFromZone { Any }`).
     if let Some(effect) = try_parse_cast_copies_with_count(tp.lower) {
         return parsed_clause(effect);
+    }
+
+    if let Some(clause) = try_parse_up_to_one_target_cast(tp.lower, ctx) {
+        return clause;
     }
 
     // CR 601.2a + CR 118.9: "cast it/that card without paying its mana cost"
@@ -42661,6 +42786,7 @@ fn parse_effect_chain_ir_body(
                 (parse_effect_clause(&text_no_qty, ctx), repeat_for)
             }
         };
+        let (clause, repeat_for) = lower_copy_each_tracked_spell(&text_no_qty, clause, repeat_for);
 
         // CR 608.2c + CR 109.4: After a `Choose(Player)` clause is finalized,
         // advance the chain's chosen-player counter exactly once. The index is
@@ -43982,10 +44108,19 @@ fn parse_effect_chain_ir_body(
             );
 
         // CR 601.2c + CR 608.2d: a multi-slot target list is one link per slot,
-        // and a shared "you may" over it has no per-link form.
-        if is_optional && multi_target_list::is_multi_slot_list(multi_target.as_ref(), &clause) {
+        // and a shared "you may" over it has no per-link form — unless the
+        // resolver folds the slots into one cast window (CR 608.2g), whose
+        // decline already is that "you may", so the head asks nothing first.
+        let free_cast_slot_list =
+            multi_target_list::is_multi_slot_list(multi_target.as_ref(), &clause)
+                && multi_target_list::is_free_cast_slot_list(&clause);
+        if is_optional
+            && multi_target_list::is_multi_slot_list(multi_target.as_ref(), &clause)
+            && !free_cast_slot_list
+        {
             multi_target_list::fail_closed_optional_list(&mut clause, normalized_text);
         }
+        let is_optional = is_optional && !free_cast_slot_list;
 
         // CR 603.6 + CR 608.2k: A reflexive zone-change trigger body ("When a
         // creature is put onto the battlefield this way, it deals damage equal to

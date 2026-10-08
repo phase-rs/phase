@@ -1135,6 +1135,8 @@
       "usePowder": "Użyj {{name}}",
       "powderDescription": "Wygnaj każdą kartę z ręki, dobierz tyle samo — to nie mulligan",
       "powderTooltip": "Wygnaj każdą kartę z ręki i dobierz tyle samo. To nie mulligan — liczba i karty na spodzie pozostają bez zmian.",
+      "freeReveal": "Pokaż i dobierz ponownie (za darmo)",
+      "freeRevealDescription": "Pokaż rękę, przetasuj ją i dobierz 7 — za darmo, bez kart na spód, to nie mulligan",
       "eyebrowMulligan": "Mulligan {{count}} · Londyński",
       "eyebrowOpening": "Ręka startowa · Mulligan londyński",
       "reviewTitle": "Przejrzyj swoją rękę startową",
@@ -1699,6 +1701,10 @@
     "empowerJace": {
       "title": "Wzmocnij Jace'a",
       "subtitle": "Wybierz kontrolowany przez siebie żeton Jace'a, aby zyskał +{{count}} lojalności"
+    },
+    "spellCopyOrder": {
+      "title": "Ustal kolejność kopii",
+      "subtitle": "Wybierz czar, którego kopia trafi teraz na stos"
     },
     "collectEvidence": {
       "title": "Zbierz dowody",

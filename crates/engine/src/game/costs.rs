@@ -115,7 +115,8 @@ fn find_eligible_exile_targets(
                 // Scan only the payer's graveyard (controller-scoped)
                 player_state
                     .map(|p| {
-                        p.graveyard
+                        state
+                            .graveyard_of(p.id)
                             .iter()
                             .copied()
                             .filter(|&id| {
@@ -4676,5 +4677,52 @@ mod tests {
         assert!(!payable_with_hand(&[true]));
         // Hostile: two cards but no Island.
         assert!(!payable_with_hand(&[false, false]));
+    }
+}
+
+#[cfg(test)]
+mod dandan_read_sweep_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{ControllerRef, TypeFilter, TypedFilter};
+    use crate::types::card_type::CoreType;
+    use crate::types::format::FormatConfig;
+    use crate::types::game_state::GameState;
+    use crate::types::identifiers::CardId;
+
+    /// CR 400.1: a controller-scoped graveyard exile cost reads the
+    /// payer's storage seat, which holds the shared pile in Dandan.
+    #[test]
+    fn payer_scoped_graveyard_exile_reads_the_shared_pile() {
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 42);
+        let payer = PlayerId(1);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            payer,
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(&mut state, CardId(2), payer, "Bear".into(), Zone::Graveyard);
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+        let filter = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+        );
+
+        let eligible = find_eligible_exile_targets(
+            &state,
+            payer,
+            source,
+            None,
+            Zone::Graveyard,
+            Some(&filter),
+        );
+
+        assert_eq!(eligible, vec![creature]);
     }
 }

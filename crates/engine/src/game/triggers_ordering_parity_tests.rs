@@ -286,6 +286,9 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // -X/-X where X is the mana value of the card THIS source exiled: each member reads
     // its own exile pile and writes only to it, so the members commute.
     "cemetery desecrator",
+    // Slime counter on SelfRef, then a token whose P/T reads the granter-named source's counters
+    // (member-bound, fail-closed): each member touches only its own source's counters, so they commute (#9682).
+    "gutter grime",
 ];
 
 /// Batch-depth GENUINE order-dependence (kept SEPARATE from the same-event

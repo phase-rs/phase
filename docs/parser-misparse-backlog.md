@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4552
-- **Total card appearances across root causes:** 4585 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4550
+- **Total card appearances across root causes:** 4583 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > Counting method: both figures count the per-root-cause card bullets only — the
 > three metadata bullets above are excluded — and are the source of truth.
@@ -24,10 +24,10 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 7 | Wrong / dropped zone parameters on zone-change effect | 208 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
 | 8 | Additional / alternative casting cost dropped | 208 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
 | 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 182 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
-| 10 | Trigger event/mode unrecognized → Unknown | 166 | oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes |
+| 10 | Trigger event/mode unrecognized → Unknown | 165 | oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes |
 | 11 | Replacement / prevention / 'instead' effect mis-modeled | 152 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
 | 12 | Modal 'choose one/N' parsed as independent abilities | 132 | oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf |
-| 13 | State/game-state condition → StaticCondition::Unrecognized | 129 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
+| 13 | State/game-state condition → StaticCondition::Unrecognized | 128 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
 | 14 | Granted/quoted ability or continuous modification dropped | 94 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
 | 15 | Multi-target / 'up to N' optionality or count dropped | 83 | oracle_target.rs strip_optional_target_prefix — preserve MultiTargetSpec and optional_targeting |
 | 16 | Keyword payload / multiplicity / mis-tokenization | 83 | game/keywords.rs + oracle keyword parsing — use typed discriminants and guard ability-word labels |
@@ -45,7 +45,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2424/4585 ≈ 53% of all misparse appearances; the top 10 cover 3414/4585 ≈ 74%. Fix these first.
+> The top **5** root causes cover 2424/4583 ≈ 53% of all misparse appearances; the top 10 cover 3413/4583 ≈ 74%. Fix these first.
 
 ## Full card lists per root cause
 
@@ -3398,7 +3398,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 10. Trigger event/mode unrecognized → Unknown  (166 cards)
+### 10. Trigger event/mode unrecognized → Unknown  (165 cards)
 
 **Signature.** TriggerMode parses as Unknown(text); the event/subject combinator (state-trigger, taps-for-mana, becomes-blocked, keyword-action, loyalty-activated, die-roll) doesn't recognize the phrasing so the trigger never fires.
 
@@ -3499,7 +3499,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Multani's Presence
 - Narci, Fable Singer
 - Netherese Puzzle-Ward
-- Olivia, Crimson Bride
 - Oni-Cult Anvil
 - Orcish Mine
 - Oura, the Imitator
@@ -3902,7 +3901,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 13. State/game-state condition → StaticCondition::Unrecognized  (129 cards)
+### 13. State/game-state condition → StaticCondition::Unrecognized  (128 cards)
 
 **Signature.** A parseable game-state predicate falls to StaticCondition::Unrecognized (evaluates permissively true) instead of a typed presence/combat/counter/comparison condition.
 
@@ -3981,7 +3980,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Knight of Malice
 - Kosei, Penitent Warlord
 - Masked Bandits
-- Mazemind Tome
 - Metathran Elite
 - Minas Morgul, Dark Fortress
 - Nature's Chosen

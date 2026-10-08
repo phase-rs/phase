@@ -8,6 +8,7 @@ use crate::game::deck_loading::DeckEntry;
 use crate::game::effects::prepare;
 use crate::game::keywords;
 use crate::game::mana_sources;
+use crate::game::mulligan;
 use crate::types::ability::{
     ChoiceType, CounterCostSelection, TapCreaturesSelectionMode, TargetRef,
 };
@@ -862,42 +863,28 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
         ],
         // CR 103.5 + 103.5b: For simultaneous mulligan, generate candidates
         // for each pending player. AI search iterates over the cross-product;
-        // the engine accepts them in any arrival order. When a pending player
-        // has one or more Serum Powders in hand, emit one `UseSerumPowder`
-        // candidate per Powder so the policy may pick that branch.
+        // the engine accepts them in any arrival order. Serum Powder and
+        // FreeReveal depend on one seat's own hand, so they are issued only by
+        // the owner-scoped enumerator.
         WaitingFor::MulliganDecision { pending, .. } => pending
             .iter()
             .flat_map(|entry| match &entry.phase {
-                MulliganDecisionPhase::Declare => {
-                    let mut actions = vec![
-                        candidate(
-                            GameAction::MulliganDecision {
-                                choice: MulliganChoice::Keep,
-                            },
-                            TacticalClass::Selection,
-                            Some(entry.player),
-                        ),
-                        candidate(
-                            GameAction::MulliganDecision {
-                                choice: MulliganChoice::Mulligan,
-                            },
-                            TacticalClass::Selection,
-                            Some(entry.player),
-                        ),
-                    ];
-                    for powder_id in serum_powders_in_hand(state, entry.player) {
-                        actions.push(candidate(
-                            GameAction::MulliganDecision {
-                                choice: MulliganChoice::UseSerumPowder {
-                                    object_id: powder_id,
-                                },
-                            },
-                            TacticalClass::Selection,
-                            Some(entry.player),
-                        ));
-                    }
-                    actions
-                }
+                MulliganDecisionPhase::Declare => vec![
+                    candidate(
+                        GameAction::MulliganDecision {
+                            choice: MulliganChoice::Keep,
+                        },
+                        TacticalClass::Selection,
+                        Some(entry.player),
+                    ),
+                    candidate(
+                        GameAction::MulliganDecision {
+                            choice: MulliganChoice::Mulligan,
+                        },
+                        TacticalClass::Selection,
+                        Some(entry.player),
+                    ),
+                ],
                 MulliganDecisionPhase::BottomCards { count, then } => {
                     let exclude = match then {
                         PendingMulliganAction::UseSerumPowder { object_id } => Some(*object_id),
@@ -1619,6 +1606,20 @@ pub fn candidate_actions_broad_with_probe(
         // CR 701.71a + CR 608.2d: empower Jace chooses exactly one Jace token
         // from the engine-provided candidates; every candidate is a legal pick.
         WaitingFor::EmpowerJaceChoice {
+            player, choices, ..
+        } => choices
+            .iter()
+            .map(|&id| {
+                candidate(
+                    GameAction::SelectCards { cards: vec![id] },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
+        // CR 405.3 + CR 707.10: the next copy of a batch may be of any spell
+        // that still has copies to make; every offered spell is a legal pick.
+        WaitingFor::SpellCopyOrderChoice {
             player, choices, ..
         } => choices
             .iter()
@@ -3841,6 +3842,26 @@ pub(crate) fn candidate_actions_for_semantic_owner_with_probe(
             .semantic_owner
             .is_none_or(|actor| actor == semantic_owner)
     });
+    // CR 103.5 + CR 103.5b: `UseSerumPowder` and `FreeReveal` depend on one
+    // seat's own hand, so they are issued only to the owner whose hand qualifies.
+    for object_id in mulligan::serum_powders_offered_to(state, semantic_owner) {
+        actions.push(candidate(
+            GameAction::MulliganDecision {
+                choice: MulliganChoice::UseSerumPowder { object_id },
+            },
+            TacticalClass::Selection,
+            Some(semantic_owner),
+        ));
+    }
+    if mulligan::free_reveal_offered_to(state, semantic_owner) {
+        actions.push(candidate(
+            GameAction::MulliganDecision {
+                choice: MulliganChoice::FreeReveal,
+            },
+            TacticalClass::Selection,
+            Some(semantic_owner),
+        ));
+    }
     authorize_candidate_actors(state, &mut actions);
     actions
 }
@@ -4500,7 +4521,7 @@ pub(crate) fn priority_actions_with_probe(
         // from there. CR 602.2: to activate an ability is to put it onto the
         // stack and pay its costs. Non-mana graveyard activations are
         // suppressed by split second, mirroring the hand-zone loop above.
-        for &obj_id in &state.players[player.0 as usize].graveyard {
+        for &obj_id in state.graveyard_of(player) {
             if let Some(obj) = state.objects.get(&obj_id) {
                 // CR 602.2: "Only an object's controller (or its owner, if it
                 // doesn't have a controller) can activate its activated ability
@@ -4583,7 +4604,7 @@ pub(crate) fn priority_actions_with_probe(
     // loop lives outside the split-second-gated block — mirroring the hand-zone
     // mana loop above. CR 602.2: only the object's controller — or its owner,
     // when it has none (CR 108.4 + CR 108.4a) — can activate it.
-    for &obj_id in &state.players[player.0 as usize].graveyard {
+    for &obj_id in state.graveyard_of(player) {
         if let Some(obj) = state.objects.get(&obj_id) {
             if obj.owner == player {
                 for (i, ability_def) in obj.abilities.iter().enumerate() {
@@ -5557,32 +5578,39 @@ fn card_name_choice_candidates(
         push_name(source_display_name, &legal_names, &mut seen, &mut choices);
     }
 
-    let mut push_object_name = |id: ObjectId| {
-        if choices.len() >= MAX_CARD_NAME_CANDIDATES {
-            return;
-        }
-        if let Some(obj) = state.objects.get(&id) {
-            push_name(&obj.name, &legal_names, &mut seen, &mut choices);
+    fn object_names<'a>(
+        state: &'a GameState,
+        ids: &'a im::Vector<ObjectId>,
+    ) -> impl Iterator<Item = &'a str> {
+        ids.iter()
+            .filter_map(|id| state.objects.get(id))
+            .map(|obj| obj.name.as_str())
+    }
+
+    let mut push_candidate = |name: &str| {
+        if choices.len() < MAX_CARD_NAME_CANDIDATES {
+            push_name(name, &legal_names, &mut seen, &mut choices);
         }
     };
 
-    for &id in &state.battlefield {
-        push_object_name(id);
-    }
+    object_names(state, &state.battlefield).for_each(&mut push_candidate);
     if let Some(controller) = state.players.iter().find(|p| p.id == player) {
-        for &id in controller.hand.iter() {
-            push_object_name(id);
-        }
-        for &id in controller.graveyard.iter() {
-            push_object_name(id);
-        }
-        for &id in controller.library.iter() {
-            push_object_name(id);
+        object_names(state, &controller.hand).for_each(&mut push_candidate);
+        object_names(state, state.graveyard_of(controller.id)).for_each(&mut push_candidate);
+        // CR 400.2: the library is a hidden zone, so the chooser's domain is the pile's
+        // registered pool names, not its live identities.
+        match state.shared_zone_holder(Zone::Library) {
+            Some(_) => state
+                .deck_pool_of(controller.id)
+                .into_iter()
+                .flat_map(|pool| pool.current_main.iter())
+                .for_each(|entry| push_candidate(&entry.card.name)),
+            None => {
+                object_names(state, state.library_of(controller.id)).for_each(&mut push_candidate)
+            }
         }
     }
-    for &id in &state.exile {
-        push_object_name(id);
-    }
+    object_names(state, &state.exile).for_each(&mut push_candidate);
 
     if choices.is_empty() {
         let fallback = state
@@ -5597,25 +5625,6 @@ fn card_name_choice_candidates(
 
     choices.truncate(MAX_CARD_NAME_CANDIDATES);
     choices
-}
-
-/// CR 103.5b + Serum Powder Oracle text: collect every ObjectId in `player`'s
-/// hand whose object name is "Serum Powder" (CR 201.2 — name match is exact
-/// and case-insensitive on canonical English).
-fn serum_powders_in_hand(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
-    let Some(p) = state.players.iter().find(|p| p.id == player) else {
-        return Vec::new();
-    };
-    p.hand
-        .iter()
-        .copied()
-        .filter(|oid| {
-            state
-                .objects
-                .get(oid)
-                .is_some_and(|o| o.name.eq_ignore_ascii_case("Serum Powder"))
-        })
-        .collect()
 }
 
 fn bottom_card_actions(
@@ -7735,6 +7744,112 @@ mod tests {
         ));
     }
 
+    fn card_name_prompt(mut state: GameState, names: Vec<String>) -> GameState {
+        state.all_card_names = names.into();
+        state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
+            player: PlayerId(0),
+            choice_type: ChoiceType::CardName,
+            options: Vec::new(),
+            source: None,
+            persist_player: None,
+        };
+        state
+    }
+
+    fn issued_names(state: &GameState) -> Vec<String> {
+        candidate_actions(state)
+            .into_iter()
+            .filter_map(|c| match c.action {
+                GameAction::ChooseOption { choice } => Some(choice),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn register_pool(state: &mut GameState, names: &[String]) {
+        state
+            .deck_pools
+            .push(crate::types::game_state::PlayerDeckPool {
+                player: PlayerId(0),
+                current_main: Arc::new(
+                    names
+                        .iter()
+                        .map(|name| crate::game::deck_loading::DeckEntry {
+                            card: crate::types::card::CardFace {
+                                name: name.clone(),
+                                ..Default::default()
+                            },
+                            count: 1,
+                        })
+                        .collect(),
+                ),
+                ..Default::default()
+            });
+    }
+
+    #[test]
+    fn card_name_candidates_in_a_per_seat_format_read_the_own_library() {
+        let mut state = GameState::new_two_player(42);
+        for (zone, name) in [
+            (Zone::Battlefield, "Field"),
+            (Zone::Hand, "Held"),
+            (Zone::Graveyard, "Grave"),
+            (Zone::Library, "Deep"),
+            (Zone::Exile, "Exiled"),
+        ] {
+            create_object(&mut state, CardId(1), PlayerId(0), name.to_string(), zone);
+        }
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Theirs".to_string(),
+            Zone::Library,
+        );
+        let names = ["Field", "Held", "Grave", "Deep", "Exiled", "Theirs"].map(String::from);
+        let state = card_name_prompt(state, names.to_vec());
+        assert_eq!(
+            issued_names(&state),
+            ["Field", "Held", "Grave", "Deep", "Exiled"].map(String::from)
+        );
+    }
+
+    #[test]
+    fn shared_pile_card_name_domain_is_the_registered_pool_whatever_the_pile_holds() {
+        let pool: Vec<String> = (0..30).map(|i| format!("Pool {i}")).collect();
+        let build = |opp_hand: &[usize], pile: &[usize]| {
+            let mut state = GameState::new(FormatConfig::dandan(), 2, 42);
+            register_pool(&mut state, &pool);
+            for &i in opp_hand {
+                create_object(
+                    &mut state,
+                    CardId(100 + i as u64),
+                    PlayerId(1),
+                    pool[i].clone(),
+                    Zone::Hand,
+                );
+            }
+            for &i in pile {
+                create_object(
+                    &mut state,
+                    CardId(200 + i as u64),
+                    PlayerId(1),
+                    pool[i].clone(),
+                    Zone::Library,
+                );
+            }
+            assert!(
+                state.players[1].library.is_empty() && !state.library_of(PlayerId(1)).is_empty()
+            );
+            card_name_prompt(state, pool.clone())
+        };
+        let a = issued_names(&build(&[0, 1, 2], &[3, 4, 5, 6]));
+        let b = issued_names(&build(&[3, 4, 5], &[0, 1, 2, 6]));
+        assert_eq!(a, b);
+        assert_eq!(a, pool[..24].to_vec(), "registered-pool order, capped");
+    }
+
     #[test]
     fn effect_zone_choice_up_to_large_pool_is_bounded() {
         let mut state = GameState::new_two_player(42);
@@ -9518,5 +9633,111 @@ mod tests {
         assert_eq!(permutations.len(), 2);
         assert_eq!(permutations[0], vec![a, b]);
         assert_eq!(permutations[1], vec![b, a]);
+    }
+
+    /// Dandan mulligan prompt: P0 holds seven nonland cards, P1 three lands and four nonland.
+    fn dandan_mulligan(p0_phase: MulliganDecisionPhase, p0_count: u8) -> GameState {
+        use crate::types::card_type::CoreType;
+        use crate::types::game_state::MulliganDecisionEntry;
+
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 7);
+        for (seat, lands) in [(PlayerId(0), 0), (PlayerId(1), 3)] {
+            for i in 0..7u64 {
+                let id = create_object(
+                    &mut state,
+                    CardId(seat.0 as u64 * 100 + i),
+                    seat,
+                    format!("Card {i}"),
+                    Zone::Hand,
+                );
+                if i < lands {
+                    state
+                        .objects
+                        .get_mut(&id)
+                        .unwrap()
+                        .card_types
+                        .core_types
+                        .push(CoreType::Land);
+                }
+            }
+        }
+        state.waiting_for = WaitingFor::MulliganDecision {
+            pending: vec![
+                MulliganDecisionEntry {
+                    player: PlayerId(0),
+                    mulligan_count: p0_count,
+                    phase: p0_phase,
+                },
+                MulliganDecisionEntry {
+                    player: PlayerId(1),
+                    mulligan_count: 0,
+                    phase: MulliganDecisionPhase::Declare,
+                },
+            ],
+            free_first_mulligan: false,
+            declared: Vec::new(),
+        };
+        state
+    }
+
+    fn free_reveal_actors(state: &GameState) -> Vec<Option<PlayerId>> {
+        [PlayerId(0), PlayerId(1)]
+            .into_iter()
+            .flat_map(|owner| candidate_actions_for_semantic_owner_with_probe(state, owner, None))
+            .filter(|c| {
+                c.action
+                    == GameAction::MulliganDecision {
+                        choice: MulliganChoice::FreeReveal,
+                    }
+            })
+            .map(|c| c.metadata.actor)
+            .collect()
+    }
+
+    #[test]
+    fn free_reveal_is_issued_only_to_the_seat_whose_hand_the_engine_says_qualifies() {
+        let state = dandan_mulligan(MulliganDecisionPhase::Declare, 0);
+        assert_eq!(free_reveal_actors(&state), vec![Some(PlayerId(0))]);
+        let keep_and_mulligan =
+            candidate_actions_for_semantic_owner_with_probe(&state, PlayerId(1), None)
+                .iter()
+                .filter(|c| c.metadata.actor == Some(PlayerId(1)))
+                .count();
+        assert_eq!(
+            keep_and_mulligan, 2,
+            "reach: the other seat still has Keep and Mulligan"
+        );
+        assert!(
+            !candidate_actions(&state).iter().any(|c| matches!(
+                c.action,
+                GameAction::MulliganDecision {
+                    choice: MulliganChoice::FreeReveal
+                }
+            )),
+            "the all-seat enumeration never carries it"
+        );
+    }
+
+    #[test]
+    fn free_reveal_is_not_issued_after_a_regular_mulligan_or_while_bottoming() {
+        assert_eq!(
+            free_reveal_actors(&dandan_mulligan(MulliganDecisionPhase::Declare, 0)).len(),
+            1,
+            "reach: the same hand is offered the free reveal before a mulligan"
+        );
+        let state = dandan_mulligan(MulliganDecisionPhase::Declare, 1);
+        assert!(free_reveal_actors(&state).is_empty());
+        let state = dandan_mulligan(
+            MulliganDecisionPhase::BottomCards {
+                count: 1,
+                then: PendingMulliganAction::Keep,
+            },
+            0,
+        );
+        assert!(free_reveal_actors(&state).is_empty());
+        assert!(
+            !candidate_actions(&state).is_empty(),
+            "reach: the bottoming prompt still has candidates"
+        );
     }
 }

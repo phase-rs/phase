@@ -1135,6 +1135,8 @@
       "usePowder": "Utiliser {{name}}",
       "powderDescription": "Exilez toutes les cartes en main, piochez le même nombre — pas un mulligan",
       "powderTooltip": "Exilez toutes les cartes de votre main et piochez le même nombre. Pas un mulligan — le compte et les cartes en dessous ne sont pas affectés.",
+      "freeReveal": "Révéler et repiocher (gratuit)",
+      "freeRevealDescription": "Révélez votre main, mélangez-la et piochez 7 — gratuit, aucune carte dessous, pas un mulligan",
       "eyebrowMulligan": "Mulligan {{count}} · Londres",
       "eyebrowOpening": "Main de départ · Mulligan de Londres",
       "reviewTitle": "Examinez votre main de départ",
@@ -1699,6 +1701,10 @@
     "empowerJace": {
       "title": "Renforcer Jace",
       "subtitle": "Choisissez un jeton Jace que vous contrôlez pour qu'il gagne +{{count}} de loyauté"
+    },
+    "spellCopyOrder": {
+      "title": "Ordonner les copies",
+      "subtitle": "Choisissez le sort dont la copie va ensuite sur la pile"
     },
     "collectEvidence": {
       "title": "Collecter des preuves",
