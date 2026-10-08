@@ -9287,6 +9287,7 @@ fn resolve_guards_in_continuous_mod(modification: &mut ContinuousModification) {
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
+        | ContinuousModification::SubstituteTextWord { .. }
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::RetainAllOtherAbilitiesFromSource
@@ -10224,6 +10225,7 @@ fn demote_lifetimes_in_modification(modification: &mut ContinuousModification) {
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
+        | ContinuousModification::SubstituteTextWord { .. }
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::RetainAllOtherAbilitiesFromSource
@@ -10840,6 +10842,7 @@ pub(crate) fn render_modification_descriptions(
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
+        | ContinuousModification::SubstituteTextWord { .. }
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::RetainAllOtherAbilitiesFromSource

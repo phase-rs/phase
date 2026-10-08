@@ -1134,6 +1134,8 @@
       "usePowder": "Usar {{name}}",
       "powderDescription": "Exile todas as cartas na mão, compre o mesmo número — não é um mulligan",
       "powderTooltip": "Exile todas as cartas em sua mão e compre o mesmo número. Não é um mulligan — a contagem e os fundos não são afetados.",
+      "freeReveal": "Revelar e comprar de novo (grátis)",
+      "freeRevealDescription": "Revele sua mão, embaralhe-a e compre 7 — grátis, sem cartas no fundo, não é um mulligan",
       "eyebrowMulligan": "Mulligan {{count}} · London",
       "eyebrowOpening": "Mão Inicial · London Mulligan",
       "reviewTitle": "Revise sua mão inicial",

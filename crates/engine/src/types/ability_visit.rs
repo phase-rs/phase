@@ -477,6 +477,7 @@ where
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
+        | ContinuousModification::SubstituteTextWord { .. }
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::RetainAllOtherAbilitiesFromSource

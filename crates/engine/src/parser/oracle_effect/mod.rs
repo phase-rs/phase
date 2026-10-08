@@ -13,6 +13,7 @@ mod per_opponent_choice;
 mod search;
 pub(crate) mod sequence;
 pub(crate) mod subject;
+mod text_change;
 pub(crate) mod token;
 
 pub(crate) use search::parse_search_name_reference_suffix;
@@ -8409,6 +8410,16 @@ pub(crate) fn is_for_each_opponent_choose_controlled(lower: &str) -> bool {
 }
 
 pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
+    // CR 612.1: "Change the text of <target> by replacing all instances of ..." owns its
+    // own duration, so it must run before the clause shell peels a trailing one.
+    {
+        let text_change_lower = text.to_lowercase();
+        if let Some(clause) =
+            text_change::try_parse_text_change_clause(TextPair::new(text, &text_change_lower))
+        {
+            return clause;
+        }
+    }
     // CR 611.2a + CR 611.2c + CR 701.26a + CR 508.1f: "Until your next turn, those
     // creatures can't become tapped unless they're being declared as attackers."
     // Must run BEFORE the unless-suffix stripper below, which would otherwise

@@ -645,6 +645,31 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       allow_debug_actions: false,
     },
   },
+  {
+    format: "Dandan",
+    label: "Dandân",
+    short_label: "DAN",
+    description: "Shared library and graveyard, fixed 80-card deck",
+    group: "Multiplayer",
+    legality_key: null,
+    default_config: {
+      format: "Dandan",
+      starting_life: 20,
+      min_players: 2,
+      max_players: 2,
+      deck_size: { type: "Exactly", data: 80 },
+      singleton: false,
+      command_zone: false,
+      commander_damage_threshold: null,
+      range_of_influence: null,
+      team_based: false,
+      uses_commander: false,
+      supplies_fixed_deck: true,
+      sideboard_policy: { type: "Forbidden" },
+      default_deck_copy_limit: { type: "Unlimited" },
+      allow_debug_actions: false,
+    },
+  },
 ];
 
 export function formatMetadata(format: GameFormat): FormatMetadata | undefined {

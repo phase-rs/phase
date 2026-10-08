@@ -129,7 +129,7 @@ fn resolve_reveal(
         .ok_or(EffectError::PlayerNotFound)?;
 
     // Snapshot library (top = index 0) to iterate without borrow conflicts.
-    let library: Vec<ObjectId> = player.library.iter().copied().collect();
+    let library: Vec<ObjectId> = state.library_of(player.id).iter().copied().collect();
     let mut revealed_misses: Vec<ObjectId> = Vec::new();
     let mut hit_cards: Vec<ObjectId> = Vec::new();
 

@@ -5,7 +5,7 @@ import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
-import { getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
+import { getWaitingForObjectChoiceIds, resolvePileSeat } from "../../viewmodel/gameStateView.ts";
 import { collectObjectActions, isManaObjectAction } from "../../viewmodel/cardActionChoice.ts";
 import { objectImageProps } from "../../services/cardImageLookup.ts";
 import { CardArtFallback } from "../card/CardArtFallback.tsx";
@@ -58,8 +58,9 @@ function TopCard({ object }: { object: GameObject }) {
 
 export function GraveyardPile({ playerId, onClick, size }: GraveyardPileProps) {
   const { t } = useTranslation("game");
+  const pileSeat = useGameStore((s) => resolvePileSeat(s.gameState, "graveyard", playerId));
   const graveyard = useGameStore(
-    (s) => s.gameState?.players[playerId]?.graveyard ?? EMPTY,
+    (s) => s.gameState?.players[pileSeat]?.graveyard ?? EMPTY,
   );
   // A card still in flight toward this pile is not shown yet: the top slot
   // shows what would be visible without it (the count still includes it).
@@ -78,7 +79,7 @@ export function GraveyardPile({ playerId, onClick, size }: GraveyardPileProps) {
   const hasTargetableCards = useGameStore((s) => {
     if (!canActForWaitingState) return false;
     const objectChoiceIds = new Set(getWaitingForObjectChoiceIds(s.waitingFor));
-    const gy = s.gameState?.players[playerId]?.graveyard ?? [];
+    const gy = s.gameState?.players[pileSeat]?.graveyard ?? [];
     return gy.some((id) => objectChoiceIds.has(id));
   });
 
@@ -93,7 +94,7 @@ export function GraveyardPile({ playerId, onClick, size }: GraveyardPileProps) {
       return false;
     }
     const objects = s.gameState?.objects;
-    const gy = s.gameState?.players[playerId]?.graveyard ?? [];
+    const gy = s.gameState?.players[pileSeat]?.graveyard ?? [];
     return gy.some((id) => {
       const obj = objects?.[id];
       return (
@@ -117,7 +118,7 @@ export function GraveyardPile({ playerId, onClick, size }: GraveyardPileProps) {
       onClick={(event) => onClick(event.currentTarget)}
       className={`group relative cursor-pointer ${hasTargetableCards || hasDelveableCards ? "ring-2 ring-amber-400/60 rounded-lg shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]" : ""}`}
       title={t("zone.graveyardTitle", { count })}
-      data-graveyard-pile={playerId}
+      data-graveyard-pile={pileSeat}
       data-grouped-ids={graveyard.join(" ")}
       style={{ width: w, height: h }}
     >

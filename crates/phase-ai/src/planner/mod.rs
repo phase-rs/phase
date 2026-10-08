@@ -3367,4 +3367,44 @@ mod tests {
             "a single-width full-window search cannot produce a cutoff"
         );
     }
+
+    /// The AI cache keys hash stored containers, so a pile in the canonical seat's
+    /// container is folded once under the shared-zone axis, not once per seat.
+    #[test]
+    fn position_hashes_fold_the_shared_pile_once() {
+        let mut standard = make_state();
+        for id in [1, 2, 3] {
+            standard.players[0].library.push_back(ObjectId(id));
+        }
+        standard.players[0].graveyard.push_back(ObjectId(4));
+        let mut dandan = standard.clone();
+        dandan.format_config = engine::types::format::FormatConfig::dandan();
+
+        assert_eq!(quick_state_hash(&standard), quick_state_hash(&dandan));
+        assert_eq!(
+            search_position_hash(&standard),
+            search_position_hash(&dandan)
+        );
+
+        let mut reordered = dandan.clone();
+        let top = reordered.players[0].library.pop_front().unwrap();
+        reordered.players[0].library.push_back(top);
+        assert_eq!(
+            quick_state_hash(&dandan),
+            quick_state_hash(&reordered),
+            "reach: quick hash sees the library length only"
+        );
+        assert_ne!(
+            search_position_hash(&dandan),
+            search_position_hash(&reordered),
+            "reach: the position hash reads the pile's order"
+        );
+        let mut buried = dandan.clone();
+        buried.players[0].graveyard.push_back(ObjectId(5));
+        assert_ne!(
+            quick_state_hash(&dandan),
+            quick_state_hash(&buried),
+            "reach: the pile's graveyard contents are hashed"
+        );
+    }
 }

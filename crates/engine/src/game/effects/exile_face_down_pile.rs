@@ -36,12 +36,14 @@ pub fn resolve(
         return Ok(());
     };
     let source_object = resolve_pile_object(state, ability, &object);
-    let top_cards = state
+    let seat = state
         .players
         .iter()
         .find(|candidate| candidate.id == player)
         .ok_or(EffectError::PlayerNotFound)?
-        .library
+        .id;
+    let top_cards = state
+        .library_of(seat)
         .iter()
         .take(count)
         .copied()
@@ -335,5 +337,47 @@ mod tests {
             state.objects[&source].face_down,
             "a delivered member must be concealed before a later member parks on CR 616.1"
         );
+    }
+}
+
+#[cfg(test)]
+mod dandan_read_sweep_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::QuantityExpr;
+    use crate::types::format::FormatConfig;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
+
+    /// CR 406.3 + CR 400.1: the non-canonical seat's face-down pile takes the
+    /// top of the shared pile, so the whole pile settles and returns to the top.
+    #[test]
+    fn the_non_canonical_seat_exiles_the_shared_pile_top() {
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 42);
+        let p1 = PlayerId(1);
+        let source = create_object(&mut state, CardId(1), p1, "Source".into(), Zone::Graveyard);
+        let top = create_object(&mut state, CardId(2), p1, "Top".into(), Zone::Library);
+        let bottom = create_object(&mut state, CardId(3), p1, "Bottom".into(), Zone::Library);
+        let ability = ResolvedAbility::new(
+            Effect::ExileFaceDownPile {
+                object: TargetFilter::SelfRef,
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![],
+            source,
+            p1,
+        );
+
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        let pile: Vec<_> = state.library_of(p1).iter().copied().collect();
+        assert_eq!(
+            pile.len(),
+            3,
+            "the full pile settled and returned to the library"
+        );
+        assert!(pile[..2].contains(&source) && pile[..2].contains(&top));
+        assert_eq!(pile[2], bottom);
     }
 }

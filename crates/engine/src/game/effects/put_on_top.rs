@@ -28,7 +28,7 @@ pub(super) fn private_zone_selection<'a>(
     let player = &state.players[choosing_player.0 as usize];
     let candidates = match source_zone {
         Zone::Hand => &player.hand,
-        Zone::Library => &player.library,
+        Zone::Library => state.library_of(choosing_player),
         Zone::Battlefield | Zone::Graveyard | Zone::Stack | Zone::Exile | Zone::Command => {
             return None;
         }

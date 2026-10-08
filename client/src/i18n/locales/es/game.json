@@ -1134,6 +1134,8 @@
       "usePowder": "Usar {{name}}",
       "powderDescription": "Exilia todas las cartas de la mano, roba el mismo número — no es un mulligan",
       "powderTooltip": "Exilia todas las cartas de tu mano y roba el mismo número. No es un mulligan — el recuento y los fondos no se ven afectados.",
+      "freeReveal": "Revelar y robar de nuevo (gratis)",
+      "freeRevealDescription": "Revela tu mano, barájala y roba 7 — gratis, sin cartas al fondo, no es un mulligan",
       "eyebrowMulligan": "Mulligan {{count}} · Londres",
       "eyebrowOpening": "Mano inicial · Mulligan de Londres",
       "reviewTitle": "Revisa tu mano inicial",

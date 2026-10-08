@@ -75,7 +75,7 @@ pub fn resolve(
     let resume = resume.as_deref();
     let mut library: Vec<ObjectId> = resume
         .map(|resume| resume.remaining.clone())
-        .unwrap_or_else(|| player.library.iter().copied().collect());
+        .unwrap_or_else(|| state.library_of(player.id).iter().copied().collect());
     let resumed_card = resume.map(|resume| resume.pending_card);
     if let Some(card) = resumed_card {
         library.insert(0, card);

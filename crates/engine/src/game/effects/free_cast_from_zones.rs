@@ -267,7 +267,7 @@ pub(in crate::game) fn eligible_candidates(
         let mut ids = Vec::new();
         for &zone in zones {
             let zone_ids = match zone {
-                Zone::Graveyard => &player.graveyard,
+                Zone::Graveyard => state.graveyard_of(player.id),
                 Zone::Hand => &player.hand,
                 // CR 400.1 + CR 608.2g: Exile is a shared zone — the whole pile
                 // is scanned and the `filter` (e.g. `ExiledBySource` +
@@ -1017,5 +1017,55 @@ mod tests {
             }
             other => panic!("expected FreeCastWindow, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod dandan_read_sweep_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{ResolutionCastFacePolicy, TypeFilter, TypedFilter};
+    use crate::types::card_type::CoreType;
+    use crate::types::format::FormatConfig;
+    use crate::types::identifiers::CardId;
+
+    /// CR 400.1: a free-cast window over "your graveyard" enumerates the
+    /// shared pile for the non-canonical seat.
+    #[test]
+    fn the_graveyard_candidates_come_from_the_shared_pile() {
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 1);
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Spell".into(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+        let face_policy = ResolutionCastFacePolicy::new(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+            ObjectId(900),
+            PlayerId(1),
+            None,
+        );
+        let request = free_cast_window_resolution_request(
+            PlayerId(1),
+            None,
+            None,
+            face_policy,
+            vec![Zone::Graveyard],
+            None,
+            Vec::new(),
+        );
+
+        let candidates = eligible_candidates(&state, &[Zone::Graveyard], None, &[], &request);
+
+        assert_eq!(candidates, vec![spell]);
     }
 }

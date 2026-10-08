@@ -380,14 +380,8 @@ fn visit_characteristic_leaf<'s>(
                 }
             }
             ZoneRef::Graveyard | ZoneRef::Library | ZoneRef::Hand => {
-                for player in scoped_players(state, scope, ctx, controller) {
-                    let zone_ids = match zone {
-                        ZoneRef::Graveyard => &player.graveyard,
-                        ZoneRef::Library => &player.library,
-                        ZoneRef::Hand => &player.hand,
-                        ZoneRef::Exile => unreachable!(),
-                    };
-                    for &obj_id in zone_ids {
+                for player in scoped_zone_holders(state, zone, scope, ctx, controller) {
+                    for &obj_id in zone_container(state, zone, player) {
                         if let Some(view) = characteristic_view_for_object(state, obj_id) {
                             visit(CharacteristicMember::Object(obj_id), view, false);
                         }
@@ -2363,6 +2357,7 @@ pub(crate) fn continuous_modification_dynamic_quantity(
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
+        | ContinuousModification::SubstituteTextWord { .. }
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::RetainAllOtherAbilitiesFromSource
@@ -4639,11 +4634,16 @@ fn resolve_ref(
                     .map_or(0, |p| u32_to_i32_saturating(p.player_counter(kind))),
             }),
         // CR 404: cards in the scoped player(s)' graveyard.
-        QuantityRef::GraveyardSize { player: scope } => {
-            resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
-                usize_to_i32_saturating(p.graveyard.len())
-            })
-        }
+        QuantityRef::GraveyardSize { player: scope } => resolve_per_zone_scalar(
+            state,
+            Some(Zone::Graveyard),
+            scope,
+            controller,
+            ctx,
+            targets,
+            ability,
+            |p| usize_to_i32_saturating(state.graveyard_of(p.id).len()),
+        ),
         // CR 810.9a + CR 810.4 + CR 904.5: current shared-resource life
         // (team total in 2HG, individual total elsewhere) minus the selected
         // controller's rules starting total. Single controller bind — no
@@ -5256,8 +5256,10 @@ fn resolve_ref(
                     .iter()
                     .find(|p| p.id == pid)
                     .map_or(0, |p| match zone {
-                        ZoneRef::Library => usize_to_i32_saturating(p.library.len()),
-                        ZoneRef::Graveyard => usize_to_i32_saturating(p.graveyard.len()),
+                        ZoneRef::Library => usize_to_i32_saturating(state.library_of(p.id).len()),
+                        ZoneRef::Graveyard => {
+                            usize_to_i32_saturating(state.graveyard_of(p.id).len())
+                        }
                         ZoneRef::Hand => usize_to_i32_saturating(p.hand.len()),
                         ZoneRef::Exile => usize_to_i32_saturating(
                             state
@@ -5411,14 +5413,8 @@ fn resolve_ref(
             // Per-player zones (graveyard, library)
             match zone {
                 ZoneRef::Graveyard | ZoneRef::Library | ZoneRef::Hand => {
-                    for player in scoped_players(state, scope, ctx, controller) {
-                        let zone_ids = match zone {
-                            ZoneRef::Graveyard => &player.graveyard,
-                            ZoneRef::Library => &player.library,
-                            ZoneRef::Hand => &player.hand,
-                            ZoneRef::Exile => unreachable!(),
-                        };
-                        for &obj_id in zone_ids {
+                    for player in scoped_zone_holders(state, zone, scope, ctx, controller) {
+                        for &obj_id in zone_container(state, zone, player) {
                             if matches_zone_card_filter(
                                 state,
                                 obj_id,
@@ -5491,7 +5487,8 @@ fn resolve_ref(
                         AggregateFunction::Sum => total,
                         // An absent table means the producer published NO per-player
                         // breakdown: only `Effect::Discard | DiscardCard |
-                        // ChangeZoneAll` populate it; every other producer takes the
+                        // ChangeZoneAll` and the shared-library simultaneous Draw
+                        // dealer populate it; every other producer takes the
                         // `None` arm in `install_previous_effect_counts_by_player`,
                         // which clears it. For a SINGLE-subject producer the scalar
                         // IS the extremum, so the fallback is exact. For a
@@ -6666,6 +6663,55 @@ fn scoped_players<'a>(
         CountScope::All => !p.is_eliminated,
         CountScope::Opponents => p.id != controller && !p.is_eliminated,
     })
+}
+
+/// CR 400.1 + CR 404.1: the seat whose container a `zone` read of `player` lands in;
+/// two seats with equal keys read one container. `None` is a scalar the player holds itself.
+fn zone_dedup_key(state: &GameState, zone: Option<Zone>, player: PlayerId) -> PlayerId {
+    zone.map_or(player, |zone| state.zone_storage_seat(zone, player))
+}
+
+/// `players` with seats that read the same `zone` container collapsed to the first seen,
+/// so an aggregate over a shared pile counts it once.
+fn distinct_zone_holders<'a>(
+    state: &'a GameState,
+    zone: Option<Zone>,
+    players: impl IntoIterator<Item = &'a crate::types::player::Player>,
+) -> impl Iterator<Item = &'a crate::types::player::Player> {
+    let mut seen = HashSet::new();
+    players
+        .into_iter()
+        .filter(move |p| seen.insert(zone_dedup_key(state, zone, p.id)))
+}
+
+/// `scoped_players` for a `CountScope` read of a per-player zone container.
+fn scoped_zone_holders<'a>(
+    state: &'a GameState,
+    zone: &ZoneRef,
+    scope: &'a CountScope,
+    ctx: QuantityContext,
+    controller: PlayerId,
+) -> impl Iterator<Item = &'a crate::types::player::Player> {
+    distinct_zone_holders(
+        state,
+        Some(zone.zone()),
+        scoped_players(state, scope, ctx, controller),
+    )
+}
+
+/// CR 400.1: `player`'s `zone` container resolved through the storage authority.
+/// Exile is a global zone and never reaches here.
+fn zone_container<'a>(
+    state: &'a GameState,
+    zone: &ZoneRef,
+    player: &'a crate::types::player::Player,
+) -> &'a im::Vector<ObjectId> {
+    match zone {
+        ZoneRef::Graveyard => state.graveyard_of(player.id),
+        ZoneRef::Library => state.library_of(player.id),
+        ZoneRef::Hand => &player.hand,
+        ZoneRef::Exile => unreachable!("exile is read by owner predication, not per player"),
+    }
 }
 
 /// CR 608.2 + CR 109.5: Owner-axis owner-match for `CountScope` against a
@@ -8767,6 +8813,28 @@ fn resolve_per_player_scalar<F>(
     ctx: QuantityContext,
     targets: &[TargetRef],
     ability: Option<&ResolvedAbility>,
+    extract: F,
+) -> i32
+where
+    F: FnMut(&crate::types::player::Player) -> i32,
+{
+    resolve_per_zone_scalar(
+        state, None, scope, controller, ctx, targets, ability, extract,
+    )
+}
+
+/// `resolve_per_player_scalar` for a scalar read from a zone container: with `Some(zone)`,
+/// the `Opponent` / `AllPlayers` population counts seats that read one shared container once
+/// (CR 400.1 as modified by the format's shared-zone axis).
+#[allow(clippy::too_many_arguments)]
+fn resolve_per_zone_scalar<F>(
+    state: &GameState,
+    zone: Option<Zone>,
+    scope: &PlayerScope,
+    controller: PlayerId,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
     mut extract: F,
 ) -> i32
 where
@@ -8826,10 +8894,14 @@ where
         // eliminated player's larger hand must not out-rank the live
         // leader).
         PlayerScope::Opponent { aggregate } => aggregate_over_players(
-            state
-                .players
-                .iter()
-                .filter(|p| p.id != controller && !p.is_eliminated),
+            distinct_zone_holders(
+                state,
+                zone,
+                state
+                    .players
+                    .iter()
+                    .filter(|p| p.id != controller && !p.is_eliminated),
+            ),
             *aggregate,
             &mut extract,
         ),
@@ -8841,10 +8913,14 @@ where
                 resolve_single_player_scope(state, ex, controller, ctx, targets, ability)
             });
             aggregate_over_players(
-                state
-                    .players
-                    .iter()
-                    .filter(|p| Some(p.id) != excluded_id && !p.is_eliminated),
+                distinct_zone_holders(
+                    state,
+                    zone,
+                    state
+                        .players
+                        .iter()
+                        .filter(|p| Some(p.id) != excluded_id && !p.is_eliminated),
+                ),
                 *aggregate,
                 &mut extract,
             )
@@ -9417,6 +9493,7 @@ pub(crate) fn resolve_player_count(
         );
     }
 
+    let mut counted_containers = HashSet::new();
     usize_to_i32_saturating(
         state
             .players
@@ -9647,7 +9724,11 @@ pub(crate) fn resolve_player_count(
                                     state, p, controller, attr,
                                 )
                                 .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
-                            }
+                            } && counted_containers.insert(zone_dedup_key(
+                                state,
+                                player_attribute_container_zone(attr),
+                                p.id,
+                            ))
                         }
                         // CR 608.2c + CR 608.2h + CR 109.4: "for each opponent
                         // who controlled a creature returned this way" — count
@@ -9677,6 +9758,15 @@ pub(crate) fn resolve_player_count(
             })
             .count(),
     )
+}
+
+/// The zone whose container a `PlayerAttribute` scalar reads, or `None` for a scalar the
+/// candidate holds itself. "Each graveyard with N or more cards" counts a shared pile once.
+fn player_attribute_container_zone(attr: &QuantityRef) -> Option<Zone> {
+    match attr {
+        QuantityRef::GraveyardSize { .. } => Some(Zone::Graveyard),
+        _ => None,
+    }
 }
 
 /// CR 603.2c + CR 608.2c: a resolving triggered ability that says "for each
@@ -23862,5 +23952,172 @@ mod tests {
             "P0 controls the DEALER (CR 120.1) and must NOT match; matching here is the \
              dealer-derived binding this reference replaces"
         );
+    }
+}
+
+#[cfg(test)]
+mod dandan_scoped_zone_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{AggregateFunction, Comparator, PlayerRelation};
+    use crate::types::format::FormatConfig;
+    use crate::types::game_state::ZoneChangeRecord;
+    use crate::types::identifiers::CardId;
+
+    const P0: PlayerId = PlayerId(0);
+    const P1: PlayerId = PlayerId(1);
+
+    fn dandan() -> GameState {
+        GameState::new(FormatConfig::dandan(), 2, 1)
+    }
+
+    fn standard() -> GameState {
+        GameState::new_two_player(1)
+    }
+
+    fn fill_graveyard(state: &mut GameState, owner: PlayerId, count: u64) {
+        for index in 0..count {
+            create_object(
+                state,
+                CardId(index),
+                owner,
+                format!("Card {index}"),
+                Zone::Graveyard,
+            );
+        }
+    }
+
+    fn holders(state: &GameState, zone: Option<Zone>) -> usize {
+        distinct_zone_holders(state, zone, state.players.iter()).count()
+    }
+
+    /// CR 400.1 as modified by a shared-zone format: seats reading one container are one holder.
+    #[test]
+    fn seats_reading_one_container_are_one_holder() {
+        let shared = dandan();
+        assert_eq!(holders(&shared, Some(Zone::Graveyard)), 1);
+        assert_eq!(holders(&shared, Some(Zone::Library)), 1);
+        assert_eq!(
+            holders(&shared, None),
+            2,
+            "a scalar the player holds itself"
+        );
+        assert_eq!(holders(&shared, Some(Zone::Hand)), 2, "hands are per seat");
+        assert_eq!(holders(&standard(), Some(Zone::Graveyard)), 2);
+    }
+
+    fn graveyard_size(scope: PlayerScope) -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::GraveyardSize { player: scope },
+        }
+    }
+
+    fn all_players(aggregate: AggregateFunction) -> PlayerScope {
+        PlayerScope::AllPlayers {
+            aggregate,
+            exclude: None,
+        }
+    }
+
+    /// The `Sum` fold has no supported card; this row guards the keyed population directly.
+    #[test]
+    fn graveyard_aggregates_count_the_shared_pile_once() {
+        let mut shared = dandan();
+        fill_graveyard(&mut shared, P0, 5);
+        let mut split = standard();
+        fill_graveyard(&mut split, P0, 5);
+        fill_graveyard(&mut split, P1, 3);
+        for (aggregate, shared_value, split_value) in [
+            (AggregateFunction::Sum, 5, 8),
+            (AggregateFunction::Max, 5, 5),
+            (AggregateFunction::Min, 5, 3),
+        ] {
+            let expr = graveyard_size(all_players(aggregate));
+            assert_eq!(
+                resolve_quantity(&shared, &expr, P1, ObjectId(1)),
+                shared_value,
+                "{aggregate:?} over the pile"
+            );
+            assert_eq!(
+                resolve_quantity(&split, &expr, P1, ObjectId(1)),
+                split_value,
+                "{aggregate:?} over two graveyards"
+            );
+        }
+        let opponents = graveyard_size(PlayerScope::Opponent {
+            aggregate: AggregateFunction::Sum,
+        });
+        assert_eq!(resolve_quantity(&shared, &opponents, P1, ObjectId(1)), 5);
+        assert_eq!(resolve_quantity(&split, &opponents, P1, ObjectId(1)), 5);
+    }
+
+    fn graveyard_power_leaving_this_turn(state: &GameState, owner: PlayerId) -> i32 {
+        let mut state = state.clone();
+        state.zone_changes_this_turn.push_back(ZoneChangeRecord {
+            owner,
+            power: Some(3),
+            ..ZoneChangeRecord::test_minimal(ObjectId(50), Some(Zone::Graveyard), Zone::Hand)
+        });
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeAggregateThisTurn {
+                from: Some(Zone::Graveyard),
+                to: Some(Zone::Hand),
+                filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                ])),
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+            },
+        };
+        resolve_quantity(&state, &expr, P0, ObjectId(1))
+    }
+
+    /// "Your graveyard" is the shared pile, so a card leaving it left every seat's graveyard.
+    #[test]
+    fn zone_change_aggregate_from_the_shared_graveyard_claims_the_pile() {
+        let shared = dandan();
+        assert_eq!(graveyard_power_leaving_this_turn(&shared, P0), 3, "reach");
+        assert_eq!(graveyard_power_leaving_this_turn(&shared, P1), 3);
+        let split = standard();
+        assert_eq!(graveyard_power_leaving_this_turn(&split, P0), 3, "reach");
+        assert_eq!(graveyard_power_leaving_this_turn(&split, P1), 0);
+    }
+
+    fn graveyards_with_seven(state: &GameState, relation: PlayerRelation) -> i32 {
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation,
+                    attr: Box::new(QuantityRef::GraveyardSize {
+                        player: PlayerScope::ScopedPlayer,
+                    }),
+                    comparator: Comparator::GE,
+                    value: Box::new(QuantityExpr::Fixed { value: 7 }),
+                },
+            },
+        };
+        resolve_quantity(state, &expr, P0, ObjectId(1))
+    }
+
+    /// "Each graveyard with seven or more cards" counts the shared pile once, whichever
+    /// relation selects the candidates.
+    #[test]
+    fn graveyards_with_n_cards_counts_a_shared_pile_once() {
+        let mut shared = dandan();
+        fill_graveyard(&mut shared, P1, 8);
+        assert_eq!(graveyards_with_seven(&shared, PlayerRelation::All), 1);
+        assert_eq!(graveyards_with_seven(&shared, PlayerRelation::Opponent), 1);
+        assert_eq!(
+            graveyards_with_seven(&shared, PlayerRelation::Controller),
+            1
+        );
+
+        let mut split = standard();
+        fill_graveyard(&mut split, P0, 8);
+        fill_graveyard(&mut split, P1, 8);
+        assert_eq!(graveyards_with_seven(&split, PlayerRelation::All), 2);
+        assert_eq!(graveyards_with_seven(&split, PlayerRelation::Opponent), 1);
     }
 }

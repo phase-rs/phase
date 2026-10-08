@@ -5763,6 +5763,9 @@ fn project_action_payload(
             MulliganChoice::Mulligan => {
                 push_value_surface(surfaces, InteractionRoleCode::Mulligan, "mulligan")
             }
+            MulliganChoice::FreeReveal => {
+                push_value_surface(surfaces, InteractionRoleCode::Mulligan, "freeReveal")
+            }
             MulliganChoice::UseSerumPowder { object_id } => {
                 push_value_surface(surfaces, InteractionRoleCode::Mulligan, "serumPowder");
                 push_object_surface(

@@ -36,21 +36,24 @@ fn extract_controller_ref(filter: &TargetFilter) -> Option<&crate::types::abilit
 }
 
 /// CR 701.20e + CR 400.2: A private self-library peek keeps its looked-at
-/// cards in the controller-owned library while publishing their identities only
-/// through the resolving effect's `last_revealed_ids` window.
+/// cards in the controller's library while publishing their identities only
+/// through the resolving effect's `last_revealed_ids` window. CR 400.1 as a
+/// shared-library format modifies it: a card is in that library when its
+/// owner's library is the controller's, so the shared pile holds every owner's.
 pub(crate) fn looked_at_controller_library_cards(
     state: &GameState,
     controller: crate::types::player::PlayerId,
 ) -> Vec<ObjectId> {
+    let library = state.zone_storage_seat(Zone::Library, controller);
     state
         .last_revealed_ids
         .iter()
         .copied()
         .filter(|id| {
-            state
-                .objects
-                .get(id)
-                .is_some_and(|object| object.zone == Zone::Library && object.owner == controller)
+            state.objects.get(id).is_some_and(|object| {
+                object.zone == Zone::Library
+                    && state.zone_storage_seat(Zone::Library, object.owner) == library
+            })
         })
         .collect()
 }
@@ -4924,6 +4927,7 @@ mod tests {
             Zone::Hand,
             Zone::Graveyard,
             PlayerId(0),
+            None,
             crate::types::game_state::ZoneChangeRecord::test_minimal(
                 card,
                 Some(Zone::Hand),
@@ -4988,6 +4992,7 @@ mod tests {
             Zone::Graveyard,
             Zone::Exile,
             PlayerId(0),
+            None,
             crate::types::game_state::ZoneChangeRecord::test_minimal(
                 card,
                 Some(Zone::Graveyard),
@@ -5242,5 +5247,44 @@ mod tests {
                 ..
             } if *found == constraint
         )));
+    }
+
+    fn looked_at_window(format: crate::types::format::FormatConfig) -> Vec<ObjectId> {
+        let mut state = GameState::new(format, 2, 42);
+        let mine = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mine".to_string(),
+            Zone::Library,
+        );
+        let theirs = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Theirs".to_string(),
+            Zone::Library,
+        );
+        state.last_revealed_ids = vec![mine, theirs];
+        let looked = looked_at_controller_library_cards(&state, PlayerId(0));
+        assert!(
+            looked.contains(&mine),
+            "reach: the controller's own card is looked at"
+        );
+        looked.into_iter().filter(|id| *id == theirs).collect()
+    }
+
+    #[test]
+    fn looked_at_cards_follow_the_library_the_controller_reads() {
+        use crate::types::format::FormatConfig;
+        assert!(
+            looked_at_window(FormatConfig::standard()).is_empty(),
+            "another player's library is not the controller's"
+        );
+        assert_eq!(
+            looked_at_window(FormatConfig::dandan()).len(),
+            1,
+            "the shared pile is the controller's library whoever owns a card"
+        );
     }
 }

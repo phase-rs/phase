@@ -197,7 +197,7 @@ fn resolve_revealed_from_library_top(
         .iter()
         .find(|p| p.id == controller)
         .ok_or(EffectError::PlayerNotFound)?;
-    let reveal_count = (count as usize).min(player.library.len());
+    let reveal_count = (count as usize).min(state.library_of(player.id).len());
 
     if reveal_count == 0 {
         events.push(GameEvent::EffectResolved {
@@ -208,7 +208,12 @@ fn resolve_revealed_from_library_top(
         return Ok(());
     }
 
-    let revealed_ids: Vec<ObjectId> = player.library.iter().take(reveal_count).copied().collect();
+    let revealed_ids: Vec<ObjectId> = state
+        .library_of(player.id)
+        .iter()
+        .take(reveal_count)
+        .copied()
+        .collect();
 
     // CR 701.20a: Mark cards as revealed and emit CardsRevealed event.
     for &card_id in &revealed_ids {

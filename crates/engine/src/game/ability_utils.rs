@@ -6274,7 +6274,8 @@ fn immediate_modification_target_slot_filter(
         | ContinuousModification::RemoveSupertype { .. }
         | ContinuousModification::AddCounterOnEnter { .. }
         | ContinuousModification::SetStartingLoyalty { .. }
-        | ContinuousModification::RemoveManaCost => None,
+        | ContinuousModification::RemoveManaCost
+        | ContinuousModification::SubstituteTextWord { .. } => None,
     }
 }
 

@@ -70,10 +70,10 @@ use crate::types::ability::{
     IllegalTargetsDisposition, ManaAbilityProducedFilter, NameStickerSet, ObjectScope,
     OriginConstraint, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope,
     PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
-    SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, StaticCondition,
-    SubAbilityLink, TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition,
-    TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
-    ZoneChangeClause,
+    SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, SpentColor,
+    StaticCondition, SubAbilityLink, TapCreaturesRequirement, TapStateChange, TargetFilter,
+    TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -9930,16 +9930,20 @@ fn try_extract_adamant_condition(
     let clause_len = prefix.len() + (after.len() - rest.len());
     Some((
         strip_condition_clause(text, pos, clause_len),
-        Some(TriggerCondition::ManaColorSpent { color, minimum: n }),
+        Some(TriggerCondition::ManaColorSpent {
+            color: SpentColor::ColorWord { color },
+            minimum: n,
+        }),
     ))
 }
 
 /// CR 400.7d: Extract symbolic-form mana-spent conditions — the Incarnation /
 /// hybrid-ETB phrasing `"if {C}{C}... was spent to cast it"` where the required
 /// mana is expressed as a run of identical colored mana symbols rather than as
-/// words. Semantically identical to Adamant (`ManaColorSpent`), only the surface
-/// syntax differs. Per CR 400.7d, a permanent's ability can reference "what mana
-/// was spent to pay [its casting] costs."
+/// words. Evaluates like Adamant (`ManaColorSpent`) but carries
+/// `SpentColor::ManaSymbol` where Adamant carries `ColorWord` (CR 612.2). Per
+/// CR 400.7d, a permanent's ability can reference "what mana was spent to pay
+/// [its casting] costs."
 ///
 /// Accepts runs of one or more pure-color symbols (`{W}`, `{U}`, `{B}`,
 /// `{R}`, `{G}`), including mixed-color runs that require each listed color to
@@ -9980,13 +9984,16 @@ impl SymbolicManaSpentIntro {
     fn condition(self, color_counts: Vec<(ManaColor, u32)>) -> TriggerCondition {
         let condition = match color_counts.as_slice() {
             [(color, minimum)] => TriggerCondition::ManaColorSpent {
-                color: *color,
+                color: SpentColor::ManaSymbol { color: *color },
                 minimum: *minimum,
             },
             _ => TriggerCondition::And {
                 conditions: color_counts
                     .into_iter()
-                    .map(|(color, minimum)| TriggerCondition::ManaColorSpent { color, minimum })
+                    .map(|(color, minimum)| TriggerCondition::ManaColorSpent {
+                        color: SpentColor::ManaSymbol { color },
+                        minimum,
+                    })
                     .collect(),
             },
         };

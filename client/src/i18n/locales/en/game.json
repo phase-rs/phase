@@ -1167,6 +1167,8 @@
       "usePowder": "Use {{name}}",
       "powderDescription": "Exile every card in hand, draw the same number — not a mulligan",
       "powderTooltip": "Exile every card in your hand and draw the same number. Not a mulligan — count and bottoms unaffected.",
+      "freeReveal": "Reveal and redraw (free)",
+      "freeRevealDescription": "Reveal your hand, shuffle it back and draw 7 — free, no cards to the bottom, not a mulligan",
       "eyebrowMulligan": "Mulligan {{count}} · London",
       "eyebrowOpening": "Opening Hand · London Mulligan",
       "reviewTitle": "Review your opening hand",

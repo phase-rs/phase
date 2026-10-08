@@ -286,6 +286,7 @@ fn bottom_card_opportunities_use_and_only_materialize_select_responses() {
             },
         ],
         free_first_mulligan: false,
+        declared: Vec::new(),
     };
     bind(mulligan.state_mut(), "response-class-mulligan-bottom");
     let mulligan_view = priority_view(mulligan.state());
@@ -2130,6 +2131,7 @@ fn simultaneous_mulligan_preserves_only_the_other_owners_slot() {
             },
         ],
         free_first_mulligan: false,
+        declared: Vec::new(),
     };
     bind(&mut state, "mulligan");
     let p0_id = state

@@ -2973,6 +2973,7 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
         // CR 612.8 + 613.1c: Layer-3 name-set from source's chosen name (Psychic
         // Paper); a granted continuous mod, no frozen event-context tag.
         | ContinuousModification::SetChosenName
+        | ContinuousModification::SubstituteTextWord { .. }
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::RetainAllOtherAbilitiesFromSource
@@ -9716,7 +9717,9 @@ mod tests {
             rhs: qfix(3),
         };
         let legacy = AbilityCondition::ManaColorSpent {
-            color: ManaColor::Red,
+            color: crate::types::ability::SpentColor::ColorWord {
+                color: ManaColor::Red,
+            },
             minimum: 3,
         };
 

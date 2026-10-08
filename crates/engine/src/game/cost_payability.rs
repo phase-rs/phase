@@ -923,7 +923,7 @@ impl AbilityCost {
             AbilityCost::Mill { count } => state
                 .players
                 .get(player.0 as usize)
-                .is_some_and(|p| p.library.len() >= *count as usize),
+                .is_some_and(|p| state.library_of(p.id).len() >= *count as usize),
             // CR 701.43b: A permanent can be exerted even if it's not tapped
             // or has already been exerted; the cost itself is always payable.
             // CR 701.43c (off-battlefield) is enforced at payment time.
@@ -1163,13 +1163,13 @@ pub(super) fn eligible_exile_cost_objects(
     };
     let ids: Box<dyn Iterator<Item = ObjectId> + '_> = match zone {
         Zone::Hand => Box::new(p.hand.iter().copied()),
-        Zone::Graveyard => Box::new(p.graveyard.iter().copied()),
+        Zone::Graveyard => Box::new(state.graveyard_of(p.id).iter().copied()),
         Zone::Library => {
             if filter.is_some() {
                 return Vec::new();
             }
-            return p
-                .library
+            return state
+                .library_of(p.id)
                 .iter()
                 .copied()
                 .filter(|id| *id != source)
@@ -1220,7 +1220,7 @@ pub(crate) fn eligible_exile_with_aggregate_objects(
 ) -> Vec<ObjectId> {
     let ctx = FilterContext::from_source_with_controller(source, player);
     let zone_ids: Vec<ObjectId> = match (zone, state.players.get(player.0 as usize)) {
-        (Zone::Graveyard, Some(p)) => p.graveyard.iter().copied().collect(),
+        (Zone::Graveyard, Some(p)) => state.graveyard_of(p.id).iter().copied().collect(),
         (Zone::Hand, Some(p)) => p.hand.iter().copied().collect(),
         // Other zones (battlefield/exile) — scan the object table by zone.
         _ => state
@@ -1269,7 +1269,7 @@ pub(crate) fn eligible_craft_materials(
         })
         .collect();
     if let Some(p) = state.players.get(player.0 as usize) {
-        out.extend(p.graveyard.iter().copied().filter(|&id| {
+        out.extend(state.graveyard_of(p.id).iter().copied().filter(|&id| {
             id != source && matches_target_filter_in_owner_zone(state, id, materials, &ctx)
         }));
     }
@@ -2315,6 +2315,61 @@ mod tests {
         assert!(
             !cost.is_payable(&scenario.state, P0, source),
             "the tag-agnostic entry point stays conservative"
+        );
+    }
+}
+
+#[cfg(test)]
+mod dandan_read_sweep_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{TypeFilter, TypedFilter};
+    use crate::types::card_type::CoreType;
+    use crate::types::format::FormatConfig;
+    use crate::types::identifiers::CardId;
+
+    const P1: PlayerId = PlayerId(1);
+
+    /// CR 118.3 + CR 400.1: every exile-cost enumerator reads the shared pile
+    /// for the non-canonical seat.
+    #[test]
+    fn exile_cost_enumerators_read_the_shared_pile() {
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            P1,
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let dead = create_object(&mut state, CardId(2), P1, "Dead".into(), Zone::Graveyard);
+        state
+            .objects
+            .get_mut(&dead)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let top = create_object(&mut state, CardId(3), P1, "Top".into(), Zone::Library);
+        create_object(&mut state, CardId(4), P1, "Next".into(), Zone::Library);
+        let any_card = TargetFilter::Typed(TypedFilter::new(TypeFilter::Card));
+        let creature = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
+
+        assert_eq!(
+            eligible_exile_cost_objects(&state, P1, source, None, Zone::Graveyard, None, 1),
+            vec![dead]
+        );
+        assert_eq!(
+            eligible_exile_cost_objects(&state, P1, source, None, Zone::Library, None, 1),
+            vec![top]
+        );
+        assert_eq!(
+            eligible_exile_with_aggregate_objects(&state, P1, source, &any_card, Zone::Graveyard),
+            vec![dead]
+        );
+        assert_eq!(
+            eligible_craft_materials(&state, P1, source, &creature),
+            vec![dead]
         );
     }
 }

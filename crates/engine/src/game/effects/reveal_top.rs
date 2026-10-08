@@ -47,11 +47,12 @@ pub fn resolve(
             // WATCH-POINT N2: skip an empty library INDIVIDUALLY — never
             // early-return, or a first empty library would suppress every later
             // player's reveal (CR 608.2b fail-closed per player).
-            if player.library.is_empty() {
+            let library = state.library_of(player.id);
+            if library.is_empty() {
                 continue;
             }
-            let count_n = count.min(player.library.len());
-            let revealed_ids: Vec<_> = player.library.iter().take(count_n).copied().collect();
+            let count_n = count.min(library.len());
+            let revealed_ids: Vec<_> = library.iter().take(count_n).copied().collect();
             // CR 701.20b: Revealing a card doesn't cause it to leave its zone.
             for &card_id in &revealed_ids {
                 state.revealed_cards.insert(card_id);
@@ -89,7 +90,7 @@ pub fn resolve(
         return Ok(());
     };
 
-    let library = &state.players[target_player.0 as usize].library;
+    let library = state.library_of(target_player);
     if library.is_empty() {
         super::publish_reveal_result(state, Vec::new());
         state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);

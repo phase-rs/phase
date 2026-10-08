@@ -1829,6 +1829,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
     }
 
+    // CR 612.1 + CR 608.2b + CR 113.1c: a text change on a spell applies before the legality recheck and target binding below, and an ability on the stack is not a spell so only spell entries are rewritten.
+    if is_spell {
+        if let Some(ability) = ability.as_mut() {
+            super::text_substitution::restamp_resolving_spell_text(state, entry.id, ability);
+        }
+    }
+
     if let Some(ability) = ability.as_mut() {
         bind_resolving_ability_referents(state, &entry, ability);
     }

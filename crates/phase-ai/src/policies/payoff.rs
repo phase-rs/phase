@@ -534,11 +534,11 @@ fn mill_cast_bonus(p: &PolicyPenalties) -> f64 {
     p.mill_cast_bonus
 }
 
-// CR 104.3c: scale by how close the lowest-library opponent is to decking.
+// CR 104.3c + CR 401.3: scale by how close the lowest-library opponent is to decking.
 fn mill_scale(ctx: &PolicyContext<'_>, _object: &GameObject) -> PayoffScale {
     let min_library = players::opponents(ctx.state, ctx.ai_player)
         .iter()
-        .map(|&opp_id| ctx.state.players[opp_id.0 as usize].library.len())
+        .map(|&opp_id| ctx.state.library_of(opp_id).len())
         .min()
         .unwrap_or(60);
 

@@ -41,7 +41,7 @@ pub fn resolve(
         .find(|p| p.id == surveil_player)
         .ok_or(EffectError::PlayerNotFound)?;
 
-    let count = surveil_num.min(player.library.len());
+    let count = surveil_num.min(state.library_of(player.id).len());
     // CR 701.25c: If a player is instructed to surveil 0, no surveil event occurs.
     if surveil_num == 0 {
         events.push(GameEvent::EffectResolved {
@@ -71,8 +71,8 @@ pub fn resolve(
         return Ok(());
     }
 
-    let cards: Vec<_> = player
-        .library
+    let cards: Vec<_> = state
+        .library_of(player.id)
         .iter()
         .take(count)
         .copied()

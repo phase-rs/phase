@@ -431,7 +431,8 @@ impl<'a> CopyExceptionOperation<'a> {
             | ContinuousModification::ChangeController
             | ContinuousModification::SetBasicLandType { .. }
             | ContinuousModification::SetChosenBasicLandType
-            | ContinuousModification::SetChosenName => Self::Layered(modification),
+            | ContinuousModification::SetChosenName
+            | ContinuousModification::SubstituteTextWord { .. } => Self::Layered(modification),
             ContinuousModification::SetName { name } => {
                 Self::Fold(FoldableCopyException::SetName { name })
             }

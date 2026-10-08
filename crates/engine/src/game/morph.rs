@@ -896,27 +896,19 @@ pub(crate) fn top_library_object(
         .find(|p| p.id == player)
         .ok_or_else(|| EngineError::InvalidAction("Player not found".to_string()))?;
 
-    let _top_card_id = player_state
-        .library
+    let top_card_id = state
+        .library_of(player_state.id)
         .front()
         .copied()
         .ok_or_else(|| EngineError::InvalidAction("Library is empty".to_string()))?;
 
-    // Find the object that corresponds to this library entry
+    // CR 400.3 + CR 701.40a + CR 701.58a: a shared-library top card is not
+    // owned by the library's reading seat, so ownership is not a gate here.
     state
         .objects
-        .iter()
-        .find(|(_, obj)| {
-            obj.owner == player
-                && obj.zone == Zone::Library
-                && state
-                    .players
-                    .iter()
-                    .find(|p| p.id == player)
-                    .map(|p| p.library.front() == Some(&obj.id))
-                    .unwrap_or(false)
-        })
-        .map(|(id, _)| *id)
+        .get(&top_card_id)
+        .filter(|obj| obj.zone == Zone::Library)
+        .map(|obj| obj.id)
         .ok_or_else(|| EngineError::InvalidAction("Top card object not found".to_string()))
 }
 

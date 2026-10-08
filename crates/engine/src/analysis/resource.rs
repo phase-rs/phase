@@ -1344,7 +1344,7 @@ impl ResourceVector {
             v.life.insert(player.id, player.life as i64);
             // CR 401: per-player library size.
             v.library_delta
-                .insert(player.id, player.library.len() as i64);
+                .insert(player.id, state.library_of(player.id).len() as i64);
             // CR 704.5c: poison counters, keyed by the VICTIM's `PlayerId` (10 ⇒ that
             // player loses) — mirrors the per-player `life`/`library_delta` maps above.
             v.poison.insert(player.id, player.poison_counters as i64);
@@ -1875,7 +1875,7 @@ impl ResourceVector {
             .iter()
             .filter(|p| !p.is_eliminated)
             .filter_map(|p| {
-                self.seat_headroom_bound(p, seat_life_charge)
+                self.seat_headroom_bound(state, p, seat_life_charge)
                     .map(|bound| (p.id, bound))
             })
             .collect();
@@ -1927,6 +1927,7 @@ impl ResourceVector {
     /// caller's relief guard has to refuse.
     fn seat_headroom_bound(
         &self,
+        state: &GameState,
         p: &crate::types::player::Player,
         seat_life_charge: &[(PlayerId, i64)],
     ) -> Option<i64> {
@@ -1968,7 +1969,7 @@ impl ResourceVector {
         // CR 104.3c + CR 121.4 (drawing from an empty library loses): a negative
         // library delta is the per-period drain.
         narrow(
-            p.library.len() as i64,
+            state.library_of(p.id).len() as i64,
             -self.library_delta.get(&p.id).copied().unwrap_or(0),
         );
 
@@ -17100,10 +17101,10 @@ mod tests {
         let c = delta.elimination_bounds(&second, &divisor);
         assert!(
             delta
-                .seat_headroom_bound(&second.players[1], &divisor)
+                .seat_headroom_bound(&second, &second.players[1], &divisor)
                 .is_some()
                 && delta
-                    .seat_headroom_bound(&second.players[2], &divisor)
+                    .seat_headroom_bound(&second, &second.players[2], &divisor)
                     .is_some(),
             "reach-guard: BOTH seats are in the reduction, so 'only one seat could ever be \
              named' does not satisfy the assertion below"
@@ -18177,13 +18178,13 @@ mod tests {
              divisors, so the bound below is a narrowing and not the un-narrowed cap"
         );
         assert_eq!(
-            delta.seat_headroom_bound(&board.players[1], &net_divisor),
+            delta.seat_headroom_bound(&board, &board.players[1], &net_divisor),
             None,
             "CR 704.5a: with the net term P1 reserves no headroom at all — the clamp disarms \
              its life axis and it leaves the reduction"
         );
         assert_eq!(
-            delta.seat_headroom_bound(&board.players[1], &frame_wise_divisor),
+            delta.seat_headroom_bound(&board, &board.players[1], &frame_wise_divisor),
             Some(2),
             "under the frame-wise term P1 is back in the reduction at `(7 - 1) / 3`"
         );
@@ -34537,6 +34538,130 @@ mod tests {
             gain_only.conforms(&gain_only.delta.clone(), &pins),
             "PAIRED POSITIVE: the same gain-only period against itself still conforms, so the \
              leg above cannot be satisfied by an always-refusing predicate"
+        );
+    }
+
+    fn shared_pile_state(cards: usize) -> GameState {
+        let mut state = GameState::new(crate::types::format::FormatConfig::dandan(), 2, 7);
+        for i in 0..cards {
+            crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(i as u64 + 1),
+                PlayerId(1),
+                "Pile Card".into(),
+                Zone::Library,
+            );
+        }
+        state
+    }
+
+    /// CR 400.1 as modified by a shared-zone format: each seat's library size is the pile's.
+    #[test]
+    fn snapshot_reads_the_shared_pile_for_every_seat() {
+        let state = shared_pile_state(5);
+        assert_eq!(
+            state.players[0].library.len(),
+            5,
+            "reach: pile is stored on P0"
+        );
+        assert!(
+            state.players[1].library.is_empty(),
+            "reach: P1's container is empty"
+        );
+        let v = ResourceVector::snapshot(&state);
+        assert_eq!(v.library_delta[&PlayerId(0)], 5);
+        assert_eq!(v.library_delta[&PlayerId(1)], 5);
+
+        let mut standard = GameState::new_two_player(7);
+        for (owner, count) in [(PlayerId(0), 3), (PlayerId(1), 5)] {
+            for i in 0..count {
+                crate::game::zones::create_object(
+                    &mut standard,
+                    crate::types::identifiers::CardId(i + 1),
+                    owner,
+                    "Card".into(),
+                    Zone::Library,
+                );
+            }
+        }
+        let v = ResourceVector::snapshot(&standard);
+        assert_eq!(
+            (v.library_delta[&PlayerId(0)], v.library_delta[&PlayerId(1)]),
+            (3, 5)
+        );
+    }
+
+    /// CR 104.3c + CR 121.4: the decking headroom of a seat is the library it draws from.
+    #[test]
+    fn seat_headroom_reads_the_shared_pile_for_every_seat() {
+        let drain = |seats: &[PlayerId]| {
+            let mut v = ResourceVector::default();
+            for seat in seats {
+                v.library_delta.insert(*seat, -1);
+            }
+            v
+        };
+        let state = shared_pile_state(5);
+        let v = drain(&[PlayerId(0), PlayerId(1)]);
+        assert_eq!(
+            v.seat_headroom_bound(&state, &state.players[0], &[]),
+            Some(5)
+        );
+        assert_eq!(
+            v.seat_headroom_bound(&state, &state.players[1], &[]),
+            Some(5)
+        );
+
+        let mut standard = GameState::new_two_player(7);
+        for i in 0..4 {
+            crate::game::zones::create_object(
+                &mut standard,
+                crate::types::identifiers::CardId(i + 1),
+                PlayerId(1),
+                "Card".into(),
+                Zone::Library,
+            );
+        }
+        let v = drain(&[PlayerId(1)]);
+        assert_eq!(
+            v.seat_headroom_bound(&standard, &standard.players[1], &[]),
+            Some(4)
+        );
+    }
+
+    /// The C1b residual compares STORED containers pairwise: a stray id in the seat
+    /// container that does not hold the pile must refuse, which reading the pile for
+    /// every seat would hide.
+    #[test]
+    fn certificate_residual_compares_stored_containers() {
+        let mut prior = shared_pile_state(0);
+        let card = crate::game::zones::create_object(
+            &mut prior,
+            crate::types::identifiers::CardId(900),
+            CERT_VICTIM,
+            "Library Card".into(),
+            Zone::Library,
+        );
+        let mut current = prior.clone();
+        current.objects.get_mut(&card).unwrap().zone = Zone::Graveyard;
+        current.players[0].library.retain(|id| *id != card);
+        current.players[0].graveyard.push_back(card);
+
+        let certified = certify(&prior, &current).expect("a pile departure certifies");
+        assert_eq!(certified.per_victim, BTreeMap::from([(CERT_VICTIM, 1)]));
+
+        let mut extra = current.clone();
+        extra.players[0].library.push_back(ObjectId(901));
+        assert!(
+            certify(&prior, &extra).is_none(),
+            "reach: an unaccounted id in the pile refuses"
+        );
+
+        let mut stray = current.clone();
+        stray.players[1].library.push_back(ObjectId(902));
+        assert!(
+            certify(&prior, &stray).is_none(),
+            "a stray id in the non-holder container refuses"
         );
     }
 }

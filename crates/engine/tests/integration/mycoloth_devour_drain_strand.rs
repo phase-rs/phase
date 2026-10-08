@@ -109,7 +109,7 @@ use engine::types::game_state::{
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::resolution::ResolutionStateWire;
+use engine::types::resolution::{ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION};
 use engine::types::zones::Zone;
 
 fn gunzip(gz: &[u8]) -> String {
@@ -246,7 +246,10 @@ fn current_ready_postreplacement_continuation_remains_restorable() {
 
     let wire = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
         .expect("the current Ready state serializes through the persistence writer");
-    assert_eq!(wire["resolution_state_version"], 4);
+    assert_eq!(
+        wire["resolution_state_version"],
+        RESOLUTION_STATE_WIRE_VERSION
+    );
     let restored = serde_json::from_value::<PersistedGameState>(wire)
         .expect("the current Ready persistence payload decodes")
         .prepare_for_restore(PersistedRestoreFinalization::Immediate)
@@ -298,7 +301,10 @@ fn supported_v1_draw_state_restores_through_persisted_game_state() {
 
     let current = serde_json::to_value(PersistedGameState::Raw(Box::new(restored)))
         .expect("restored v1 state rewrites through the current persistence writer");
-    assert_eq!(current["resolution_state_version"], 4);
+    assert_eq!(
+        current["resolution_state_version"],
+        RESOLUTION_STATE_WIRE_VERSION
+    );
     assert!(current["resolution_frames"].is_object());
     assert!(current.get("pending_multi_draw").is_none());
 }
@@ -447,7 +453,10 @@ fn v3_paused_postreplacement_direct_choice_remains_restorable() {
 
     let mut wire = serde_json::to_value(PersistedGameState::Raw(Box::new(runner.state().clone())))
         .expect("current persisted wire serializes");
-    assert_eq!(wire["resolution_state_version"], 4);
+    assert_eq!(
+        wire["resolution_state_version"],
+        RESOLUTION_STATE_WIRE_VERSION
+    );
     let delivery_owner = wire["resolution_frames"]["frames"][1]["data"]["draw_sequences"]["frames"]
         [0]
     .as_object_mut()
@@ -502,7 +511,10 @@ fn current_paused_postreplacement_round_trip_resumes_like_uninterrupted() {
 
     let wire = serde_json::to_value(PersistedGameState::Raw(Box::new(restored.state().clone())))
         .expect("current persisted wire serializes");
-    assert_eq!(wire["resolution_state_version"], 4);
+    assert_eq!(
+        wire["resolution_state_version"],
+        RESOLUTION_STATE_WIRE_VERSION
+    );
     let state = serde_json::from_value::<PersistedGameState>(wire)
         .expect("current persisted wire decodes")
         .prepare_for_restore(PersistedRestoreFinalization::Immediate)

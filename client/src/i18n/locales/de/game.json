@@ -1134,6 +1134,8 @@
       "usePowder": "{{name}} verwenden",
       "powderDescription": "Schicke jede Karte auf der Hand ins Exil, ziehe die gleiche Anzahl — kein Mulligan",
       "powderTooltip": "Schicke jede Karte auf deiner Hand ins Exil und ziehe die gleiche Anzahl. Kein Mulligan — Anzahl und unter die Bibliothek zu legende Karten bleiben unberührt.",
+      "freeReveal": "Aufdecken und neu ziehen (gratis)",
+      "freeRevealDescription": "Decke deine Hand auf, mische sie zurück und ziehe 7 — gratis, keine Karten unter die Bibliothek, kein Mulligan",
       "eyebrowMulligan": "Mulligan {{count}} · London",
       "eyebrowOpening": "Starthand · London-Mulligan",
       "reviewTitle": "Überprüfe deine Starthand",

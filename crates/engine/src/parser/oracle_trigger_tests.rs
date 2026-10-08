@@ -22,7 +22,9 @@ use crate::types::ability::{
     SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter, TriggerCondition,
     TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
 };
-use crate::types::ability::{EffectOutcomeSignal, IllegalTargetsDisposition, MultiTargetSpec};
+use crate::types::ability::{
+    EffectOutcomeSignal, IllegalTargetsDisposition, MultiTargetSpec, SpentColor,
+};
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::game_state::WaitingFor;
@@ -27292,7 +27294,9 @@ fn extract_adamant_three_red() {
     assert_eq!(
         cond.unwrap(),
         TriggerCondition::ManaColorSpent {
-            color: crate::types::mana::ManaColor::Red,
+            color: SpentColor::ColorWord {
+                color: crate::types::mana::ManaColor::Red,
+            },
             minimum: 3,
         }
     );
@@ -27312,7 +27316,9 @@ fn extract_symbolic_mana_spent_two_green() {
     assert_eq!(
         cond.unwrap(),
         TriggerCondition::ManaColorSpent {
-            color: crate::types::mana::ManaColor::Green,
+            color: SpentColor::ManaSymbol {
+                color: crate::types::mana::ManaColor::Green,
+            },
             minimum: 2,
         }
     );
@@ -27326,7 +27332,9 @@ fn extract_symbolic_mana_spent_two_blue_with_trailing_effect() {
     assert_eq!(
         cond.unwrap(),
         TriggerCondition::ManaColorSpent {
-            color: crate::types::mana::ManaColor::Blue,
+            color: SpentColor::ManaSymbol {
+                color: crate::types::mana::ManaColor::Blue,
+            },
             minimum: 2,
         }
     );
@@ -27339,7 +27347,9 @@ fn extract_symbolic_mana_spent_single_red_this_spell() {
     assert_eq!(
         cond.unwrap(),
         TriggerCondition::ManaColorSpent {
-            color: crate::types::mana::ManaColor::Red,
+            color: SpentColor::ManaSymbol {
+                color: crate::types::mana::ManaColor::Red,
+            },
             minimum: 1,
         }
     );
@@ -27353,7 +27363,9 @@ fn extract_symbolic_unless_mana_spent_single_blue() {
         cond.unwrap(),
         TriggerCondition::Not {
             condition: Box::new(TriggerCondition::ManaColorSpent {
-                color: crate::types::mana::ManaColor::Blue,
+                color: SpentColor::ManaSymbol {
+                    color: crate::types::mana::ManaColor::Blue,
+                },
                 minimum: 1,
             }),
         }
@@ -27368,7 +27380,9 @@ fn extract_symbolic_unless_mana_spent_two_black() {
         cond.unwrap(),
         TriggerCondition::Not {
             condition: Box::new(TriggerCondition::ManaColorSpent {
-                color: crate::types::mana::ManaColor::Black,
+                color: SpentColor::ManaSymbol {
+                    color: crate::types::mana::ManaColor::Black,
+                },
                 minimum: 2,
             }),
         }
@@ -27548,7 +27562,9 @@ fn extract_symbolic_mana_spent_mid_sentence() {
     assert_eq!(
         cond.unwrap(),
         TriggerCondition::ManaColorSpent {
-            color: crate::types::mana::ManaColor::Red,
+            color: SpentColor::ManaSymbol {
+                color: crate::types::mana::ManaColor::Red,
+            },
             minimum: 3,
         }
     );
@@ -27569,7 +27585,9 @@ fn extract_symbolic_mana_spent_lowercase_input() {
     assert_eq!(
         cond.unwrap(),
         TriggerCondition::ManaColorSpent {
-            color: crate::types::mana::ManaColor::Green,
+            color: SpentColor::ManaSymbol {
+                color: crate::types::mana::ManaColor::Green,
+            },
             minimum: 2,
         }
     );
@@ -27588,11 +27606,15 @@ fn extract_symbolic_mana_spent_mixed_colors() {
         conditions,
         vec![
             TriggerCondition::ManaColorSpent {
-                color: crate::types::mana::ManaColor::Green,
+                color: SpentColor::ManaSymbol {
+                    color: crate::types::mana::ManaColor::Green,
+                },
                 minimum: 1,
             },
             TriggerCondition::ManaColorSpent {
-                color: crate::types::mana::ManaColor::Blue,
+                color: SpentColor::ManaSymbol {
+                    color: crate::types::mana::ManaColor::Blue,
+                },
                 minimum: 1,
             },
         ]

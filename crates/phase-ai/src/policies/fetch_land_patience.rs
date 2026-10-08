@@ -268,8 +268,8 @@ fn library_holds_search_match(
     search_filter: &TargetFilter,
 ) -> bool {
     let filter_ctx = FilterContext::from_source(ctx.state, source_id);
-    ctx.state.players[ctx.ai_player.0 as usize]
-        .library
+    ctx.state
+        .library_of(ctx.ai_player)
         .iter()
         .any(|&card_id| matches_target_filter(ctx.state, card_id, search_filter, &filter_ctx))
 }
@@ -355,15 +355,19 @@ mod tests {
     }
 
     fn verdict_for(state: &GameState, source_id: ObjectId) -> PolicyVerdict {
+        verdict_for_seat(state, source_id, AI)
+    }
+
+    fn verdict_for_seat(state: &GameState, source_id: ObjectId, ai: PlayerId) -> PolicyVerdict {
         let candidate = CandidateAction {
             action: GameAction::ActivateAbility {
                 source_id,
                 ability_index: 0,
             },
-            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
+            metadata: ActionMetadata::for_actor(Some(ai), TacticalClass::Ability),
         };
         let decision = AiDecisionContext {
-            waiting_for: WaitingFor::Priority { player: AI },
+            waiting_for: WaitingFor::Priority { player: ai },
             candidates: Vec::new(),
         };
         let config = AiConfig::default();
@@ -372,7 +376,7 @@ mod tests {
             state,
             decision: &decision,
             candidate: &candidate,
-            ai_player: AI,
+            ai_player: ai,
             config: &config,
             context: &context,
             cast_facts: None,
@@ -644,6 +648,54 @@ mod tests {
             }
             PolicyVerdict::Reject { .. } => {
                 panic!("opponent-turn untapped fetch must not be gated")
+            }
+        }
+    }
+
+    /// The fetch preference reads the shared pile for either seat, and a dry
+    /// pile stays unpreferred.
+    #[test]
+    fn untapped_fetchland_reads_the_shared_pile_from_either_seat() {
+        for (format, ai) in [
+            (engine::types::format::FormatConfig::dandan(), PlayerId(1)),
+            (engine::types::format::FormatConfig::dandan(), PlayerId(0)),
+            (engine::types::format::FormatConfig::standard(), PlayerId(1)),
+        ] {
+            for stocked in [true, false] {
+                let mut state = GameState::new(format.clone(), 2, 42);
+                state.active_player = ai;
+                state.phase = Phase::PreCombatMain;
+                if stocked {
+                    let land = create_object(
+                        &mut state,
+                        CardId(2),
+                        ai,
+                        "Forest".to_string(),
+                        Zone::Library,
+                    );
+                    state
+                        .objects
+                        .get_mut(&land)
+                        .unwrap()
+                        .card_types
+                        .core_types
+                        .push(CoreType::Land);
+                }
+                let source = create_object(
+                    &mut state,
+                    CardId(1),
+                    ai,
+                    "Fetch Source".to_string(),
+                    Zone::Battlefield,
+                );
+                let obj = state.objects.get_mut(&source).unwrap();
+                obj.card_types.core_types.push(CoreType::Land);
+                Arc::make_mut(&mut obj.abilities).push(fetch_land_ability(EtbTapState::Untapped));
+                let preferred = matches!(
+                    verdict_for_seat(&state, source, ai),
+                    PolicyVerdict::Score { ref reason, .. } if reason.kind == "fetch_untapped_own_turn"
+                );
+                assert_eq!(preferred, stocked, "{ai:?} stocked={stocked}");
             }
         }
     }

@@ -27,6 +27,7 @@ use crate::types::ability::{
 #[cfg(test)]
 use crate::types::ability::{AttackSubject, CombatHistoryScope};
 use crate::types::events::{GameEvent, PlayerActionKind};
+use crate::types::format::ZoneScope;
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, DiscardBatchCursor,
     ExileLinkKind, GameState, LKISnapshot, ManaAbilityResume, MayTriggerAutoChoiceKey,
@@ -689,11 +690,11 @@ pub(crate) fn player_control_count_compares(
     )
 }
 
-/// CR 402.1 / 119.1 / 119.3 / 122.1f / 404.1: Read scalar `attr` for one
+/// CR 402.1 / 119.1 / 119.3 / 122.1f: Read scalar `attr` for one
 /// candidate player DIRECTLY off the candidate `Player` (NOT via the
 /// controller-scoped `resolve_quantity`), so `PlayerFilter::PlayerAttribute`
 /// reads each player's own hand size / life total / life lost or gained /
-/// graveyard / player-counter rather than the controller's. Returns `None` for
+/// player-counter rather than the controller's. Returns `None` for
 /// any non-scalar `QuantityRef`; the parser
 /// invariant guarantees only the scalar subset reaches here, and `None` fails
 /// the candidate predicate closed.
@@ -710,8 +711,6 @@ pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<
         QuantityRef::LifeGainedThisTurn { .. } => {
             Some(u32_to_i32_saturating(p.life_gained_this_turn))
         }
-        // CR 404.1: cards in the candidate's graveyard.
-        QuantityRef::GraveyardSize { .. } => Some(usize_to_i32_saturating(p.graveyard.len())),
         // CR 122.1f (poison) + CR 122.1: the candidate's named player-counter total.
         QuantityRef::PlayerCounter { kind, .. } => {
             Some(u32_to_i32_saturating(p.player_counter(kind)))
@@ -731,8 +730,8 @@ pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<
     }
 }
 
-/// CR 402.1 / 119.1 / 403.3 / 608.2h: Per-candidate scalar lookup that needs game-state
-/// backing (battlefield entry ledger). Used by `PlayerFilter::PlayerAttribute`
+/// CR 402.1 / 119.1 / 404.1 / 403.3 / 608.2h: Per-candidate scalar lookup that needs game-state
+/// backing (battlefield entry ledger, shared-zone graveyard). Used by `PlayerFilter::PlayerAttribute`
 /// in `resolve_player_count` when `candidate_player_scalar` returns `None`.
 pub(crate) fn candidate_player_scalar_with_state(
     state: &crate::types::game_state::GameState,
@@ -750,6 +749,13 @@ pub(crate) fn candidate_player_scalar_with_state(
         // `Player::life` via the live game state.
         QuantityRef::LifeTotal { .. } => {
             Some(crate::game::players::team_life_total(state, candidate.id))
+        }
+        // CR 404.1 + CR 400.1: cards in the candidate's graveyard, read through
+        // the storage authority so a shared-graveyard format counts the pile.
+        QuantityRef::GraveyardSize { .. } => {
+            Some(crate::game::arithmetic::usize_to_i32_saturating(
+                state.graveyard_of(candidate.id).len(),
+            ))
         }
         QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => {
             Some(crate::game::arithmetic::usize_to_i32_saturating(
@@ -6808,65 +6814,141 @@ fn is_player_scope_local_continuation(
     // and graveyard into their library, then draws" is one per-player
     // instruction. Keep every parser-marked origin move, the terminal shuffle,
     // and its fixed or EventContextAmount draw in the current iteration.
-    let is_scoped_library_shuffle_chain = matches!(
-        (parent, child),
-        (
-            Effect::ChangeZoneAll {
-                origin: Some(_),
-                destination: Zone::Library,
-                target: TargetFilter::ScopedPlayer,
-                library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
-                ..
-            },
-            Effect::ChangeZoneAll {
-                origin: Some(_),
-                destination: Zone::Library,
-                target: TargetFilter::ScopedPlayer,
-                library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
-                ..
-            }
-        ) | (
-            Effect::ChangeZoneAll {
-                origin: Some(Zone::Hand),
-                destination: Zone::Library,
-                target: TargetFilter::ScopedPlayer,
-                ..
-            },
+    let scoped_shuffle = |effect: &Effect| {
+        matches!(
+            effect,
             Effect::Shuffle {
                 target: TargetFilter::ScopedPlayer,
-            }
-        ) | (
-            Effect::ChangeZoneAll {
-                origin: Some(_),
-                destination: Zone::Library,
-                target: TargetFilter::ScopedPlayer,
-                library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
-                ..
-            },
-            Effect::Shuffle {
-                target: TargetFilter::ScopedPlayer,
-            }
-        ) | (
-            Effect::Shuffle {
-                target: TargetFilter::ScopedPlayer,
-            },
-            Effect::Draw {
-                target: TargetFilter::ScopedPlayer,
-                count: QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextAmount,
-                },
-            }
-        ) | (
-            Effect::Shuffle {
-                target: TargetFilter::ScopedPlayer,
-            },
-            Effect::Draw {
-                target: TargetFilter::ScopedPlayer,
-                count: QuantityExpr::Fixed { .. },
             }
         )
-    );
+    };
+    let is_scoped_library_shuffle_chain = (is_scoped_pile_return(parent)
+        && (is_scoped_pile_return(child) || scoped_shuffle(child)))
+        || matches!(
+            (parent, child),
+            (
+                Effect::ChangeZoneAll {
+                    origin: Some(Zone::Hand),
+                    destination: Zone::Library,
+                    target: TargetFilter::ScopedPlayer,
+                    ..
+                },
+                Effect::Shuffle {
+                    target: TargetFilter::ScopedPlayer,
+                }
+            ) | (
+                Effect::Shuffle {
+                    target: TargetFilter::ScopedPlayer,
+                },
+                Effect::Draw {
+                    target: TargetFilter::ScopedPlayer,
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                }
+            ) | (
+                Effect::Shuffle {
+                    target: TargetFilter::ScopedPlayer,
+                },
+                Effect::Draw {
+                    target: TargetFilter::ScopedPlayer,
+                    count: QuantityExpr::Fixed { .. },
+                }
+            )
+        );
     is_scoped_library_shuffle_chain && scope_keeps_scoped_whole_hand_shuffle_local(scope)
+}
+
+/// The parser-marked "put <zone> into their library" move whose terminal
+/// shuffle is left to a following `Shuffle`.
+fn is_scoped_pile_return(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::ChangeZoneAll {
+            origin: Some(_),
+            destination: Zone::Library,
+            target: TargetFilter::ScopedPlayer,
+            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            ..
+        }
+    )
+}
+
+/// `node` with its chain-position fields (`sub_ability`, `sub_link`) normalized, so the
+/// shared rider predicate, which judges a standalone node, sees only the node's own riders.
+fn standalone_view(node: &ResolvedAbility) -> ResolvedAbility {
+    let mut alone = node.clone();
+    alone.sub_ability = None;
+    alone.sub_link = SubAbilityLink::ContinuationStep;
+    alone
+}
+
+/// CR 400.1 as modified by a shared-library format + CR 701.24a + CR 608.2c: the
+/// parsed per-player wheel ("each player moves their <zones> into their library,
+/// then draws N") is one all-players move phase, one shuffle of the single pile,
+/// and a separate scoped draw. Re-tagging the shuffle as the next printed
+/// instruction makes the scope driver detach it, with the draw behind it, from
+/// the per-seat move template; the draw keeps its own scope and `ContinuationStep`
+/// link so the dealer sees a bare scoped draw. `None` leaves the chain as parsed.
+fn shared_library_wheel_split(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    scope: &PlayerFilter,
+) -> Option<ResolvedAbility> {
+    if state.format_config.format.shared_zones().library != ZoneScope::Shared
+        || ability.player_scope.as_ref() != Some(scope)
+    {
+        return None;
+    }
+    let plain = |node: &ResolvedAbility| {
+        scoped_library_search::has_no_resolution_riders(&standalone_view(node))
+    };
+    fn continuation(node: &ResolvedAbility) -> Option<&ResolvedAbility> {
+        node.sub_ability
+            .as_deref()
+            .filter(|sub| sub.sub_link == SubAbilityLink::ContinuationStep)
+    }
+    let mut node = ability;
+    let mut moves = 0usize;
+    while is_scoped_pile_return(&node.effect) {
+        if !plain(node) || (moves > 0 && node.player_scope.is_some()) {
+            return None;
+        }
+        node = continuation(node)?;
+        moves += 1;
+    }
+    if moves == 0
+        || !plain(node)
+        || node.player_scope.is_some()
+        || !matches!(
+            node.effect,
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer,
+            }
+        )
+    {
+        return None;
+    }
+    let draw = continuation(node)?;
+    if !plain(draw)
+        || draw.player_scope.as_ref() != Some(scope)
+        || !matches!(
+            draw.effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { .. },
+                target: TargetFilter::ScopedPlayer,
+            }
+        )
+    {
+        return None;
+    }
+    let mut split = ability.clone();
+    let mut cursor = &mut split;
+    for _ in 0..moves {
+        cursor = cursor.sub_ability.as_deref_mut()?;
+    }
+    cursor.sub_link = SubAbilityLink::SequentialSibling;
+    Some(split)
 }
 
 /// CR 115.10 + CR 608.2c + CR 701.24a: Does this `player_scope` filter keep the
@@ -15293,6 +15375,46 @@ fn resolve_chain_body(
                 .into_iter()
                 .filter(|pid| chosen_players.contains(pid))
                 .collect();
+            // CR 121.2 + CR 121.2c as modified by the format's `DealOrder`: every
+            // chosen player's draw over a shared library is one dealt instruction.
+            let seats: Vec<(PlayerId, ResolvedAbility)> = fanout_players
+                .iter()
+                .map(|&pid| {
+                    let mut seat = per_target.clone();
+                    seat.targets = vec![TargetRef::Player(pid)];
+                    seat.multi_target = None;
+                    (pid, seat)
+                })
+                .collect();
+            if let Some(dealer_seats) = draw::plan_simultaneous_draw(state, &seats) {
+                let events_before_fanout = events.len();
+                match draw::start_simultaneous_draw(state, dealer_seats, events) {
+                    draw::SimultaneousDraw::Parked => {
+                        if let Some(tail) = after_fanout {
+                            state
+                                .insert_ability_continuation_parent_at_child_boundary(
+                                    PendingContinuation::new(tail, state),
+                                    child_stack_start,
+                                )
+                                .expect("the dealer's frames sit above the tail's boundary");
+                        }
+                    }
+                    draw::SimultaneousDraw::Completed => {
+                        for _ in &fanout_players {
+                            events.push(GameEvent::EffectResolved {
+                                kind: EffectKind::from(&per_target.effect),
+                                source_id: per_target.source_id,
+                                subject: None,
+                            });
+                        }
+                        record_player_actions_performed(state, &events[events_before_fanout..]);
+                        if let Some(after_fanout) = after_fanout {
+                            resolve_ability_chain(state, &after_fanout, events, depth + 1)?;
+                        }
+                    }
+                }
+                return Ok(());
+            }
             let initial_waiting_for = state.waiting_for.clone();
             for (i, pid) in fanout_players.iter().enumerate() {
                 let mut narrowed = per_target.clone();
@@ -15484,6 +15606,8 @@ fn resolve_chain_body(
         // intentionally detaches a final searched-this-way shuffle, but it can
         // also detach arbitrary delivery riders; only the former is explicitly
         // preserved by the scoped simultaneous-search completion.
+        let wheel = shared_library_wheel_split(state, ability, scope);
+        let ability = wheel.as_ref().unwrap_or(ability);
         let scoped_search_delivery_is_safe =
             scoped_library_search::has_only_detachable_shuffle_tail(ability);
         let (scoped_template, after_scope) = split_player_scope_chain(ability, scope);
@@ -15515,6 +15639,64 @@ fn resolve_chain_body(
                 events,
             )?;
             return Ok(());
+        }
+
+        // CR 121.2 + CR 121.2c as modified by the format's `DealOrder`: a bare
+        // scoped draw over a shared library is one instruction dealt to every seat
+        // together, with the unscoped tail running once after it.
+        if !after_scope_needs_linked_exile && !next_sub_needs_tracked_set(ability) {
+            let seats: Vec<(PlayerId, ResolvedAbility)> = matching_players
+                .iter()
+                .map(|&pid| (pid, bind_scoped_seat(&scoped_template, controller, pid)))
+                .collect();
+            if let Some(dealer_seats) = draw::plan_simultaneous_draw(state, &seats) {
+                match draw::start_simultaneous_draw(state, dealer_seats, events) {
+                    draw::SimultaneousDraw::Parked => {
+                        // The tail belongs below the dealer's frames, not above a nested
+                        // instruction's, or it would run before the cards are dealt.
+                        if let Some(tail) = after_scope {
+                            state
+                                .insert_ability_continuation_parent_at_child_boundary(
+                                    PendingContinuation::new(tail, state),
+                                    child_stack_start,
+                                )
+                                .expect("the dealer's frames sit above the tail's boundary");
+                        }
+                        state.clause_minimum_snapshot = None;
+                    }
+                    draw::SimultaneousDraw::Completed => {
+                        for _ in &matching_players {
+                            events.push(GameEvent::EffectResolved {
+                                kind: EffectKind::from(&scoped_template.effect),
+                                source_id: scoped_template.source_id,
+                                subject: None,
+                            });
+                        }
+                        record_player_actions_performed(state, &events[scoped_events_before..]);
+                        let drawn_by_player = state.last_effect_counts_by_player.clone();
+                        publish_player_scope_clause_results(
+                            state,
+                            ability,
+                            &scoped_template,
+                            &matching_players,
+                            false,
+                            &events[scoped_events_before..],
+                        );
+                        // The generic publication clears a table its effect kind does
+                        // not produce from events.
+                        install_previous_effect_counts_by_player(
+                            state,
+                            Some(drawn_by_player),
+                            false,
+                        );
+                        state.clause_minimum_snapshot = None;
+                        if let Some(after_scope) = after_scope {
+                            resolve_ability_chain(state, &after_scope, events, depth + 1)?;
+                        }
+                    }
+                }
+                return Ok(());
+            }
         }
 
         let initial_waiting_for = state.waiting_for.clone();
@@ -15558,7 +15740,6 @@ fn resolve_chain_body(
         // post-clause-N board. See §8 of the Balance plan.
         capture_clause_minimum_snapshot(state, &scoped_template);
         for (i, pid) in matching_players.iter().enumerate() {
-            let mut scoped = scoped_template.clone();
             // CR 608.2c + CR 101.3: Each scoped iteration is a fresh
             // sub-resolution of the scoped template — read the whole
             // instruction per iteration. The cost-payment-failed signal is
@@ -15572,17 +15753,7 @@ fn resolve_chain_body(
             // safety: no corpus card relies on cross-iteration carry-over
             // of this flag.
             state.cost_payment_failed_flag = false;
-            scoped.set_original_controller_recursive(controller);
-            // CR 608.2: The scoped player is the acting controller for the
-            // WHOLE per-player chain, not just the top clause. A co-scoped
-            // sub-clause kept in this iteration (Duskmantle Seer's "loses life
-            // equal to that card's mana value, then puts it into their hand")
-            // must resolve its implicit-controller recipient and any generic
-            // handler against the iterating player — so rebind recursively. The
-            // printed controller is preserved via `original_controller` above,
-            // keeping "you" references stable (CR 109.5).
-            scoped.set_controller_recursive(*pid);
-            scoped.set_scoped_player_recursive(*pid);
+            let scoped = bind_scoped_seat(&scoped_template, controller, *pid);
             resolve_ability_chain(state, &scoped, events, depth + 1)?;
 
             // CR 608.2e: Break if inner effect entered a player-choice state —
@@ -15652,13 +15823,8 @@ fn resolve_chain_body(
                 // Each remaining player gets the scoped instruction only; the
                 // unscoped tail runs once after the final scoped iteration.
                 for &remaining_pid in remaining.iter().rev() {
-                    let mut remaining_scoped = scoped_template.clone();
-                    remaining_scoped.set_original_controller_recursive(controller);
-                    // CR 608.2: mirror the in-loop recursive controller rebind so
-                    // a co-scoped sub-clause resumed via continuation also acts as
-                    // the iterating player.
-                    remaining_scoped.set_controller_recursive(remaining_pid);
-                    remaining_scoped.set_scoped_player_recursive(remaining_pid);
+                    let mut remaining_scoped =
+                        bind_scoped_seat(&scoped_template, controller, remaining_pid);
                     // CR 608.2c: each remaining player's clause is an INDEPENDENT
                     // following instruction, not a continuation of the prior
                     // player's. When the scoped template carries a conditional
@@ -17148,25 +17314,7 @@ fn resolve_chain_body(
     } else {
         ability
     };
-    // CR 608.2c + CR 109.5: Accumulate player actions across the chain for
-    // `PlayerFilter::PerformedActionThisWay`. This is distinct from
-    // `last_zone_changed_ids`: "searched this way" keys off the player action
-    // even when the search finds no card.
-    for event in &events[events_before..] {
-        if let GameEvent::PlayerPerformedAction {
-            player_id, action, ..
-        } = event
-        {
-            state.player_actions_this_way.insert((*player_id, *action));
-            // Draw completions record their turn-ledger entry at the single event
-            // emission site in `draw.rs`; overlapping nested chain windows may
-            // still see that event for the resolution-local set, but must not
-            // append it to the Vec more than once.
-            if *action != PlayerActionKind::Draw {
-                record_player_action_this_turn(state, *player_id, *action);
-            }
-        }
-    }
+    record_player_actions_performed(state, &events[events_before..]);
 
     // CR 608.2c: Normalize the actual outcome before the printed tail is
     // evaluated. An effect that resolved as a no-op keeps `WhenYouDo` /
@@ -18963,6 +19111,43 @@ fn resolve_chain_body(
     Ok(())
 }
 
+/// CR 608.2c + CR 109.5: Accumulate the player actions in `new_events` for
+/// `PlayerFilter::PerformedActionThisWay`. This is distinct from
+/// `last_zone_changed_ids`: "searched this way" keys off the player action even
+/// when the search finds no card.
+fn record_player_actions_performed(state: &mut GameState, new_events: &[GameEvent]) {
+    for event in new_events {
+        if let GameEvent::PlayerPerformedAction {
+            player_id, action, ..
+        } = event
+        {
+            state.player_actions_this_way.insert((*player_id, *action));
+            // Draw completions record their turn-ledger entry at the single event
+            // emission site in `draw.rs`; overlapping nested chain windows may
+            // still see that event for the resolution-local set, but must not
+            // append it to the Vec more than once.
+            if *action != PlayerActionKind::Draw {
+                record_player_action_this_turn(state, *player_id, *action);
+            }
+        }
+    }
+}
+
+/// CR 608.2 + CR 109.5: `template` bound to run for `seat`. The scoped player is
+/// the acting controller for the whole per-player chain; the printed controller
+/// stays in `original_controller` so "you" references are stable.
+fn bind_scoped_seat(
+    template: &ResolvedAbility,
+    controller: PlayerId,
+    seat: PlayerId,
+) -> ResolvedAbility {
+    let mut bound = template.clone();
+    bound.set_original_controller_recursive(controller);
+    bound.set_controller_recursive(seat);
+    bound.set_scoped_player_recursive(seat);
+    bound
+}
+
 /// Append one completed player action to the turn ledger. Draw frames call this
 /// at the same point they publish their `PlayerPerformedAction`; other event kinds
 /// use their single chain or completion recorder.
@@ -20010,7 +20195,7 @@ pub(crate) fn evaluate_condition(
         AbilityCondition::ManaColorSpent { color, minimum } => state
             .objects
             .get(&ability.source_id)
-            .is_some_and(|obj| obj.colors_spent_to_cast.get(*color) >= *minimum),
+            .is_some_and(|obj| obj.colors_spent_to_cast.get(color.color()) >= *minimum),
         AbilityCondition::HasMaxSpeed => has_max_speed(state, ability.controller),
         // CR 103.1: True when the scoped player took the first turn of the
         // game. The parser only emits `ControllerRef::You` (Radiant Smite,
@@ -21004,6 +21189,7 @@ fn resolve_add_pending_enters_modifications(
 mod tests {
     use super::*;
     use crate::database::synthesis::synthesize_extort;
+    use crate::types::ability::SpentColor;
 
     /// CR 608.2c: the pile placement after a reveal-only until-loop is bound to the
     /// exact cards that reveal looked at, on the continuation itself — so an
@@ -36163,7 +36349,9 @@ mod tests {
             PlayerId(0),
         )
         .condition(AbilityCondition::ManaColorSpent {
-            color: ManaColor::Black,
+            color: SpentColor::ManaSymbol {
+                color: ManaColor::Black,
+            },
             minimum: 1,
         });
 
@@ -41015,14 +41203,14 @@ mod tests {
             ),
             Some(3)
         );
-        // CR 404.1: graveyard size reads p.graveyard.len().
+        // CR 404.1: graveyard size needs the storage authority, so the stateless
+        // reader fails the predicate closed and the stateful one counts.
+        let graveyard_size = QuantityRef::GraveyardSize {
+            player: PlayerScope::Controller,
+        };
+        assert_eq!(candidate_player_scalar(p, &graveyard_size), None);
         assert_eq!(
-            candidate_player_scalar(
-                p,
-                &QuantityRef::GraveyardSize {
-                    player: PlayerScope::Controller
-                }
-            ),
+            candidate_player_scalar_with_state(&state, p, PlayerId(0), &graveyard_size),
             Some(2)
         );
         // CR 122.1f: poison reads the dedicated poison_counters field.
@@ -43575,6 +43763,209 @@ mod tests {
         );
     }
 
+    const DAYS_UNDOING_ORACLE: &str = "Each player shuffles their hand and graveyard into their library, then draws seven cards. If it's your turn, end the turn.";
+
+    fn days_undoing_ability() -> ResolvedAbility {
+        let definition = crate::parser::oracle_effect::parse_effect_chain(
+            DAYS_UNDOING_ORACLE,
+            AbilityKind::Spell,
+        );
+        build_resolved_from_def(&definition, ObjectId(100), PlayerId(0))
+    }
+
+    fn dandan_state() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.format_config = crate::types::format::FormatConfig::dandan();
+        state
+    }
+
+    /// The node `depth` links below `ability`: graveyard move 1, shuffle 2, draw 3.
+    fn chain_node(ability: &mut ResolvedAbility, depth: usize) -> &mut ResolvedAbility {
+        let mut node = ability;
+        for _ in 0..depth {
+            node = node
+                .sub_ability
+                .as_deref_mut()
+                .expect("chain is long enough");
+        }
+        node
+    }
+
+    /// CR 400.1 + CR 701.24a: over a shared library the shuffle is the only
+    /// re-tagged link, so the draw reaches the dealer as its own scoped clause.
+    #[test]
+    fn shared_library_wheel_split_retags_only_the_shuffle() {
+        let ability = days_undoing_ability();
+        let scope = ability
+            .player_scope
+            .clone()
+            .expect("Day's Undoing is scoped");
+
+        let mut split = shared_library_wheel_split(&dandan_state(), &ability, &scope)
+            .expect("the shared-library wheel is split");
+        assert_eq!(
+            chain_node(&mut split, 2).sub_link,
+            SubAbilityLink::SequentialSibling,
+            "the shuffle starts the all-players tail"
+        );
+        chain_node(&mut split, 2).sub_link = SubAbilityLink::ContinuationStep;
+        assert_eq!(
+            format!("{split:?}"),
+            format!("{ability:?}"),
+            "no other field changed"
+        );
+
+        let split = shared_library_wheel_split(&dandan_state(), &ability, &scope).unwrap();
+        let (head, tail) = split_player_scope_chain(&split, &scope);
+        let shuffle = tail.expect("the shuffle detaches from the per-seat moves");
+        assert!(matches!(shuffle.effect, Effect::Shuffle { .. }));
+        assert!(
+            head.sub_ability
+                .as_deref()
+                .is_some_and(|graveyard| graveyard.sub_ability.is_none()),
+            "the per-seat template ends after the graveyard move"
+        );
+        let draw = shuffle.sub_ability.as_deref().expect("the draw follows");
+        let (draw_clause, end_turn) = split_player_scope_chain(draw, &scope);
+        assert!(
+            end_turn.is_some(),
+            "the end-the-turn tail detaches after the draw"
+        );
+        assert!(
+            scoped_library_search::has_no_resolution_riders(&draw_clause),
+            "the dealer's seat is a bare scoped draw"
+        );
+    }
+
+    /// CR 608.2c: a wheel that follows an earlier instruction (Time Spiral's
+    /// exile) is the class whichever link the head carries; a mid-chain link
+    /// that is not a continuation still ends the class.
+    #[test]
+    fn shared_library_wheel_split_ignores_the_heads_own_link() {
+        let mut ability = days_undoing_ability();
+        let scope = ability.player_scope.clone().unwrap();
+        let state = dandan_state();
+        assert!(
+            shared_library_wheel_split(&state, &ability, &scope).is_some(),
+            "reach: the ContinuationStep head is the class"
+        );
+        ability.sub_link = SubAbilityLink::SequentialSibling;
+        assert!(
+            shared_library_wheel_split(&state, &ability, &scope).is_some(),
+            "a SequentialSibling head is still the wheel"
+        );
+        chain_node(&mut ability, 2).sub_link = SubAbilityLink::SequentialSibling;
+        assert!(
+            shared_library_wheel_split(&state, &ability, &scope).is_none(),
+            "a SequentialSibling shuffle node is not a continuation"
+        );
+    }
+
+    #[test]
+    fn shared_library_wheel_split_leaves_separate_libraries_unchanged() {
+        let ability = days_undoing_ability();
+        let scope = ability.player_scope.clone().unwrap();
+        assert!(
+            shared_library_wheel_split(&GameState::new_two_player(42), &ability, &scope).is_none()
+        );
+    }
+
+    #[test]
+    fn shared_library_wheel_split_refuses_every_other_shape() {
+        let base = days_undoing_ability();
+        let scope = base.player_scope.clone().unwrap();
+        let state = dandan_state();
+        assert!(
+            shared_library_wheel_split(&state, &base, &scope).is_some(),
+            "reach: the unmutated chain is the class"
+        );
+
+        type Mutation = (&'static str, fn(&mut ResolvedAbility));
+        let mutations: [Mutation; 17] = [
+            ("EventContextAmount draw", |a| {
+                chain_node(a, 3).effect = Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                    target: TargetFilter::ScopedPlayer,
+                }
+            }),
+            ("Controller draw", |a| {
+                chain_node(a, 3).effect = Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 7 },
+                    target: TargetFilter::Controller,
+                }
+            }),
+            ("unscoped draw", |a| chain_node(a, 3).player_scope = None),
+            ("optional root", |a| a.optional = true),
+            ("conditioned shuffle", |a| {
+                chain_node(a, 2).condition = Some(AbilityCondition::IsYourTurn)
+            }),
+            ("conditioned draw", |a| {
+                chain_node(a, 3).condition = Some(AbilityCondition::IsYourTurn)
+            }),
+            ("Controller shuffle", |a| {
+                chain_node(a, 2).effect = Effect::Shuffle {
+                    target: TargetFilter::Controller,
+                }
+            }),
+            ("repeat_for shuffle", |a| {
+                chain_node(a, 2).repeat_for = Some(QuantityExpr::Fixed { value: 2 })
+            }),
+            ("repeat_for move", |a| {
+                chain_node(a, 1).repeat_for = Some(QuantityExpr::Fixed { value: 2 })
+            }),
+            ("repeat_for draw", |a| {
+                chain_node(a, 3).repeat_for = Some(QuantityExpr::Fixed { value: 2 })
+            }),
+            ("else_ability shuffle", |a| {
+                let node = chain_node(a, 2);
+                node.else_ability = Some(Box::new(node.clone()));
+            }),
+            ("optional_player move", |a| {
+                chain_node(a, 1).optional_player = Some(TargetFilter::Controller)
+            }),
+            ("duration shuffle", |a| {
+                chain_node(a, 2).duration = Some(Duration::UntilEndOfTurn)
+            }),
+            ("forward_result move", |a| {
+                chain_node(a, 1).forward_result = true
+            }),
+            ("non-terminal move", |a| {
+                chain_node(a, 1).effect =
+                    zone_to_library_effect(Zone::Graveyard, TargetFilter::ScopedPlayer)
+            }),
+            ("shuffle without a move", |a| {
+                chain_node(a, 0).effect = Effect::Shuffle {
+                    target: TargetFilter::ScopedPlayer,
+                }
+            }),
+            ("node between shuffle and draw", |a| {
+                let draw = chain_node(a, 2).sub_ability.take();
+                let mut between = ResolvedAbility::new(
+                    Effect::Shuffle {
+                        target: TargetFilter::ScopedPlayer,
+                    },
+                    vec![],
+                    ObjectId(100),
+                    PlayerId(0),
+                );
+                between.sub_ability = draw;
+                chain_node(a, 2).sub_ability = Some(Box::new(between));
+            }),
+        ];
+        let accepted: Vec<&str> = mutations
+            .into_iter()
+            .filter(|(_, mutate)| {
+                let mut ability = base.clone();
+                mutate(&mut ability);
+                shared_library_wheel_split(&state, &ability, &scope).is_some()
+            })
+            .map(|(label, _)| label)
+            .collect();
+        assert!(accepted.is_empty(), "not the wheel class: {accepted:?}");
+    }
+
     /// CR 608.2c + CR 701.24a + CR 115.10 (#6957): a NON-`All` SCOPE-position
     /// `PlayerFilter` keeps the scoped whole-hand shuffle inside each iteration.
     ///
@@ -44408,5 +44799,65 @@ mod tests {
                 inner: Box::new(leaf),
             }
         ));
+    }
+}
+
+#[cfg(test)]
+mod dandan_read_sweep_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::PlayerScope;
+    use crate::types::format::FormatConfig;
+    use crate::types::identifiers::CardId;
+    use crate::types::zones::Zone;
+
+    fn graveyard_size() -> QuantityRef {
+        QuantityRef::GraveyardSize {
+            player: PlayerScope::Controller,
+        }
+    }
+
+    /// CR 404.1 + CR 400.1: a candidate's graveyard size is the shared pile's
+    /// size for every seat of a shared-graveyard format, and its own pile otherwise.
+    #[test]
+    fn candidate_graveyard_size_reads_the_storage_authority() {
+        let mut shared = GameState::new(FormatConfig::dandan(), 2, 7);
+        let mut standard = GameState::new_two_player(7);
+        for (n, state) in [(3u64, &mut shared), (1, &mut standard)] {
+            for i in 0..n {
+                create_object(
+                    state,
+                    CardId(i + 1),
+                    PlayerId(1),
+                    format!("Dead {i}"),
+                    Zone::Graveyard,
+                );
+            }
+        }
+        let read = |state: &GameState, seat: usize| {
+            candidate_player_scalar_with_state(
+                state,
+                &state.players[seat],
+                PlayerId(0),
+                &graveyard_size(),
+            )
+        };
+
+        assert_eq!(
+            read(&shared, 1),
+            Some(3),
+            "the non-canonical seat counts the pile"
+        );
+        assert_eq!(
+            read(&shared, 0),
+            Some(3),
+            "the canonical seat counts the pile"
+        );
+        assert_eq!(
+            read(&standard, 1),
+            Some(1),
+            "reach: Standard counts the seat's own pile"
+        );
+        assert_eq!(read(&standard, 0), Some(0));
     }
 }

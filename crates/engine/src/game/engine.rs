@@ -2555,8 +2555,11 @@ fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
                 if !(recurs
                     && delta.is_net_progress()
                     && has_no_loss_axis(&delta)
-                    && crate::analysis::loop_check::classify_win_kind(controller, &delta)
-                        == crate::analysis::loop_check::WinKind::Advantage)
+                    && crate::analysis::loop_check::classify_win_kind(
+                        controller,
+                        &delta,
+                        Some(state),
+                    ) == crate::analysis::loop_check::WinKind::Advantage)
                 {
                     return None;
                 }
@@ -2660,7 +2663,11 @@ fn build_cert(
     };
     crate::analysis::loop_check::LoopCertificate {
         unbounded: delta.unbounded_axes_for(winner),
-        win_kind: crate::analysis::loop_check::classify_win_kind(winner, &win_kind_delta),
+        win_kind: crate::analysis::loop_check::classify_win_kind(
+            winner,
+            &win_kind_delta,
+            Some(state),
+        ),
         // The offer is only reached for an OPTIONAL loop.
         mandatory: false,
         residual_board_delta: crate::analysis::resource::board_delta(prior, state),
@@ -3189,7 +3196,7 @@ fn certified_bounded_cycle_offer<'a>(
     // (5) CR 732.2a: the conjunct that proves this class is DISJOINT from Path C's
     // revocable-∞ advantage mark. An `Advantage` cycle drives nobody toward a CR 704
     // threshold, so it has no bound to state and belongs to the other seam.
-    if crate::analysis::loop_check::classify_win_kind(proposer, &periodic.delta)
+    if crate::analysis::loop_check::classify_win_kind(proposer, &periodic.delta, Some(state))
         == crate::analysis::loop_check::WinKind::Advantage
     {
         return Err(BoundedOfferRefusal::AdvantageOnlyCycle);
@@ -6755,10 +6762,17 @@ fn normalize_recast_frame(
         for id in &ids {
             s.objects.remove(id);
         }
-        if let Some(p) = s.players.iter_mut().find(|p| p.id == ctx.controller) {
-            p.hand.retain(|id| !ids.contains(id)); // allow-raw-zone: prunes a discarded recast comparison-frame CLONE (fn takes &GameState, returns a normalized clone) - not a gameplay zone event
-            p.graveyard.retain(|id| !ids.contains(id)); // allow-raw-zone: prunes a discarded recast comparison-frame CLONE (fn takes &GameState, returns a normalized clone) - not a gameplay zone event
-            p.library.retain(|id| !ids.contains(id)); // allow-raw-zone: prunes a discarded recast comparison-frame CLONE (fn takes &GameState, returns a normalized clone) - not a gameplay zone event
+        let pruned_seat = s
+            .players
+            .iter_mut()
+            .find(|p| p.id == ctx.controller)
+            .map(|p| {
+                p.hand.retain(|id| !ids.contains(id)); // allow-raw-zone: prunes a discarded recast comparison-frame CLONE (fn takes &GameState, returns a normalized clone) - not a gameplay zone event
+                p.id
+            });
+        if let Some(seat) = pruned_seat {
+            s.graveyard_of_mut(seat).retain(|id| !ids.contains(id));
+            s.library_of_mut(seat).retain(|id| !ids.contains(id));
         }
     }
     // CR 608.2 anaphora / display bookkeeping: the "last created token / revealed /
@@ -18566,6 +18580,16 @@ pub fn start_game(state: &mut GameState) -> ActionResult {
     result
 }
 
+/// The structure actually played: the configured one, never longer than the format's `ceiling` (CR 100.6a: a two-player match is usually two wins; CR 100.4: sideboarding happens between games).
+fn match_type_within(configured: MatchType, ceiling: MatchType) -> MatchType {
+    match (configured, ceiling) {
+        (MatchType::Bo3, MatchType::Bo3) => MatchType::Bo3,
+        (MatchType::Bo3, MatchType::Bo1) | (MatchType::Bo1, MatchType::Bo1 | MatchType::Bo3) => {
+            MatchType::Bo1
+        }
+    }
+}
+
 /// Start game with a specific player taking the first turn.
 pub fn start_game_with_starting_player(
     state: &mut GameState,
@@ -18582,6 +18606,11 @@ pub fn start_game_with_starting_player(
     {
         state.match_config.match_type = MatchType::Bo1;
     }
+    // The ceiling is read from the format, so no host-supplied match config can raise it.
+    state.match_config.match_type = match_type_within(
+        state.match_config.match_type,
+        state.format_config.format.best_of_three_ceiling(),
+    );
 
     events.push(GameEvent::GameStarted);
 
@@ -26355,5 +26384,54 @@ mod minted_battlefield_set_tests {
             .for_each(|p| p.library.retain(|x| *x != arrival));
         let (_, k2) = derived_fodder_class(&minted_both, &after).expect("one minted class");
         assert_eq!(k2, 2, "two MINTED members of one class report k = 2");
+    }
+}
+
+#[cfg(test)]
+mod dandan_read_sweep_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::format::FormatConfig;
+    use crate::types::game_state::{BuybackUsage, LoopAction, LoopActionContext};
+    use crate::types::identifiers::CardId;
+
+    /// CR 400.1: stripping the self-returning recast card from a
+    /// comparison frame also removes its id from the shared pile it sat in.
+    #[test]
+    fn recast_frame_prunes_the_shared_pile_graveyard() {
+        for (format, shared) in [
+            (FormatConfig::dandan(), true),
+            (FormatConfig::standard(), false),
+        ] {
+            let mut state = GameState::new(format, 2, 7);
+            let seat = PlayerId(1);
+            let recast = create_object(
+                &mut state,
+                CardId(5),
+                seat,
+                "Recast".into(),
+                Zone::Graveyard,
+            );
+            let kept = create_object(&mut state, CardId(6), seat, "Kept".into(), Zone::Graveyard);
+            let ctx = LoopActionContext {
+                card_id: CardId(5),
+                controller: seat,
+                action: LoopAction::Recast {
+                    from_zone: Zone::Graveyard,
+                    uses_buyback: BuybackUsage::NotUsed,
+                },
+                convoke: None,
+                pins: Vec::new(),
+            };
+
+            let frame = normalize_recast_frame(&state, &ctx);
+
+            assert!(!frame.objects.contains_key(&recast), "shared={shared}");
+            assert_eq!(
+                frame.graveyard_of(seat).iter().copied().collect::<Vec<_>>(),
+                vec![kept],
+                "shared={shared}: the pile no longer holds the stripped id"
+            );
+        }
     }
 }

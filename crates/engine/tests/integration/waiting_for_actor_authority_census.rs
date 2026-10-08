@@ -860,6 +860,7 @@ fn mulligan_adapters_preserve_the_single_pending_actor_rule() {
             })
             .collect(),
         free_first_mulligan: false,
+        declared: Vec::new(),
     };
     let bottoming = |n: u8| WaitingFor::OpeningHandBottomCards {
         pending: (0..n)

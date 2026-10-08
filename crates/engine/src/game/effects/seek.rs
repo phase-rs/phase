@@ -45,10 +45,8 @@ pub fn resolve(
     // Collect library objects that match the filter.
     // CR 107.3a + CR 601.2b: ability-context filter evaluation.
     let ctx = FilterContext::from_ability(ability);
-    let library_scope = player
-        .library
-        .iter()
-        .take(from_top.unwrap_or(player.library.len()));
+    let library = state.library_of(player.id);
+    let library_scope = library.iter().take(from_top.unwrap_or(library.len()));
     let mut matching: Vec<_> = library_scope
         .filter(|&&obj_id| matches_target_filter(state, obj_id, &filter, &ctx))
         .copied()
@@ -82,7 +80,8 @@ pub fn resolve(
     let reqs: Vec<ZoneMoveRequest> = matching[..pick_count]
         .iter()
         .map(|&card_id| {
-            let mut req = ZoneMoveRequest::effect(card_id, destination, ability.source_id);
+            let mut req = ZoneMoveRequest::effect(card_id, destination, ability.source_id)
+                .hand_taker(ability.controller);
             req.mods.enter_tapped = enter_tapped;
             if track_exiled {
                 req = req.track_exiled_by_source();

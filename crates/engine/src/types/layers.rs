@@ -116,6 +116,8 @@ impl ContinuousModification {
             // CR 612.8 + CR 613.1c: Setting an object's name to the source's
             // chosen card name is a text-changing effect — Layer 3.
             ContinuousModification::SetChosenName => Layer::Text,
+            // CR 612.1 + CR 613.1c: replacing a word in rules text is Layer 3.
+            ContinuousModification::SubstituteTextWord { .. } => Layer::Text,
             ContinuousModification::AddPower { .. }
             | ContinuousModification::AddToughness { .. }
             | ContinuousModification::AddDynamicPower { .. }
@@ -257,7 +259,7 @@ pub struct ActiveContinuousEffect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::CopiableValues;
+    use crate::types::ability::{CopiableValues, TextSubstitutionSpec, TextWordDomain};
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
 
@@ -321,6 +323,16 @@ mod tests {
         );
         // CR 612.8 + CR 613.1c: SetChosenName is a text-changing effect (Layer 3).
         assert_eq!(ContinuousModification::SetChosenName.layer(), Layer::Text);
+        // CR 612.1 + CR 613.1c: a text-word substitution is a Layer 3 effect.
+        assert_eq!(
+            ContinuousModification::SubstituteTextWord {
+                substitution: TextSubstitutionSpec::Chosen {
+                    domains: vec![TextWordDomain::ColorWord],
+                },
+            }
+            .layer(),
+            Layer::Text
+        );
         assert_eq!(
             ContinuousModification::SetTextName {
                 name: "Legitimate Businessperson".to_string(),

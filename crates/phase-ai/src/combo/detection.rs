@@ -99,8 +99,8 @@ pub(crate) fn piece_present(piece: &ComboPiece, state: &GameState, ai: PlayerId)
                 .get(&id)
                 .is_some_and(|obj| obj.controller == ai && matches_predicate(pred, &obj.name))
         }),
-        ComboPiece::InGraveyard(pred) => player
-            .graveyard
+        ComboPiece::InGraveyard(pred) => state
+            .graveyard_of(player.id)
             .iter()
             .any(|&id| matches_in_zone(pred, state, id)),
         // InLibrary is treated as "tutorable, not yet present" — never returns true.
@@ -299,6 +299,39 @@ mod tests {
                 }
             }
             other => panic!("expected ReachableThisTurn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn graveyard_piece_reads_the_shared_pile_from_either_seat() {
+        use engine::game::zones::create_object;
+        use engine::types::format::FormatConfig;
+        use engine::types::identifiers::CardId;
+        use engine::types::zones::Zone;
+
+        let piece = ComboPiece::InGraveyard(CardPredicate::NameEquals("Brainstorm"));
+        for (format, owner) in [
+            (FormatConfig::dandan(), PlayerId(1)),
+            (FormatConfig::dandan(), PlayerId(0)),
+            (FormatConfig::standard(), PlayerId(1)),
+        ] {
+            let mut state = GameState::new(format, 2, 0);
+            assert!(
+                !piece_present(&piece, &state, owner),
+                "reach: an empty graveyard holds no piece"
+            );
+            create_object(
+                &mut state,
+                CardId(1),
+                owner,
+                "Brainstorm".to_string(),
+                Zone::Graveyard,
+            );
+            assert!(piece_present(&piece, &state, owner), "{owner:?}");
+            assert!(
+                !piece_present(&piece, &state, PlayerId(7)),
+                "an absent seat holds no piece"
+            );
         }
     }
 }

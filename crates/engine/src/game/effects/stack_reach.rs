@@ -522,7 +522,7 @@ fn instruction_writes(
                 .players
                 .iter()
                 .filter(|candidate| candidate.id == player)
-                .flat_map(|player| player.library.iter())
+                .flat_map(|candidate| board.library_of(candidate.id).iter())
                 .map(|id| {
                     ProposedEvent::zone_change(
                         *id,
@@ -987,5 +987,51 @@ fn node_acted_on(
             declared.live_object_targets(state)
         }
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod dandan_read_sweep_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::format::FormatConfig;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
+
+    /// CR 701.25a + CR 400.1: a surveil by the non-canonical seat moves the
+    /// shared pile, so a replacement that applies to a pile card's move counts.
+    #[test]
+    fn surveil_moves_come_from_the_shared_pile() {
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 42);
+        let p1 = PlayerId(1);
+        create_object(&mut state, CardId(1), p1, "Island".into(), Zone::Library);
+        let rest = create_object(&mut state, CardId(2), p1, "Rest".into(), Zone::Battlefield);
+        let def = crate::parser::oracle_replacement::parse_replacement_line(
+            "If a card would be put into a graveyard from anywhere, exile it instead.",
+            "Rest",
+        )
+        .expect("a graveyard-entry replacement parses");
+        state
+            .objects
+            .get_mut(&rest)
+            .unwrap()
+            .replacement_definitions
+            .push(def);
+        let surveil = ResolvedAbility::new(
+            Effect::Surveil {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            p1,
+        );
+
+        let written = instruction_writes(&state, &surveil, &[], &Written::default());
+
+        assert!(
+            written.is_none(),
+            "the replacement applies to the pile card's move"
+        );
     }
 }
