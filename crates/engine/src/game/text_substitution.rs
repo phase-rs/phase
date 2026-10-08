@@ -9,8 +9,8 @@ use serde_json::Value;
 
 use crate::game::game_object::GameObject;
 use crate::game::layers::{
-    gather_transient_continuous_effects, is_intrinsic_basic_land_mana_ability,
-    order_active_continuous_effects,
+    gather_transient_continuous_effects, is_intrinsic_basic_land_mana_ability, order_by_timestamp,
+    select_next_effect,
 };
 use crate::types::ability::{
     ContinuousModification, ResolvedAbility, TargetFilter, TextSubstitution, TextSubstitutionSpec,
@@ -211,21 +211,26 @@ fn word_domain(leaf: &str) -> Option<TextWordDomain> {
 impl TextSubstitution {
     /// CR 612.1 + CR 612.2: `value` with every replaced word rewritten at classified carrier positions only, or `None` when nothing changed or the value does not survive its serialized form.
     pub fn rewrite<T: Serialize + DeserializeOwned>(&self, value: &T) -> Option<T> {
+        self.rewrite_counted(value).map(|(rewritten, _)| rewritten)
+    }
+
+    /// [`Self::rewrite`] plus the number of word instances it replaced.
+    fn rewrite_counted<T: Serialize + DeserializeOwned>(&self, value: &T) -> Option<(T, usize)> {
         let mut json = serde_json::to_value(value).ok()?;
         let (from, to) = self.words();
         let domain = self.domain();
-        let mut changed = false;
+        let mut occurrences = 0;
         walk_strings(&mut json, None, "", &mut |tag, key, leaf| {
             if leaf == from && carrier_class(tag, key, domain) == Some(WordClass::Word) {
                 *leaf = to.to_owned();
-                changed = true;
+                occurrences += 1;
             }
         });
-        if !changed {
+        if occurrences == 0 {
             return None;
         }
         match serde_json::from_value(json) {
-            Ok(rewritten) => Some(rewritten),
+            Ok(rewritten) => Some((rewritten, occurrences)),
             Err(error) => {
                 debug_assert!(false, "text substitution broke a serde round trip: {error}");
                 None
@@ -233,76 +238,89 @@ impl TextSubstitution {
         }
     }
 
-    /// Rewrites `value` in place; returns whether it changed.
-    fn rewrite_in_place<T: Serialize + DeserializeOwned>(&self, value: &mut T) -> bool {
-        match self.rewrite(value) {
-            Some(rewritten) => {
+    /// Rewrites `value` in place; returns the number of word instances replaced.
+    fn rewrite_in_place<T: Serialize + DeserializeOwned>(&self, value: &mut T) -> usize {
+        match self.rewrite_counted(value) {
+            Some((rewritten, occurrences)) => {
                 *value = rewritten;
-                true
+                occurrences
             }
-            None => false,
+            None => 0,
         }
     }
 }
 
-fn rewrite_each<T: Clone>(definitions: &mut Definitions<T>, rewrite: impl Fn(&T) -> Option<T>) {
-    let updates: Vec<(usize, T)> = (0..definitions.len())
-        .filter_map(|i| rewrite(&definitions[i]).map(|rewritten| (i, rewritten)))
+/// Rewrites each definition `rewrite` changes; returns the word instances replaced.
+fn rewrite_each<T: Clone>(
+    definitions: &mut Definitions<T>,
+    rewrite: impl Fn(&T) -> Option<(T, usize)>,
+) -> usize {
+    let updates: Vec<(usize, T, usize)> = (0..definitions.len())
+        .filter_map(|i| rewrite(&definitions[i]).map(|(rewritten, n)| (i, rewritten, n)))
         .collect();
-    for (i, rewritten) in updates {
+    let mut occurrences = 0;
+    for (i, rewritten, n) in updates {
         definitions[i] = rewritten;
+        occurrences += n;
     }
+    occurrences
 }
 
-/// CR 612.1 + CR 612.2: applies one substitution to a permanent's rules text and type line, never touching the name, mana cost, color indicator or P/T because mana symbols and names are not words.
-fn apply_to_permanent_text(obj: &mut GameObject, substitution: &TextSubstitution) {
-    let updates: Vec<(usize, _)> = obj
+/// CR 612.1 + CR 612.2: applies one substitution to a permanent's rules text and type line, never touching the name, mana cost, color indicator or P/T because mana symbols and names are not words; returns the word instances replaced, with the type line's repeats kept until [`collapse_subtype_repeats`].
+fn apply_to_permanent_text(obj: &mut GameObject, substitution: &TextSubstitution) -> usize {
+    let mut occurrences = 0;
+    let updates: Vec<(usize, _, usize)> = obj
         .abilities
         .iter()
         .enumerate()
-        .filter_map(|(i, ability)| substitution.rewrite(ability).map(|a| (i, a)))
+        .filter_map(|(i, ability)| {
+            substitution
+                .rewrite_counted(ability)
+                .map(|(a, n)| (i, a, n))
+        })
         .collect();
     if !updates.is_empty() {
         let abilities = Arc::make_mut(&mut obj.abilities);
-        for (i, ability) in updates {
+        for (i, ability, n) in updates {
             abilities[i] = ability;
+            occurrences += n;
         }
     }
 
-    rewrite_each(&mut obj.trigger_definitions, |entry: &TriggerEntry| {
-        substitution.rewrite(&entry.definition).map(|definition| {
-            let mut rewritten = entry.clone();
-            rewritten.definition = definition;
-            rewritten
-        })
+    occurrences += rewrite_each(&mut obj.trigger_definitions, |entry: &TriggerEntry| {
+        substitution
+            .rewrite_counted(&entry.definition)
+            .map(|(definition, n)| {
+                let mut rewritten = entry.clone();
+                rewritten.definition = definition;
+                (rewritten, n)
+            })
     });
-    rewrite_each(&mut obj.static_definitions, |definition| {
-        substitution.rewrite(definition)
+    occurrences += rewrite_each(&mut obj.static_definitions, |definition| {
+        substitution.rewrite_counted(definition)
     });
-    rewrite_each(&mut obj.replacement_definitions, |definition| {
+    occurrences += rewrite_each(&mut obj.replacement_definitions, |definition| {
         (!definition.is_resolution_installed())
-            .then(|| substitution.rewrite(definition))
+            .then(|| substitution.rewrite_counted(definition))
             .flatten()
     });
 
     for keyword in obj.keywords.iter_mut() {
-        substitution.rewrite_in_place(keyword);
+        occurrences += substitution.rewrite_in_place(keyword);
     }
 
-    // CR 205.3i + CR 612.1: a land-type word on the type line is text too; a subtype
-    // set has no repeats, so a rewrite onto an existing subtype collapses.
+    // CR 205.3i + CR 612.1: a land-type word on the type line is text too.
     if let TextSubstitution::BasicLandType { from, .. } = substitution {
         let (from_word, to_word) = substitution.words();
         let mut changed = false;
         for subtype in obj.card_types.subtypes.iter_mut() {
             if subtype == from_word {
                 *subtype = to_word.to_owned();
+                occurrences += 1;
                 changed = true;
             }
         }
         if changed {
-            let mut seen = HashSet::new();
-            obj.card_types.subtypes.retain(|s| seen.insert(s.clone()));
             // CR 305.6: the replaced type's intrinsic mana ability goes with its word, and the new type's ability is derived after the Type layer.
             let color = from.mana_color();
             if obj
@@ -315,9 +333,58 @@ fn apply_to_permanent_text(obj: &mut GameObject, substitution: &TextSubstitution
             }
         }
     }
+    occurrences
 }
 
-/// CR 612.1 + CR 613.7b + CR 613.8: the `Fixed` substitutions in effect on each `SpecificObject` recipient in application order, grouped per recipient so an effect on one object never changes what an effect on another does to its own words.
+/// The engine's subtype list holds no repeats, so rewrites onto an existing subtype collapse once the last change has applied.
+fn collapse_subtype_repeats(obj: &mut GameObject) {
+    let mut seen = HashSet::new();
+    obj.card_types.subtypes.retain(|s| seen.insert(s.clone()));
+}
+
+/// CR 613.8a: effect X depends on effect Y iff applying Y to the recipient's current text changes how many words X rewrites there, so the edge `i -> j` is measured by running the rewrite itself on clones of the recipient.
+fn dependency_edges<R: Clone>(
+    recipient: &R,
+    pending: &[TextSubstitution],
+    apply: fn(&mut R, &TextSubstitution) -> usize,
+) -> Vec<Vec<usize>> {
+    let now: Vec<usize> = pending
+        .iter()
+        .map(|substitution| apply(&mut recipient.clone(), substitution))
+        .collect();
+    let mut edges = vec![Vec::new(); pending.len()];
+    for (j, provider) in pending.iter().enumerate() {
+        let mut after = recipient.clone();
+        apply(&mut after, provider);
+        for (i, substitution) in pending.iter().enumerate() {
+            if i != j && apply(&mut after.clone(), substitution) != now[i] {
+                edges[i].push(j);
+            }
+        }
+    }
+    edges
+}
+
+/// CR 613.8a-c: applies `pending` (in timestamp order) to `recipient` one effect at a time, reevaluating the dependency relation against the changed text after each; returns the word instances replaced.
+fn apply_in_dependency_order<R: Clone>(
+    recipient: &mut R,
+    mut pending: Vec<TextSubstitution>,
+    apply: fn(&mut R, &TextSubstitution) -> usize,
+) -> usize {
+    let mut occurrences = 0;
+    while !pending.is_empty() {
+        let next = if pending.len() == 1 {
+            0
+        } else {
+            select_next_effect(&dependency_edges(recipient, &pending, apply))
+        };
+        let selected = pending.remove(next);
+        occurrences += apply(recipient, &selected);
+    }
+    occurrences
+}
+
+/// CR 612.1 + CR 613.7: the `Fixed` substitutions in effect on each `SpecificObject` recipient in timestamp order, grouped per recipient so an effect on one object never changes what an effect on another does to its own words; the application order is [`apply_in_dependency_order`]'s.
 pub fn active_text_substitutions(state: &GameState) -> BTreeMap<ObjectId, Vec<TextSubstitution>> {
     let mut gathered = Vec::new();
     gather_transient_continuous_effects(state, &mut gathered);
@@ -342,7 +409,7 @@ pub fn active_text_substitutions(state: &GameState) -> BTreeMap<ObjectId, Vec<Te
     by_recipient
         .into_iter()
         .map(|(id, effects)| {
-            let ordered = order_active_continuous_effects(Layer::Text, &effects, state);
+            let ordered = order_by_timestamp(&effects.iter().collect::<Vec<_>>());
             let substitutions = ordered
                 .into_iter()
                 .filter_map(|effect| match effect.modification {
@@ -359,19 +426,19 @@ pub fn active_text_substitutions(state: &GameState) -> BTreeMap<ObjectId, Vec<Te
 
 /// CR 612.1 + CR 613.1c: the Layer 3 pre-pass runs before the statics of layers 4-7 are gathered so a changed static generates its effects from the changed text, and spells on the stack are read through [`restamp_resolving_spell_text`] instead.
 pub(crate) fn apply_battlefield_text_substitutions(state: &mut GameState, bf_ids: &[ObjectId]) {
-    let substitutions = active_text_substitutions(state);
+    let mut substitutions = active_text_substitutions(state);
     if substitutions.is_empty() {
         return;
     }
     for id in bf_ids {
-        let Some(list) = substitutions.get(id) else {
+        let Some(list) = substitutions.remove(id) else {
             continue;
         };
         let Some(obj) = state.objects.get_mut(id) else {
             continue;
         };
-        for substitution in list {
-            apply_to_permanent_text(obj, substitution);
+        if apply_in_dependency_order(obj, list, apply_to_permanent_text) > 0 {
+            collapse_subtype_repeats(obj);
         }
     }
 }
@@ -382,18 +449,19 @@ pub fn restamp_resolving_spell_text(
     object_id: ObjectId,
     ability: &mut ResolvedAbility,
 ) {
-    let substitutions = active_text_substitutions(state);
-    let Some(list) = substitutions.get(&object_id) else {
+    let mut substitutions = active_text_substitutions(state);
+    let Some(list) = substitutions.remove(&object_id) else {
         return;
     };
-    for substitution in list {
-        rewrite_resolved_ability(substitution, ability);
-    }
+    apply_in_dependency_order(ability, list, rewrite_resolved_ability);
 }
 
 /// Field-exhaustive on purpose: a new `ResolvedAbility` field forces a decision
-/// between rules text (rewritten) and runtime state (never text).
-fn rewrite_resolved_ability(substitution: &TextSubstitution, ability: &mut ResolvedAbility) {
+/// between rules text (rewritten) and runtime state (never text); returns the word instances replaced.
+fn rewrite_resolved_ability(
+    ability: &mut ResolvedAbility,
+    substitution: &TextSubstitution,
+) -> usize {
     let ResolvedAbility {
         // Rules text: filters, conditions and quantities that carry words.
         effect,
@@ -469,22 +537,23 @@ fn rewrite_resolved_ability(substitution: &TextSubstitution, ability: &mut Resol
         illegal_targets_disposition: _,
     } = ability;
 
-    substitution.rewrite_in_place(effect);
-    substitution.rewrite_in_place(condition);
-    substitution.rewrite_in_place(duration);
-    substitution.rewrite_in_place(optional_player);
-    substitution.rewrite_in_place(multi_target);
-    substitution.rewrite_in_place(target_constraints);
-    substitution.rewrite_in_place(repeat_for);
-    substitution.rewrite_in_place(unless_pay);
-    substitution.rewrite_in_place(player_scope);
-    substitution.rewrite_in_place(target_chooser);
-    substitution.rewrite_in_place(activation_cost_reduction);
-    substitution.rewrite_in_place(repeat_until);
-    substitution.rewrite_in_place(mode_abilities);
+    let mut occurrences = substitution.rewrite_in_place(effect)
+        + substitution.rewrite_in_place(condition)
+        + substitution.rewrite_in_place(duration)
+        + substitution.rewrite_in_place(optional_player)
+        + substitution.rewrite_in_place(multi_target)
+        + substitution.rewrite_in_place(target_constraints)
+        + substitution.rewrite_in_place(repeat_for)
+        + substitution.rewrite_in_place(unless_pay)
+        + substitution.rewrite_in_place(player_scope)
+        + substitution.rewrite_in_place(target_chooser)
+        + substitution.rewrite_in_place(activation_cost_reduction)
+        + substitution.rewrite_in_place(repeat_until)
+        + substitution.rewrite_in_place(mode_abilities);
     for next in [sub_ability, else_ability].into_iter().flatten() {
-        rewrite_resolved_ability(substitution, next);
+        occurrences += rewrite_resolved_ability(next, substitution);
     }
+    occurrences
 }
 
 #[cfg(test)]

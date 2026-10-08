@@ -360,7 +360,7 @@ fn chain_plus_loop_on_one_object_and_unrelated_loop_on_another() {
     assert_eq!(
         walks(&runner, x),
         ["Forest"],
-        "CR 613.8b: A and C loop (timestamp A, C); B depends on A and follows it"
+        "CR 613.8b: B and C loop and B, the older, applies first; A depends on B and follows it"
     );
     assert_eq!(
         walks(&runner, y),
@@ -1070,7 +1070,7 @@ fn incremental_flush_matches_full_evaluation_with_a_live_substitution() {
     }
 }
 
-/// `active_text_substitutions` groups per recipient and orders each list on its own.
+/// `active_text_substitutions` groups per recipient and lists each in timestamp order.
 #[test]
 fn active_substitutions_are_grouped_and_ordered_per_recipient() {
     use engine::types::ability::BasicLandType::{Forest, Plains, Swamp};
@@ -1099,14 +1099,14 @@ fn active_substitutions_are_grouped_and_ordered_per_recipient() {
         );
     }
     let active = active_text_substitutions(runner.state());
-    assert_eq!(active.len(), 2, "one ordered list per recipient");
+    assert_eq!(active.len(), 2, "one list per recipient");
     assert_eq!(
         active[&x],
         [
-            TextSubstitution::basic_land_type(Swamp, Plains).unwrap(),
             TextSubstitution::basic_land_type(Plains, Forest).unwrap(),
+            TextSubstitution::basic_land_type(Swamp, Plains).unwrap(),
         ],
-        "X: the chain applies by dependency, not by timestamp"
+        "X: timestamp order, the routine picks the application order"
     );
     assert_eq!(
         active[&y],
@@ -1114,8 +1114,340 @@ fn active_substitutions_are_grouped_and_ordered_per_recipient() {
             TextSubstitution::basic_land_type(Swamp, Forest).unwrap(),
             TextSubstitution::basic_land_type(Swamp, Plains).unwrap(),
         ],
-        "Y: a loop applies in timestamp order, untouched by X's chain"
+        "Y: its own list, untouched by X's chain"
     );
+}
+
+const HACK: &str = "Magical Hack";
+const SPRAY: &str = "Crystal Spray";
+const SLEIGHT: &str = "Sleight of Mind";
+
+fn text_change_mana(card: &str) -> &'static [ManaType] {
+    if card == SPRAY {
+        &[ManaType::Blue, ManaType::Colorless, ManaType::Colorless]
+    } else {
+        &[ManaType::Blue]
+    }
+}
+
+/// One real text-changing card per `(card, label)` step, in the caster's hand in step order.
+fn text_spells(
+    scenario: &mut GameScenario,
+    db: &engine::database::CardDatabase,
+    steps: &[(&str, &str)],
+) -> Vec<ObjectId> {
+    steps
+        .iter()
+        .map(|(card, _)| scenario.add_real_card(P0, card, Zone::Hand, db))
+        .collect()
+}
+
+/// Casts each step at `target`, each resolved before the next is cast.
+fn cast_steps(
+    runner: &mut GameRunner,
+    spells: &[ObjectId],
+    steps: &[(&str, &str)],
+    target: ObjectId,
+) {
+    for (spell, (card, label)) in spells.iter().zip(steps) {
+        cast_text_change(runner, *spell, target, label, text_change_mana(card));
+    }
+}
+
+/// The cycle's effects by letter: A = Island -> Swamp, B = Forest -> Island (Magical Hack), C = Swamp -> Forest (Crystal Spray), cast in the order spelled.
+fn cycle(order: &str) -> Vec<(&'static str, &'static str)> {
+    order
+        .chars()
+        .map(|step| match step {
+            'A' => (HACK, "Island -> Swamp"),
+            'B' => (HACK, "Forest -> Island"),
+            'C' => (SPRAY, "Swamp -> Forest"),
+            other => panic!("unknown cycle step {other}"),
+        })
+        .collect()
+}
+
+/// The type line and offered mana of a real `start` land after the steps resolve this turn.
+fn land_after(
+    db: &engine::database::CardDatabase,
+    start: &str,
+    steps: &[(&str, &str)],
+) -> (Vec<String>, BTreeSet<ManaType>) {
+    let mut scenario = new_scenario();
+    let spells = text_spells(&mut scenario, db, steps);
+    let land = scenario.add_real_card(P0, start, Zone::Battlefield, db);
+    let mut runner = build(scenario, db);
+    cast_steps(&mut runner, &spells, steps, land);
+    (
+        runner.state().objects[&land].card_types.subtypes.clone(),
+        offered_mana(&runner, land),
+    )
+}
+
+/// CR 613.8a-c: the three-cycle on an Island ends Island whichever order it is cast in, because C depends on A and B depends on C.
+#[test]
+fn land_type_cycle_on_a_type_line_orders_by_the_recipients_current_text() {
+    let db = db!();
+    for order in ["ABC", "CAB"] {
+        assert_eq!(
+            land_after(db, "Island", &cycle(order)),
+            (vec!["Island".to_string()], BTreeSet::from([ManaType::Blue])),
+            "order {order}"
+        );
+    }
+    assert_eq!(
+        land_after(db, "Island", &cycle("AB")),
+        (vec!["Swamp".to_string()], BTreeSet::from([ManaType::Black])),
+        "guard: without C, A and B both resolve and the Island ends a Swamp"
+    );
+}
+
+/// CR 613.8a-c: the verdict depends on which word the recipient starts with, so each start and order is its own case.
+#[test]
+fn cycle_verdict_depends_on_the_recipients_starting_land() {
+    let db = db!();
+    let ty = |name: &str| vec![name.to_string()];
+    for (start, order, expected, mana) in [
+        ("Forest", "ABC", "Forest", ManaType::Green),
+        ("Forest", "CAB", "Swamp", ManaType::Black),
+        ("Swamp", "ABC", "Island", ManaType::Blue),
+        ("Swamp", "CAB", "Swamp", ManaType::Black),
+    ] {
+        assert_eq!(
+            land_after(db, start, &cycle(order)),
+            (ty(expected), BTreeSet::from([mana])),
+            "{start}, order {order}"
+        );
+    }
+    assert_eq!(
+        land_after(db, "Forest", &cycle("AB")),
+        (ty("Swamp"), BTreeSet::from([ManaType::Black])),
+        "guard: a Forest with only A and B ends a Swamp"
+    );
+    assert_eq!(
+        land_after(db, "Swamp", &cycle("CB")),
+        (ty("Island"), BTreeSet::from([ManaType::Blue])),
+        "guard: a Swamp with only C and B ends an Island"
+    );
+}
+
+/// CR 613.8b: two effects that each remove the Island the other rewrites are a loop and apply in timestamp order, and a later effect that depends on one of them follows.
+#[test]
+fn type_line_loop_applies_in_timestamp_order() {
+    let db = db!();
+    let (a, d) = ((HACK, "Island -> Swamp"), (HACK, "Island -> Forest"));
+    let c = (SPRAY, "Swamp -> Plains");
+    let ty = |name: &str| vec![name.to_string()];
+    assert_eq!(
+        land_after(db, "Island", &[a, d]),
+        (ty("Swamp"), BTreeSet::from([ManaType::Black]))
+    );
+    assert_eq!(
+        land_after(db, "Island", &[d, a]),
+        (ty("Forest"), BTreeSet::from([ManaType::Green]))
+    );
+    assert_eq!(
+        land_after(db, "Island", &[a, d, c]),
+        (ty("Plains"), BTreeSet::from([ManaType::White])),
+        "C depends on A, which made the Swamp C rewrites"
+    );
+}
+
+/// CR 613.8a: a rewrite onto a land type the type line already holds leaves both instances in the text until every change has applied, so the second change reads two Swamps in either cast order.
+#[test]
+fn type_line_repeats_count_until_every_change_has_applied() {
+    let db = db!();
+    let a = (HACK, "Island -> Swamp");
+    let b = (HACK, "Swamp -> Forest");
+    let ty = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+    let line = |steps: &[(&str, &str)]| land_after(db, "Sunken Hollow", steps).0;
+    assert_eq!(line(&[a, b]), ty(&["Forest"]));
+    assert_eq!(line(&[b, a]), ty(&["Forest"]));
+    assert_eq!(line(&[a]), ty(&["Swamp"]), "guard: A alone");
+    assert_eq!(line(&[b]), ty(&["Island", "Forest"]), "guard: B alone");
+}
+
+/// CR 613.8a-c: a land-type cycle on a keyword recipient applies in dependency order from its current text (Bog Wraith's landwalk).
+#[test]
+fn land_cycle_on_a_keyword_orders_by_the_recipients_current_text() {
+    let db = db!();
+    let wraith_after = |order: &str| {
+        let steps: Vec<(&str, &str)> = order
+            .chars()
+            .map(|step| match step {
+                'A' => (HACK, "Swamp -> Forest"),
+                'B' => (HACK, "Plains -> Swamp"),
+                'C' => (SPRAY, "Forest -> Plains"),
+                other => panic!("unknown step {other}"),
+            })
+            .collect();
+        let mut scenario = new_scenario();
+        let spells = text_spells(&mut scenario, db, &steps);
+        let wraith = scenario.add_real_card(P0, "Bog Wraith", Zone::Battlefield, db);
+        let mut runner = build(scenario, db);
+        cast_steps(&mut runner, &spells, &steps, wraith);
+        walks(&runner, wraith)
+    };
+    for order in ["ABC", "CAB"] {
+        assert_eq!(wraith_after(order), ["Swamp"], "order {order}");
+    }
+    assert_eq!(
+        wraith_after("AB"),
+        ["Forest"],
+        "guard: without C, A and B both resolve"
+    );
+}
+
+/// CR 613.8a-c: the color cycle on a rules-text recipient (Bad Moon) reads from the recipient's current text.
+#[test]
+fn color_cycle_on_a_static_orders_by_the_recipients_current_text() {
+    let db = db!();
+    let pts = |order: &str| {
+        let steps: Vec<(&str, &str)> = order
+            .chars()
+            .map(|step| match step {
+                'A' => (SLEIGHT, "Black -> Red"),
+                'B' => (SLEIGHT, "White -> Black"),
+                'C' => (SPRAY, "Red -> White"),
+                other => panic!("unknown step {other}"),
+            })
+            .collect();
+        let mut scenario = new_scenario();
+        let spells = text_spells(&mut scenario, db, &steps);
+        let moon = scenario.add_real_card(P0, "Bad Moon", Zone::Battlefield, db);
+        let creatures: Vec<ObjectId> = [ManaColor::Black, ManaColor::White, ManaColor::Red]
+            .into_iter()
+            .map(|color| {
+                scenario
+                    .add_creature(P0, "Guy", 2, 2)
+                    .with_color(vec![color])
+                    .id()
+            })
+            .collect();
+        let mut runner = build(scenario, db);
+        cast_steps(&mut runner, &spells, &steps, moon);
+        creatures
+            .iter()
+            .map(|id| runner.state().objects[id].power.unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        pts("ABC"),
+        [3, 2, 2],
+        "black, white, red: the anthem reads Black again"
+    );
+    assert_eq!(
+        pts("AB"),
+        [2, 2, 3],
+        "guard: without C the anthem reads Red"
+    );
+}
+
+/// Terror's victim zone after `sleights` resolve against it on the stack, in order.
+fn terror_victim_zone(db: &engine::database::CardDatabase, sleights: &[&str]) -> Zone {
+    let mut scenario = new_scenario();
+    let terror = scenario.add_real_card(P0, "Terror", Zone::Hand, db);
+    let spells: Vec<ObjectId> = sleights
+        .iter()
+        .map(|_| scenario.add_real_card(P0, SLEIGHT, Zone::Hand, db))
+        .collect();
+    let victim = scenario
+        .add_creature(P1, "White Guy", 2, 2)
+        .with_color(vec![ManaColor::White])
+        .id();
+    let mut runner = build(scenario, db);
+    give(&mut runner, P0, &[ManaType::Black, ManaType::Colorless]);
+    let _ = runner.cast(terror).target_objects(&[victim]).commit();
+    for (spell, label) in spells.into_iter().zip(sleights) {
+        give(&mut runner, P0, &[ManaType::Blue]);
+        let _ = runner.cast(spell).target_objects(&[terror]).commit();
+        for _ in 0..8 {
+            if matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }) {
+                break;
+            }
+            runner.act(GameAction::PassPriority).expect("pass priority");
+        }
+        runner
+            .act(GameAction::ChooseOption {
+                choice: (*label).into(),
+            })
+            .expect("answer the word prompt");
+    }
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach-guard: only Terror is left on the stack"
+    );
+    while !runner.state().stack.is_empty() {
+        runner.act(GameAction::PassPriority).expect("pass priority");
+    }
+    runner.state().objects[&victim].zone
+}
+
+/// CR 613.8a-c + CR 608.2b: the color cycle cast at a spell on the stack changes what resolves in dependency order, so Terror reads nonblack and still destroys the white creature.
+#[test]
+fn color_cycle_on_a_stack_spell_orders_by_the_recipients_current_text() {
+    let db = db!();
+    let (a, b, c) = ("Black -> Red", "White -> Black", "Red -> White");
+    assert_eq!(
+        terror_victim_zone(db, &[]),
+        Zone::Graveyard,
+        "guard: unchanged Terror kills the white creature"
+    );
+    assert_eq!(
+        terror_victim_zone(db, &[a, b]),
+        Zone::Graveyard,
+        "guard: A and B leave Terror nonblack"
+    );
+    assert_eq!(terror_victim_zone(db, &[a, b, c]), Zone::Graveyard);
+}
+
+/// CR 613.8a-c: the restamp seam applies a color cycle in dependency order, so "blue" ends blue.
+#[test]
+fn restamp_applies_a_color_cycle_in_dependency_order() {
+    let db = db!();
+    let restamped = |installed: &[(ManaColor, ManaColor)]| {
+        let mut scenario = new_scenario();
+        let sirocco = scenario.add_real_card(P0, "Sirocco", Zone::Hand, db);
+        let mut runner = build(scenario, db);
+        let def = runner.state().objects[&sirocco].abilities[0].clone();
+        let mut ability = build_resolved_from_def(&def, sirocco, P0);
+        let before = serde_json::to_value(&ability).unwrap();
+        for &(from, to) in installed {
+            runner.state_mut().add_transient_continuous_effect(
+                ObjectId(900),
+                P1,
+                engine::types::ability::Duration::Permanent,
+                engine::types::ability::TargetFilter::SpecificObject { id: sirocco },
+                vec![ContinuousModification::SubstituteTextWord {
+                    substitution: TextSubstitutionSpec::Fixed(
+                        TextSubstitution::color(from, to).unwrap(),
+                    ),
+                }],
+                None,
+            );
+        }
+        restamp_resolving_spell_text(runner.state(), sirocco, &mut ability);
+        (before, serde_json::to_value(&ability).unwrap())
+    };
+    let repeat = |value: &serde_json::Value| {
+        value
+            .pointer("/sub_ability/repeat_for")
+            .expect("Sirocco's discard link carries a repeat_for")
+            .to_string()
+    };
+    let a = (ManaColor::Blue, ManaColor::Red);
+    let b = (ManaColor::White, ManaColor::Blue);
+    let c = (ManaColor::Red, ManaColor::White);
+
+    let (before, after) = restamped(&[a, b]);
+    assert!(repeat(&before).contains("\"Blue\""));
+    assert!(
+        repeat(&after).contains("\"Red\""),
+        "guard: A and B turn \"blue\" red"
+    );
+    let (before, after) = restamped(&[a, b, c]);
+    assert_eq!(after, before, "A, C, B returns \"blue\" to blue");
 }
 
 fn walks_in(state: &engine::types::game_state::GameState, id: ObjectId) -> Vec<String> {

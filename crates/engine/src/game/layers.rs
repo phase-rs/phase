@@ -35,8 +35,8 @@ use crate::types::ability::{
     BasicLandType, CardTypeSetSource, CastingPermission, ChosenSubtypeKind, CommanderOwnership,
     ContinuousModification, CopiableValues, Designation, Duration, Effect, FilterProp,
     ManaContribution, ManaProduction, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
-    StaticCondition, StaticDefinition, TargetFilter, TextSubstitution, TextSubstitutionSpec,
-    TriggerGrantProducerKey, TriggerProducerOrigin, TypedFilter,
+    StaticCondition, StaticDefinition, TargetFilter, TriggerGrantProducerKey,
+    TriggerProducerOrigin, TypedFilter,
 };
 use crate::types::ability_visit::{
     each_granter_symbol, granter_symbols, granter_symbols_mut, DefinitionNode, DefinitionNodeMut,
@@ -8668,6 +8668,20 @@ fn dependency_path_exists(edges: &[Vec<usize>], from: usize, target: usize) -> b
     false
 }
 
+/// CR 613.8b: the next effect to apply from `edges` (`edges[i]` lists the effects `i` depends on, indexed in timestamp order). An edge inside a dependency loop is ignored, but an edge leaving the loop must still be satisfied. `j` is in `i`'s cyclic component exactly when both can reach each other, so an effect also waits for older members of its own loop.
+pub(crate) fn select_next_effect(edges: &[Vec<usize>]) -> usize {
+    (0..edges.len())
+        .find(|&i| {
+            edges[i]
+                .iter()
+                .all(|&j| dependency_path_exists(edges, j, i))
+                && (0..i).all(|j| {
+                    !dependency_path_exists(edges, i, j) || !dependency_path_exists(edges, j, i)
+                })
+        })
+        .expect("a finite dependency graph has an independent or cyclic effect")
+}
+
 /// CR 613.8b-c: Select and apply one ability-layer effect, then rebuild the
 /// remaining dependency relation from the changed state. On a loop, only a
 /// member of that loop takes the timestamp fallback.
@@ -8796,21 +8810,7 @@ fn apply_ability_effects_with_referenced_grants(
                     }
                 }
             }
-            // CR 613.8b: Ignore only edges within a dependency loop. An edge
-            // leaving that loop must still be satisfied. `j` is in `i`'s cyclic
-            // component exactly when both can reach each other. Pending is already
-            // timestamp-sorted, so wait for older members of the same loop.
-            (0..pending.len())
-                .find(|&i| {
-                    edges[i]
-                        .iter()
-                        .all(|&j| dependency_path_exists(&edges, j, i))
-                        && (0..i).all(|j| {
-                            !dependency_path_exists(&edges, i, j)
-                                || !dependency_path_exists(&edges, j, i)
-                        })
-                })
-                .expect("a finite dependency graph has an independent or cyclic effect")
+            select_next_effect(&edges)
         };
         let selected = pending.remove(next);
         apply_continuous_effect_filtered(
@@ -8888,47 +8888,6 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
     }
     if a.characteristic_defining != b.characteristic_defining {
         return false;
-    }
-
-    // CR 613.8a + CR 613.8b: a word substitution depends on another only on the same recipient and word class, by creating (`b.to == a.from`) or removing (`b.from == a.from`, a symmetric loop) the word it acts on.
-    if let (
-        ContinuousModification::SubstituteTextWord {
-            substitution: a_spec,
-        },
-        ContinuousModification::SubstituteTextWord {
-            substitution: b_spec,
-        },
-    ) = (&a.modification, &b.modification)
-    {
-        let (TargetFilter::SpecificObject { id: a_id }, TargetFilter::SpecificObject { id: b_id }) =
-            (&a.affected_filter, &b.affected_filter)
-        else {
-            return false;
-        };
-        if a_id != b_id {
-            return false;
-        }
-        return match (a_spec, b_spec) {
-            (
-                TextSubstitutionSpec::Fixed(TextSubstitution::Color { from: a_from, .. }),
-                TextSubstitutionSpec::Fixed(TextSubstitution::Color {
-                    from: b_from,
-                    to: b_to,
-                }),
-            ) => b_to == a_from || b_from == a_from,
-            (
-                TextSubstitutionSpec::Fixed(TextSubstitution::BasicLandType {
-                    from: a_from, ..
-                }),
-                TextSubstitutionSpec::Fixed(TextSubstitution::BasicLandType {
-                    from: b_from,
-                    to: b_to,
-                }),
-            ) => b_to == a_from || b_from == a_from,
-            (TextSubstitutionSpec::Fixed(_), TextSubstitutionSpec::Fixed(_))
-            | (TextSubstitutionSpec::Chosen { .. }, _)
-            | (_, TextSubstitutionSpec::Chosen { .. }) => false,
-        };
     }
 
     if matches!(b.modification, ContinuousModification::CopyValues { .. }) {
@@ -9063,7 +9022,9 @@ fn filter_prop_references_pt_stat(prop: &FilterProp) -> bool {
 }
 
 /// Order effects by timestamp (deterministic fallback). CDAs sort first per CR 604.3.
-fn order_by_timestamp(effects: &[&ActiveContinuousEffect]) -> Vec<ActiveContinuousEffect> {
+pub(crate) fn order_by_timestamp(
+    effects: &[&ActiveContinuousEffect],
+) -> Vec<ActiveContinuousEffect> {
     let mut sorted: Vec<ActiveContinuousEffect> = effects.iter().map(|e| (*e).clone()).collect();
     // CR 613.7: see `order_with_dependencies` — `mod_index` is the
     // written-order tiebreak for equal-timestamp same-source effects.
@@ -11498,7 +11459,8 @@ mod tests {
         CountScope, DamageChannel, DamageKindFilter, Duration, Effect, FilterProp, ManaProduction,
         ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValueScope, QuantityExpr,
         QuantityRef, ReplacementDefinition, SacrificeCost, StaticCondition, StaticDefinition,
-        TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+        TargetFilter, TextSubstitution, TextSubstitutionSpec, TriggerCondition, TriggerDefinition,
+        TypeFilter, TypedFilter, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::{CounterMatch, CounterType};
@@ -24046,85 +24008,64 @@ mod tests {
         TextSubstitution::basic_land_type(from, to).expect("from != to")
     }
 
-    /// CR 613.8a + CR 613.8b: word substitutions depend on each other only on one recipient and within one word class.
+    /// CR 613.8a: a text-word effect's dependencies are read from the recipient's text, so the fixed graph reports none between two word effects while a type writer and a type reader still depend.
     #[test]
-    fn text_word_substitutions_depend_only_on_one_recipient_and_one_word_class() {
+    fn fixed_graph_no_longer_orders_text_word_effects() {
         use BasicLandType::{Forest, Plains, Swamp};
         let state = setup();
         let object = ObjectId(1);
-        let other = ObjectId(2);
         let swamp_to_plains = word_entry(object, 1, 1, land_word(Swamp, Plains));
         let plains_to_forest = word_entry(object, 2, 2, land_word(Plains, Forest));
         let swamp_to_forest = word_entry(object, 3, 3, land_word(Swamp, Forest));
-
-        // Chain: applying Swamp->Plains creates the word Plains->Forest acts on.
-        assert!(depends_on(&plains_to_forest, &swamp_to_plains, &state));
-        assert!(!depends_on(&swamp_to_plains, &plains_to_forest, &state));
-
-        // Loop: each removes the Swamp the other acts on.
-        assert!(depends_on(&swamp_to_plains, &swamp_to_forest, &state));
-        assert!(depends_on(&swamp_to_forest, &swamp_to_plains, &state));
-
-        // A color word and a land-type word are disjoint carriers (CR 612.2).
-        let color = word_entry(
-            object,
-            4,
-            4,
-            TextSubstitution::color(ManaColor::Black, ManaColor::Blue).expect("from != to"),
-        );
-        assert!(!depends_on(&color, &swamp_to_plains, &state));
-        assert!(!depends_on(&swamp_to_plains, &color, &state));
-
-        // Another recipient never matters, even for an identical `from` or a chain.
-        let other_swamp_to_forest = word_entry(other, 5, 5, land_word(Swamp, Forest));
-        let other_plains_to_forest = word_entry(other, 6, 6, land_word(Plains, Forest));
         for (a, b) in [
-            (&other_swamp_to_forest, &swamp_to_plains),
-            (&swamp_to_plains, &other_swamp_to_forest),
-            (&other_plains_to_forest, &swamp_to_plains),
-            (&plains_to_forest, &other_swamp_to_forest),
+            (&plains_to_forest, &swamp_to_plains),
+            (&swamp_to_plains, &swamp_to_forest),
+            (&swamp_to_forest, &swamp_to_plains),
         ] {
             assert!(!depends_on(a, b, &state));
         }
 
-        // A non-`SpecificObject` recipient never depends, and a `Chosen` spec is inert.
-        let mut filter_shaped = swamp_to_forest.clone();
-        filter_shaped.affected_filter = TargetFilter::Any;
-        assert!(!depends_on(&swamp_to_plains, &filter_shaped, &state));
-        let chosen = entry(
-            ObjectId(900),
+        let mut reader = entry(
+            ObjectId(901),
             None,
-            Some(7),
+            Some(8),
             0,
-            7,
-            ContinuousModification::SubstituteTextWord {
-                substitution: TextSubstitutionSpec::Chosen {
-                    domains: vec![crate::types::ability::TextWordDomain::BasicLandType],
-                },
+            8,
+            ContinuousModification::AddPower { value: 1 },
+        );
+        reader.affected_filter = TargetFilter::Typed(TypedFilter::creature());
+        let writer = entry(
+            ObjectId(902),
+            None,
+            Some(9),
+            0,
+            9,
+            ContinuousModification::AddType {
+                core_type: CoreType::Creature,
             },
         );
-        assert!(!depends_on(&chosen, &swamp_to_plains, &state));
-        assert!(!depends_on(&swamp_to_plains, &chosen, &state));
+        assert!(depends_on(&reader, &writer, &state));
+        assert!(!depends_on(&writer, &reader, &state));
     }
 
-    /// CR 613.8: a dependency overrides timestamp order in the Text layer.
+    /// CR 613.8b: the kernel picks the oldest independent effect, a provider before its dependent, and the oldest member of a loop unless an edge leaves the loop.
     #[test]
-    fn text_word_chain_orders_by_dependency_not_timestamp() {
-        use BasicLandType::{Forest, Plains, Swamp};
-        let state = setup();
-        let object = ObjectId(1);
-        let plains_to_forest = word_entry(object, 1, 1, land_word(Plains, Forest));
-        let swamp_to_plains = word_entry(object, 2, 2, land_word(Swamp, Plains));
-        let ordered = order_active_continuous_effects(
-            Layer::Text,
-            &[plains_to_forest, swamp_to_plains],
-            &state,
-        );
-        let ids: Vec<Option<u64>> = ordered.iter().map(|e| e.transient_id).collect();
+    fn select_next_effect_follows_the_cr_613_8b_loop_rule() {
+        assert_eq!(select_next_effect(&[vec![], vec![], vec![]]), 0);
         assert_eq!(
-            ids,
-            [Some(2), Some(1)],
-            "Swamp->Plains first although cast later"
+            select_next_effect(&[vec![1], vec![]]),
+            1,
+            "chain: effect 0 depends on 1"
+        );
+        assert_eq!(
+            select_next_effect(&[vec![1], vec![0]]),
+            0,
+            "two-node loop: the older member"
+        );
+        assert_eq!(
+            select_next_effect(&[vec![1, 2], vec![0], vec![]]),
+            2,
+            "the loop of 0 and 1 waits for 2, an edge that leaves it"
         );
     }
 
