@@ -9513,6 +9513,20 @@ fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> b
         | Effect::ExileFromTopUntil { .. } => events
             .iter()
             .any(|event| matches!(event, GameEvent::ZoneChanged { .. })),
+        // CR 608.2c: the mandatory-rider seed treats "if you do" as "the
+        // preceding instruction's event happened." This arm is that witness for
+        // a library put, same as the singular ChangeZone / Mill arms: any
+        // ZoneChanged in the put's own slice. CR 111.8 + CR 704.5d: a token that
+        // has left the battlefield cannot move, so the slice has no ZoneChanged
+        // (measured empty for a token Spot). The source-not-current early return
+        // emits EffectResolved and no ZoneChanged, so the witness is the zone
+        // change, not EffectResolved. CR 118.12's Standstill example is that
+        // unable-to-pay case and is the citation for R4, not for this predicate.
+        // CR 118.12's "regardless of what events actually occurred" (Gather
+        // Specimens) is the reading this arm does not implement.
+        Effect::PutAtLibraryPosition { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ZoneChanged { .. })),
         Effect::Counter { .. } | Effect::CounterAll { .. } => events
             .iter()
             .any(|event| matches!(event, GameEvent::SpellCountered { .. })),

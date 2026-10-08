@@ -11248,18 +11248,21 @@ fn strip_return_destination_command_zone() {
 }
 
 #[test]
-fn return_to_graveyard_produces_change_zone() {
-    let e = parse_effect("Return the exiled cards to their owner's graveyard");
+fn return_exiled_cards_to_graveyard_binds_exiled_by_source() {
+    // CR 406.6 + CR 607.2a: a cross-resolution graveyard return names the
+    // linked exile, and the origin is exile rather than the destination word.
+    let e = parse_effect("Return the exiled cards to their owner's graveyard.");
     assert!(
         matches!(
             e,
-            Effect::ChangeZone {
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Exile),
                 destination: Zone::Graveyard,
+                target: TargetFilter::ExiledBySource,
                 ..
             }
         ),
-        "Expected ChangeZone to Graveyard, got {:?}",
-        e
+        "expected ChangeZoneAll exile→graveyard ExiledBySource, got {e:?}"
     );
 }
 
@@ -11396,6 +11399,346 @@ fn same_chain_put_exiled_card_keeps_tracked_set() {
         matches!(target, TargetFilter::TrackedSet { .. }),
         "same-chain 'put the exiled card' must keep TrackedSet(0), got {target:?}"
     );
+}
+
+const THE_SPOT_ORACLE: &str = "When The Spot enters, exile up to one target nonland permanent and up to one target nonland permanent card from a graveyard.\nWhen The Spot dies, put him on the bottom of his owner's library. If you do, return the exiled cards to their owners' hands.";
+
+/// CR 406.6 + CR 607.2a: The Spot's dies trigger returns the cards its enters
+/// trigger exiled, and does not name The Spot itself.
+#[test]
+fn the_spot_dies_return_exiled_cards_binds_exiled_by_source() {
+    use crate::types::triggers::TriggerMode;
+
+    let parsed = parse_oracle_text(
+        THE_SPOT_ORACLE,
+        "The Spot, Living Portal",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    // CR 700.4: "dies" is a battlefield-to-graveyard zone change. The engine
+    // records that as `TriggerMode::ChangesZone`, not a separate dies variant.
+    let dies = parsed
+        .triggers
+        .iter()
+        .find(|trigger| {
+            trigger.mode == TriggerMode::ChangesZone
+                && trigger.origin == Some(Zone::Battlefield)
+                && trigger.destination == Some(Zone::Graveyard)
+        })
+        .expect("dies trigger");
+    let execute = dies.execute.as_deref().expect("dies trigger body");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::ParentTarget,
+                position: LibraryPosition::Bottom,
+                ..
+            }
+        ),
+        "dies head must put ParentTarget on the bottom, got {:?}",
+        execute.effect
+    );
+    let rider = execute.sub_ability.as_deref().expect("if you do rider");
+    assert!(
+        matches!(
+            rider.condition,
+            Some(AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::OptionalEffectPerformed,
+            })
+        ),
+        "rider must be gated on the put having happened, got {:?}",
+        rider.condition
+    );
+    assert!(
+        matches!(
+            rider.effect.as_ref(),
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Exile),
+                destination: Zone::Hand,
+                target: TargetFilter::ExiledBySource,
+                ..
+            }
+        ),
+        "return must be ChangeZoneAll from exile via ExiledBySource, got {:?}",
+        rider.effect
+    );
+    let serialized = serde_json::to_string(execute).expect("serialize dies body");
+    assert!(
+        !serialized.contains("TrackedSet"),
+        "dies body must not name a same-chain tracked set: {serialized}"
+    );
+    assert!(
+        !serialized.contains("Bounce"),
+        "dies body must not bounce: {serialized}"
+    );
+}
+
+/// CR 406.6 + CR 607.2a: singular and plural hand returns, and the graveyard
+/// return, all bind the linked exile. The graveyard row is hostile to reading
+/// the destination word as the origin.
+#[test]
+fn cross_resolution_return_exiled_anaphor_binds_exiled_by_source() {
+    for (text, destination) in [
+        ("Return the exiled card to its owner's hand.", Zone::Hand),
+        (
+            "Return the exiled cards to their owners' hands.",
+            Zone::Hand,
+        ),
+        (
+            "Return the exiled cards to their owner's graveyard.",
+            Zone::Graveyard,
+        ),
+    ] {
+        let effect = parse_effect(text);
+        assert!(
+            matches!(
+                effect,
+                Effect::ChangeZoneAll {
+                    origin: Some(Zone::Exile),
+                    destination: dest,
+                    target: TargetFilter::ExiledBySource,
+                    ..
+                } if dest == destination
+            ),
+            "{text} must bind ExiledBySource from exile to {destination:?}, got {effect:?}"
+        );
+    }
+}
+
+/// CR 406.6 + CR 610.3: a battlefield return stays the exile-until pair.
+#[test]
+fn battlefield_return_exiled_card_keeps_tracked_set() {
+    let effect =
+        parse_effect("Return the exiled card to the battlefield under its owner's control.");
+    assert!(
+        matches!(
+            effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::TrackedSet { .. },
+                ..
+            }
+        ),
+        "battlefield return must stay ChangeZone to TrackedSet, got {effect:?}"
+    );
+}
+
+fn chain_hand_return_target(def: &AbilityDefinition) -> Option<&TargetFilter> {
+    let here = match def.effect.as_ref() {
+        Effect::Bounce {
+            target,
+            destination: None | Some(Zone::Hand),
+            ..
+        } => Some(target),
+        Effect::ChangeZone {
+            destination: Zone::Hand,
+            target,
+            ..
+        }
+        | Effect::ChangeZoneAll {
+            destination: Zone::Hand,
+            target,
+            ..
+        } => Some(target),
+        _ => None,
+    };
+    if let Some(target) = here {
+        return Some(target);
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = def.effect.as_ref() {
+        if let Some(target) = chain_hand_return_target(effect) {
+            return Some(target);
+        }
+    }
+    def.sub_ability
+        .as_deref()
+        .and_then(chain_hand_return_target)
+}
+
+fn ability_contains_exiled_by_source(def: &AbilityDefinition) -> bool {
+    let here = match def.effect.as_ref() {
+        Effect::ChangeZone {
+            target: TargetFilter::ExiledBySource,
+            ..
+        }
+        | Effect::ChangeZoneAll {
+            target: TargetFilter::ExiledBySource,
+            ..
+        }
+        | Effect::Bounce {
+            target: TargetFilter::ExiledBySource,
+            ..
+        } => true,
+        Effect::CreateDelayedTrigger { effect, .. } => ability_contains_exiled_by_source(effect),
+        _ => false,
+    };
+    here || def
+        .sub_ability
+        .as_deref()
+        .is_some_and(ability_contains_exiled_by_source)
+}
+
+/// CR 406.6 + CR 607.2a: a same-chain hand return names that chain's exile.
+#[test]
+fn same_chain_return_exiled_card_keeps_tracked_set() {
+    let def = parse_effect_chain(
+        "Exile target creature. Return the exiled card to its owner's hand.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            def.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ),
+        "head must exile, got {:?}",
+        def.effect
+    );
+    let target = chain_hand_return_target(&def).expect("hand return node");
+    assert!(
+        matches!(target, TargetFilter::TrackedSet { .. }),
+        "same-chain return must keep TrackedSet, got {target:?}"
+    );
+    assert!(
+        !matches!(target, TargetFilter::ExiledBySource),
+        "same-chain return must not bind ExiledBySource"
+    );
+}
+
+/// CR 406.6 + CR 607.2a + CR 603.7a: a delayed body names the creating
+/// resolution's exile, even though that nested chain has no exile producer.
+#[test]
+fn delayed_body_return_exiled_card_keeps_tracked_set() {
+    let def = parse_effect_chain(
+        "Exile target creature. At the beginning of the next end step, return the exiled card to its owner's hand.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            def.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ),
+        "head must exile, got {:?}",
+        def.effect
+    );
+    fn find_delayed(def: &AbilityDefinition) -> Option<&AbilityDefinition> {
+        if let Effect::CreateDelayedTrigger { effect, .. } = def.effect.as_ref() {
+            return Some(effect);
+        }
+        def.sub_ability.as_deref().and_then(find_delayed)
+    }
+    let body = find_delayed(&def).expect("delayed trigger body");
+    let target = chain_hand_return_target(body).expect("delayed hand return");
+    assert!(
+        matches!(target, TargetFilter::TrackedSet { id } if *id == TrackedSetId(0)),
+        "delayed body must keep TrackedSet(0), got {target:?} in {:?}",
+        body.effect
+    );
+    assert!(
+        !ability_contains_exiled_by_source(body),
+        "delayed body must not bind ExiledBySource: {body:?}"
+    );
+}
+
+/// CR 406.6 + CR 607.2a: each gate differs from the positive by one input.
+#[test]
+fn cross_resolution_exiled_return_target_gates() {
+    let tracked = TargetFilter::TrackedSet {
+        id: TrackedSetId(0),
+    };
+    let rebound = super::imperative::cross_resolution_exiled_return_target(
+        "the exiled cards",
+        &tracked,
+        Some(Zone::Hand),
+        &ParseContext::default(),
+    );
+    assert_eq!(rebound, Some(TargetFilter::ExiledBySource));
+
+    let exile_cost = ParseContext {
+        current_ability_exile_cost_zone: Some(Zone::Exile),
+        ..ParseContext::default()
+    };
+    assert_eq!(
+        super::imperative::cross_resolution_exiled_return_target(
+            "the exiled cards",
+            &tracked,
+            Some(Zone::Hand),
+            &exile_cost,
+        ),
+        None
+    );
+
+    let same_chain = ParseContext {
+        chain_has_prior_exile_producer: true,
+        ..ParseContext::default()
+    };
+    assert_eq!(
+        super::imperative::cross_resolution_exiled_return_target(
+            "the exiled cards",
+            &tracked,
+            Some(Zone::Hand),
+            &same_chain,
+        ),
+        None
+    );
+
+    let delayed = ParseContext {
+        trigger_body_scope: TriggerConditionScope::Delayed,
+        ..ParseContext::default()
+    };
+    assert_eq!(
+        super::imperative::cross_resolution_exiled_return_target(
+            "the exiled cards",
+            &tracked,
+            Some(Zone::Hand),
+            &delayed,
+        ),
+        None
+    );
+
+    assert_eq!(
+        super::imperative::cross_resolution_exiled_return_target(
+            "the exiled cards",
+            &tracked,
+            Some(Zone::Battlefield),
+            &ParseContext::default(),
+        ),
+        None
+    );
+    assert_eq!(
+        super::imperative::cross_resolution_exiled_return_target(
+            "the exiled cards",
+            &tracked,
+            None,
+            &ParseContext::default(),
+        ),
+        None
+    );
+
+    for text in [
+        "the exiled cardboard",
+        "the exiled card's owner",
+        "target exiled card",
+        "each exiled card",
+    ] {
+        assert_eq!(
+            super::imperative::cross_resolution_exiled_return_target(
+                text,
+                &tracked,
+                Some(Zone::Hand),
+                &ParseContext::default(),
+            ),
+            None,
+            "{text} must not match the anaphor"
+        );
+    }
 }
 
 // ── Singular battlefield-recall anaphor ──

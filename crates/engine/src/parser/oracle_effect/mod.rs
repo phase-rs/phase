@@ -2098,6 +2098,8 @@ fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
     // this selects a parsing mode, it does not implement a rule.)
     let mut inner_ctx = ParseContext {
         trigger_condition_scope: TriggerConditionScope::Delayed,
+        // CR 603.7a: the body parsed below is the delayed trigger this chain creates.
+        trigger_body_scope: TriggerConditionScope::Delayed,
         ..ParseContext::default()
     };
     let mut trigger_def = parse_dealt_damage_this_way_dies_trigger(condition_text, &mut inner_ctx)
@@ -2488,6 +2490,22 @@ fn try_parse_enters_this_way_additional_counter(lower: &str) -> Option<Effect> {
     })
 }
 
+/// CR 603.7a: parse a delayed or reflexive trigger body as its own ability
+/// chain, with `trigger_body_scope` set so "the exiled card" stays bound to
+/// the creating resolution.
+fn parse_delayed_trigger_body_standalone(text: &str, kind: AbilityKind) -> AbilityDefinition {
+    let mut body_ctx = ParseContext {
+        trigger_body_scope: TriggerConditionScope::Delayed,
+        ..ParseContext::default()
+    };
+    lower_ability_ir(&parse_ability_ir(
+        text,
+        kind,
+        ChainLoweringMode::Standalone,
+        &mut body_ctx,
+    ))
+}
+
 /// CR 603.7: Parse "when you next cast a [type] spell [post-spell modifier] this turn, [effect]"
 /// delayed triggers. Creates a one-shot delayed trigger that fires once on the next matching
 /// SpellCast event.
@@ -2538,7 +2556,7 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
     let mut inner = if let Some(parsed) = try_parse_enters_with_additional_counters(effect_lower) {
         parsed
     } else {
-        parse_effect_chain(effect_text, AbilityKind::Spell)
+        parse_delayed_trigger_body_standalone(effect_text, AbilityKind::Spell)
     };
     // CR 608.2k: In a "when you next cast a <spell> this turn" delayed trigger the
     // "that <spell>" anaphor in the body names the newly-cast spell object (the
@@ -2673,6 +2691,8 @@ fn try_parse_when_next_generic_event(tp: TextPair) -> Option<ParsedEffectClause>
     }
     trigger_def.execute = None;
 
+    // CR 603.7a: the body is a delayed trigger created by the resolving chain.
+    inner_ctx.trigger_body_scope = TriggerConditionScope::Delayed;
     let inner = parse_effect_chain_with_context(after.original, AbilityKind::Spell, &mut inner_ctx);
 
     Some(ParsedEffectClause {
@@ -2759,6 +2779,8 @@ fn try_parse_reflexive_this_way_trigger(tp: TextPair) -> Option<ParsedEffectClau
         def
     };
 
+    // CR 603.7a: the body is a reflexive trigger created by the resolving chain.
+    inner_ctx.trigger_body_scope = TriggerConditionScope::Delayed;
     let inner = parse_effect_chain_with_context(after.original, AbilityKind::Spell, &mut inner_ctx);
 
     Some(ParsedEffectClause {
@@ -2906,7 +2928,11 @@ fn try_parse_at_next_phase_delayed_trigger(
 ) -> Option<ParsedEffectClause> {
     let (effect_text, condition) = strip_temporal_prefix(text);
     let condition = condition?;
-    let mut ctx = ParseContext::default();
+    // CR 603.7a: the body is a delayed trigger created when the spell resolves.
+    let mut ctx = ParseContext {
+        trigger_body_scope: TriggerConditionScope::Delayed,
+        ..ParseContext::default()
+    };
     let inner = parse_effect_chain_with_context(effect_text, kind, &mut ctx);
     Some(ParsedEffectClause {
         unlowered_guard: None,
@@ -4321,6 +4347,8 @@ fn try_parse_inline_delayed_trigger(
     if self_disjunction {
         inner_ctx.subject = Some(TargetFilter::SelfRef);
     }
+    // CR 603.7a: the body is a delayed trigger created by the resolving chain.
+    inner_ctx.trigger_body_scope = TriggerConditionScope::Delayed;
     let mut inner =
         parse_effect_chain_with_context(effect_text, AbilityKind::Spell, &mut inner_ctx);
     if self_disjunction {
@@ -11077,7 +11105,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     if let Some((is_win, effect_text)) =
         imperative::try_parse_reflexive_coin_flip_branch(text, &lower)
     {
-        let inner = parse_effect_chain(effect_text, AbilityKind::Spell);
+        let inner = parse_delayed_trigger_body_standalone(effect_text, AbilityKind::Spell);
         return build_reflexive_coin_flip_trigger(is_win, inner);
     }
 
@@ -20726,6 +20754,15 @@ fn try_parse_verb_and_target<'a>(
             .then_some(crate::types::zones::Zone::Exile)
         });
         let target = add_inferred_origin_constraints_to_target(target, origin, rest_lower);
+        let (target, origin, is_mass) = match imperative::cross_resolution_exiled_return_target(
+            target_text,
+            &target,
+            dest.as_ref().map(|d| d.zone),
+            ctx,
+        ) {
+            Some(linked) => (linked, Some(Zone::Exile), true),
+            None => (target, origin, is_mass),
+        };
         // CR 115.1: A bounce resolves at-resolution iff the Oracle text omitted
         // the word "target" AND the filter has a controller scope to enumerate
         // against. Computed here so both Hand-destined and default-None
@@ -42318,6 +42355,11 @@ fn parse_effect_chain_ir_body(
             // object's LKI. This struct literal REPLACES the parent context, so
             // the carry has to be spelled; `..Default::default()` would reset it.
             trigger_zone_change: ctx.trigger_zone_change.clone(),
+            // CR 603.7a + CR 607.1: this chunk is the same printed or delayed body
+            // as the enclosing chain. Copy the body scope; `..Default::default()`
+            // would reset it to Printed and rebind a delayed "return the exiled
+            // card" as a second printed linked ability.
+            trigger_body_scope: ctx.trigger_body_scope,
             ..Default::default()
         };
         let ctx = &mut chunk_ctx;
@@ -42497,7 +42539,12 @@ fn parse_effect_chain_ir_body(
         });
         if let Some(prefix_condition) = prefix_delayed {
             let (inner_text, inner_multi_target) = strip_any_number_quantifier(text_after_prefix);
+            // CR 603.7a: the prefix delayed trigger's body is created by this
+            // resolving chain, not a second ability printed on the object.
+            let enclosing_body_scope =
+                std::mem::replace(&mut ctx.trigger_body_scope, TriggerConditionScope::Delayed);
             let inner_ir = parse_effect_chain_ir(&inner_text, kind, ctx);
+            ctx.trigger_body_scope = enclosing_body_scope;
             let mut inner_def = lower_effect_chain_ir(&inner_ir);
             if let Some(spec) = inner_multi_target {
                 inner_def = inner_def.multi_target(spec);

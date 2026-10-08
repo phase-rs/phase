@@ -24,7 +24,7 @@ use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect_w
 use super::token::try_parse_token;
 use super::{
     attach_controller_if_absent, is_bare_object_pronoun, is_bare_plural_object_pronoun,
-    resolve_it_pronoun, ParseContext, PriorZoneChoicePartition,
+    resolve_it_pronoun, ParseContext, PriorZoneChoicePartition, TriggerConditionScope,
 };
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
@@ -217,6 +217,43 @@ pub(super) fn filter_has_controller_scope(filter: &TargetFilter) -> bool {
         }
         TargetFilter::Not { filter } => filter_has_controller_scope(filter),
         _ => false,
+    }
+}
+
+/// CR 406.6 + CR 607.1 + CR 607.2a: a "return the exiled card(s) to <hand |
+/// graveyard>" clause with no earlier exile in its own chain names the cards
+/// this object's linked ability exiled in a separate resolution, so it binds
+/// durably to `ExiledBySource`. Returns `None` to keep the parsed binding.
+pub(super) fn cross_resolution_exiled_return_target(
+    target_text: &str,
+    same_chain_binding: &TargetFilter,
+    destination: Option<Zone>,
+    ctx: &ParseContext,
+) -> Option<TargetFilter> {
+    // CR 610.3: battlefield returns stay on the `TrackedSet` shape the
+    // EtbExileLtbReturn relation pairs into an exile-until duration.
+    if !matches!(destination, Some(zone) if zone != Zone::Battlefield) {
+        return None;
+    }
+    // CR 608.2k: an exile-cost anaphor binds via `CostPaidObject`.
+    if ctx.current_ability_exile_cost_zone.is_some() {
+        return None;
+    }
+    // CR 603.7a + CR 608.2c + CR 607.1: a delayed body is not a second ability
+    // printed on the object. Keep the same-chain binding the return parser built.
+    if ctx.trigger_body_scope == TriggerConditionScope::Delayed {
+        return None;
+    }
+    let lower = target_text.trim().to_ascii_lowercase();
+    all_consuming(crate::parser::oracle_target::parse_exiled_card_anaphor)
+        .parse(lower.as_str())
+        .ok()?;
+    match resolve_singular_exiled_card_target(
+        ctx.chain_has_prior_exile_producer,
+        same_chain_binding.clone(),
+    ) {
+        TargetFilter::ExiledBySource => Some(TargetFilter::ExiledBySource),
+        _ => None,
     }
 }
 
@@ -2475,6 +2512,15 @@ pub(super) fn parse_targeted_action_ast(
             super::add_inferred_origin_constraints_to_target(target, origin, rest_lower)
         } else {
             target
+        };
+        let (target, origin, is_mass) = match cross_resolution_exiled_return_target(
+            target_text,
+            &target,
+            dest.as_ref().map(|d| d.zone),
+            ctx,
+        ) {
+            Some(linked) => (linked, Some(Zone::Exile), true),
+            None => (target, origin, is_mass),
         };
 
         // CR 400.7: Single-object battlefield destinations use ChangeZone;

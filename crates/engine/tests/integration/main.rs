@@ -1879,3 +1879,4 @@ mod owned_you_target_authority;
 
 mod base_pt_designation_filter;
 mod exile_origin_target_acquisition;
+mod issue_7418_the_spot_dies_returns_exiled_cards;

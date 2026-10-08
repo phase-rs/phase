@@ -246,18 +246,29 @@ fn parse_card_or_cards_word(input: &str) -> super::oracle_nom::error::OracleResu
     parse_word_bounded(input, "cards").or_else(|_| parse_word_bounded(input, "card"))
 }
 
+/// CR 406.6 + CR 607.2a: the linked-exile anaphor "the exiled card" /
+/// "the exiled cards". Callers wrap it in `all_consuming` so possessive or
+/// qualified forms ("the exiled card's owner") are not mistaken for it.
+pub(crate) fn parse_exiled_card_anaphor(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, ()> {
+    preceded(tag("the exiled "), parse_card_or_cards_word).parse(input)
+}
+
 /// CR 608.2c + CR 406.6 + CR 607.2a + CR 707.10 + CR 702.75a: Resolve a
-/// singular "the exiled card" / "copy the exiled card" anaphor to the
-/// correct binding. When an earlier clause in the SAME resolution chain
-/// already exiled a card (`chain_has_prior_exile_producer`), the anaphor
-/// refers to that same-chain exile and keeps its pre-existing binding
-/// (`same_chain_binding`, e.g. `TrackedSet{0}` or `ParentTarget`). Otherwise
-/// the referenced exile happened in an EARLIER, separately-resolved ability
-/// (e.g. an ETB Imprint or a synthesized Hideaway ETB) — CR 406.6 durable
-/// exile-zone tracking is required, so the anaphor must bind to
-/// `TargetFilter::ExiledBySource`, resolved at runtime via this source's
-/// `exile_links` (CR 607.1/607.2a: linked abilities reference the same
-/// object across resolutions).
+/// singular or plural "the exiled card" / "the exiled cards" / "copy the
+/// exiled card" anaphor to the correct binding. Callers are the copy verb,
+/// the cast verb, the put verb, and the return verb
+/// (`cross_resolution_exiled_return_target`). When an earlier clause in the
+/// SAME resolution chain already exiled a card
+/// (`chain_has_prior_exile_producer`), the anaphor refers to that same-chain
+/// exile and keeps its pre-existing binding (`same_chain_binding`, e.g.
+/// `TrackedSet{0}` or `ParentTarget`). Otherwise the referenced exile
+/// happened in an EARLIER, separately-resolved ability (e.g. an ETB Imprint
+/// or a synthesized Hideaway ETB) — CR 406.6 durable exile-zone tracking is
+/// required, so the anaphor must bind to `TargetFilter::ExiledBySource`,
+/// resolved at runtime via this source's `exile_links` (CR 607.1/607.2a:
+/// linked abilities reference the same object across resolutions).
 pub(crate) fn resolve_singular_exiled_card_target(
     chain_has_prior_exile_producer: bool,
     same_chain_binding: TargetFilter,
