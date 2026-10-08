@@ -2598,6 +2598,53 @@ fn becomes_prepared_scope_follows_subject_shape() {
     }
 }
 
+/// CR 115.10a + CR 722.3a: the mass (`All`) reading of "<subject> becomes
+/// (un)prepared" is fail-closed. Only an untargeted subject that names an
+/// enumerable population ("each creature you control") is `All`; a subject the
+/// parser could not classify (`Any`, a contentless `Typed`, a player filter)
+/// matches no bounded population, so it keeps its filter under `Single` instead
+/// of sweeping both players' battlefields.
+#[test]
+fn prepared_designation_subject_unclassified_subject_stays_single() {
+    use super::subject::prepared_designation_subject;
+    use crate::parser::oracle_ir::ast::SubjectApplication;
+    use crate::types::ability::{ControllerRef, TypedFilter};
+    let untargeted = |affected: TargetFilter| SubjectApplication {
+        affected,
+        target: None,
+        multi_target: None,
+        inherits_parent: false,
+        is_optional: false,
+    };
+    let yours = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+
+    // Positive reach guard: the Codie subject shape is an enumerable
+    // population, through the helper and through the real parse.
+    assert_eq!(
+        prepared_designation_subject(&untargeted(yours.clone())),
+        (yours.clone(), EffectScope::All)
+    );
+    assert_eq!(
+        parse_effect("Each creature you control becomes prepared."),
+        Effect::BecomePrepared {
+            target: yours,
+            scope: EffectScope::All,
+        }
+    );
+
+    // Unclassified subjects: no enumerable population, so `Single`.
+    for unclassified in [
+        TargetFilter::Any,
+        TargetFilter::Typed(TypedFilter::default()),
+        TargetFilter::Player,
+    ] {
+        assert_eq!(
+            prepared_designation_subject(&untargeted(unclassified.clone())),
+            (unclassified, EffectScope::Single)
+        );
+    }
+}
+
 /// CR 601.2c + CR 508.1d + CR 509.1c: A dual-target combat compound —
 /// "up to one target creature [combat compulsion] and up to one target creature
 /// [combat prohibition]" — must split into two independently-targeted conjuncts

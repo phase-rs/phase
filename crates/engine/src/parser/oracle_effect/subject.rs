@@ -4328,22 +4328,31 @@ pub(super) fn static_affected_for_application(application: &SubjectApplication) 
 /// (un)prepared", read from the shape of the already-parsed subject.
 ///
 /// A declared target ("target creature becomes prepared") or an inherited
-/// antecedent binds through `ParentTarget` with `Single` scope. An untargeted
+/// antecedent carries `ParentTarget` with `Single` scope. An untargeted
 /// subject that is a context reference (`SelfRef` for "this creature",
-/// `TriggeringSource`, `LastCreated`, ...) names one object, also `Single`. Any
-/// other untargeted noun phrase ("each creature you control") is a population:
-/// it is not a target (CR 115.10a), so the filter is kept and read at
-/// resolution under `All`.
-fn prepared_designation_subject(application: &SubjectApplication) -> (TargetFilter, EffectScope) {
+/// `TriggeringSource`, `LastCreated`, ...) names one object, also `Single`. An
+/// untargeted noun phrase that names an enumerable population ("each creature
+/// you control") is not a target (CR 115.10a), so the filter is kept and read
+/// at resolution under `All`.
+///
+/// The `All` reading is positive and fail-closed: it requires
+/// [`TargetFilter::names_enumerable_population`], because `Any` and a
+/// contentless `Typed` match every object and an `All` sweep over them would
+/// (un)prepare both players' battlefields. A subject that is neither a context
+/// reference nor an enumerable population keeps its filter under `Single`.
+pub(super) fn prepared_designation_subject(
+    application: &SubjectApplication,
+) -> (TargetFilter, EffectScope) {
     if application.target.is_some() || application.inherits_parent {
         return (TargetFilter::ParentTarget, EffectScope::Single);
     }
-    let scope = if application.affected.is_context_ref() {
-        EffectScope::Single
-    } else {
+    let affected = &application.affected;
+    let scope = if !affected.is_context_ref() && affected.names_enumerable_population() {
         EffectScope::All
+    } else {
+        EffectScope::Single
     };
-    (application.affected.clone(), scope)
+    (affected.clone(), scope)
 }
 
 /// CR 707.2 + CR 115.1 + CR 611.2c: map a parsed "<subject> become[s] a copy /
@@ -5614,11 +5623,12 @@ fn build_become_clause(
     {
         // CR 722.3a + CR 115.10a: Resolve the prepare/unprepare subject. A
         // targeted subject ("target creature becomes prepared", Biblioplex)
-        // binds to the chosen object via `ParentTarget`; a self-referential or
-        // anaphoric subject ("this creature becomes prepared" — Stensian
-        // Sanguinist, normalized to `~` → `SelfRef`) keeps its own `affected`
-        // filter; both are `Single`. An untargeted population ("each creature
-        // you control becomes prepared" — Codie, Ravenous Codex) is `All`.
+        // carries `ParentTarget`; the declared-target slot for that class is a
+        // known pre-existing gap. A self-referential or anaphoric subject
+        // ("this creature becomes prepared" — Stensian Sanguinist, normalized
+        // to `~` → `SelfRef`) keeps its own `affected` filter; both are
+        // `Single`. An untargeted enumerable population ("each creature you
+        // control becomes prepared" — Codie, Ravenous Codex) is `All`.
         let (target, scope) = prepared_designation_subject(&application);
         let effect = match kind {
             PreparedKind::Prepared => Effect::BecomePrepared { target, scope },
