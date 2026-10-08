@@ -700,7 +700,7 @@ fn resolve_revealing_player(
             crate::game::ability_utils::parent_target_controller(ability, state)
                 .unwrap_or(ability.controller),
         ),
-        TargetFilter::DeclaredPlayer { .. } => {
+        filter if filter.names_one_player() => {
             super::resolve_player_for_context_ref(state, ability, player_filter)
         }
         _ if super::declared_player_slot_is_empty(state, ability, player_filter) => None,

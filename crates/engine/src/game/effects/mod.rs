@@ -12271,7 +12271,7 @@ fn resolve_context_player(
 /// acting subject (the target permanent's controller). This mirrors the
 /// `resolve_library_owner` logic in `search_library.rs` but applies generally
 /// to any optional effect whose embedded player-scope target is a context-ref.
-/// `None`: addressed to an illegal or unannounced `DeclaredPlayer` (CR 608.2b), so no one is
+/// `None`: addressed to an illegal, unannounced or departed declared player (CR 608.2b), so no one is
 /// asked and the optional resolves as declined.
 pub(crate) fn optional_prompt_player(
     state: &GameState,
@@ -12284,7 +12284,7 @@ pub(crate) fn optional_prompt_player(
             return Some(player);
         }
         // CR 608.2b: a payer that is an illegal or unannounced declared player is asked no one.
-        if matches!(payer, TargetFilter::DeclaredPlayer { .. }) {
+        if payer.names_one_player() {
             return None;
         }
     }
@@ -12299,7 +12299,7 @@ pub(crate) fn optional_prompt_player(
         }
         // CR 608.2b: an instruction addressed to an illegal or unannounced declared
         // player is offered to no one.
-        if matches!(optional_player, TargetFilter::DeclaredPlayer { .. }) {
+        if optional_player.names_one_player() {
             return None;
         }
     }

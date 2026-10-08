@@ -76,7 +76,7 @@ pub fn resolve(
     // Find the target player from resolved targets. Targeted RevealHand
     // (Thoughtseize, Duress) builds a real `TargetRef::Player` slot — keep that
     // fast path unchanged (zero regression).
-    let declared_player = if matches!(target, TargetFilter::DeclaredPlayer { .. })
+    let declared_player = if target.names_one_player()
         || super::declared_player_slot_is_empty(state, ability, &target)
     {
         match super::resolve_player_for_context_ref(state, ability, &target) {

@@ -1024,13 +1024,18 @@ fn e2_true_condition_takes_the_main_branch() {
 // Definition-level readers of a payload
 // ---------------------------------------------------------------------------------------------
 
-fn deciding_run(payload: AbilityDefinition, before: After, decide: bool) -> Out {
+fn deciding_run(
+    payload: AbilityDefinition,
+    before: After,
+    after_install: After,
+    decide: bool,
+) -> Out {
     run_deciding(
         then(head(), delayed(payload, Phase::End)),
         &[Pick::Player(P1)],
         &[Phase::End],
         before,
-        After::Nothing,
+        after_install,
         Some(decide),
     )
 }
@@ -1060,10 +1065,10 @@ fn unless_lose() -> AbilityDefinition {
 /// I1: `optional_player` naming G offers the "may" to G's player (CR 608.2d, CR 603.7a).
 #[test]
 fn i1_optional_player_offers_the_groups_player_the_may() {
-    let accepted = deciding_run(may_draw(), After::Nothing, true);
+    let accepted = deciding_run(may_draw(), After::Nothing, After::Nothing, true);
     assert_eq!(accepted.asked, ["optional:1"]);
     assert_eq!(accepted.hand, [0, 3, 2]);
-    let declined = deciding_run(may_draw(), After::Nothing, false);
+    let declined = deciding_run(may_draw(), After::Nothing, After::Nothing, false);
     assert_eq!(declined.asked, ["optional:1"]);
     assert_eq!(declined.hand, [0, 2, 2]);
 }
@@ -1071,10 +1076,10 @@ fn i1_optional_player_offers_the_groups_player_the_may() {
 /// I2: `unless_pay.payer` naming G offers the payment to G's player (CR 118.12a, CR 603.7a).
 #[test]
 fn i2_unless_payer_offers_the_payment_to_the_groups_player() {
-    let declined = deciding_run(unless_lose(), After::Nothing, false);
+    let declined = deciding_run(unless_lose(), After::Nothing, After::Nothing, false);
     assert_eq!(declined.asked, ["unless:1"]);
     assert_eq!(declined.life, [20, 17, 20]);
-    let paid = deciding_run(unless_lose(), After::Nothing, true);
+    let paid = deciding_run(unless_lose(), After::Nothing, After::Nothing, true);
     assert_eq!(paid.asked, ["unless:1"]);
     assert_eq!(paid.life, [20, 20, 20]);
 }
@@ -1084,7 +1089,19 @@ fn i2_unless_payer_offers_the_payment_to_the_groups_player() {
 #[test]
 fn i3_unavailable_group_player_is_asked_nothing_and_nothing_happens() {
     for payload in [may_draw(), unless_lose()] {
-        let out = deciding_run(payload, After::Eliminate, true);
+        let out = deciding_run(payload, After::Eliminate, After::Nothing, true);
+        assert!(out.asked.is_empty(), "{:?}", out.asked);
+        assert_eq!((out.life[0], out.life[2]), (20, 20));
+        assert_eq!((out.hand[0], out.hand[2]), (0, 2));
+    }
+}
+
+/// I3b: a declared player who left after the delayed payload was installed is likewise asked
+/// nothing (CR 608.2b, CR 603.7a), not replaced by the controller.
+#[test]
+fn i3b_group_player_gone_after_install_is_asked_nothing() {
+    for payload in [may_draw(), unless_lose()] {
+        let out = deciding_run(payload, After::Nothing, After::Eliminate, true);
         assert!(out.asked.is_empty(), "{:?}", out.asked);
         assert_eq!((out.life[0], out.life[2]), (20, 20));
         assert_eq!((out.hand[0], out.hand[2]), (0, 2));

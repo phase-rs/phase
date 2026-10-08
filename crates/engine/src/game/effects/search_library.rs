@@ -411,9 +411,9 @@ fn known_search_library_owner(ability: &ResolvedAbility) -> Option<PlayerId> {
     if matches!(
         &ability.effect,
         Effect::SearchLibrary {
-            target_player: Some(TargetFilter::DeclaredPlayer { .. }),
+            target_player: Some(filter),
             ..
-        }
+        } if filter.names_one_player()
     ) {
         return None;
     }
@@ -640,10 +640,8 @@ pub(crate) fn prepare_effective_search(
     let searched_library = effective_zones.contains(&Zone::Library);
     let searched_zone_owner = match target_player.as_ref() {
         // CR 608.2b: a declared player with no legal referent has no library to search.
-        Some(TargetFilter::DeclaredPlayer { group }) => {
-            let Some(player) =
-                crate::game::targeting::resolve_live_declared_player(state, ability, *group)
-            else {
+        Some(filter) if filter.names_one_player() => {
+            let Some(player) = super::resolve_player_for_context_ref(state, ability, filter) else {
                 return Ok(None);
             };
             player

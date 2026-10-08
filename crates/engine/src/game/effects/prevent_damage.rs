@@ -364,7 +364,7 @@ pub fn resolve(
 
     // CR 608.2b: a declared player with no legal referent is not protected, and
     // a shield with no recipient filter would protect everyone.
-    if matches!(target, TargetFilter::DeclaredPlayer { .. })
+    if target.names_one_player()
         && super::resolve_player_for_context_ref(state, ability, &target).is_none()
     {
         return Ok(());

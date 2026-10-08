@@ -21332,6 +21332,15 @@ pub enum VoteVisibility {
 }
 
 impl TargetFilter {
+    /// Either variant names exactly one player, so one that does not resolve names no one
+    /// instead of falling back to another player (CR 608.2b).
+    pub(crate) fn names_one_player(&self) -> bool {
+        matches!(
+            self,
+            TargetFilter::DeclaredPlayer { .. } | TargetFilter::SpecificPlayer { .. }
+        )
+    }
+
     /// CR 608.2c + CR 701.24c: True only for the mixed-zone owner population
     /// used by compound all-player shuffles. One operand is the iterated
     /// player's hand; the other is every permanent that player owns. Ordinary
@@ -36035,6 +36044,21 @@ mod tests {
     use crate::types::game_state::{DelayedTrigger, GameState, ZoneChangeRecord};
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn names_one_player_is_the_declared_and_bound_player_only() {
+        let group = ChosenGroupId(ChosenGroupId::DECLARED_PLAYER_BASE);
+        assert!(TargetFilter::DeclaredPlayer { group }.names_one_player());
+        assert!(TargetFilter::SpecificPlayer { id: PlayerId(1) }.names_one_player());
+        for other in [
+            TargetFilter::Player,
+            TargetFilter::Controller,
+            TargetFilter::ParentTargetController,
+            TargetFilter::Typed(TypedFilter::default()),
+        ] {
+            assert!(!other.names_one_player(), "{other:?}");
+        }
+    }
 
     /// CR 123.6e: unique vowels are the *different* vowels among A, E, I, O,
     /// U and Y, case-insensitively, over every text read. Each value exposes
