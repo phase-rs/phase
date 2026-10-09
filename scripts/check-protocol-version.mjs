@@ -111,7 +111,8 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +45: v116 adds the simultaneous-draw dealer to the multi-draw resolution frame.
 // +46: v117 adds `DerivedViews.shared_piles` (the shared-pile holder seat).
 // +47: v118 retypes the `ManaColorSpent` color to `SpentColor` (word versus symbol).
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 47;
+// +48: v119 carries full draw-replacement AbilityDefinition scope and chains.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 48;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -184,7 +185,8 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +44: wire 98 moves with full-game v116 for the simultaneous-draw dealer.
 // +45: wire 99 moves with full-game v117 for `DerivedViews.shared_piles`.
 // +46: wire 100 moves with full-game v118 for `SpentColor` on `ManaColorSpent`.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 46;
+// +47: wire 101 moves with full-game v119 for full draw-replacement definitions.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 47;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

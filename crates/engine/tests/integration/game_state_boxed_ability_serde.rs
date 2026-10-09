@@ -43,16 +43,267 @@
 use engine::game::scenario::{P0, P1};
 use engine::game::triggers::PendingTrigger;
 use engine::game::zones::create_object;
-use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef};
-use engine::types::game_state::{
-    GameState, PendingCast, PendingDiscardForCostResume, PersistedGameState, StackEntry,
-    StackEntryKind, WaitingFor,
+use engine::types::ability::{
+    AbilityCondition, AbilityDefinition, AbilityKind, Effect, ModalChoice, PlayerFilter,
+    QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef,
 };
-use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::game_state::{
+    GameState, PendingCast, PendingDiscardForCostResume, PersistedGameState,
+    PersistedRestoreFinalization, StackEntry, StackEntryKind, TargetSelectionConstraint,
+    WaitingFor,
+};
+use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use engine::types::mana::ManaCost;
+use engine::types::resolution::ResolutionStateWire;
 use engine::types::zones::Zone;
 
 const SOURCE: ObjectId = ObjectId(700);
+
+fn worship_definition() -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 5 },
+            player: TargetFilter::Controller,
+        },
+    )
+}
+
+fn state_with_draw_replacement() -> (GameState, ObjectId, ObjectId, AbilityDefinition) {
+    let mut state = state_with_resolving_stack_entry();
+    let source = create_object(
+        &mut state,
+        CardId(2),
+        P0,
+        "Words of Worship".to_string(),
+        Zone::Battlefield,
+    );
+    let target = create_object(
+        &mut state,
+        CardId(3),
+        P1,
+        "Selected object".to_string(),
+        Zone::Battlefield,
+    );
+    state.objects.get_mut(&source).unwrap().incarnation = 3;
+    state.objects.get_mut(&target).unwrap().incarnation = 7;
+    let definition = worship_definition()
+        .player_scope(PlayerFilter::Opponent)
+        .condition(AbilityCondition::IsYourTurn)
+        .optional()
+        .target_choice_timing(TargetChoiceTiming::Resolution)
+        .target_constraint(TargetSelectionConstraint::DifferentTargetPlayers)
+        .sub_ability(worship_definition().player_scope(PlayerFilter::All))
+        .with_else_ability(worship_definition())
+        .with_modal(
+            ModalChoice {
+                min_choices: 1,
+                max_choices: 1,
+                mode_count: 1,
+                mode_descriptions: vec!["gain life".to_string()],
+                ..Default::default()
+            },
+            vec![worship_definition()],
+        );
+    let effect = Effect::CreateDrawReplacement {
+        replacement_effect: Box::new(definition.clone()),
+    };
+    let object = state.objects.get_mut(&source).unwrap();
+    object.abilities = vec![AbilityDefinition::new(
+        AbilityKind::Activated,
+        effect.clone(),
+    )]
+    .into();
+    object.base_abilities = object.abilities.clone();
+    let mut resolved = ResolvedAbility::new(
+        effect,
+        vec![TargetRef::Object(target), TargetRef::Player(P1)],
+        source,
+        P0,
+    );
+    resolved.source_incarnation = Some(3);
+    resolved.target_incarnations = vec![ObjectIncarnationRef::of(target, 7)];
+    resolved.selected_target_incarnations = vec![ObjectIncarnationRef::of(target, 7)];
+    let entry = state.resolving_stack_entry.as_mut().unwrap();
+    entry.source_id = source;
+    *entry.ability_mut().unwrap() = resolved;
+    let mut stacked = entry.clone();
+    stacked.id = ObjectId(705);
+    state.stack.push_back(stacked);
+    let WaitingFor::OptionalEffectChoice { source_id, .. } = &mut state.waiting_for else {
+        panic!("fixture must retain its valid optional prompt")
+    };
+    *source_id = source;
+    (state, source, target, definition)
+}
+
+fn assert_draw_replacement_carriers(
+    state: &GameState,
+    source: ObjectId,
+    target: ObjectId,
+    expected: &AbilityDefinition,
+) {
+    let object = &state.objects[&source];
+    assert_eq!(object.abilities.len(), 1);
+    assert_eq!(object.base_abilities, object.abilities);
+    assert_eq!(object.abilities[0].kind, AbilityKind::Activated);
+    assert_eq!(object.incarnation, 3);
+    assert_eq!(state.objects[&target].incarnation, 7);
+    let Effect::CreateDrawReplacement { replacement_effect } = &*object.abilities[0].effect else {
+        panic!("object must carry the replacement")
+    };
+    assert_eq!(&**replacement_effect, expected);
+    assert_eq!(state.stack.len(), 1);
+    for entry in [
+        state.stack.front().unwrap(),
+        state
+            .resolving_stack_entry
+            .as_ref()
+            .expect("resolving carrier survives"),
+    ] {
+        let ability = entry.ability().expect("populated resolved carrier");
+        assert_eq!(entry.source_id, source);
+        assert_eq!(ability.source_id, source);
+        assert_eq!(ability.controller, P0);
+        assert_eq!(ability.source_incarnation, Some(3));
+        assert_eq!(
+            ability.targets,
+            vec![TargetRef::Object(target), TargetRef::Player(P1)]
+        );
+        assert_eq!(
+            ability.target_incarnations,
+            vec![ObjectIncarnationRef::of(target, 7)]
+        );
+        assert_eq!(
+            ability.selected_target_incarnations,
+            vec![ObjectIncarnationRef::of(target, 7)]
+        );
+        let Effect::CreateDrawReplacement { replacement_effect } = &ability.effect else {
+            panic!("resolved carrier must reach the replacement")
+        };
+        assert_eq!(&**replacement_effect, expected);
+        assert_eq!(replacement_effect.kind, AbilityKind::Spell);
+        assert!(matches!(
+            *replacement_effect.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn draw_replacements_restore_through_populated_raw_trusted_and_resolution_ingresses() {
+    let (state, source, target, current) = state_with_draw_replacement();
+    assert_draw_replacement_carriers(&state, source, target, &current);
+    // Absolute guards on the nondefault modern metadata before any roundtrip.
+    assert_eq!(current.player_scope, Some(PlayerFilter::Opponent));
+    assert_eq!(current.condition, Some(AbilityCondition::IsYourTurn));
+    assert!(current.optional);
+    assert_eq!(current.target_choice_timing, TargetChoiceTiming::Resolution);
+    assert_eq!(
+        current.target_constraints,
+        vec![TargetSelectionConstraint::DifferentTargetPlayers]
+    );
+    assert_eq!(
+        current.sub_ability.as_ref().unwrap().player_scope,
+        Some(PlayerFilter::All)
+    );
+    assert!(current.else_ability.is_some());
+    assert_eq!(current.modal.as_ref().unwrap().mode_count, 1);
+    assert_eq!(current.mode_abilities.len(), 1);
+
+    for legacy in [false, true] {
+        let expected = if legacy {
+            worship_definition()
+        } else {
+            current.clone()
+        };
+        let carriers = [
+            ("bare", serde_json::to_value(&state).unwrap()),
+            (
+                "raw",
+                serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone()))).unwrap(),
+            ),
+            (
+                "trusted",
+                serde_json::to_value(PersistedGameState::capture(state.clone())).unwrap(),
+            ),
+            (
+                "resolution",
+                serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap(),
+            ),
+        ];
+        for (carrier, mut value) in carriers {
+            let raw = if carrier == "trusted" {
+                &mut value["state"]
+            } else {
+                &mut value
+            };
+            let paths = [
+                format!(
+                    "/objects/{}/abilities/0/effect/replacement_effect",
+                    source.0
+                ),
+                format!(
+                    "/objects/{}/base_abilities/0/effect/replacement_effect",
+                    source.0
+                ),
+                "/stack/0/kind/data/ability/effect/replacement_effect".to_string(),
+                "/resolving_stack_entry/kind/data/ability/effect/replacement_effect".to_string(),
+            ];
+            for path in &paths {
+                let field = raw
+                    .pointer_mut(path)
+                    .expect("the populated carrier reaches the changed field");
+                assert_eq!(*field, serde_json::to_value(&current).unwrap());
+                if legacy {
+                    // Exact legacy Worship witness; replace only the changed field.
+                    *field = serde_json::json!({"type": "GainLife", "amount": {"type": "Fixed", "value": 5}});
+                }
+            }
+            let restored = match carrier {
+                "bare" => serde_json::from_value::<GameState>(value)
+                    .expect("bare state decodes the replacement"),
+                "resolution" => {
+                    let wire: ResolutionStateWire = serde_json::from_value(value)
+                        .expect("resolution wire decodes the replacement");
+                    assert_draw_replacement_carriers(wire.game_state(), source, target, &expected);
+                    wire.into_game_state()
+                }
+                "raw" | "trusted" => {
+                    let persisted: PersistedGameState = serde_json::from_value(value)
+                        .expect("persisted state decodes before rehydration");
+                    assert_eq!(
+                        matches!(&persisted, PersistedGameState::Trusted(_)),
+                        carrier == "trusted"
+                    );
+                    persisted
+                        .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+                        .expect("populated snapshot satisfies preparation")
+                        .finalize_after_rehydration(|decoded| {
+                            assert_draw_replacement_carriers(decoded, source, target, &expected);
+                            Ok(())
+                        })
+                        .expect("populated snapshot satisfies checked finalization")
+                }
+                _ => unreachable!(),
+            };
+            assert_draw_replacement_carriers(&restored, source, target, &expected);
+            let modern = serde_json::to_value(PersistedGameState::capture(restored)).unwrap();
+            for path in &paths {
+                let field = modern["state"]
+                    .pointer(path)
+                    .expect("populated fields reserialize");
+                assert_eq!(field["kind"], "Spell");
+                assert_eq!(field["effect"]["amount"]["value"], 5);
+                assert!(field.get("type").is_none());
+                assert_eq!(*field, serde_json::to_value(&expected).unwrap());
+            }
+        }
+    }
+}
 
 fn damage_ability() -> ResolvedAbility {
     ResolvedAbility::new(

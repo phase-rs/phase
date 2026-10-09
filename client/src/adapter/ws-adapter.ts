@@ -210,6 +210,10 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 119 — CreateDrawReplacement.replacement_effect carries a full AbilityDefinition
+ *      with scope and chains. Older peers cannot read the wrapper; the current
+ *      engine still reads legacy stored bare effects. Wire 101 moves with it;
+ *      lobby messages are unchanged.
  * 118 — ManaColorSpent on AbilityCondition and TriggerCondition retypes `color` from a
  *      bare ManaColor to SpentColor (ColorWord or ManaSymbol), serialized in the ability
  *      and trigger definitions of GameState. A v117 peer cannot deserialize the tagged
@@ -746,7 +750,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 118;
+export const PROTOCOL_VERSION = 119;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

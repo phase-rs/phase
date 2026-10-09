@@ -3346,6 +3346,10 @@ mod tests {
         }
     }
 
+    /// `CreateDrawReplacement.replacement_effect` carries a full `AbilityDefinition`
+    /// with scope and chains; a v118 peer cannot read that wrapper and must be
+    /// refused before it receives v119 state. Legacy bare effects remain readable
+    /// by the current engine's field decoder.
     /// `ManaColorSpent` on `AbilityCondition` and `TriggerCondition` retypes `color`
     /// to `SpentColor` (word versus symbol provenance, CR 612.2); a v117 peer cannot
     /// deserialize the tagged color, so it must be refused before it receives v118
@@ -3461,8 +3465,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_118_for_spent_color_provenance() {
-        assert_eq!(PROTOCOL_VERSION, 118);
+    fn protocol_version_is_119_for_draw_replacement_definitions() {
+        assert_eq!(PROTOCOL_VERSION, 119);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3473,7 +3477,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_118_for_spent_color_provenance` stays
+    /// `protocol_version_is_119_for_draw_replacement_definitions` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

@@ -6338,6 +6338,27 @@ where
     serde_json::from_value(raw).map_err(serde::de::Error::custom)
 }
 
+/// Reads the former bare draw-replacement effect and the current full definition.
+/// Serialization continues to emit only the full definition. The effect's `type`
+/// tag selects the legacy decoder, even when that effect has `kind`/`effect` fields.
+fn deserialize_draw_replacement_effect_compat<'de, D>(
+    d: D,
+) -> Result<Box<AbilityDefinition>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = serde_json::Value::deserialize(d)?;
+    if raw.get("type").is_some() {
+        serde_json::from_value::<Effect>(raw)
+            .map(|effect| Box::new(AbilityDefinition::new(AbilityKind::Spell, effect)))
+            .map_err(serde::de::Error::custom)
+    } else {
+        serde_json::from_value::<AbilityDefinition>(raw)
+            .map(Box::new)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 /// Controller reference for filter matching.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ControllerRef {
@@ -19316,11 +19337,20 @@ pub enum Effect {
     },
     /// CR 614.1a + CR 614.6 + CR 514.2 + CR 121.1: install a one-shot, this-turn
     /// "the next time you would draw a card this turn, [effect] instead" draw
-    /// replacement (Words of Worship/Wilding). Mirrors CreateDamageReplacement for
-    /// the Draw event class; the substitute is a heterogeneous Effect resolved via
-    /// the post-replacement continuation. RUNTIME: create_draw_replacement::resolve.
+    /// replacement (the Words cycle). Mirrors CreateDamageReplacement for the
+    /// Draw event class; the substitute is resolved via the post-replacement
+    /// continuation. RUNTIME: create_draw_replacement::resolve.
+    ///
+    /// The substitute is a full `AbilityDefinition` (mirroring
+    /// `CreateDelayedTrigger::effect`) so it carries a player iteration scope
+    /// ("each player returns…" — Words of Wind; "each opponent discards…" —
+    /// Words of Waste) and sub-ability chains. CR 115.1c + CR 602.2b: a
+    /// "target" in the substitute's head effect (Words of War's "any target")
+    /// is chosen as the creating ability is activated and carried into the
+    /// installed shield.
     CreateDrawReplacement {
-        replacement_effect: Box<Effect>,
+        #[serde(deserialize_with = "deserialize_draw_replacement_effect_compat")]
+        replacement_effect: Box<AbilityDefinition>,
     },
     /// CR 614.1a + CR 611.2 + CR 901.9c: Install a floating "if a player would
     /// planeswalk as a result of rolling the planar die, [replacement_effect]
@@ -20601,6 +20631,7 @@ pub enum NestedDefinitionEdge {
     SeparateIntoPilesUnchosen,
     RevealFromHandOnDecline,
     CreateDelayedTriggerEffect,
+    CreateDrawReplacementEffect,
     RollDieResult,
     FlipCoinWin,
     FlipCoinLose,
@@ -22744,8 +22775,11 @@ impl Effect {
             // spell ability, not in a top-level `target` field.
             | Effect::EpicCopy { .. }
             | Effect::CreateDamageReplacement { .. }
-            // CR 614.11: CreateDrawReplacement is non-targeted — "you would
-            // draw" scopes via the shield's source-player default, no slot.
+            // The resolver scopes "you would draw" with source_controller and
+            // valid_player: You, so the carrier itself names no target. A
+            // "target" in its substitute (Words of War) is surfaced by
+            // `triggers::extract_target_filter_from_effect`'s delegation to the
+            // substitute head (CR 115.1c).
             | Effect::CreateDrawReplacement { .. }
             // CR 614.1a: CreatePlaneswalkReplacement is non-targeted — "a player
             // would planeswalk" scopes via the shield's player scope, no slot.
@@ -23746,11 +23780,6 @@ impl Effect {
                     f(q);
                 }
             }
-            Effect::CreateDrawReplacement {
-                replacement_effect, ..
-            } => {
-                replacement_effect.for_each_quantity_expr(f);
-            }
             Effect::CreatePlaneswalkReplacement {
                 replacement_effect, ..
             } => {
@@ -24033,6 +24062,9 @@ impl Effect {
             | Effect::BecomeSaddled { .. }
             | Effect::SetClassLevel { .. }
             | Effect::CreateDelayedTrigger { .. }
+            // CR 614.6: the substitute is a nested `AbilityDefinition`,
+            // evaluated when the shield applies, not in this resolution.
+            | Effect::CreateDrawReplacement { .. }
             | Effect::AddTargetReplacement { .. }
             | Effect::AddRestriction { .. }
             | Effect::ReduceNextSpellCost { .. }
@@ -24191,6 +24223,12 @@ impl Effect {
             Effect::CreateDelayedTrigger { effect, .. } => {
                 f(NestedDefinitionEdge::CreateDelayedTriggerEffect, effect)
             }
+            // CR 614.6: the substitute a one-shot draw replacement performs
+            // in place of the replaced draw.
+            Effect::CreateDrawReplacement { replacement_effect } => f(
+                NestedDefinitionEdge::CreateDrawReplacementEffect,
+                replacement_effect,
+            ),
             // CR 706.3a: one payload per results-table striation.
             Effect::RollDie { results, .. } => {
                 for result in results {
@@ -24364,7 +24402,6 @@ impl Effect {
             | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
             | Effect::PreventDamage { .. }
             | Effect::CreateDamageReplacement { .. }
-            | Effect::CreateDrawReplacement { .. }
             | Effect::CreatePlaneswalkReplacement { .. }
             | Effect::LoseTheGame { .. }
             | Effect::WinTheGame { .. }
@@ -35998,6 +36035,233 @@ mod tests {
     use crate::types::game_state::{DelayedTrigger, GameState, ZoneChangeRecord};
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
+
+    fn legacy_worship_draw_replacement() -> serde_json::Value {
+        // Witnessed in integration_cards.json.gz at the original PR base.
+        serde_json::json!({
+            "type": "CreateDrawReplacement",
+            "replacement_effect": { "type": "GainLife", "amount": { "type": "Fixed", "value": 5 } }
+        })
+    }
+
+    fn worship_replacement_definition() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                player: TargetFilter::Controller,
+            },
+        )
+    }
+
+    #[test]
+    fn draw_replacement_reads_legacy_effect_and_emits_full_definition() {
+        let effect: Effect = serde_json::from_value(legacy_worship_draw_replacement())
+            .expect("legacy Worship payload must decode at the Effect boundary");
+        let Effect::CreateDrawReplacement { replacement_effect } = &effect else {
+            panic!("expected a draw replacement");
+        };
+        assert_eq!(**replacement_effect, worship_replacement_definition());
+        assert_eq!(replacement_effect.kind, AbilityKind::Spell);
+        assert_eq!(replacement_effect.player_scope, None);
+        assert!(replacement_effect.sub_ability.is_none());
+        assert!(replacement_effect.else_ability.is_none());
+        let modern = serde_json::to_value(&effect).unwrap();
+        assert_eq!(modern["replacement_effect"]["kind"], "Spell");
+        assert_eq!(modern["replacement_effect"]["effect"]["amount"]["value"], 5);
+        assert!(modern["replacement_effect"].get("type").is_none());
+        assert_eq!(serde_json::from_value::<Effect>(modern).unwrap(), effect);
+    }
+
+    #[test]
+    fn draw_replacement_preserves_current_definition_metadata() {
+        for scope in [PlayerFilter::All, PlayerFilter::Opponent] {
+            let definition = worship_replacement_definition()
+                .player_scope(scope.clone())
+                .condition(AbilityCondition::IsYourTurn)
+                .optional()
+                .optional_targeting()
+                .target_choice_timing(TargetChoiceTiming::Resolution)
+                .target_constraint(TargetSelectionConstraint::DifferentTargetPlayers)
+                .sub_ability(worship_replacement_definition().description("sub".to_string()))
+                .with_else_ability(worship_replacement_definition().description("else".to_string()))
+                .with_modal(
+                    ModalChoice {
+                        min_choices: 1,
+                        max_choices: 1,
+                        mode_count: 1,
+                        mode_descriptions: vec!["mode".to_string()],
+                        ..Default::default()
+                    },
+                    vec![worship_replacement_definition().description("mode".to_string())],
+                );
+            let effect = Effect::CreateDrawReplacement {
+                replacement_effect: Box::new(definition),
+            };
+            let decoded: Effect =
+                serde_json::from_value(serde_json::to_value(&effect).unwrap()).unwrap();
+            let Effect::CreateDrawReplacement { replacement_effect } = &decoded else {
+                panic!("expected a draw replacement");
+            };
+            assert_eq!(replacement_effect.player_scope, Some(scope));
+            assert_eq!(
+                replacement_effect.condition,
+                Some(AbilityCondition::IsYourTurn)
+            );
+            assert!(replacement_effect.optional && replacement_effect.optional_targeting);
+            assert_eq!(
+                replacement_effect.target_choice_timing,
+                TargetChoiceTiming::Resolution
+            );
+            assert_eq!(
+                replacement_effect.target_constraints,
+                vec![TargetSelectionConstraint::DifferentTargetPlayers]
+            );
+            assert_eq!(
+                replacement_effect
+                    .sub_ability
+                    .as_ref()
+                    .unwrap()
+                    .description
+                    .as_deref(),
+                Some("sub")
+            );
+            assert_eq!(
+                replacement_effect
+                    .else_ability
+                    .as_ref()
+                    .unwrap()
+                    .description
+                    .as_deref(),
+                Some("else")
+            );
+            assert_eq!(replacement_effect.modal.as_ref().unwrap().mode_count, 1);
+            assert_eq!(replacement_effect.mode_abilities.len(), 1);
+            assert_eq!(
+                replacement_effect.mode_abilities[0].description.as_deref(),
+                Some("mode")
+            );
+            assert_eq!(
+                decoded, effect,
+                "all current metadata must survive the selected decoder"
+            );
+        }
+    }
+
+    #[test]
+    fn draw_replacement_legacy_decode_recurses_through_definitions_and_tagged_effects() {
+        let mut parent = serde_json::to_value(worship_replacement_definition()).unwrap();
+        let nested =
+            serde_json::json!({"kind": "Spell", "effect": legacy_worship_draw_replacement()});
+        parent["sub_ability"] = nested.clone();
+        parent["else_ability"] = nested.clone();
+        parent["modal"] = serde_json::to_value(ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        parent["mode_abilities"] = serde_json::json!([nested]);
+        let decoded: AbilityDefinition = serde_json::from_value(parent).unwrap();
+        assert!(matches!(*decoded.effect, Effect::GainLife { .. }));
+        assert_eq!(decoded.modal.as_ref().unwrap().mode_count, 1);
+        assert_eq!(decoded.mode_abilities.len(), 1);
+        for child in [
+            decoded.sub_ability.as_deref().unwrap(),
+            decoded.else_ability.as_deref().unwrap(),
+            &decoded.mode_abilities[0],
+        ] {
+            let Effect::CreateDrawReplacement { replacement_effect } = &*child.effect else {
+                panic!("nested definition must reach the draw replacement");
+            };
+            assert_eq!(**replacement_effect, worship_replacement_definition());
+        }
+
+        // CreateDelayedTrigger has its own `effect` field; it is still a legacy Effect.
+        let mut delayed = legacy_worship_draw_replacement();
+        delayed["replacement_effect"] = serde_json::json!({
+            "type": "CreateDelayedTrigger",
+            "condition": (DelayedTriggerCondition::AtNextPhase { phase: Phase::End }),
+            "effect": { "kind": "Spell", "effect": legacy_worship_draw_replacement() }
+        });
+        let effect: Effect = serde_json::from_value(delayed).unwrap();
+        let Effect::CreateDrawReplacement { replacement_effect } = effect else {
+            panic!("expected outer replacement")
+        };
+        assert_eq!(replacement_effect.kind, AbilityKind::Spell);
+        assert_eq!(replacement_effect.player_scope, None);
+        let Effect::CreateDelayedTrigger { effect: child, .. } = *replacement_effect.effect else {
+            panic!("legacy tagged effect must select Effect decoding")
+        };
+        let Effect::CreateDrawReplacement { replacement_effect } = *child.effect else {
+            panic!("expected inner replacement")
+        };
+        assert_eq!(*replacement_effect, worship_replacement_definition());
+    }
+
+    #[test]
+    fn draw_replacement_preserves_defaults_and_propagates_selected_decoder_errors() {
+        let mut defaulted = legacy_worship_draw_replacement();
+        defaulted["replacement_effect"] = serde_json::json!({ "type": "GainLife" });
+        let decoded: Effect = serde_json::from_value(defaulted)
+            .expect("the established missing amount default remains valid");
+        let Effect::CreateDrawReplacement { replacement_effect } = decoded else {
+            panic!("expected draw replacement")
+        };
+        assert!(matches!(
+            *replacement_effect.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller
+            }
+        ));
+
+        let modern = serde_json::to_value(worship_replacement_definition()).unwrap();
+        let legacy = legacy_worship_draw_replacement()["replacement_effect"].clone();
+        let malformed = [
+            (serde_json::Value::Null, modern.clone()),
+            (serde_json::json!({"kind": "Spell"}), modern.clone()),
+            (serde_json::json!({"effect": legacy}), modern.clone()),
+            (
+                serde_json::json!({"kind": "Unknown", "effect": {"type": "GainLife"}}),
+                modern.clone(),
+            ),
+            (
+                serde_json::json!({"kind": "Spell", "effect": {"type": "Unknown"}}),
+                modern,
+            ),
+            (serde_json::json!({"type": "Unknown"}), legacy.clone()),
+            (
+                serde_json::json!({"type": "GainLife", "amount": {"type": "Fixed"}}),
+                legacy,
+            ),
+        ];
+        for (bad, good) in malformed {
+            let mut valid = legacy_worship_draw_replacement();
+            valid["replacement_effect"] = good;
+            assert!(
+                serde_json::from_value::<Effect>(valid.clone()).is_ok(),
+                "same-family positive reaches the field decoder"
+            );
+            let nested_valid = serde_json::json!({"kind": "Spell", "effect": {"type": "GainLife"}, "sub_ability": {"kind": "Spell", "effect": valid}});
+            assert!(
+                serde_json::from_value::<AbilityDefinition>(nested_valid).is_ok(),
+                "same-family positive reaches the nested field decoder"
+            );
+            let mut invalid = legacy_worship_draw_replacement();
+            invalid["replacement_effect"] = bad.clone();
+            assert!(
+                serde_json::from_value::<Effect>(invalid.clone()).is_err(),
+                "selected decoder must reject {bad}"
+            );
+            let nested = serde_json::json!({"kind": "Spell", "effect": {"type": "GainLife"}, "sub_ability": {"kind": "Spell", "effect": invalid}});
+            assert!(
+                serde_json::from_value::<AbilityDefinition>(nested).is_err(),
+                "nested malformed payload must reject its containing definition"
+            );
+        }
+    }
 
     /// CR 123.6e: unique vowels are the *different* vowels among A, E, I, O,
     /// U and Y, case-insensitively, over every text read. Each value exposes

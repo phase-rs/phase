@@ -106,6 +106,10 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  101 — game_setup and state_update carry CreateDrawReplacement's full
+ *       AbilityDefinition payload with scope and chains. A v100 peer cannot
+ *       read the wrapper, so first contact rejects the skew. Bumped with
+ *       full-game protocol 119; local legacy effects remain readable.
  *  100 — game_setup and state_update carry GameState, whose ability and trigger
  *       conditions now carry a ManaColorSpent color as SpentColor (word or symbol
  *       provenance). A v99 peer cannot deserialize the tagged color, so first
@@ -593,7 +597,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 100 as const;
+export const WIRE_PROTOCOL_VERSION = 101 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

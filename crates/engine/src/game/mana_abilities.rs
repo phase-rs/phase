@@ -6615,7 +6615,7 @@ mod tests {
             (
                 "CreateDrawReplacement",
                 Effect::CreateDrawReplacement {
-                    replacement_effect: Box::new(draw_one()),
+                    replacement_effect: Box::new(link(draw_one())),
                 },
             ),
             (
