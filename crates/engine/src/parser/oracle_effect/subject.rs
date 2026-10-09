@@ -4334,9 +4334,14 @@ pub(super) fn static_affected_for_application(application: &SubjectApplication) 
 ///   creature that attacked this turn" — Hexhaven Dueling Arena) keeps its
 ///   typed filter, so `build_target_slots` surfaces a slot chosen at
 ///   announcement and the filter's restrictions are enforced.
-/// - A context-ref `target` (anaphor markers `ParentTarget` /
-///   `TriggeringSource`) or an `inherits_parent` subject ("it becomes
-///   unprepared") keeps the established `ParentTarget` binding.
+/// - A context-ref `target` keeps its own referent, because it already names
+///   an antecedent: `TriggeringSource` for "that creature" in a triggered
+///   ability (CR 608.2k: the object the trigger condition referred to, read
+///   from the trigger event at resolution), `ParentTarget` for "the other
+///   creature". Being context refs, neither builds a target slot (CR 115.10a).
+/// - `ParentTarget` is used only for an `inherits_parent` subject with no
+///   target of its own ("it becomes unprepared" after a prior instruction's
+///   object, CR 608.2c).
 /// - An untargeted subject that is a context reference (`SelfRef` for "this
 ///   creature" — Stensian Sanguinist, `TriggeringSource`, `LastCreated`, ...)
 ///   uses the subject's own `affected` filter and names one object.
@@ -4353,10 +4358,11 @@ pub(super) fn prepared_designation_subject(
     application: &SubjectApplication,
 ) -> (TargetFilter, EffectScope) {
     match application.target.as_ref() {
-        Some(declared) if !declared.is_context_ref() => {
-            return (declared.clone(), EffectScope::Single);
-        }
-        Some(_) => return (TargetFilter::ParentTarget, EffectScope::Single),
+        // The subject carries its own referent: a declared selection slot (typed
+        // filter), or a context ref that already names an antecedent
+        // (`TriggeringSource` for "that creature" in a trigger, `ParentTarget`
+        // for "the other creature"). Keep it verbatim.
+        Some(target) => return (target.clone(), EffectScope::Single),
         None if application.inherits_parent => {
             return (TargetFilter::ParentTarget, EffectScope::Single);
         }

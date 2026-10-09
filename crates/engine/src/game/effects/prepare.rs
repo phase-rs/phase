@@ -92,6 +92,10 @@ fn resolve_object_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<O
 
 /// Extract object targets from `ability.targets`, or fall back to `last_created_token_ids`
 /// for `TargetFilter::LastCreated`. Mirrors the pattern used by `suspect::resolve`.
+///
+/// A pure event-context reference (`TriggeringSource` for "that creature" /
+/// "it" in a triggered ability, ...) resolves from the trigger event(s), live,
+/// and only to a phased-in battlefield permanent.
 fn resolve_single_object_targets(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -110,6 +114,27 @@ fn resolve_single_object_targets(
     {
         return vec![ability.source_id];
     }
+    // CR 608.2k + CR 603.2: "that creature" / "it" in a triggered ability's effect
+    // names the object the trigger condition referred to, not a declared target.
+    // Pure event-context refs resolve from the published trigger event(s): never
+    // from `ability.targets` and never from `source_id`. With no published event
+    // the result is empty. The only other referent is the shared Aura/Equipment
+    // attached-host rule of the `TriggeringSource` arm (CR 301.5a + CR 303.4b),
+    // which applies only when a published event names no object.
+    if crate::game::targeting::is_pure_event_context_filter(filter) {
+        return crate::game::targeting::resolve_event_context_targets(
+            state,
+            filter,
+            ability.source_id,
+        )
+        .into_iter()
+        .filter_map(|target| match target {
+            TargetRef::Object(id) => Some(id),
+            TargetRef::Player(_) => None,
+        })
+        .filter(|&id| is_phased_in_battlefield_permanent(state, id))
+        .collect();
+    }
     ability
         .targets
         .iter()
@@ -118,6 +143,18 @@ fn resolve_single_object_targets(
             _ => None,
         })
         .collect()
+}
+
+/// CR 722.3a + CR 110.1 + CR 702.26b: only a phased-in permanent on the
+/// battlefield can gain or lose the prepared designation. An event referent
+/// (CR 608.2k) can have left the battlefield (CR 400.7: it is then a new
+/// object) or phased out before the trigger resolves; neither is a permanent
+/// that can be affected.
+fn is_phased_in_battlefield_permanent(state: &GameState, id: ObjectId) -> bool {
+    state
+        .objects
+        .get(&id)
+        .is_some_and(|obj| obj.zone == Zone::Battlefield && obj.is_phased_in())
 }
 
 /// Returns true if the given permanent has a printed `CardLayout::Prepare(_, _)`
@@ -2277,6 +2314,265 @@ mod tests {
             let back: Effect = serde_json::from_value(json).unwrap();
             assert_eq!(back, effect);
         }
+    }
+
+    // ---- Event referent: "that creature" / "it" in a triggered ability ----
+    //
+    // CR 608.2k + CR 603.2: the subject is the object the trigger condition
+    // referred to, read from the published trigger event at resolution. The
+    // event is `PermanentUntapped`, whose only field is the object the event
+    // names (`extract_source_from_event`).
+
+    /// `BecomePrepared` / `BecomeUnprepared` naming the trigger event's object.
+    fn event_referent_prepare() -> Effect {
+        Effect::BecomePrepared {
+            target: TargetFilter::TriggeringSource,
+            scope: EffectScope::Single,
+        }
+    }
+
+    fn event_referent_unprepare() -> Effect {
+        Effect::BecomeUnprepared {
+            target: TargetFilter::TriggeringSource,
+            scope: EffectScope::Single,
+        }
+    }
+
+    /// Publish a single-object trigger event naming `object_id`, as
+    /// `stack.rs` does while the trigger resolves.
+    fn publish_event_naming(state: &mut GameState, object_id: ObjectId) {
+        state.current_trigger_event = Some(GameEvent::PermanentUntapped { object_id });
+        state.current_trigger_events.clear();
+    }
+
+    fn clear_published_events(state: &mut GameState) {
+        state.current_trigger_event = None;
+        state.current_trigger_events.clear();
+    }
+
+    /// CR 608.2k + CR 722.3a: the event's object becomes prepared; the ability's
+    /// eligible source does not.
+    #[test]
+    fn become_prepared_event_referent_prepares_the_event_object() {
+        let mut state = GameState::new_two_player(42);
+        let source = add_prepare_creature(&mut state, PlayerId(0), "Watcher", true);
+        let entering = add_prepare_creature(&mut state, PlayerId(0), "Entering", true);
+        publish_event_naming(&mut state, entering);
+        let ability = ResolvedAbility::new(event_referent_prepare(), vec![], source, PlayerId(0));
+
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(became_prepared(&events), vec![entering]);
+        assert!(state.objects[&entering].prepared.is_some());
+        assert!(
+            state.objects[&source].prepared.is_none(),
+            "the trigger's source is not the event referent"
+        );
+    }
+
+    /// CR 608.2c + CR 608.2k: an unrelated object target inherited through a
+    /// chain does not displace the event referent.
+    #[test]
+    fn become_prepared_event_referent_beats_inherited_chain_targets() {
+        let mut state = GameState::new_two_player(42);
+        let source = add_prepare_creature(&mut state, PlayerId(0), "Watcher", false);
+        let entering = add_prepare_creature(&mut state, PlayerId(0), "Entering", true);
+        let decoy = add_prepare_creature(&mut state, PlayerId(0), "Decoy", true);
+        publish_event_naming(&mut state, entering);
+        let ability = ResolvedAbility::new(
+            event_referent_prepare(),
+            vec![TargetRef::Object(decoy)],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(became_prepared(&events), vec![entering]);
+        assert!(state.objects[&entering].prepared.is_some());
+        assert!(
+            state.objects[&decoy].prepared.is_none(),
+            "a chain target is not the event referent"
+        );
+    }
+
+    /// With no published trigger event there is no referent: neither the
+    /// chain's object target nor the source is a substitute. Paired: with the
+    /// event published, the same shape prepares the event's object.
+    #[test]
+    fn become_prepared_event_referent_without_a_published_event_fails_closed() {
+        let mut state = GameState::new_two_player(42);
+        let source = add_prepare_creature(&mut state, PlayerId(0), "Watcher", true);
+        let entering = add_prepare_creature(&mut state, PlayerId(0), "Entering", true);
+        let decoy = add_prepare_creature(&mut state, PlayerId(0), "Decoy", true);
+
+        // Reach guard: the branch resolves the event's object when one is published.
+        publish_event_naming(&mut state, entering);
+        let ability = ResolvedAbility::new(event_referent_prepare(), vec![], source, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(became_prepared(&events), vec![entering]);
+
+        clear_published_events(&mut state);
+        let ability = ResolvedAbility::new(
+            event_referent_prepare(),
+            vec![TargetRef::Object(decoy)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+        assert!(became_prepared(&events).is_empty(), "{events:?}");
+        assert!(state.objects[&decoy].prepared.is_none());
+        assert!(state.objects[&source].prepared.is_none());
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::BecomePrepared,
+                ..
+            }
+        )));
+    }
+
+    /// CR 722.3a + CR 110.1 + CR 400.7: an event referent that has left the
+    /// battlefield is not a permanent and cannot become prepared, even with a
+    /// prepare face. Paired: an event referent on the battlefield does.
+    #[test]
+    fn become_prepared_event_referent_skips_an_object_that_left_the_battlefield() {
+        let mut state = GameState::new_two_player(42);
+        let source = add_prepare_creature(&mut state, PlayerId(0), "Watcher", false);
+        let entering = add_prepare_creature(&mut state, PlayerId(0), "Entering", true);
+        let departed = add_prepare_creature(&mut state, PlayerId(0), "Departed", true);
+
+        publish_event_naming(&mut state, entering);
+        let ability = ResolvedAbility::new(event_referent_prepare(), vec![], source, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(became_prepared(&events), vec![entering], "reach guard");
+
+        crate::game::zones::move_to_zone(&mut state, departed, Zone::Graveyard, &mut Vec::new());
+        let obj = state.objects.get_mut(&departed).unwrap();
+        assert_eq!(obj.zone, Zone::Graveyard, "fixture reach guard");
+        // Keep it otherwise eligible so only the battlefield gate can skip it.
+        obj.back_face = Some(BackFaceForTest::prepare());
+        publish_event_naming(&mut state, departed);
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+        assert!(became_prepared(&events).is_empty(), "{events:?}");
+        assert!(state.objects[&departed].prepared.is_none());
+    }
+
+    /// CR 702.26b: a phased-out event referent is treated as though it does not
+    /// exist. Paired: once phased in, it becomes prepared.
+    #[test]
+    fn become_prepared_event_referent_skips_a_phased_out_object() {
+        use crate::game::game_object::PhaseOutCause;
+        let mut state = GameState::new_two_player(42);
+        let source = add_prepare_creature(&mut state, PlayerId(0), "Watcher", false);
+        let entering = add_prepare_creature(&mut state, PlayerId(0), "Entering", true);
+        state.objects.get_mut(&entering).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+        publish_event_naming(&mut state, entering);
+        let ability = ResolvedAbility::new(event_referent_prepare(), vec![], source, PlayerId(0));
+
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+        assert!(became_prepared(&events).is_empty(), "{events:?}");
+        assert!(state.objects[&entering].prepared.is_none());
+
+        state.objects.get_mut(&entering).unwrap().phase_status = PhaseStatus::PhasedIn;
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(
+            became_prepared(&events),
+            vec![entering],
+            "phased in, it is reached"
+        );
+    }
+
+    /// CR 722.3a: an event referent without a prepare spell is skipped. Paired:
+    /// an eligible event referent in the same state becomes prepared.
+    #[test]
+    fn become_prepared_event_referent_without_a_prepare_face_is_skipped() {
+        let mut state = GameState::new_two_player(42);
+        let source = add_prepare_creature(&mut state, PlayerId(0), "Watcher", true);
+        let eligible = add_prepare_creature(&mut state, PlayerId(0), "Eligible", true);
+        let faceless = add_prepare_creature(&mut state, PlayerId(0), "Faceless", false);
+        let ability = ResolvedAbility::new(event_referent_prepare(), vec![], source, PlayerId(0));
+
+        publish_event_naming(&mut state, eligible);
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(became_prepared(&events), vec![eligible], "reach guard");
+
+        publish_event_naming(&mut state, faceless);
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+        assert!(became_prepared(&events).is_empty(), "{events:?}");
+        assert!(state.objects[&faceless].prepared.is_none());
+        assert!(state.objects[&source].prepared.is_none());
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::BecomePrepared,
+                ..
+            }
+        )));
+    }
+
+    /// CR 115.10a: the event referent is affected, not targeted, so no target
+    /// slot is built. Paired: a typed filter under the same scope builds one.
+    #[test]
+    fn become_prepared_event_referent_claims_no_target_slot() {
+        let mut state = GameState::new_two_player(42);
+        let source = add_prepare_creature(&mut state, PlayerId(0), "Watcher", false);
+        add_prepare_creature(&mut state, PlayerId(0), "A", true);
+
+        for effect in [event_referent_prepare(), event_referent_unprepare()] {
+            assert_eq!(
+                effect.target_filter(),
+                Some(&TargetFilter::TriggeringSource)
+            );
+            assert!(crate::game::triggers::extract_target_filter_from_effect(&effect).is_none());
+            let slots = build_target_slots(
+                &state,
+                &ResolvedAbility::new(effect.clone(), vec![], source, PlayerId(0)),
+            )
+            .unwrap();
+            assert!(slots.is_empty(), "{effect:?} must build no target slot");
+        }
+
+        let typed = mass_prepare(EffectScope::Single);
+        assert_eq!(
+            crate::game::triggers::extract_target_filter_from_effect(&typed),
+            Some(&creatures_you_control())
+        );
+    }
+
+    /// CR 722.3b + CR 608.2k: only the event's object loses the designation.
+    #[test]
+    fn become_unprepared_event_referent_unprepares_only_the_event_object() {
+        let mut state = GameState::new_two_player(42);
+        let source = add_prepare_creature(&mut state, PlayerId(0), "Watcher", true);
+        let event_obj = add_prepare_creature(&mut state, PlayerId(0), "Attacker", true);
+        let bystander = add_prepare_creature(&mut state, PlayerId(0), "Bystander", true);
+        for id in [source, event_obj, bystander] {
+            prepare_object(&mut state, id, &mut Vec::new());
+            assert!(state.objects[&id].prepared.is_some(), "precondition");
+        }
+        publish_event_naming(&mut state, event_obj);
+        let ability = ResolvedAbility::new(event_referent_unprepare(), vec![], source, PlayerId(0));
+
+        let mut events = Vec::new();
+        resolve_become_unprepared(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(became_unprepared(&events), vec![event_obj]);
+        assert!(state.objects[&event_obj].prepared.is_none());
+        assert!(state.objects[&bystander].prepared.is_some());
+        assert!(state.objects[&source].prepared.is_some());
     }
 
     /// Helper to build a minimal back-face with `layout_kind == Prepare` so

@@ -23,14 +23,25 @@
 //! Revert-fail: with the parser arm reverted, no target prompt appears
 //! (`announce_activation` / `drive_tomekeeper_etb` prompt assertions fail) and
 //! the chosen creature's `prepared` state never changes.
+//!
+//! Event referent section: in a triggered ability, "that creature" / "it
+//! becomes (un)prepared" names the object the trigger condition referred to
+//! (CR 608.2k + CR 603.2; CR 603.6a for "Whenever a [type] enters"). It is
+//! affected, not targeted (CR 115.10a), and is read from the trigger event at
+//! resolution. The watcher texts there are building-block fixtures, not
+//! printed cards: no printed card has this shape today. Regression mechanism:
+//! the parser rebound "that creature" to `ParentTarget`, which the resolver
+//! read as the trigger's own source; the resolver had no event-referent route,
+//! so even the bare "it" form prepared nothing.
 
+use engine::game::combat::AttackTarget;
 use engine::game::effects::prepare::prepare_object;
 use engine::game::game_object::BackFaceData;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::{parse_oracle_text, ParsedAbilities};
 use engine::types::ability::{
-    AbilityDefinition, ActivationRestriction, Effect, EffectKind, FilterProp, TargetFilter,
-    TargetRef, TypeFilter,
+    AbilityDefinition, ActivationRestriction, Effect, EffectKind, EffectScope, FilterProp,
+    TargetFilter, TargetRef, TypeFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card::LayoutKind;
@@ -765,4 +776,400 @@ fn tomekeeper_choosing_no_mode_changes_nothing() {
     assert!(!is_prepared(&runner, tomekeeper));
     assert!(!is_prepared(&runner, eligible));
     assert!(!any_became_prepared(&events));
+}
+
+// ---------------------------------------------------------------------------
+// Event referent: "that creature" / "it" in a triggered ability
+// ---------------------------------------------------------------------------
+//
+// Building-block fixtures (not printed cards; no printed card has this shape).
+
+const ETB_THAT_CREATURE: &str =
+    "Whenever another creature you control enters, that creature becomes prepared.";
+
+const ETB_IT: &str = "Whenever another creature you control enters, it becomes prepared.";
+
+const ATTACK_THAT_CREATURE_UNPREPARE: &str =
+    "Whenever a creature you control attacks, that creature becomes unprepared.";
+
+/// A trigger event the stack does not pre-seed as a parent target (only
+/// zone-change, attack-batch, station/crew/saddle and mill events are), so the
+/// subject's own referent is the only route to the tapped creature.
+const TAPPED_THAT_CREATURE: &str =
+    "Whenever a creature you control becomes tapped, that creature becomes prepared.";
+
+const ETB_DECLARED_TARGET_THEN_THAT_CREATURE: &str ="Whenever another creature you control enters, target creature you control gets +1/+1 until end of turn. That creature becomes prepared.";
+
+/// Infinite Coursework (verbatim Oracle text, as in `oracle_tests.rs`).
+const INFINITE_COURSEWORK: &str = "Enchant creature\nWhen this Aura enters, tap enchanted creature. It becomes unprepared.\nEnchanted creature loses all abilities and doesn't untap during its controller's untap step.";
+
+fn collect_prepare_effects(def: &AbilityDefinition, out: &mut Vec<Effect>) {
+    if matches!(
+        def.effect.as_ref(),
+        Effect::BecomePrepared { .. } | Effect::BecomeUnprepared { .. }
+    ) {
+        out.push(def.effect.as_ref().clone());
+    }
+    for nested in def
+        .sub_ability
+        .iter()
+        .chain(def.else_ability.iter())
+        .map(|b| b.as_ref())
+        .chain(def.mode_abilities.iter())
+    {
+        collect_prepare_effects(nested, out);
+    }
+}
+
+/// Every (un)prepare effect in the card's trigger chains, in order.
+fn trigger_prepare_effects(parsed: &ParsedAbilities) -> Vec<Effect> {
+    let mut out = Vec::new();
+    for trigger in &parsed.triggers {
+        if let Some(execute) = trigger.execute.as_deref() {
+            collect_prepare_effects(execute, &mut out);
+        }
+    }
+    out
+}
+
+fn event_referent(prepare: bool) -> Effect {
+    let (target, scope) = (TargetFilter::TriggeringSource, EffectScope::Single);
+    if prepare {
+        Effect::BecomePrepared { target, scope }
+    } else {
+        Effect::BecomeUnprepared { target, scope }
+    }
+}
+
+/// Pass priority until the stack is empty, accumulating every emitted event.
+/// Any prompt other than Priority (e.g. a target prompt) is a failure: the
+/// event referent is affected, not targeted (CR 115.10a).
+fn pass_until_stack_empty(runner: &mut GameRunner, events: &mut Vec<GameEvent>) {
+    for _ in 0..64 {
+        match runner.state().waiting_for {
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                let result = runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing priority must be accepted");
+                events.extend(result.events);
+            }
+            WaitingFor::Priority { .. } => return,
+            _ => panic!(
+                "unexpected WaitingFor while resolving the trigger: {}",
+                runner.waiting_for_kind()
+            ),
+        }
+    }
+    panic!("the trigger did not resolve within the step budget");
+}
+
+/// SHAPE: "that creature" and "it" in a trigger both lower to the event
+/// referent (`TriggeringSource`), for prepare and unprepare alike.
+#[test]
+fn become_prepared_event_referent_parses_to_triggering_source() {
+    for (text, name, prepare) in [
+        (ETB_THAT_CREATURE, "That-Creature Watcher", true),
+        (ETB_IT, "It Watcher", true),
+        (ATTACK_THAT_CREATURE_UNPREPARE, "Attack Watcher", false),
+        (TAPPED_THAT_CREATURE, "Tapped Watcher", true),
+    ] {
+        let parsed = parse_card(text, name, &["Creature"]);
+        assert_eq!(parsed.triggers.len(), 1, "{name}: one trigger");
+        assert_eq!(
+            trigger_prepare_effects(&parsed),
+            vec![event_referent(prepare)],
+            "{name}: the subject is the trigger event's object"
+        );
+    }
+}
+
+/// SHAPE (regression guard): an `inherits_parent` subject with no target of
+/// its own keeps `ParentTarget` (Infinite Coursework's "It becomes
+/// unprepared.").
+#[test]
+fn become_prepared_event_referent_leaves_inherited_parent_target() {
+    let parsed = parse_oracle_text(
+        INFINITE_COURSEWORK,
+        "Infinite Coursework",
+        &[],
+        &["Enchantment".to_string()],
+        &["Aura".to_string()],
+    );
+    assert_eq!(
+        trigger_prepare_effects(&parsed),
+        vec![Effect::BecomeUnprepared {
+            target: TargetFilter::ParentTarget,
+            scope: EffectScope::Single,
+        }]
+    );
+}
+
+/// Cast a creature under a watcher whose ETB trigger prepares the event
+/// referent. Watcher and bystander are eligible too (hostile fixture), so a
+/// subject bound to the source or to any other creature is observable.
+fn assert_event_referent_prepares_entering_creature(watcher_text: &str) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let watcher = scenario
+        .add_creature_from_oracle(P0, "Prepared Watcher", 2, 2, watcher_text)
+        .id();
+    let bystander = scenario.add_creature(P0, "Bystander Scholar", 2, 2).id();
+    let entering = scenario
+        .add_creature_to_hand(P0, "Entering Scholar", 2, 2)
+        .id();
+    let mut runner = scenario.build();
+    for id in [watcher, bystander, entering] {
+        give_prepare_face(&mut runner, id);
+        assert!(
+            !is_prepared(&runner, id),
+            "precondition: nothing is prepared"
+        );
+    }
+
+    let outcome = runner.cast(entering).resolve();
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(
+        is_prepared(&runner, entering),
+        "the entering creature (the event referent) must become prepared"
+    );
+    assert!(became_prepared(outcome.events(), entering));
+    assert!(
+        !is_prepared(&runner, watcher),
+        "the trigger's source is not the event referent"
+    );
+    assert!(!is_prepared(&runner, bystander));
+}
+
+/// CR 608.2k + CR 603.6a + CR 722.3a: "that creature" is the creature that
+/// entered.
+///
+/// DISCRIMINATION: with the parser arm reverted, the subject is `ParentTarget`
+/// and the watcher is prepared instead (negative flips); with the resolver
+/// branch reverted, nothing is prepared (positive flips).
+#[test]
+fn become_prepared_event_referent_that_creature_prepares_entering_creature() {
+    assert_event_referent_prepares_entering_creature(ETB_THAT_CREATURE);
+}
+
+/// CR 608.2k + CR 603.6a + CR 722.3a: the bare pronoun "it" names the same
+/// object.
+///
+/// DISCRIMINATION: this text already parsed to `TriggeringSource`; with the
+/// resolver branch reverted, nothing is prepared (positive flips).
+#[test]
+fn become_prepared_event_referent_it_prepares_entering_creature() {
+    assert_event_referent_prepares_entering_creature(ETB_IT);
+}
+
+/// CR 722.3a: an entering creature without a prepare spell is skipped. Paired
+/// in the same game: an eligible creature entering under the same watcher
+/// becomes prepared.
+#[test]
+fn become_prepared_event_referent_ineligible_entering_creature_is_skipped() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let watcher = scenario
+        .add_creature_from_oracle(P0, "Prepared Watcher", 2, 2, ETB_THAT_CREATURE)
+        .id();
+    let eligible = scenario
+        .add_creature_to_hand(P0, "Eligible Scholar", 2, 2)
+        .id();
+    let faceless = scenario.add_creature_to_hand(P0, "Plain Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    for id in [watcher, eligible] {
+        give_prepare_face(&mut runner, id);
+    }
+
+    let first = runner.cast(eligible).resolve();
+    assert!(
+        became_prepared(first.events(), eligible),
+        "positive: the eligible entering creature becomes prepared"
+    );
+    assert!(is_prepared(&runner, eligible));
+
+    let second = runner.cast(faceless).resolve();
+    assert!(
+        effect_resolved(second.events(), EffectKind::BecomePrepared),
+        "reach guard: the trigger fired and the prepare effect resolved"
+    );
+    assert!(!any_became_prepared(second.events()));
+    assert!(!is_prepared(&runner, faceless));
+    assert!(!is_prepared(&runner, watcher));
+}
+
+/// CR 722.3b + CR 608.2k + CR 508.1m: "that creature" in an attack trigger is
+/// the attacking creature; only it loses the designation.
+///
+/// DISCRIMINATION: with the parser arm reverted, the watcher (the source) is
+/// unprepared and the attacker stays prepared; with the resolver branch
+/// reverted, nothing is unprepared.
+#[test]
+fn become_unprepared_event_referent_attacker_loses_designation() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let watcher = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Unprepared Watcher",
+            2,
+            2,
+            ATTACK_THAT_CREATURE_UNPREPARE,
+        )
+        .id();
+    let attacker = scenario.add_creature(P0, "Attacking Scholar", 2, 2).id();
+    let bystander = scenario.add_creature(P0, "Bystander Scholar", 2, 2).id();
+    let mut runner = scenario.build();
+    for id in [watcher, attacker, bystander] {
+        give_prepare_face(&mut runner, id);
+        pre_prepare(&mut runner, id);
+    }
+
+    runner.pass_both_players();
+    let mut events = runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers must be accepted")
+        .events;
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the event referent is not a target, so no target prompt; got {}",
+        runner.waiting_for_kind()
+    );
+    assert!(
+        !runner.state().stack.is_empty(),
+        "reach guard: the attack trigger is on the stack"
+    );
+    pass_until_stack_empty(&mut runner, &mut events);
+
+    assert!(
+        became_unprepared(&events, attacker),
+        "the attacking creature (the event referent) must become unprepared"
+    );
+    assert!(!is_prepared(&runner, attacker));
+    assert!(
+        is_prepared(&runner, watcher),
+        "the trigger's source is not the event referent"
+    );
+    assert!(is_prepared(&runner, bystander));
+}
+
+/// CR 608.2k + CR 603.2 + CR 722.3a: "that creature" in a "becomes tapped"
+/// trigger is the creature that became tapped (here by attacking), not the
+/// trigger's source.
+///
+/// DISCRIMINATION: with the parser arm reverted, the subject is `ParentTarget`,
+/// which nothing binds for this event, so the resolver prepares the watcher
+/// (the source) instead; with the resolver branch reverted, nothing is
+/// prepared.
+#[test]
+fn become_prepared_event_referent_unseeded_event_prepares_the_tapped_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let watcher = scenario
+        .add_creature_from_oracle(P0, "Tapped Watcher", 2, 2, TAPPED_THAT_CREATURE)
+        .id();
+    let attacker = scenario.add_creature(P0, "Attacking Scholar", 2, 2).id();
+    let bystander = scenario.add_creature(P0, "Bystander Scholar", 2, 2).id();
+    let mut runner = scenario.build();
+    for id in [watcher, attacker, bystander] {
+        give_prepare_face(&mut runner, id);
+        assert!(
+            !is_prepared(&runner, id),
+            "precondition: nothing is prepared"
+        );
+    }
+
+    runner.pass_both_players();
+    let mut events = runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers must be accepted")
+        .events;
+    assert!(
+        runner.state().objects[&attacker].tapped,
+        "reach guard: attacking tapped the creature"
+    );
+    pass_until_stack_empty(&mut runner, &mut events);
+
+    assert!(
+        effect_resolved(&events, EffectKind::BecomePrepared),
+        "reach guard: the tap trigger fired and its prepare effect resolved"
+    );
+    assert!(
+        is_prepared(&runner, attacker),
+        "the tapped creature (the event referent) must become prepared \
+         (watcher prepared: {})",
+        is_prepared(&runner, watcher)
+    );
+    assert!(became_prepared(&events, attacker));
+    assert!(
+        !is_prepared(&runner, watcher),
+        "the trigger's source is not the event referent"
+    );
+    assert!(!is_prepared(&runner, bystander));
+}
+
+/// CR 608.2c + CR 115.1d: when the chain declared a matching target, "That
+/// creature" names that declared target, not the trigger's event object.
+/// Hostile guard for the `inherits_parent` arm (unchanged by the event-referent
+/// fix): the chosen creature becomes prepared, the entering creature does not.
+#[test]
+fn become_prepared_event_referent_yields_to_a_declared_target() {
+    let parsed = parse_card(
+        ETB_DECLARED_TARGET_THEN_THAT_CREATURE,
+        "Declared Watcher",
+        &["Creature"],
+    );
+    assert_eq!(
+        trigger_prepare_effects(&parsed),
+        vec![Effect::BecomePrepared {
+            target: TargetFilter::ParentTarget,
+            scope: EffectScope::Single,
+        }],
+        "\"That creature\" after a declared target binds the declared target"
+    );
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let watcher = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Declared Watcher",
+            2,
+            2,
+            ETB_DECLARED_TARGET_THEN_THAT_CREATURE,
+        )
+        .id();
+    let chosen = scenario.add_creature(P0, "Chosen Scholar", 2, 2).id();
+    let entering = scenario
+        .add_creature_to_hand(P0, "Entering Scholar", 2, 2)
+        .id();
+    let mut runner = scenario.build();
+    for id in [watcher, chosen, entering] {
+        give_prepare_face(&mut runner, id);
+    }
+
+    let outcome = runner.cast(entering).target_object(chosen).resolve();
+
+    assert_eq!(
+        runner.state().objects[&chosen].power,
+        Some(3),
+        "reach guard: the trigger's declared target got +1/+1"
+    );
+    assert!(
+        is_prepared(&runner, chosen),
+        "\"That creature\" is the declared target"
+    );
+    assert!(became_prepared(outcome.events(), chosen));
+    assert!(!is_prepared(&runner, entering));
+    assert!(!is_prepared(&runner, watcher));
 }
