@@ -14,7 +14,8 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::move_to_zone;
 use engine::types::ability::{
     AbilityCondition, Comparator, ControllerRef, Effect, FilterProp, ObjectScope, PtValue,
-    QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TypeFilter, TypedFilter,
+    QuantityExpr, QuantityRef, ResolvedAbility, SubAbilityLink, TargetFilter, TargetRef,
+    TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
@@ -24,6 +25,7 @@ use engine::types::game_state::{
     StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
     StackResolutionSession, WaitingFor,
 };
+use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -665,6 +667,169 @@ fn root_repeat_for_refuses_the_run() {
         (2, 0),
         "reach guard: members 2 and 3 create 0/0 Germs that die"
     );
+    assert_eq!(bulk.counters.bulk_entries, 0);
+}
+
+/// P1's 0/2 Wall beside the run's sources.
+fn opponent_wall(scenario: &mut GameScenario) {
+    scenario
+        .add_creature(P1, "Wall", 0, 2)
+        .with_subtypes(vec!["Wall"]);
+}
+
+fn wall_on_battlefield(state: &GameState) -> ObjectId {
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .find(|id| state.objects[id].name == "Wall")
+        .expect("reach guard: the Wall is on the battlefield")
+}
+
+/// "If you control five or more artifacts": never met on these boards, and the
+/// artifacts it counts are disjoint from the creature tokens the run creates,
+/// so every member takes the base branch (CR 608.2c).
+fn you_control_five_or_more_artifacts() -> AbilityCondition {
+    AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Artifact)
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::InZone {
+                            zone: Zone::Battlefield,
+                        }]),
+                ),
+            },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 5 },
+    }
+}
+
+/// The next printed instruction after the "instead" sentence: "This deals 1
+/// damage to each Wall."
+fn one_damage_to_each_wall(ability: &ResolvedAbility) -> ResolvedAbility {
+    let mut tail = ResolvedAbility::new(
+        Effect::DamageAll {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Typed(TypedFilter::creature().subtype("Wall".to_string())),
+            player_filter: None,
+            damage_source: None,
+        },
+        vec![],
+        ability.source_id,
+        ability.controller,
+    );
+    tail.sub_link = SubAbilityLink::SequentialSibling;
+    tail
+}
+
+/// Give each stacked trigger "If you control five or more artifacts, create a
+/// 0/0 Germ instead." with `attach` placing the Wall-damage instruction on
+/// that override sub.
+fn unmet_instead_with_wall_damage(
+    s0: &mut GameState,
+    attach: impl Fn(&mut ResolvedAbility, ResolvedAbility),
+) {
+    edit_stacked_abilities(s0, |ability| {
+        let mut swapped = ability.effect.clone();
+        germ(&mut swapped);
+        let mut sub = ResolvedAbility::new(swapped, vec![], ability.source_id, ability.controller)
+            .condition(AbilityCondition::ConditionInstead {
+                inner: Box::new(you_control_five_or_more_artifacts()),
+            });
+        attach(&mut sub, one_damage_to_each_wall(ability));
+        ability.sub_ability = Some(Box::new(sub));
+    });
+}
+
+fn damage_dealt_to(events: &[GameEvent], object: ObjectId) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(event, GameEvent::DamageDealt { target: TargetRef::Object(id), .. } if *id == object)
+        })
+        .count()
+}
+
+/// Reach guard for the Wall-damage rows: in the sequential reference the
+/// Wall takes lethal damage from member 2 and dies at member 2's checkpoint
+/// (CR 704.5g, CR 704.3), so member 3's instruction deals it nothing.
+fn assert_wall_died_at_member_two(reference: &Drive, wall: ObjectId) {
+    assert_eq!(
+        damage_dealt_to(&reference.events, wall),
+        2,
+        "reach guard: members 1 and 2 damage the Wall, member 3 finds none"
+    );
+    assert!(
+        reference.state.players[1]
+            .graveyard
+            .iter()
+            .any(|id| reference.state.objects[id].name == "Wall"),
+        "reach guard: the Wall died"
+    );
+}
+
+/// A8-TN (labelled class fixture: an unmet "instead" override followed by the
+/// independent next instruction "This deals 1 damage to each Wall."): the
+/// instruction runs after each member's base token (CR 608.2c). Member 1's
+/// checkpoint sees one damage on the Wall; member 2's would see lethal, so the
+/// run is not bulk-admitted.
+#[test]
+fn unmet_instead_tail_refuses_the_run() {
+    let mut s0 = landfall_board(0, |s| {
+        sporemounds(s, 3);
+        opponent_wall(s);
+    });
+    let wall = wall_on_battlefield(&s0);
+    unmet_instead_with_wall_damage(&mut s0, |sub, tail| sub.sub_ability = Some(Box::new(tail)));
+    let (bulk, reference) = parity("A8-TN", s0);
+    assert_eq!(tokens_named(&reference.state, "Saproling"), 3);
+    assert_wall_died_at_member_two(&reference, wall);
+    assert_eq!(bulk.counters.bulk_entries, 0);
+}
+
+/// A8-TE (labelled class fixture: as A8-TN, with the Wall damage as the
+/// override's else-chain): the else-chain runs after each member's base token
+/// (CR 608.2c), so the run is not bulk-admitted.
+#[test]
+fn unmet_instead_else_chain_refuses_the_run() {
+    let mut s0 = landfall_board(0, |s| {
+        sporemounds(s, 3);
+        opponent_wall(s);
+    });
+    let wall = wall_on_battlefield(&s0);
+    unmet_instead_with_wall_damage(&mut s0, |sub, tail| sub.else_ability = Some(Box::new(tail)));
+    let (bulk, reference) = parity("A8-TE", s0);
+    assert_eq!(tokens_named(&reference.state, "Saproling"), 3);
+    assert_wall_died_at_member_two(&reference, wall);
+    assert_eq!(bulk.counters.bulk_entries, 0);
+}
+
+/// A8-TM (labelled class fixture: Scute Swarm's met copy override followed by
+/// "This deals 1 damage to each Wall."): the swapped chain adopts the
+/// override's tail (CR 608.2c), so each member's copy is followed by the
+/// damage and the run is not bulk-admitted.
+#[test]
+fn met_copy_instead_tail_refuses_the_run() {
+    let mut s0 = landfall_board(5, |s| {
+        scutes(s, 3);
+        opponent_wall(s);
+    });
+    assert_eq!(s0.stack.len(), 3, "reach guard: three Scute triggers");
+    let wall = wall_on_battlefield(&s0);
+    edit_stacked_abilities(&mut s0, |ability| {
+        let tail = one_damage_to_each_wall(ability);
+        let sub = ability
+            .sub_ability
+            .as_mut()
+            .expect("Scute Swarm's copy override");
+        sub.sub_ability = Some(Box::new(tail));
+    });
+    let (bulk, reference) = parity("A8-TM", s0);
+    assert_eq!(tokens_named(&reference.state, "Scute Swarm"), 3);
+    assert_wall_died_at_member_two(&reference, wall);
     assert_eq!(bulk.counters.bulk_entries, 0);
 }
 

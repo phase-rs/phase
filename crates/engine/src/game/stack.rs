@@ -3625,6 +3625,44 @@ fn created_token_ids(events: &[GameEvent]) -> Vec<ObjectId> {
         .collect()
 }
 
+/// CR 111.1 + CR 614.1a: an event a bulk member's resolution may emit, without
+/// its object ids: a token's creation and battlefield entry, a replacement
+/// applied to that creation, and the completion of the token effect and of the
+/// stack object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenEntryEvent {
+    Created,
+    Entered,
+    ReplacementApplied,
+    Resolved(EffectKind),
+    StackResolved,
+}
+
+/// A member's resolution events as `TokenEntryEvent`s, in order. `None` when
+/// any event is something else (a later instruction's damage, life change or
+/// zone move), which no inert checkpoint of member 1 vetted.
+fn token_entry_events(events: &[GameEvent]) -> Option<Vec<TokenEntryEvent>> {
+    let created = created_token_ids(events);
+    events
+        .iter()
+        .map(|event| match event {
+            GameEvent::TokenCreated { .. } => Some(TokenEntryEvent::Created),
+            GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Battlefield,
+                ..
+            } if created.contains(object_id) => Some(TokenEntryEvent::Entered),
+            GameEvent::ReplacementApplied { .. } => Some(TokenEntryEvent::ReplacementApplied),
+            GameEvent::EffectResolved {
+                kind: kind @ (EffectKind::Token | EffectKind::CopyTokenOf),
+                ..
+            } => Some(TokenEntryEvent::Resolved(*kind)),
+            GameEvent::StackResolved { .. } => Some(TokenEntryEvent::StackResolved),
+            _ => None,
+        })
+        .collect()
+}
+
 /// What a reader between two bulk members can see of a produced token: its
 /// event-object snapshot (every characteristic the trigger-subject grammar
 /// interrogates) plus its functioning trigger and static definitions.
@@ -3685,9 +3723,13 @@ enum BulkMemberRun {
 /// nor world once layered (CR 704.5j, CR 704.5k), the entry perturbs no
 /// other object's layered values (`layers::entry_perturbs_layer_reads`), and
 /// no state trigger (CR 603.8), delayed trigger (CR 603.7), epic effect or
-/// exile link exists. A `ForAsLongAs` duration the elided layer flushes would
-/// retire (CR 611.2b) is not re-checked between members; every admitted member
-/// emits only the ETB pair, which no parsed duration condition reads. Members
+/// exile link exists. Member 1's checkpoint speaks for an elided one only if
+/// that member did what member 1 did: member 1 must create a token and emit
+/// nothing but its token entry (`token_entry_events`), and each of members
+/// 2..N must emit exactly member 1's token-entry events, or the whole run is
+/// refused. A `ForAsLongAs` duration the elided layer flushes would retire
+/// (CR 611.2b) is not re-checked between members; every member emits only its
+/// token entry, which no parsed duration condition reads. Members
 /// 2..N each resolve through `resolve_top` with their own captured entry (no
 /// representative replay), and members 2..N−1
 /// keep the production event-trigger collection (CR 603.2) over their own
@@ -3715,6 +3757,10 @@ fn resolve_bulk_members(
         return None;
     }
     let produced = created_token_ids(&bulk_events);
+    // CR 117.5 + CR 704.3: the elided checkpoints are vetted on member 1's
+    // alone, so member 1 must have created a token and done nothing else; each
+    // later member is held to these events below.
+    let run_events = token_entry_events(&bulk_events).filter(|_| !produced.is_empty())?;
     let views_before = token_reader_views(&bulk, &produced);
     let events_after_resolution = bulk_events.len();
     let stack_after_resolution = bulk.stack.len();
@@ -3774,9 +3820,13 @@ fn resolve_bulk_members(
         let member_start = bulk_events.len();
         let stack_before = bulk.stack.len();
         resolve_top(&mut bulk, &mut bulk_events);
+        // CR 117.5 + CR 704.3: this member's elided checkpoint is member 1's
+        // only if the member created member 1's tokens through the same events
+        // and did nothing else.
         if stack_before.saturating_sub(bulk.stack.len()) != 1
             || !matches!(bulk.waiting_for, WaitingFor::Priority { .. })
             || !priority_checkpoint_is_settled(&bulk)
+            || token_entry_events(&bulk_events[member_start..]).as_ref() != Some(&run_events)
         {
             return None;
         }

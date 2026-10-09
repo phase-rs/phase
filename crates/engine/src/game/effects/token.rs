@@ -2626,10 +2626,11 @@ pub(crate) fn token_effect_is_source_independent(ability: &ResolvedAbility) -> b
 /// `Effect::Token` with a literal `Fixed` count whose per-resolution spec
 /// resolves read-only, mirroring `resolve`. `None` for any other shape.
 ///
-/// A root `condition` or `repeat_for` decides at each member's resolution
-/// whether, and how many times, its token is created, and either can read the
-/// member's own source (a counted filter excluding it). Member 1's checkpoint
-/// then vets a token the other members need not create, so both refuse.
+/// A root `condition`, `repeat_for` or `player_scope` decides at each member's
+/// resolution whether, how many times, or for which players its token is
+/// created, and each can read the member's own source (a counted filter
+/// excluding it, an enchanted or exiling source). Member 1's checkpoint
+/// then vets a token the other members need not create, so all three refuse.
 fn bulk_token_shape(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -2645,6 +2646,7 @@ fn bulk_token_shape(
     if !matches!(count, QuantityExpr::Fixed { .. })
         || ability.condition.is_some()
         || ability.repeat_for.is_some()
+        || ability.player_scope.is_some()
     {
         return None;
     }
@@ -2686,6 +2688,18 @@ pub(crate) fn admits_bulk_run(
         else {
             return false;
         };
+        // CR 608.2c + CR 704.3: the override's own chain (`sub_ability`,
+        // `else_ability`) runs after the token in one branch or both, and on
+        // the met branch its `repeat_for` / `player_scope` decide per member how
+        // many tokens it creates (`ability_utils::apply_instead_swap`). Member
+        // 1's checkpoint speaks for neither, so refuse them.
+        if sub.sub_ability.is_some()
+            || sub.else_ability.is_some()
+            || sub.repeat_for.is_some()
+            || sub.player_scope.is_some()
+        {
+            return false;
+        }
         // CR 608.2c: each member evaluates the swap against its own source (a
         // counted filter can exclude or relate to that source), so the run is
         // admitted only when every member takes member 1's branch.
