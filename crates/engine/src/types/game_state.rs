@@ -29693,10 +29693,11 @@ impl GameState {
     }
 
     /// See `normalize_for_loop`. Per object, rank-based over the retained
-    /// `lki_by_incarnation` keys and the incarnations trigger events name
-    /// (`ZoneChanged` entries and stamped `PermanentTapped` taps), so two
-    /// positions minted at different times compare equal while which
-    /// incarnation each event names — and its snapshot — is preserved.
+    /// `lki_by_incarnation` and `lki_copiable_values_by_incarnation` keys and
+    /// the incarnations trigger events name (`ZoneChanged` entries and stamped
+    /// `PermanentTapped` taps), so two positions minted at different times
+    /// compare equal while which incarnation each event names — and its
+    /// snapshot — is preserved.
     fn canonicalize_lki_incarnations_for_loop(&mut self) {
         fn named_incarnation(event: &mut GameEvent) -> Option<(ObjectId, &mut u64)> {
             match event {
@@ -29862,6 +29863,12 @@ impl GameState {
                 .or_default()
                 .extend(history.keys().copied());
         }
+        for (object_id, history) in self.lki_copiable_values_by_incarnation.iter() {
+            present
+                .entry(*object_id)
+                .or_default()
+                .extend(history.keys().copied());
+        }
         self.for_each_trigger_event_carrier_mut(&mut |event| {
             if let Some((object_id, incarnation)) = named_incarnation(event) {
                 present.entry(object_id).or_default().push(*incarnation);
@@ -29887,6 +29894,17 @@ impl GameState {
                 (object_id, history)
             })
             .collect();
+        self.lki_copiable_values_by_incarnation =
+            std::mem::take(&mut self.lki_copiable_values_by_incarnation)
+                .into_iter()
+                .map(|(object_id, history)| {
+                    let history = history
+                        .into_iter()
+                        .map(|(incarnation, values)| (canonical(object_id, incarnation), values))
+                        .collect();
+                    (object_id, history)
+                })
+                .collect();
         self.for_each_trigger_event_carrier_mut(&mut |event| {
             if let Some((object_id, incarnation)) = named_incarnation(event) {
                 *incarnation = canonical(object_id, *incarnation);
@@ -38905,9 +38923,9 @@ mod tests {
             values
         };
         let (departed, later, other) = (values("Departed"), values("Later"), values("Other"));
-        let entry = |id: u64, effect: Effect| {
+        let entry_at = |id: u64, effect: Effect, incarnation: u64| {
             let mut ability = ResolvedAbility::new(effect, vec![], source, PlayerId(0));
-            ability.source_incarnation = Some(captured);
+            ability.source_incarnation = Some(incarnation);
             StackEntry {
                 id: ObjectId(id),
                 source_id: source,
@@ -38925,6 +38943,7 @@ mod tests {
                 },
             }
         };
+        let entry = |id: u64, effect: Effect| entry_at(id, effect, captured);
         let copy_effect = Effect::CopyTokenOf {
             target: TargetFilter::SelfRef,
             owner: TargetFilter::Controller,
@@ -38935,7 +38954,7 @@ mod tests {
             extra_keywords: vec![],
             additional_modifications: vec![],
         };
-        a.stack.push_back(entry(20, copy_effect));
+        a.stack.push_back(entry(20, copy_effect.clone()));
         a.lki_copiable_values_by_incarnation
             .entry(source)
             .or_default()
@@ -38958,11 +38977,33 @@ mod tests {
         );
         assert_eq!(
             normalized_a.lki_copiable_values_by_incarnation[&source]
-                .keys()
-                .copied()
+                .values()
+                .cloned()
                 .collect::<Vec<_>>(),
-            vec![captured],
+            vec![departed.clone()],
             "the captured own-source incarnation remains available"
+        );
+
+        // CR 104.4b + CR 400.7: the captured incarnation is monotonic identity,
+        // not position. The same position minted with incarnation 91 instead
+        // of 7 confirms as a repeat; different values under it do not.
+        let minted_later = |values: CopiableValues| {
+            let mut later_state = a.clone();
+            later_state.stack.clear();
+            later_state
+                .stack
+                .push_back(entry_at(20, copy_effect.clone(), 91));
+            later_state.lki_copiable_values_by_incarnation =
+                im::HashMap::from_iter([(source, im::HashMap::from_iter([(91, values)]))]);
+            later_state.normalize_for_loop()
+        };
+        assert!(
+            loop_states_equal(&normalized_a, &minted_later(departed.clone())),
+            "a renumbered captured incarnation with equal values is the same position"
+        );
+        assert!(
+            !loop_states_equal(&normalized_a, &minted_later(other.clone())),
+            "a renumbered captured incarnation with different values is not"
         );
 
         let mut changed = a.clone();

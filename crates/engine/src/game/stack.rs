@@ -3685,8 +3685,11 @@ enum BulkMemberRun {
 /// nor world once layered (CR 704.5j, CR 704.5k), the entry perturbs no
 /// other object's layered values (`layers::entry_perturbs_layer_reads`), and
 /// no state trigger (CR 603.8), delayed trigger (CR 603.7), epic effect or
-/// exile link exists. Members 2..N each resolve through `resolve_top` with
-/// their own captured entry (no representative replay), and members 2..N−1
+/// exile link exists. A `ForAsLongAs` duration the elided layer flushes would
+/// retire (CR 611.2b) is not re-checked between members; every admitted member
+/// emits only the ETB pair, which no parsed duration condition reads. Members
+/// 2..N each resolve through `resolve_top` with their own captured entry (no
+/// representative replay), and members 2..N−1
 /// keep the production event-trigger collection (CR 603.2) over their own
 /// events; the last member's checkpoint is the caller's.
 fn resolve_bulk_members(

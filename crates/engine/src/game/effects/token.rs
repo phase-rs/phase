@@ -2587,9 +2587,10 @@ fn condition_invariant_for_token(
 /// `TargetFilter::Controller`), its `count` is a literal `Fixed` (no
 /// source-relative quantity), it does not enter attacking (combat reads the
 /// source), and it is not attached to a host (attachment reads the source's
-/// target). The remaining fields are pure characteristics (name / P/T / types /
-/// colors / keywords / supertypes / static abilities / ETB counters) which are
-/// baked into the spec and identical across sources — bound but unconstrained.
+/// target). The remaining fields are characteristics bound but unconstrained
+/// here: a spec can still read its source (a `Source`-scoped P/T quantity, a
+/// static stamped with its creator, CR 201.5a), so a consumer that treats
+/// members as interchangeable compares their resolved specs (`admits_bulk_run`).
 ///
 /// EXHAUSTIVE destructure (no `..`): every field of `Effect::Token` is
 /// consciously dispositioned, mirroring `resolve_token_spec`. A future field
@@ -2700,6 +2701,26 @@ pub(crate) fn admits_bulk_run(
     // the executor clones; a supertype a continuous effect adds (CR 613.1d) is
     // checked on member 1's layered token in the stack's bulk executor.
     if has_pairwise_sba_supertype(&spec.characteristics.supertypes) {
+        return false;
+    }
+
+    // CR 201.5a + CR 704.3: member 1's checkpoint speaks for the elided ones
+    // only if every member creates member 1's token. A distinct-source run's
+    // spec can read its member's source (a `Source`-scoped P/T quantity, a
+    // static stamped with its creator), so each member's spec must match.
+    if !run_members.iter().skip(1).all(|member| {
+        bulk_token_shape(state, member).is_some_and(
+            |(member_spec, member_owner, member_tapped, member_count)| {
+                TokenSpec {
+                    source_id: spec.source_id,
+                    ..member_spec
+                } == spec
+                    && member_owner == owner
+                    && member_tapped == enter_tapped
+                    && member_count == resolved_count
+            },
+        )
+    }) {
         return false;
     }
 

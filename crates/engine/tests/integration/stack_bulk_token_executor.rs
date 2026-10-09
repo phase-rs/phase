@@ -12,7 +12,7 @@ use engine::game::engine::{apply, apply_verified_ai_priority_pass};
 use engine::game::perf_counters;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::move_to_zone;
-use engine::types::ability::Effect;
+use engine::types::ability::{Effect, ObjectScope, PtValue, QuantityExpr, QuantityRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::events::GameEvent;
@@ -474,6 +474,44 @@ fn legendary_token_run_refuses_at_the_pairwise_sba_gate() {
     };
     assert_eq!(candidates.len(), 2);
     assert_eq!(reference.state.stack.len(), RUN - 2);
+    assert_eq!(bulk.counters.bulk_entries, 0);
+}
+
+/// A8-X (labelled class fixture: the stacked token specs are edited to an X/X
+/// Saproling where X is the source's power): three distinct-source Sporemounds
+/// of power 2, 0 and 3 create different tokens. Member 2's 0/0 Saproling dies
+/// at its own checkpoint (CR 704.5f) before member 3 resolves, which member
+/// 1's checkpoint cannot show, so the run is not bulk-admitted.
+#[test]
+fn distinct_source_token_specs_refuse_the_run() {
+    let mut s0 = landfall_board(0, |s| {
+        // Under the identity order setup index 1 resolves second.
+        for power in [2, 0, 3] {
+            s.add_creature_from_oracle(P0, "Sporemound", power, 3, SPOREMOUND)
+                .with_subtypes(vec!["Fungus"]);
+        }
+    });
+    assert_eq!(s0.stack.len(), 3, "reach guard: three Sporemound triggers");
+    edit_stacked_token_specs(&mut s0, |effect| {
+        if let Effect::Token {
+            power, toughness, ..
+        } = effect
+        {
+            let source_power = PtValue::Quantity(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Source,
+                },
+            });
+            *power = source_power.clone();
+            *toughness = source_power;
+        }
+    });
+    let (bulk, reference) = parity("A8-X", s0);
+    assert_eq!(
+        tokens_named(&reference.state, "Saproling"),
+        2,
+        "reach guard: member 2's 0/0 Saproling dies"
+    );
     assert_eq!(bulk.counters.bulk_entries, 0);
 }
 
