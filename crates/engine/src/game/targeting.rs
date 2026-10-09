@@ -389,10 +389,12 @@ fn find_legal_targets_with_context(
                         }
                     }
                 }
+                // CR 108.2 + CR 109.1: an exile-zone target is a card in
+                // exile; the CR 722.3c retained prepare copy is not one.
                 Zone::Exile => add_zone_targets(
                     state,
                     Zone::Exile,
-                    state.exile.iter().copied(),
+                    zone_card_ids(state, Zone::Exile),
                     filter,
                     target_ctx,
                     false,
@@ -3299,6 +3301,40 @@ pub(crate) fn zone_object_ids(state: &GameState, zone: Zone) -> Vec<ObjectId> {
     }
 }
 
+/// CR 108.2 + CR 109.1: Returns the ids of the CARDS in the given zone — the
+/// population that "cards in <zone>" queries, card choices and card moves
+/// range over. Card-level counterpart of [`zone_object_ids`], filtered through
+/// the single card-population authority
+/// [`GameObject::is_card_population_member`](crate::game::game_object::GameObject::is_card_population_member).
+///
+/// Only `Zone::Exile` is filtered: CR 722.3c keeps a prepared permanent's copy
+/// there as an exception to CR 704.5e, and that copy is not a card. Every
+/// other zone returns exactly `zone_object_ids`, including stack entries for
+/// activated and triggered abilities, which have no `state.objects` entry.
+///
+/// Object-level consumers — casting from exile, layers, trigger reconcile and
+/// the CR 800.4a leave-the-game sweep — keep using `zone_object_ids`.
+pub(crate) fn zone_card_ids(state: &GameState, zone: Zone) -> Vec<ObjectId> {
+    let ids = zone_object_ids(state, zone);
+    match zone {
+        Zone::Exile => ids
+            .into_iter()
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.is_card_population_member())
+            })
+            .collect(),
+        Zone::Library
+        | Zone::Hand
+        | Zone::Battlefield
+        | Zone::Graveyard
+        | Zone::Stack
+        | Zone::Command => ids,
+    }
+}
+
 /// Extract all explicit zone restrictions from a target filter, recursing through combinators.
 pub(crate) fn extract_explicit_zones(filter: &TargetFilter) -> Vec<Zone> {
     match filter {
@@ -3814,6 +3850,157 @@ mod tests {
 
     fn creature_filter() -> TargetFilter {
         TargetFilter::Typed(TypedFilter::creature())
+    }
+
+    /// One real Instant card, one non-card copy of a card (the CR 722.3c
+    /// retained prepare copy's shape: `is_copy`, not a token, an Instant) and
+    /// one Instant token, all owned by P0 in exile; P0 also controls a
+    /// creature token on the battlefield. Returns `(state, card, copy, token,
+    /// battlefield_token)`.
+    fn exile_population_board() -> (GameState, ObjectId, ObjectId, ObjectId, ObjectId) {
+        fn exiled(state: &mut GameState, card: u64, name: &str) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Exile,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Instant);
+            id
+        }
+        let mut state = GameState::new_two_player(42);
+        let card = exiled(&mut state, 10, "Exiled Instant");
+        let copy = exiled(&mut state, 11, "Retained Prepare Copy");
+        state.objects.get_mut(&copy).unwrap().is_copy = true;
+        let token = exiled(&mut state, 12, "Exiled Instant Token");
+        state.objects.get_mut(&token).unwrap().is_token = true;
+        let battlefield_token = create_object(
+            &mut state,
+            CardId(13),
+            PlayerId(0),
+            "Battlefield Token".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&battlefield_token).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_token = true;
+        }
+        (state, card, copy, token, battlefield_token)
+    }
+
+    fn sorted_ids(mut ids: Vec<ObjectId>) -> Vec<ObjectId> {
+        ids.sort_by_key(|id| id.0);
+        ids
+    }
+
+    /// CR 108.2 + CR 109.1 + CR 722.3c: `zone_card_ids` is the card-level
+    /// listing — in exile it drops the non-card copy and the token — while
+    /// `zone_object_ids` stays object-level (casting, layers and the CR 800.4a
+    /// sweep read every object). Every other zone lists the same ids as
+    /// `zone_object_ids`, including a battlefield token (CR 111.1) and an
+    /// activated-ability stack entry, whose id has no `state.objects` entry.
+    #[test]
+    fn exile_card_population_zone_card_ids_vs_zone_object_ids() {
+        let (mut state, card, copy, token, battlefield_token) = exile_population_board();
+        for (card_num, zone) in [
+            (20, Zone::Graveyard),
+            (21, Zone::Hand),
+            (22, Zone::Library),
+            (23, Zone::Command),
+        ] {
+            create_object(
+                &mut state,
+                CardId(card_num),
+                PlayerId(0),
+                format!("{zone:?} Object"),
+                zone,
+            );
+        }
+        let ability_id = ObjectId(9_000);
+        state.stack.push_back(StackEntry {
+            id: ability_id,
+            source_id: battlefield_token,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: battlefield_token,
+                ability: Box::new(ResolvedAbility::new(
+                    crate::types::ability::Effect::Draw {
+                        target: TargetFilter::Controller,
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    vec![],
+                    battlefield_token,
+                    PlayerId(0),
+                )),
+            },
+        });
+        assert!(
+            !state.objects.contains_key(&ability_id),
+            "the ability entry has no object: the Stack equality is not vacuous"
+        );
+
+        // The object-level listing still sees every object in exile.
+        assert_eq!(
+            sorted_ids(zone_object_ids(&state, Zone::Exile)),
+            sorted_ids(vec![card, copy, token])
+        );
+        // The card-level listing sees only the card.
+        assert_eq!(zone_card_ids(&state, Zone::Exile), vec![card]);
+
+        for zone in [
+            Zone::Battlefield,
+            Zone::Stack,
+            Zone::Graveyard,
+            Zone::Hand,
+            Zone::Library,
+            Zone::Command,
+        ] {
+            let objects = zone_object_ids(&state, zone);
+            assert!(!objects.is_empty(), "{zone:?}: fixture populates the zone");
+            assert_eq!(zone_card_ids(&state, zone), objects, "{zone:?}");
+        }
+        assert_eq!(
+            zone_card_ids(&state, Zone::Battlefield),
+            vec![battlefield_token]
+        );
+        assert_eq!(zone_card_ids(&state, Zone::Stack), vec![ability_id]);
+    }
+
+    /// CR 108.2 + CR 109.1 + CR 722.3c: an exile-zone target ("target instant
+    /// card you own in exile") is a card; the non-card copy and the token are
+    /// not offered while the real card is. The battlefield search is untouched:
+    /// a battlefield token is a permanent (CR 110.1, CR 111.1) and is offered.
+    #[test]
+    fn exile_card_population_target_search_offers_only_cards() {
+        let (state, card, copy, token, battlefield_token) = exile_population_board();
+        let exile_filter =
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant).properties(vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::You,
+                },
+                FilterProp::InZone { zone: Zone::Exile },
+            ]));
+        let offered = find_legal_targets(&state, &exile_filter, PlayerId(0), battlefield_token);
+        assert_eq!(offered, vec![TargetRef::Object(card)]);
+        assert!(!offered.contains(&TargetRef::Object(copy)));
+        assert!(!offered.contains(&TargetRef::Object(token)));
+
+        let battlefield_filter =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }]));
+        assert_eq!(
+            find_legal_targets(&state, &battlefield_filter, PlayerId(0), card),
+            vec![TargetRef::Object(battlefield_token)]
+        );
     }
 
     // CR 120.1 (#5615): Red Guardian, Super-Soldier — "destroy target creature an

@@ -274,6 +274,10 @@ pub(crate) fn change_zone_all_player_scope_member_matches(
     origin_zones: &[Zone],
 ) -> bool {
     origin_zones.contains(&object.zone)
+        // CR 108.2 + CR 109.1: a player-scoped mass move ("all cards you own
+        // in exile") ranges over cards; the CR 722.3c retained prepare copy is
+        // not one. Battlefield tokens stay members (CR 110.1, CR 111.1).
+        && object.is_card_population_member()
         && if object.zone == Zone::Battlefield {
             object.controller == player
         } else {
@@ -445,6 +449,9 @@ fn resolution_zone_candidates(
         .filter(|(id, object)| {
             scan_zones.contains(&object.zone)
                 && !object.is_emblem
+                // CR 108.2 + CR 109.1: a zone scan chooses among the cards in
+                // the zone; the CR 722.3c retained prepare copy is not one.
+                && object.is_card_population_member()
                 && crate::game::filter::matches_target_filter_for_zone(
                     state,
                     **id,
@@ -2158,6 +2165,9 @@ pub fn resolve_all(
             .iter()
             .filter(|(&id, obj)| {
                 origin_zones.contains(&obj.zone)
+                    // CR 108.2 + CR 109.1: a mass move out of exile moves
+                    // cards; the CR 722.3c retained prepare copy is not one.
+                    && obj.is_card_population_member()
                     && (!tracked_members_name_parent_object
                         || if delayed_exile_return {
                             target_pin_is_current_or_delayed_exile_successor(state, ability, id)
@@ -11149,6 +11159,182 @@ mod tests {
                 mixed_tracked_set_run(format, &[0, 2]),
                 (Zone::Hand, Zone::Graveyard, Zone::Battlefield)
             );
+        }
+    }
+}
+
+/// CR 108.2 + CR 109.1 + CR 722.3c: zone scans that choose or move CARDS out of
+/// exile range over the card population. Each row puts one real Instant card
+/// and one non-card copy of a card (the CR 722.3c retained prepare copy's
+/// shape: `is_copy`, not a token, an Instant owned by P0) in P0's exile.
+#[cfg(test)]
+mod exile_card_population_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::MultiTargetSpec;
+    use crate::types::card_type::CoreType;
+    use crate::types::identifiers::CardId;
+
+    const P0: PlayerId = PlayerId(0);
+    const SOURCE: ObjectId = ObjectId(100);
+
+    /// Returns `(state, card, copy)`.
+    fn board() -> (GameState, ObjectId, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let mut exiled = Vec::new();
+        for (card, name) in [(10, "Exiled Instant"), (11, "Retained Prepare Copy")] {
+            let id = create_object(&mut state, CardId(card), P0, name.to_string(), Zone::Exile);
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Instant);
+            exiled.push(id);
+        }
+        let (card, copy) = (exiled[0], exiled[1]);
+        state.objects.get_mut(&copy).unwrap().is_copy = true;
+        // Reach guard: the copy is a non-card object in P0's exile.
+        assert!(state.exile.contains(&copy));
+        assert!(!state.objects[&copy].is_represented_by_a_card());
+        assert_eq!(state.objects[&copy].owner, P0);
+        (state, card, copy)
+    }
+
+    fn owned_exiled_instants() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant).properties(vec![
+            FilterProp::Owned {
+                controller: ControllerRef::You,
+            },
+            FilterProp::InZone { zone: Zone::Exile },
+        ]))
+    }
+
+    fn change_zone_all(origin: Zone, destination: Zone, target: TargetFilter) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(origin),
+                destination,
+                target,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                library_shuffle: Default::default(),
+                random_order: false,
+            },
+            vec![],
+            SOURCE,
+            P0,
+        )
+    }
+
+    fn assert_card_moved_copy_stayed(state: &GameState, card: ObjectId, copy: ObjectId) {
+        assert_eq!(
+            state.objects[&card].zone,
+            Zone::Hand,
+            "the real card moves (reach guard)"
+        );
+        assert!(state.players[0].hand.contains(&card));
+        assert_eq!(
+            state.objects[&copy].zone,
+            Zone::Exile,
+            "the non-card copy is not a card in exile and is not moved"
+        );
+        assert!(state.exile.contains(&copy));
+        assert!(!state.players[0].hand.contains(&copy));
+    }
+
+    /// "Return all instant cards you own from exile to your hand": the
+    /// filter-scoped mass scan moves the real card and leaves the copy.
+    #[test]
+    fn exile_card_population_filter_scoped_mass_move_leaves_the_copy() {
+        let (mut state, card, copy) = board();
+        let ability = change_zone_all(Zone::Exile, Zone::Hand, owned_exiled_instants());
+        resolve_all(&mut state, &ability, &mut Vec::new()).unwrap();
+        assert_card_moved_copy_stayed(&state, card, copy);
+    }
+
+    /// Player-scoped mass move ("all cards you own in exile"): the shared
+    /// per-object member authority admits the real card only.
+    #[test]
+    fn exile_card_population_player_scoped_mass_move_leaves_the_copy() {
+        let (mut state, card, copy) = board();
+        assert!(change_zone_all_player_scope_member_matches(
+            &state.objects[&card],
+            P0,
+            &[Zone::Exile]
+        ));
+        let ability = change_zone_all(Zone::Exile, Zone::Hand, TargetFilter::Controller);
+        resolve_all(&mut state, &ability, &mut Vec::new()).unwrap();
+        assert_card_moved_copy_stayed(&state, card, copy);
+    }
+
+    /// CR 110.1 + CR 111.1: the zone-aware population keeps battlefield
+    /// tokens — "exile all creatures you control" still moves a token.
+    #[test]
+    fn exile_card_population_battlefield_mass_move_still_moves_tokens() {
+        let mut state = GameState::new_two_player(42);
+        let token = create_object(
+            &mut state,
+            CardId(20),
+            P0,
+            "Creature Token".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&token).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_token = true;
+        }
+        let ability = change_zone_all(
+            Zone::Battlefield,
+            Zone::Exile,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        );
+        resolve_all(&mut state, &ability, &mut Vec::new()).unwrap();
+        assert!(
+            !state.battlefield.contains(&token),
+            "the battlefield token is a member of the creatures-you-control population"
+        );
+    }
+
+    /// CR 608.2d: a choice of an exiled card announced while the effect is
+    /// applied offers the real card only.
+    #[test]
+    fn exile_card_population_resolution_choice_offers_only_cards() {
+        let (mut state, card, copy) = board();
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Exile),
+                destination: Zone::Hand,
+                target: owned_exiled_instants(),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: true,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            SOURCE,
+            P0,
+        );
+        ability.multi_target = Some(MultiTargetSpec::unlimited(0));
+        ability.target_choice_timing = TargetChoiceTiming::Resolution;
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { cards, .. } => {
+                assert_eq!(cards, &vec![card], "the copy {copy:?} is not offered");
+            }
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
         }
     }
 }

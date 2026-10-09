@@ -3921,6 +3921,40 @@ impl GameObject {
         !self.is_token && !self.is_copy
     }
 
+    /// CR 108.2 + CR 109.1: Whether this object belongs to the population of
+    /// "cards" in its current zone — the population that queries such as "the
+    /// number of cards in exile" or "instant cards you own in exile" range
+    /// over. A copy of a card is a different kind of object from a card
+    /// (CR 109.1), and a token is not a card (CR 108.2b).
+    ///
+    /// Zone-aware so mixed-zone enumerations stay correct with one call:
+    /// - `Exile`: only objects represented by a card. CR 722.3c keeps a
+    ///   prepared permanent's copy in exile as an explicit exception to
+    ///   CR 704.5e; that copy is not a card and must not be counted, chosen or
+    ///   moved as one.
+    /// - `Library`, `Hand`, `Graveyard`: every object. CR 704.5d and CR 704.5e
+    ///   make a token or a copy of a card in these zones cease to exist at the
+    ///   next state-based-action check, before any query reads the zone.
+    /// - `Battlefield`, `Stack`, `Command`: every object. These zones
+    ///   legitimately hold non-card objects that their populations include —
+    ///   tokens are permanents (CR 110.1, CR 111.1), copies of spells are
+    ///   spells (CR 707.10), and emblems live in the command zone (CR 114.1).
+    ///
+    /// Object-level enumeration (casting the CR 722.3c copy, layers, the
+    /// CR 800.4a leave-the-game sweep) reads every object in the zone and must
+    /// not use this predicate. Exhaustive so a new `Zone` forces a decision.
+    pub fn is_card_population_member(&self) -> bool {
+        match self.zone {
+            Zone::Exile => self.is_represented_by_a_card(),
+            Zone::Library
+            | Zone::Hand
+            | Zone::Graveyard
+            | Zone::Battlefield
+            | Zone::Stack
+            | Zone::Command => true,
+        }
+    }
+
     /// CR 702.66a: Delve may exile only a card from its owner's graveyard.
     pub fn is_delve_eligible(&self, player: PlayerId) -> bool {
         self.owner == player && self.zone == Zone::Graveyard && self.is_represented_by_a_card()
@@ -4242,6 +4276,65 @@ mod tests {
         stamp_cast_payment(&mut obj);
         obj.clear_cast_payment_stamps();
         assert_cast_payment_stamps_default(&obj, "after clear_cast_payment_stamps");
+    }
+
+    /// CR 108.2 + CR 109.1 + CR 722.3c: `is_card_population_member` excludes
+    /// non-card objects (tokens, copies of cards) from the exile card
+    /// population only; every other zone keeps its full population (library,
+    /// hand and graveyard non-cards cease under CR 704.5d/704.5e; battlefield,
+    /// stack and command legitimately hold tokens, spell copies and emblems).
+    #[test]
+    fn exile_card_population_member_truth_table() {
+        let kinds: [(&str, bool, bool); 4] = [
+            ("card", false, false),
+            ("token", true, false),
+            ("copy", false, true),
+            ("token+copy", true, true),
+        ];
+        let zones = [
+            Zone::Library,
+            Zone::Hand,
+            Zone::Battlefield,
+            Zone::Graveyard,
+            Zone::Stack,
+            Zone::Exile,
+            Zone::Command,
+        ];
+        for zone in zones {
+            for (label, is_token, is_copy) in kinds {
+                let mut obj = GameObject::new(
+                    ObjectId(1),
+                    CardId(1),
+                    PlayerId(0),
+                    format!("Population {label}"),
+                    zone,
+                );
+                obj.is_token = is_token;
+                obj.is_copy = is_copy;
+                let is_card = label == "card";
+                // Reach guard: the fixture realizes the intended object kind
+                // through the existing card authority.
+                assert_eq!(
+                    obj.is_represented_by_a_card(),
+                    is_card,
+                    "{label}: fixture must be the intended object kind"
+                );
+                let expected = match zone {
+                    Zone::Exile => is_card,
+                    Zone::Library
+                    | Zone::Hand
+                    | Zone::Graveyard
+                    | Zone::Battlefield
+                    | Zone::Stack
+                    | Zone::Command => true,
+                };
+                assert_eq!(
+                    obj.is_card_population_member(),
+                    expected,
+                    "{label} in {zone:?}"
+                );
+            }
+        }
     }
 
     /// CR 400.7 (issue #5943): `reset_for_battlefield_exit` clears the five

@@ -288,11 +288,12 @@ pub(in crate::game) fn eligible_candidates(
     };
 
     for id in candidate_ids {
-        if !state
-            .objects
-            .get(&id)
-            .is_some_and(|object| zones.contains(&object.zone))
-        {
+        // CR 108.2 + CR 109.1: the pool is the CARDS in the named zones; the
+        // CR 722.3c retained prepare copy in exile is not a card and is cast
+        // only through its own CR 722.3c permission.
+        if !state.objects.get(&id).is_some_and(|object| {
+            zones.contains(&object.zone) && object.is_card_population_member()
+        }) {
             continue;
         }
         // CR 601.2b-c + CR 608.2g: discover candidates by projecting each
@@ -557,6 +558,34 @@ mod tests {
         let object = state.objects.get_mut(&id).unwrap();
         object.base_card_types = object.card_types.clone();
         id
+    }
+
+    /// CR 108.2 + CR 109.1 + CR 722.3c: a free-cast window over exile offers
+    /// the CARDS in exile. A non-card copy of a card (the CR 722.3c retained
+    /// prepare copy's shape: `is_copy`, not a token, an Instant owned by P0) is
+    /// not offered — it is cast only through its own CR 722.3c permission —
+    /// while a real Instant card of the same shape is.
+    #[test]
+    fn exile_card_population_free_cast_pool_offers_only_cards() {
+        let mut state = GameState::new_two_player(1);
+        let card = add_card(&mut state, PlayerId(0), Zone::Exile, CoreType::Instant, 0);
+        let copy = add_card(&mut state, PlayerId(0), Zone::Exile, CoreType::Instant, 0);
+        state.objects.get_mut(&copy).unwrap().is_copy = true;
+        assert!(state.exile.contains(&copy));
+        assert!(!state.objects[&copy].is_represented_by_a_card());
+
+        let candidates = test_eligible_candidates(
+            &state,
+            &[Zone::Exile],
+            None,
+            &[],
+            test_face_policy(
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                ObjectId(900),
+                PlayerId(0),
+            ),
+        );
+        assert_eq!(candidates, vec![card], "the copy {copy:?} is not offered");
     }
 
     #[test]

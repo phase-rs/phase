@@ -23,8 +23,9 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, ControllerRef, CountScope, Effect, FilterProp, QuantityExpr,
-    QuantityRef, ResolvedAbility, TargetFilter, TargetRef, TypedFilter,
+    AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, CountScope, Effect,
+    FilterProp, QuantityExpr, QuantityRef, ResolvedAbility, StaticCondition, TargetFilter,
+    TargetRef, TypedFilter, ZoneRef,
 };
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::card_type::CoreType;
@@ -2215,4 +2216,352 @@ fn opponent_prepared_spell_watcher_ignores_own_prepared_cast() {
     pass_twice(&mut runner);
     assert!(runner.state().stack.is_empty());
     assert_eq!(life(runner.state(), P0), p0_life);
+}
+
+// ---------------------------------------------------------------------------
+// CR 108.2 + CR 109.1 + CR 722.3c: the retained prepare copy is a copy of a
+// card, not a card. It remains in exile while its permanent stays prepared
+// (the CR 704.5e exception), and every query for CARDS in exile must not see
+// it, while object-level exile enumeration (casting it, the CR 800.4a sweep)
+// still does.
+// ---------------------------------------------------------------------------
+
+/// Verbatim Oracle text of Crackling Drake.
+const CRACKLING_DRAKE_ORACLE: &str = "Flying\nCrackling Drake's power is equal to the total number of instant and sorcery cards you own in exile and in your graveyard.\nWhen this creature enters, draw a card.";
+
+/// Verbatim Oracle text of Ketramose, the New Dawn.
+const KETRAMOSE_ORACLE: &str = "Menace, lifelink, indestructible\nKetramose can't attack or block unless there are seven or more cards in exile.\nWhenever one or more cards are put into exile from graveyards and/or the battlefield during your turn, you draw a card and lose 1 life.";
+
+/// Whether `expr` reads a count of cards in exile.
+fn reads_exile_card_count(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Exile,
+                    ..
+                },
+        } => true,
+        QuantityExpr::Sum { exprs } => exprs.iter().any(reads_exile_card_count),
+        _ => false,
+    }
+}
+
+fn power(runner: &mut GameRunner, id: ObjectId) -> Option<i32> {
+    engine::game::layers::evaluate_layers(runner.state_mut());
+    runner.state().objects[&id].power
+}
+
+fn exile_ids(state: &GameState) -> Vec<ObjectId> {
+    let mut ids: Vec<ObjectId> = state.exile.iter().copied().collect();
+    ids.sort_by_key(|id| id.0);
+    ids
+}
+
+/// P0 controls Codie, an unprepared Emeritus of Truce and Crackling Drake
+/// (built from its verbatim Oracle text). Real instants: P0's Lightning Bolt in
+/// exile, P0's Shock in the graveyard, P1's Opt in exile, and P0's Counterspell
+/// in hand. P0's pool pays Codie's activation exactly.
+struct DrakeBoard {
+    runner: GameRunner,
+    codie: ObjectId,
+    emeritus: ObjectId,
+    drake: ObjectId,
+    bolt: ObjectId,
+    opt: ObjectId,
+    counterspell: ObjectId,
+}
+
+fn build_drake_board(db: &CardDatabase) -> DrakeBoard {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let codie = scenario
+        .add_creature_from_oracle(P0, "Codie, Ravenous Codex", 1, 4, CODIE_ORACLE)
+        .id();
+    let emeritus = scenario.add_real_card(P0, "Emeritus of Truce", Zone::Battlefield, db);
+    let drake = scenario
+        .add_creature_from_oracle(P0, "Crackling Drake", 0, 4, CRACKLING_DRAKE_ORACLE)
+        .id();
+    let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Exile, db);
+    scenario.add_real_card(P0, "Shock", Zone::Graveyard, db);
+    let opt = scenario.add_real_card(P1, "Opt", Zone::Exile, db);
+    let counterspell = scenario.add_real_card(P0, "Counterspell", Zone::Hand, db);
+    scenario.with_mana_pool(P0, mana(WUBRG));
+
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    assert_eq!(
+        runner.state().objects[&emeritus]
+            .back_face
+            .as_ref()
+            .map(|back| back.name.as_str()),
+        Some("Swords to Plowshares"),
+        "Emeritus of Truce must hydrate its prepare face"
+    );
+    DrakeBoard {
+        runner,
+        codie,
+        emeritus,
+        drake,
+        bolt,
+        opt,
+        counterspell,
+    }
+}
+
+/// Codie's activation prepares Emeritus of Truce; returns the exact linked
+/// Swords to Plowshares copy once priority returns with an empty stack.
+fn activate_codie_preparing_emeritus(board: &mut DrakeBoard) -> ObjectId {
+    let visited = drive_activation(&mut board.runner, board.codie, 0);
+    assert!(
+        !visited.contains(&"TargetSelection"),
+        "CR 115.10a: Codie's activation announces no target; visited {visited:?}"
+    );
+    // CR 117.4: both players pass and the activated ability resolves.
+    pass_twice(&mut board.runner);
+    assert_priority(&board.runner, P0);
+    let state = board.runner.state();
+    assert!(state.stack.is_empty());
+    assert!(state.objects[&board.codie].tapped);
+    assert!(state.players[0].mana_pool.mana.is_empty());
+    assert!(state.objects[&board.emeritus].prepared.is_some());
+    exact_linked_copy(state, board.emeritus, P0, "Swords to Plowshares")
+}
+
+/// The maintainer's discriminating regression. Crackling Drake's power is "the
+/// total number of instant and sorcery cards you own in exile and in your
+/// graveyard". Codie's activation prepares Emeritus of Truce, whose CR 722.3c
+/// Swords to Plowshares copy (an Instant owned by P0) remains in exile. That
+/// copy is a copy of a card, not a card (CR 108.2 + CR 109.1), so the Drake
+/// still counts only Lightning Bolt in exile and Shock in the graveyard.
+#[test]
+fn exile_card_population_crackling_drake_ignores_the_retained_prepare_copy() {
+    let mut board = build_drake_board(db());
+    let drake = board.drake;
+
+    // Reach guards: the Drake's parsed CDA reads cards in exile, and the board
+    // holds exactly Bolt (P0's) and Opt (P1's) in exile.
+    let reads_exile = board.runner.state().objects[&drake]
+        .static_definitions
+        .as_slice()
+        .iter()
+        .flat_map(|definition| definition.modifications.iter())
+        .any(|modification| {
+            matches!(
+                modification,
+                ContinuousModification::SetDynamicPower { value } if reads_exile_card_count(value)
+            )
+        });
+    assert!(
+        reads_exile,
+        "Crackling Drake must parse its power CDA over cards in exile"
+    );
+    assert_eq!(
+        exile_ids(board.runner.state()),
+        exile_ids_of(&[board.bolt, board.opt])
+    );
+    // Bolt (exile) + Shock (graveyard); P1's Opt is not P0's.
+    assert_eq!(power(&mut board.runner, drake), Some(2));
+
+    let copy = activate_codie_preparing_emeritus(&mut board);
+    let state = board.runner.state();
+    assert!(state.objects[&copy]
+        .card_types
+        .core_types
+        .contains(&CoreType::Instant));
+    // Positive reach guard: a non-card Instant owned by P0 now sits in exile.
+    assert_eq!(
+        exile_ids(state),
+        exile_ids_of(&[board.bolt, board.opt, copy])
+    );
+
+    // CR 108.2 + CR 109.1: the copy is not a card; the Drake still reads 2.
+    assert_eq!(
+        power(&mut board.runner, drake),
+        Some(2),
+        "the retained Swords copy must not count as an instant card in exile"
+    );
+
+    // Idempotence: further state-based action checks keep the copy (the
+    // CR 722.3c retention is preserved) and the reading.
+    for _ in 0..2 {
+        engine::game::sba::check_state_based_actions(board.runner.state_mut(), &mut Vec::new());
+        assert_eq!(
+            exact_linked_copy(
+                board.runner.state(),
+                board.emeritus,
+                P0,
+                "Swords to Plowshares"
+            ),
+            copy
+        );
+        assert_eq!(power(&mut board.runner, drake), Some(2));
+    }
+
+    // Paired positive: a real instant card P0 owns entering exile counts.
+    engine::game::zones::move_to_zone(
+        board.runner.state_mut(),
+        board.counterspell,
+        Zone::Exile,
+        &mut Vec::new(),
+    );
+    assert!(board.runner.state().exile.contains(&board.counterspell));
+    assert_eq!(power(&mut board.runner, drake), Some(3));
+}
+
+fn exile_ids_of(ids: &[ObjectId]) -> Vec<ObjectId> {
+    let mut ids = ids.to_vec();
+    ids.sort_by_key(|id| id.0);
+    ids
+}
+
+/// Ketramose's "unless there are seven or more cards in exile" counts every
+/// card in exile, regardless of owner. Six real cards plus two retained
+/// prepare copies (one per player) are SIX cards: Ketramose can't attack; the
+/// seventh real card lets it attack.
+#[test]
+fn exile_card_population_unfiltered_all_scope_count() {
+    let db = db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ketramose = scenario
+        .add_creature(P0, "Ketramose, the New Dawn", 4, 4)
+        .from_oracle_text(KETRAMOSE_ORACLE)
+        .id();
+    let emeritus_p0 = scenario.add_real_card(P0, "Emeritus of Truce", Zone::Battlefield, db);
+    let emeritus_p1 = scenario.add_real_card(P1, "Emeritus of Truce", Zone::Battlefield, db);
+    for name in ["Shock", "Opt", "Lightning Bolt"] {
+        scenario.add_real_card(P0, name, Zone::Exile, db);
+    }
+    for name in ["Counterspell", "Grizzly Bears", "Bear Cub"] {
+        scenario.add_real_card(P1, name, Zone::Exile, db);
+    }
+    let divination = scenario.add_real_card(P0, "Divination", Zone::Hand, db);
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    // Reach guard: the parsed restriction reads every card in exile.
+    let count = runner.state().objects[&ketramose]
+        .static_definitions
+        .as_slice()
+        .iter()
+        .find_map(
+            |definition| match (&definition.mode, &definition.condition) {
+                (StaticMode::CantAttackOrBlock, Some(StaticCondition::Not { condition })) => {
+                    match condition.as_ref() {
+                        StaticCondition::QuantityComparison { lhs, .. } => Some(lhs.clone()),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            },
+        )
+        .expect("Ketramose must parse its exile-count attack restriction");
+    assert!(matches!(
+        &count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Exile,
+                card_types,
+                filter: None,
+                scope: CountScope::All,
+            },
+        } if card_types.is_empty()
+    ));
+
+    set_prepared(&mut runner, emeritus_p0);
+    set_prepared(&mut runner, emeritus_p1);
+    // Two retained copies of two owners (multi-authority).
+    exact_linked_copy(runner.state(), emeritus_p0, P0, "Swords to Plowshares");
+    exact_linked_copy(runner.state(), emeritus_p1, P1, "Swords to Plowshares");
+    assert_eq!(runner.state().exile.len(), 8);
+
+    let scoped = |scope: CountScope| QuantityExpr::Ref {
+        qty: QuantityRef::ZoneCardCount {
+            zone: ZoneRef::Exile,
+            card_types: Vec::new(),
+            filter: None,
+            scope,
+        },
+    };
+    let read = |runner: &GameRunner, expr: &QuantityExpr| {
+        engine::game::quantity::resolve_quantity(runner.state(), expr, P0, ketramose)
+    };
+    let can_attack = |runner: &mut GameRunner| {
+        engine::game::layers::evaluate_layers(runner.state_mut());
+        engine::game::combat::validate_attackers(runner.state(), &[ketramose]).is_ok()
+    };
+
+    // Six real cards; the copies are not cards (CR 108.2 + CR 109.1).
+    assert_eq!(read(&runner, &count), 6);
+    assert_eq!(read(&runner, &scoped(CountScope::Opponents)), 3);
+    assert_eq!(read(&runner, &scoped(CountScope::Owner)), 3);
+    assert!(
+        !can_attack(&mut runner),
+        "six cards in exile: Ketramose can't attack"
+    );
+
+    // Paired positive: a seventh real card enables the attack.
+    engine::game::zones::move_to_zone(runner.state_mut(), divination, Zone::Exile, &mut Vec::new());
+    assert_eq!(read(&runner, &count), 7);
+    assert_eq!(read(&runner, &scoped(CountScope::Owner)), 4);
+    assert!(
+        can_attack(&mut runner),
+        "seven cards in exile: Ketramose can attack"
+    );
+}
+
+/// The object-level contract the maintainer asked to keep: the retained copy
+/// is still an object in exile that can be cast through its CR 722.3c
+/// permission after every card-population change.
+#[test]
+fn exile_card_population_object_level_cast_is_preserved() {
+    let mut board = build_drake_board(db());
+    let copy = activate_codie_preparing_emeritus(&mut board);
+    assert!(board.runner.state().exile.contains(&copy));
+    board.runner.state_mut().players[0]
+        .mana_pool
+        .add(ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]));
+    assert!(
+        has_cast_prepared_copy(board.runner.state(), board.emeritus),
+        "CR 722.3c: the prepared Swords copy stays castable from exile"
+    );
+}
+
+/// CR 800.4a consumer-contract regression (not revert-discriminating: the copy
+/// would also cease once its permanent left). The leave-the-game sweep reads
+/// every object a departing player owns: P0's real card stays in exile owned
+/// by P0, P0's prepared permanent leaves the battlefield, the CR 722.3c
+/// retention lapses, and the copy ceases to exist (CR 704.5e).
+#[test]
+fn exile_card_population_leave_the_game_sweep_still_reaches_objects() {
+    let db = db();
+    let mut scenario =
+        GameScenario::new_with_format(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let emeritus = scenario.add_real_card(P0, "Emeritus of Truce", Zone::Battlefield, db);
+    let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Exile, db);
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    set_prepared(&mut runner, emeritus);
+    // Paired positive: before the departure the copy exists and is linked.
+    let copy = exact_linked_copy(runner.state(), emeritus, P0, "Swords to Plowshares");
+
+    let state = runner.state_mut();
+    engine::game::elimination::eliminate_player(state, P0, &mut Vec::new());
+    engine::game::sba::check_state_based_actions(state, &mut Vec::new());
+
+    assert!(state.exile.contains(&bolt));
+    assert_eq!(state.objects[&bolt].owner, P0);
+    assert!(!state.battlefield.contains(&emeritus));
+    assert!(
+        !state.exile.contains(&copy),
+        "the copy left exile with its departed owner's other objects"
+    );
+    assert!(linked_copies(state, emeritus)
+        .iter()
+        .all(|id| state.objects[id].zone != Zone::Exile));
 }
