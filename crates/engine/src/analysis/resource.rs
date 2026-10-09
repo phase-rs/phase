@@ -8182,6 +8182,20 @@ fn project_out_resources(state: &GameState) -> GameState {
     // the warmup-skipping steady-cycle measurement never re-counts. Projected out as
     // pure pumped history.
     s.ability_resolutions_this_turn.clear();
+    // CR 732.2a + CR 104.4b: the "added mana with this ability this turn" ledger is pumped
+    // HISTORY, not a repetition-blocking gate, so it is CLEARED. Unlike the constraint-keyed
+    // `triggers_fired_*` sets preserved below, EVERY triggered ability that deposits mana
+    // writes it, and a blink or token loop mints a fresh `TriggerDefinitionRef` (new
+    // incarnation, CR 400.7) each cycle, so a retained set would grow and falsely refuse a
+    // legitimate unrestricted loop. Its one reader is the CR 603.4 intervening-if leaf
+    // `TriggerCondition::AddedManaWithThisAbilityThisTurn`, which may sit on a trigger of any
+    // timing, so soundness rests on that leaf's classification below rather than on when its
+    // trigger fires.
+    // Strict `GameState::eq` still compares it. Soundness obligation: any condition that reads
+    // this field must be classified `projected: true` in `ability_scan` (as
+    // `AbilityUseCountThisTurn` is), which keeps the fire-time projected-read gate
+    // (`fire_time_conditions_read_projected_resource`) fail-closed while such a trigger is live.
+    s.triggered_abilities_added_mana_this_turn.clear();
     s.loyalty_abilities_activated_this_turn.clear();
     s.extra_loyalty_activations_this_turn.clear();
     // CR 603.2h: trigger once-per-turn / N-times-per-turn limits. These maps have

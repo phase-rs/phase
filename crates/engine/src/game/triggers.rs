@@ -11,9 +11,9 @@ use crate::types::ability::{
     DamageKindFilter, DelayedTriggerCondition, DurationEvent, Effect, FilterProp, ModalChoice,
     NameStickerSet, ObjectScope, OriginConstraint, PlayerFilter, PlayerScope, PtValue,
     QuantityExpr, QuantityRef, RenownSubject, ResolvedAbility, SacrificeCost, StaticCondition,
-    TargetFilter, TargetRef, TributeOutcome, TriggerCondition, TriggerConstraint,
-    TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
-    TriggerGrantProducerKey, TypeFilter, TypedFilter,
+    TargetFilter, TargetRef, TributeOutcome, TriggerCondition, TriggerConditionAnchor,
+    TriggerConstraint, TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef,
+    TriggerEntry, TriggerGrantProducerKey, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -1167,7 +1167,7 @@ fn candidate_passes_batched_filters(
 }
 
 /// CR 603.4: a trigger's two fire-time condition inputs, kept apart and never
-/// merged.
+/// merged, together with the identity of the triggered ability they gate.
 #[derive(Clone, Copy, Default)]
 struct FiringConditions<'a> {
     /// The definition's own condition: a printed intervening-if, or a head
@@ -1179,13 +1179,23 @@ struct FiringConditions<'a> {
     /// A delayed body's hoisted intervening-if (`delayed_intervening_if`). Its
     /// resolution recheck is carried on the pending trigger separately.
     body_if: Option<&'a TriggerCondition>,
+    /// CR 603.4 + CR 607.1c: the `trigger_definition_ref` the gated ability's
+    /// builder installs, so a self-linked leaf ("if you haven't added mana with
+    /// this ability this turn") reads the same key that ability's deposits record
+    /// under. `None` when the gated ability carries no triggered identity, which
+    /// makes such a leaf fail closed.
+    trigger_definition: Option<&'a TriggerDefinitionRef>,
 }
 
 impl<'a> FiringConditions<'a> {
-    fn printed(trig_def: &'a TriggerDefinition) -> Self {
+    fn printed(
+        trig_def: &'a TriggerDefinition,
+        trigger_definition: Option<&'a TriggerDefinitionRef>,
+    ) -> Self {
         Self {
             head: trig_def.condition.as_ref(),
             body_if: None,
+            trigger_definition,
         }
     }
 
@@ -1202,6 +1212,7 @@ impl<'a> FiringConditions<'a> {
                 condition,
                 controller,
                 Some(source_context),
+                self.trigger_definition,
                 Some(event),
             )
         })
@@ -3093,7 +3104,7 @@ fn collect_matching_triggers_inner(
                 controller,
                 matcher,
                 active_suppress_triggers,
-                FiringConditions::printed(trig_def),
+                FiringConditions::printed(trig_def, definition_ref.as_ref()),
                 &ability,
             );
             for FiringGroup {
@@ -4420,6 +4431,7 @@ fn collect_latched_batched_zone_triggers(
                             condition,
                             stamped.lki.controller,
                             Some(&*stamped),
+                            Some(&latched.definition_ref),
                             Some(event),
                         )
                     })
@@ -9896,6 +9908,7 @@ fn resolve_accepted_triggered_mana_body(
             condition: trigger.condition.as_ref(),
             controller: trigger.controller,
             trigger_source: trigger.ability.trigger_source.as_ref(),
+            trigger_definition: trigger.ability.trigger_definition_ref.as_ref(),
             trigger_event: trigger.trigger_event.as_ref(),
             subject_match_count: trigger.subject_match_count,
             die_result: trigger.die_result,
@@ -11302,6 +11315,9 @@ pub fn check_state_triggers(state: &mut GameState) {
                     cond,
                     controller,
                     Some(&source_context),
+                    // CR 603.4 + CR 607.1c: the same identity the builder below
+                    // installs, so a self-linked leaf reads this ability's key.
+                    Some(definition_ref),
                     None,
                 )
             });
@@ -13179,6 +13195,7 @@ fn delayed_whenever_event_firings(
     let conditions = FiringConditions {
         head: trigger.condition.as_ref(),
         body_if: body_if.as_ref(),
+        trigger_definition: delayed.ability.trigger_definition_ref.as_ref(),
     };
     let once_per_batch = fires_once_per_batch(trigger);
     let mut consumed = HashSet::new();
@@ -13320,6 +13337,7 @@ fn collect_matching_delayed_triggers(
                     &condition,
                     delayed.controller,
                     delayed.ability.trigger_source.as_ref(),
+                    delayed.ability.trigger_definition_ref.as_ref(),
                     Some(&trigger_event),
                 ) {
                     // CR 603.4 + CR 603.7b: the ability did not trigger. It is
@@ -14578,33 +14596,44 @@ fn trigger_subject_read<'event, 'state>(
 /// still be used for event attribution, but source facts must read through
 /// `TriggerSourceContext::source_read` so a later same-id incarnation cannot
 /// answer an intervening-if check.
+///
+/// `trigger_definition` is the identity of the triggered ability this check
+/// gates: the same `trigger_definition_ref` its builder installs, which is the
+/// definition half of the "added mana with this ability" ledger key; the
+/// other half is `controller`. `None` means
+/// the gated ability carries no triggered identity.
 pub(crate) fn check_trigger_condition_with_source(
     state: &GameState,
     condition: &TriggerCondition,
     controller: PlayerId,
     source_context: Option<&TriggerSourceContext>,
+    trigger_definition: Option<&TriggerDefinitionRef>,
     trigger_event: Option<&GameEvent>,
 ) -> bool {
     if trigger_event.is_some_and(|event| !zone_changed_condition_provenance_is_coherent(event)) {
         return false;
     }
 
-    // CR 603.4 + CR 109.4: polarity-safe fail-closed for designation leaves.
+    // CR 603.4 + CR 109.4 + CR 607.1c: polarity-safe fail-closed for anchored
+    // leaves.
     //
-    // A leaf whose PLAYER ANCHOR cannot be resolved is UNANSWERABLE, not false.
+    // A leaf whose ANCHOR cannot be resolved — a designation leaf's player, or a
+    // self-linked leaf's own trigger identity — is UNANSWERABLE, not false.
     // Returning `false` from inside the recursion inverts to `true` under
-    // `TriggerCondition::Not` — the shape every "unless" grammar and the
-    // "if you're not the monarch" bridge produce — firing the trigger precisely
-    // when the engine cannot identify the player. Reject here, at the same outer
+    // `TriggerCondition::Not` — the shape every "unless" grammar, the
+    // "if you're not the monarch" bridge and the "if you haven't added mana
+    // with this ability" guard produce — firing the trigger precisely when the
+    // engine cannot answer the question. Reject here, at the same outer
     // boundary that already rejects incoherent zone-change provenance directly
     // above, so the boolean combinators in
     // `evaluate_trigger_condition_with_source` can never reinterpret it as an
     // ordinary false operand.
-    if !trigger_condition_designation_anchors_resolvable(
+    if !trigger_condition_anchors_resolvable(
         state,
         condition,
         controller,
         source_context,
+        trigger_definition,
         trigger_event,
     ) {
         return false;
@@ -14615,71 +14644,83 @@ pub(crate) fn check_trigger_condition_with_source(
         condition,
         controller,
         source_context,
+        trigger_definition,
         trigger_event,
     )
 }
 
-/// CR 603.4 + CR 109.4: boundary predicate — does every designation leaf in this
-/// tree have a resolvable player anchor?
+/// CR 603.4 + CR 109.4 + CR 607.1c: boundary predicate — does every anchored
+/// leaf in this tree have a resolvable anchor?
 ///
-/// NOT a second evaluator: it recurses only the boolean combinators and
-/// delegates every anchor question to
+/// NOT a second evaluator: it recurses only the boolean combinators. A
+/// designation leaf's player question is delegated to
 /// `quantity::resolve_player_scope_for_trigger_check`, the same single authority
-/// the leaves use, via the compiler-forced
-/// [`TriggerCondition::designation_player_anchor`] accessor. The `_ => true`
-/// leaf arm is safe precisely because that accessor is exhaustive: a future
-/// anchored leaf is a compile error there, not a silent fail-open here.
+/// the leaves use; a self-linked leaf needs only the gated ability's identity.
+/// Both kinds are reported by the compiler-forced
+/// [`TriggerCondition::evaluation_anchor`] accessor. The `_ => true` leaf arm is
+/// safe precisely because that accessor is exhaustive: a future anchored leaf is
+/// a compile error there, not a silent fail-open here.
 ///
 /// Deliberately conservative: an unresolvable anchor anywhere rejects the whole
 /// condition, INCLUDING inside an `Or` whose other operand is true. No corpus
-/// card places a designation leaf under `Or`; the choice is pinned by
+/// card places an anchored leaf under `Or`; the choice is pinned by
 /// `unresolvable_designation_anchor_absorbs_or_cr_603_4` so a future card
 /// needing the looser reading has a failing test to point at.
-fn trigger_condition_designation_anchors_resolvable(
+fn trigger_condition_anchors_resolvable(
     state: &GameState,
     condition: &TriggerCondition,
     controller: PlayerId,
     source_context: Option<&TriggerSourceContext>,
+    trigger_definition: Option<&TriggerDefinitionRef>,
     trigger_event: Option<&GameEvent>,
 ) -> bool {
-    if let Some(scope) = condition.designation_player_anchor() {
-        return crate::game::quantity::resolve_player_scope_for_trigger_check(
-            state,
-            scope,
-            controller,
-            source_context,
-            trigger_event,
-        )
-        .is_some();
-    }
-    match condition {
-        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
-            conditions.iter().all(|inner| {
-                trigger_condition_designation_anchors_resolvable(
-                    state,
-                    inner,
-                    controller,
-                    source_context,
-                    trigger_event,
-                )
-            })
-        }
-        TriggerCondition::Not { condition } => trigger_condition_designation_anchors_resolvable(
-            state,
-            condition,
-            controller,
-            source_context,
-            trigger_event,
-        ),
-        TriggerCondition::EventTime { condition } => {
-            trigger_condition_designation_anchors_resolvable(
+    match condition.evaluation_anchor() {
+        Some(TriggerConditionAnchor::Player(scope)) => {
+            return crate::game::quantity::resolve_player_scope_for_trigger_check(
                 state,
-                condition,
+                scope,
                 controller,
                 source_context,
                 trigger_event,
             )
+            .is_some();
         }
+        // CR 607.1c + CR 603.4: a self-linked leaf is unanswerable without this
+        // trigger's identity.
+        Some(TriggerConditionAnchor::OwnTriggerDefinition) => {
+            return trigger_definition.is_some();
+        }
+        None => {}
+    }
+    match condition {
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+            conditions.iter().all(|inner| {
+                trigger_condition_anchors_resolvable(
+                    state,
+                    inner,
+                    controller,
+                    source_context,
+                    trigger_definition,
+                    trigger_event,
+                )
+            })
+        }
+        TriggerCondition::Not { condition } => trigger_condition_anchors_resolvable(
+            state,
+            condition,
+            controller,
+            source_context,
+            trigger_definition,
+            trigger_event,
+        ),
+        TriggerCondition::EventTime { condition } => trigger_condition_anchors_resolvable(
+            state,
+            condition,
+            controller,
+            source_context,
+            trigger_definition,
+            trigger_event,
+        ),
         _ => true,
     }
 }
@@ -14692,6 +14733,7 @@ fn evaluate_trigger_condition_with_source(
     condition: &TriggerCondition,
     controller: PlayerId,
     source_context: Option<&TriggerSourceContext>,
+    trigger_definition: Option<&TriggerDefinitionRef>,
     trigger_event: Option<&GameEvent>,
 ) -> bool {
     let source_id = source_context.map(|source| source.identity.reference.object_id);
@@ -14916,6 +14958,15 @@ fn evaluate_trigger_condition_with_source(
                         .flatten()
                 });
             matches!((via, source_id), (Some(via), Some(source)) if via == source)
+        }
+        // CR 603.4 + CR 607.1c: this occurrence's own per-player record. The boundary
+        // has already rejected `None`.
+        TriggerCondition::AddedManaWithThisAbilityThisTurn => {
+            trigger_definition.is_some_and(|definition| {
+                state
+                    .triggered_abilities_added_mana_this_turn
+                    .contains(&(definition.clone(), controller))
+            })
         }
         // CR 305.1 + CR 603.4: "without being played" is encoded as
         // `Not(WasPlayed)` and checks the triggering zone-change object first.
@@ -15499,7 +15550,7 @@ fn evaluate_trigger_condition_with_source(
         //
         // An unresolvable scope cannot reach this arm: the entry boundary in
         // `check_trigger_condition_with_source` has already rejected the whole
-        // condition (see `trigger_condition_designation_anchors_resolvable`).
+        // condition (see `trigger_condition_anchors_resolvable`).
         // The `is_some_and` below is therefore a total-function formality, not
         // the fail-closed mechanism — putting the rejection here instead would
         // fail OPEN under `TriggerCondition::Not`.
@@ -15734,6 +15785,7 @@ fn evaluate_trigger_condition_with_source(
                 c,
                 controller,
                 source_context,
+                trigger_definition,
                 trigger_event,
             )
         }),
@@ -15743,6 +15795,7 @@ fn evaluate_trigger_condition_with_source(
                 c,
                 controller,
                 source_context,
+                trigger_definition,
                 trigger_event,
             )
         }),
@@ -15754,6 +15807,7 @@ fn evaluate_trigger_condition_with_source(
             condition,
             controller,
             source_context,
+            trigger_definition,
             trigger_event,
         ),
         // CR 508.1m + CR 603.4 / CR 603.8: an event-time gate ("while" gates, and
@@ -15765,6 +15819,7 @@ fn evaluate_trigger_condition_with_source(
             condition,
             controller,
             source_context,
+            trigger_definition,
             trigger_event,
         ),
         // CR 309.7: True when the controller has completed a dungeon. `specific: None`
@@ -15857,6 +15912,8 @@ fn evaluate_trigger_condition_with_source(
 /// collection and stack rechecks call `check_trigger_condition_with_source`
 /// with the context captured at observation time; tests may materialize a
 /// context from a deliberately live source to state their setup compactly.
+/// It supplies no trigger identity, so a self-linked leaf fails closed here;
+/// fixtures that need one call `check_trigger_condition_with_source` directly.
 #[cfg(test)]
 pub(crate) fn check_trigger_condition(
     state: &GameState,
@@ -15876,6 +15933,7 @@ pub(crate) fn check_trigger_condition(
         condition,
         controller,
         source_context.as_ref(),
+        None,
         trigger_event,
     )
 }
@@ -18381,7 +18439,7 @@ pub mod tests {
             PlayerId(0),
             super::super::trigger_matchers::match_damage_done_once_by_controller,
             &[],
-            FiringConditions::printed(&trigger),
+            FiringConditions::printed(&trigger, None),
         )
         .into_iter()
         .map(|group| {
@@ -18509,7 +18567,7 @@ pub mod tests {
             PlayerId(0),
             super::super::trigger_matchers::match_damage_done_once_by_controller,
             &[],
-            FiringConditions::printed(&trigger),
+            FiringConditions::printed(&trigger, None),
         )
         .into_iter()
         .map(|group| {
@@ -24403,6 +24461,73 @@ pub mod tests {
             bound_fired_remaining, 0,
             "the fired one-shot is removed from delayed_triggers as before"
         );
+    }
+
+    /// CR 603.4 + CR 603.7: a delayed ability's resolution gate is derived from
+    /// that ability's own `AbilityCondition`, the same derivation its fire-time
+    /// check uses. A delayed ability therefore carries no `TriggerCondition` of
+    /// its own, so a trigger-only leaf can never reach its gate.
+    #[test]
+    fn delayed_entry_gate_is_derived_from_the_delayed_abilitys_own_condition() {
+        let mut state = setup();
+        let controller = PlayerId(0);
+        state.active_player = controller;
+        state.priority_player = controller;
+        let source = create_object(
+            &mut state,
+            CardId(0x0603_0701),
+            controller,
+            "Fight for the Throne".to_string(),
+            Zone::Battlefield,
+        );
+        // CR 903.3 + CR 903.3d: owned AND controlled, so the gate is true and
+        // the delayed ability reaches the stack.
+        let commander = make_creature(&mut state, controller, "Your Commander", 2, 2);
+        state
+            .objects
+            .get_mut(&commander)
+            .expect("staged commander")
+            .is_commander = true;
+        let victim = make_creature(&mut state, PlayerId(1), "Doomed Squire", 1, 1);
+        let mut ability = ResolvedAbility::new(
+            Effect::BecomeMonarch {
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            controller,
+        );
+        ability.condition = Some(AbilityCondition::ControlsCommander {
+            ownership: CommanderOwnership::Own,
+        });
+        let expected_gate = delayed_intervening_if(&ability);
+        state.delayed_triggers.push(DelayedTrigger {
+            condition: DelayedTriggerCondition::WhenDies {
+                filter: TargetFilter::Any,
+            },
+            ability: Box::new(ability),
+            controller,
+            source_id: source,
+            one_shot: true,
+            provenance: DelayedInstallIdentity::LegacyDelayed,
+        });
+
+        let death = zone_changed_event(
+            victim,
+            Zone::Battlefield,
+            Zone::Graveyard,
+            vec![CoreType::Creature],
+            Vec::new(),
+        );
+        check_delayed_triggers(&mut state, &[death]);
+
+        // Reach: the gate held, so exactly the delayed ability is on the stack.
+        assert_eq!(state.stack.len(), 1);
+        assert!(expected_gate.is_some(), "the fixture's gate must hoist");
+        let StackEntryKind::TriggeredAbility { condition, .. } = &state.stack[0].kind else {
+            panic!("the delayed ability must be a triggered stack entry");
+        };
+        assert_eq!(condition, &expected_gate);
     }
 
     /// CR 603.7b for the PHASE-NAMED one-shot class — the case the discard was
@@ -30774,6 +30899,7 @@ pub mod tests {
                 &condition,
                 PlayerId(0),
                 Some(&prior_source_context),
+                None,
                 Some(&event),
             ),
             "the prior source context must still receive its own damage trigger"
@@ -32004,6 +32130,66 @@ pub mod tests {
         );
     }
 
+    /// CR 603.4 + CR 607.1c: "if you haven't added mana with this ability this
+    /// turn" is about the gated trigger's own occurrence. Without that identity
+    /// the leaf is unanswerable, so the boundary rejects it before `Not` can
+    /// invert a missing identity into a firing trigger.
+    #[test]
+    fn self_linked_leaf_without_trigger_identity_fails_closed_cr_603_4() {
+        let mut state = setup();
+        let printed = |printed_index| TriggerDefinitionRef {
+            source: ObjectIncarnationRef::of(ObjectId(1), 0),
+            occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                base_set: crate::types::ability::TriggerBaseSetInstanceRef::INITIAL,
+                printed_index,
+            },
+        };
+        let own = printed(0);
+        let sibling = printed(1);
+        let leaf = TriggerCondition::AddedManaWithThisAbilityThisTurn;
+        let guard = TriggerCondition::Not {
+            condition: Box::new(leaf.clone()),
+        };
+        let check = |state: &GameState, condition, definition| {
+            check_trigger_condition_with_source(
+                state,
+                condition,
+                PlayerId(0),
+                None,
+                definition,
+                None,
+            )
+        };
+
+        // Positive control: this trigger's identity with nothing recorded.
+        assert!(check(&state, &guard, Some(&own)));
+        assert!(!check(&state, &leaf, Some(&own)));
+        // No identity: unanswerable, so rejected under `Not` as well as bare.
+        assert!(
+            !check(&state, &guard, None),
+            "`Not` must not invert a missing identity into a firing trigger"
+        );
+        assert!(!check(&state, &leaf, None));
+
+        // CR 113.2c: another ability's record does not answer for this one.
+        state
+            .triggered_abilities_added_mana_this_turn
+            .insert((sibling, PlayerId(0)));
+        assert!(check(&state, &guard, Some(&own)));
+
+        // This ability's own record closes its guard.
+        state
+            .triggered_abilities_added_mana_this_turn
+            .insert((own.clone(), PlayerId(1)));
+        assert!(check(&state, &guard, Some(&own)));
+        state
+            .triggered_abilities_added_mana_this_turn
+            .insert((own.clone(), PlayerId(0)));
+        assert!(!check(&state, &guard, Some(&own)));
+        assert!(check(&state, &leaf, Some(&own)));
+        assert!(!check(&state, &guard, None));
+    }
+
     /// CR 725.1: vacancy and identity stay distinct predicates after the
     /// subject axis is added.
     #[test]
@@ -32418,6 +32604,7 @@ pub mod tests {
             PlayerId(0),
             Some(&source_context),
             None,
+            None,
         ));
     }
 
@@ -32462,6 +32649,7 @@ pub mod tests {
             },
             PlayerId(0),
             Some(&watcher_context),
+            None,
             Some(&event),
         ));
     }
@@ -32538,6 +32726,7 @@ pub mod tests {
             &TriggerCondition::SourceIsTapped,
             PlayerId(0),
             Some(&source_context),
+            None,
             None,
         ));
         assert!(matches_target_filter(
@@ -50019,6 +50208,7 @@ pub mod tests {
             &condition,
             PlayerId(0),
             Some(&source_context),
+            None,
             Some(&event),
         ));
 
@@ -50027,6 +50217,7 @@ pub mod tests {
             &state,
             &condition,
             PlayerId(0),
+            None,
             None,
             Some(&event),
         ));
@@ -50056,6 +50247,7 @@ pub mod tests {
             &condition,
             PlayerId(0),
             None,
+            None,
             Some(&chosen),
         ));
         // Another player's choice must not fire this controller's trigger.
@@ -50063,6 +50255,7 @@ pub mod tests {
             &state,
             &condition,
             PlayerId(1),
+            None,
             None,
             Some(&chosen),
         ));
@@ -50075,6 +50268,7 @@ pub mod tests {
             &state,
             &condition,
             PlayerId(0),
+            None,
             None,
             Some(&unchosen),
         ));

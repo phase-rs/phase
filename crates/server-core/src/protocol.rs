@@ -3347,11 +3347,14 @@ mod tests {
     }
 
     /// `FilterProp::PrepareSpell` (CR 722.3d), the `scope` field on
-    /// `Effect::BecomePrepared` / `BecomeUnprepared` (CR 722.3a + CR 115.10a)
-    /// and `SpellCastRecord::prepared_copy_source` are new in serialized
-    /// full-game state; a v120 peer cannot parse the new `FilterProp` tag and
-    /// would read a mass prepare as a single-target one, so it must be refused
-    /// before it receives v121 state.
+    /// `Effect::BecomePrepared` / `BecomeUnprepared` (CR 722.3a + CR 115.10a),
+    /// `SpellCastRecord::prepared_copy_source` and `CopiableValues::prepare_face`
+    /// are new in serialized full-game state; a v121 peer cannot parse the new
+    /// `FilterProp` tag and would read a mass prepare as a single-target one, so
+    /// it must be refused before it receives v122 state.
+    /// The successful-mana-history ledger now stores the actual receiving
+    /// player with each trigger definition. A v120 peer cannot decode a
+    /// nonempty pair ledger, so it must be refused before v121 state.
     /// The CR 601.2a spell announcement adds `GameObject::spell_announcement`,
     /// `GameState::next_spell_announcement` and `GameEvent::BecomesTarget.targeter`;
     /// a v119 peer cannot decode v120 state, so it must be refused before state
@@ -3471,8 +3474,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_121_for_prepared_spell_and_mass_prepare() {
-        assert_eq!(PROTOCOL_VERSION, 121);
+    fn protocol_version_is_122_for_prepared_spell_and_mass_prepare() {
+        assert_eq!(PROTOCOL_VERSION, 122);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3483,7 +3486,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_121_for_prepared_spell_and_mass_prepare` stays
+    /// `protocol_version_is_122_for_prepared_spell_and_mass_prepare` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

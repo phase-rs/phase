@@ -1474,19 +1474,38 @@ fn pay_ability_cost_inner(
                         super::mana_sources::mana_production_could_produce_two_or_more_colors(
                             state, player, source_id, produced,
                         );
+                    let mut deposited = false;
                     for color in colors {
-                        super::mana_payment::produce_mana_with_attributes_from_source_quality(
-                            state,
-                            source_id,
-                            super::mana_sources::mana_color_to_type(color),
-                            player,
-                            false,
-                            source_could_produce_two_or_more_colors,
-                            &restrictions,
-                            grants,
-                            *expiry,
-                            events,
-                        );
+                        deposited |=
+                            !super::mana_payment::produce_mana_with_attributes_from_source_quality(
+                                state,
+                                source_id,
+                                super::mana_sources::mana_color_to_type(color),
+                                player,
+                                false,
+                                source_could_produce_two_or_more_colors,
+                                &restrictions,
+                                grants,
+                                *expiry,
+                                events,
+                            )
+                            .is_empty();
+                    }
+                    // CR 118.1 + CR 118.12 + CR 607.1c: paying this resolution-time cost
+                    // carries out the resolving ability's own instruction to add mana, so a
+                    // real deposit is mana added "with this ability". Gated on returned units:
+                    // a {0}-reduced cumulative upkeep never reaches this arm
+                    // (`expand_per_counter(_, 0)` is `Mana {0}`), and a prevented production
+                    // (CR 614.1) returns none.
+                    match scope {
+                        PaymentScope::Resolution { ability, .. } => {
+                            super::effects::mana::record_triggered_ability_added_mana(
+                                state, ability, player, deposited,
+                            )
+                        }
+                        // CR 602.1a: an activation cost belongs to an activated ability,
+                        // which has no triggered identity to record.
+                        PaymentScope::Activation { .. } => {}
                     }
                 }
                 // CR 118.3 + CR 701.26a: tapping one determined permanent (the granter, or the
