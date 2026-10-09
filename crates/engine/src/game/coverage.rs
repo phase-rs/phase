@@ -24934,6 +24934,66 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             "modeled tree must emit no unsupported item"
         );
     }
+
+    /// A member-filtered tracked set renders its restriction ("matching …"),
+    /// never the bare short-circuit: a formatter that dropped the filter
+    /// would render two predicates the runtime treats differently as one
+    /// signature. The unfiltered short-circuit keeps its exact legacy
+    /// string, and the `DistinctCardTypes` or-pattern path renders the
+    /// restriction too.
+    #[test]
+    fn filtered_tracked_set_population_renders_its_restriction() {
+        use crate::types::ability::{
+            AggregateFunction, CardTypeSetSource, ControllerRef, ObjectProperty, PropertyAggregate,
+            QuantityRef, TargetFilter, ThisWayCause, TrackedAnaphorSource, TypedFilter,
+        };
+        let member = || TargetFilter::Typed(TypedFilter::card().controller(ControllerRef::You));
+        let aggregate = |source| {
+            QuantityRef::PropertyAggregate(
+                PropertyAggregate::new(AggregateFunction::Sum, ObjectProperty::Toughness, source)
+                    .expect("statically valid property aggregate"),
+            )
+        };
+
+        // Unfiltered: the "those cards" short-circuit is preserved exactly.
+        assert_eq!(
+            fmt_quantity_ref(&aggregate(CardTypeSetSource::TrackedSet {
+                set: TrackedAnaphorSource::ChainSet,
+                caused_by: None,
+                filter: None,
+            })),
+            "total toughness of those cards"
+        );
+        // Filtered: the restriction renders through "matching", not the bare base.
+        assert_eq!(
+            fmt_quantity_ref(&aggregate(CardTypeSetSource::TrackedSet {
+                set: TrackedAnaphorSource::ChainSet,
+                caused_by: None,
+                filter: Some(member()),
+            })),
+            "total toughness of tracked cards matching you control card"
+        );
+        // Filtered with a cause word: both the cause and the restriction render.
+        assert_eq!(
+            fmt_quantity_ref(&aggregate(CardTypeSetSource::TrackedSet {
+                set: TrackedAnaphorSource::ChainSet,
+                caused_by: Some(ThisWayCause::Sacrificed),
+                filter: Some(member()),
+            })),
+            "total toughness of cards sacrificed this way matching you control card"
+        );
+        // The `DistinctCardTypes` or-pattern path names the restriction too.
+        assert_eq!(
+            fmt_quantity_ref(&QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::TrackedSet {
+                    set: TrackedAnaphorSource::ChainSet,
+                    caused_by: None,
+                    filter: Some(member()),
+                },
+            }),
+            "card types among tracked cards matching you control card"
+        );
+    }
 }
 
 #[cfg(test)]

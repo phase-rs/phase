@@ -19796,6 +19796,28 @@ fn should_collect_player_scope_sacrifice_choices(ability: &ResolvedAbility) -> b
     matches!(ability.effect, Effect::Sacrifice { .. }) && ability.sub_ability.is_none()
 }
 
+/// CR 608.2c: publish the members of a completed player-scope sacrifice
+/// clause for a downstream tracked-set consumer (Danse Macabre's die modifier
+/// reads the sacrificed members here — later instructions read what earlier
+/// ones published). The sacrifice-specific
+/// choice flow returns before the generic fan-out's
+/// `publish_player_scope_clause_results` call, so without this the clause's
+/// set is never published and consumers read 0. Mirrors that authority's
+/// gate-then-publish pair: `tail_needs_set` is the detached after-scope
+/// chain (sync arm) or the parked continuation (resumed arms).
+fn publish_completed_sacrifice_clause_set(
+    state: &mut GameState,
+    template: &ResolvedAbility,
+    tail_needs_set: bool,
+    scoped_events: &[GameEvent],
+) {
+    if !tail_needs_set {
+        return;
+    }
+    let affected = affected_objects_with_causes(state, template, &template.effect, scoped_events);
+    publish_tracked_set_with_causes(state, affected);
+}
+
 fn start_player_scope_sacrifice_choices(
     state: &mut GameState,
     template: &ResolvedAbility,
@@ -19833,7 +19855,17 @@ fn start_player_scope_sacrifice_choices(
         PlayerScopeSacrificePerformOutcome::PausedForReplacement => {
             return Ok(ResolutionProgress::Waiting)
         }
-        PlayerScopeSacrificePerformOutcome::Completed { .. } => {
+        PlayerScopeSacrificePerformOutcome::Completed {
+            events_before_sacrifice,
+            events_after_sacrifice,
+            ..
+        } => {
+            publish_completed_sacrifice_clause_set(
+                state,
+                template,
+                branch_references_tracked_set(after_scope.as_deref()),
+                &events[events_before_sacrifice..events_after_sacrifice],
+            );
             if let Some(after_scope) = after_scope {
                 return resolve_ability_chain_step(state, &after_scope, events, depth + 1);
             }
@@ -19889,11 +19921,25 @@ pub(crate) fn advance_pending_player_scope_sacrifice_choice(
             events_before_sacrifice,
             events_after_sacrifice,
             sacrificed_count,
-        } => Ok(PendingPlayerScopeSacrificeOutcome::Completed {
-            events_before_sacrifice,
-            events_after_sacrifice,
-            sacrificed_count,
-        }),
+        } => {
+            // The after-scope tail was parked on the continuation frame when
+            // the choice paused; gate publication on it, mirroring the sync
+            // arm's detached-tail gate.
+            let tail_needs_set = state
+                .active_ability_continuation()
+                .is_some_and(|c| branch_references_tracked_set(Some(c.chain.as_ref())));
+            publish_completed_sacrifice_clause_set(
+                state,
+                &pending.ability,
+                tail_needs_set,
+                &events[events_before_sacrifice..events_after_sacrifice],
+            );
+            Ok(PendingPlayerScopeSacrificeOutcome::Completed {
+                events_before_sacrifice,
+                events_after_sacrifice,
+                sacrificed_count,
+            })
+        }
     }
 }
 
@@ -19920,11 +19966,24 @@ pub(crate) fn drain_pending_player_scope_sacrifice_after_replacement(
             events_before_sacrifice,
             events_after_sacrifice,
             sacrificed_count,
-        } => Ok(PendingPlayerScopeSacrificeOutcome::Completed {
-            events_before_sacrifice,
-            events_after_sacrifice,
-            sacrificed_count,
-        }),
+        } => {
+            // Same parked-tail gate as the choice-resumption arm above: the
+            // after-scope tail rode the continuation frame across the pause.
+            let tail_needs_set = state
+                .active_ability_continuation()
+                .is_some_and(|c| branch_references_tracked_set(Some(c.chain.as_ref())));
+            publish_completed_sacrifice_clause_set(
+                state,
+                &pending.ability,
+                tail_needs_set,
+                &events[events_before_sacrifice..events_after_sacrifice],
+            );
+            Ok(PendingPlayerScopeSacrificeOutcome::Completed {
+                events_before_sacrifice,
+                events_after_sacrifice,
+                sacrificed_count,
+            })
+        }
     }
 }
 

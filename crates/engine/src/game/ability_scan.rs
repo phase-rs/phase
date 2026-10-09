@@ -7845,6 +7845,11 @@ mod tests {
             scope: CountScope::Controller,
             filter: Some(TargetFilter::TriggeringSource),
         };
+        let event_filtered_chain = CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: Some(TargetFilter::TriggeringSource),
+        };
         let rows = vec![
             (
                 CardTypeSetSource::Objects {
@@ -7887,6 +7892,18 @@ mod tests {
                     sibling: false,
                     projected: true,
                     history: HistoryReads::NONE,
+                },
+            ),
+            // CR 603.3b: a chain set is effect-visible (NONE) until a member
+            // filter reads the trigger event — then the event axis must light
+            // up or the reader is ordered before its writer. The sibling axis
+            // comes from the live-board evaluation context's fail-closed base.
+            (
+                event_filtered_chain,
+                Axes {
+                    event: true,
+                    sibling: true,
+                    projected: false,
                 },
             ),
             (

@@ -10757,8 +10757,17 @@ pub(super) fn parse_destroy_ast(
         // CR 608.2k: thread `ctx` so bare "it"/"them" anaphors bind to the
         // triggering subject ("Whenever a creature dies, destroy it" class).
         let (target, rem) = parse_target_with_ctx(rest, ctx);
+        // Upstream evolution (true-upstream rebase): an attachment qualifier
+        // now binds into the target rather than refusing the arm. Our
+        // fail-closed guard runs AFTER the bind, on the bound target, so a
+        // genuinely dropped "this way" still refuses.
         let phrase = &rest[..rest.len() - rem.len()];
         let (target, _rem) = bind_attachment_qualifier(target, phrase, rem, ctx)?;
+        // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+        // way" the filter doesn't bind must refuse, not sweep.
+        if super::target_span_dropped_this_way_anaphor(rest, &target) {
+            return None;
+        }
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
         return Some(ZoneCounterImperativeAst::Destroy { target, all: true });
@@ -10778,6 +10787,11 @@ pub(super) fn parse_destroy_ast(
         if crate::game::filter::filter_reads_declared_slot(&target)
             && nom_primitives::scan_contains(&phrase.to_lowercase(), "target ")
         {
+            return None;
+        }
+        // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+        // way" the filter doesn't bind must refuse, not sweep.
+        if super::target_span_dropped_this_way_anaphor(rest, &target) {
             return None;
         }
         #[cfg(debug_assertions)]
@@ -11552,6 +11566,11 @@ pub(super) fn parse_exile_ast(
         } else {
             parsed_target
         };
+        // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+        // way" the filter doesn't bind must refuse, not sweep.
+        if super::target_span_dropped_this_way_anaphor(rest, &target) {
+            return None;
+        }
         let origin = super::infer_origin_zone(rest_lower);
         let (origin, target) = super::compose_exile_graveyard_origin_and_target(
             origin,
@@ -11645,6 +11664,11 @@ pub(super) fn parse_exile_ast(
     if mass_zone {
         let (target, _rem) =
             ctx.with_player_antecedents(|scoped| parse_target_with_ctx(rest_text, scoped));
+        // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+        // way" the filter doesn't bind must refuse, not sweep.
+        if super::target_span_dropped_this_way_anaphor(rest_text, &target) {
+            return None;
+        }
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
         let origin = super::infer_origin_zone(rest_lower);
@@ -11691,6 +11715,11 @@ pub(super) fn parse_exile_ast(
         let tail_is_consumed = tail_clean.is_empty() || !enter_with_counters.is_empty();
         if rem.trim().is_empty() && !matches!(target, TargetFilter::Any) && tail_is_consumed {
             attach_controller_if_absent(&mut target, ControllerRef::You);
+            // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+            // way" the filter doesn't bind must refuse, not sweep.
+            if super::target_span_dropped_this_way_anaphor(rest_lower, &target) {
+                return None;
+            }
             if let TargetFilter::Typed(typed) = &mut target {
                 typed
                     .properties
@@ -11755,6 +11784,11 @@ pub(super) fn parse_exile_ast(
             && target.extract_in_zone() == Some(Zone::Graveyard)
             && terminal_punctuation_only(remainder)
         {
+            // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+            // way" the filter doesn't bind must refuse, not sweep.
+            if super::target_span_dropped_this_way_anaphor(target_text, &target) {
+                return None;
+            }
             return Some(ZoneCounterImperativeAst::Exile {
                 origin: Some(Zone::Graveyard),
                 target,
@@ -11848,6 +11882,11 @@ pub(super) fn parse_exile_ast(
     } else {
         parsed_target
     };
+    // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+    // way" the filter doesn't bind must refuse, not sweep.
+    if super::target_span_dropped_this_way_anaphor(target_input, &target) {
+        return None;
+    }
     // CR 400.7 (issue #6505): infer the origin zone excluding ONLY a trailing
     // compound conjunct ("and their graveyard", Strategic Betrayal) so its
     // sibling graveyard leg cannot leak Zone::Graveyard onto the battlefield

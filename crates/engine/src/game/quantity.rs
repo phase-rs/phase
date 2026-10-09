@@ -488,7 +488,6 @@ fn visit_characteristic_leaf<'s>(
         // `targeting::resolve_tracked_set_id`: that authority SKIPS empty sets, and
         // under mode scoping not skipping is the correct semantics here.
         CardTypeSetSource::TrackedSet {
-<<<<<<< HEAD
             set: TrackedAnaphorSource::TriggeringBatch,
             caused_by,
         } => {

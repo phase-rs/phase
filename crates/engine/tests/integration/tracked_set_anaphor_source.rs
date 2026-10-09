@@ -26,8 +26,9 @@ use engine::game::quantity::{resolve_quantity, resolve_quantity_with_ctx, Quanti
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
-    AggregateFunction, CardTypeSetSource, ControllerRef, Effect, ObjectProperty, QuantityExpr,
-    QuantityRef, TargetFilter, TrackedAnaphorSource, TypedFilter,
+    AbilityDefinition, AggregateFunction, CardTypeSetSource, ControllerRef, DieResultBranch,
+    Effect, ObjectProperty, QuantityExpr, QuantityRef, TargetFilter, TrackedAnaphorSource,
+    TypedFilter,
 };
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
@@ -589,6 +590,26 @@ fn unimplemented_count(name: &str, oracle: &str, types: &[String]) -> usize {
         .count()
 }
 
+/// The single d20 `DieRolled` total from a cast's events. Reach-guarded:
+/// exactly one d20 roll must have happened, so a missing roll fails here
+/// instead of silently comparing against a default.
+fn d20_total(events: &[GameEvent]) -> u8 {
+    let mut totals = events.iter().filter_map(|event| match event {
+        GameEvent::DieRolled {
+            result: Some(total),
+            sides: 20,
+            ..
+        } => Some(*total),
+        _ => None,
+    });
+    let total = totals.next().expect("the cast must roll exactly one d20");
+    assert!(
+        totals.next().is_none(),
+        "the cast must roll exactly one d20"
+    );
+    total
+}
+
 /// B-2 — RUNTIME cast drive. Danse Macabre resolves end to end: both players
 /// sacrifice (mandatory fast path — one eligible creature each, so no prompt),
 /// the d20 rolls with the filtered toughness bonus, and the winning die row
@@ -632,6 +653,90 @@ fn danse_macabre_cast_sacrifices_both_sides_and_honestly_no_ops_the_row() {
         matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
         "expected a clean return to priority, got {:?}",
         outcome.final_waiting_for()
+    );
+
+    // The die modifier through the pipeline: Danse's post-modifier total
+    // minus the natural from an identical control cast (same seed, same RNG
+    // consumption — the sacrifices draw no randomness) must equal exactly
+    // the filtered toughness bonus (oak's 3): not 0 (filter dropped the
+    // bonus) and not 10 (filter ignored, elm's 7 leaked in).
+    let danse_total = d20_total(outcome.events());
+    let mut control_scenario = GameScenario::new();
+    control_scenario.at_phase(Phase::PreCombatMain);
+    control_scenario.add_creature(P0, "Oak", 2, 3);
+    control_scenario.add_creature(P1, "Elm", 1, 7);
+    let control_spell = control_scenario
+        .add_spell_to_hand_from_oracle(P0, "Control Die", false, "Roll a d20.")
+        .id();
+    let mut control_runner = control_scenario.build();
+    let control_outcome = control_runner.cast(control_spell).resolve();
+    let natural = d20_total(control_outcome.events());
+    assert_eq!(
+        danse_total as i32 - natural as i32,
+        3,
+        "Danse's d20 modifier must be the filtered toughness bonus (oak's 3): \
+         post-modifier total {danse_total}, control natural {natural}"
+    );
+}
+
+/// B-2b — RUNTIME resumed path. Same die-modifier differential as B-2, but
+/// each player controls TWO creatures so the sacrifice pauses for
+/// `EffectZoneChoice` prompts (the driver answers in engine-listed order)
+/// and completes through the resumption arms. Both of P0's creatures have
+/// toughness 3, so the differential reads 3 whichever one is picked; a
+/// publication miss on the resumed path reads 0 instead.
+#[test]
+fn danse_macabre_modifier_flows_when_sacrifice_pauses_for_choices() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let oak = scenario.add_creature(P0, "Oak", 2, 3).id();
+    let pine = scenario.add_creature(P0, "Pine", 4, 3).id();
+    let elm = scenario.add_creature(P1, "Elm", 1, 7).id();
+    let ash = scenario.add_creature(P1, "Ash", 5, 5).id();
+    let danse = scenario
+        .add_spell_to_hand_from_oracle(P0, "Danse Macabre", false, DANSE)
+        .id();
+    let mut runner = scenario.build();
+    // Declared picks, consumed in APNAP prompt order: oak (toughness 3, the
+    // bonus the differential below must read) for P0, elm for P1.
+    let outcome = runner.cast(danse).effect_zone(&[oak, elm]).resolve();
+
+    // Reach guards: exactly one creature per side left the battlefield, so
+    // the prompt path ran (the Auto fast path takes effect only at a single
+    // eligible creature) and the roll below read a prompted completion.
+    let state = outcome.state();
+    let in_graveyard = |id| {
+        state
+            .objects
+            .get(&id)
+            .is_some_and(|obj| obj.zone == Zone::Graveyard)
+    };
+    let p0_sacrificed = [oak, pine].iter().filter(|id| in_graveyard(**id)).count();
+    let p1_sacrificed = [elm, ash].iter().filter(|id| in_graveyard(**id)).count();
+    assert_eq!(
+        (p0_sacrificed, p1_sacrificed),
+        (1, 1),
+        "each side must sacrifice exactly one of its two creatures"
+    );
+
+    let danse_total = d20_total(outcome.events());
+    let mut control_scenario = GameScenario::new();
+    control_scenario.at_phase(Phase::PreCombatMain);
+    control_scenario.add_creature(P0, "Oak", 2, 3);
+    control_scenario.add_creature(P0, "Pine", 4, 3);
+    control_scenario.add_creature(P1, "Elm", 1, 7);
+    control_scenario.add_creature(P1, "Ash", 5, 5);
+    let control_spell = control_scenario
+        .add_spell_to_hand_from_oracle(P0, "Control Die", false, "Roll a d20.")
+        .id();
+    let mut control_runner = control_scenario.build();
+    let control_outcome = control_runner.cast(control_spell).resolve();
+    let natural = d20_total(control_outcome.events());
+    assert_eq!(
+        danse_total as i32 - natural as i32,
+        3,
+        "the resumed sacrifice must publish its members like the sync path: \
+         post-modifier total {danse_total}, control natural {natural}"
     );
 }
 
@@ -688,16 +793,23 @@ fn agent_interposed_anaphor_binds_chain_set_with_member_filter_at_card_level() {
     );
 }
 
-/// B-4 — RESOLVER + MUTUAL DESTRUCTION. A chain set holding both players'
-/// sacrificed creatures (read from LKI — both members have left the
-/// battlefield) resolves 3 under Danse's `You` filter and 10 unfiltered.
-/// The unfiltered 10 is the over-count the filter exists to prevent.
+/// B-4 — RESOLVER + MUTUAL DESTRUCTION. A chain set holding the caster's own
+/// sacrificed 1/1, the opponent's own 1/7, and a 1/2 the caster controlled
+/// but did not own (read from LKI — all members have left the battlefield)
+/// resolves 3 under Danse's `You` filter and 10 unfiltered. Every wrong
+/// reading differs: dropping the filter reads 10 (over-count), and either
+/// owner-keyed reading (1 or 8) misses the control-but-not-own arm, which is
+/// exactly the arm that separates a controller predicate from an owner
+/// predicate.
 #[test]
 fn filtered_tracked_set_aggregate_counts_only_the_named_agents_members_via_lki() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let oak = scenario.add_creature_to_graveyard(P0, "Oak", 2, 3).id();
+    let oak = scenario.add_creature_to_graveyard(P0, "Oak", 1, 1).id();
     let elm = scenario.add_creature_to_graveyard(P1, "Elm", 1, 7).id();
+    // CR 701.21a: sacrificed from under P0's control, so it moved to its
+    // owner's (P1's) graveyard — owner and controller disagree by construction.
+    let loaned = scenario.add_creature_to_graveyard(P1, "Loaned", 1, 2).id();
     let runner = scenario.build();
 
     // LKI as the sacrifice publisher would have captured it at zone-change time.
@@ -710,9 +822,18 @@ fn filtered_tracked_set_aggregate_counts_only_the_named_agents_members_via_lki()
             .snapshot_public_characteristics();
         state.lki_cache.insert(oid, snapshot);
     }
+    let mut loaned_snapshot = state
+        .objects
+        .get(&loaned)
+        .expect("tracked member exists")
+        .snapshot_public_characteristics();
+    loaned_snapshot.controller = P0;
+    state.lki_cache.insert(loaned, loaned_snapshot);
     let set_id = engine::types::identifiers::TrackedSetId(state.next_tracked_set_id);
     state.next_tracked_set_id += 1;
-    state.tracked_object_sets.insert(set_id, vec![oak, elm]);
+    state
+        .tracked_object_sets
+        .insert(set_id, vec![oak, elm, loaned]);
 
     let aggregate = |filter: Option<TargetFilter>| QuantityExpr::Ref {
         qty: QuantityRef::PropertyAggregate(
@@ -736,23 +857,27 @@ fn filtered_tracked_set_aggregate_counts_only_the_named_agents_members_via_lki()
     assert_eq!(
         resolve_quantity(&state, &filtered, P0, oak),
         3,
-        "Danse's filter admits only the caster's sacrificed creature (toughness 3)"
+        "Danse's filter admits the caster's own 1/1 plus the controlled-but-not-owned 1/2"
     );
     assert_eq!(
         resolve_quantity(&state, &unfiltered, P0, oak),
         10,
-        "without the member filter the opponent's toughness 7 leaks in — the \
+        "without the member filter every member's toughness leaks in — the \
          over-count that makes the restriction load-bearing, not decorative"
     );
 
     // The no-LKI fallback arm: with the snapshots gone (the cache clears on
-    // phase/step transitions), the same members resolve from their live
-    // objects to the same answers.
+    // phase/step transitions), the loaned member resolves from its live
+    // graveyard object, where CR 108.4a substitutes its owner (P1) for the
+    // controller query — so it drops out and the filter reads 1, not 3. That
+    // drop is the specified degradation, and it proves the LKI branch (not
+    // the live-object branch) carries the control-but-not-own arm.
     state.lki_cache.clear();
     assert_eq!(
         resolve_quantity(&state, &filtered, P0, oak),
-        3,
-        "filter over live objects without LKI still admits only the caster's member"
+        1,
+        "without LKI the control-but-not-own arm is invisible to the filter \
+         (CR 108.4a owner substitution)"
     );
     assert_eq!(
         resolve_quantity(&state, &unfiltered, P0, oak),
@@ -875,4 +1000,35 @@ fn danse_put_into_zone_rows_refuse_honestly_while_neighbors_parse() {
         2,
         "exactly the two die rows may be red, got {json}"
     );
+
+    // The results table itself: both rows keep their printed ranges and both
+    // bodies refuse as `Unimplemented { name: "return" }`. The participle
+    // axis that would bind them (unit 8e) is DEFERRED(phase 7), so refusal
+    // — not an over-broad reanimation — is the honest shape.
+    fn roll_results(def: &AbilityDefinition) -> Option<&Vec<DieResultBranch>> {
+        if let Effect::RollDie { results, .. } = &*def.effect {
+            return Some(results);
+        }
+        def.sub_ability.as_deref().and_then(roll_results)
+    }
+    let results = parsed
+        .abilities
+        .iter()
+        .find_map(roll_results)
+        .expect("Danse must carry a RollDie results table");
+    assert_eq!(
+        results
+            .iter()
+            .map(|row| (row.min, row.max))
+            .collect::<Vec<_>>(),
+        vec![(1, 14), (15, 255)],
+        "both die rows keep their printed ranges"
+    );
+    for (index, row) in results.iter().enumerate() {
+        assert!(
+            matches!(&*row.effect.effect, Effect::Unimplemented { name, .. } if name == "return"),
+            "row {index} body must refuse as Unimplemented(return), got {:?}",
+            row.effect.effect
+        );
+    }
 }

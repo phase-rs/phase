@@ -40478,6 +40478,45 @@ mod tests {
         assert!(round_tripped.is_resolution_installed());
     }
 
+    /// The `CardTypeSetSource::TrackedSet` member `filter` is additive and
+    /// wire-compatible: `None` emits no key (every existing serialized
+    /// `card-data.json` entry stays byte-identical), an old payload carrying
+    /// no key loads as `None`, and a `Some` payload round-trips faithfully.
+    #[test]
+    fn tracked_set_member_filter_is_wire_compatible() {
+        let bare = CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: None,
+        };
+        let json = serde_json::to_string(&bare).expect("serializes");
+        assert!(
+            !json.contains("filter"),
+            "an unfiltered tracked set must emit no `filter` key: {json}"
+        );
+
+        // An old payload with no `filter` key loads as `None`.
+        let loaded: CardTypeSetSource = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(loaded, bare);
+
+        // A filtered source round-trips faithfully, key and payload both.
+        let filtered = CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: Some(TargetFilter::Typed(
+                TypedFilter::card().controller(ControllerRef::You),
+            )),
+        };
+        let filtered_json = serde_json::to_string(&filtered).expect("serializes");
+        assert!(
+            filtered_json.contains("filter"),
+            "a filtered tracked set must emit its `filter` key: {filtered_json}"
+        );
+        let round_tripped: CardTypeSetSource =
+            serde_json::from_str(&filtered_json).expect("deserializes");
+        assert_eq!(round_tripped, filtered);
+    }
+
     #[test]
     fn when_you_do_marker_with_guard_is_a_flat_root_and() {
         let condition = AbilityCondition::when_you_do_with_guard(AbilityCondition::And {

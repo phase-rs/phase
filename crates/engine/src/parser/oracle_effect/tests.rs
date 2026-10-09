@@ -94920,6 +94920,171 @@ fn only_that_player_binds_the_declared_player_as_zone_chooser() {
         );
         assert!(unimplemented, "{text}: {def:?}");
     }
+
+/// Stitcher Geralf's exile sentence names a participle the target-position
+/// grammar cannot bind ("put into graveyards this way"), so the exile
+/// dispatcher must refuse rather than sweeping every creature card in
+/// graveyards (CR 608.2c — the Entry-35 guard mirrored to exile verbs).
+#[test]
+fn stitcher_geralf_exile_sentence_with_put_participle_is_refused() {
+    let control = parse_effect("Exile up to two creature cards.");
+    assert!(
+        matches!(&control, Effect::ChangeZone { .. }),
+        "reach guard: the same exile without the participle must still lower, got {control:?}"
+    );
+    let refused = parse_effect("Exile up to two creature cards put into graveyards this way.");
+    assert!(
+        matches!(&refused, Effect::Unimplemented { name, .. } if name == "exile"),
+        "Stitcher's exile must refuse the unhandled put-participle, got {refused:?}"
+    );
+}
+
+/// Harsh Mercy rides the mirrored destroy-verb guard through the same
+/// mechanism as the accepted Bidding/Tide flips: the destroy dispatcher's
+/// target span names "this way" ("of a type chosen this way") without
+/// binding it, so the line must refuse rather than destroying every
+/// creature (CR 608.2c).
+#[test]
+fn harsh_mercy_destroy_sentence_with_chosen_type_anaphor_is_refused() {
+    let control = parse_effect("Destroy all creatures.");
+    assert!(
+        matches!(&control, Effect::DestroyAll { .. }),
+        "reach guard: the same destroy-all without the anaphor must still lower, got {control:?}"
+    );
+    let refused = parse_effect("Destroy all creatures that aren't of a type chosen this way.");
+    assert!(
+        matches!(&refused, Effect::Unimplemented { name, .. } if name == "destroy"),
+        "Harsh Mercy's destroy must refuse the unhandled chosen-type anaphor, got {refused:?}"
+    );
+}
+
+/// Flickerform's delayed-trigger body: "the other" binds `TrackedSet` at the
+/// return dispatcher (so the Entry-35 guard passes), then "that creature" in
+/// the attach tail triggers the chunk-loop anaphoric rewriter, which would
+/// collapse the set to `ParentTarget` — resolving against the exiled
+/// creature instead of the other exiled cards. The rewriter must refuse the
+/// clause instead (CR 608.2c). The durable fix needs linked-exile-style
+/// binding for the delayed trigger rather than the chain set, which is stale
+/// by the time a delayed trigger fires (CR 603.7c) — DEFERRED(phase 7); this
+/// pin is the refusal, not the binding.
+#[test]
+fn flickerform_return_with_exiled_this_way_and_attach_tail_is_refused() {
+    // Reach guard 1: the anaphoric rewriter still fires for an ordinary
+    // "if you do" anaphor with no tracked set in play.
+    let control = parse_effect_chain(
+        "Exile target creature. If you do, return it to the battlefield.",
+        AbilityKind::Spell,
+    );
+    let control_sub = control
+        .sub_ability
+        .as_deref()
+        .expect("the conditional followup must chain as a sub-ability");
+    assert!(
+        matches!(
+            &*control_sub.effect,
+            Effect::ChangeZone {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "reach guard: the plain if-you-do anaphor must still rewrite to the parent target, got {:?}",
+        control_sub.effect
+    );
+    // Reach guard 2: without "this way" in the span the rewriter still
+    // proceeds (the `ParentTarget` target below is pre-existing rewriter
+    // behavior, not endorsed — this pins only that refusal requires the
+    // "this way" trigger).
+    let no_trigger = parse_effect_chain(
+        "Return that card to the battlefield. If you do, return the other cards to the battlefield attached to that creature.",
+        AbilityKind::Spell,
+    );
+    let no_trigger_sub = no_trigger
+        .sub_ability
+        .as_deref()
+        .expect("the conditional followup must chain as a sub-ability");
+    assert!(
+        !matches!(&*no_trigger_sub.effect, Effect::Unimplemented { .. }),
+        "reach guard: without \"this way\" the rewriter must still proceed, got {:?}",
+        no_trigger_sub.effect
+    );
+
+    let refused = parse_effect_chain(
+        "Return that card to the battlefield under its owner's control. If you do, return the other cards exiled this way to the battlefield under their owners' control attached to that creature.",
+        AbilityKind::Spell,
+    );
+    let refused_sub = refused
+        .sub_ability
+        .as_deref()
+        .expect("the conditional followup must chain as a sub-ability");
+    assert!(
+        matches!(&*refused_sub.effect, Effect::Unimplemented { name, .. } if name == "return"),
+        "Flickerform's return must refuse the clobbered tracked-set anaphor, got {:?}",
+        refused_sub.effect
+    );
+    assert!(
+        refused_sub.sub_ability.is_none(),
+        "the refused sentence's attach dependent must go with it, got {:?}",
+        refused_sub.sub_ability
+    );
+    assert!(
+        refused_sub.condition.is_some(),
+        "the refusal must keep its \"if you do\" gate, got {:?}",
+        refused_sub.condition
+    );
+}
+
+/// The narrowed fail-closed predicate distinguishes BOUND quantity-position
+/// anaphors from DROPPED target-identity participles (CR 608.2c). Wrath of the
+/// Skies' destroy span must NOT trip it (its "this way" rides the
+/// payment-amount channel), while Stitcher Geralf's and Harsh Mercy's spans
+/// must (their participles name the targets and bind nothing).
+#[test]
+fn dropped_this_way_predicate_fires_only_on_unbound_anaphors() {
+    let unbound_target = TargetFilter::Typed(TypedFilter::card());
+    // Wrath: the span really does name "this way" (presence guard, so the
+    // `false` below cannot pass vacuously), but the payment-amount excision
+    // binds it — no refusal.
+    let wrath_span = "each artifact, creature, and enchantment with mana value less than or equal to the amount of {E} paid this way.";
+    assert!(
+        scan_contains_for_test(wrath_span, "this way"),
+        "presence guard: the Wrath span must name the anaphor, got {wrath_span:?}"
+    );
+    assert!(
+        !super::target_span_dropped_this_way_anaphor(wrath_span, &unbound_target),
+        "Wrath's quantity-bound payment anaphor must not trip the refusal"
+    );
+    // Stitcher: the put-participle binds nothing — refusal.
+    assert!(
+        super::target_span_dropped_this_way_anaphor(
+            "up to two creature cards put into graveyards this way.",
+            &unbound_target
+        ),
+        "Stitcher's dropped put-participle must trip the refusal"
+    );
+    // Harsh Mercy: the chosen-type anaphor binds nothing — refusal.
+    assert!(
+        super::target_span_dropped_this_way_anaphor(
+            "all creatures that aren't of a type chosen this way.",
+            &unbound_target
+        ),
+        "Harsh Mercy's dropped chosen-type anaphor must trip the refusal"
+    );
+    // A tracked-set target passes through untouched even with "this way" present.
+    assert!(
+        !super::target_span_dropped_this_way_anaphor(
+            "the other cards exiled this way",
+            &TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0),
+            }
+        ),
+        "a bound tracked-set target must pass through untouched"
+    );
+}
+
+/// Test-local word-boundary presence probe (mirrors `scan_contains_phrase`;
+/// kept local so this pin does not depend on that helper's own wiring).
+fn scan_contains_for_test(text: &str, phrase: &str) -> bool {
+    crate::parser::oracle_nom::primitives::scan_contains(&text.to_ascii_lowercase(), phrase)
 }
 
 // ---------------------------------------------------------------------------

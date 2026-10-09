@@ -1114,7 +1114,13 @@ fn parse_noted_number_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 /// order.
 /// `PayAmountChoice` records this value in `last_effect_count` before it resumes
 /// the chained effect, which is the runtime carrier for `EventContextAmount`.
-fn parse_paid_energy_this_way_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+///
+/// `pub(crate)` (not private) because the exile/destroy-verb fail-closed guard
+/// (`target_span_dropped_this_way_anaphor` in `oracle_effect`) runs this
+/// combinator over a dispatcher's target span: a "this way" this combinator
+/// consumes is quantity-bound (a payment threshold), never a dropped
+/// target-identity anaphor, so it must not trip the refusal.
+pub(crate) fn parse_paid_energy_this_way_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     value(
         QuantityRef::EventContextAmount,
         preceded(opt(tag("the ")), tag("amount of {e} paid this way")),
@@ -8839,6 +8845,15 @@ mod tests {
                 .is_none()
         );
         assert!(parse_quantity_ref("the total power of the sacrificed cards").is_err());
+
+        // Hostile: "an opponent" is not a leaf in the agent grammar — only
+        // the closed you/they set composes — so the interposed agent
+        // position must refuse rather than minting an honorary leaf.
+        assert!(
+            parse_quantity_ref("the total power of the creature an opponent sacrificed this way")
+                .is_err(),
+            "an opponent in the agent position must refuse (NON-CLAIM, M3)"
+        );
     }
 
     /// CR 702.167c + CR 105.1: "the number of colors among the exiled cards used

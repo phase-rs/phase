@@ -7805,7 +7805,9 @@ mod tests {
     /// fails here.
     #[test]
     fn characteristic_source_reads_are_exact_per_population() {
-        use crate::types::ability::{CardTypeSetSource, TurnJournalKind, TypeFilter, TypedFilter};
+        use crate::types::ability::{
+            CardTypeSetSource, TrackedAnaphorSource, TurnJournalKind, TypeFilter, TypedFilter,
+        };
 
         let board_filter = TargetFilter::Typed(
             TypedFilter::new(TypeFilter::Permanent).controller(ControllerRef::You),
@@ -7872,6 +7874,37 @@ mod tests {
             union_profile,
             RwProfile::empty(),
             "a fold that collapses to empty is FAIL-OPEN for CR 603.3b"
+        );
+
+        // (e) CR 603.3b: a member-filtered chain set merges the filter's
+        // board read onto the zone-membership base — omitting it is
+        // fail-open (the controller span would silently narrow), while an
+        // unfiltered chain set keeps exactly the base profile.
+        let filtered_chain = CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: Some(board_filter.clone()),
+        };
+        let mut expected_filtered = reads_zone_membership();
+        expected_filtered.merge(board_membership_read(&board_filter));
+        assert_eq!(
+            characteristic_source_read(&filtered_chain),
+            expected_filtered,
+            "a filtered chain set must merge its member filter's board read"
+        );
+        assert_ne!(
+            characteristic_source_read(&filtered_chain),
+            reads_zone_membership(),
+            "a merge that drops the member filter's controller span must fail"
+        );
+        assert_eq!(
+            characteristic_source_read(&CardTypeSetSource::TrackedSet {
+                set: TrackedAnaphorSource::ChainSet,
+                caused_by: None,
+                filter: None,
+            }),
+            reads_zone_membership(),
+            "an unfiltered chain set keeps the zone-membership profile"
         );
 
         // Idempotence: a union of two identical members equals that member.
