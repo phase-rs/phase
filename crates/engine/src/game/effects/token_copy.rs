@@ -101,9 +101,10 @@ pub fn resolve(
     // create a token …" (e.g., Twinflame), `ability.targets` carries N >= 1
     // object refs and the resolver creates one copy per target.
     //
-    // Zone-eligibility: unlike `Bounce` / `ChangeZone`, `CopyTokenOf` reads
-    // copiable values via `compute_current_copiable_values`, which is
-    // zone-agnostic — so a source in the graveyard is fine.
+    // Zone-eligibility: unlike `Bounce` / `ChangeZone`, a copy source other
+    // than the ability's own source is read live through `copy_source`
+    // (`compute_current_copiable_values`, which is zone-agnostic) — so such
+    // a source in the graveyard is fine.
     //
     // CR 608.2h + CR 707.2: "a copy of this creature" (`SelfRef`) reads its own
     // source through `copy_source`, which supplies the source's last-known
@@ -171,11 +172,11 @@ pub fn resolve(
                 .collect()
         } else {
             // CR 608.2c + 603.10a: Delegate to the unified 3-tier dispatch so
-            // `SelfRef` always resolves to the source object (the LTB
-            // self-trigger shape — Vaultborn Tyrant, Ochre Jelly), and
             // `None` / `ParentTarget` fall back to source only when
-            // `ability.targets` is empty. Without this, a chained
-            // `CopyTokenOf { target: SelfRef }` sub-ability would inherit the
+            // `ability.targets` is empty. An own-source `SelfRef` never
+            // reaches this branch: it is read through `copy_source` above,
+            // which never reads `ability.targets`, so a chained
+            // `CopyTokenOf { target: SelfRef }` sub-ability cannot inherit the
             // parent's targets via chain propagation in
             // `effects::mod.rs::resolve_ability_chain` (issue #323 class).
             //
