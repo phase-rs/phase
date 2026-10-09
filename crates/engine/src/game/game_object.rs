@@ -3934,7 +3934,9 @@ impl GameObject {
     ///   moved as one.
     /// - `Library`, `Hand`, `Graveyard`: every object. CR 704.5d and CR 704.5e
     ///   make a token or a copy of a card in these zones cease to exist at the
-    ///   next state-based-action check, before any query reads the zone.
+    ///   next state-based-action check; only exile holds a non-card across SBA
+    ///   checks (the CR 722.3c exception), so only exile is gated here, and a
+    ///   transient non-card in another zone stays in the population.
     /// - `Battlefield`, `Stack`, `Command`: every object. These zones
     ///   legitimately hold non-card objects that their populations include —
     ///   tokens are permanents (CR 110.1, CR 111.1), copies of spells are
