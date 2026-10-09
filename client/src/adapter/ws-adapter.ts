@@ -210,6 +210,10 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 121 — FilterProp gains Prepared (CR 722.3a), serialized in the trigger
+ *      conditions (and ability/filter definitions) of GameState. A v120 peer
+ *      cannot deserialize the new tagged variant. P2P moves in lockstep to
+ *      wire 103.
  * 120 — CR 601.2a spell announcement: GameObject gains spell_announcement,
  *      GameState gains next_spell_announcement, and GameEvent BecomesTarget
  *      gains the targeter that announced the target. A v119 peer cannot
@@ -751,7 +755,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 120;
+export const PROTOCOL_VERSION = 121;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

@@ -2560,6 +2560,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         // CR 701.15b/c: goad is a candidate-local designation, not a legacy
         // event-context or per-source member-bound referent.
@@ -2849,6 +2850,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         // CR 701.15b/c: goad is a candidate-local designation, not a legacy
         // event-context or per-source member-bound referent.

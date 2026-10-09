@@ -28962,6 +28962,7 @@ fn filter_prop_reads_chosen_target(prop: &FilterProp, read: TargetRead) -> bool 
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
         | FilterProp::ToughnessGTPower

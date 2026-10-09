@@ -37949,3 +37949,161 @@ fn becomes_target_object_controller_antecedent_fails_closed() {
         );
     }
 }
+// CR 603.4 + CR 722.3a: Woodwork Prodigy (FRA) front face, verbatim Oracle —
+// "At the beginning of your upkeep, if this creature isn't prepared, it
+// becomes prepared. (While it's prepared, you may cast a copy of its spell.
+// Doing so unprepares it.)" The source-designation gate hoists to a
+// trigger-level intervening-if (`Not(SourceMatchesFilter{property-only
+// Prepared})`) and the residual effect prepares the source itself ("it" →
+// SelfRef). Same sentence on Stingerquill Voxmancer and Paradox Shaper.
+#[test]
+fn woodwork_prodigy_unprepared_gate_hoists_intervening_if() {
+    let def = parse_trigger_line(
+        "At the beginning of your upkeep, if this creature isn't prepared, it becomes prepared. (While it's prepared, you may cast a copy of its spell. Doing so unprepares it.)",
+        "Woodwork Prodigy",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::Upkeep));
+    let expected = Some(TriggerCondition::Not {
+        condition: Box::new(TriggerCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::Prepared]),
+            ),
+        }),
+    });
+    assert_eq!(def.condition, expected);
+    let execute = def.execute.as_deref().expect("residual effect parses");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::BecomePrepared {
+                target: TargetFilter::SelfRef
+            }
+        ),
+        "residual 'it becomes prepared' must prepare the source, got {:?}",
+        execute.effect
+    );
+    let json = serde_json::to_string(&def).expect("serialize trigger");
+    assert!(
+        // allow-noncombinator: test assertion scans serialized AST JSON, not parsing dispatch
+        !json.contains("\"Unimplemented\""),
+        "Woodwork Prodigy trigger must contain no Effect::Unimplemented"
+    );
+}
+
+// Paired reach-guard for the affirmative polarity: "if this creature is
+// prepared" must produce the un-negated source-designation gate (proves the
+// negated test above exercises the polarity axis rather than a
+// always-negated shape).
+#[test]
+fn prepared_gate_affirmative_polarity_reach_guard() {
+    let def = parse_trigger_line(
+        "At the beginning of your upkeep, if this creature is prepared, draw a card.",
+        "Prepared Probe",
+    );
+    let expected = Some(TriggerCondition::SourceMatchesFilter {
+        filter: TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Prepared])),
+    });
+    assert_eq!(def.condition, expected);
+    assert!(def.execute.is_some());
+}
+
+// Apostrophe/negation surface variants: curly "isn’t" (U+2019, some Oracle
+// printings) and the two-word "is not" must gate identically to ASCII
+// "isn't".
+#[test]
+fn prepared_gate_apostrophe_variants() {
+    let expected = Some(TriggerCondition::Not {
+        condition: Box::new(TriggerCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::Prepared]),
+            ),
+        }),
+    });
+    for text in [
+        "At the beginning of your upkeep, if this creature isn’t prepared, it becomes prepared.",
+        "At the beginning of your upkeep, if this creature is not prepared, it becomes prepared.",
+    ] {
+        let def = parse_trigger_line(text, "Woodwork Prodigy");
+        assert_eq!(def.condition, expected, "gate must fire for {text:?}");
+        assert!(def.execute.is_some());
+    }
+}
+
+// Hostile non-match: a NON-source subject ("that creature") must NOT hoist
+// the source-designation gate, while the trigger itself still parses (proves
+// the negative is not vacuous — the input got past any upstream
+// short-circuit).
+#[test]
+fn prepared_gate_rejects_nonsource_subject() {
+    let def = parse_trigger_line(
+        "At the beginning of your upkeep, if that creature isn't prepared, it becomes prepared.",
+        "Woodwork Prodigy",
+    );
+    let is_prepared_gate = matches!(
+        &def.condition,
+        Some(TriggerCondition::Not { condition }) if matches!(
+            condition.as_ref(),
+            TriggerCondition::SourceMatchesFilter { filter }
+                if matches!(
+                    filter,
+                    // allow-noncombinator: test guard scans a parsed property vec, not parsing dispatch
+                    TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::Prepared)
+                )
+        )
+    );
+    assert!(
+        !is_prepared_gate,
+        "non-source subject must not hoist the prepared source gate, got {:?}",
+        def.condition
+    );
+    assert!(
+        def.execute.is_some(),
+        "the trigger body must still parse for the hostile input"
+    );
+}
+
+// Hostile matrix: attached subjects, bare recipient-anaphoric "it", and
+// incomplete/post-effect/otherwise-bearing forms must NOT hoist the prepared
+// source gate, while the trigger body itself still parses (non-vacuous
+// negatives — each input got past any upstream short-circuit).
+#[test]
+fn prepared_gate_rejects_nonsource_grammar_matrix() {
+    for text in [
+        // Attached subjects bind the host/recipient, never the ability source.
+        "At the beginning of your upkeep, if equipped creature isn't prepared, it becomes prepared.",
+        "At the beginning of your upkeep, if enchanted creature isn't prepared, it becomes prepared.",
+        // Bare "it" is recipient-anaphoric outside explicit-self grammar.
+        "At the beginning of your upkeep, if it isn't prepared, it becomes prepared.",
+        // Post-effect placement is not an intervening-if (CR 603.4: the gate
+        // must sit immediately after the trigger condition).
+        "At the beginning of your upkeep, it becomes prepared if this creature isn't prepared.",
+        // Post-effect Otherwise conditionals are not intervening-if gates.
+        "At the beginning of your upkeep, it becomes prepared if this creature isn't prepared. Otherwise, draw a card.",
+        // Incomplete gate: no predicate to hoist.
+        "At the beginning of your upkeep, if this creature isn't, it becomes prepared.",
+    ] {
+        let def = parse_trigger_line(text, "Woodwork Prodigy");
+        let is_prepared_gate = matches!(
+            &def.condition,
+            Some(TriggerCondition::Not { condition }) if matches!(
+                condition.as_ref(),
+                TriggerCondition::SourceMatchesFilter { filter }
+                    if matches!(
+                        filter,
+                        // allow-noncombinator: test guard scans a parsed property vec, not parsing dispatch
+                        TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::Prepared)
+                    )
+            )
+        );
+        assert!(
+            !is_prepared_gate,
+            "nonsource grammar must not hoist the prepared source gate, got {:?} for {text:?}",
+            def.condition
+        );
+        assert!(
+            def.execute.is_some(),
+            "the trigger body must still parse for {text:?}"
+        );
+    }
+}

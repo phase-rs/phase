@@ -2439,6 +2439,41 @@ fn parse_source_is_saddled(input: &str) -> OracleResult<'_, StaticCondition> {
     Ok((rest, condition))
 }
 
+/// CR 722.3a + CR 700.7 + CR 603.4: Parse "<explicit self> is[n't] prepared"
+/// → SourceMatchesFilter over the property-only prepared filter, wrapping the
+/// negated idiom in `Not { SourceMatchesFilter }`. The polarity is a single
+/// `alt()` axis over the affirmative ("is prepared") and the two negated
+/// spellings ("isn't prepared" / "is not prepared"), longest-match first so
+/// "is not" wins over "is " before the predicate — the `parse_source_is_saddled`
+/// template. Woodwork Prodigy's upkeep trigger ("if this creature isn't
+/// prepared, it becomes prepared"; same sentence on Stingerquill Voxmancer and
+/// Paradox Shaper) drives the negated branch.
+///
+/// Explicit-self subjects only (`parse_explicit_self_source_subject`: `~` /
+/// "this creature" / "this permanent" / ...). Attached prefixes ("equipped /
+/// enchanted creature ") and the bare recipient-anaphoric "it" are deliberately
+/// NOT accepted here: for those the real subject is the host/recipient, not
+/// the ability source, so a `Source*` check would bind the wrong object.
+/// Property-only filter shape (no creature-type gate): the prepared
+/// designation is a permanent property, and CR 700.7 keeps "this creature"
+/// bound even after type loss (One with the Stars).
+fn parse_source_is_prepared(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = parse_explicit_self_source_subject(input)?;
+    let (rest, negated) = parse_copula_is_or_isnt(rest)?;
+    let (rest, _) = tag("prepared").parse(rest)?;
+    let condition = StaticCondition::SourceMatchesFilter {
+        filter: crate::parser::oracle_effect::conditions::prepared_source_filter(),
+    };
+    let condition = if negated {
+        StaticCondition::Not {
+            condition: Box::new(condition),
+        }
+    } else {
+        condition
+    };
+    Ok((rest, condition))
+}
+
 /// CR 702.171b + CR 508.1m: Bare elided-subject participle state gate
 /// ("Whenever this creature attacks while saddled" — Alacrian Jaguar). The
 /// printed while-gate elides the subject; the participle is part of the trigger
@@ -2542,6 +2577,9 @@ fn parse_source_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
         // CR 702.171b: "~ is saddled" / "this creature isn't saddled" / etc.
         // (negation composes Not { SourceIsSaddled }).
         parse_source_is_saddled,
+        // CR 722.3a: "~ is prepared" / "this creature isn't prepared" / etc.
+        // (negation composes Not { SourceMatchesFilter { Typed([Prepared]) } }).
+        parse_source_is_prepared,
         // CR 301.5 + CR 303.4: "~ is attached to a creature" / "this equipment is attached to a creature".
         // Must precede `parse_source_is_type` so the specific "is attached to a creature"
         // predicate wins over generic "is <type>" dispatch.

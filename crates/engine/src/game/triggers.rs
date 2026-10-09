@@ -12664,6 +12664,7 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         | FilterProp::Transformed
         | FilterProp::Foretold
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
         | FilterProp::Modified

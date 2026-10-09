@@ -75,9 +75,32 @@ fn resolve_object_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<O
     // object target — the subject is the ability's own source.
     // CR 608.2c: a triggered BecomePrepared bound to the source via ParentTarget
     // with no explicit target (e.g. Tam landfall) likewise resolves to source_id.
-    if matches!(filter, TargetFilter::SelfRef)
-        || (ability.targets.is_empty() && matches!(filter, TargetFilter::ParentTarget))
-    {
+    //
+    // CR 400.7 + CR 110.1 + CR 722.3a: the SelfRef branch resolves through the
+    // shared incarnation authority (`targeting::resolved_targets`, via
+    // `self_ref_is_current`) instead of returning the raw source id — a source
+    // that changed zones is a new object, so a pending trigger must not prepare
+    // the graveyard card, and a same-id blink return must not prepare the new
+    // permanent. Only a battlefield permanent can gain the designation, so
+    // off-battlefield resolutions are dropped on the same path. The
+    // ParentTarget-empty fallback below keeps its legacy shape: it names
+    // event-context referents, not the source incarnation.
+    if matches!(filter, TargetFilter::SelfRef) {
+        return crate::game::targeting::resolved_targets(ability, filter, state)
+            .into_iter()
+            .filter_map(|t| match t {
+                TargetRef::Object(id) => Some(id),
+                _ => None,
+            })
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|object| object.zone == Zone::Battlefield)
+            })
+            .collect();
+    }
+    if ability.targets.is_empty() && matches!(filter, TargetFilter::ParentTarget) {
         return vec![ability.source_id];
     }
     ability

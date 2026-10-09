@@ -960,6 +960,10 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         // CR 701.15b: A live designation may come from a TCE or printed source
         // outside the candidate fingerprint.
         | FilterProp::Goaded
+        // CR 722.3a: prepared reads `obj.prepared`, which the candidate
+        // fingerprint does not capture at all (unlike `is_suspected` /
+        // `is_renowned`); memoizing it is unsound — POISON for memoization.
+        | FilterProp::Prepared
         | FilterProp::PowerGTSource
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy

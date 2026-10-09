@@ -4338,6 +4338,7 @@ fn filter_prop_reads_life(prop: &FilterProp) -> bool {
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
         | FilterProp::ToughnessGTPower

@@ -6922,6 +6922,10 @@ pub enum FilterProp {
     /// CR 701.15b/c: Matches creatures with the goaded designation (at least one
     /// player has goaded it).
     Goaded,
+    /// CR 722.3a: Matches permanents with the prepared designation. A permanent
+    /// can only gain this designation if it has a prepare spell, and only while
+    /// it does not already have it.
+    Prepared,
     /// CR 510.1c: Matches creatures whose toughness is greater than their power.
     ToughnessGTPower,
     /// CR 208.1 + CR 613.4a + CR 613.4b: Matches a creature whose current

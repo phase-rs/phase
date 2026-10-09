@@ -60,6 +60,10 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 121 — `FilterProp` gains `Prepared` (CR 722.3a), serialized in the trigger
+///      conditions (and ability/filter definitions) of `GameState`. A v120 peer
+///      cannot deserialize the new tagged variant. Full-game peers and P2P move
+///      in lockstep (wire 103); no lobby carrier names it.
 /// 120 — CR 601.2a spell announcement: `GameObject::spell_announcement`,
 ///      `GameState::next_spell_announcement` and the `targeter` on
 ///      `GameEvent::BecomesTarget`. A v119 peer cannot deserialize the new
@@ -914,7 +918,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 120;
+pub const PROTOCOL_VERSION: u32 = 121;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2171,12 +2175,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 120);
+        assert_eq!(PROTOCOL_VERSION, 121);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 119);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 120);
     }
 
     #[test]

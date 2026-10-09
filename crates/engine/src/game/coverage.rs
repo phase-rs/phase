@@ -1100,6 +1100,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             }
             FilterProp::Suspected => parts.push("suspected".into()),
             FilterProp::Renowned => parts.push("renowned".into()),
+            // CR 722.3a
+            FilterProp::Prepared => parts.push("prepared".into()),
             // CR 701.15b/c
             FilterProp::Goaded => parts.push("goaded".into()),
             // CR 700.9

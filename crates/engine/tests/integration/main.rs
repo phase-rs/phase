@@ -1517,6 +1517,7 @@ mod wish_outside_game_scope;
 mod witherbloom_altar_probe;
 mod wolverine_best_there_is_dealt_damage_counter;
 mod wolverine_fierce_fighter_heal;
+mod woodwork_prodigy_upkeep_becomes_prepared;
 mod world_at_war_first_of_turn_anchor;
 mod wrenn_and_six_up_to_one_optout;
 mod yare_extra_blockers;

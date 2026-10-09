@@ -6037,6 +6037,7 @@ fn prop_is_arrival_invariant(prop: &crate::types::ability::FilterProp) -> bool {
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
         | FilterProp::ToughnessGTPower

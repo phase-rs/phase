@@ -4492,6 +4492,7 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         // CR 701.15b/c: goad is a candidate-local designation read; it scans no
         // board/object axis.

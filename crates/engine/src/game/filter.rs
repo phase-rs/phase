@@ -330,6 +330,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
@@ -767,6 +768,7 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         | FilterProp::OtherThanTriggerObject
         | FilterProp::InTrackedSet { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
@@ -1005,6 +1007,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
@@ -1934,6 +1937,7 @@ pub(crate) fn filter_prop_contains(
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
         | FilterProp::ToughnessGTPower
@@ -2182,6 +2186,7 @@ fn filter_prop_contains_filter_prop(
             | FilterProp::NotColor { .. }
             | FilterProp::NotSupertype { .. }
             | FilterProp::Suspected
+            | FilterProp::Prepared
             | FilterProp::Renowned
             | FilterProp::Goaded
             | FilterProp::ToughnessGTPower
@@ -2709,6 +2714,7 @@ fn rewrite_filter_prop(
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
         | FilterProp::ToughnessGTPower
@@ -6589,6 +6595,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::MatchesLastChosenCardPredicate
         | FilterProp::HasSingleTarget
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         // CR 701.15b/c: a spell on the stack carries no goad designation. Fail closed.
         | FilterProp::Goaded
@@ -7967,6 +7974,8 @@ fn matches_filter_prop(
         ),
         // CR 701.60b: Match creatures with the suspected designation.
         FilterProp::Suspected => obj.is_suspected,
+        // CR 722.3a: Match permanents with the prepared designation.
+        FilterProp::Prepared => obj.prepared.is_some(),
         // CR 702.112b: Match permanents with the renowned designation.
         FilterProp::Renowned => obj.is_renowned,
         // CR 701.15b/c: a creature is goaded iff at least one player has goaded it.
@@ -8752,6 +8761,10 @@ fn zone_change_record_matches_property(
         // evaluated on the live stack object, not the snapshot).
         | FilterProp::Modal
         | FilterProp::Renowned
+        // CR 722.3a: prepared is a live-battlefield designation cleared on zone
+        // change (`GameObject::prepared` resets); zone-change records do not
+        // snapshot it (unlike Suspected's `record.is_suspected`). Fail closed.
+        | FilterProp::Prepared
         // CR 701.15b/c: goad is not snapshotted onto the zone-change record
         // (unlike Suspected's `record.is_suspected`). Fail closed.
         | FilterProp::Goaded
@@ -19424,6 +19437,7 @@ mod characteristic_read_classification_tests {
             | FilterProp::NotColor { .. }
             | FilterProp::NotSupertype { .. }
             | FilterProp::Suspected
+            | FilterProp::Prepared
             | FilterProp::Renowned
             | FilterProp::Goaded
             | FilterProp::ToughnessGTPower

@@ -6373,6 +6373,18 @@ pub(crate) fn static_condition_to_trigger_condition(
             StaticCondition::SourceIsTapped => Some(TriggerCondition::Not {
                 condition: Box::new(TriggerCondition::SourceIsTapped),
             }),
+            // CR 722.3a + CR 603.4: Not(SourceMatchesFilter) → the source does
+            // not match the filter. General compositional negation: the
+            // affirmative arm bridges the filter 1:1, so negating both sides
+            // preserves semantics for every filter — including the
+            // property-only prepared-designation filter ("if ~/this creature
+            // isn't prepared"). A source that lost its creature type (CR 700.7
+            // keeps "this creature" bound) still gates on the designation.
+            StaticCondition::SourceMatchesFilter { filter } => Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::SourceMatchesFilter {
+                    filter: filter.clone(),
+                }),
+            }),
             // CR 725.1 + CR 109.5: "if you're not the monarch" / "if an opponent
             // is the monarch". The subject scope must survive the bridge —
             // collapsing it to `Controller` here would silently rebind
