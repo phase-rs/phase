@@ -29360,6 +29360,18 @@ pub enum TriggerCondition {
     /// self-referential cases.
     PlacedByAbilitySource,
 
+    /// CR 603.4 + CR 607.1c + CR 106.4: "if you haven't added mana with this ability
+    /// this turn" (Carpet of Flowers) — true when THIS triggered ability's exact
+    /// occurrence (`TriggerDefinitionRef`, CR 113.2c per ability, CR 400.7 per
+    /// object) and this trigger's controller are in
+    /// `GameState::triggered_abilities_added_mana_this_turn`, which is
+    /// written only when mana actually reached a pool, so a declined "you may"
+    /// (CR 603.5) or an X of 0 leaves it false. Negation wraps via `Not`.
+    /// Unanswerable without the trigger's identity: `evaluation_anchor` reports
+    /// `OwnTriggerDefinition`, and the CR 603.4 boundary rejects it rather than
+    /// letting `Not` invert it.
+    AddedManaWithThisAbilityThisTurn,
+
     /// CR 608.2c + CR 603.2 + CR 603.4: "if it targets [filter]" intervening-if
     /// on a spell-cast trigger — true when the triggering spell's committed targets
     /// include at least one object matching `filter`. The trigger source is excluded
@@ -29412,15 +29424,28 @@ pub enum TriggerCondition {
     EventTime { condition: Box<TriggerCondition> },
 }
 
+/// CR 603.4: what must resolve before a leaf is answerable at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TriggerConditionAnchor<'a> {
+    /// CR 109.4: the player whose designation the leaf tests.
+    Player(&'a PlayerScope),
+    /// CR 607.1c + CR 113.2c: the exact trigger occurrence the leaf is linked to.
+    OwnTriggerDefinition,
+}
+
 impl TriggerCondition {
-    /// CR 109.4 + CR 603.4: the player whose DESIGNATION this leaf tests, when
-    /// the leaf is a designation predicate at all.
+    /// CR 603.4: the anchor this leaf needs resolved before it is answerable,
+    /// when it needs one at all.
+    ///
+    /// Two anchor kinds exist. A designation leaf (CR 109.4) tests a player's
+    /// designation, so it needs its [`PlayerScope`] resolved. A self-linked leaf
+    /// (CR 607.1c) reads this triggered ability's own history, so it needs the
+    /// identity of the trigger occurrence it gates.
     ///
     /// Exhaustive by design — there is deliberately no wildcard arm. This is
     /// the guard that makes the polarity boundary gate in `game::triggers`
-    /// total: adding a future designation leaf that carries a [`PlayerScope`]
-    /// is a COMPILE ERROR here, not a latent fail-open under
-    /// [`TriggerCondition::Not`].
+    /// total: adding a future anchored leaf of either kind is a COMPILE ERROR
+    /// here, not a latent fail-open under [`TriggerCondition::Not`].
     ///
     /// Boolean combinators return `None`; the gate recurses them itself.
     /// `QuantityComparison` returns `None` BY DEFINITION — it tests a quantity,
@@ -29429,9 +29454,12 @@ impl TriggerCondition {
     /// and `0 > 0` is false, which inverts under `Not`) is orthogonal, affects
     /// every existing [`PlayerScope::DefendingPlayer`] card, and is deliberately
     /// out of scope here.
-    pub(crate) fn designation_player_anchor(&self) -> Option<&PlayerScope> {
+    pub(crate) fn evaluation_anchor(&self) -> Option<TriggerConditionAnchor<'_>> {
         match self {
-            TriggerCondition::IsMonarch { player } => Some(player),
+            TriggerCondition::IsMonarch { player } => Some(TriggerConditionAnchor::Player(player)),
+            TriggerCondition::AddedManaWithThisAbilityThisTurn => {
+                Some(TriggerConditionAnchor::OwnTriggerDefinition)
+            }
             TriggerCondition::GainedLife { .. }
             | TriggerCondition::LostLife
             | TriggerCondition::Descended
@@ -42013,15 +42041,30 @@ mod monarch_subject_axis_tests {
     }
 
     /// The polarity boundary gates are only sound because these accessors are
-    /// exhaustive. Pin the two answers they must give.
+    /// exhaustive. Pin the answers they must give for each anchor kind.
     #[test]
-    fn designation_player_anchor_reports_the_monarch_subject_and_nothing_else() {
+    fn evaluation_anchor_reports_each_anchor_kind_and_nothing_else() {
         assert_eq!(
             TriggerCondition::IsMonarch {
                 player: PlayerScope::DefendingPlayer
             }
-            .designation_player_anchor(),
-            Some(&PlayerScope::DefendingPlayer)
+            .evaluation_anchor(),
+            Some(TriggerConditionAnchor::Player(
+                &PlayerScope::DefendingPlayer
+            ))
+        );
+        // CR 607.1c + CR 113.2c: the self-linked leaf needs its own trigger
+        // occurrence; the `Not` that negates it is a combinator, not a leaf.
+        assert_eq!(
+            TriggerCondition::AddedManaWithThisAbilityThisTurn.evaluation_anchor(),
+            Some(TriggerConditionAnchor::OwnTriggerDefinition)
+        );
+        assert_eq!(
+            TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::AddedManaWithThisAbilityThisTurn),
+            }
+            .evaluation_anchor(),
+            None
         );
         assert_eq!(
             StaticCondition::IsMonarch {
@@ -42031,10 +42074,7 @@ mod monarch_subject_axis_tests {
             Some((Designation::Monarch, &PlayerScope::ScopedPlayer))
         );
         // CR 725.1: vacancy is a different predicate and carries no subject.
-        assert_eq!(
-            TriggerCondition::NoMonarch.designation_player_anchor(),
-            None
-        );
+        assert_eq!(TriggerCondition::NoMonarch.evaluation_anchor(), None);
         assert_eq!(StaticCondition::NoMonarch.designation_anchor(), None);
         // A quantity tests a quantity, not a designation — by definition.
         assert_eq!(
@@ -42047,7 +42087,7 @@ mod monarch_subject_axis_tests {
                 comparator: Comparator::GT,
                 rhs: QuantityExpr::Fixed { value: 0 },
             }
-            .designation_player_anchor(),
+            .evaluation_anchor(),
             None
         );
     }

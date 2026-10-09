@@ -60,13 +60,18 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 121 — `TargetFilter` gains `DeclaredPlayer { group }` (CR 608.2c + CR 115.1a),
+/// 121 — `GameState::triggered_abilities_added_mana_this_turn` records
+///       (trigger definition, receiving player), so copied triggers check
+///       their own controller's successful mana history. A v120 peer cannot
+///       decode a nonempty pair ledger. P2P moves in lockstep (wire 103);
+///       lobby-only messages are unchanged.
+/// 122 — `TargetFilter` gains `DeclaredPlayer { group }` (CR 608.2c + CR 115.1a),
 ///      the player a later clause names after a declared target player. It
-///      reaches every serialized ability, so a v120 peer cannot deserialize it
+///      reaches every serialized ability, so a v121 peer cannot deserialize it
 ///      and the exact-match handshake refuses the pairing. `SpellContext` also
 ///      gains `outer_declared_players` (CR 603.7a), the players a delayed
 ///      ability's creating chain named by group, omitted when empty; amended in
-///      place, not bumped. Full-game peers and P2P move in lockstep (wire 103);
+///      place, not bumped. Full-game peers and P2P move in lockstep (wire 104);
 ///      lobby messages are unchanged.
 /// 120 — CR 601.2a spell announcement: `GameObject::spell_announcement`,
 ///      `GameState::next_spell_announcement` and the `targeter` on
@@ -922,7 +927,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 121;
+pub const PROTOCOL_VERSION: u32 = 122;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2179,12 +2184,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 121);
+        assert_eq!(PROTOCOL_VERSION, 122);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 120);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 121);
     }
 
     #[test]

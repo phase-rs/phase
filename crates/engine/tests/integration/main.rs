@@ -1831,6 +1831,7 @@ mod torch_the_tower_die_exile;
 mod tracked_set_anaphor_source;
 mod trench_behemoth_landfall_force_attack;
 mod trigger_index_stale_entry_panics;
+mod triggered_ability_mana_ledger;
 mod triple_triad_owned_plus_lesser_mv_impulse;
 mod triumphant_chomp;
 mod tromokratis;

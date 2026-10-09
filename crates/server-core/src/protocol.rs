@@ -3347,8 +3347,8 @@ mod tests {
     }
 
     /// `TargetFilter::DeclaredPlayer` is new in serialized full-game state
-    /// (CR 608.2c + CR 115.1a); a v120 peer cannot deserialize it, so it must be
-    /// refused before it receives v121 state. `SpellContext` also gains
+    /// (CR 608.2c + CR 115.1a); a v121 peer cannot deserialize it, so it must be
+    /// refused before it receives v122 state. `SpellContext` also gains
     /// `outer_declared_players` (CR 603.7a), the players a delayed ability's
     /// creating chain named by group, omitted when empty; amended in place, not
     /// bumped.
@@ -3471,8 +3471,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_121_for_declared_player_reference() {
-        assert_eq!(PROTOCOL_VERSION, 121);
+    fn protocol_version_is_122_for_declared_player_reference() {
+        assert_eq!(PROTOCOL_VERSION, 122);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3483,7 +3483,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_121_for_declared_player_reference` stays
+    /// `protocol_version_is_122_for_declared_player_reference` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

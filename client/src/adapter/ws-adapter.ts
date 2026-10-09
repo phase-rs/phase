@@ -210,12 +210,16 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 121 — TargetFilter gains DeclaredPlayer { group } (CR 608.2c + CR 115.1a), the
- *      player a later clause names after a declared target player. A v120 peer
+ * 121 — GameState's triggered-ability mana ledger records the actual
+ *       receiving player alongside the exact trigger definition. A v120 peer
+ *       cannot decode a nonempty pair ledger; the exact-match handshake
+ *       refuses it. P2P moves in lockstep (wire 103).
+ * 122 — TargetFilter gains DeclaredPlayer { group } (CR 608.2c + CR 115.1a), the
+ *      player a later clause names after a declared target player. A v121 peer
  *      cannot deserialize it; the exact-match handshake refuses the pairing.
  *      SpellContext also gains outer_declared_players (CR 603.7a), the players a
  *      delayed ability's creating chain named by group, omitted when empty;
- *      amended in place, not bumped. P2P moves in lockstep (wire 103); lobby
+ *      amended in place, not bumped. P2P moves in lockstep (wire 104); lobby
  *      messages are unchanged.
  * 120 — CR 601.2a spell announcement: GameObject gains spell_announcement,
  *      GameState gains next_spell_announcement, and GameEvent BecomesTarget
@@ -758,7 +762,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 121;
+export const PROTOCOL_VERSION = 122;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

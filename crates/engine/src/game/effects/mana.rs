@@ -300,8 +300,9 @@ pub fn resolve(
     // CR 106.4: When an effect instructs a player to add mana, that mana goes
     // into that player's mana pool.
     let produced_mana = !mana_types.is_empty();
+    let mut deposited = false;
     for mana_type in mana_types {
-        mana_payment::produce_mana_with_attributes_from_source_quality(
+        deposited |= !mana_payment::produce_mana_with_attributes_from_source_quality(
             state,
             ability.source_id,
             mana_type,
@@ -312,9 +313,11 @@ pub fn resolve(
             grants,
             expiry,
             events,
-        );
+        )
+        .is_empty();
     }
     record_firebending_if_marked(state, ability, produced_mana, events);
+    record_triggered_ability_added_mana(state, ability, recipient, deposited);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -371,9 +374,10 @@ pub fn handle_choose_mana_effect(
     // controller.
     let recipient = mana_effect_recipient(state, ability, target.as_ref());
     let produced_mana = recipient.is_some() && !mana_types.is_empty();
+    let mut deposited = false;
     if let Some(recipient) = recipient {
         for mana_type in mana_types {
-            mana_payment::produce_mana_with_attributes_from_source_quality(
+            deposited |= !mana_payment::produce_mana_with_attributes_from_source_quality(
                 state,
                 ability.source_id,
                 mana_type,
@@ -384,10 +388,14 @@ pub fn handle_choose_mana_effect(
                 grants,
                 *expiry,
                 events,
-            );
+            )
+            .is_empty();
         }
     }
     record_firebending_if_marked(state, ability, produced_mana, events);
+    if let Some(recipient) = recipient {
+        record_triggered_ability_added_mana(state, ability, recipient, deposited);
+    }
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -430,6 +438,40 @@ fn record_firebending_if_marked(
         ability.source_id,
         ability.controller,
     );
+}
+
+/// CR 106.4 + CR 607.1c: the single recording authority for "this triggered
+/// ability added mana this turn". Records the resolving ability's exact
+/// `TriggerDefinitionRef` and actual receiving `PlayerId` when `deposited`
+/// is true, meaning at least one `ManaUnit` reached a pool. Two deposit
+/// routes call it: the
+/// `Effect::Mana` resolver (`resolve`, `handle_choose_mana_effect`), and
+/// the resolution-time `AbilityCost::EffectCost { Effect::Mana }` payment
+/// in `costs::pay_ability_cost_inner`. Paying that cost carries out the
+/// resolving ability's own instruction to add mana (CR 118.1 + CR 118.12 +
+/// CR 608.2c), so the mana is added with that ability (Braid of Fire's
+/// cumulative upkeep, CR 702.24a). A `None` ref is the ordinary
+/// non-triggered case: spells, activated abilities, replacement
+/// may-costs. The state-trigger builder passes `None`, so a state trigger records nothing here.
+pub(crate) fn record_triggered_ability_added_mana(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    player: PlayerId,
+    deposited: bool,
+) {
+    // No unit reached a pool (declined, zero-count, prevented, or no legal
+    // recipient): nothing was added with this ability, so there is no record.
+    if !deposited {
+        return;
+    }
+    // Only a triggered ability carries a definition ref; any other resolving
+    // ability that adds mana is outside this per-trigger record by design.
+    let Some(definition_ref) = &ability.trigger_definition_ref else {
+        return;
+    };
+    state
+        .triggered_abilities_added_mana_this_turn
+        .insert((definition_ref.clone(), player));
 }
 
 fn chosen_mana_types_for_prompt(

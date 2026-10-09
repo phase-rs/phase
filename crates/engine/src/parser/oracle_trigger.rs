@@ -32,7 +32,7 @@ use super::oracle_ir::trigger::{
 use super::oracle_modal::try_parse_inline_modal_ir;
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition::{
-    parse_affirmative_reflexive_connector, parse_elided_subject_state_condition,
+    parse_affirmative_reflexive_connector, parse_elided_subject_state_condition, parse_havent,
 };
 use super::oracle_nom::condition::{
     parse_inner_condition, parse_spell_history_filter, parse_there_are_battlefield_count_clause,
@@ -6164,7 +6164,7 @@ fn rebind_attack_anaphor_to_defending_player(cond: &mut TriggerCondition) {
             rebind_attack_anaphor_to_defending_player(condition)
         }
         // All other variants are leaves that carry no `PlayerScope`, which
-        // `TriggerCondition::designation_player_anchor` enforces exhaustively
+        // `TriggerCondition::evaluation_anchor` enforces exhaustively
         // for the designation family — nothing to rebind.
         _ => {}
     }
@@ -6756,6 +6756,24 @@ fn parse_first_time_counters_intervening_if(input: &str) -> OracleResult<'_, Tri
     Ok((rest, TriggerCondition::FirstTimeObjectCountersAddedThisTurn))
 }
 
+/// CR 603.4 + CR 607.1c: "if you haven't added mana with this ability this turn" —
+/// a self-linked intervening-if (Carpet of Flowers). The guard's subject is this
+/// ability's own occurrence, so it lowers to `Not(AddedManaWithThisAbilityThisTurn)`.
+fn parse_added_mana_with_this_ability_intervening_if(
+    input: &str,
+) -> OracleResult<'_, TriggerCondition> {
+    // Oracle text spells the contraction with either apostrophe, so the shared
+    // `parse_havent` combinator accepts both `haven't` and `haven\u{2019}t`.
+    let (rest, _) = (tag("if you "), parse_havent, tag(" ")).parse(input)?;
+    let (rest, _) = tag("added mana with this ability this turn").parse(rest)?;
+    Ok((
+        rest,
+        TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::AddedManaWithThisAbilityThisTurn),
+        },
+    ))
+}
+
 /// CR 508.1 + CR 603.4: "if a <type> and a <type> [and ...] attacked this combat"
 /// — typed attack-declaration conjunction (Fearless Swashbuckler: "if a Pirate
 /// and a Vehicle attacked this combat"). Each typed noun becomes one
@@ -7344,6 +7362,21 @@ fn extract_if_condition_with_card_name(
     // CounterAdded event), so it cannot lower through a StaticCondition.
     if let Some((before, condition, rest)) =
         scan_preceded(&lower, parse_first_time_counters_intervening_if)
+    {
+        let pos = before.len();
+        let clause_len = lower.len() - before.len() - rest.len();
+        return (
+            strip_condition_clause(text, pos, clause_len),
+            Some(condition),
+        );
+    }
+
+    // CR 603.4 + CR 607.1c: "if you haven't added mana with this ability this
+    // turn" — a self-linked intervening-if (Carpet of Flowers). Its subject is
+    // this triggered ability's own occurrence, which has no static analogue, so
+    // it cannot lower through a StaticCondition.
+    if let Some((before, condition, rest)) =
+        scan_preceded(&lower, parse_added_mana_with_this_ability_intervening_if)
     {
         let pos = before.len();
         let clause_len = lower.len() - before.len() - rest.len();

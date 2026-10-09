@@ -1977,7 +1977,8 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         | TriggerCondition::ControlsCommander { .. }
         | TriggerCondition::ChosenLabelIs { .. }
         | TriggerCondition::ExceptFirstDrawInDrawStep
-        | TriggerCondition::PlacedByAbilitySource => false,
+        | TriggerCondition::PlacedByAbilitySource
+        | TriggerCondition::AddedManaWithThisAbilityThisTurn => false,
     }
 }
 
@@ -7006,7 +7007,15 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         | TriggerCondition::CastTimingPermission { .. }
         | TriggerCondition::ChosenLabelIs { .. }
         | TriggerCondition::ExceptFirstDrawInDrawStep
-        | TriggerCondition::PlacedByAbilitySource => RwProfile::empty(),
+        | TriggerCondition::PlacedByAbilitySource
+        // CR 603.3b: order-independent. The leaf reads only the ledger entry
+        // keyed by its own `TriggerDefinitionRef` and controller, and the only
+        // writer of that key is a resolution carrying that same ref and player
+        // (`record_triggered_ability_added_mana`). A distinct-definition member
+        // (a second Carpet of Flowers) writes a different key, so no member's
+        // write feeds another member's read; an identical-definition pair
+        // shares one source and takes the existing `all_same_source` path.
+        | TriggerCondition::AddedManaWithThisAbilityThisTurn => RwProfile::empty(),
         // CR 903.3d: a LIVE battlefield census — see `commander_control_read`.
         // Shared with the `AbilityCondition` / `StaticCondition` mirrors of the
         // same printed clause.
