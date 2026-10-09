@@ -2784,6 +2784,7 @@ mod tests {
                 target: TargetRef::Object(entry),
                 source_id: countered_by,
                 source_controller: PlayerId(1),
+                targeter: None,
             },
             GameEvent::SpellCountered {
                 object_id: entry,

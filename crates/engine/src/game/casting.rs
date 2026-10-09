@@ -759,11 +759,15 @@ pub(crate) fn sacrifice_cost_bounds_with_chosen_x(
 /// Crime commitment is deliberately separate: CR 700.13's targeting
 /// classification is retained through the in-flight action and recorded only
 /// after the spell or ability has successfully reached the stack.
+///
+/// `targeter` records which stack object announced the targets (CR 115.1 +
+/// CR 113.8); see [`spell_targeter`] and [`pending_cast_targeter`].
 pub(crate) fn emit_targeting_events(
     _state: &GameState,
     targets: &[TargetRef],
     source_id: ObjectId,
     controller: PlayerId,
+    targeter: Option<crate::types::events::Targeter>,
     events: &mut Vec<GameEvent>,
 ) {
     for target in targets {
@@ -773,6 +777,7 @@ pub(crate) fn emit_targeting_events(
                     target: TargetRef::Object(*obj_id),
                     source_id,
                     source_controller: controller,
+                    targeter,
                 });
             }
             TargetRef::Player(pid) => {
@@ -780,9 +785,39 @@ pub(crate) fn emit_targeting_events(
                     target: TargetRef::Player(*pid),
                     source_id,
                     source_controller: controller,
+                    targeter,
                 });
             }
         }
+    }
+}
+
+/// CR 601.2a + CR 601.2c: the targeter identity of a spell being cast, read from
+/// the announcement stamped on its object (`announce_spell_on_stack`).
+pub(crate) fn spell_targeter(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Option<crate::types::events::Targeter> {
+    state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.spell_announcement)
+        .map(crate::types::events::Targeter::Spell)
+}
+
+/// CR 601.2c + CR 602.2b: the targeter of an in-progress cast or activation. A
+/// pending activation is an activated ability (CR 113.8); anything else on this
+/// carrier is a spell.
+pub(crate) fn pending_cast_targeter(
+    state: &GameState,
+    pending: &crate::types::game_state::PendingCast,
+) -> Option<crate::types::events::Targeter> {
+    if pending.activation_ability_index.is_some() {
+        Some(crate::types::events::Targeter::Ability(
+            crate::types::ability::StackAbilityKind::Activated,
+        ))
+    } else {
+        spell_targeter(state, pending.object_id)
     }
 }
 
@@ -18438,6 +18473,13 @@ fn announce_spell_on_stack(
     // resolution (#5051; cancel rewind uses the same clear in handle_cancel_cast).
     clear_cast_scoped_creature_type_choice(state, prepared.object_id);
 
+    // CR 601.2a + CR 400.7: a new identity for this spell, carried through
+    // targeting, payment and the finalization move to the stack.
+    let announcement = state.mint_spell_announcement();
+    if let Some(obj) = state.objects.get_mut(&prepared.object_id) {
+        obj.spell_announcement = Some(announcement);
+    }
+
     stack::push_to_stack(
         state,
         StackEntry {
@@ -18649,6 +18691,7 @@ fn continue_with_prepared(
                     &declared_targets_in_chain(&resolved),
                     prepared.object_id,
                     player,
+                    spell_targeter(state, prepared.object_id),
                     events,
                 );
                 return check_additional_cost_or_pay(
@@ -18735,6 +18778,7 @@ fn continue_with_prepared(
                 &declared_targets_in_chain(&resolved),
                 prepared.object_id,
                 player,
+                spell_targeter(state, prepared.object_id),
                 events,
             );
             return check_additional_cost_or_pay(
@@ -19132,6 +19176,7 @@ fn continue_with_prepared(
                 &declared_targets_in_chain(&resolved),
                 prepared.object_id,
                 player,
+                spell_targeter(state, prepared.object_id),
                 events,
             );
             return check_additional_cost_or_pay(
@@ -27342,6 +27387,9 @@ fn activate_with_cost_carrier(
                 &declared_targets_in_chain(&resolved),
                 source_id,
                 player,
+                Some(crate::types::events::Targeter::Ability(
+                    crate::types::ability::StackAbilityKind::Activated,
+                )),
                 events,
             );
             let mut pending = PendingCast::for_activation(
@@ -27811,6 +27859,12 @@ pub fn handle_cancel_cast(
     }
 
     if pending.activation_ability_index.is_none() {
+        // CR 733.1: "No abilities trigger and no effects apply as a result of
+        // an undone action." The undone announcement's identity ends here and
+        // is never reminted, so nothing can later resolve a targeter to it.
+        if let Some(obj) = state.objects.get_mut(&pending.object_id) {
+            obj.spell_announcement = None;
+        }
         // CR 601.2i: Remove the placeholder stack entry pushed at announcement.
         // No other player can interject between announce and cancel, so the
         // entry is still the topmost object for this cast.

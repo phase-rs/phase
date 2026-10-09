@@ -3305,6 +3305,108 @@ impl ResolutionStack {
         self.frames.iter()
     }
 
+    /// CR 104.4b: whether any parked frame is an unsettled delivery (a
+    /// zone-change or batch delivery mid-flight). Its retained events are not
+    /// normalized, so loop equality treats a state holding one as not
+    /// comparable. Exhaustive on purpose: a new frame family must say whether
+    /// it is a settled, visited carrier or an unsettled one.
+    pub(crate) fn holds_unsettled_delivery_frame(&self) -> bool {
+        self.frames.iter().any(|frame| match frame {
+            ResolutionFrame::ChangeZone(_) | ResolutionFrame::BatchDelivery(_) => true,
+            ResolutionFrame::AbilityContinuation(_)
+            | ResolutionFrame::RepeatFor(_)
+            | ResolutionFrame::RepeatUntil(_)
+            | ResolutionFrame::RepeatedOptionalPayment(_)
+            | ResolutionFrame::CounterMoves(_)
+            | ResolutionFrame::CounterRemovals(_)
+            | ResolutionFrame::CounterAdditions(_)
+            | ResolutionFrame::CopyToken(_)
+            | ResolutionFrame::DebugCardEntries(_)
+            | ResolutionFrame::EachPlayerCopyChosen(_)
+            | ResolutionFrame::ChooseOneOf(_)
+            | ResolutionFrame::VoteBallot(_)
+            | ResolutionFrame::PerPlayerZoneChoice(_)
+            | ResolutionFrame::PerCategoryZoneChoice(_)
+            | ResolutionFrame::OptionalEffect(_)
+            | ResolutionFrame::CoinFlip(_)
+            | ResolutionFrame::DieRoll(_)
+            | ResolutionFrame::Proliferate(_)
+            | ResolutionFrame::MultiDraw(_)
+            | ResolutionFrame::Discard(_)
+            | ResolutionFrame::ConniveReentry(_)
+            | ResolutionFrame::LifeTotalAssignment(_)
+            | ResolutionFrame::SpellResolution(_)
+            | ResolutionFrame::MutateMerge(_)
+            | ResolutionFrame::CipherEncode(_)
+            | ResolutionFrame::PostReplacement(_) => false,
+        })
+    }
+
+    /// CR 104.4b: every trigger event a parked frame retains, in every frame
+    /// rather than only the active one — an optional frame's singular and plural
+    /// events, a copy-chosen walk's trigger event, and an ability continuation's zone-choice and pending trigger
+    /// contexts. Loop normalization's one carrier traversal reads and renumbers
+    /// identities through this.
+    pub(crate) fn for_each_retained_trigger_event_mut(
+        &mut self,
+        f: &mut impl FnMut(&mut GameEvent),
+    ) {
+        for frame in self.frames.iter_mut() {
+            match frame {
+                ResolutionFrame::OptionalEffect(frame) => {
+                    if let Some(event) = frame.trigger_event.as_mut() {
+                        f(event);
+                    }
+                    frame.trigger_events.iter_mut().for_each(&mut *f);
+                }
+                ResolutionFrame::EachPlayerCopyChosen(pending) => {
+                    if let Some(event) = pending.trigger_event.as_mut() {
+                        f(event);
+                    }
+                }
+                ResolutionFrame::AbilityContinuation(frame) => {
+                    let contexts = frame
+                        .choose_zone_trigger_context
+                        .iter_mut()
+                        .chain(frame.pending.trigger_context.iter_mut());
+                    for context in contexts {
+                        if let Some(event) = context.event.as_mut() {
+                            f(event);
+                        }
+                        context.events.iter_mut().for_each(&mut *f);
+                    }
+                }
+                // Exhaustive on purpose: a frame family that starts retaining a
+                // trigger event must be visited here.
+                ResolutionFrame::RepeatFor(_)
+                | ResolutionFrame::RepeatUntil(_)
+                | ResolutionFrame::RepeatedOptionalPayment(_)
+                | ResolutionFrame::ChangeZone(_)
+                | ResolutionFrame::BatchDelivery(_)
+                | ResolutionFrame::CounterMoves(_)
+                | ResolutionFrame::CounterRemovals(_)
+                | ResolutionFrame::CounterAdditions(_)
+                | ResolutionFrame::CopyToken(_)
+                | ResolutionFrame::DebugCardEntries(_)
+                | ResolutionFrame::ChooseOneOf(_)
+                | ResolutionFrame::VoteBallot(_)
+                | ResolutionFrame::PerPlayerZoneChoice(_)
+                | ResolutionFrame::PerCategoryZoneChoice(_)
+                | ResolutionFrame::CoinFlip(_)
+                | ResolutionFrame::DieRoll(_)
+                | ResolutionFrame::Proliferate(_)
+                | ResolutionFrame::MultiDraw(_)
+                | ResolutionFrame::Discard(_)
+                | ResolutionFrame::ConniveReentry(_)
+                | ResolutionFrame::LifeTotalAssignment(_)
+                | ResolutionFrame::SpellResolution(_)
+                | ResolutionFrame::MutateMerge(_)
+                | ResolutionFrame::CipherEncode(_)
+                | ResolutionFrame::PostReplacement(_) => {}
+            }
+        }
+    }
+
     /// Park work that is inside the current active operation.
     pub fn push_inner(&mut self, frame: ResolutionFrame) {
         if let ResolutionFrame::MultiDraw(draw) = &frame {

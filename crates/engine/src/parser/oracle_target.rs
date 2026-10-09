@@ -9818,7 +9818,8 @@ fn parse_except_continuity_exemption_suffix(text: &str) -> Option<(FilterProp, u
 }
 
 /// CR 205.3: "that isn't a <Subtype>" / "that's not a <Subtype>"
-/// relative-clause negation suffix. Returns negated type filters to append to
+/// relative-clause negation suffix, including an Oxford-comma subtype list
+/// (see [`parse_relative_subtype_list`]). Returns negated type filters to append to
 /// the enclosing target's `neg_type_filters`. Mirrors the `non-<Subtype>`
 /// prefix pattern but expressed as a trailing relative clause
 /// ("target attacking Vampire that isn't a Demon" → `Non(Subtype("Demon"))`).
@@ -9840,23 +9841,68 @@ fn parse_that_isnt_subtype_suffix(text: &str) -> Option<(Vec<TypeFilter>, usize)
             return None;
         };
 
-    // Optional article: "a " / "an " before the subtype.
-    let (after_article, article_len) =
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("a ").parse(after_neg) {
-            (rest, "a ".len())
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("an ").parse(after_neg) {
-            (rest, "an ".len())
-        } else {
-            (after_neg, 0)
-        };
-
-    // CR 205.3: Subtype token — delegates to the shared subtype recognizer.
-    let (subtype, sub_len) = parse_subtype(after_article)?;
-    let total = leading_ws + neg_len + article_len + sub_len;
+    // CR 205.3: one subtype or an Oxford-comma subtype list ("isn't a Kraken,
+    // Leviathan, Merfolk, Octopus, or Serpent" — Summon: Leviathan). Not being
+    // any of the listed subtypes is not being each of them, so every leg becomes
+    // its own `Non`, AND-combined by the caller's `neg_type_filters`.
+    let (subtypes, list_len) = parse_relative_subtype_list(after_neg)?;
+    let total = leading_ws + neg_len + list_len;
     Some((
-        vec![TypeFilter::Non(Box::new(TypeFilter::Subtype(subtype)))],
+        subtypes
+            .into_iter()
+            .map(|subtype| TypeFilter::Non(Box::new(TypeFilter::Subtype(subtype))))
+            .collect(),
         total,
     ))
+}
+
+/// One "[a/an] <Subtype>" leg of a relative-clause subtype list. Returns the
+/// canonical subtype and the text after it.
+fn parse_relative_subtype_leg(input: &str) -> Option<(String, &str)> {
+    let (body, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("an "),
+        tag::<_, _, OracleError<'_>>("a "),
+    )))
+    .parse(input)
+    .ok()?;
+    // CR 205.3: delegates to the shared subtype recognizer.
+    let (subtype, len) = parse_subtype(body)?;
+    Some((subtype, &body[len..]))
+}
+
+/// CR 205.3a + CR 205.3m: the subtype list of a "that is / that isn't" relative
+/// clause — a single leg, a two-leg "X or Y", or an Oxford-comma list
+/// "X, Y, ..., or Z" (each leg may carry its own article). Returns the canonical
+/// subtypes and the bytes consumed.
+///
+/// A list is closed only by an "or" leg, so a comma run that never
+/// closes ("a Demon, Zombies you control ...") is not read as a list: the result
+/// rolls back to the legs up to the last closing conjunction, or to the first leg.
+pub(crate) fn parse_relative_subtype_list(input: &str) -> Option<(Vec<String>, usize)> {
+    let (first, mut rest) = parse_relative_subtype_leg(input)?;
+    let mut subtypes = vec![first];
+    let mut closed = (1usize, rest);
+    while let Ok((after_separator, closes)) = alt((
+        value(
+            true,
+            alt((tag::<_, _, OracleError<'_>>(", or "), tag(" or "))),
+        ),
+        value(false, tag(", ")),
+    ))
+    .parse(rest)
+    {
+        let Some((next, after_leg)) = parse_relative_subtype_leg(after_separator) else {
+            break;
+        };
+        subtypes.push(next);
+        rest = after_leg;
+        if closes {
+            closed = (subtypes.len(), rest);
+        }
+    }
+    let (count, end) = closed;
+    subtypes.truncate(count);
+    Some((subtypes, input.len() - end.len()))
 }
 
 fn is_relative_core_type_filter(type_filter: &TypeFilter) -> bool {
@@ -9949,7 +9995,7 @@ fn parse_that_is_core_type_suffix(text: &str) -> Option<(Vec<TypeFilter>, usize)
 /// Creature core type. Returns the bytes consumed (including leading whitespace).
 /// Returns `None` unless the clause names at least one recognized subtype, so
 /// color/supertype "that's …" relative clauses are left to their own parsers.
-fn parse_that_is_subtype_suffix(text: &str) -> Option<(TypeFilter, usize)> {
+pub(crate) fn parse_that_is_subtype_suffix(text: &str) -> Option<(TypeFilter, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
 
@@ -9965,38 +10011,11 @@ fn parse_that_is_subtype_suffix(text: &str) -> Option<(TypeFilter, usize)> {
         return None;
     };
 
-    // One "[a/an] <Subtype>" leg → `(Subtype, remaining)`.
-    let parse_leg = |rest: &'_ str| -> Option<(String, usize)> {
-        let after_article = if let Ok((r, _)) = tag::<_, _, OracleError<'_>>("a ").parse(rest) {
-            ("a ".len(), r)
-        } else if let Ok((r, _)) = tag::<_, _, OracleError<'_>>("an ").parse(rest) {
-            ("an ".len(), r)
-        } else {
-            (0usize, rest)
-        };
-        let (article_len, body) = after_article;
-        let (subtype, sub_len) = parse_subtype(body)?;
-        Some((subtype, article_len + sub_len))
-    };
-
-    let mut subtypes: Vec<TypeFilter> = Vec::new();
-    let (first, first_len) = parse_leg(after_intro)?;
-    subtypes.push(TypeFilter::Subtype(first));
-    let mut rest = &after_intro[first_len..];
-
-    // Optional " or [a/an] <Subtype>" continuations.
-    loop {
-        let Ok((after_or, _)) = tag::<_, _, OracleError<'_>>(" or ").parse(rest) else {
-            break;
-        };
-        let Some((next, next_len)) = parse_leg(after_or) else {
-            break;
-        };
-        subtypes.push(TypeFilter::Subtype(next));
-        rest = &after_or[next_len..];
-    }
-
-    let consumed = leading_ws + (trimmed.len() - rest.len());
+    // CR 205.3: one subtype, "X or Y", or an Oxford-comma list ("that's a Demon,
+    // Horror, or Nightmare" — Ancient Cellarspawn); any leg satisfies the clause.
+    let (subtypes, list_len) = parse_relative_subtype_list(after_intro)?;
+    let consumed = leading_ws + (trimmed.len() - after_intro.len()) + list_len;
+    let mut subtypes: Vec<TypeFilter> = subtypes.into_iter().map(TypeFilter::Subtype).collect();
     let filter = if subtypes.len() == 1 {
         subtypes.pop().expect("non-empty")
     } else {

@@ -10630,6 +10630,9 @@ impl DelveWitness {
                 || path.starts_with("/resolved_rules_journal/")
                 // Monotone mana-unit id counter, never rewound.
                 || path == "/next_pip_id"
+                // CR 601.2a + CR 733.1: monotone spell-announcement counter; an
+                // undone announcement's id is never reminted.
+                || path == "/next_spell_announcement"
                 // Layer-pass caches derived from printed characteristics.
                 || (std::iter::once(&self.spell)
                     .chain(&self.redirects)

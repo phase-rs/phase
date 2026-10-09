@@ -787,6 +787,10 @@ struct LlmDraftOutcome {
     reasoning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// What the provider reported spending on this reply, used or not.
+    /// Diagnostic only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<phase_llm::TokenUsage>,
 }
 
 #[derive(Serialize)]
@@ -796,6 +800,8 @@ struct LlmDraftPickRequest {
     fingerprint: String,
     option_count: usize,
     required_pick_count: usize,
+    /// Size of the prompt this request carries, for measuring prompt growth.
+    prompt_chars: usize,
     request: phase_llm::HttpRequestSpec,
 }
 
@@ -862,6 +868,9 @@ fn build_llm_draft_pick_requests_inner(
                 .into_iter()
                 .filter_map(|seat| {
                     let view = filter_for_player(draft_session, seat);
+                    // A seat with no prompt asks nothing: notably a forced pick
+                    // (the last card of a pack), which the bot path takes and
+                    // records without a provider round trip.
                     let request = phase_llm::build_draft_pick_prompt(
                         seat, &view, difficulty, card_db, &set_names,
                     )
@@ -872,6 +881,7 @@ fn build_llm_draft_pick_requests_inner(
                         fingerprint: request.fingerprint,
                         option_count: request.option_count,
                         required_pick_count: request.required_pick_count,
+                        prompt_chars: request.prompt.char_count(),
                         request: http,
                     })
                 })
@@ -911,6 +921,10 @@ fn submit_pick_with_llm_bot_picks_inner(
         let mut outcomes: Vec<LlmDraftOutcome> = Vec::with_capacity(responses.len());
 
         for response in &responses {
+            let usage = phase_llm::token_usage(
+                phase_llm::LlmProvider::from_label(&response.provider),
+                &response.body,
+            );
             match resolve_llm_draft_pick(draft_session, response) {
                 Ok(selection) => {
                     overrides.insert(response.seat, selection.card_instance_ids);
@@ -919,6 +933,7 @@ fn submit_pick_with_llm_bot_picks_inner(
                         used: true,
                         reasoning: selection.reasoning,
                         error: None,
+                        usage,
                     });
                 }
                 Err(error) => outcomes.push(LlmDraftOutcome {
@@ -926,6 +941,7 @@ fn submit_pick_with_llm_bot_picks_inner(
                     used: false,
                     reasoning: None,
                     error: Some(error.to_string()),
+                    usage,
                 }),
             }
         }
@@ -2503,6 +2519,37 @@ mod llm_draft_resolution_tests {
             resolve_llm_draft_pick(&session, &reply),
             Err(phase_llm::LlmError::StaleDecision)
         ));
+    }
+
+    /// CR 905.1a: the last card of a pack is not a choice. No seat holding one
+    /// is put to a provider, and the bot path still takes and records it.
+    #[test]
+    fn a_forced_last_pick_builds_no_request_and_is_still_recorded() {
+        let mut session = started_quick_pod();
+        for pack in session.current_pack.iter_mut().flatten() {
+            pack.0.truncate(1);
+        }
+        let human_card = session.current_pack[0].as_ref().unwrap().0[0]
+            .instance_id
+            .clone();
+        let pools_before: Vec<usize> = session.pools.iter().map(Vec::len).collect();
+
+        session_cell::install(session.clone());
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        let requests = build_llm_draft_pick_requests_inner(
+            r#"{"provider":"OpenAiCompatible","baseUrl":"https://provider.test/v1","model":"test"}"#,
+            "{}",
+        )
+        .unwrap();
+        session_cell::clear();
+        assert!(requests.is_empty(), "a forced pick was put to a provider");
+
+        RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(42))));
+        apply_human_pick_and_resolve_bots(&mut session, human_card).unwrap();
+        for (seat, before) in pools_before.iter().enumerate() {
+            assert_eq!(session.pools[seat].len(), before + 1, "seat {seat}");
+        }
     }
 
     /// The production response-to-pick path for Jev: the reply is read against

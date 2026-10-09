@@ -31,7 +31,7 @@ use super::card_type::{CoreType, Supertype};
 use super::counter::{counter_map_serde, CounterMatch, CounterType};
 use super::events::{
     EventAttachmentSnapshot, EventCombatSnapshot, EventObjectHistorySnapshot,
-    EventObjectRelationSnapshot, EventObjectSnapshot, GameEvent, PlayerActionKind,
+    EventObjectRelationSnapshot, EventObjectSnapshot, GameEvent, PlayerActionKind, Targeter,
 };
 use super::format::{FormatConfig, ZoneScope};
 use super::identifiers::{
@@ -1160,6 +1160,15 @@ pub struct ManaSpentSourceSnapshot {
     pub source_id: ObjectId,
     pub lki: LKISnapshot,
 }
+
+/// CR 601.2a + CR 400.7: the identity of one spell on the stack, minted when the
+/// spell is announced (or a copy is put onto the stack, CR 707.10) and carried
+/// unchanged through targeting, payment and finalization — unlike the object's
+/// incarnation, which advances when finalization moves the card to the stack.
+/// Never reused: the allocator only increases, and cleared identities are not
+/// reminted. Legacy saves carry no announcement, which matches nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SpellAnnouncement(pub u64);
 
 /// CR 601.2i: Stable coordinate of one finalized cast in its caster's
 /// turn-scoped spell-cast journal.
@@ -8642,6 +8651,94 @@ pub enum ManaAbilityResume {
     FinalizePendingManaPayment {
         player: PlayerId,
     },
+}
+
+/// CR 104.4b: the trigger events (and deferred cost events) a paused payment
+/// resume retains, for `GameState::for_each_trigger_event_carrier_mut`.
+/// Exhaustive on purpose: a variant that starts retaining an event must be
+/// visited here.
+fn visit_cost_move_resume_events(
+    resume: &mut PendingCostMoveResume,
+    f: &mut impl FnMut(&mut GameEvent),
+) {
+    match resume {
+        PendingCostMoveResume::SacrificeForCost {
+            deferred_cost_events,
+            ..
+        } => deferred_cost_events.iter_mut().for_each(&mut *f),
+        PendingCostMoveResume::CollectEvidencePayment { resume, .. } => match resume.as_mut() {
+            CollectEvidenceResume::ManaAbility {
+                pending_mana_ability,
+            } => visit_pending_mana_ability_events(pending_mana_ability, f),
+            CollectEvidenceResume::Casting { .. } | CollectEvidenceResume::Effect { .. } => {}
+        },
+        PendingCostMoveResume::ManaAbilityPayment { pending, cursor } => {
+            visit_pending_mana_ability_events(pending, f);
+            visit_mana_cost_cursor_events(cursor, f);
+        }
+        PendingCostMoveResume::CounterAdditionUnlessPayment { trigger_event, .. } => {
+            if let Some(event) = trigger_event.as_mut() {
+                f(event);
+            }
+        }
+        PendingCostMoveResume::RandomDiscardUnlessPayment(resume) => {
+            if let Some(event) = resume.trigger_event.as_mut() {
+                f(event);
+            }
+        }
+        PendingCostMoveResume::Cast { .. }
+        | PendingCostMoveResume::WardSacrificePayment { .. }
+        | PendingCostMoveResume::ReplacementMayCost { .. }
+        | PendingCostMoveResume::Foretell { .. }
+        | PendingCostMoveResume::UnlessBouncePayment { .. }
+        | PendingCostMoveResume::ActivationMillPayment { .. }
+        | PendingCostMoveResume::LoyaltyActivation { .. } => {}
+    }
+}
+
+/// A parked mana-ability activation: its resume roots, and its cost cursor's
+/// parents (each a parked activation of its own).
+fn visit_pending_mana_ability_events(
+    pending: &mut PendingManaAbility,
+    f: &mut impl FnMut(&mut GameEvent),
+) {
+    visit_mana_ability_resume_events(&mut pending.resume, f);
+    if let Some(resume) = pending.cost_move_resume.as_mut() {
+        visit_mana_ability_resume_events(resume, f);
+    }
+}
+
+fn visit_mana_cost_cursor_events(
+    cursor: &mut ManaAbilityCostCursor,
+    f: &mut impl FnMut(&mut GameEvent),
+) {
+    cursor.deferred_cost_events.iter_mut().for_each(&mut *f);
+    if let Some(parent) = cursor.parent.as_deref_mut() {
+        visit_pending_mana_ability_events(&mut parent.pending, f);
+        visit_mana_cost_cursor_events(&mut parent.cursor, f);
+    }
+}
+
+fn visit_mana_ability_resume_events(
+    resume: &mut ManaAbilityResume,
+    f: &mut impl FnMut(&mut GameEvent),
+) {
+    match resume {
+        ManaAbilityResume::UnlessPayment { trigger_event, .. } => {
+            if let Some(event) = trigger_event.as_mut() {
+                f(event);
+            }
+        }
+        ManaAbilityResume::Priority
+        | ManaAbilityResume::CompanionToHand { .. }
+        | ManaAbilityResume::TurnFaceUp { .. }
+        | ManaAbilityResume::EndContinuousEffect { .. }
+        | ManaAbilityResume::ManaPayment { .. }
+        | ManaAbilityResume::ManaSourceSelection { .. }
+        | ManaAbilityResume::EffectPayCost { .. }
+        | ManaAbilityResume::PhyrexianCastPayment { .. }
+        | ManaAbilityResume::FinalizePendingManaPayment { .. } => {}
+    }
 }
 
 impl ManaAbilityResume {
@@ -20012,6 +20109,11 @@ declare_game_state! {
     /// games don't re-mint colliding ids.
     #[serde(default)]
     pub next_pip_id: u64,
+    /// CR 601.2a + CR 400.7: the last [`SpellAnnouncement`] minted. Monotonic and
+    /// serialized, so a reloaded game never remints an id a live or departed
+    /// spell still carries.
+    #[serde(default)]
+    pub next_spell_announcement: u64,
     /// Resolved-rules journal for exact mana provenance and P2 mana commands.
     /// It is serialized so a restored game retains the command operands needed
     /// by later retained-prefix replay.
@@ -21789,6 +21891,17 @@ declare_game_state! {
     /// still resolves to a no-op. That gate is what keeps F1 out of this change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_color_this_resolution: Option<crate::types::mana::ManaColor>,
+
+    /// CR 105.4 + CR 608.2c: the colour the current resolution's most recent
+    /// colour choice named, persisting or not ("Choose a color. … a creature
+    /// of that color"). Unlike last_named_choice, a later choice of another
+    /// kind (a number, a player) doesn't overwrite it, and a parked
+    /// continuation doesn't clear it; unlike chosen_color_this_resolution,
+    /// a non-persisting chooser writes it, so its readers are only those that
+    /// name "that color" within the same resolution. Cleared at every
+    /// top-level resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub named_color_this_resolution: Option<crate::types::mana::ManaColor>,
 
     /// CR 608.2c + CR 123.1: the sticker the current resolution's most recent
     /// PutSticker instruction placed ("that sticker"). Cleared at every
@@ -27808,6 +27921,7 @@ impl GameState {
             // CR 118.3a: start at 1 so minted pip ids never collide with the
             // `ManaPipId(0)` unstamped sentinel.
             next_pip_id: 1,
+            next_spell_announcement: 0,
             resolved_rules_journal: ResolvedRulesJournal::default(),
             active_payment_pins: Vec::new(),
             active_rules_execution_node: None,
@@ -28028,6 +28142,7 @@ impl GameState {
             last_named_choice: None,
             chosen_counter_kind_this_resolution: None,
             chosen_color_this_resolution: None,
+            named_color_this_resolution: None,
             placed_sticker_this_resolution: None,
             last_chosen_damage_source: None,
             all_creature_types: Vec::new(),
@@ -28245,6 +28360,14 @@ impl GameState {
         let ts = self.next_timestamp;
         self.next_timestamp += 1;
         ts
+    }
+
+    /// CR 601.2a + CR 707.10: mint the identity of a spell put onto the stack.
+    /// Strictly increasing from 1, so it never collides with an earlier
+    /// announcement, even one minted before a reload.
+    pub(crate) fn mint_spell_announcement(&mut self) -> SpellAnnouncement {
+        self.next_spell_announcement += 1;
+        SpellAnnouncement(self.next_spell_announcement)
     }
 
     /// CR 613.7: carry the timestamp allocator past a timestamp that a CR 733
@@ -29142,6 +29265,7 @@ impl GameState {
         // loop pre-filter fingerprint.
         self.chosen_counter_kind_this_resolution.hash(&mut h);
         self.chosen_color_this_resolution.hash(&mut h);
+        self.named_color_this_resolution.hash(&mut h);
         // CR 608.2c: "that sticker" can change what a following instruction
         // reads (phase-2 quantity), so distinct live values must not share a
         // loop pre-filter fingerprint.
@@ -29186,6 +29310,7 @@ impl GameState {
         clone.state_revision = 0;
         clone.next_timestamp = 0;
         clone.next_object_id = 0;
+        clone.next_spell_announcement = 0;
         clone.next_delayed_trigger_token = 0;
         clone.next_delayed_trigger_instance = 0;
         clone.next_resolution_cast_offer_id = 0;
@@ -29414,9 +29539,10 @@ impl GameState {
 
         // CR 104.4b + CR 732.2a: incarnation-versioned LKI is historical support
         // state, not independently loop-material state. Retain only snapshots
-        // reachable from trigger-event carriers that can still resume or resolve:
-        // stack/resolving entries, pending/deferred/ordering triggers, current and
-        // batched trigger contexts, and continuation/optional-choice sidecars.
+        // reachable from trigger-event carriers that can still resume or resolve
+        // (`for_each_trigger_event_carrier_mut`: stack/resolving entries,
+        // pending/deferred/ordering triggers, current and batched trigger events,
+        // every parked resolution frame, and a paused triggered mana ability).
         // WaitingFor copies are intentionally not a separate authority: every
         // trigger-event-bearing prompt has one of those pending/continuation
         // carriers, and loop samples are taken at the post-pipeline Priority frame.
@@ -29430,91 +29556,20 @@ impl GameState {
                     referenced_lki.insert(ObjectIncarnationRef::of(*object_id, incarnation));
                 }
             }
+            // CR 400.7 + CR 608.2h: a tap event names the incarnation that was
+            // tapped; "that permanent's controller" reads its snapshot.
+            if let GameEvent::PermanentTapped {
+                object_id,
+                incarnation: Some(incarnation),
+                ..
+            } = event
+            {
+                referenced_lki.insert(ObjectIncarnationRef::of(*object_id, *incarnation));
+            }
         };
 
-        for entry in &clone.stack {
-            if let StackEntryKind::TriggeredAbility {
-                trigger_event: Some(event),
-                ..
-            } = &entry.kind
-            {
-                record_event(event);
-            }
-        }
-        if let Some(entry) = clone.resolving_stack_entry.as_ref() {
-            if let StackEntryKind::TriggeredAbility {
-                trigger_event: Some(event),
-                ..
-            } = &entry.kind
-            {
-                record_event(event);
-            }
-        }
-        if let Some(pending) = clone.pending_trigger.as_ref() {
-            if let Some(event) = pending.trigger_event.as_ref() {
-                record_event(event);
-            }
-        }
-        for event in &clone.pending_trigger_event_batch {
-            record_event(event);
-        }
-        for context in &clone.deferred_triggers {
-            if let Some(event) = context.pending.trigger_event.as_ref() {
-                record_event(event);
-            }
-            for event in &context.trigger_events {
-                record_event(event);
-            }
-        }
-        if let Some(order) = clone.pending_trigger_order.as_ref() {
-            for context in order.groups.iter().flat_map(|group| group.triggers.iter()) {
-                if let Some(event) = context.pending.trigger_event.as_ref() {
-                    record_event(event);
-                }
-                for event in &context.trigger_events {
-                    record_event(event);
-                }
-            }
-        }
-        if let Some(event) = clone.current_trigger_event.as_ref() {
-            record_event(event);
-        }
-        for event in &clone.current_trigger_events {
-            record_event(event);
-        }
-        for events in clone.stack_trigger_event_batches.values() {
-            for event in events {
-                record_event(event);
-            }
-        }
-        if let Some(event) = clone
-            .active_optional_effect_frame()
-            .and_then(|frame| frame.trigger_event.as_ref())
-        {
-            record_event(event);
-        }
-        if let Some(context) = clone
-            .active_ability_continuation_frame()
-            .and_then(|frame| frame.choose_zone_trigger_context.as_ref())
-        {
-            if let Some(event) = context.event.as_ref() {
-                record_event(event);
-            }
-            for event in &context.events {
-                record_event(event);
-            }
-        }
-        if let Some(context) = clone
-            .active_ability_continuation()
-            .and_then(|continuation| continuation.trigger_context.as_ref())
-        {
-            if let Some(event) = context.event.as_ref() {
-                record_event(event);
-            }
-            for event in &context.events {
-                record_event(event);
-            }
-        }
+        // The same traversal the canonicalization below uses (CR 104.4b).
+        clone.for_each_trigger_event_carrier_mut(&mut |event| record_event(event));
 
         clone.lki_by_incarnation = std::mem::take(&mut clone.lki_by_incarnation)
             .into_iter()
@@ -29525,20 +29580,460 @@ impl GameState {
                 (!history.is_empty()).then_some((object_id, history))
             })
             .collect();
-        // CR 104.4b + CR 608.2h: records no live spell-cast trigger can reach are
-        // history, not position — prune the same way as `lki_by_incarnation`,
-        // against the set captured above before it was cleared.
+        // CR 104.4b + CR 608.2h: records no live spell-cast trigger and no
+        // announcement-bound targeting event can reach are history, not
+        // position. Prune them the same way as `lki_by_incarnation`, against the
+        // set captured above before it was cleared, plus every departure whose
+        // spell a `BecomesTarget` targeter still names (the targeter authority,
+        // `targeting::event_referent_controller`, reads that record).
+        let targeted_announcements = clone.targeter_spell_announcements();
         clone.departed_stack_spells = std::mem::take(&mut clone.departed_stack_spells)
             .into_iter()
             .filter_map(|(object_id, mut history)| {
-                history.retain(|incarnation, _| {
+                history.retain(|incarnation, record| {
                     retained_departed_spells
                         .contains(&ObjectIncarnationRef::of(object_id, *incarnation))
+                        || record
+                            .object
+                            .spell_announcement
+                            .is_some_and(|announcement| {
+                                targeted_announcements.contains(&announcement)
+                            })
                 });
                 (!history.is_empty()).then_some((object_id, history))
             })
             .collect();
+        // CR 104.4b + CR 601.2a: a spell's announcement is monotonic identity,
+        // not position. Renumber every announcement by its rank among those
+        // the position carries, on the spell objects, the departure records,
+        // and the `BecomesTarget` targeters on every trigger-event carrier, so
+        // two positions minted at different times still confirm as a repeat
+        // while which spell each targeter names is preserved. Ranked AFTER
+        // pruning, so discarded history cannot shift the surviving ranks.
+        clone.canonicalize_spell_announcements_for_loop();
+        // CR 104.4b + CR 400.7: an incarnation is monotonic identity too. Renumber
+        // the retained LKI keys and every trigger event that names one, per
+        // object, by rank — after pruning, so discarded history cannot shift it.
+        clone.canonicalize_lki_incarnations_for_loop();
         clone
+    }
+
+    /// See `normalize_for_loop`. Per object, rank-based over the retained
+    /// `lki_by_incarnation` keys and the incarnations trigger events name
+    /// (`ZoneChanged` entries and stamped `PermanentTapped` taps), so two
+    /// positions minted at different times compare equal while which
+    /// incarnation each event names — and its snapshot — is preserved.
+    fn canonicalize_lki_incarnations_for_loop(&mut self) {
+        fn named_incarnation(event: &mut GameEvent) -> Option<(ObjectId, &mut u64)> {
+            match event {
+                GameEvent::ZoneChanged {
+                    object_id, record, ..
+                } => record
+                    .entered_incarnation
+                    .as_mut()
+                    .map(|incarnation| (*object_id, incarnation)),
+                GameEvent::PermanentTapped {
+                    object_id,
+                    incarnation: Some(incarnation),
+                    ..
+                } => Some((*object_id, incarnation)),
+                // Exhaustive on purpose: a new event that names an incarnation must
+                // decide here whether loop normalization renumbers it.
+                GameEvent::PermanentTapped {
+                    incarnation: None, ..
+                }
+                | GameEvent::GameStarted
+                | GameEvent::HiddenSearchViewed { .. }
+                | GameEvent::TurnStarted { .. }
+                | GameEvent::ExtraTurnCreated { .. }
+                | GameEvent::PhaseChanged { .. }
+                | GameEvent::PriorityPassed { .. }
+                | GameEvent::SpellCast { .. }
+                | GameEvent::Mutated { .. }
+                | GameEvent::Augmented { .. }
+                | GameEvent::Melded { .. }
+                | GameEvent::SpellCopied { .. }
+                | GameEvent::XValueChosen { .. }
+                | GameEvent::AbilityActivated { .. }
+                | GameEvent::LifeChanged { .. }
+                | GameEvent::ManaAdded { .. }
+                | GameEvent::TappedForMana { .. }
+                | GameEvent::ManaAbilityProduced { .. }
+                | GameEvent::ManaPoolEmptied { .. }
+                | GameEvent::ManaBurn { .. }
+                | GameEvent::ManaRecolored { .. }
+                | GameEvent::CreatureExerted { .. }
+                | GameEvent::CreatureEnlisted { .. }
+                | GameEvent::ArmyAmassed { .. }
+                | GameEvent::Foretold { .. }
+                | GameEvent::BecameForetold { .. }
+                | GameEvent::PlayerLost { .. }
+                | GameEvent::MulliganStarted
+                | GameEvent::CardsDrawn { .. }
+                | GameEvent::CardDrawn { .. }
+                | GameEvent::PermanentUntapped { .. }
+                | GameEvent::PermanentPhasedOut { .. }
+                | GameEvent::PermanentPhasedIn { .. }
+                | GameEvent::PlayerPhasedOut { .. }
+                | GameEvent::PlayerPhasedIn { .. }
+                | GameEvent::LandPlayed { .. }
+                | GameEvent::StackPushed { .. }
+                | GameEvent::StackResolved { .. }
+                | GameEvent::Discarded { .. }
+                | GameEvent::Milled { .. }
+                | GameEvent::DamageCleared { .. }
+                | GameEvent::GameOver { .. }
+                | GameEvent::ResolutionHalted { .. }
+                | GameEvent::DamageDealt { .. }
+                | GameEvent::DamagePrevented { .. }
+                | GameEvent::SpellCountered { .. }
+                | GameEvent::CounterAdded { .. }
+                | GameEvent::SagaChapterAbilityResolved { .. }
+                | GameEvent::ObjectIntensified { .. }
+                | GameEvent::Evolved { .. }
+                | GameEvent::CounterRemoved { .. }
+                | GameEvent::TokenCreated { .. }
+                | GameEvent::ObjectConjured { .. }
+                | GameEvent::CreatureDestroyed { .. }
+                | GameEvent::PermanentSacrificed { .. }
+                | GameEvent::ControllerChanged { .. }
+                | GameEvent::EffectResolved { .. }
+                | GameEvent::Unattached { .. }
+                | GameEvent::ContinuousEffectEnded { .. }
+                | GameEvent::AttackersDeclared { .. }
+                | GameEvent::BlockersDeclared { .. }
+                | GameEvent::AttackerBecameBlockedByEffect { .. }
+                | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
+                | GameEvent::CombatTaxPaid { .. }
+                | GameEvent::CombatTaxDeclined { .. }
+                | GameEvent::BecomesTarget { .. }
+                | GameEvent::VehicleCrewed { .. }
+                | GameEvent::Stationed { .. }
+                | GameEvent::Saddled { .. }
+                | GameEvent::ReplacementApplied { .. }
+                | GameEvent::Transformed { .. }
+                | GameEvent::Flipped { .. }
+                | GameEvent::Specialized { .. }
+                | GameEvent::DayNightChanged { .. }
+                | GameEvent::TurnedFaceUp { .. }
+                | GameEvent::TurnedFaceDown { .. }
+                | GameEvent::CardsRevealed { .. }
+                | GameEvent::ChosenNumbersRevealed { .. }
+                | GameEvent::CombatDamageDealtToPlayer { .. }
+                | GameEvent::PlayerEliminated { .. }
+                | GameEvent::CrimeCommitted { .. }
+                | GameEvent::Cycled { .. }
+                | GameEvent::PlayerPerformedAction { .. }
+                | GameEvent::CardPredicateGuessMade { .. }
+                | GameEvent::Regenerated { .. }
+                | GameEvent::CreatureSuspected { .. }
+                | GameEvent::CreatureNoLongerSuspected { .. }
+                | GameEvent::Detained { .. }
+                | GameEvent::BecamePrepared { .. }
+                | GameEvent::BecameUnprepared { .. }
+                | GameEvent::CaseSolved { .. }
+                | GameEvent::ClassLevelGained { .. }
+                | GameEvent::MonarchChanged { .. }
+                | GameEvent::CityBlessingGained { .. }
+                | GameEvent::EnduringStoryGained { .. }
+                | GameEvent::DieRolled { .. }
+                | GameEvent::DieRollIgnored { .. }
+                | GameEvent::StartingPlayerContest { .. }
+                | GameEvent::CoinFlipped { .. }
+                | GameEvent::RingTemptsYou { .. }
+                | GameEvent::RoomEntered { .. }
+                | GameEvent::RoomDoorUnlocked { .. }
+                | GameEvent::BecomesPlotted { .. }
+                | GameEvent::DungeonCompleted { .. }
+                | GameEvent::Planeswalked { .. }
+                | GameEvent::ChaosEnsued { .. }
+                | GameEvent::PlanarDieRolled { .. }
+                | GameEvent::SchemeSetInMotion { .. }
+                | GameEvent::SchemeAbandoned { .. }
+                | GameEvent::InitiativeTaken { .. }
+                | GameEvent::AttractionOpened { .. }
+                | GameEvent::ContraptionAssembled { .. }
+                | GameEvent::StickerPlaced { .. }
+                | GameEvent::AttractionsRolledToVisit { .. }
+                | GameEvent::AttractionVisited { .. }
+                | GameEvent::ContraptionCranked { .. }
+                | GameEvent::Firebend { .. }
+                | GameEvent::Airbend { .. }
+                | GameEvent::Earthbend { .. }
+                | GameEvent::Waterbend { .. }
+                | GameEvent::CompanionRevealed { .. }
+                | GameEvent::CompanionMovedToHand { .. }
+                | GameEvent::NinjutsuActivated { .. }
+                | GameEvent::KeywordAbilityActivated { .. }
+                | GameEvent::CreatureExploited { .. }
+                | GameEvent::EnergyChanged { .. }
+                | GameEvent::SpeedChanged { .. }
+                | GameEvent::PlayerCounterChanged { .. }
+                | GameEvent::ManaExpended { .. }
+                | GameEvent::Clash { .. }
+                | GameEvent::VoteCast { .. }
+                | GameEvent::VoteResolved { .. }
+                | GameEvent::PowerToughnessChanged { .. }
+                | GameEvent::CascadeMissed { .. }
+                | GameEvent::DebugActionUsed { .. }
+                | GameEvent::DebugPermissionGranted { .. }
+                | GameEvent::DebugPermissionRevoked { .. } => None,
+            }
+        }
+        let mut present: std::collections::HashMap<ObjectId, Vec<u64>> =
+            std::collections::HashMap::new();
+        for (object_id, history) in self.lki_by_incarnation.iter() {
+            present
+                .entry(*object_id)
+                .or_default()
+                .extend(history.keys().copied());
+        }
+        self.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let Some((object_id, incarnation)) = named_incarnation(event) {
+                present.entry(object_id).or_default().push(*incarnation);
+            }
+        });
+        for incarnations in present.values_mut() {
+            incarnations.sort_unstable();
+            incarnations.dedup();
+        }
+        let canonical = |object_id: ObjectId, incarnation: u64| {
+            let rank = present[&object_id]
+                .binary_search(&incarnation)
+                .expect("every incarnation was collected above");
+            rank as u64 + 1
+        };
+        self.lki_by_incarnation = std::mem::take(&mut self.lki_by_incarnation)
+            .into_iter()
+            .map(|(object_id, history)| {
+                let history = history
+                    .into_iter()
+                    .map(|(incarnation, snapshot)| (canonical(object_id, incarnation), snapshot))
+                    .collect();
+                (object_id, history)
+            })
+            .collect();
+        self.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let Some((object_id, incarnation)) = named_incarnation(event) {
+                *incarnation = canonical(object_id, *incarnation);
+            }
+        });
+    }
+
+    /// The spell announcements named by `BecomesTarget` targeters on every
+    /// trigger-event carrier that can still resume or resolve.
+    fn targeter_spell_announcements(&mut self) -> HashSet<SpellAnnouncement> {
+        let mut named = HashSet::new();
+        self.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let GameEvent::BecomesTarget {
+                targeter: Some(Targeter::Spell(announcement)),
+                ..
+            } = event
+            {
+                named.insert(*announcement);
+            }
+        });
+        named
+    }
+
+    /// See `normalize_for_loop`. Rank-based, so the mapping depends only on
+    /// the relative order of the announcements present, which is the same for
+    /// two positions with the same structure minted at different times.
+    fn canonicalize_spell_announcements_for_loop(&mut self) {
+        let mut present: Vec<SpellAnnouncement> = Vec::new();
+        for (_, object) in self.objects.iter() {
+            present.extend(object.spell_announcement);
+        }
+        for (_, records) in self.departed_stack_spells.iter() {
+            for (_, record) in records.iter() {
+                present.extend(record.object.spell_announcement);
+            }
+        }
+        self.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let GameEvent::BecomesTarget {
+                targeter: Some(Targeter::Spell(announcement)),
+                ..
+            } = event
+            {
+                present.push(*announcement);
+            }
+        });
+        present.sort_unstable();
+        present.dedup();
+        let canonical = |announcement: SpellAnnouncement| {
+            let rank = present
+                .binary_search(&announcement)
+                .expect("every announcement was collected above");
+            SpellAnnouncement(rank as u64 + 1)
+        };
+        for (_, object) in self.objects.iter_mut() {
+            if let Some(announcement) = object.spell_announcement.as_mut() {
+                *announcement = canonical(*announcement);
+            }
+        }
+        for (_, records) in self.departed_stack_spells.iter_mut() {
+            for (_, record) in records.iter_mut() {
+                if let Some(announcement) = record.object.spell_announcement.as_mut() {
+                    *announcement = canonical(*announcement);
+                }
+            }
+        }
+        self.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let GameEvent::BecomesTarget {
+                targeter: Some(Targeter::Spell(announcement)),
+                ..
+            } = event
+            {
+                *announcement = canonical(*announcement);
+            }
+        });
+    }
+
+    /// CR 104.4b + CR 732.2a: the restricted loop-normalization contract.
+    /// `for_each_trigger_event_carrier_mut` normalizes every carrier live at a
+    /// settled Priority sample. A state that still holds an unsettled delivery
+    /// carrier — a zone-change or batch-delivery frame, a player-scope sacrifice
+    /// completion, a discard or combat-lifelink batch, deferred entry events, or
+    /// undispatched attack/blocker declaration events — is not loop-comparable:
+    /// it never compares equal, so no draw or shortcut is certified from it.
+    pub(crate) fn is_loop_comparable(&self) -> bool {
+        !self.resolution_stack.holds_unsettled_delivery_frame()
+            && self.pending_player_scope_sacrifice_choice.is_none()
+            && self.pending_discard_batch.is_none()
+            && self.pending_combat_lifelink.is_none()
+            && self.deferred_entry_events.is_empty()
+            && self.pending_attack_trigger_events.is_empty()
+            && self
+                .combat
+                .as_ref()
+                .is_none_or(|combat| combat.pending_blocker_declaration_events.is_empty())
+    }
+
+    /// Every trigger-event carrier that can still resume or resolve: the stack,
+    /// pending/deferred/ordering triggers, current and batched trigger events,
+    /// every parked resolution frame, and a paused triggered mana ability. The
+    /// one traversal `normalize_for_loop` uses for both LKI retention and
+    /// identity canonicalization.
+    fn for_each_trigger_event_carrier_mut(&mut self, f: &mut impl FnMut(&mut GameEvent)) {
+        for entry in self
+            .stack
+            .iter_mut()
+            .chain(self.resolving_stack_entry.iter_mut())
+        {
+            if let StackEntryKind::TriggeredAbility {
+                trigger_event: Some(event),
+                ..
+            } = &mut entry.kind
+            {
+                f(event);
+            }
+        }
+        if let Some(event) = self
+            .pending_trigger
+            .as_mut()
+            .and_then(|pending| pending.trigger_event.as_mut())
+        {
+            f(event);
+        }
+        self.pending_trigger_event_batch
+            .iter_mut()
+            .for_each(&mut *f);
+        let order_contexts = self
+            .pending_trigger_order
+            .iter_mut()
+            .flat_map(|order| order.groups.iter_mut())
+            .flat_map(|group| group.triggers.iter_mut());
+        for context in self.deferred_triggers.iter_mut().chain(order_contexts) {
+            if let Some(event) = context.pending.trigger_event.as_mut() {
+                f(event);
+            }
+            context.trigger_events.iter_mut().for_each(&mut *f);
+        }
+        if let Some(event) = self.current_trigger_event.as_mut() {
+            f(event);
+        }
+        self.current_trigger_events.iter_mut().for_each(&mut *f);
+        for events in self.stack_trigger_event_batches.values_mut() {
+            events.iter_mut().for_each(&mut *f);
+        }
+        // CR 117.3d + CR 117.4: a stack-resolution session fences each triggered
+        // entry with its captured trigger event.
+        if let Some(session) = self.stack_resolution_session.as_mut() {
+            for fence in session.entries.iter_mut() {
+                if let StackResolutionEntryProvenance::TriggeredAbility(provenance) =
+                    &mut fence.provenance
+                {
+                    if let Some(event) = provenance.trigger_event.as_mut() {
+                        f(event);
+                    }
+                }
+            }
+        }
+        // Every parked frame, not only the active one: an optional frame's
+        // singular and plural events, a continuation's trigger contexts.
+        self.resolution_stack.for_each_retained_trigger_event_mut(f);
+        // CR 605.4a: a triggered mana ability paused mid-occurrence retains its
+        // current work item, its accepted tail and its collected batches.
+        if let Some(resume) = self.pending_triggered_mana_resume.as_deref_mut() {
+            fn context_events(
+                context: &mut crate::game::triggers::PendingTriggerContext,
+                f: &mut impl FnMut(&mut GameEvent),
+            ) {
+                if let Some(event) = context.pending.trigger_event.as_mut() {
+                    f(event);
+                }
+                context.trigger_events.iter_mut().for_each(&mut *f);
+            }
+            context_events(&mut resume.current, f);
+            for context in resume.accepted_tail.iter_mut() {
+                context_events(context, f);
+            }
+            for batch in resume.collected_batches.iter_mut() {
+                for context in batch.contexts.iter_mut() {
+                    context_events(context, f);
+                }
+                batch.delayed_events.iter_mut().for_each(&mut *f);
+                for consumed in batch.delayed_consumed.iter_mut() {
+                    f(&mut consumed.event);
+                }
+            }
+            match &mut resume.outer_resume {
+                ManaTriggerFixedPointResume::Parent => {}
+                ManaTriggerFixedPointResume::Root { resume, .. } => {
+                    visit_mana_ability_resume_events(resume, f);
+                }
+                ManaTriggerFixedPointResume::ColorChoice(choice) => match &mut choice.context {
+                    ManaChoiceContext::ManaAbility(pending) => {
+                        visit_pending_mana_ability_events(pending, f);
+                    }
+                    ManaChoiceContext::ResolvingEffect(..) => {}
+                },
+            }
+        }
+        // CR 608.2c + CR 608.2h: a staged resolution payment's captured trigger
+        // context.
+        if let Some(context) = self
+            .payment_transaction
+            .as_deref_mut()
+            .and_then(|transaction| transaction.resolving_trigger_context.as_mut())
+        {
+            if let Some(event) = context.event.as_mut() {
+                f(event);
+            }
+            context.events.iter_mut().for_each(&mut *f);
+        }
+        // CR 118.12 + CR 616.1: payment resumes paused on a replacement choice.
+        if let Some(resume) = self.pending_cost_move_resume.as_mut() {
+            visit_cost_move_resume_events(resume, f);
+        }
+        if let Some(resume) = self.pending_deferred_life_cost_resume.as_mut() {
+            match resume {
+                DeferredLifeCostResume::ManaRoot { resume, .. } => {
+                    visit_mana_ability_resume_events(resume, f);
+                }
+                DeferredLifeCostResume::Cast { .. } | DeferredLifeCostResume::PayAmount { .. } => {}
+            }
+        }
     }
 
     /// PR-3 (Option C): push one NORMALIZED post-resolution snapshot onto the
@@ -29560,6 +30055,17 @@ impl GameState {
     /// share every other conjunct, including `WaitingFor::Priority{active_player}`, which is
     /// what keeps the ring homogeneous for `analysis::resource::ring_delta_signature`.
     pub(crate) fn record_loop_detect_sample(&mut self) {
+        // CR 104.4b + CR 732.2a: the restricted normalization contract. A beat
+        // holding an unsettled delivery carrier is never sampled, and it breaks
+        // the ring's contiguity like the settle sampler's own `else` clear, so
+        // no route (strict equality, growth cover, or `ring_delta_signature`'s
+        // bounded offer) certifies a period across it.
+        if !self.is_loop_comparable() {
+            self.loop_detect_ring.clear();
+            // CR 603.5: the answers belong to the window the ring just lost.
+            self.loop_answer_journal = None;
+            return;
+        }
         if self.loop_detect_ring.len() == LOOP_DETECT_RING_CAP {
             self.loop_detect_ring.pop_front();
         }
@@ -30202,7 +30708,9 @@ const LOOP_DETECT_RING_CAP: usize = 16;
 /// equality. Only a true match permits a draw, so the cheap `loop_fingerprint`
 /// can never cause a wrongful draw.
 pub(crate) fn loop_states_equal(a: &GameState, b: &GameState) -> bool {
-    a == b
+    a.is_loop_comparable()
+        && b.is_loop_comparable()
+        && a == b
         && a.stack_trigger_firings == b.stack_trigger_firings
         && objects_content_eq(&a.objects, &b.objects)
 }
@@ -30286,6 +30794,7 @@ pub(crate) fn object_content_eq(x: &GameObject, y: &GameObject) -> bool {
         // #6865: a cast occurrence is resolution-semantic provenance while the
         // spell remains on the stack. Comparing it is fail-safe for loop detection.
         && x.cast_occurrence == y.cast_occurrence
+        && x.spell_announcement == y.spell_announcement
 }
 
 /// CR 104.4b compile-time totality guard for the object-growth cover gate's
@@ -30316,6 +30825,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         next_resolution_cast_offer_id: _,
         next_logical_zone_change_group_id: _,
         next_pip_id: _,
+        next_spell_announcement: _,
         resolved_rules_journal: _,
         active_payment_pins: _,
         active_rules_execution_node: _,
@@ -30559,6 +31069,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         last_named_choice: _,
         chosen_counter_kind_this_resolution: _,
         chosen_color_this_resolution: _,
+        named_color_this_resolution: _,
         placed_sticker_this_resolution: _,
         last_chosen_damage_source: _,
         all_creature_types: _,
@@ -30733,6 +31244,7 @@ impl PartialEq for GameState {
             && self.next_delayed_trigger_instance == other.next_delayed_trigger_instance
             && self.next_resolution_cast_offer_id == other.next_resolution_cast_offer_id
             && self.next_pip_id == other.next_pip_id
+            && self.next_spell_announcement == other.next_spell_announcement
             && self.resolved_rules_journal == other.resolved_rules_journal
             && self.battlefield == other.battlefield
             && self.stack == other.stack
@@ -30940,6 +31452,7 @@ impl PartialEq for GameState {
             && self.chosen_counter_kind_this_resolution
                 == other.chosen_counter_kind_this_resolution
             && self.chosen_color_this_resolution == other.chosen_color_this_resolution
+            && self.named_color_this_resolution == other.named_color_this_resolution
             && self.placed_sticker_this_resolution == other.placed_sticker_this_resolution
             && self.last_revealed_ids == other.last_revealed_ids
             && self.private_look_ids == other.private_look_ids
@@ -37740,6 +38253,257 @@ mod tests {
         assert!(a != b, "\"that sticker\" participates in state equality");
     }
 
+    /// CR 104.4b + CR 601.2a: two positions that differ only in WHEN their
+    /// spells were announced normalize equal, while a targeter that names a
+    /// different spell than the other position's targeter stays distinguishable.
+    #[test]
+    fn normalize_for_loop_canonicalizes_spell_announcements_by_rank() {
+        fn position(spell_a: u64, spell_b: u64, targeter_names: u64) -> GameState {
+            let mut state = GameState::new_two_player(7);
+            for (id, announcement) in [(ObjectId(600), spell_a), (ObjectId(601), spell_b)] {
+                let mut object = GameObject::new(
+                    id,
+                    CardId(id.0),
+                    PlayerId(0),
+                    "Loop Spell".to_string(),
+                    Zone::Stack,
+                );
+                object.spell_announcement = Some(SpellAnnouncement(announcement));
+                state.objects.insert(id, object);
+            }
+            state.next_spell_announcement = spell_a.max(spell_b);
+            // `pending_trigger` is an equality-compared trigger-event carrier.
+            state.pending_trigger = Some(Box::new(crate::game::triggers::PendingTrigger {
+                source_id: ObjectId(602),
+                controller: PlayerId(1),
+                condition: None,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    Vec::new(),
+                    ObjectId(602),
+                    PlayerId(1),
+                )),
+                timestamp: 0,
+                target_constraints: Vec::new(),
+                distribute: None,
+                trigger_event: Some(GameEvent::BecomesTarget {
+                    target: crate::types::ability::TargetRef::Player(PlayerId(1)),
+                    source_id: ObjectId(600),
+                    source_controller: PlayerId(0),
+                    targeter: Some(Targeter::Spell(SpellAnnouncement(targeter_names))),
+                }),
+                modal: None,
+                mode_abilities: vec![],
+                description: None,
+                may_trigger_origin: None,
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            }));
+            state
+        }
+        let early = position(3, 4, 3).normalize_for_loop();
+        let late = position(91, 92, 91).normalize_for_loop();
+        assert!(
+            loop_states_equal(&early, &late),
+            "minted at different times, same position"
+        );
+        let other_referent = position(91, 92, 92).normalize_for_loop();
+        assert!(
+            !loop_states_equal(&early, &other_referent),
+            "a targeter naming the other spell is a different position"
+        );
+        assert_eq!(early.next_spell_announcement, 0);
+    }
+
+    fn announced_departure(
+        spell: ObjectId,
+        announcement: u64,
+        controller: PlayerId,
+    ) -> DepartedStackSpell {
+        let mut object = GameObject::new(
+            spell,
+            CardId(spell.0),
+            controller,
+            "Departed Spell".to_string(),
+            Zone::Graveyard,
+        );
+        object.controller = controller;
+        object.spell_announcement = Some(SpellAnnouncement(announcement));
+        DepartedStackSpell {
+            entry: StackEntry {
+                id: spell,
+                source_id: spell,
+                controller,
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: spell,
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::NoOp,
+                        vec![],
+                        spell,
+                        controller,
+                    )),
+                },
+            },
+            object: Box::new(object),
+        }
+    }
+
+    fn pending_targeting_trigger(targeter_names: u64, source: ObjectId) -> GameState {
+        let mut state = GameState::new_two_player(7);
+        state.pending_trigger = Some(Box::new(crate::game::triggers::PendingTrigger {
+            source_id: ObjectId(602),
+            controller: PlayerId(0),
+            condition: None,
+            ability: Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                Vec::new(),
+                ObjectId(602),
+                PlayerId(0),
+            )),
+            timestamp: 0,
+            target_constraints: Vec::new(),
+            distribute: None,
+            trigger_event: Some(GameEvent::BecomesTarget {
+                target: crate::types::ability::TargetRef::Object(ObjectId(602)),
+                source_id: source,
+                source_controller: PlayerId(1),
+                targeter: Some(Targeter::Spell(SpellAnnouncement(targeter_names))),
+            }),
+            modal: None,
+            mode_abilities: vec![],
+            description: None,
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: None,
+            provenance: None,
+        }));
+        state
+    }
+
+    /// CR 104.4b + CR 608.2h: a departure record a pending targeting event's
+    /// targeter still names is position, not history. Two positions that differ
+    /// only in that departed spell's last controller (the answer the targeter
+    /// authority reads) stay distinguishable after normalization.
+    #[test]
+    fn normalize_for_loop_keeps_the_departure_a_targeter_names() {
+        let position = |last_controller: PlayerId| {
+            let mut state = pending_targeting_trigger(5, ObjectId(610));
+            state.departed_stack_spells.insert(
+                ObjectId(610),
+                im::HashMap::from_iter([(
+                    1,
+                    announced_departure(ObjectId(610), 5, last_controller),
+                )]),
+            );
+            state.normalize_for_loop()
+        };
+        let p0 = position(PlayerId(0));
+        assert_eq!(
+            p0.departed_stack_spells
+                .get(&ObjectId(610))
+                .map(|records| records.len()),
+            Some(1),
+            "the named record is retained"
+        );
+        assert!(
+            !loop_states_equal(&p0, &position(PlayerId(1))),
+            "a different last controller is a different position"
+        );
+    }
+
+    /// CR 104.4b: announcements are ranked AFTER unreachable history is pruned,
+    /// so an unreferenced older departure can't shift the surviving ranks.
+    #[test]
+    fn normalize_for_loop_ranks_announcements_after_pruning() {
+        let position = |first: u64, stale_departure: bool| {
+            let mut state = GameState::new_two_player(7);
+            for (id, announcement) in [(ObjectId(600), first), (ObjectId(601), first + 1)] {
+                let mut object = GameObject::new(
+                    id,
+                    CardId(id.0),
+                    PlayerId(0),
+                    "Loop Spell".to_string(),
+                    Zone::Stack,
+                );
+                object.spell_announcement = Some(SpellAnnouncement(announcement));
+                state.objects.insert(id, object);
+            }
+            if stale_departure {
+                state.departed_stack_spells.insert(
+                    ObjectId(620),
+                    im::HashMap::from_iter([(
+                        1,
+                        announced_departure(ObjectId(620), first - 1, PlayerId(0)),
+                    )]),
+                );
+            }
+            state.normalize_for_loop()
+        };
+        assert!(
+            loop_states_equal(&position(1, false), &position(2, true)),
+            "pruned history does not shift the live spells' ranks"
+        );
+    }
+
+    /// CR 601.2a: the announcement, its allocator and the event's targeter
+    /// round-trip through serde; a legacy payload without them decodes to
+    /// "no announcement" (which matches nothing) and a zero allocator.
+    #[test]
+    fn spell_announcement_and_targeter_round_trip() {
+        let mut state = GameState::new_two_player(7);
+        let mut object = GameObject::new(
+            ObjectId(700),
+            CardId(700),
+            PlayerId(1),
+            "Announced".to_string(),
+            Zone::Stack,
+        );
+        object.spell_announcement = Some(SpellAnnouncement(12));
+        state.objects.insert(ObjectId(700), object);
+        state.next_spell_announcement = 12;
+        for targeter in [
+            Targeter::Spell(SpellAnnouncement(12)),
+            Targeter::Ability(crate::types::ability::StackAbilityKind::Triggered),
+        ] {
+            state.current_trigger_event = Some(GameEvent::BecomesTarget {
+                target: crate::types::ability::TargetRef::Object(ObjectId(1)),
+                source_id: ObjectId(700),
+                source_controller: PlayerId(1),
+                targeter: Some(targeter),
+            });
+            let json = serde_json::to_string(&state).expect("serialize");
+            let restored: GameState = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(
+                restored.objects[&ObjectId(700)].spell_announcement,
+                Some(SpellAnnouncement(12))
+            );
+            assert_eq!(restored.next_spell_announcement, 12);
+            assert_eq!(restored.current_trigger_event, state.current_trigger_event);
+        }
+
+        let legacy_event: GameEvent = serde_json::from_value(serde_json::json!({
+            "type": "BecomesTarget",
+            "data": {
+                "target": { "Object": 1 },
+                "source_id": 700,
+                "source_controller": 1
+            }
+        }))
+        .expect("a legacy targeting event decodes");
+        assert!(matches!(
+            legacy_event,
+            GameEvent::BecomesTarget { targeter: None, .. }
+        ));
+        let legacy_object: GameObject = serde_json::from_value({
+            let mut value = serde_json::to_value(&state.objects[&ObjectId(700)]).unwrap();
+            value.as_object_mut().unwrap().remove("spell_announcement");
+            value
+        })
+        .expect("a legacy object decodes");
+        assert_eq!(legacy_object.spell_announcement, None);
+    }
+
     #[test]
     fn normalize_for_loop_canonicalizes_cast_coordinates_but_preserves_identity_shape() {
         fn ability_graph(occurrence: CastOccurrence) -> ResolvedAbility {
@@ -38011,13 +38775,21 @@ mod tests {
             loop_states_equal(&normalized_a, &normalized_b),
             "irrelevant incarnation history must not block loop recurrence"
         );
+        let retained: Vec<u64> = normalized_a.lki_by_incarnation[&entrant]
+            .keys()
+            .copied()
+            .collect();
+        let named = match &normalized_a.stack[0].kind {
+            StackEntryKind::TriggeredAbility {
+                trigger_event: Some(GameEvent::ZoneChanged { record, .. }),
+                ..
+            } => record.entered_incarnation,
+            other => panic!("unexpected stack entry {other:?}"),
+        };
         assert_eq!(
-            normalized_a.lki_by_incarnation[&entrant]
-                .keys()
-                .copied()
-                .collect::<Vec<_>>(),
-            vec![referenced_incarnation],
-            "the trigger-referenced incarnation remains available"
+            (retained.len(), named),
+            (1, retained.first().copied()),
+            "the trigger-referenced incarnation remains available (canonically renumbered)"
         );
 
         let mut changed_reference = a;
@@ -38029,6 +38801,374 @@ mod tests {
         assert!(
             !loop_states_equal(&normalized_a, &changed_reference.normalize_for_loop()),
             "different LKI for a still-referenced incarnation remains meaningful"
+        );
+    }
+
+    /// Pre-push review R3. CR 104.4b + CR 400.7 + CR 608.2h: a Royal Decree
+    /// trigger on the stack names the tapped Pyromancer's departed incarnation,
+    /// whose snapshot records its last controller. Two positions that differ
+    /// only in how incarnations were allocated (3 vs 91, renumbered
+    /// consistently in the event and the LKI key) are the same position.
+    /// Controls: a different departed controller, or an event that names an
+    /// incarnation with no retained snapshot (the snapshot is for another), stay unequal.
+    #[test]
+    fn normalize_for_loop_canonicalizes_a_tapped_incarnation() {
+        fn snapshot(controller: PlayerId) -> LKISnapshot {
+            LKISnapshot {
+                name: "Prodigal Pyromancer".to_string(),
+                token_image_ref: None,
+                power: Some(1),
+                toughness: Some(1),
+                base_power: Some(1),
+                base_toughness: Some(1),
+                mana_value: 3,
+                controller,
+                owner: PlayerId(0),
+                card_types: vec![CoreType::Creature],
+                subtypes: Vec::new(),
+                supertypes: Vec::new(),
+                keywords: Vec::new(),
+                colors: vec![ManaColor::Red],
+                chosen_attributes: Vec::new(),
+                counters: HashMap::new(),
+                tapped: true,
+                is_suspected: false,
+                attachments: Vec::new(),
+            }
+        }
+
+        let pyromancer = ObjectId(50);
+        let decree = ObjectId(5);
+        let position = |incarnation: u64, departed: Option<(u64, PlayerId)>| {
+            let mut state = GameState::new_two_player(7);
+            state.stack.push_back(StackEntry {
+                id: ObjectId(20),
+                source_id: decree,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: decree,
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::DealDamage {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::ParentTargetController,
+                            damage_source: None,
+                            excess: None,
+                        },
+                        vec![],
+                        decree,
+                        PlayerId(0),
+                    )),
+                    condition: None,
+                    trigger_event: Some(GameEvent::PermanentTapped {
+                        object_id: pyromancer,
+                        caused_by: None,
+                        incarnation: Some(incarnation),
+                    }),
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+            if let Some((key, controller)) = departed {
+                state
+                    .lki_by_incarnation
+                    .entry(pyromancer)
+                    .or_default()
+                    .insert(key, snapshot(controller));
+            }
+            state
+        };
+
+        let early = position(3, Some((3, PlayerId(1))));
+        let late = position(91, Some((91, PlayerId(1))));
+        assert_ne!(early, late, "reach guard: the raw positions differ");
+        assert!(
+            loop_states_equal(&early.normalize_for_loop(), &late.normalize_for_loop()),
+            "consistently renumbered incarnations are the same position"
+        );
+        let other_controller = position(91, Some((91, PlayerId(0))));
+        assert!(
+            !loop_states_equal(
+                &early.normalize_for_loop(),
+                &other_controller.normalize_for_loop()
+            ),
+            "a different departed controller is a different position"
+        );
+        let unmatched = position(92, Some((91, PlayerId(1))));
+        assert!(
+            !loop_states_equal(&early.normalize_for_loop(), &unmatched.normalize_for_loop()),
+            "an event naming an incarnation with no retained snapshot is a different position"
+        );
+    }
+
+    /// Maintainer round 4, finding 1. CR 104.4b + CR 400.7: LKI retention and
+    /// identity canonicalization share one carrier traversal that reaches every
+    /// parked frame, not only the active one. A tapped incarnation named only in
+    /// a BURIED optional frame's PLURAL `trigger_events`, or only in a buried
+    /// copy-chosen walk's `trigger_event`, keeps its snapshot, and two positions
+    /// minted at incarnation 3 vs 91 compare equal. Negative: the
+    /// retained snapshot names a different controller, so the positions differ.
+    #[test]
+    fn normalize_for_loop_reaches_a_buried_frames_plural_trigger_events() {
+        use crate::types::resolution::{OptionalEffectFrame, ResolutionFrame};
+
+        fn snapshot(controller: PlayerId) -> LKISnapshot {
+            LKISnapshot {
+                name: "Prodigal Pyromancer".to_string(),
+                token_image_ref: None,
+                power: Some(1),
+                toughness: Some(1),
+                base_power: Some(1),
+                base_toughness: Some(1),
+                mana_value: 3,
+                controller,
+                owner: PlayerId(0),
+                card_types: vec![CoreType::Creature],
+                subtypes: Vec::new(),
+                supertypes: Vec::new(),
+                keywords: Vec::new(),
+                colors: vec![ManaColor::Red],
+                chosen_attributes: Vec::new(),
+                counters: HashMap::new(),
+                tapped: true,
+                is_suspected: false,
+                attachments: Vec::new(),
+            }
+        }
+        fn optional_frame(trigger_events: Vec<GameEvent>) -> ResolutionFrame {
+            ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    vec![],
+                    ObjectId(5),
+                    PlayerId(0),
+                )),
+                trigger_event: None,
+                trigger_events,
+                trigger_match_count: None,
+                return_result_occurrence: None,
+            })
+        }
+
+        fn copy_chosen_frame(trigger_event: GameEvent) -> ResolutionFrame {
+            ResolutionFrame::EachPlayerCopyChosen(PendingEachPlayerCopyChosen {
+                stage: CopyChosenStage::AwaitingCopy,
+                player: PlayerId(0),
+                chosen: Vec::new(),
+                remaining_choices: Vec::new(),
+                choose_filter: TargetFilter::Controller,
+                min: 0,
+                max: 0,
+                copy_modifications: Vec::new(),
+                scale: None,
+                choose_scope: CopyChooseScope::Chooser,
+                source_id: ObjectId(5),
+                source_controller: PlayerId(0),
+                scoped_players: Vec::new(),
+                trigger_event: Some(trigger_event),
+            })
+        }
+
+        let pyromancer = ObjectId(50);
+        let position_in = |copy_chosen: bool, incarnation: u64, controller: PlayerId| {
+            let mut state = GameState::new_two_player(7);
+            let tapped = GameEvent::PermanentTapped {
+                object_id: pyromancer,
+                caused_by: None,
+                incarnation: Some(incarnation),
+            };
+            state.resolution_stack.push_inner(if copy_chosen {
+                copy_chosen_frame(tapped)
+            } else {
+                optional_frame(vec![tapped])
+            });
+            // The frame above buries the event-bearing one.
+            state
+                .resolution_stack
+                .push_inner(optional_frame(Vec::new()));
+            state
+                .lki_by_incarnation
+                .entry(pyromancer)
+                .or_default()
+                .insert(incarnation, snapshot(controller));
+            state
+        };
+
+        // The buried optional frame's plural events, then a buried copy-chosen
+        // walk's singular trigger event.
+        for copy_chosen in [false, true] {
+            let position =
+                |incarnation, controller| position_in(copy_chosen, incarnation, controller);
+            let early = position(3, PlayerId(1));
+            let late = position(91, PlayerId(1));
+            assert_ne!(
+                early, late,
+                "[copy_chosen={copy_chosen}] reach guard: the raw positions differ"
+            );
+            let normalized_late = late.normalize_for_loop();
+            assert_eq!(
+                normalized_late
+                    .lki_by_incarnation
+                    .get(&pyromancer)
+                    .map(|history| history.len()),
+                Some(1),
+                "[copy_chosen={copy_chosen}] the snapshot the buried event names is retained"
+            );
+            assert!(
+                loop_states_equal(&early.normalize_for_loop(), &normalized_late),
+                "[copy_chosen={copy_chosen}] consistently renumbered incarnations are the same position"
+            );
+            let other_controller = position(91, PlayerId(0));
+            assert!(
+                !loop_states_equal(
+                    &early.normalize_for_loop(),
+                    &other_controller.normalize_for_loop()
+                ),
+                "[copy_chosen={copy_chosen}] a different referent controller is a different position"
+            );
+        }
+    }
+
+    /// Maintainer round 4 re-check. CR 104.4b + CR 601.2a: a stack-resolution
+    /// session fences each triggered entry with its trigger event. Disenchant
+    /// (600) targets Forsaken Wastes (602), whose trigger is fenced; two
+    /// positions whose Disenchant was announced at 3 vs 91 normalize equal. A
+    /// fence naming a different announcement than the spell's is a different
+    /// position.
+    #[test]
+    fn normalize_for_loop_reaches_a_stack_resolution_fence_event() {
+        fn position(disenchant: u64, fence_names: u64) -> GameState {
+            let mut state = GameState::new_two_player(7);
+            let mut object = GameObject::new(
+                ObjectId(600),
+                CardId(600),
+                PlayerId(0),
+                "Disenchant".to_string(),
+                Zone::Stack,
+            );
+            object.spell_announcement = Some(SpellAnnouncement(disenchant));
+            state.objects.insert(ObjectId(600), object);
+            state.next_spell_announcement = disenchant;
+            let entry = StackEntry {
+                id: ObjectId(20),
+                source_id: ObjectId(602),
+                controller: PlayerId(1),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: ObjectId(602),
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::NoOp,
+                        vec![],
+                        ObjectId(602),
+                        PlayerId(1),
+                    )),
+                    condition: None,
+                    trigger_event: Some(GameEvent::BecomesTarget {
+                        target: crate::types::ability::TargetRef::Object(ObjectId(602)),
+                        source_id: ObjectId(600),
+                        source_controller: PlayerId(0),
+                        targeter: Some(Targeter::Spell(SpellAnnouncement(fence_names))),
+                    }),
+                    description: None,
+                    source_name: "Forsaken Wastes".to_string(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            };
+            state.stack_resolution_session = Some(StackResolutionSession {
+                entries: vec![StackResolutionEntryFence::capture(&entry)],
+                cursor: 0,
+                representatives: [PlayerId(0)].into_iter().collect(),
+                verified_pass_representatives: BTreeSet::new(),
+                budget: StackResolutionBudget::Unlimited,
+                policy: StackResolutionPolicy::Committed,
+                auto_pass_overlay: StackResolutionAutoPassOverlay {
+                    baseline: BTreeMap::new(),
+                },
+            });
+            state
+        }
+        let early = position(3, 3);
+        let late = position(91, 91);
+        assert_ne!(early, late, "reach guard: the raw positions differ");
+        assert!(
+            loop_states_equal(&early.normalize_for_loop(), &late.normalize_for_loop()),
+            "a fenced trigger event renumbered with its spell is the same position"
+        );
+        let other_referent = position(91, 92);
+        assert!(
+            !loop_states_equal(
+                &early.normalize_for_loop(),
+                &other_referent.normalize_for_loop()
+            ),
+            "a fence naming a different announcement is a different position"
+        );
+    }
+
+    /// Maintainer round 4 re-check. CR 104.4b: the restricted normalization
+    /// contract. A state still holding an unsettled delivery carrier (here,
+    /// deferred entry events) is not loop-comparable: it never compares equal,
+    /// even with an identical copy of itself.
+    #[test]
+    fn an_unsettled_delivery_carrier_makes_the_state_not_loop_comparable() {
+        let settled = GameState::new_two_player(7);
+        assert!(settled.is_loop_comparable());
+        assert!(
+            loop_states_equal(
+                &settled.normalize_for_loop(),
+                &settled.clone().normalize_for_loop()
+            ),
+            "reach guard: a settled state equals its copy"
+        );
+        let mut unsettled = settled.clone();
+        unsettled
+            .deferred_entry_events
+            .push(GameEvent::PermanentTapped {
+                object_id: ObjectId(50),
+                caused_by: None,
+                incarnation: Some(3),
+            });
+        assert!(!unsettled.is_loop_comparable());
+        let normalized = unsettled.normalize_for_loop();
+        assert!(
+            !loop_states_equal(&normalized, &normalized.clone()),
+            "an unsettled carrier is never loop-equal, even to itself"
+        );
+
+        // Every certification route reads the sample ring, so the sampler is
+        // gated too. Reach guard: three settled beats with a steady life delta
+        // certify a bounded offer.
+        let mut ring = GameState::new_two_player(7);
+        for life in [40, 39, 38] {
+            ring.players[1].life = life;
+            ring.record_loop_detect_sample();
+        }
+        assert_eq!(
+            ring.loop_detect_ring.len(),
+            3,
+            "reach guard: settled beats sample"
+        );
+        assert!(
+            crate::analysis::resource::ring_delta_signature(&ring).is_some(),
+            "reach guard: a steady settled ring certifies"
+        );
+        // An unsettled beat records no sample and breaks the ring, so nothing
+        // is certified from it.
+        ring.players[1].life = 37;
+        ring.deferred_entry_events = unsettled.deferred_entry_events.clone();
+        ring.record_loop_detect_sample();
+        assert!(
+            ring.loop_detect_ring.is_empty(),
+            "no sample from an unsettled beat"
+        );
+        assert!(
+            crate::analysis::resource::ring_delta_signature(&ring).is_none(),
+            "no shortcut is certified across an unsettled beat"
         );
     }
 

@@ -451,7 +451,11 @@ fn unique_recipient_from_filter(
     // event.
     if matches!(
         filter,
-        TargetFilter::TriggeringPlayer | TargetFilter::TriggeringSourceController
+        TargetFilter::TriggeringPlayer
+            | TargetFilter::TriggeringSourceController
+            // CR 113.8: "that spell or ability's controller" on a targeting
+            // trigger (Fractured Loyalty) — the targeter's controller.
+            | TargetFilter::TriggeringSpellController
     ) {
         return crate::game::targeting::resolve_event_context_target(
             state,

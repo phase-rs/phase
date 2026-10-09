@@ -533,9 +533,9 @@ pub fn resolve_triggered_mana_ability_inline(
         // Use the standard resolution entry so sub_ability chains resolve uniformly.
         // CR 605.4a: mark the inline subresolution so work that must belong to
         // a resolution carrier refuses to park inside it.
-        state.mana_subresolution_depth += 1;
-        let _ = super::effects::resolve_ability_chain(state, ability, events, 0);
-        state.mana_subresolution_depth -= 1;
+        run_inline_mana_subresolution(state, |state| {
+            let _ = super::effects::resolve_ability_chain(state, ability, events, 0);
+        });
         state.current_triggered_mana_override = previous_mana_override;
         state.current_trigger_event = previous_trigger_event;
     });
@@ -3961,9 +3961,23 @@ fn resolve_mana_ability_sub_chain(
     // of a painland cannot legitimately fail in a well-formed game state.
     // CR 605.3b: the sub-chain is an inline subresolution; see
     // `GameState::mana_subresolution_depth`.
+    run_inline_mana_subresolution(state, |state| {
+        let _ = super::effects::resolve_ability_chain(state, sub, events, 0);
+    });
+}
+
+/// CR 605.3a + CR 605.3b + CR 608.2c: a mana ability activated while another
+/// spell or ability is resolving (to pay a cost it asks for) resolves inline. It is not
+/// a new resolution of that outer ability, so the outer resolution's own
+/// "that color" (`named_color_this_resolution`) must survive it: the inline
+/// chain starts with a fresh slot (its depth-zero entry resets it, and a color
+/// it names stays its own) and the outer value is restored afterwards.
+fn run_inline_mana_subresolution(state: &mut GameState, run: impl FnOnce(&mut GameState)) {
+    let outer_named_color = state.named_color_this_resolution.take();
     state.mana_subresolution_depth += 1;
-    let _ = super::effects::resolve_ability_chain(state, sub, events, 0);
+    run(state);
     state.mana_subresolution_depth -= 1;
+    state.named_color_this_resolution = outer_named_color;
 }
 
 fn contains_duplicate_object_id(ids: &[ObjectId]) -> bool {

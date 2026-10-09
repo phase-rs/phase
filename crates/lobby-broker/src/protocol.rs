@@ -60,14 +60,18 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 119 — `FilterProp::PrepareSpell` ("a prepared spell" cast-trigger qualifier,
-///      CR 722.3d) and `scope` on `Effect::BecomePrepared` /
+/// 121 — `FilterProp::PrepareSpell` ("a prepared spell" cast-trigger qualifier,
+///      CR 722.3d), `scope` on `Effect::BecomePrepared` /
 ///      `BecomeUnprepared` (mass "each creature you control becomes
-///      prepared", CR 722.3a + CR 115.10a). A v118 peer cannot parse the new
-///      `FilterProp` tag and would read a mass scope as a single-target
-///      prepare because serde ignores the unknown field. Full-game peers and
-///      P2P move in lockstep (wire 101); lobby carriers hold no `GameState`
-///      and are unchanged.
+///      prepared", CR 722.3a + CR 115.10a) and `prepared_copy_source` on
+///      `SpellCastRecord`. A v120 peer cannot parse the new `FilterProp` tag
+///      and would read a mass scope as a single-target prepare because serde
+///      ignores the unknown field. Full-game peers and P2P move in lockstep
+///      (wire 103); lobby carriers hold no `GameState` and are unchanged.
+/// 120 — CR 601.2a spell announcement: `GameObject::spell_announcement`,
+///      `GameState::next_spell_announcement` and the `targeter` on
+///      `GameEvent::BecomesTarget`. A v119 peer cannot deserialize the new
+///      state. P2P moves to wire 102. (119/101 is reserved for the Legends of Jidoor PR.)
 /// 118 — `AbilityCondition::ManaColorSpent` and `TriggerCondition::ManaColorSpent` retype `color` from `ManaColor` to `SpentColor` (`ColorWord` or `ManaSymbol`, CR 612.2), serialized in the ability and trigger definitions of `GameState`. A v117 peer cannot deserialize the tagged color and would rewrite a printed mana symbol under a color-word text change. Full-game peers and P2P move in lockstep (wire 100); no lobby carrier names it.
 /// 117 — `DerivedViews` gains `shared_piles`, the engine-published seat whose `Player` container stores a shared library and graveyard (a shared-zone format's piles), omitted for a per-player format. A v116 peer drops the key and renders per-seat piles for a state whose other seat's containers are empty. Full-game peers and P2P move in lockstep (wire 99); no lobby carrier names it.
 /// 116 — `RESOLUTION_STATE_WIRE_VERSION` 4 to 5: the multi-draw resolution frame gains the simultaneous-draw `dealer` (a shared-library format's in-game simultaneous draw), serialized in `GameState`'s resolution frames and omitted when absent. A v115 peer refuses the version-5 resolution state. Full-game peers and P2P move in lockstep (wire 98); no lobby carrier names it.
@@ -918,7 +922,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 119;
+pub const PROTOCOL_VERSION: u32 = 121;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2175,12 +2179,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 119);
+        assert_eq!(PROTOCOL_VERSION, 121);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 118);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 120);
     }
 
     #[test]

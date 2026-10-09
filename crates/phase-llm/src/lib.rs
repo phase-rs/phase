@@ -46,6 +46,9 @@ pub mod wire;
 #[cfg(feature = "draft")]
 pub mod draft_decision;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub use error::{LlmError, LlmResult};
 pub use format_guidance::game_format_brief;
 pub use game_decision::{
@@ -60,7 +63,7 @@ pub use provider::{
 };
 pub use wire::{
     build_chat_request, completion_from_response, extract_completion_text, system_one_option_keys,
-    LlmReply,
+    token_usage, LlmReply, TokenUsage,
 };
 
 #[cfg(feature = "draft")]

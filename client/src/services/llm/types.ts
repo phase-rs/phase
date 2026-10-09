@@ -62,6 +62,8 @@ export interface LlmHttpRequestSpec {
 export interface LlmDecisionRequest {
   fingerprint: string;
   optionCount: number;
+  /** Characters of prompt the request carries (system + user). */
+  promptChars: number;
   request: LlmHttpRequestSpec;
 }
 
@@ -71,7 +73,19 @@ export interface LlmDraftPickRequest {
   fingerprint: string;
   optionCount: number;
   requiredPickCount: number;
+  /** Characters of prompt the request carries (system + user). */
+  promptChars: number;
   request: LlmHttpRequestSpec;
+}
+
+/**
+ * Matches `phase_llm::wire::TokenUsage`: what a provider reported spending on
+ * one call. An absent field is unknown, never zero.
+ */
+export interface LlmTokenUsage {
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  cachedInputTokens?: number | null;
 }
 
 /** What the engine did with one seat's draft response. */
@@ -80,6 +94,8 @@ export interface LlmDraftOutcome {
   used: boolean;
   reasoning?: string;
   error?: string;
+  /** Provider-reported token usage for this seat's reply, used or not. */
+  usage?: LlmTokenUsage;
 }
 
 /**

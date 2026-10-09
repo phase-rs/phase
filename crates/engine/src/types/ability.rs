@@ -18888,9 +18888,9 @@ pub enum Effect {
     ///
     /// `scope` is the single-vs-mass axis, exactly as on [`Effect::Suspect`]:
     /// `EffectScope::Single` (the default) is an anaphor/self-reference
-    /// (`SelfRef`, `LastCreated`, any context ref) or a declared target, which
-    /// carries `ParentTarget` (the declared-target slot for the "Target
-    /// creature becomes prepared" class is a known pre-existing gap);
+    /// (`SelfRef`, `LastCreated`, `ParentTarget`, any context ref) or a
+    /// declared target ("Target creature becomes prepared"), which keeps its
+    /// typed filter so a target slot is chosen at announcement;
     /// `EffectScope::All` is an untargeted filter that names an enumerable
     /// population ("Each creature you control becomes prepared"), enumerated
     /// over the battlefield at resolution (CR 115.10a: it is not a target).

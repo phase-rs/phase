@@ -5001,6 +5001,15 @@ export interface AiLlmProposalResult {
   /** The model's own one-line justification, for local diagnostics only. */
   reasoning?: string | null;
   error?: string;
+  /**
+   * Provider-reported token usage (`phase_llm::wire::TokenUsage`), present on
+   * success and refusal alike. Diagnostic only.
+   */
+  usage?: {
+    inputTokens?: number | null;
+    outputTokens?: number | null;
+    cachedInputTokens?: number | null;
+  } | null;
 }
 
 /** Engine-built HTTP call for one LLM request. Executed verbatim. */
@@ -5015,6 +5024,8 @@ export interface LlmHttpRequestSpec {
 export interface LlmDecisionRequestResult {
   fingerprint?: string;
   optionCount?: number;
+  /** Characters of prompt the request carries (system + user). */
+  promptChars?: number;
   request?: LlmHttpRequestSpec;
   error?: string;
   /** The engine's typed refusal (`phase_llm::LlmError`), when it carries one. */

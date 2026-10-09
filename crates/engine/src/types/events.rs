@@ -32,6 +32,22 @@ fn default_nth_in_turn() -> u32 {
     1
 }
 
+/// CR 115.1 + CR 113.8 + CR 601.2c: the stack object that announced a target,
+/// recorded when the target is chosen. "That spell or ability's controller"
+/// names that stack object, not the source permanent an ability's
+/// `BecomesTarget.source_id` points at (CR 113.7a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum Targeter {
+    /// A spell, by its announcement identity. Control of a spell can change
+    /// while it is on the stack (CR 109.4), so its controller is read live, or
+    /// as it last existed there once it has left (CR 608.2h).
+    Spell(super::game_state::SpellAnnouncement),
+    /// An activated or triggered ability. Its controller is fixed once it is on
+    /// the stack (CR 113.8): the event's `source_controller`.
+    Ability(super::ability::StackAbilityKind),
+}
+
 /// A passive, viewer-safe snapshot of one face seen during a hidden-zone search.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LibrarySearchCardFaceView {
@@ -1098,6 +1114,13 @@ pub enum GameEvent {
         /// `None` for self-initiated taps (mana abilities, attacking, crew, costs).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caused_by: Option<ObjectId>,
+        /// CR 400.7 + CR 608.2h: the incarnation of the permanent that became
+        /// tapped. If it leaves the battlefield and returns before a trigger
+        /// that reads "that permanent's controller" resolves (Royal Decree vs.
+        /// a blink), the returned permanent is a new object; this names the one
+        /// that was tapped. `None` on legacy events.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        incarnation: Option<u64>,
     },
     /// CR 701.43a + CR 701.43d: A creature was exerted as it attacked. Fires the
     /// linked `TriggerMode::Exerted` "when you do" trigger (Combat Celebrant,
@@ -1451,6 +1474,12 @@ pub enum GameEvent {
         target: TargetRef,
         source_id: ObjectId,
         source_controller: PlayerId,
+        /// CR 115.1 + CR 113.8: which stack object announced the target.
+        /// `None` on events built before this was recorded (legacy saves, and
+        /// hand-built test events): readers fall back to the object authority
+        /// on `source_id`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        targeter: Option<Targeter>,
     },
     /// CR 702.122e: A Vehicle's crew ability resolved.
     /// Carries creature list for trigger conditions that reference "creatures that crewed it".
@@ -1952,6 +1981,24 @@ pub enum GameEvent {
         host: PlayerId,
         player_id: PlayerId,
     },
+}
+
+impl GameEvent {
+    /// CR 400.7 + CR 608.2h: a `PermanentTapped` event for `object_id`, stamped
+    /// with the incarnation of the permanent that is tapped now, so a later
+    /// "that permanent's controller" names this object even if it has left and
+    /// returned as a new one.
+    pub(crate) fn permanent_tapped(
+        state: &super::game_state::GameState,
+        object_id: ObjectId,
+        caused_by: Option<ObjectId>,
+    ) -> Self {
+        GameEvent::PermanentTapped {
+            object_id,
+            caused_by,
+            incarnation: state.objects.get(&object_id).map(|obj| obj.incarnation),
+        }
+    }
 }
 
 /// CR 603.2 + CR 702.59a: True when an off-zone trigger source was already

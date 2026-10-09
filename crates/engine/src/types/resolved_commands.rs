@@ -1255,6 +1255,10 @@ pub struct ResolvedStackPushCommand {
     pub origin: ResolvedStackPushOrigin,
     /// Zero-based index the entry occupies after the push (CR 405.2).
     pub resulting_position: usize,
+    /// CR 601.2a + CR 707.10: the identity minted for a spell put onto the
+    /// stack, stamped on its object. `None` for abilities and legacy journals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spell_announcement: Option<crate::types::game_state::SpellAnnouncement>,
     pub cause: RulesExecutionNodeRef,
 }
 

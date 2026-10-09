@@ -2413,10 +2413,12 @@ mod concretizer_seams {
             GameEvent::PermanentTapped {
                 object_id: host,
                 caused_by: None,
+                incarnation: None,
             },
             GameEvent::PermanentTapped {
                 object_id: other,
                 caused_by: None,
+                incarnation: None,
             },
         ];
         let st = runner.state();

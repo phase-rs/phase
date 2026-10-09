@@ -6383,6 +6383,7 @@ pub(super) fn commit_attack_declaration(
                 events.push(GameEvent::PermanentTapped {
                     object_id: id,
                     caused_by: None,
+                    incarnation: Some(obj.incarnation),
                 });
             }
         }

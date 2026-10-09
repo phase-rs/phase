@@ -6,6 +6,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::error::{LlmError, LlmResult};
+use crate::render::history::HistoryBudget;
 
 /// A system/user message pair. Every protocol in [`crate::wire`] carries these
 /// two fields, whatever it calls them.
@@ -19,6 +20,23 @@ pub struct LlmPrompt {
     /// and `user` are, so every provider is shown the same position and the same
     /// option domain.
     pub frame: DecisionFrame,
+}
+
+impl LlmPrompt {
+    /// Characters a chat provider is sent for this prompt (system + user).
+    ///
+    /// The measure prompt-size work is judged by before any provider reports a
+    /// token count — and the one available for every provider, including those
+    /// that report none.
+    pub fn char_count(&self) -> usize {
+        self.system.chars().count() + self.user.chars().count()
+    }
+
+    /// A rough token estimate (about four characters per token for English
+    /// text). For logging trends, never for a budget decision.
+    pub fn estimated_tokens(&self) -> usize {
+        self.char_count().div_ceil(4)
+    }
 }
 
 /// One decision, split into the parts a typed question needs: who the model is
@@ -109,19 +127,24 @@ pub fn difficulty_brief(difficulty: AiDifficulty) -> &'static str {
     }
 }
 
-/// Whether this difficulty should be shown the full move history and the full
-/// public board, or only the immediate position.
+/// How much game history this difficulty is shown.
 ///
-/// Returned as a line count rather than a bool so the caller has the actual
-/// budget: the two lowest difficulties deliberately reason from a near-term
-/// window, which is a large part of what makes them beatable.
-pub fn history_window(difficulty: AiDifficulty) -> usize {
-    match difficulty {
-        AiDifficulty::VeryEasy => 0,
-        AiDifficulty::Easy => 10,
-        AiDifficulty::Medium => 30,
-        AiDifficulty::Hard => 60,
-        AiDifficulty::VeryHard | AiDifficulty::CEDH => 100,
+/// History is summarized per turn cycle ([`crate::render::history`]): the cycle
+/// in progress verbatim, earlier cycles as one line per turn. The two lowest
+/// difficulties deliberately reason from a near-term window, which is a large
+/// part of what makes them beatable; every budget is bounded, so no difficulty's
+/// prompt grows with the length of the game.
+pub fn history_budget(difficulty: AiDifficulty) -> HistoryBudget {
+    let (summarized_cycles, current_cycle_entries) = match difficulty {
+        AiDifficulty::VeryEasy => (0, 0),
+        AiDifficulty::Easy => (0, 10),
+        AiDifficulty::Medium => (1, 25),
+        AiDifficulty::Hard => (2, 40),
+        AiDifficulty::VeryHard | AiDifficulty::CEDH => (3, 60),
+    };
+    HistoryBudget {
+        summarized_cycles,
+        current_cycle_entries,
     }
 }
 
@@ -744,7 +767,9 @@ mod tests {
         assert_eq!(briefs.len(), difficulties.len());
         // Monotonic: a harder seat never sees less history than an easier one.
         for pair in difficulties.windows(2) {
-            assert!(history_window(pair[0]) <= history_window(pair[1]));
+            let (easier, harder) = (history_budget(pair[0]), history_budget(pair[1]));
+            assert!(easier.summarized_cycles <= harder.summarized_cycles);
+            assert!(easier.current_cycle_entries <= harder.current_cycle_entries);
         }
     }
 }

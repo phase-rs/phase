@@ -3645,9 +3645,13 @@ fn parse_for_each_one_life_changed_this_turn(input: &str) -> OracleResult<'_, Qu
 /// gained/lost this turn" (`LifeGainedThisTurn`/`LifeLostThisTurn`), whose
 /// "for each 1 life ... this turn" form `parse_for_each_one_life_changed_this_turn`
 /// claims first, and from Blood Tyrant's "1 life lost or gained this way" (no
-/// "you"; handled by the `TrackedSetSize` "this way" block).
+/// "you"; handled by the `TrackedSetSize` "this way" block). The subject is
+/// the triggering player either way: "you" on the controller's own trigger,
+/// the anaphoric "they" on a trigger about another player ("that player loses
+/// 2 life for each 1 life they gained" — False Cure).
 fn parse_for_each_one_life_changed(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = alt((tag("1 life you "), tag("one life you "))).parse(input)?;
+    let (rest, _) = alt((tag("1 life "), tag("one life "))).parse(input)?;
+    let (rest, _) = alt((tag("you "), tag("they "))).parse(rest)?;
     value(
         QuantityRef::EventContextAmount,
         alt((tag("gained"), tag("lost"))),

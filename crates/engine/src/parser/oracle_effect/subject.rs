@@ -4324,16 +4324,25 @@ pub(super) fn static_affected_for_application(application: &SubjectApplication) 
     }
 }
 
-/// CR 115.10a + CR 722.3a: the `(target, scope)` of "<subject> becomes
-/// (un)prepared", read from the shape of the already-parsed subject.
+/// CR 115.10a + CR 722.3a + CR 722.3b: the `(target, scope)` of "<subject>
+/// becomes (un)prepared", read from the shape of the already-parsed subject.
 ///
-/// A declared target ("target creature becomes prepared") or an inherited
-/// antecedent carries `ParentTarget` with `Single` scope. An untargeted
-/// subject that is a context reference (`SelfRef` for "this creature",
-/// `TriggeringSource`, `LastCreated`, ...) names one object, also `Single`. An
-/// untargeted noun phrase that names an enumerable population ("each creature
-/// you control") is not a target (CR 115.10a), so the filter is kept and read
-/// at resolution under `All`.
+/// Like `BecomeSaddled`, the effect's `target` IS the selection slot, and a
+/// designation of one object is [`EffectScope::Single`]:
+/// - CR 115.1c/115.1d + CR 601.2c/602.2b: a DECLARED target ("target creature
+///   becomes prepared" — Skycoach Waypoint, Biblioplex Tomekeeper; "target
+///   creature that attacked this turn" — Hexhaven Dueling Arena) keeps its
+///   typed filter, so `build_target_slots` surfaces a slot chosen at
+///   announcement and the filter's restrictions are enforced.
+/// - A context-ref `target` (anaphor markers `ParentTarget` /
+///   `TriggeringSource`) or an `inherits_parent` subject ("it becomes
+///   unprepared") keeps the established `ParentTarget` binding.
+/// - An untargeted subject that is a context reference (`SelfRef` for "this
+///   creature" — Stensian Sanguinist, `TriggeringSource`, `LastCreated`, ...)
+///   uses the subject's own `affected` filter and names one object.
+/// - An untargeted noun phrase that names an enumerable population ("each
+///   creature you control") is not a target (CR 115.10a), so the filter is
+///   kept and read at resolution under `All`.
 ///
 /// The `All` reading is positive and fail-closed: it requires
 /// [`TargetFilter::names_enumerable_population`], because `Any` and a
@@ -4343,8 +4352,15 @@ pub(super) fn static_affected_for_application(application: &SubjectApplication) 
 pub(super) fn prepared_designation_subject(
     application: &SubjectApplication,
 ) -> (TargetFilter, EffectScope) {
-    if application.target.is_some() || application.inherits_parent {
-        return (TargetFilter::ParentTarget, EffectScope::Single);
+    match application.target.as_ref() {
+        Some(declared) if !declared.is_context_ref() => {
+            return (declared.clone(), EffectScope::Single);
+        }
+        Some(_) => return (TargetFilter::ParentTarget, EffectScope::Single),
+        None if application.inherits_parent => {
+            return (TargetFilter::ParentTarget, EffectScope::Single);
+        }
+        None => {}
     }
     let affected = &application.affected;
     let scope = if !affected.is_context_ref() && affected.names_enumerable_population() {
@@ -5621,14 +5637,13 @@ fn build_become_clause(
     )))
     .parse(become_lower.as_str())
     {
-        // CR 722.3a + CR 115.10a: Resolve the prepare/unprepare subject. A
-        // targeted subject ("target creature becomes prepared", Biblioplex)
-        // carries `ParentTarget`; the declared-target slot for that class is a
-        // known pre-existing gap. A self-referential or anaphoric subject
-        // ("this creature becomes prepared" — Stensian Sanguinist, normalized
-        // to `~` → `SelfRef`) keeps its own `affected` filter; both are
-        // `Single`. An untargeted enumerable population ("each creature you
-        // control becomes prepared" — Codie, Ravenous Codex) is `All`.
+        // CR 722.3a + CR 722.3b: Resolve the prepare/unprepare target and its
+        // scope from the subject (`prepared_designation_subject`). Like
+        // `BecomeSaddled` below, a declared target keeps its typed filter as
+        // the selection slot; an anaphor, self reference, or untargeted
+        // population keeps its own filter, and only an untargeted enumerable
+        // population ("each creature you control" — Codie, Ravenous Codex) is
+        // `All`.
         let (target, scope) = prepared_designation_subject(&application);
         let effect = match kind {
             PreparedKind::Prepared => Effect::BecomePrepared { target, scope },

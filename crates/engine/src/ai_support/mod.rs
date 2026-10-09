@@ -1098,6 +1098,7 @@ fn resolve_mana_option_for_trigger_probe(
                 events.push(GameEvent::PermanentTapped {
                     object_id: option.object_id,
                     caused_by: None,
+                    incarnation: Some(obj.incarnation),
                 });
             }
         }

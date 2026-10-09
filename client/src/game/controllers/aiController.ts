@@ -4,6 +4,7 @@ import { profileForSeat, useLlmStore } from "../../stores/llmStore";
 import { executeLlmRequest } from "../../services/llm/llmClient";
 import { loadProviderCatalog } from "../../services/llm/catalog";
 import { reportLlmFailure } from "../../services/llm/diagnostics";
+import { recordLlmUsage } from "../../services/llm/usage";
 import { resolvedEndpointOf } from "../../services/llm/endpoint";
 import type { AiActionProposal, GameAction, GameState, WaitingFor } from "../../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
@@ -94,12 +95,15 @@ function waitingForDebugLabel(waitingFor: WaitingFor | null | undefined): string
 /**
  * How many engine-authored log entries an LLM decision is given as history.
  *
- * The engine decides how many of these it actually renders (by difficulty, via
- * `phase_llm::prompt::history_window`); this is only the bound on what crosses
- * the boundary, so a thousand-entry Commander game does not serialize its whole
- * log on every priority pass.
+ * The engine decides what of this it actually renders (by difficulty, via
+ * `phase_llm::prompt::history_budget`): the turn cycle in progress verbatim and
+ * the last few completed cycles as one line per turn, so the PROMPT stays
+ * bounded however long the game runs. This is only the bound on what crosses
+ * the boundary — sized to cover those cycles in a four-seat game, where a cycle
+ * logs a few hundred entries — so a thousand-entry Commander game does not
+ * serialize its whole log on every priority pass.
  */
-const LLM_HISTORY_TRANSFER_LIMIT = 120;
+const LLM_HISTORY_TRANSFER_LIMIT = 600;
 
 /**
  * Consecutive LLM failures a seat may take before the controller stops trying
@@ -178,6 +182,8 @@ async function llmActionProposal(
     status,
     body,
   );
+  // The call was paid for whether or not its reply is usable.
+  recordLlmUsage("game", `seat ${llmSeatIndex}`, built.promptChars, resolved?.usage);
   if (!resolved?.proposal) {
     reportLlmFailure(`LLM opponent (seat ${llmSeatIndex}) reply was refused`, resolved?.error);
     return null;
