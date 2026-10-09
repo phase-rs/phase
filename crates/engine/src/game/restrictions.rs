@@ -281,6 +281,13 @@ pub(crate) fn spell_cast_record_for(
         // history record carries provenance so own-cast exclusion (CR 601.2i)
         // can identify a permanent's own pending cast positionally.
         spell_object_id: Some(obj.id),
+        // CR 722.3d + CR 601.2i: capture the prepare-spell designation the
+        // spell has as it becomes cast (the CR 722.3c linked copy's marker), so
+        // `FilterProp::PrepareSpell` and its negation are exact on the history
+        // record after the spell leaves the stack. Unconditional on zone: the
+        // live candidate seam projects the linked copy while it still waits in
+        // exile, and that object can only be cast as a prepare spell.
+        prepared_copy_source: obj.prepared_copy_source,
     }
 }
 
@@ -3980,6 +3987,7 @@ mod tests {
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                prepared_copy_source: None,
             }]),
         );
 
@@ -4017,6 +4025,7 @@ mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    prepared_copy_source: None,
                 },
                 crate::types::game_state::SpellCastRecord {
                     name: String::new(),
@@ -4032,6 +4041,7 @@ mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    prepared_copy_source: None,
                 },
                 crate::types::game_state::SpellCastRecord {
                     name: String::new(),
@@ -4047,6 +4057,7 @@ mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    prepared_copy_source: None,
                 },
             ]),
         );

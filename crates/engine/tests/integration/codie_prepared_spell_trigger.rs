@@ -18,22 +18,23 @@ use std::sync::Arc;
 
 use engine::database::CardDatabase;
 use engine::game::effects::paradigm::{arm_paradigm, enqueue_offer_if_any};
-use engine::game::filter::{matches_target_filter, FilterContext};
+use engine::game::filter::{matches_target_filter, spell_record_matches_filter, FilterContext};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, FilterProp, QuantityExpr, ResolvedAbility,
-    TargetFilter, TargetRef, TypedFilter,
+    AbilityDefinition, AbilityKind, CountScope, Effect, FilterProp, QuantityExpr, QuantityRef,
+    ResolvedAbility, TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
+use engine::types::game_state::{GameState, SpellCastRecord, StackEntryKind, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
-use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::statics::{ProhibitionScope, StaticMode};
 use engine::types::zones::Zone;
 use engine::types::TriggerMode;
 
@@ -344,6 +345,53 @@ fn prepare_spell_filter() -> TargetFilter {
     TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::PrepareSpell]))
 }
 
+/// The four prepare-designation history queries, in order: `PrepareSpell`,
+/// `TargetFilter::Not { PrepareSpell }`, `FilterProp::Not { PrepareSpell }`, and
+/// `AnyOf { PrepareSpell, Modal }` (`Modal` is unevaluable on a record, so only
+/// `PrepareSpell` can make the disjunction true).
+fn prepare_history_filters() -> [TargetFilter; 4] {
+    [
+        prepare_spell_filter(),
+        TargetFilter::Not {
+            filter: Box::new(prepare_spell_filter()),
+        },
+        TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Not {
+            prop: Box::new(FilterProp::PrepareSpell),
+        }])),
+        TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::AnyOf {
+            props: vec![FilterProp::PrepareSpell, FilterProp::Modal],
+        }])),
+    ]
+}
+
+/// CR 722.3d: the readings of a spell cast as a prepare spell.
+const PREPARED_READINGS: [bool; 4] = [true, false, false, true];
+/// The readings of a spell not cast as a prepare spell (and not modal).
+const ORDINARY_READINGS: [bool; 4] = [false, true, true, false];
+
+/// Evaluate every `prepare_history_filters` query against one cast-history
+/// record through the public spell-record filter authority.
+fn prepare_readings(state: &GameState, record: &SpellCastRecord) -> [bool; 4] {
+    prepare_history_filters()
+        .map(|filter| spell_record_matches_filter(record, &filter, P0, &state.all_creature_types))
+}
+
+/// CR 117.1: P0's "spells you've cast this turn" count, optionally filtered,
+/// resolved through the production quantity resolver.
+fn spells_cast_this_turn(state: &GameState, source: ObjectId, filter: Option<TargetFilter>) -> i32 {
+    engine::game::quantity::resolve_quantity(
+        state,
+        &QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastThisTurn {
+                scope: CountScope::Controller,
+                filter,
+            },
+        },
+        P0,
+        source,
+    )
+}
+
 /// `(object_id, original_id)` of every `SpellCopied` event in `events`.
 fn spell_copied(events: &[GameEvent]) -> Vec<(ObjectId, ObjectId)> {
     events
@@ -553,6 +601,12 @@ fn codie_prepared_spell_paradigm_copy_neither_carries_nor_triggers() {
         "CR 707.12: a Paradigm copy is not a prepare spell"
     );
     assert_fresh_paradigm_cast(runner.state(), copy_id, 0);
+    // CR 707.12: the cast-history record of the Paradigm cast (identified by
+    // `assert_fresh_paradigm_cast` above) records no prepare designation, so the
+    // history readings are those of an ordinary spell.
+    let record = &runner.state().spells_cast_this_turn_by_player[&P0][0];
+    assert_eq!(record.prepared_copy_source, None);
+    assert_eq!(prepare_readings(runner.state(), record), ORDINARY_READINGS);
     // Reach guard: the Paradigm route's SpellCast event reaches trigger collection.
     assert_eq!(
         triggers_from(runner.state(), contemplation),
@@ -606,6 +660,14 @@ fn codie_prepared_spell_cast_copy_of_card_clears_marker() {
         event,
         GameEvent::SpellCast { object_id, .. } if *object_id == copy_id
     )));
+    // CR 707.12: the cast-history record of this cast names the copy and
+    // records no prepare designation, despite the hostile source marker.
+    let record = state.spells_cast_this_turn_by_player[&P0]
+        .last()
+        .expect("casting a copy of a card is a real cast and is recorded");
+    assert_eq!(record.spell_object_id, Some(copy_id));
+    assert_eq!(record.prepared_copy_source, None);
+    assert_eq!(prepare_readings(&state, record), ORDINARY_READINGS);
 }
 
 /// CR 601.2i + CR 722.3d + CR 707.10c: casting a prepared Swords to Plowshares
@@ -640,14 +702,15 @@ fn codie_prepared_spell_cast_copies_and_retargets() {
 /// the trigger, retarget the copy to `y`, and resolve both spells. Asserts the
 /// copy is made once from `spell_id`, the original keeps `x`, the copy targets
 /// `y`, the copy does not retrigger Codie, and both Swords resolve (X and Y
-/// exiled, each controller gains its creature's power).
+/// exiled, each controller gains its creature's power). Returns the id of the
+/// single copy (from its `SpellCopied` event).
 fn finish_codie_copy_and_retarget(
     runner: &mut GameRunner,
     codie: ObjectId,
     spell_id: ObjectId,
     x: ObjectId,
     y: ObjectId,
-) {
+) -> ObjectId {
     let mut events = pass_twice(runner);
     match &runner.state().waiting_for {
         WaitingFor::CopyRetarget {
@@ -717,6 +780,7 @@ fn finish_codie_copy_and_retarget(
     // gains 3.
     assert_eq!(life_after[0] - life_before[0], 2, "P0 gains X's power");
     assert_eq!(life_after[1] - life_before[1], 3, "P1 gains Y's power");
+    copy_id
 }
 
 /// Negative: an ordinary spell cast from hand is not a prepared spell.
@@ -1582,4 +1646,346 @@ fn codie_serialized_shapes_carry_the_new_tags() {
             ..
         }
     ));
+}
+
+/// P0 controls a prepared Emeritus of Truce (targeted Swords to Plowshares,
+/// {W}) and a prepared Goblin Glasswright (untargeted Craft with Pride, a {R}
+/// sorcery), a creature `x`; P1 controls a 3/3 `y`. P0 holds `shocks` copies of
+/// the non-modal Shock ({R}) and a pool of exactly {W}{R}{R}. No Codie: the
+/// cast-history ledger is read directly. `cast_limit`, when set, is a static on
+/// a P0 creature.
+struct LedgerFixture {
+    runner: GameRunner,
+    emeritus: ObjectId,
+    glasswright: ObjectId,
+    x: ObjectId,
+    y: ObjectId,
+    shocks: Vec<ObjectId>,
+}
+
+fn build_ledger_fixture(
+    db: &CardDatabase,
+    shocks: usize,
+    cast_limit: Option<StaticMode>,
+) -> LedgerFixture {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let emeritus = scenario.add_real_card(P0, "Emeritus of Truce", Zone::Battlefield, db);
+    let glasswright = scenario.add_real_card(P0, "Goblin Glasswright", Zone::Battlefield, db);
+    let x = scenario.add_creature(P0, "Exile Target", 2, 2).id();
+    let y = scenario.add_creature(P1, "Shock Target", 3, 3).id();
+    if let Some(mode) = cast_limit {
+        scenario
+            .add_creature(P0, "Cast Limiter", 1, 1)
+            .with_static(mode);
+    }
+    // Shock's printed {R}: the pool accounting below shows that only the cast
+    // limit, never mana, keeps a Shock from being cast.
+    let shocks: Vec<ObjectId> = (0..shocks)
+        .map(|_| {
+            scenario
+                .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK_ORACLE)
+                .with_mana_cost(ManaCost::Cost {
+                    generic: 0,
+                    shards: vec![ManaCostShard::Red],
+                })
+                .id()
+        })
+        .collect();
+    scenario.with_mana_pool(P0, mana(&[ManaType::White, ManaType::Red, ManaType::Red]));
+
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    set_prepared(&mut runner, emeritus);
+    set_prepared(&mut runner, glasswright);
+    // Reach guard: each permanent is prepared with exactly one linked copy.
+    exact_linked_copy(runner.state(), emeritus, P0, "Swords to Plowshares");
+    exact_linked_copy(runner.state(), glasswright, P0, "Craft with Pride");
+
+    LedgerFixture {
+        runner,
+        emeritus,
+        glasswright,
+        x,
+        y,
+        shocks,
+    }
+}
+
+/// P0's cast-history records, in cast order.
+fn p0_cast_records(state: &GameState) -> Vec<SpellCastRecord> {
+    state
+        .spells_cast_this_turn_by_player
+        .get(&P0)
+        .map(|records| records.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn offers_cast_spell(state: &GameState, spell: ObjectId) -> bool {
+    engine::ai_support::legal_actions(state).iter().any(
+        |action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == spell),
+    )
+}
+
+/// Cast the prepared Swords to Plowshares of `emeritus` at `target` and resolve
+/// it (CR 117.4); returns the cast spell's id.
+fn cast_and_resolve_prepared_swords(
+    runner: &mut GameRunner,
+    emeritus: ObjectId,
+    target: ObjectId,
+) -> ObjectId {
+    let spell = start_prepared_cast(runner, emeritus);
+    drive_cast_to_stack(runner, Some(target));
+    assert_priority(runner, P0);
+    assert_eq!(
+        runner.state().objects[&spell].prepared_copy_source,
+        Some(emeritus)
+    );
+    pass_twice(runner);
+    assert_priority(runner, P0);
+    assert!(runner.state().stack.is_empty());
+    spell
+}
+
+/// Cast an ordinary Shock at `target` and resolve it.
+fn cast_and_resolve_shock(runner: &mut GameRunner, shock: ObjectId, target: ObjectId) {
+    {
+        let commit = runner.cast(shock).target_object(target).commit();
+        let state = commit.state();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+        assert_eq!(state.objects[&shock].zone, Zone::Stack);
+        assert_eq!(state.objects[&shock].prepared_copy_source, None);
+    }
+    pass_twice(runner);
+    assert_priority(runner, P0);
+    assert!(runner.state().stack.is_empty());
+}
+
+/// CR 722.3d + CR 601.2i: each prepared cast records the prepare-spell
+/// designation on the cast-history ledger and an ordinary cast records none, so
+/// the positive, `TargetFilter::Not`, `FilterProp::Not` and `AnyOf` history
+/// queries are exact per record and per quantity. Two prepared casts from two
+/// different permanents surround an ordinary one.
+#[test]
+fn prepare_spell_designation_is_recorded_on_the_cast_ledger() {
+    let LedgerFixture {
+        mut runner,
+        emeritus,
+        glasswright,
+        x,
+        y,
+        shocks,
+    } = build_ledger_fixture(db(), 1, None);
+    let shock = shocks[0];
+    let glass_copy = exact_linked_copy(runner.state(), glasswright, P0, "Craft with Pride");
+
+    let swords = cast_and_resolve_prepared_swords(&mut runner, emeritus, x);
+    cast_and_resolve_shock(&mut runner, shock, y);
+    // A sorcery-speed prepared cast, left on the stack.
+    runner
+        .act(GameAction::CastPreparedCopy {
+            source: glasswright,
+        })
+        .expect("the prepared Craft with Pride is castable on an empty stack");
+    drive_cast_to_stack(&mut runner, None);
+    assert_priority(&runner, P0);
+
+    let state = runner.state();
+    assert_eq!(state.stack.len(), 1);
+    assert_eq!(state.stack[0].id, glass_copy);
+    assert!(state.players[0].mana_pool.mana.is_empty());
+    let records = p0_cast_records(state);
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.spell_object_id)
+            .collect::<Vec<_>>(),
+        [Some(swords), Some(shock), Some(glass_copy)],
+        "one record per cast, in cast order"
+    );
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.prepared_copy_source)
+            .collect::<Vec<_>>(),
+        [Some(emeritus), None, Some(glasswright)],
+        "CR 722.3d: each prepared cast names its own permanent; the ordinary cast names none"
+    );
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| prepare_readings(state, record))
+            .collect::<Vec<_>>(),
+        [PREPARED_READINGS, ORDINARY_READINGS, PREPARED_READINGS]
+    );
+
+    // CR 117.1: the same queries as a "spells you've cast this turn" count.
+    assert_eq!(spells_cast_this_turn(state, emeritus, None), 3);
+    assert_eq!(
+        prepare_history_filters().map(|filter| spells_cast_this_turn(
+            state,
+            emeritus,
+            Some(filter)
+        )),
+        [2, 1, 1, 2]
+    );
+
+    // Control for the inversion mechanism: a record without the designation
+    // reads as non-prepare under both negations; one with it reads as prepare.
+    assert_eq!(
+        prepare_readings(state, &SpellCastRecord::default()),
+        ORDINARY_READINGS
+    );
+    assert_eq!(
+        prepare_readings(
+            state,
+            &SpellCastRecord {
+                prepared_copy_source: Some(ObjectId(900)),
+                ..Default::default()
+            }
+        ),
+        PREPARED_READINGS
+    );
+}
+
+/// CR 707.10 + CR 722.3d: Codie's copy of a prepared spell is a prepare spell
+/// but is not cast, so the ledger holds exactly one prepare record for the one
+/// prepared cast.
+#[test]
+fn codie_copy_of_a_prepared_spell_is_not_recorded_as_a_cast() {
+    let Fixture {
+        mut runner,
+        codies,
+        prepare_source: emeritus,
+        x,
+        y,
+        ..
+    } = build_fixture(db(), FixtureSpec::swords(1));
+    let codie = codies[0];
+    let spell_id = begin_prepared_cast(&mut runner, emeritus);
+    drive_cast_to_stack(&mut runner, Some(x));
+    assert_priority(&runner, P0);
+    assert_eq!(triggers_from(runner.state(), codie), 1);
+
+    // Reach guard: the helper asserts exactly one `SpellCopied` from `spell_id`
+    // and that the copy matched the prepared-spell filter on the stack.
+    let copy_id = finish_codie_copy_and_retarget(&mut runner, codie, spell_id, x, y);
+    assert_ne!(copy_id, spell_id);
+
+    let state = runner.state();
+    assert!(state.stack.is_empty());
+    let records = p0_cast_records(state);
+    assert_eq!(records.len(), 1, "CR 707.10: the copy is not cast");
+    assert_eq!(records[0].spell_object_id, Some(spell_id));
+    assert_eq!(records[0].prepared_copy_source, Some(emeritus));
+    assert_eq!(prepare_readings(state, &records[0]), PREPARED_READINGS);
+    assert_eq!(
+        spells_cast_this_turn(state, emeritus, Some(prepare_spell_filter())),
+        1
+    );
+    assert_eq!(spells_cast_this_turn(state, emeritus, None), 1);
+}
+
+/// A typed `PerTurnCastLimit` (CR 101.2 + CR 604.1) that allows each player one
+/// spell per turn that is not a prepare spell (no printed card; it drives the
+/// cast-limit consumer of the history filter): a prepared cast does not use up
+/// the allowance, an ordinary cast does.
+fn non_prepare_cast_limit() -> StaticMode {
+    StaticMode::PerTurnCastLimit {
+        who: ProhibitionScope::AllPlayers,
+        max: 1,
+        spell_filter: Some(TargetFilter::Not {
+            filter: Box::new(prepare_spell_filter()),
+        }),
+    }
+}
+
+/// History side: after a prepared cast, an ordinary Shock is still castable
+/// (the prepared record is not counted as non-prepare); after one ordinary
+/// cast, a second affordable Shock is blocked.
+#[test]
+fn negated_prepare_cast_limit_does_not_count_a_prepared_cast() {
+    let LedgerFixture {
+        mut runner,
+        emeritus,
+        x,
+        y,
+        shocks,
+        ..
+    } = build_ledger_fixture(db(), 2, Some(non_prepare_cast_limit()));
+    let (shock, second_shock) = (shocks[0], shocks[1]);
+    assert!(engine::game::casting::can_cast_object_now(
+        runner.state(),
+        P0,
+        shock
+    ));
+
+    cast_and_resolve_prepared_swords(&mut runner, emeritus, x);
+    let records = p0_cast_records(runner.state());
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].prepared_copy_source, Some(emeritus));
+    // Discriminating: the prepared record is not a non-prepare cast.
+    assert!(
+        engine::game::casting::can_cast_object_now(runner.state(), P0, shock),
+        "a prepared cast must not use up the non-prepare allowance"
+    );
+    assert!(offers_cast_spell(runner.state(), shock));
+
+    cast_and_resolve_shock(&mut runner, shock, y);
+    // The limit instrument works: one Red remains, so only the limit blocks
+    // the second Shock.
+    let pool = &runner.state().players[0].mana_pool.mana;
+    assert_eq!(pool.len(), 1);
+    assert_eq!(pool[0].color, ManaType::Red);
+    assert!(!engine::game::casting::can_cast_object_now(
+        runner.state(),
+        P0,
+        second_shock
+    ));
+    assert!(!offers_cast_spell(runner.state(), second_shock));
+}
+
+/// Candidate side: after an ordinary cast used up the non-prepare allowance,
+/// the prepared Swords (projected from the linked copy still waiting in exile)
+/// is still castable, and its cast is recorded as a prepare spell.
+#[test]
+fn negated_prepare_cast_limit_allows_the_prepared_candidate() {
+    let LedgerFixture {
+        mut runner,
+        emeritus,
+        x,
+        y,
+        shocks,
+        ..
+    } = build_ledger_fixture(db(), 2, Some(non_prepare_cast_limit()));
+    let (shock, second_shock) = (shocks[0], shocks[1]);
+
+    cast_and_resolve_shock(&mut runner, shock, y);
+    // The limit instrument works: {W}{R} remain, so only the limit blocks the
+    // second Shock.
+    assert_eq!(runner.state().players[0].mana_pool.mana.len(), 2);
+    assert!(!engine::game::casting::can_cast_object_now(
+        runner.state(),
+        P0,
+        second_shock
+    ));
+
+    // Discriminating: the prepared candidate is a prepare spell.
+    assert!(
+        has_cast_prepared_copy(runner.state(), emeritus),
+        "the prepared Swords must stay castable under a non-prepare limit"
+    );
+    cast_and_resolve_prepared_swords(&mut runner, emeritus, x);
+    let records = p0_cast_records(runner.state());
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.prepared_copy_source)
+            .collect::<Vec<_>>(),
+        [None, Some(emeritus)]
+    );
 }

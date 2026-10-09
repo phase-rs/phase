@@ -6557,9 +6557,10 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // SpellCastRecord carries no modal field — conservative gap (CR 700.2
         // evaluated on the live stack object, not the snapshot).
         FilterProp::Modal => false,
-        // SpellCastRecord carries no prepare marker; live stack object only —
-        // conservative gap (CR 722.3d evaluated on the live stack object).
-        FilterProp::PrepareSpell => false,
+        // CR 722.3d: the record captured the spell's prepare-spell designation
+        // as it became cast (CR 601.2i), so the positive answer and its
+        // `FilterProp::Not` / `TargetFilter::Not` inversion are both exact.
+        FilterProp::PrepareSpell => record.prepared_copy_source.is_some(),
         // All remaining props require on-battlefield or stack state unavailable from a snapshot.
         // CR 607 (by analogy): the controller's per-player anchor label is a
         // live-game read, not a cast-time snapshot property — fail closed.
@@ -8201,8 +8202,9 @@ fn matches_filter_prop(
         // conjunct is load-bearing: the linked copy waiting in exile carries the
         // same marker and is not a spell (CR 112.1; a copy of a spell is a spell
         // only on the stack, CR 112.1a). The CR 722.3a permanent designation
-        // (`obj.prepared`) is deliberately not read. `spell_object_matches_property`
-        // reaches the fail-closed spell-record arm for this prop (no consumer).
+        // (`obj.prepared`) is deliberately not read. Cast-history and live
+        // cast-candidate filters read the same marker from the record captured by
+        // `restrictions::spell_cast_record_for` (`spell_record_matches_property`).
         FilterProp::PrepareSpell => obj.zone == Zone::Stack && obj.prepared_copy_source.is_some(),
         // CR 115.9c: Stack entry's targets all match the inner filter — permissive at
         // per-object level, validated by trigger matchers and retarget effects against the
@@ -8771,8 +8773,15 @@ fn zone_change_record_matches_property(
         // ZoneChangeRecord carries no modal field — conservative gap (CR 700.2
         // evaluated on the live stack object, not the snapshot).
         | FilterProp::Modal
-        // ZoneChangeRecord carries no prepare marker — conservative gap (CR 722.3d
-        // evaluated on the live stack object, not the snapshot).
+        // CR 722.3d: ZoneChangeRecord carries no prepare marker, so this arm fails
+        // closed. Producer boundary: `FilterProp::PrepareSpell` is produced only by
+        // `parse_spell_designation_adjective`, which is private to
+        // `oracle_trigger.rs` and called only while building `TriggerMode::SpellCast`
+        // `valid_card` filters; those filters are evaluated against the live stack
+        // object (the live matcher), never against a ZoneChangeRecord. `Not` /
+        // `AnyOf` over this prop on a zone-change record is therefore unreachable
+        // from parsed text; a producer that reaches it must capture the marker on
+        // ZoneChangeRecord first.
         | FilterProp::PrepareSpell
         | FilterProp::Renowned
         // CR 701.15b/c: goad is not snapshotted onto the zone-change record
@@ -11638,6 +11647,7 @@ mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            prepared_copy_source: None,
         };
         let filter = TargetFilter::Typed(
             TypedFilter::creature()
@@ -11754,6 +11764,7 @@ mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            prepared_copy_source: None,
         };
         let non_x_record = SpellCastRecord {
             has_x_in_cost: false,
@@ -11838,6 +11849,7 @@ mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            prepared_copy_source: None,
         };
         let exile_record = SpellCastRecord {
             from_zone: Zone::Exile,
@@ -17671,6 +17683,7 @@ mod tests {
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                prepared_copy_source: None,
             }
         };
 
@@ -18224,6 +18237,7 @@ mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            prepared_copy_source: None,
         };
         let dragon_filter = make_subtype_filter("Dragon");
         let plains_filter = make_subtype_filter("Plains");
