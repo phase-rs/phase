@@ -50,6 +50,7 @@ const JETMIR: &str = "Creatures you control get +1/+0 and have vigilance as long
 const INTANGIBLE_VIRTUE: &str = "Creature tokens you control get +1/+1 and have vigilance.";
 const BRISTLY_BILL: &str = "Landfall — Whenever a land you control enters, put a +1/+1 counter on target creature.\n{3}{G}{G}: Double the number of +1/+1 counters on each creature you control.";
 const LEYLINE_OF_SINGULARITY: &str = "If this card is in your opening hand, you may begin the game with it on the battlefield.\nAll nonland permanents are legendary.";
+const MIRROR_GALLERY: &str = "The \"legend rule\" doesn't apply.";
 
 // Synthetic class fixtures (no printed card has the shape). Each carries a
 // positive reach guard: the sequential life delta equals the derived figure
@@ -58,6 +59,10 @@ const STOP_OBSERVER: &str =
     "Whenever a creature you control enters, if you control ten or more creatures, you gain 1 life.";
 const FIXED_POINT_OBSERVER: &str = "Whenever a creature you control enters, if you control two or more creature tokens with power 2 or greater, you gain 1 life.";
 const POPULATION_GRANT: &str = "As long as you control eight or more creatures, creatures you control have \"Whenever another creature you control enters, you gain 1 life.\"";
+const OPPONENT_CREATURE_OBSERVER: &str =
+    "Whenever a creature an opponent controls enters, you gain 1 life.";
+const ANOTHER_CREATURE_OBSERVER: &str =
+    "Whenever another creature you control enters, you gain 1 life.";
 
 const RUN: usize = 6;
 
@@ -772,16 +777,136 @@ fn bulk_run_stays_inside_the_authorized_limit() {
     }
 }
 
-/// S1 (preservation): a met copy-instead run (six lands, CR 608.2c + CR 707.2)
-/// is refused by the production verdict and the sequential proof consumes it
-/// in one boundary, as before the bulk path existed.
+/// A2 (P5a-S1 retired into it): with six lands each Scute trigger takes the
+/// copy branch (CR 608.2c) and copies its own source (CR 707.2). The sources
+/// share copiable values, so the run resolves in one bulk boundary, equal to
+/// sequential resolution.
 #[test]
-fn met_copy_instead_run_stays_on_the_proof() {
-    let s0 = landfall_board(5, |s| scutes(s, RUN));
-    let (bulk, reference) = parity("S1", s0);
+fn met_copy_instead_run_resolves_in_one_bulk_boundary() {
+    for n in [RUN, 40] {
+        let s0 = landfall_board(5, |s| scutes(s, n));
+        assert_eq!(s0.stack.len(), n, "reach guard: {n} Scute triggers");
+        let (bulk, reference) = parity("A2", s0);
+        assert_eq!(tokens_named(&reference.state, "Scute Swarm"), n);
+        assert_eq!(bulk.counters.bulk_entries, n as u64);
+        assert_eq!(bulk.counters.batched_entries, n as u64);
+    }
+}
+
+/// L-FIX-C: a copy-branch token reaches its member's checkpoint unlayered,
+/// and Intangible Virtue makes it 2/2 there (CR 613.4c). The intervening-if
+/// (CR 603.4) is false for member 1 (one token) and true for members 2..6:
+/// P0 gains 5. Member 1's token changes at its checkpoint, so the run refuses.
+#[test]
+fn copy_branch_token_changed_by_its_checkpoint_refuses() {
+    let s0 = landfall_board(5, |s| {
+        scutes(s, RUN);
+        s.add_enchantment_from_oracle(P0, "Intangible Virtue", INTANGIBLE_VIRTUE);
+        s.add_creature_from_oracle(P0, "Fixed Point Observer", 0, 4, FIXED_POINT_OBSERVER);
+    });
+    assert_parsed(&s0, "Fixed Point Observer");
+    let (bulk, reference) = parity("L-FIX-C", s0);
     assert_eq!(tokens_named(&reference.state, "Scute Swarm"), RUN);
+    assert_eq!(reference.state.players[0].life, 20 + 5);
     assert_eq!(bulk.counters.bulk_entries, 0);
-    assert_eq!(bulk.counters.batched_entries, RUN as u64);
+}
+
+/// Seven Scute Swarm sources; `divergent` (an index in setup order) is a 2/2
+/// Insect Mutant (labelled class fixture: a source whose copiable values,
+/// CR 707.2, differ from the others', as a modified copy's would).
+fn scutes_with_divergent(scenario: &mut GameScenario, divergent: usize) {
+    for index in 0..=RUN {
+        let (power, subtypes) = if index == divergent {
+            (2, vec!["Insect", "Mutant"])
+        } else {
+            (1, vec!["Insect"])
+        };
+        scenario
+            .add_creature_from_oracle(P0, "Scute Swarm", power, power, SCUTE_SWARM)
+            .with_subtypes(subtypes);
+    }
+}
+
+fn mutant_tokens(state: &GameState) -> usize {
+    state
+        .battlefield
+        .iter()
+        .map(|id| &state.objects[id])
+        .filter(|object| {
+            object.is_token && object.card_types.subtypes.iter().any(|s| s == "Mutant")
+        })
+        .count()
+}
+
+/// A3: one source's copiable values diverge from the rest (CR 707.2), at the
+/// bottom, the middle or the top of the run. The copy arm admits only a run
+/// whose every member shares the top member's values, so the run is refused
+/// and each member copies its own source: exactly one Mutant token.
+/// Preservation row; A2 is its discriminating sibling.
+#[test]
+fn divergent_copy_source_refuses_the_run() {
+    for divergent in [0, RUN / 2, RUN] {
+        let s0 = landfall_board(5, |s| scutes_with_divergent(s, divergent));
+        assert_eq!(
+            s0.stack.len(),
+            RUN + 1,
+            "reach guard: {} Scute triggers",
+            RUN + 1
+        );
+        let (bulk, reference) = parity("A3", s0);
+        assert_eq!(tokens_named(&reference.state, "Scute Swarm"), RUN + 1);
+        assert_eq!(mutant_tokens(&reference.state), 1);
+        assert_eq!(
+            bulk.counters.bulk_entries, 0,
+            "divergent source at {divergent}"
+        );
+    }
+}
+
+/// A3-mid-L (labelled class fixture: a legendary source carrying Scute
+/// Swarm's verbatim text, placed mid-run). Its member's copy shares the
+/// source's name, so the legend rule (CR 704.5j) asks at that member's
+/// checkpoint, which only a whole-run copiable-value check keeps from being
+/// elided. Preservation row; A2 is its discriminating sibling.
+#[test]
+fn legendary_source_mid_run_refuses_the_run() {
+    let s0 = landfall_board(5, |s| {
+        scutes(s, 3);
+        s.add_creature_from_oracle(P0, "Scute Legend", 1, 1, SCUTE_SWARM)
+            .with_subtypes(vec!["Insect"])
+            .as_legendary();
+        scutes(s, 3);
+    });
+    assert_eq!(
+        s0.stack.len(),
+        RUN + 1,
+        "reach guard: {} Scute triggers",
+        RUN + 1
+    );
+    let (bulk, reference) = parity("A3-mid-L", s0);
+    let WaitingFor::ChooseLegend { candidates, .. } = &reference.state.waiting_for else {
+        panic!("the legend rule must ask after the legendary source's member");
+    };
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(tokens_named(&reference.state, "Scute Legend"), 1);
+    // The legendary source, added at setup index 3 of 7, resolves fourth.
+    assert_eq!(reference.state.stack.len(), RUN - 3);
+    assert_eq!(bulk.counters.bulk_entries, 0);
+}
+
+/// A5-C: on the copy branch Peregrin Took still adds one Food per creation
+/// event (CR 614.1a): each member creates its own copy, so six copies and six
+/// Foods.
+#[test]
+fn copy_branch_replacement_adds_one_food_per_member() {
+    let s0 = landfall_board(5, |s| {
+        scutes(s, RUN);
+        s.add_creature_from_oracle(P0, "Peregrin Took", 2, 3, PEREGRIN_TOOK);
+    });
+    let (bulk, reference) = parity("A5-C", s0);
+    assert_eq!(tokens_named(&reference.state, "Scute Swarm"), RUN);
+    assert_eq!(tokens_named(&reference.state, "Food"), RUN);
+    assert_eq!(bulk.counters.bulk_entries, RUN as u64);
 }
 
 /// Every battlefield Scute Swarm moves to the graveyard through the production
@@ -800,11 +925,12 @@ fn remove_scute_sources(state: &mut GameState) {
     }
 }
 
-/// L5 (P5b-1): every source left the battlefield after its met landfall
-/// trigger. Each member copies its own source's last-known copiable values
-/// (CR 608.2h + CR 707.2; Scute Swarm's ruling), so the run makes six Scute
-/// Swarm tokens. The production verdict still refuses the met copy run
-/// (P5a-S1), so the sequential proof resolves it.
+/// L5 (P5b-1) and A2-D (P5b-2): every source left the battlefield after its
+/// met landfall trigger. Each member copies its own source's last-known
+/// copiable values (CR 608.2h + CR 707.2; Scute Swarm's ruling), so the run
+/// makes six Scute Swarm tokens. The copy arm reads those values through the
+/// copy handler's own authority, and they are shared, so the run is admitted
+/// as one bulk boundary.
 #[test]
 fn departed_self_copy_run_still_creates_every_copy() {
     let mut s0 = landfall_board(5, |s| scutes(s, RUN));
@@ -818,7 +944,7 @@ fn departed_self_copy_run_still_creates_every_copy() {
     );
     let (bulk, reference) = parity("L5", s0);
     assert_eq!(tokens_named(&reference.state, "Scute Swarm"), RUN);
-    assert_eq!(bulk.counters.bulk_entries, 0);
+    assert_eq!(bulk.counters.bulk_entries, RUN as u64);
 }
 
 /// Six Scute Swarms under Leyline of Singularity (every nonland permanent is
@@ -852,12 +978,34 @@ fn kept_source_position(state: &GameState) -> usize {
         + 1
 }
 
+/// A8-C: the kept source's trigger resolves first. Its copy is legendary in
+/// layer 4 (CR 613.1d) and shares the source's name, so the legend rule
+/// (CR 704.5j) asks after member 1 between the source and its copy.
+#[test]
+fn legendary_self_copy_asks_after_member_one() {
+    let s0 = leyline_board(RUN - 1);
+    assert_eq!(
+        kept_source_position(&s0),
+        1,
+        "reach guard: kept source on top"
+    );
+    let (bulk, reference) = parity("A8-C", s0);
+    let WaitingFor::ChooseLegend { candidates, .. } = &reference.state.waiting_for else {
+        panic!("the legend rule must ask after member 1");
+    };
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(reference.state.stack.len(), RUN - 1);
+    assert_eq!(bulk.counters.bulk_entries, 0);
+}
+
 /// L6 (P5b-1; A8-C-GY's derived reading): the kept source's trigger resolves
 /// fourth, so members 1–3 copy sources the legend rule put into the
 /// graveyard. Each copies its source's last-known copiable values
 /// (CR 608.2h), so member 1's copy is a legendary Scute Swarm under Leyline
 /// and the legend rule (CR 704.5j) asks after member 1, over the kept source
-/// and that copy, with five entries still on the stack.
+/// and that copy, with five entries still on the stack. A8-C-GY (P5b-2): the
+/// copy arm admits the run on the departed members' last-known values, and
+/// member 1's checkpoint asks the legend rule, so the bulk path refuses it.
 #[test]
 fn self_copy_run_with_departed_sources_asks_after_member_one() {
     let s0 = leyline_board(2);
@@ -884,6 +1032,215 @@ fn self_copy_run_with_departed_sources_asks_after_member_one() {
             && reference.state.objects[id].name == "Scute Swarm"));
     assert_eq!(reference.state.stack.len(), RUN - 1);
     assert_eq!(bulk.counters.bulk_entries, 0);
+}
+
+/// A8-C, departed copies legendary through a layer-4 effect: under Leyline
+/// every source has left the battlefield, the kept one too. Member 1's copy is
+/// the only legendary Scute Swarm; member 2's is the second, so the legend
+/// rule (CR 704.5j) asks after member 2. Member 1's copy reaches its
+/// checkpoint unlayered and Leyline makes it legendary there (CR 613.1d), so
+/// the member-1 fixed point refuses the run, with the layered
+/// pairwise-supertype check on that copy behind it.
+#[test]
+fn departed_legendary_self_copies_ask_after_member_two() {
+    let mut s0 = leyline_board(RUN - 1);
+    remove_scute_sources(&mut s0);
+    assert!(
+        !s0.battlefield
+            .iter()
+            .any(|id| s0.objects[id].name == "Scute Swarm"),
+        "reach guard: no source is on the battlefield"
+    );
+    let (bulk, reference) = parity("A8-C departed, layered", s0);
+    let WaitingFor::ChooseLegend { candidates, .. } = &reference.state.waiting_for else {
+        panic!("the legend rule must ask after member 2");
+    };
+    assert_eq!(candidates.len(), 2);
+    assert!(candidates
+        .iter()
+        .all(|id| reference.state.objects[id].is_token));
+    assert_eq!(reference.state.stack.len(), RUN - 2);
+    assert_eq!(bulk.counters.bulk_entries, 0);
+}
+
+/// A8-C, departed copies legendary from their copiable values (labelled class
+/// fixture: six legendary sources carrying Scute Swarm's verbatim text under
+/// one name, as a "legendary in addition" copy exception would make them,
+/// CR 707.9b). The Forest's checkpoint keeps one (CR 704.5j), then every
+/// source leaves. Each copy is legendary from its source's last-known
+/// copiable values (CR 608.2h + CR 707.2), so member 1's copy is unchanged by
+/// its checkpoint and alone; member 2's is the second, so the legend rule asks
+/// after member 2. Only the layered pairwise-supertype check on member 1's
+/// copy refuses the run.
+#[test]
+fn departed_printed_legendary_self_copies_ask_after_member_two() {
+    let mut s0 = landfall_board(5, |s| {
+        for _ in 0..RUN {
+            s.add_creature_from_oracle(P0, "Scute Swarm", 1, 1, SCUTE_SWARM)
+                .with_subtypes(vec!["Insect"])
+                .as_legendary();
+        }
+    });
+    assert_eq!(s0.stack.len(), RUN, "reach guard: {RUN} Scute triggers");
+    remove_scute_sources(&mut s0);
+    let (bulk, reference) = parity("A8-C departed, copiable", s0);
+    let WaitingFor::ChooseLegend { candidates, .. } = &reference.state.waiting_for else {
+        panic!("the legend rule must ask after member 2");
+    };
+    assert_eq!(candidates.len(), 2);
+    assert!(candidates
+        .iter()
+        .all(|id| reference.state.objects[id].is_token));
+    assert_eq!(reference.state.stack.len(), RUN - 2);
+    assert_eq!(bulk.counters.bulk_entries, 0);
+}
+
+/// A8-C-MG (labelled class fixture: six legendary Scute Swarms, as their
+/// copiable values would be under a "legendary in addition" copy exception,
+/// CR 707.9b). Mirror Gallery switches the legend rule off, so no member asks;
+/// each copy is legendary before its checkpoint, and the pairwise supertype
+/// check refuses the run conservatively.
+#[test]
+fn legendary_self_copy_without_the_legend_rule_refuses() {
+    let s0 = landfall_board(5, |s| {
+        for _ in 0..RUN {
+            s.add_creature_from_oracle(P0, "Scute Swarm", 1, 1, SCUTE_SWARM)
+                .with_subtypes(vec!["Insect"])
+                .as_legendary();
+        }
+        s.add_artifact_from_oracle(P0, "Mirror Gallery", MIRROR_GALLERY);
+    });
+    assert_eq!(s0.stack.len(), RUN, "reach guard: {RUN} Scute triggers");
+    let (bulk, reference) = parity("A8-C-MG", s0);
+    assert!(matches!(
+        reference.state.waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(tokens_named(&reference.state, "Scute Swarm"), RUN);
+    assert_eq!(bulk.counters.bulk_entries, 0);
+}
+
+/// A8-L2 (labelled class fixture: six legendary sources under distinct names,
+/// each carrying Scute Swarm's verbatim text). Each member copies its own
+/// legendary source (CR 707.2), so the legend rule (CR 704.5j) asks after
+/// member 1 between the source and its copy.
+#[test]
+fn legendary_distinct_sources_ask_after_member_one() {
+    let s0 = landfall_board(5, |s| {
+        for index in 1..=RUN {
+            s.add_creature_from_oracle(P0, &format!("Scute Legend {index}"), 1, 1, SCUTE_SWARM)
+                .with_subtypes(vec!["Insect"])
+                .as_legendary();
+        }
+    });
+    let (bulk, reference) = parity("A8-L2", s0);
+    let WaitingFor::ChooseLegend { candidates, .. } = &reference.state.waiting_for else {
+        panic!("the legend rule must ask after member 1");
+    };
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(reference.state.stack.len(), RUN - 1);
+    assert_eq!(bulk.counters.bulk_entries, 0);
+}
+
+/// L-SHAPE-C: on the copy branch a copy token reaches its member's
+/// checkpoint unlayered, so Jetmir's statics (CR 611.3a) change member 1's
+/// copy there (+1/+0 and vigilance with three or more creatures), and the
+/// member-1 fixed point refuses the run before the layer verdict is read.
+#[test]
+fn copy_branch_population_conditioned_static_refuses() {
+    let s0 = landfall_board(5, |s| {
+        scutes(s, 2);
+        s.add_creature_from_oracle(P0, "Jetmir, Nexus of Revels", 5, 4, JETMIR);
+    });
+    assert_eq!(s0.stack.len(), 2, "reach guard: 2 Scute triggers");
+    let (bulk, reference) = parity("L-SHAPE-C", s0);
+    assert_eq!(tokens_named(&reference.state, "Scute Swarm"), 2);
+    assert_eq!(bulk.counters.bulk_entries, 0);
+}
+
+/// L-GRANT-C: the copy-branch sibling of L-GRANT. The grant crosses at member
+/// 2 (six Scute Swarms and two copies make eight creatures); from member k >= 2
+/// on, each of the 5 + k other creatures triggers (CR 603.10):
+/// 7 + 8 + 9 + 10 + 11 = 45. Member 1's copy is unchanged at its checkpoint,
+/// so the layer verdict (CR 611.3a) is the gate that refuses.
+#[test]
+fn copy_branch_population_granted_trigger_refuses() {
+    let s0 = landfall_board(5, |s| {
+        scutes(s, RUN);
+        s.add_enchantment_from_oracle(P0, "Population Grant", POPULATION_GRANT);
+    });
+    assert_parsed(&s0, "Population Grant");
+    let (bulk, reference) = parity("L-GRANT-C", s0);
+    assert_eq!(reference.state.players[0].life, 20 + 45);
+    assert_eq!(bulk.counters.bulk_entries, 0);
+}
+
+/// Labelled class fixture: `count` sources carrying Scute Swarm's verbatim
+/// text plus `line`, so every copy carries `line` too (CR 707.2).
+fn scutes_with_line(scenario: &mut GameScenario, count: usize, line: &str) {
+    let text = format!("{SCUTE_SWARM}\n{line}");
+    for _ in 0..count {
+        scenario
+            .add_creature_from_oracle(P0, "Scute Swarm", 1, 1, &text)
+            .with_subtypes(vec!["Insect"]);
+    }
+}
+
+/// Reach guard for `scutes_with_line`: a source parsed the landfall trigger
+/// and the appended trigger line.
+fn assert_carries_two_triggers(state: &GameState) {
+    assert_parsed(state, "Scute Swarm");
+    let source = state
+        .battlefield
+        .iter()
+        .map(|id| &state.objects[id])
+        .find(|object| object.name == "Scute Swarm")
+        .expect("a source is on the battlefield");
+    assert_eq!(
+        source.trigger_definitions.len(),
+        2,
+        "reach guard: landfall plus the appended trigger"
+    );
+}
+
+/// A7b-C (copy-arm sibling of A7b): every copy carries an observer of
+/// creatures an opponent controls. P0's copies never match its trigger
+/// condition (CR 603.2), so P0 gains no life and the copy arm admits the run
+/// whole: an observer is decided by applicability, never by its event type
+/// alone (D5.4).
+#[test]
+fn copy_branch_non_matching_observer_is_admitted() {
+    let s0 = landfall_board(5, |s| scutes_with_line(s, RUN, OPPONENT_CREATURE_OBSERVER));
+    assert_carries_two_triggers(&s0);
+    assert_eq!(s0.stack.len(), RUN, "reach guard: {RUN} Scute triggers");
+    let (bulk, reference) = parity("A7b-C", s0);
+    assert_eq!(tokens_named(&reference.state, "Scute Swarm"), RUN);
+    assert_eq!(reference.state.players[0].life, 20);
+    assert_eq!(bulk.counters.bulk_entries, RUN as u64);
+}
+
+/// U-STOP-C (copy-arm sibling of U-STOP): every copy carries "whenever
+/// another creature you control enters". Every source has left, so member 1's
+/// copy enters alone and its checkpoint is inert. Member 1's copy sees member
+/// 2's (CR 603.2), so the per-member collection ends the first boundary at
+/// member 2 (CR 603.3b). Member k's copy triggers each of the k − 1 earlier
+/// copies: 0 + 1 + 2 + 3 + 4 + 5 = 15.
+#[test]
+fn copy_branch_run_ends_at_the_first_member_whose_collection_is_non_empty() {
+    let mut s0 = landfall_board(5, |s| scutes_with_line(s, RUN, ANOTHER_CREATURE_OBSERVER));
+    assert_carries_two_triggers(&s0);
+    remove_scute_sources(&mut s0);
+    assert_eq!(s0.stack.len(), RUN, "reach guard: {RUN} Scute triggers");
+    assert!(
+        !s0.battlefield
+            .iter()
+            .any(|id| s0.objects[id].name == "Scute Swarm"),
+        "reach guard: no source is on the battlefield"
+    );
+    let (bulk, reference) = parity("U-STOP-C", s0);
+    assert_eq!(tokens_named(&reference.state, "Scute Swarm"), RUN);
+    assert_eq!(reference.state.players[0].life, 20 + 15);
+    assert_eq!(bulk.counters.bulk_entries, 2);
 }
 
 /// L-SHAPE: Jetmir's population-conditioned statics (CR 611.3a) are perturbed

@@ -1,10 +1,6 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::{DisplaySource, GameObject};
-#[cfg(test)]
-use crate::game::layers::has_active_copy_layer_effects;
 use crate::game::layers::{compute_current_copiable_values, remove_subtype_set};
-#[cfg(test)]
-use crate::game::printed_cards::intrinsic_copiable_values;
 use crate::game::quantity::resolve_quantity;
 use crate::game::{targeting, zones};
 use crate::types::ability::{
@@ -353,7 +349,9 @@ impl CopySource {
 /// once that object has left the public zone it was identified in, with its
 /// last-known copiable values for that exact incarnation. A later object
 /// under the same storage id is a new object and is never the source.
-/// `None` when the source supplies neither.
+/// `None` when the source supplies neither. The stack's bulk copy admission
+/// (`token::try_resolve_copy_batch`) reads it too, on each member's swapped
+/// ability, so admission and handler read one copy source per member.
 pub(crate) fn copy_source(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -1438,63 +1436,6 @@ pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
     super::token::push_committed_token_entry_events(state, token_id, name, source_id, events);
     super::token::record_last_created_copy_batch_token(state, token_id);
     true
-}
-
-/// CR 707.2: Compute the longest contiguous prefix of `source_ids` (top-down
-/// resolution order) whose copy sources all share IDENTICAL copiable values.
-///
-/// Tier-3 batch support: a run of "create a token that's a copy of it"
-/// self-copy triggers from distinct sources produces N tokens with identical
-/// characteristics iff every source has the same CR 707.2 copiable values. This
-/// walks the run, snapshots the top source's copiable values, then extends the
-/// prefix while each subsequent source's values are `==` to the snapshot.
-///
-/// Conserves on a vanished source: if `compute_current_copiable_values` returns
-/// `None` for any source in the prefix walk, the prefix stops there (the top
-/// source returning `None` yields `None` overall — nothing to batch).
-///
-/// Returns `(prefix_values, prefix_len)`. `prefix_len` may be shorter than
-/// `source_ids.len()` (a divergent tail resolves later). Token art is read from
-/// the live source at resolution time (`token_copy::resolve`), so no display
-/// `PrintedCardRef` is threaded through the batch probe (CR 707.2: not a
-/// copiable characteristic).
-#[cfg(test)]
-pub(crate) fn compute_copy_batch_prefix(
-    state: &GameState,
-    source_ids: &[ObjectId],
-) -> Option<(crate::types::ability::CopiableValues, u32)> {
-    let top_id = *source_ids.first()?;
-    if !has_active_copy_layer_effects(state) {
-        let top = state.objects.get(&top_id)?;
-        let prefix_values = intrinsic_copiable_values(top);
-        let mut prefix_len = 1u32;
-        for &id in source_ids.iter().skip(1) {
-            let Some(obj) = state.objects.get(&id) else {
-                break;
-            };
-            if intrinsic_copiable_values(obj) == prefix_values {
-                prefix_len += 1;
-            } else {
-                break;
-            }
-        }
-        return Some((prefix_values, prefix_len));
-    }
-
-    // Conserve on a vanished top source.
-    let prefix_values = compute_current_copiable_values(state, top_id)?;
-
-    let mut prefix_len = 1u32;
-    for &id in source_ids.iter().skip(1) {
-        // CR 707.2: stop at the first source that vanished (None) or whose
-        // copiable values diverge from the prefix snapshot.
-        match compute_current_copiable_values(state, id) {
-            Some(values) if values == prefix_values => prefix_len += 1,
-            _ => break,
-        }
-    }
-
-    Some((prefix_values, prefix_len))
 }
 
 /// CR 707.2 + CR 707.9: Apply non-keyword `, except <body>` modifications to

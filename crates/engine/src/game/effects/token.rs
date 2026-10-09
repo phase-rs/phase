@@ -2448,68 +2448,6 @@ pub(crate) fn spec_emits_only_etb_pair(spec: &TokenSpec) -> bool {
         && !spec.attach_to.is_requested()
 }
 
-/// CR 603.6a + CR 111.1: The set of event keys a single produced token EMITS as
-/// it enters the battlefield, given its core types. Mirrors the event-side
-/// deriver exactly (`keys_from_event` — the `to == Zone::Battlefield` branch of
-/// its `GameEvent::ZoneChanged` arm for the ETB pair, and its
-/// `GameEvent::TokenCreated` arm for `TokenCreated`): a token entering emits the broad
-/// `EnterBattlefield(None)`, one narrow `EnterBattlefield(Some(ct))` per core
-/// type, and `TokenCreated`. Kept in lockstep with the deriver so the §2.3a gate
-/// reasons about exactly the events siblings would observe.
-#[cfg(test)]
-fn produced_token_emitted_keys(
-    produced_core_types: &[CoreType],
-) -> Vec<crate::types::triggers::TriggerEventKey> {
-    use crate::types::triggers::TriggerEventKey;
-    // CR 603.6a: broad ETB key, emitted for every entering permanent, plus one
-    // narrow key per core type of the entering object.
-    let mut keys = vec![TriggerEventKey::EnterBattlefield(None)];
-    keys.extend(
-        produced_core_types
-            .iter()
-            .map(|ct| TriggerEventKey::EnterBattlefield(Some(*ct))),
-    );
-    // CR 111.1 ("Some effects put tokens onto the battlefield"): a token's
-    // creation also emits `TokenCreated`. NOT CR 111.10, which is the
-    // predefined-token characteristics catalog (Treasure/Food/Clue/Role) and
-    // says nothing about event emission — the ~58 other CR 111.10 citations in
-    // this file are correct for exactly that catalog.
-    keys.push(TriggerEventKey::TokenCreated);
-    keys
-}
-
-/// CR 603.2 + CR 603.6a + CR 603.3: The §2.3a produced-token-non-observer gate,
-/// parameterized by what the produced token actually EMITS on entry. A produced
-/// token whose own triggers OBSERVE its in-batch siblings would fire on them —
-/// which one-by-one resolution (CR 603.3 topmost-on-stack) lets it do, but a
-/// single batched application would not — so such a token cannot batch.
-///
-/// The gate intersects each trigger's REGISTERED keys (`keys_from_trigger_def`,
-/// the EXACT classifier the live index uses, so the observer-key derivation can
-/// never drift from registration) with the set of keys the produced token EMITS
-/// on entry (`produced_token_emitted_keys`, mirroring CR 603.6a's broad+narrow
-/// emission for `produced_core_types`). A landfall trigger registered under
-/// `EnterBattlefield(Some(Land))` carried by a Creature copy (which emits only
-/// `{None, Some(Creature), TokenCreated}`) does NOT intersect → it cannot
-/// observe its creature siblings → batch-safe. A "whenever a creature enters"
-/// trigger (`EnterBattlefield(Some(Creature))`) or a broad permanent-ETB trigger
-/// (`EnterBattlefield(None)`) DOES intersect a creature copy's emission →
-/// refused.
-///
-/// Conservatively rejects any trigger routed to unclassified (catch-all/dynamic
-/// modes fire on everything, so they always observe siblings).
-#[cfg(test)]
-pub(crate) fn produced_token_is_non_observer(
-    triggers: &[TriggerDefinition],
-    produced_core_types: &[CoreType],
-) -> bool {
-    let emitted = produced_token_emitted_keys(produced_core_types);
-    triggers.iter().all(|def| {
-        let (keys, route_unclassified) = crate::game::trigger_index::keys_from_trigger_def(def);
-        !route_unclassified && !keys.iter().any(|k| emitted.contains(k))
-    })
-}
-
 /// CR 614.1a + CR 616.1: The §3.4 MEDIUM-1 interactive-replacement gate. Token
 /// creation routes through `replace_event`, which can return `NeedsChoice` (and
 /// set `waiting_for`) when a single optional/`MayCost` replacement applies or
@@ -2708,27 +2646,33 @@ fn bulk_token_shape(
 ///
 /// A `ConditionInstead` sub-ability that is currently NOT met is accepted only
 /// when its condition is provably invariant across the run (so every member
-/// takes the base branch). A met copy-instead swap (`CopyTokenOf`) is refused:
-/// the copy arm's bulk admission (`try_resolve_copy_batch`) is not a production
-/// path, so such a run goes to the stack's sequential proof.
-pub(crate) fn admits_bulk_run(state: &GameState, ability: &ResolvedAbility) -> bool {
+/// takes the base branch). A met copy-instead swap (`CopyTokenOf`) is decided by
+/// the copy arm (`try_resolve_copy_batch`) over the run's members,
+/// `run_members` (top-down resolution order).
+pub(crate) fn admits_bulk_run(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    run_members: &[&ResolvedAbility],
+) -> bool {
     let Some((spec, owner, enter_tapped, resolved_count)) = bulk_token_shape(state, ability) else {
         return false;
     };
 
-    // CR 608.2c: A sub-ability changes the resolved effect. The only acceptable
-    // shape is a `ConditionInstead`-gated sub currently NOT met whose condition
-    // is provably invariant across the run (the base `Token` resolves for every
-    // member).
+    // CR 608.2c: A sub-ability changes the resolved effect. The acceptable
+    // shapes are a `ConditionInstead`-gated sub that is met (every member
+    // resolves the swapped effect; the copy arm decides) or one currently NOT
+    // met whose condition is provably invariant across the run (the base
+    // `Token` resolves for every member).
     if let Some(sub) = &ability.sub_ability {
         let Some(crate::types::ability::AbilityCondition::ConditionInstead { inner }) =
             &sub.condition
         else {
             return false;
         };
-        if super::evaluate_condition(inner, state, ability)
-            || !condition_invariant_for_token(inner, &spec.characteristics.core_types)
-        {
+        if super::evaluate_condition(inner, state, ability) {
+            return try_resolve_copy_batch(state, ability, sub, inner, run_members);
+        }
+        if !condition_invariant_for_token(inner, &spec.characteristics.core_types) {
             return false;
         }
     }
@@ -2767,30 +2711,6 @@ pub(crate) fn has_pairwise_sba_supertype(supertypes: &[Supertype]) -> bool {
     })
 }
 
-/// Test-only entry to the copy arm's bulk admission. `admits_bulk_run` refuses
-/// every met copy-instead swap, so the copy arm's inline tests reach it here,
-/// through the same base-shape and met-condition dispatch the production
-/// verdict performs before refusing.
-#[cfg(test)]
-pub(crate) fn copy_arm_admits_bulk_run(
-    state: &GameState,
-    ability: &ResolvedAbility,
-    run_source_ids: &[ObjectId],
-) -> bool {
-    if bulk_token_shape(state, ability).is_none() {
-        return false;
-    }
-    let Some(sub) = &ability.sub_ability else {
-        return false;
-    };
-    let Some(crate::types::ability::AbilityCondition::ConditionInstead { inner }) = &sub.condition
-    else {
-        return false;
-    };
-    super::evaluate_condition(inner, state, ability)
-        && try_resolve_copy_batch(state, ability, sub, inner, run_source_ids)
-}
-
 /// Token handler-owned admission for the stack's clone-and-proof runner.
 /// This is deliberately read-only; `resolve` remains the sole production
 /// authority for creating each token.
@@ -2799,23 +2719,23 @@ pub(crate) fn supports_sequential_batch_proof(ability: &ResolvedAbility) -> bool
 }
 
 /// CR 608.2c + CR 707.2: A met `ConditionInstead` whose swapped effect is a
-/// bare `CopyTokenOf { target: SelfRef, … }` copies the run's own source object
-/// per entry. When a contiguous prefix of the run's copy sources share
-/// identical copiable values (CR 707.2 fingerprints), those N self-copies are
-/// equivalent to one batched spec, so the prefix collapses into a single
-/// `CopyToken` batch. The prefix may be shorter than `run_len`; the remainder
-/// resolves in a later step (which re-enters this path).
+/// bare `CopyTokenOf { target: SelfRef, … }` copies each member's own source
+/// object (CR 608.2h: its last-known copiable values once it has left the
+/// battlefield). The copy arm admits the run only when every member has a copy
+/// source and all of them share the top member's copiable values (CR 707.2):
+/// each member then creates a token from the copiable values member 1's token
+/// took, so member 1's checkpoint speaks for the elided ones. Any other run is
+/// refused whole; the stack's sequential proof takes it.
 ///
 /// `sub` is the override sub-ability (its effect is the swapped `CopyTokenOf`);
-/// `inner` is the already-fired `ConditionInstead` condition. `run_source_ids`
-/// are the per-entry source ids (top-down resolution order).
-#[cfg(test)]
+/// `inner` is the already-fired `ConditionInstead` condition. `run_members` are
+/// the run's abilities (top-down resolution order).
 fn try_resolve_copy_batch(
     state: &GameState,
     ability: &ResolvedAbility,
     sub: &ResolvedAbility,
     inner: &crate::types::ability::AbilityCondition,
-    run_source_ids: &[ObjectId],
+    run_members: &[&ResolvedAbility],
 ) -> bool {
     // 1. SHAPE GATE FIRST (cheapest): the swapped effect must be a bare
     //    self-copy with the default single-token shape and no exceptions.
@@ -2836,55 +2756,72 @@ fn try_resolve_copy_batch(
         return false;
     }
 
-    // 2. LAZY-GATHER the run's copy sources (only now, after the shape gate).
-    //    Each entry's `target: SelfRef` copy source is that entry's own source
-    //    object — exactly `run_source_ids` (top-down resolution order).
-    if run_source_ids.len() < 2 {
-        // A prefix of fewer than 2 cannot collapse; fall back to sequential.
+    // 2. CR 608.2h + CR 707.2: each member copies its own source, read on its
+    //    own swapped ability through the copy handler's authority
+    //    (`token_copy::copy_source`): the source's current copiable values
+    //    while it is the incarnation the member captured, or that
+    //    incarnation's last-known ones once it has left the battlefield. A
+    //    member with no copy source is refused.
+    if run_members.len() < 2 {
         return false;
     }
-
-    // 3. Compute the value-equal contiguous prefix (CR 707.2).
-    let Some((prefix_values, prefix_len)) =
-        super::token_copy::compute_copy_batch_prefix(state, run_source_ids)
+    let Some(copy_sources) = run_members
+        .iter()
+        .map(|member| {
+            let swapped = crate::game::ability_utils::apply_instead_swap(
+                member,
+                member.sub_ability.as_deref()?,
+            );
+            super::token_copy::copy_source(
+                state,
+                &swapped,
+                super::token_copy::CopySourceReferent::OwnSource,
+            )
+        })
+        .collect::<Option<Vec<_>>>()
     else {
         return false;
     };
-    if prefix_len < 2 {
+
+    // 3. CR 707.2: every member must copy the top member's copiable values.
+    //    A run with a divergent member is refused whole: the executor resolves
+    //    the whole run, and a divergent member's token would differ from member
+    //    1's, so member 1's checkpoint could not speak for it.
+    let run_values = &copy_sources[0].values;
+    if copy_sources
+        .iter()
+        .any(|source| source.values != *run_values)
+    {
         return false;
     }
-    if !copy_token_values_emit_only_etb_pair(&prefix_values) {
+    if !copy_token_values_emit_only_etb_pair(run_values) {
+        return false;
+    }
+    // Supertypes are left to the executor's layered pairwise check on member
+    // 1's token (CR 704.5j, CR 704.5k): a copy's legendary supertype may come
+    // from its copiable values (CR 707.9b) or from a layer-4 effect
+    // (CR 613.1d), and only the layered token shows both.
+
+    // 4. H1 INVARIANCE GATE (AFTER the run's values): the condition must be
+    //    invariant over the COPY's core types (what enters), not the
+    //    placeholder spec's. A copy creating Lands gated on a Land count would
+    //    diverge per resolution.
+    if !condition_invariant_for_token(inner, &run_values.card_types.core_types) {
         return false;
     }
 
-    // 4. H1 INVARIANCE GATE (AFTER prefix): the condition must be invariant over
-    //    the COPY's core types (what enters), not the placeholder spec's. A copy
-    //    creating Lands gated on a Land count would diverge per resolution.
-    if !condition_invariant_for_token(inner, &prefix_values.card_types.core_types) {
-        return false;
-    }
-
-    // 5. Build the probe spec from the prefix's shared copiable values so the
-    //    §2.2a emits-only-ETB-pair gate holds and Layer C's
-    //    `zone_change_record_from_spec` reflects the true produced token.
-    let probe_spec = copy_probe_spec(ability, &prefix_values);
+    // 5. Build the probe spec from the run's shared copiable values so the
+    //    emits-only-ETB-pair and replacement-choice gates read the token each
+    //    member actually creates.
+    let probe_spec = copy_probe_spec(ability, run_values);
     if !spec_emits_only_etb_pair(&probe_spec) {
         return false;
     }
-    // §2.3a: a copy token inherits the copied permanent's full trigger set
-    // (CR 707.2 + CR 707.5 — the copy's ETB triggers fire), so the non-observer
-    // gate reads the prefix's copiable trigger definitions — NOT
-    // `base_token_trigger_defs` (which only surfaces a base token's Role-subtype
-    // triggers). The produced token's emission is derived from the COPY's core
-    // types (what enters), so a Scute-shape landfall trigger keyed
-    // `EnterBattlefield(Some(Land))` on a Creature copy does NOT intersect the
-    // copy's `{None, Some(Creature), TokenCreated}` emission and stays batch-safe.
-    if !produced_token_is_non_observer(
-        &prefix_values.trigger_definitions,
-        &prefix_values.card_types.core_types,
-    ) {
-        return false;
-    }
+    // CR 603.2 + CR 603.3b: observers are not decided here, as on the base
+    // arm. A trigger that sees a member's token, whether the copy carries it
+    // (CR 707.2) or another permanent does, is collected by member 1's
+    // checkpoint or by the executor's per-member collection, which ends the
+    // run at that member.
     let owner = resolve_token_owner(state, ability, &TargetFilter::Controller);
     if token_creation_needs_choice(
         state,
@@ -2900,10 +2837,8 @@ fn try_resolve_copy_batch(
 
 /// CR 306.5b + CR 614.1c + CR 707.2: `CopyTokenOf` seeds intrinsic counters
 /// from the copied values while applying the copy. Those counters emit
-/// `CounterAdded` and may pause for replacement choices, so the copy-prefix
-/// batch may only collapse values whose creation still emits exactly the ETB
-/// pair.
-#[cfg(test)]
+/// `CounterAdded` and may pause for replacement choices, so the copy arm
+/// may only admit values whose creation still emits exactly the ETB pair.
 fn copy_token_values_emit_only_etb_pair(values: &crate::types::ability::CopiableValues) -> bool {
     crate::game::printed_cards::intrinsic_face_counters(values.loyalty, None).is_empty()
         && crate::game::printed_cards::self_etb_counter_replacements(
@@ -2912,12 +2847,12 @@ fn copy_token_values_emit_only_etb_pair(values: &crate::types::ability::Copiable
         .is_empty()
 }
 
-/// CR 707.2 + CR 603.6a: Build the Layer C / §2.2a probe `TokenSpec` for a
-/// copy-prefix batch from the prefix's shared copiable values. The probe needs
-/// only the copiable values (CR 707.2): token art comes from the live source at
-/// resolution time (`token_copy::resolve`), so no `PrintedCardRef` is threaded
-/// through the probe.
-#[cfg(test)]
+/// CR 707.2 + CR 603.6a: Build the probe `TokenSpec` the copy arm's
+/// emits-only-ETB-pair and replacement-choice gates read, from the run's shared
+/// copiable values. The probe needs only the copiable values (CR 707.2): a
+/// copy's display identity comes from its copy source at resolution time
+/// (`token_copy::copy_source`), so no `PrintedCardRef` is threaded through the
+/// probe.
 pub(crate) fn copy_probe_spec(
     ability: &ResolvedAbility,
     values: &crate::types::ability::CopiableValues,

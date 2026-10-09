@@ -3669,6 +3669,19 @@ fn resolve_bulk_members(
     })
 }
 
+/// The abilities of the top `run_len` entries, top-down. A member whose effect
+/// copies "this creature" copies its own source (CR 707.2), so the bulk
+/// admission reads each member. `None` when an entry carries no ability.
+fn run_member_abilities(state: &GameState, run_len: u32) -> Option<Vec<&ResolvedAbility>> {
+    state
+        .stack
+        .iter()
+        .rev()
+        .take(run_len as usize)
+        .map(StackEntry::ability)
+        .collect()
+}
+
 /// CR 117.4 + CR 608.2: the bulk token executor. Resolves the top `run_len`
 /// entries (already clamped to the session-authorized limit) when Layer B
 /// admits the run (`effects::admits_bulk_token_run`) and its member-1
@@ -3696,7 +3709,8 @@ fn resolve_bulk_token_run(
     let StackEntryKind::TriggeredAbility { ability, .. } = &state.stack.back()?.kind else {
         return None;
     };
-    if !effects::admits_bulk_token_run(state, ability) {
+    let run_members = run_member_abilities(state, run_len)?;
+    if !effects::admits_bulk_token_run(state, ability, &run_members) {
         return None;
     }
     let mut members = capture_batch_members(state, run_len);
@@ -5116,16 +5130,17 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
 ///   during resolution. Not in key by design.
 /// - `subject_match_count` — RESOLUTION-RELEVANT but PROVABLY EQUAL across a
 ///   run: it is the CR 603.2c filtered subject count from the firing event
-///   batch. `resolve_batched` lifts it into resolution scope from the run's top
-///   entry (stack.rs:1135-1145), and `trigger_event` (which carries the firing
-///   event) is already in the key — two entries with equal `trigger_event` and
-///   equal deep `ability` carry the same batched subject count. It is therefore
-///   redundant to key on (would never break a run the other fields kept
-///   together) and is correctly applied from the top entry in the batch path.
+///   batch, and `trigger_event` (which carries the firing event) is already in
+///   the key — two entries with equal `trigger_event` and equal deep `ability`
+///   carry the same batched subject count. It is therefore redundant to key on
+///   (would never break a run the other fields kept together). Each member
+///   still resolves its own entry through `resolve_top`, whose
+///   `bind_resolution_scope` lifts that entry's count into resolution scope.
 /// - `die_result` — EXCLUDED for the same reason as `subject_match_count`: it
-///   is CR 706.2 resolution data (the carried die-roll result re-stamped from
-///   the run's top entry in `resolve_batched`), not run identity. Keying on it
-///   would needlessly split runs without changing correctness.
+///   is CR 706.2 resolution data (the carried die-roll result that
+///   `bind_resolution_scope` re-stamps from each member's own entry), not run
+///   identity. Keying on it would needlessly split runs without changing
+///   correctness.
 fn batch_run_key<'a>(state: &'a GameState, entry: &'a StackEntry) -> Option<BatchRunKey<'a>> {
     let StackEntryKind::TriggeredAbility {
         source_id,
@@ -8513,7 +8528,7 @@ mod tests {
             batch_run_len, effects, fixed_controller_gain_life_run_len,
             fixed_opponent_effect_run_len, priority_checkpoint_is_settled, resolve_next,
             resolve_next_with_limit, resolve_proven_inert_trigger_batch_with_proof_hook,
-            resolve_top, self_counter_run_len,
+            resolve_top, run_member_abilities, self_counter_run_len,
         };
         // Test fixtures from the parent `tests` module.
         use super::{pending_spell_entry, setup};
@@ -8673,8 +8688,8 @@ mod tests {
 
         /// Create a plain creature permanent (no triggers/replacements) under
         /// player 0 with the given P/T and a single subtype, and return its id.
-        /// Copy sources for the batch-copy path must be observer-free so the
-        /// copy token inherits no ETB-keyed trigger (§2.3a). `name` doubles as
+        /// Copy sources for the batch-copy path are observer-free so the copy
+        /// token inherits no trigger that sees its siblings. `name` doubles as
         /// the subtype so distinct names yield distinct copiable values.
         fn add_plain_creature_source(
             state: &mut GameState,
@@ -8745,7 +8760,7 @@ mod tests {
         /// trigger. `name` doubles as the subtype so distinct names yield
         /// distinct copiable values. Unlike `add_plain_creature_source`, the copy
         /// token is NOT observer-free — but its Land-keyed trigger does not
-        /// observe its Creature siblings, so the refined §2.3a gate batches it.
+        /// observe its Creature siblings, so the run still batches.
         fn add_landfall_creature_source(
             state: &mut GameState,
             name: &str,
@@ -8798,8 +8813,8 @@ mod tests {
         /// Create a copy source whose copied token would OBSERVE its in-batch
         /// siblings: a Creature carrying a "whenever a creature you control
         /// enters" trigger registered under `EnterBattlefield(Some(Creature))`.
-        /// A CR 707.2 copy inherits it, and the copy's Creature emission DOES
-        /// intersect the Creature ETB key, so the refined §2.3a gate must refuse.
+        /// A CR 707.2 copy inherits it, and it sees each Creature copy enter,
+        /// so the run must never take a bulk boundary.
         fn add_creature_observer_source(
             state: &mut GameState,
             name: &str,
@@ -9170,23 +9185,13 @@ mod tests {
             all_events
         }
 
-        /// Test shim over the production base-arm admission verdict.
-        fn base_admits(state: &GameState, ability: &ResolvedAbility) -> bool {
-            effects::admits_bulk_token_run(state, ability)
-        }
-
-        /// Test shim: gather the top `run_len` run source ids and invoke the
-        /// `#[cfg(test)]` copy-arm verdict, mirroring the gather the live call
-        /// site performed before the copy arm was retired to test-only.
-        fn copy_arm_admits(state: &GameState, ability: &ResolvedAbility, run_len: u32) -> bool {
-            let run_source_ids: Vec<ObjectId> = state
-                .stack
-                .iter()
-                .rev()
-                .take(run_len as usize)
-                .map(|e| e.source_id)
-                .collect();
-            effects::token::copy_arm_admits_bulk_run(state, ability, &run_source_ids)
+        /// Test shim over the production bulk admission verdict for the run on
+        /// top of the stack, with the call site's per-member source gather.
+        fn admits(state: &GameState, ability: &ResolvedAbility) -> bool {
+            let run_len = batch_run_len(state).expect("a batch run is on top");
+            let run_members =
+                run_member_abilities(state, run_len).expect("every member is an ability");
+            effects::admits_bulk_token_run(state, ability, &run_members)
         }
 
         fn token_ids(state: &GameState) -> Vec<ObjectId> {
@@ -10143,7 +10148,7 @@ mod tests {
             {
                 let ability = state.stack.back().unwrap().ability().unwrap().clone();
                 assert!(
-                    base_admits(&state, &ability),
+                    admits(&state, &ability),
                     "reach: the observer-free token shape must pass admission"
                 );
             }
@@ -10242,7 +10247,7 @@ mod tests {
                 assert_eq!(batch_run_len(&state), Some(5));
                 let ability = state.stack.back().unwrap().ability().unwrap().clone();
                 assert!(
-                    !base_admits(&state, &ability),
+                    !admits(&state, &ability),
                     "entering-counter spec must fail the §2.2a gate"
                 );
             }
@@ -10296,7 +10301,7 @@ mod tests {
             push_token_triggers(&mut state, src, effect, None, 5);
             assert_eq!(batch_run_len(&state), Some(5));
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            assert!(!base_admits(&state, &ability));
+            assert!(!admits(&state, &ability));
         }
 
         #[test]
@@ -10438,13 +10443,14 @@ mod tests {
         }
 
         // §2.2 + CR 707.2 — ConditionInstead MET copy branch: a single
-        // (identical-value) source's met copy-instead swap now BATCHES along the
-        // value-equal prefix (whole run), consuming `run_len` entries.
+        // (identical-value) source's met copy-instead swap is admitted by the
+        // production verdict, and the bulk executor consumes the whole run in
+        // one boundary.
         #[test]
-        fn condition_instead_met_copy_branch_refuses() {
+        fn condition_instead_met_copy_branch_is_admitted() {
             let mut state = setup();
             add_lands(&mut state, 6); // 6 lands → "if you control 6+ lands" is met.
-                                      // Observer-free source so the copy token passes the §2.3a gate.
+                                      // Observer-free source, so member 1's checkpoint stays inert.
             let src = add_plain_creature_source(&mut state, "Scout", 1, 1);
             let sub = copy_instead_sub(src, 6);
 
@@ -10455,33 +10461,18 @@ mod tests {
                 Some(Box::new(sub)),
                 5,
             );
-            let run_len = batch_run_len(&state).unwrap();
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            // Condition met (6 lands) ⇒ swap to CopyTokenOf. The production
-            // verdict refuses every met copy branch; the test-only copy arm
-            // still admits it, and the single source's 5 entries share
-            // identical copiable values (CR 707.2), so its prefix spans the
-            // whole run.
+            // Condition met (6 lands) ⇒ swap to CopyTokenOf. The single
+            // source's 5 entries share identical copiable values (CR 707.2).
             assert!(
-                !base_admits(&state, &ability),
-                "the production verdict must refuse a met copy-instead branch"
+                admits(&state, &ability),
+                "met copy-instead with identical values must be admitted"
             );
-            assert!(
-                copy_arm_admits(&state, &ability, run_len),
-                "met copy-instead with identical values must pass the copy arm"
-            );
-            let run_source_ids: Vec<ObjectId> = state
-                .stack
-                .iter()
-                .rev()
-                .take(run_len as usize)
-                .map(|e| e.source_id)
-                .collect();
+            crate::game::perf_counters::reset();
+            assert_eq!(resolve_to_empty_batched(&mut state), vec![5]);
             assert_eq!(
-                effects::token_copy::compute_copy_batch_prefix(&state, &run_source_ids)
-                    .map(|(_, len)| len),
-                Some(run_len),
-                "identical-source copy prefix must span the full run"
+                crate::game::perf_counters::stack_bulk_snapshot().bulk_entries,
+                5
             );
         }
 
@@ -10530,7 +10521,7 @@ mod tests {
             // Land count invariant (token is a Creature, condition counts Lands) ⇒
             // base branch is provably stable ⇒ batchable.
             assert_eq!(run_len, 5);
-            assert!(base_admits(&state, &ability));
+            assert!(admits(&state, &ability));
         }
 
         // §3.4 — mandatory Doubling-Season-class replacement still batches and
@@ -10570,11 +10561,11 @@ mod tests {
         }
 
         // §3.4 + CR 614.1a + CR 707.2 (issue #1511): a mandatory token-count
-        // doubler applies to a `CopyTokenOf` swap collapsed into the copy-prefix
-        // batch — each of the 5 self-copy resolutions creates one copy doubled
-        // to two, for 10 copy tokens. Locks in that routing copy-token creation
-        // through the `CreateToken` replacement pipeline doubles uniformly on
-        // the batched copy path without double-counting.
+        // doubler applies to a `CopyTokenOf` swap inside a bulk copy run — each
+        // of the 5 self-copy resolutions creates one copy doubled to two, for
+        // 10 copy tokens. Locks in that routing copy-token creation through the
+        // `CreateToken` replacement pipeline doubles uniformly on the batched
+        // copy path without double-counting.
         #[test]
         fn mandatory_token_doubling_batches_and_doubles_copy_prefix() {
             let mut state = setup();
@@ -10714,90 +10705,9 @@ mod tests {
             );
         }
 
-        // §9.5 HIGH-2 — produced-token-non-observer gate (direct, discriminating):
-        // the gate is the INTERSECTION of a trigger's registered keys with the
-        // produced token's CR 603.6a emission. A Creature produced token emits
-        // exactly {EnterBattlefield(None), EnterBattlefield(Some(Creature)),
-        // TokenCreated}. A creature-ETB observer intersects (refused); the real
-        // Scute-shape landfall trigger (EnterBattlefield(Some(Land))) does NOT
-        // intersect a creature emission and is batch-SAFE (the HIGH fix — the old
-        // coarse wildcard gate refused this and the headline repro never batched).
-        #[test]
-        fn produced_token_non_observer_gate_discriminates() {
-            use super::super::effects::token::produced_token_is_non_observer;
-            // The produced (copied) token is a Creature: emission =
-            // {None, Some(Creature), TokenCreated}.
-            let produced_creature = [CoreType::Creature];
-
-            // A creature-ETB observer trigger registers under Some(Creature) ⇒
-            // intersects the creature emission ⇒ must fail the gate.
-            let etb_observer = TriggerDefinition::new(TriggerMode::ChangesZone)
-                .destination(Zone::Battlefield)
-                .valid_card(TargetFilter::Typed(TypedFilter {
-                    type_filters: vec![TypeFilter::Creature],
-                    ..Default::default()
-                }));
-            assert!(
-                !produced_token_is_non_observer(
-                    std::slice::from_ref(&etb_observer),
-                    &produced_creature
-                ),
-                "a creature-ETB-observing produced token must fail the gate"
-            );
-
-            // The HEADLINE fix: a landfall trigger registers under
-            // EnterBattlefield(Some(Land)). A Creature copy emits no Land key, so
-            // the intersection is EMPTY ⇒ the Scute-shape copy is batch-SAFE. The
-            // old coarse gate (any EnterBattlefield(_)) refused this and the named
-            // repro never collapsed.
-            let landfall = TriggerDefinition::new(TriggerMode::ChangesZone)
-                .destination(Zone::Battlefield)
-                .valid_card(TargetFilter::Typed(TypedFilter {
-                    type_filters: vec![TypeFilter::Land],
-                    ..Default::default()
-                }));
-            assert!(
-                produced_token_is_non_observer(std::slice::from_ref(&landfall), &produced_creature),
-                "a Land-keyed landfall trigger on a Creature copy does not observe \
-                 its creature siblings ⇒ batch-safe (the HIGH fix)"
-            );
-
-            // Over-permit guard: a broad permanent-ETB observer registers under
-            // the broad EnterBattlefield(None) key, which is in EVERY token's
-            // emission ⇒ must still be refused.
-            let broad_etb = TriggerDefinition::new(TriggerMode::ChangesZone)
-                .destination(Zone::Battlefield)
-                .valid_card(TargetFilter::Typed(TypedFilter {
-                    type_filters: vec![TypeFilter::Permanent],
-                    ..Default::default()
-                }));
-            assert!(
-                !produced_token_is_non_observer(
-                    std::slice::from_ref(&broad_etb),
-                    &produced_creature
-                ),
-                "a broad permanent-ETB observer (None key) intersects every emission ⇒ refused"
-            );
-
-            // Symmetry check: the SAME landfall trigger on a LAND copy (emission
-            // includes Some(Land)) DOES intersect ⇒ refused. Proves the gate keys
-            // off the produced token's real core types, not a fixed assumption.
-            assert!(
-                !produced_token_is_non_observer(std::slice::from_ref(&landfall), &[CoreType::Land]),
-                "a landfall trigger on a Land copy observes its land siblings ⇒ refused"
-            );
-
-            // No triggers ⇒ passes (the bare Insect/Servo go-wide case).
-            assert!(
-                produced_token_is_non_observer(&[], &produced_creature),
-                "a trigger-free produced token passes the gate"
-            );
-        }
-
-        // §9.5 HIGH-2 — produced-token-non-observer gate: a CopyTokenOf run whose
-        // copy SOURCE carries an ETB observer trigger must refuse. (The copy
-        // branch falls back wholesale in v1 — see B5 — so this confirms a
-        // copy-source observer never reaches a batched resolution.)
+        // A CopyTokenOf run whose copy SOURCE carries an ETB observer trigger
+        // must refuse. Its copy target is a specific object, not `SelfRef`, so
+        // the copy arm's shape gate refuses it.
         #[test]
         fn copy_source_with_etb_observer_refuses_to_batch() {
             let mut state = setup();
@@ -10871,14 +10781,13 @@ mod tests {
                 Some(Box::new(sub)),
                 5,
             );
-            let run_len = batch_run_len(&state).unwrap();
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            // The instead-swap fires (>= 1 land) ⇒ copy branch ⇒ not batchable in
-            // v1 (the copy path produces no TokenSpec and falls back). The gate
-            // therefore refuses regardless — confirming a copy-source observer
-            // never reaches a batched resolution.
+            // The instead-swap fires (>= 1 land) ⇒ copy branch. Its copy target
+            // is a specific object, not `SelfRef`, so the copy arm's shape gate
+            // refuses — a copy-source observer never reaches a batched
+            // resolution.
             assert!(
-                !base_admits(&state, &ability) && !copy_arm_admits(&state, &ability, run_len),
+                !admits(&state, &ability),
                 "copy branch (and any copy-source observer) must refuse to batch"
             );
         }
@@ -10916,7 +10825,7 @@ mod tests {
             // The optional replacement could pause for a NeedsChoice prompt
             // mid-batch ⇒ Layer B refuses.
             assert!(
-                !base_admits(&state, &ability),
+                !admits(&state, &ability),
                 "optional replacement must force fall-back"
             );
         }
@@ -10967,7 +10876,7 @@ mod tests {
             // Reach guard: admission passes, so the refusal below is member 1's
             // checkpoint collecting the source's own creature-ETB trigger.
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            assert!(base_admits(&state, &ability));
+            assert!(admits(&state, &ability));
 
             // End-to-end: the batch driver must fall back to one entry at a time.
             let steps = resolve_to_empty_batched(&mut state);
@@ -11027,7 +10936,7 @@ mod tests {
             push_token_triggers(&mut state, src, servo, None, 5);
 
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            assert!(base_admits(&state, &ability), "reach: admission passes");
+            assert!(admits(&state, &ability), "reach: admission passes");
             let steps = resolve_to_empty_batched(&mut state);
             assert!(
                 steps.iter().all(|&c| c == 1),
@@ -11077,7 +10986,7 @@ mod tests {
             push_token_triggers(&mut state, src, insect_token_effect(), None, 5);
 
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            assert!(base_admits(&state, &ability), "reach: admission passes");
+            assert!(admits(&state, &ability), "reach: admission passes");
             let steps = resolve_to_empty_batched(&mut state);
             assert!(
                 steps.iter().all(|&c| c == 1),
@@ -11184,8 +11093,8 @@ mod tests {
                 let mut state = setup();
                 add_lands(&mut state, lands);
                 // Observer-free copy source so the met-copy branch can batch
-                // (a copy inherits the source's triggers; an ETB-keyed trigger
-                // would fail the §2.3a non-observer gate).
+                // (a copy inherits the source's triggers; one that sees its
+                // siblings would stop the run at member 1's checkpoint).
                 let src = add_plain_creature_source(&mut state, "Scout", 1, 1);
                 let sub = copy_instead_sub(src, 6);
                 push_token_triggers(
@@ -11221,9 +11130,9 @@ mod tests {
                 assert_eq!(batched.battlefield.len(), sequential.battlefield.len());
             }
 
-            // MET (6 lands): copy-instead fires ⇒ Layer B copy-prefix batches.
+            // MET (6 lands): copy-instead fires ⇒ the copy arm decides.
             // The single source's 5 entries share identical copiable values
-            // (CR 707.2), and the observer-free copy token passes §2.3a, so the
+            // (CR 707.2), and the observer-free copy token sees no sibling, so the
             // whole run collapses into ONE batched step producing 5 copies —
             // equal to the sequential path.
             {
@@ -11284,9 +11193,10 @@ mod tests {
         }
 
         // CR 707.2 — cross-source copy collapse: K distinct sources with
-        // IDENTICAL copiable values each fire a met copy-instead self-copy. The
-        // value-equal prefix spans the whole run, so all K collapse into one
-        // batch producing K copies. Result equals the sequential path.
+        // IDENTICAL copiable values each fire a met copy-instead self-copy.
+        // Every member shares the top member's copiable values, so all K
+        // collapse into one batch producing K copies. Result equals the
+        // sequential path.
         #[test]
         fn cross_source_copy_identical_values_forms_one_batch() {
             let mut base = setup();
@@ -11345,10 +11255,9 @@ mod tests {
                 3,
             );
 
-            let run_len = batch_run_len(&state).unwrap();
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
             assert!(
-                !copy_arm_admits(&state, &ability, run_len),
+                !admits(&state, &ability),
                 "copy-token batch must refuse values that emit intrinsic CounterAdded events"
             );
         }
@@ -11357,12 +11266,9 @@ mod tests {
         // K distinct copy sources are real Scute-Swarm-shape creatures, each
         // carrying a landfall trigger keyed EnterBattlefield(Some(Land)). The
         // copied tokens are CREATURES that inherit the landfall trigger (CR
-        // 707.2/707.5). A Creature copy emits {None, Some(Creature), TokenCreated}
-        // — the Land-keyed landfall does NOT intersect it, so the §2.3a gate is
-        // safe and the whole run STILL collapses into ONE batch. This is
-        // DISCRIMINATING: under the OLD coarse gate (any EnterBattlefield(_)
-        // rejected) try_resolve_copy_batch returned None and the run resolved
-        // one-at-a-time — the named perf bug was never fixed for its own card.
+        // 707.2/707.5). A land trigger never sees a Creature copy enter, so
+        // member 1's checkpoint and the per-member collection find nothing and
+        // the whole run STILL collapses into ONE batch.
         #[test]
         fn cross_source_copy_with_landfall_trigger_still_batches() {
             let mut base = setup();
@@ -11418,22 +11324,22 @@ mod tests {
             );
         }
 
-        // CR 603.6a (over-permit guard) — a SelfRef copy whose copied token DOES
-        // observe its in-batch siblings must STILL refuse. The copy source is a
-        // Creature carrying a "whenever a creature you control enters" trigger
-        // (EnterBattlefield(Some(Creature))); the Creature copy's emission
-        // includes Some(Creature), so the intersection is non-empty ⇒ refused.
-        // Proves the refined gate did not become unsafe.
+        // CR 603.2 + CR 603.6a (over-permit guard) — a SelfRef copy run whose
+        // copy sources carry a "whenever a creature you control enters" trigger,
+        // which each copy inherits (CR 707.2), must never take a bulk boundary.
+        // Admission does not decide observers (D5.4): member 1's checkpoint
+        // collects the live sources' triggers on member 1's copy, so the run
+        // refuses there and resolves as the sequential path does.
         #[test]
         fn cross_source_copy_with_creature_etb_observer_refuses_batch() {
-            let mut state = setup();
-            add_lands(&mut state, 6); // met ⇒ copy branch fires.
+            let mut base = setup();
+            add_lands(&mut base, 6); // met ⇒ copy branch fires.
 
             for _ in 0..5 {
-                let src = add_creature_observer_source(&mut state, "Watcher", 2, 2);
+                let src = add_creature_observer_source(&mut base, "Watcher", 2, 2);
                 let sub = copy_instead_sub(src, 6);
                 push_token_triggers(
-                    &mut state,
+                    &mut base,
                     src,
                     insect_token_effect(),
                     Some(Box::new(sub)),
@@ -11441,18 +11347,27 @@ mod tests {
                 );
             }
 
-            let run_len = batch_run_len(&state).unwrap();
-            let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            // The copied token observes creature ETB (its siblings) ⇒ the §2.3a
-            // intersection is non-empty ⇒ must refuse to batch.
-            assert!(
-                !copy_arm_admits(&state, &ability, run_len),
-                "a copy whose token observes creature-ETB siblings must refuse to batch"
+            // Reach guard: admission passes, so the refusal below is member 1's
+            // checkpoint collecting the sources' creature-ETB triggers.
+            let ability = base.stack.back().unwrap().ability().unwrap().clone();
+            assert!(admits(&base, &ability), "reach: admission passes");
+
+            let mut batched = base.clone();
+            let mut sequential = base.clone();
+            crate::game::perf_counters::reset();
+            let (_, batched_events) = resolve_to_empty_batched_with_events(&mut batched);
+            assert_eq!(
+                crate::game::perf_counters::stack_bulk_snapshot().bulk_entries,
+                0,
+                "a copy whose token observes creature-ETB siblings must never take a bulk boundary"
             );
+            let sequential_events = resolve_to_empty_sequential_with_events(&mut sequential);
+            assert_eq!(token_ids(&batched).len(), token_ids(&sequential).len());
+            assert_eq!(batched_events, sequential_events);
         }
 
-        // CR 707.2 — divergent-tail prefix batching: K cross-source copies where
-        // a middle source diverges in copiable values. Clone proof proves that the
+        // CR 707.2 — divergent member: K cross-source copies where a middle
+        // source diverges in copiable values. Clone proof proves that the
         // entire run is equivalent to sequential resolution, so all five entries
         // collapse into one batch despite the divergent source values.
         #[test]
@@ -11466,7 +11381,8 @@ mod tests {
             //
             // Build: 2 identical "Alpha" sources, then 1 "Beta" (divergent P/T),
             // then 2 more "Alpha". Pushed bottom→top. Resolution order (top→down):
-            // Alpha, Alpha, Beta, Alpha, Alpha. The prefix is the top 2 Alphas.
+            // Alpha, Alpha, Beta, Alpha, Alpha. The copy arm refuses the run
+            // (Beta's copiable values diverge), so the clone proof takes it.
             let specs: [(&str, i32, i32); 5] = [
                 ("Alpha", 2, 2),
                 ("Alpha", 2, 2),
@@ -11549,12 +11465,11 @@ mod tests {
                 5,
             );
 
-            let run_len = batch_run_len(&state).unwrap();
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
             // The copy creates Lands; the condition counts Lands ⇒ each created
             // Land flips the count ⇒ order-sensitive ⇒ must refuse.
             assert!(
-                !copy_arm_admits(&state, &ability, run_len),
+                !admits(&state, &ability),
                 "a met copy creating Lands gated on a Land count must refuse to batch"
             );
         }

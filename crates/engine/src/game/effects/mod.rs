@@ -7425,11 +7425,16 @@ fn is_multi_target_player_filter(filter: &TargetFilter) -> bool {
 /// CR 608.2 + CR 608.2c: Layer B — whether resolving this effect once per
 /// member of a run of identical untargeted entries is admitted to the bulk
 /// executor: each member's resolution reads only inputs the run leaves
-/// unchanged and creates what member 1's did. `false` (the default) for every
-/// effect not explicitly proven.
-pub(crate) fn admits_bulk_token_run(state: &GameState, ability: &ResolvedAbility) -> bool {
+/// unchanged and creates what member 1's did. `run_members` are the run's
+/// abilities, top-down (`ability` first): a self-copy member reads its own
+/// source. `false` (the default) for every effect not explicitly proven.
+pub(crate) fn admits_bulk_token_run(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    run_members: &[&ResolvedAbility],
+) -> bool {
     match &ability.effect {
-        Effect::Token { .. } => token::admits_bulk_run(state, ability),
+        Effect::Token { .. } => token::admits_bulk_run(state, ability, run_members),
         // Exhaustive conservative default: every other effect is not admitted.
         // The wildcard encodes "opt-in," not a forgotten arm — a new admitted
         // handler adds an explicit arm above.
