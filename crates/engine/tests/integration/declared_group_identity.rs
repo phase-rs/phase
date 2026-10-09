@@ -1427,7 +1427,7 @@ fn c1_shuffle_target_carries_the_declared_player() {
     );
 }
 
-/// CR 119.1: `GainLife.player`.
+/// CR 119.3: `GainLife.player`.
 #[test]
 fn c2_gain_life_player_carries_the_declared_player() {
     assert_carried("GainLife", kind("GainLife", &dp(G)), life);
