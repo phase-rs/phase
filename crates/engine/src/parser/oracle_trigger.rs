@@ -13025,6 +13025,17 @@ fn parse_spell_designation_adjective(i: &str) -> OracleResult<'_, FilterProp> {
     .parse(i)
 }
 
+/// CR 700.2 + CR 722.3d: re-attach the optional designation adjective peeled by
+/// `parse_spell_designation_adjective` to the built spell filter (`None` leaves
+/// the filter unchanged). Every cast-trigger branch (`you cast`, `<who> casts`)
+/// attaches through here, before owner scoping, so the branches cannot drift.
+fn with_spell_designation(filter: TargetFilter, designation: Option<FilterProp>) -> TargetFilter {
+    match designation {
+        Some(prop) => add_spell_prop(filter, prop),
+        None => filter,
+    }
+}
+
 fn add_controller(filter: TargetFilter, controller: ControllerRef) -> TargetFilter {
     match filter {
         TargetFilter::Typed(TypedFilter {
@@ -18972,10 +18983,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             } else {
                 filter
             };
-            let filter = match designation {
-                Some(prop) => add_spell_prop(filter, prop),
-                None => filter,
-            };
+            let filter = with_spell_designation(filter, designation);
             let filter = if spell_not_owned_by_you {
                 with_owner_scope(filter, ControllerRef::Opponent)
             } else {
@@ -18992,10 +19000,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         } else {
             filter
         };
-        let filter = match designation {
-            Some(prop) => add_spell_prop(filter, prop),
-            None => filter,
-        };
+        let filter = with_spell_designation(filter, designation);
         let filter = if spell_not_owned_by_you {
             with_owner_scope(filter, ControllerRef::Opponent)
         } else {
@@ -19083,41 +19088,47 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
                     Err(_) => (spell_clause, OriginConstraint::Any),
                 };
             def.spell_cast_origin = cast_origin;
+            // CR 700.2 + CR 722.3d: peel the same optional leading designation
+            // adjective ("modal ", "prepared ") as the "you cast a/an" branch, so
+            // "an opponent casts a prepared spell" narrows `valid_card` instead of
+            // dropping the adjective and firing on every spell. Each path below
+            // re-attaches it through `with_spell_designation` before owner scoping.
+            let (spell_clause, designation) = opt(parse_spell_designation_adjective)
+                .parse(spell_clause)
+                .unwrap_or((spell_clause, None));
             // Handle "with mana value [, power, or toughness] equal to the chosen number"
             // (Talion, the Kindly Lord). CR 202.3 + CR 208.1: disjunctive match on
             // mana value, power, or toughness against the source's chosen number.
             if let Some(base_tf) = parse_spell_chosen_number_quality(spell_clause) {
+                let filter = with_spell_designation(TargetFilter::Typed(base_tf), designation);
                 let filter = if spell_not_owned_by_caster {
-                    with_owner_scope(TargetFilter::Typed(base_tf), ControllerRef::Opponent)
+                    with_owner_scope(filter, ControllerRef::Opponent)
                 } else {
-                    TargetFilter::Typed(base_tf)
+                    filter
                 };
                 def.valid_card = Some(filter);
                 return Some((TriggerMode::SpellCast, def));
             }
             // Handle "multicolored" as a spell property (not a type phrase)
             if scan_contains(spell_clause, "multicolored") {
-                let filter = if spell_not_owned_by_caster {
-                    with_owner_scope(
-                        TargetFilter::Typed(TypedFilter::default().properties(vec![
-                            FilterProp::ColorCount {
-                                comparator: Comparator::GE,
-                                count: 2,
-                            },
-                        ])),
-                        ControllerRef::Opponent,
-                    )
-                } else {
+                let filter = with_spell_designation(
                     TargetFilter::Typed(TypedFilter::default().properties(vec![
                         FilterProp::ColorCount {
                             comparator: Comparator::GE,
                             count: 2,
                         },
-                    ]))
+                    ])),
+                    designation,
+                );
+                let filter = if spell_not_owned_by_caster {
+                    with_owner_scope(filter, ControllerRef::Opponent)
+                } else {
+                    filter
                 };
                 def.valid_card = Some(filter);
             } else {
                 let (filter, _rest) = parse_type_phrase_folding(spell_clause);
+                let filter = with_spell_designation(filter, designation);
                 let is_meaningful = match &filter {
                     TargetFilter::Typed(tf) => tf.has_meaningful_type_constraint(),
                     TargetFilter::Or { .. } => true,
@@ -22911,6 +22922,263 @@ mod prepared_spell_cast_trigger_tests {
         let props = typed_props(modal_instant.valid_card.as_ref());
         assert!(props.contains(&FilterProp::Modal), "{props:?}");
         assert!(!props.contains(&FilterProp::PrepareSpell), "{props:?}");
+    }
+}
+
+/// CR 700.2 + CR 722.3d: the `<who> casts a ...` cast-trigger branch (an
+/// opponent, a player, enchanted player) peels the "modal" / "prepared"
+/// designation adjective exactly as the `you cast` branch does. Each positive
+/// is paired with the same caster's plain-spell negative; `valid_target` is the
+/// reach guard proving the caster branch was taken.
+#[cfg(test)]
+mod caster_scoped_spell_designation_tests {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{
+        Comparator, ControllerRef, FilterProp, OriginConstraint, TargetFilter, TypeFilter,
+        TypedFilter,
+    };
+    use crate::types::zones::Zone;
+    use crate::types::{TriggerDefinition, TriggerMode};
+
+    fn cast_trigger(text: &str, core_types: &[&str], subtypes: &[&str]) -> TriggerDefinition {
+        let core_types: Vec<String> = core_types.iter().map(|t| (*t).to_string()).collect();
+        let subtypes: Vec<String> = subtypes.iter().map(|t| (*t).to_string()).collect();
+        parse_oracle_text(text, "Designation Watcher", &[], &core_types, &subtypes)
+            .triggers
+            .into_iter()
+            .find(|t| matches!(t.mode, TriggerMode::SpellCast))
+            .unwrap_or_else(|| panic!("must parse a SpellCast trigger: {text}"))
+    }
+
+    fn creature_cast_trigger(text: &str) -> TriggerDefinition {
+        cast_trigger(text, &["Creature"], &[])
+    }
+
+    fn opponent_caster() -> Option<TargetFilter> {
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        ))
+    }
+
+    fn designated_spell(prop: FilterProp) -> Option<TargetFilter> {
+        Some(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Card],
+            controller: None,
+            properties: vec![prop],
+        }))
+    }
+
+    fn typed_props(filter: Option<&TargetFilter>) -> Vec<FilterProp> {
+        match filter {
+            Some(TargetFilter::Typed(tf)) => tf.properties.clone(),
+            other => panic!("expected a Typed valid_card, got {other:?}"),
+        }
+    }
+
+    /// Every top-level property of a spell filter, through `Or` / `And` / `Not`.
+    fn all_props(filter: &TargetFilter) -> Vec<FilterProp> {
+        match filter {
+            TargetFilter::Typed(tf) => tf.properties.clone(),
+            TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                filters.iter().flat_map(all_props).collect()
+            }
+            TargetFilter::Not { filter } => all_props(filter),
+            _ => Vec::new(),
+        }
+    }
+
+    fn carries_designation(trigger: &TriggerDefinition) -> bool {
+        trigger.valid_card.as_ref().is_some_and(|filter| {
+            all_props(filter)
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::Modal | FilterProp::PrepareSpell))
+        })
+    }
+
+    /// P3-1 / P3-2: "an opponent casts a modal spell" narrows `valid_card` to
+    /// `Modal`; the plain-spell sibling keeps `valid_card == None`.
+    #[test]
+    fn opponent_casts_modal_spell_carries_modal_prop() {
+        let modal = creature_cast_trigger("Whenever an opponent casts a modal spell, draw a card.");
+        assert_eq!(modal.valid_target, opponent_caster());
+        assert_eq!(modal.valid_card, designated_spell(FilterProp::Modal));
+        assert_eq!(modal.spell_cast_origin, OriginConstraint::Any);
+
+        let plain = creature_cast_trigger("Whenever an opponent casts a spell, draw a card.");
+        assert_eq!(plain.valid_target, opponent_caster());
+        assert_eq!(plain.valid_card, None);
+        assert!(!carries_designation(&plain));
+    }
+
+    /// P3-3: "a player casts a prepared instant spell" keeps the Instant type
+    /// filter and adds `PrepareSpell` (no caster scope, no `Modal`).
+    #[test]
+    fn player_casts_prepared_instant_spell_keeps_type_and_prepare_spell() {
+        let trigger =
+            creature_cast_trigger("Whenever a player casts a prepared instant spell, draw a card.");
+        assert_eq!(trigger.valid_target, None);
+        match trigger.valid_card.as_ref() {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Instant),
+                    "{:?}",
+                    tf.type_filters
+                );
+                assert!(
+                    tf.properties.contains(&FilterProp::PrepareSpell),
+                    "{:?}",
+                    tf.properties
+                );
+                assert!(!tf.properties.contains(&FilterProp::Modal));
+            }
+            other => panic!("expected Typed valid_card, got {other:?}"),
+        }
+    }
+
+    /// P3-4: "enchanted player casts a modal spell" keeps the `AttachedTo`
+    /// caster scope (CR 303.4m) and carries `Modal`.
+    #[test]
+    fn enchanted_player_casts_modal_spell_carries_modal_prop() {
+        let trigger = cast_trigger(
+            "Enchant player\nWhenever enchanted player casts a modal spell, you draw a card.",
+            &["Enchantment"],
+            &["Aura"],
+        );
+        assert_eq!(trigger.valid_target, Some(TargetFilter::AttachedTo));
+        assert_eq!(trigger.valid_card, designated_spell(FilterProp::Modal));
+    }
+
+    /// P3-6: the designation composes with a cast-origin tail (CR 601.2a).
+    #[test]
+    fn opponent_casts_modal_spell_from_exile_keeps_origin() {
+        let trigger = creature_cast_trigger(
+            "Whenever an opponent casts a modal spell from exile, draw a card.",
+        );
+        assert_eq!(trigger.valid_target, opponent_caster());
+        assert_eq!(
+            trigger.spell_cast_origin,
+            OriginConstraint::Equals(Zone::Exile)
+        );
+        assert_eq!(trigger.valid_card, designated_spell(FilterProp::Modal));
+    }
+
+    /// P3-7: the designation composes with the multicolored quality and with the
+    /// chosen-number quality (Talion's disjunction gains the conjunct).
+    #[test]
+    fn caster_designation_composes_with_multicolored_and_chosen_number() {
+        let multicolored = creature_cast_trigger(
+            "Whenever a player casts a modal multicolored spell, draw a card.",
+        );
+        assert_eq!(multicolored.valid_target, None);
+        let props = typed_props(multicolored.valid_card.as_ref());
+        assert!(
+            props.contains(&FilterProp::ColorCount {
+                comparator: Comparator::GE,
+                count: 2,
+            }),
+            "{props:?}"
+        );
+        assert!(props.contains(&FilterProp::Modal), "{props:?}");
+
+        let chosen = creature_cast_trigger(
+            "Whenever an opponent casts a modal spell with mana value, power, or toughness equal to the chosen number, that player loses 2 life and you draw a card.",
+        );
+        assert_eq!(chosen.valid_target, opponent_caster());
+        let props = typed_props(chosen.valid_card.as_ref());
+        assert!(props.contains(&FilterProp::Modal), "{props:?}");
+        let disjunction = props
+            .iter()
+            .find_map(|prop| match prop {
+                FilterProp::AnyOf { props } => Some(props.len()),
+                _ => None,
+            })
+            .expect("the chosen-number disjunction must survive the peel");
+        assert_eq!(disjunction, 3);
+    }
+
+    /// P3-8 preservation: caster-scoped cast triggers with no designation
+    /// adjective (Talion, Maddening Hex, Ghostly Pilferer, a plain creature-spell
+    /// watcher, a graveyard-origin watcher) carry neither `Modal` nor
+    /// `PrepareSpell`, and the two unchanged shapes are pinned exactly.
+    #[test]
+    fn caster_triggers_without_designation_are_unchanged() {
+        let creature =
+            creature_cast_trigger("Whenever an opponent casts a creature spell, draw a card.");
+        assert_eq!(creature.valid_target, opponent_caster());
+        assert_eq!(
+            creature.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: None,
+                properties: vec![],
+            }))
+        );
+        assert!(!carries_designation(&creature));
+
+        let graveyard =
+            creature_cast_trigger("Whenever a player casts a spell from a graveyard, draw a card.");
+        assert_eq!(graveyard.valid_target, None);
+        assert_eq!(graveyard.valid_card, None);
+        assert_eq!(
+            graveyard.spell_cast_origin,
+            OriginConstraint::Equals(Zone::Graveyard)
+        );
+
+        let talion = creature_cast_trigger(
+            "Whenever an opponent casts a spell with mana value, power, or toughness equal to the chosen number, that player loses 2 life and you draw a card.",
+        );
+        assert!(talion.valid_card.is_some(), "{:?}", talion.valid_card);
+        assert!(!carries_designation(&talion));
+
+        let hex = cast_trigger(
+            "Enchant player\nWhenever enchanted player casts a noncreature spell, you draw a card.",
+            &["Enchantment"],
+            &["Aura"],
+        );
+        assert_eq!(hex.valid_target, Some(TargetFilter::AttachedTo));
+        assert!(hex.valid_card.is_some(), "{:?}", hex.valid_card);
+        assert!(!carries_designation(&hex));
+
+        let pilferer = creature_cast_trigger(
+            "Whenever an opponent casts a spell from anywhere other than their hand, draw a card.",
+        );
+        assert_eq!(
+            pilferer.spell_cast_origin,
+            OriginConstraint::NotEquals(Zone::Hand)
+        );
+        assert!(!carries_designation(&pilferer));
+    }
+
+    /// P3-8b: the caster matrix {you cast, an opponent casts, a player casts} x
+    /// {modal, prepared}: every positive narrows `valid_card` to exactly the
+    /// designation, every plain-spell sibling leaves it `None`.
+    #[test]
+    fn designation_matrix_over_casters() {
+        let casters = [
+            ("you cast", Some(TargetFilter::Controller)),
+            ("an opponent casts", opponent_caster()),
+            ("a player casts", None),
+        ];
+        let designations = [
+            ("modal", FilterProp::Modal),
+            ("prepared", FilterProp::PrepareSpell),
+        ];
+        for (caster, valid_target) in &casters {
+            for (adjective, prop) in &designations {
+                let text = format!("Whenever {caster} a {adjective} spell, draw a card.");
+                let positive = creature_cast_trigger(&text);
+                assert_eq!(&positive.valid_target, valid_target, "{text}");
+                assert_eq!(
+                    positive.valid_card,
+                    designated_spell(prop.clone()),
+                    "{text}"
+                );
+            }
+            let text = format!("Whenever {caster} a spell, draw a card.");
+            let plain = creature_cast_trigger(&text);
+            assert_eq!(&plain.valid_target, valid_target, "{text}");
+            assert_eq!(plain.valid_card, None, "{text}");
+        }
     }
 }
 

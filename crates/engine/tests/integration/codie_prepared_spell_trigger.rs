@@ -23,8 +23,8 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, CountScope, Effect, FilterProp, QuantityExpr, QuantityRef,
-    ResolvedAbility, TargetFilter, TargetRef, TypedFilter,
+    AbilityDefinition, AbilityKind, ControllerRef, CountScope, Effect, FilterProp, QuantityExpr,
+    QuantityRef, ResolvedAbility, TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::card_type::CoreType;
@@ -1988,4 +1988,231 @@ fn negated_prepare_cast_limit_allows_the_prepared_candidate() {
             .collect::<Vec<_>>(),
         [None, Some(emeritus)]
     );
+}
+
+/// "Whenever an opponent casts a prepared spell": Codie's "a prepared spell"
+/// designation on the opponent-caster branch (`<who> casts a ...`). No printed
+/// card carries this trigger; the watcher drives that branch's designation peel
+/// through the live cast-trigger matcher.
+const OPPONENT_PREPARED_WATCHER_ORACLE: &str =
+    "Whenever an opponent casts a prepared spell, you gain 1 life.";
+
+/// P0 controls the opponent-prepared-spell watcher and a 2/2 `x`;
+/// `prepare_owner` controls Emeritus of Truce (targeted Swords to Plowshares,
+/// {W}); P1 controls a 3/3 `y` and holds a {R} Shock.
+struct WatcherFixture {
+    runner: GameRunner,
+    watcher: ObjectId,
+    emeritus: ObjectId,
+    x: ObjectId,
+    y: ObjectId,
+    shock: ObjectId,
+}
+
+fn build_watcher_fixture(
+    db: &CardDatabase,
+    prepare_owner: PlayerId,
+    p0_pool: &[ManaType],
+    p1_pool: &[ManaType],
+) -> WatcherFixture {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let watcher = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Prepared Watcher",
+            1,
+            1,
+            OPPONENT_PREPARED_WATCHER_ORACLE,
+        )
+        .id();
+    let emeritus =
+        scenario.add_real_card(prepare_owner, "Emeritus of Truce", Zone::Battlefield, db);
+    let x = scenario.add_creature(P0, "Exile Target", 2, 2).id();
+    let y = scenario.add_creature(P1, "Retarget Target", 3, 3).id();
+    let shock = scenario
+        .add_spell_to_hand_from_oracle(P1, "Shock", true, SHOCK_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::Red],
+        })
+        .id();
+    if !p0_pool.is_empty() {
+        scenario.with_mana_pool(P0, mana(p0_pool));
+    }
+    if !p1_pool.is_empty() {
+        scenario.with_mana_pool(P1, mana(p1_pool));
+    }
+
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    WatcherFixture {
+        runner,
+        watcher,
+        emeritus,
+        x,
+        y,
+        shock,
+    }
+}
+
+/// Parse reach guard: the watcher carries a SpellCast trigger scoped to an
+/// opponent caster and narrowed to prepared spells (CR 722.3d).
+fn assert_watches_opponent_prepared_spells(state: &GameState, watcher: ObjectId) {
+    let opponent_caster = Some(TargetFilter::Typed(
+        TypedFilter::default().controller(ControllerRef::Opponent),
+    ));
+    let watches = state.objects[&watcher]
+        .trigger_definitions
+        .as_slice()
+        .iter()
+        .map(|entry| entry.definition())
+        .any(|definition| {
+            matches!(definition.mode, TriggerMode::SpellCast)
+                && definition.valid_target == opponent_caster
+                && matches!(
+                    &definition.valid_card,
+                    Some(TargetFilter::Typed(typed))
+                        if typed.properties.contains(&FilterProp::PrepareSpell)
+                )
+        });
+    assert!(
+        watches,
+        "the watcher must carry its opponent-scoped SpellCast trigger narrowed to prepared spells"
+    );
+}
+
+fn life(state: &GameState, player: PlayerId) -> i32 {
+    state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .expect("player exists")
+        .life
+}
+
+/// Positive (CR 722.3d + CR 603.2): an opponent's prepared cast triggers the
+/// watcher exactly once, and the trigger resolves for the watcher's controller.
+#[test]
+fn opponent_prepared_spell_watcher_fires_on_opponent_prepared_cast() {
+    let WatcherFixture {
+        mut runner,
+        watcher,
+        emeritus,
+        y,
+        ..
+    } = build_watcher_fixture(db(), P1, &[], &[ManaType::White]);
+    assert_watches_opponent_prepared_spells(runner.state(), watcher);
+    let p0_life = life(runner.state(), P0);
+    let p1_life = life(runner.state(), P1);
+
+    set_prepared(&mut runner, emeritus);
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes priority to P1");
+    assert_priority(&runner, P1);
+    // P1 aims its Swords at its own creature so the "its controller gains life"
+    // rider can never touch P0's life total.
+    let spell = start_prepared_cast(&mut runner, emeritus);
+    drive_cast_to_stack(&mut runner, Some(y));
+
+    let state = runner.state();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(state.objects[&spell].zone, Zone::Stack);
+    assert_eq!(state.objects[&spell].controller, P1);
+    assert_eq!(state.objects[&spell].prepared_copy_source, Some(emeritus));
+    assert_eq!(state.stack.len(), 2);
+    assert_eq!(
+        triggers_from(state, watcher),
+        1,
+        "an opponent's prepared spell must trigger the watcher once"
+    );
+
+    // P1 and P0 pass: the watcher's trigger (top of the stack) resolves.
+    pass_twice(&mut runner);
+    let state = runner.state();
+    assert_eq!(state.stack.len(), 1);
+    assert_eq!(state.stack[0].id, spell);
+    assert_eq!(life(state, P0), p0_life + 1);
+    assert_eq!(life(state, P1), p1_life);
+}
+
+/// Paired negative (the discriminating leg): an opponent's ordinary spell cast
+/// from hand is not a prepared spell, so the watcher stays silent.
+#[test]
+fn opponent_prepared_spell_watcher_ignores_opponent_ordinary_cast() {
+    let WatcherFixture {
+        mut runner,
+        watcher,
+        x,
+        shock,
+        ..
+    } = build_watcher_fixture(db(), P1, &[], &[ManaType::Red]);
+    let p0_life = life(runner.state(), P0);
+
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes priority to P1");
+    assert_priority(&runner, P1);
+    {
+        let commit = runner.cast(shock).target_object(x).commit();
+        let state = commit.state();
+        // Reach guard: P1's Shock really became an unmarked spell on the stack.
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.objects[&shock].zone, Zone::Stack);
+        assert_eq!(state.objects[&shock].controller, P1);
+        assert_eq!(state.objects[&shock].prepared_copy_source, None);
+        assert_eq!(
+            triggers_from(state, watcher),
+            0,
+            "the watcher must not trigger on an opponent's ordinary spell"
+        );
+        assert_eq!(state.stack.len(), 1);
+    }
+    // Checked after the runtime negative so that a dropped designation reports
+    // the false trigger first; the test needs both to pass.
+    assert_watches_opponent_prepared_spells(runner.state(), watcher);
+
+    pass_twice(&mut runner);
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(life(runner.state(), P0), p0_life);
+}
+
+/// Paired negative (caster scope): the watcher's controller casting its own
+/// prepared spell is not an opponent's cast.
+#[test]
+fn opponent_prepared_spell_watcher_ignores_own_prepared_cast() {
+    let WatcherFixture {
+        mut runner,
+        watcher,
+        emeritus,
+        y,
+        ..
+    } = build_watcher_fixture(db(), P0, &[ManaType::White], &[]);
+    assert_watches_opponent_prepared_spells(runner.state(), watcher);
+    let p0_life = life(runner.state(), P0);
+
+    let spell = begin_prepared_cast(&mut runner, emeritus);
+    drive_cast_to_stack(&mut runner, Some(y));
+    assert_priority(&runner, P0);
+
+    // Reach guard: P0's spell is a marked prepared spell on the stack, so only
+    // the opponent caster scope keeps the watcher silent.
+    let state = runner.state();
+    assert_eq!(state.objects[&spell].zone, Zone::Stack);
+    assert_eq!(state.objects[&spell].controller, P0);
+    assert_eq!(state.objects[&spell].prepared_copy_source, Some(emeritus));
+    assert_eq!(state.stack.len(), 1);
+    assert_eq!(
+        triggers_from(state, watcher),
+        0,
+        "the watcher must not trigger on its controller's prepared spell"
+    );
+
+    // Swords resolves: P1 (y's controller) gains life, P0 does not.
+    pass_twice(&mut runner);
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(life(runner.state(), P0), p0_life);
 }
