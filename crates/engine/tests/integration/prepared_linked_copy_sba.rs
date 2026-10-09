@@ -10,15 +10,19 @@
 //! face is hand-built as in `fra_bloodline_recollector.rs`.
 
 use engine::ai_support::legal_actions;
-use engine::game::game_object::{BackFaceData, PhaseOutCause};
+use engine::game::effects::attach::attach_to;
+use engine::game::game_object::{AttachTarget, BackFaceData, PhaseOutCause};
 use engine::game::phasing::{phase_in_object, phase_out_object};
 use engine::game::sba::check_state_based_actions;
-use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::{create_object, move_to_zone};
-use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter};
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, Effect, EffectScope, QuantityExpr, TargetFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::card::LayoutKind;
 use engine::types::card_type::{CardType, CoreType};
+use engine::types::counter::CounterType;
 use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::ManaCost;
@@ -92,7 +96,8 @@ fn assert_parsed_prepare_lines(runner: &GameRunner, source: ObjectId) {
         matches!(
             object.abilities[0].effect.as_ref(),
             Effect::BecomePrepared {
-                target: TargetFilter::SelfRef
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
             }
         ),
         "ability 0 must be a self-ref BecomePrepared, got {:?}",
@@ -102,7 +107,8 @@ fn assert_parsed_prepare_lines(runner: &GameRunner, source: ObjectId) {
         matches!(
             object.abilities[1].effect.as_ref(),
             Effect::BecomeUnprepared {
-                target: TargetFilter::SelfRef
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
             }
         ),
         "ability 1 must be a self-ref BecomeUnprepared, got {:?}",
@@ -554,4 +560,189 @@ fn persisted_linked_copy_is_the_one_cast_and_no_second_copy_appears() {
         "CR 704.5e: the resolved copy of a spell ceases to exist"
     );
     assert_copy_present(state, copy_b, b);
+}
+
+/// The single linked copy of `source`, asserted present in exile.
+fn single_linked_copy(state: &GameState, source: ObjectId) -> ObjectId {
+    let linked = linked_copies(state, source);
+    assert_eq!(
+        linked.len(),
+        1,
+        "CR 722.3c: prepared {source:?} must keep exactly one linked copy, found {linked:?}"
+    );
+    assert_copy_present(state, linked[0], source);
+    linked[0]
+}
+
+/// CR 722.3c + CR 707.2 + CR 110.5: the copy has only the characteristics of
+/// the prepare spell. None of the permanent's counters, marked damage,
+/// attachments, statuses or battlefield designations reach it, while the
+/// permanent itself keeps all of them.
+#[test]
+fn linked_copy_carries_none_of_the_permanents_battlefield_state() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario
+        .add_creature(P0, "Prepared Host", 2, 2)
+        .from_oracle_text(PREPARE_SELF)
+        .id();
+    let equipment = scenario
+        .add_creature(P0, "Host Equipment", 0, 0)
+        .as_artifact()
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.objects.get_mut(&host).unwrap().back_face = Some(prepare_face("Prepare Face Host"));
+        // CR 301.5 + CR 704.5n: an Equipment legally attached to a creature, so
+        // the state-based actions leave it attached.
+        attach_to(state, equipment, host);
+        let source = state.objects.get_mut(&host).unwrap();
+        source.counters.insert(CounterType::Plus1Plus1, 2);
+        source.damage_marked = 1;
+        source.tapped = true;
+        source.monstrous = true;
+        source.is_suspected = true;
+        source.goaded_by.insert(P1);
+    }
+    assert_eq!(runner.state().objects[&host].attachments, vec![equipment]);
+
+    runner.activate(host, 0).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ));
+
+    let state = runner.state();
+    let copy = &state.objects[&single_linked_copy(state, host)];
+    assert!(
+        copy.counters.is_empty(),
+        "CR 707.2: counters are not copied"
+    );
+    assert!(copy.attachments.is_empty());
+    assert_eq!(copy.attached_to, None);
+    assert_eq!(copy.damage_marked, 0);
+    assert!(!copy.tapped, "CR 707.2 + CR 110.5: status is not copied");
+    assert!(!copy.monstrous);
+    assert!(!copy.is_suspected);
+    assert!(copy.goaded_by.is_empty());
+    assert_eq!(copy.name, "Prepare Face Host");
+
+    // Paired positive: the permanent keeps every piece of state the copy lacks,
+    // so the instrument sees non-empty state and the strip touched only the copy.
+    let source = &state.objects[&host];
+    assert!(source.prepared.is_some());
+    assert_eq!(source.counters.get(&CounterType::Plus1Plus1), Some(&2));
+    assert_eq!(source.attachments, vec![equipment]);
+    assert_eq!(
+        state.objects[&equipment].attached_to,
+        Some(AttachTarget::Object(host))
+    );
+    assert_eq!(source.damage_marked, 1);
+    assert!(source.tapped);
+    assert!(source.monstrous);
+    assert!(source.is_suspected);
+    assert!(source.goaded_by.contains(&P1));
+}
+
+/// CR 903.3 + CR 903.9a + CR 722.3c: the commander designation is an attribute
+/// of the card, not of the copy, so preparing a commander never offers to move
+/// its prepare-spell copy to the command zone, while the copy is waiting in
+/// exile or after it is cast and resolves.
+#[test]
+fn linked_copy_of_a_commander_is_not_a_commander() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let commander = scenario
+        .add_creature(P0, "Prepared Commander", 2, 2)
+        .from_oracle_text(PREPARE_SELF)
+        .id();
+    scenario.with_library_top(P0, &["Library One", "Library Two"]);
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.format_config.command_zone = true;
+        let source = state.objects.get_mut(&commander).unwrap();
+        source.back_face = Some(prepare_face("Commander Prepare Face"));
+        source.is_commander = true;
+    }
+
+    runner.activate(commander, 0).resolve();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "the priority-return SBA must not park a command-zone choice, got {:?}",
+        runner.state().waiting_for
+    );
+    let copy = single_linked_copy(runner.state(), commander);
+    assert!(!runner.state().objects[&copy].is_commander);
+    assert!(runner.state().objects[&commander].is_commander);
+    assert!(runner.state().objects[&commander].prepared.is_some());
+
+    // Control: a commander-flagged object in exile does park the CR 903.9a
+    // choice, so the instrument observes the consequence the strip prevents.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&copy)
+        .unwrap()
+        .is_commander = true;
+    run_sba(&mut runner);
+    match &runner.state().waiting_for {
+        WaitingFor::CommanderZoneChoice {
+            commander_id,
+            current_zone,
+            ..
+        } => {
+            assert_eq!(*commander_id, copy);
+            assert_eq!(*current_zone, Zone::Exile);
+        }
+        other => panic!("control: expected CommanderZoneChoice for the copy, got {other:?}"),
+    }
+    {
+        let state = runner.state_mut();
+        state.objects.get_mut(&copy).unwrap().is_commander = false;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    let hand_before = runner.state().players[0].hand.len();
+    runner
+        .act(GameAction::CastPreparedCopy { source: commander })
+        .expect("CastPreparedCopy must start the cast");
+    for _ in 0..16 {
+        match &runner.state().waiting_for {
+            WaitingFor::ManaPayment { .. } => {
+                runner.act(GameAction::PassPriority).expect("pay mana");
+            }
+            WaitingFor::Priority { .. } => break,
+            other => panic!("unexpected waiting state during prepared cast: {other:?}"),
+        }
+    }
+    assert!(runner.state().stack.iter().any(|entry| entry.id == copy));
+
+    for _ in 0..8 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("pass priority");
+        assert!(
+            !matches!(
+                runner.state().waiting_for,
+                WaitingFor::CommanderZoneChoice { .. }
+            ),
+            "the resolved copy must never be offered to the command zone"
+        );
+    }
+    let state = runner.state();
+    assert!(state.stack.is_empty());
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ));
+    assert_eq!(state.players[0].hand.len(), hand_before + 1);
+    assert!(!state.objects.contains_key(&copy));
+    assert!(state.objects[&commander].is_commander);
 }

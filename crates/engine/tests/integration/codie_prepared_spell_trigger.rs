@@ -1156,13 +1156,15 @@ fn drive_activation(
     panic!("the activation never returned to priority; visited {visited:?}");
 }
 
-/// P0 controls Codie, an unprepared Emeritus of Truce, a Goblin Glasswright
-/// that is already prepared, and a creature with no prepare spell; P1 controls
-/// its own Emeritus of Truce. P0's pool pays Codie's activation exactly.
+/// P0 controls Codie, an unprepared Emeritus of Truce, an unprepared Konstrari
+/// Improviser, a Goblin Glasswright that is already prepared, and a creature
+/// with no prepare spell; P1 controls its own Emeritus of Truce. P0's pool pays
+/// Codie's activation exactly.
 struct MassFixture {
     runner: GameRunner,
     codie: ObjectId,
     emeritus_p0: ObjectId,
+    konstrari_p0: ObjectId,
     glasswright_p0: ObjectId,
     faceless_p0: ObjectId,
     emeritus_p1: ObjectId,
@@ -1175,6 +1177,7 @@ fn build_mass_fixture(db: &CardDatabase) -> MassFixture {
         .add_creature_from_oracle(P0, "Codie, Ravenous Codex", 1, 4, CODIE_ORACLE)
         .id();
     let emeritus_p0 = scenario.add_real_card(P0, "Emeritus of Truce", Zone::Battlefield, db);
+    let konstrari_p0 = scenario.add_real_card(P0, "Konstrari Improviser", Zone::Battlefield, db);
     let glasswright_p0 = scenario.add_real_card(P0, "Goblin Glasswright", Zone::Battlefield, db);
     let faceless_p0 = scenario.add_creature(P0, "Faceless Bystander", 2, 2).id();
     let emeritus_p1 = scenario.add_real_card(P1, "Emeritus of Truce", Zone::Battlefield, db);
@@ -1183,7 +1186,7 @@ fn build_mass_fixture(db: &CardDatabase) -> MassFixture {
     let mut runner = scenario.build();
     runner.state_mut().debug_mode = true;
     engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
-    for id in [emeritus_p0, glasswright_p0, emeritus_p1] {
+    for id in [emeritus_p0, konstrari_p0, glasswright_p0, emeritus_p1] {
         assert!(
             runner.state().objects[&id].back_face.is_some(),
             "{} must hydrate its prepare face",
@@ -1191,16 +1194,73 @@ fn build_mass_fixture(db: &CardDatabase) -> MassFixture {
         );
     }
     assert!(runner.state().objects[&faceless_p0].back_face.is_none());
+    // Konstrari Improviser "enters prepared" ("This creature enters prepared."),
+    // and `add_real_card` moved it onto the battlefield through the zone
+    // pipeline that applies that replacement. Unprepare it, which ceases that
+    // copy, so Codie's activation is what prepares it here.
+    assert!(runner.state().objects[&konstrari_p0].prepared.is_some());
+    runner
+        .act(GameAction::Debug(DebugAction::SetPrepared {
+            object_id: konstrari_p0,
+            prepared: false,
+        }))
+        .expect("Debug SetPrepared must unprepare the permanent");
+    assert!(runner.state().objects[&konstrari_p0].prepared.is_none());
+    assert!(linked_copies(runner.state(), konstrari_p0).is_empty());
     set_prepared(&mut runner, glasswright_p0);
 
     MassFixture {
         runner,
         codie,
         emeritus_p0,
+        konstrari_p0,
         glasswright_p0,
         faceless_p0,
         emeritus_p1,
     }
+}
+
+/// CR 722.3c: every object in any zone linked to `source` as its prepare copy.
+fn linked_copies(state: &GameState, source: ObjectId) -> Vec<ObjectId> {
+    state
+        .objects
+        .values()
+        .filter(|object| object.prepared_copy_source == Some(source))
+        .map(|object| object.id)
+        .collect()
+}
+
+/// The single object linked to `source`, asserted to be its exact CR 722.3c
+/// copy: a non-token copy waiting in exile, owned and controlled by
+/// `controller`, with the prepare face's name and face up (CR 406.3).
+fn exact_linked_copy(
+    state: &GameState,
+    source: ObjectId,
+    controller: PlayerId,
+    prepare_face: &str,
+) -> ObjectId {
+    let linked = linked_copies(state, source);
+    assert_eq!(
+        linked.len(),
+        1,
+        "CR 722.3c: {source:?} must have exactly one linked copy, found {linked:?}"
+    );
+    let copy = &state.objects[&linked[0]];
+    assert_eq!(copy.zone, Zone::Exile);
+    assert!(state.exile.contains(&copy.id));
+    assert!(copy.is_copy);
+    assert!(!copy.is_token);
+    assert_eq!(copy.owner, controller);
+    assert_eq!(copy.controller, controller);
+    assert_eq!(copy.name, prepare_face);
+    assert!(!copy.face_down);
+    copy.id
+}
+
+fn has_cast_prepared_copy(state: &GameState, source: ObjectId) -> bool {
+    engine::ai_support::legal_actions(state)
+        .iter()
+        .any(|action| matches!(action, GameAction::CastPreparedCopy { source: s } if *s == source))
 }
 
 /// CR 115.10a + CR 722.3a: "{W}{U}{B}{R}{G}, {T}: Each creature you control
@@ -1215,6 +1275,7 @@ fn codie_activation_prepares_each_eligible_creature_without_targeting() {
         mut runner,
         codie,
         emeritus_p0,
+        konstrari_p0,
         glasswright_p0,
         faceless_p0,
         emeritus_p1,
@@ -1223,9 +1284,11 @@ fn codie_activation_prepares_each_eligible_creature_without_targeting() {
         runner.state().objects[&glasswright_p0].prepared.is_some(),
         "Glasswright starts prepared"
     );
-    for id in [emeritus_p0, emeritus_p1, faceless_p0, codie] {
+    for id in [emeritus_p0, konstrari_p0, emeritus_p1, faceless_p0, codie] {
         assert!(runner.state().objects[&id].prepared.is_none());
     }
+    // Baseline before the activation: the already-prepared Glasswright's copy.
+    let glass_copy = exact_linked_copy(runner.state(), glasswright_p0, P0, "Craft with Pride");
 
     let visited = drive_activation(&mut runner, codie, 0);
     assert!(
@@ -1251,17 +1314,22 @@ fn codie_activation_prepares_each_eligible_creature_without_targeting() {
     assert!(runner.state().objects[&codie].tapped);
     assert!(runner.state().players[0].mana_pool.mana.is_empty());
 
+    // CR 117.4: both players pass and the ability resolves; priority returns to
+    // P0 only after the state-based actions are checked.
     let events = pass_twice(&mut runner);
     assert_priority(&runner, P0);
     assert!(runner.state().stack.is_empty());
-    let prepared_events: Vec<ObjectId> = events
+    let mut prepared_events: Vec<ObjectId> = events
         .iter()
         .filter_map(|event| match event {
             GameEvent::BecamePrepared { object_id } => Some(*object_id),
             _ => None,
         })
         .collect();
-    assert_eq!(prepared_events, [emeritus_p0]);
+    prepared_events.sort_by_key(|id| id.0);
+    let mut expected = vec![emeritus_p0, konstrari_p0];
+    expected.sort_by_key(|id| id.0);
+    assert_eq!(prepared_events, expected);
     assert!(events.iter().any(|event| matches!(
         event,
         GameEvent::EffectResolved {
@@ -1270,10 +1338,8 @@ fn codie_activation_prepares_each_eligible_creature_without_targeting() {
         }
     )));
 
-    // The linked exile copy each new designation creates (CR 722.3c) is pinned
-    // at the resolver by the `prepare.rs` unit tests; this test reads the
-    // designation through the full activation.
     assert!(runner.state().objects[&emeritus_p0].prepared.is_some());
+    assert!(runner.state().objects[&konstrari_p0].prepared.is_some());
     // CR 722.3a: already prepared, so it can't gain the designation again (no
     // second `BecamePrepared` above).
     assert!(runner.state().objects[&glasswright_p0].prepared.is_some());
@@ -1282,6 +1348,40 @@ fn codie_activation_prepares_each_eligible_creature_without_targeting() {
             runner.state().objects[&id].prepared.is_none(),
             "{} must stay unprepared",
             runner.state().objects[&id].name
+        );
+    }
+
+    // CR 722.3c + CR 704.5e: each copy the activation created survived the
+    // state-based actions checked before priority returned. No castability is
+    // asserted here: the pool is empty, so neither prepare spell is affordable.
+    let copies_after_activation = |state: &GameState| {
+        [
+            exact_linked_copy(state, emeritus_p0, P0, "Swords to Plowshares"),
+            exact_linked_copy(state, konstrari_p0, P0, "Soul Tether"),
+            exact_linked_copy(state, glasswright_p0, P0, "Craft with Pride"),
+        ]
+    };
+    let [emeritus_copy, konstrari_copy, glass_after] = copies_after_activation(runner.state());
+    assert_eq!(
+        glass_after, glass_copy,
+        "no second Glasswright copy appears"
+    );
+    for id in [emeritus_p1, faceless_p0, codie] {
+        assert!(linked_copies(runner.state(), id).is_empty());
+    }
+    // The fixture puts nothing else in exile.
+    let mut exile: Vec<ObjectId> = runner.state().exile.iter().copied().collect();
+    exile.sort_by_key(|id| id.0);
+    let mut expected_exile = vec![glass_copy, emeritus_copy, konstrari_copy];
+    expected_exile.sort_by_key(|id| id.0);
+    assert_eq!(exile, expected_exile);
+
+    // Idempotence: further state-based action checks keep the same copies.
+    for _ in 0..2 {
+        engine::game::sba::check_state_based_actions(runner.state_mut(), &mut Vec::new());
+        assert_eq!(
+            copies_after_activation(runner.state()),
+            [emeritus_copy, konstrari_copy, glass_copy]
         );
     }
 }
@@ -1316,20 +1416,112 @@ fn codie_activation_then_prepared_cast_copies_and_retargets() {
     assert_priority(&runner, P0);
     assert!(runner.state().stack.is_empty());
     assert!(runner.state().objects[&emeritus].prepared.is_some());
-    assert_eq!(runner.state().players[0].mana_pool.mana.len(), 1);
+    let pool = &runner.state().players[0].mana_pool.mana;
+    assert_eq!(pool.len(), 1);
+    assert_eq!(pool[0].color, ManaType::White);
+
+    // CR 722.3c: the copy made at the activation is waiting in exile before
+    // any cast, and it is castable for the {W} left in the pool.
+    let persisted = exact_linked_copy(runner.state(), emeritus, P0, "Swords to Plowshares");
+    assert!(has_cast_prepared_copy(runner.state(), emeritus));
 
     let spell_id = start_prepared_cast(&mut runner, emeritus);
+    assert_eq!(
+        spell_id, persisted,
+        "CR 722.3c: the copy created when Emeritus became prepared is the object cast"
+    );
     drive_cast_to_stack(&mut runner, Some(x));
     assert_priority(&runner, P0);
-    assert_eq!(runner.state().stack.len(), 2);
-    assert_eq!(
-        triggers_from(runner.state(), codie),
-        1,
-        "CR 601.2i + CR 722.3d: casting the prepared spell triggers Codie"
-    );
-    assert!(runner.state().players[0].mana_pool.mana.is_empty());
+    {
+        let state = runner.state();
+        assert_eq!(state.stack.len(), 2);
+        let spell_entry = state
+            .stack
+            .iter()
+            .find(|entry| entry.id == persisted)
+            .expect("the persisted copy is the spell on the stack");
+        assert!(matches!(spell_entry.kind, StackEntryKind::Spell { .. }));
+        assert_eq!(state.objects[&persisted].zone, Zone::Stack);
+        assert_eq!(
+            state.objects[&persisted].prepared_copy_source,
+            Some(emeritus)
+        );
+        assert_eq!(
+            triggers_from(state, codie),
+            1,
+            "CR 601.2i + CR 722.3d: casting the prepared spell triggers Codie"
+        );
+        assert!(state.players[0].mana_pool.mana.is_empty());
+        assert!(
+            state.objects[&emeritus].prepared.is_none(),
+            "CR 722.3c + CR 601.2i: the permanent is unprepared as the spell becomes cast"
+        );
+        assert!(
+            !state
+                .objects
+                .values()
+                .any(|object| object.zone == Zone::Exile
+                    && object.prepared_copy_source == Some(emeritus)),
+            "no second copy is created in exile"
+        );
+        assert!(!has_cast_prepared_copy(state, emeritus));
+        assert_eq!(state.spells_cast_this_turn_by_player[&P0].len(), 1);
+    }
 
     finish_codie_copy_and_retarget(&mut runner, codie, spell_id, x, y);
+    assert!(
+        !runner
+            .state()
+            .objects
+            .values()
+            .any(|object| object.zone == Zone::Exile && object.prepared_copy_source.is_some()),
+        "no linked copy remains in exile once the prepared spell was cast"
+    );
+}
+
+/// CR 601.2i + CR 722.3c: backing out of the prepared cast at its target
+/// prompt restores the designation and leaves the same copy waiting in exile,
+/// through the state-based actions, for a later cast.
+#[test]
+fn codie_activation_then_cancelled_prepared_cast_keeps_the_same_copy() {
+    let mut spec = FixtureSpec::swords(1);
+    spec.p0_pool = WUBRG_AND_W;
+    let Fixture {
+        mut runner,
+        codies,
+        prepare_source: emeritus,
+        ..
+    } = build_fixture(db(), spec);
+    let codie = codies[0];
+    drive_activation(&mut runner, codie, 0);
+    pass_twice(&mut runner);
+    assert_priority(&runner, P0);
+    let persisted = exact_linked_copy(runner.state(), emeritus, P0, "Swords to Plowshares");
+
+    let announced = start_prepared_cast(&mut runner, emeritus);
+    assert_eq!(announced, persisted);
+    // Reach guard: the cast unprepared the permanent before the cancel.
+    assert!(runner.state().objects[&emeritus].prepared.is_none());
+
+    runner
+        .act(GameAction::CancelCast)
+        .expect("the prepared cast is cancellable at its target prompt");
+    assert_priority(&runner, P0);
+    engine::game::sba::check_state_based_actions(runner.state_mut(), &mut Vec::new());
+
+    let state = runner.state();
+    assert!(state.stack.is_empty());
+    assert!(
+        state.objects[&emeritus].prepared.is_some(),
+        "CR 601.2i: the cancelled cast restores the prepared designation"
+    );
+    assert_eq!(
+        exact_linked_copy(state, emeritus, P0, "Swords to Plowshares"),
+        persisted,
+        "the same copy waits in exile; none is recreated"
+    );
+    assert!(has_cast_prepared_copy(state, emeritus));
+    assert_eq!(start_prepared_cast(&mut runner, emeritus), persisted);
 }
 
 /// The serialized shapes the protocol bump covers: Codie's activated ability

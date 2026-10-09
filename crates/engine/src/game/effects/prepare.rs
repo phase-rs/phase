@@ -12,7 +12,7 @@ use crate::types::zones::Zone;
 use crate::game::ability_utils::build_target_slots;
 use crate::game::casting;
 use crate::game::engine::{PriorityAnnouncementFacadeAccess, PriorityPrincipal};
-use crate::game::game_object::{GameObject, PreparedState};
+use crate::game::game_object::{GameObject, PhaseStatus, PreparedState};
 use crate::game::printed_cards::apply_back_face_to_object;
 
 /// An engine-authored prepared-copy announcement for the Priority preflight.
@@ -328,6 +328,13 @@ pub(crate) fn linked_prepared_copy_source(object: &GameObject) -> Option<ObjectI
         .filter(|_| object.zone == Zone::Exile)
 }
 
+/// CR 722.3c: Whether `object` is the linked prepare-spell copy waiting in
+/// exile. That copy is cast only through its prepared permanent's
+/// `CastPreparedCopy` action, so the generic exile cast paths exclude it.
+pub(crate) fn is_linked_prepared_copy(object: &GameObject) -> bool {
+    linked_prepared_copy_source(object).is_some()
+}
+
 /// CR 722.3c + CR 702.26b + CR 702.26d: Whether `object` is a prepared
 /// permanent on the battlefield — it "remains on the battlefield and has the
 /// prepared designation". A phased-out permanent is treated as though it is not
@@ -425,6 +432,92 @@ pub(crate) fn replay_remove_linked_prepared_copy_if_idle(
         .expect("validated linked idle copy must cease during zone replay");
 }
 
+/// CR 722.3c + CR 707.2: Clear, on a clone of the prepared permanent, every
+/// piece of state the permanent holds that its prepare-spell copy does not
+/// acquire. The copy "has only the characteristics of that permanent's prepare
+/// spell", and a copy never takes the original's status, counters or stickers.
+/// Single construction-site authority for the CR 722.3c copy.
+///
+/// Fields not cleared here are either rewritten for the copy afterwards (the
+/// prepare-face characteristics via `apply_back_face_to_object`, plus the
+/// identity, zone, link and permission assignments in
+/// `synthesize_prepared_copy_object`) or are derived display values recomputed
+/// on every state derivation.
+fn strip_non_copiable_state(copy: &mut GameObject) {
+    // CR 400.7: the battlefield-exit authority clears the designations, cast
+    // provenance, cast-payment stamps and merge identity that belong to the
+    // permanent, not to a new object built from its card.
+    copy.reset_for_battlefield_exit();
+
+    // CR 707.2 + CR 110.5: status (tapped, flipped, face down, phased out),
+    // counters and stickers are not copied.
+    copy.tapped = false;
+    copy.flipped = false;
+    copy.face_down = false;
+    copy.face_down_cause = None;
+    copy.phase_status = PhaseStatus::PhasedIn;
+    copy.counters.clear();
+    copy.stickers.clear();
+
+    // CR 722.3c: only the prepare spell's characteristics — none of the
+    // permanent's battlefield state (marked damage, attachment and pairing
+    // relationships, entry bookkeeping, combat-assignment flags, face
+    // orientation) and none of the alternative forms it was cast or exists in.
+    copy.damage_marked = 0;
+    copy.dealt_deathtouch_damage = false;
+    copy.attached_to = None;
+    copy.attachments.clear();
+    copy.paired_with = None;
+    copy.pair_controller = None;
+    copy.chosen_attributes.clear();
+    copy.entered_battlefield_turn = None;
+    copy.summoning_sick = false;
+    copy.echo_due = false;
+    copy.loyalty_activations_this_turn = 0;
+    copy.assigns_damage_from_toughness = false;
+    copy.assigns_damage_as_though_unblocked = false;
+    copy.assigns_no_combat_damage = false;
+    copy.transformed = false;
+    copy.modal_back_face = false;
+    copy.cast_face_committed = false;
+    copy.bestow_form = None;
+    copy.prototype_form = None;
+    copy.mutate_form = None;
+    copy.cleave_form = None;
+    copy.cleave_variant = None;
+    copy.split_from_merge_survivor = None;
+    // Layer-derived carriers of the permanent's characteristics. Layers do not
+    // re-seed an exile object, so they would otherwise describe the permanent
+    // instead of the prepare-face characteristics installed afterwards.
+    copy.granted_abilities_from = None;
+    copy.layer1_copy_effect = None;
+    copy.layer1_name_origin = None;
+    copy.copied_room_halves = None;
+    copy.base_name_origin = None;
+
+    // CR 707.2: the choices made while casting are copied only from an object
+    // on the stack; the permanent's own cast (kicker, additional costs, modes,
+    // alternative cost, timing permission, cost-paid object) is not the
+    // copy's, and the copy's later cast records its own.
+    copy.kickers_paid.clear();
+    copy.additional_cost_payment_count = 0;
+    copy.additional_cost_payments.clear();
+    copy.chosen_modes.clear();
+    copy.cast_variant_paid = None;
+    copy.cast_timing_permission = None;
+    copy.cast_cost_paid_object = None;
+    copy.fused_split_spell = false;
+    copy.cast_occurrence = None;
+
+    // CR 903.3 + CR 903.9a: the commander designation is an attribute of the
+    // card itself, not of a copy, so the copy in exile is never a commander
+    // eligible for the command-zone return. The Oathbreaker signature-spell
+    // role is likewise a role of the card.
+    copy.is_commander = false;
+    copy.commander_tax = None;
+    copy.signature_spell = None;
+}
+
 fn synthesize_prepared_copy_object(
     state: &mut GameState,
     source_id: ObjectId,
@@ -456,16 +549,20 @@ fn synthesize_prepared_copy_object(
     copy_obj.id = copy_id;
     // allow-raw-zone: prepared-copy birth in exile has no from-zone event (CR 722.3c).
     copy_obj.zone = Zone::Exile;
+    // Assigned before the strip below: the battlefield-exit reset seeds
+    // `base_controller` from `owner`, which must already be the copy's owner
+    // (the creating controller), not the source card's owner.
     copy_obj.controller = controller;
     copy_obj.owner = controller;
+    strip_non_copiable_state(&mut copy_obj);
     // CR 722.3c + CR 707.12: this is a castable copy of a card in exile, not a
     // token. A token outside the battlefield would cease to exist under CR
     // 111.7; a permanent-spell copy instead becomes a token only as it resolves
     // under CR 111.13 + CR 707.10f.
     copy_obj.is_token = false;
     copy_obj.is_copy = true;
-    copy_obj.tapped = false;
     copy_obj.prepared = None;
+    // Linked after the strip, which clears the field.
     copy_obj.prepared_copy_source = Some(source_id);
     // Do not re-enter alternative-face casting logic for this synthetic copy.
     copy_obj.back_face = None;
@@ -791,6 +888,21 @@ mod tests {
         assert!(events.iter().any(
             |event| matches!(event, GameEvent::BecamePrepared { object_id: id } if *id == object_id)
         ));
+        let copy = {
+            let copies = linked_copies(&state, object_id);
+            assert_eq!(
+                copies.len(),
+                1,
+                "CR 722.3c: entering prepared creates one copy"
+            );
+            copies[0]
+        };
+
+        // CR 722.3c + CR 704.5e: the copy made as the permanent entered prepared
+        // survives the state-based actions checked before priority.
+        crate::game::sba::check_state_based_actions(&mut state, &mut Vec::new());
+        assert_eq!(linked_copies(&state, object_id), vec![copy]);
+        assert!(state.exile.contains(&copy));
 
         let actions = legal_actions(&state);
         assert!(actions.iter().any(
@@ -1110,6 +1222,136 @@ mod tests {
         cast_prepared_copy(&mut state, source, PlayerId(1), &mut Vec::new()).unwrap();
         assert_eq!(state.objects[&copy].controller, PlayerId(1));
         assert_eq!(state.objects[&copy].owner, PlayerId(0));
+    }
+
+    /// CR 722.3c + CR 109.4 + CR 108.4a: the copy's controller (the prepared
+    /// permanent's controller) creates it and owns it; its owner-seeded
+    /// `base_controller` names that player, never the source card's owner.
+    #[test]
+    fn prepared_copy_of_a_stolen_permanent_is_owned_and_controlled_by_its_controller() {
+        let mut state = GameState::new_two_player(42);
+        let source = setup_creature(&mut state);
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.back_face = Some(BackFaceForTest::prepare());
+            obj.controller = PlayerId(1);
+            obj.base_controller = Some(PlayerId(1));
+        }
+        assert_eq!(state.objects[&source].owner, PlayerId(0));
+
+        prepare_object(&mut state, source, &mut Vec::new());
+
+        let copy = linked_prepared_copy_id(&state, source).expect("prepare creates the copy");
+        let copy = &state.objects[&copy];
+        assert_eq!(copy.owner, PlayerId(1));
+        assert_eq!(copy.controller, PlayerId(1));
+        assert_eq!(copy.base_controller, Some(PlayerId(1)));
+        assert_eq!(
+            state.objects[&source].owner,
+            PlayerId(0),
+            "reach guard: the source card is still owned by P0"
+        );
+    }
+
+    /// CR 707.2 + CR 110.5 + CR 722.3c + CR 903.3: the copy-hygiene building
+    /// block resets every permanent-only field it owns, whatever the clone
+    /// carried in.
+    #[test]
+    fn strip_non_copiable_state_resets_every_permanent_only_field() {
+        use crate::game::game_object::{AttachTarget, PhaseOutCause, SignatureSpellState};
+        use crate::types::ability::{
+            CastTimingPermission, CastVariantPaid, ChosenAttribute, FaceDownCause, KickerVariant,
+        };
+        use crate::types::counter::CounterType;
+        use crate::types::mana::ManaColor;
+        use crate::types::stickers::{AppliedSticker, StickerLocator};
+
+        let mut state = GameState::new_two_player(42);
+        let id = setup_creature(&mut state);
+        let mut obj = state.objects[&id].clone();
+        obj.counters.insert(CounterType::Plus1Plus1, 2);
+        obj.stickers.push(AppliedSticker::Name {
+            locator: StickerLocator {
+                sheet: "Sheet".into(),
+                index: 1,
+            },
+            text: "Name".into(),
+            position: 0,
+            timestamp: 1,
+        });
+        obj.damage_marked = 3;
+        obj.dealt_deathtouch_damage = true;
+        obj.attachments.push(ObjectId(77));
+        obj.attached_to = Some(AttachTarget::Object(ObjectId(78)));
+        obj.paired_with = Some(ObjectId(79));
+        obj.pair_controller = Some(PlayerId(0));
+        obj.tapped = true;
+        obj.flipped = true;
+        obj.face_down = true;
+        obj.face_down_cause = Some(FaceDownCause::Morph);
+        obj.phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+        obj.chosen_attributes
+            .push(ChosenAttribute::Color(ManaColor::Red));
+        obj.entered_battlefield_turn = Some(3);
+        obj.summoning_sick = true;
+        obj.echo_due = true;
+        obj.transformed = true;
+        obj.modal_back_face = true;
+        obj.monstrous = true;
+        obj.is_suspected = true;
+        obj.goaded_by.insert(PlayerId(1));
+        obj.kickers_paid.push(KickerVariant::First);
+        obj.additional_cost_payment_count = 2;
+        obj.chosen_modes.push(1);
+        obj.cast_variant_paid = Some((CastVariantPaid::Evoke, 3));
+        obj.cast_timing_permission = Some((CastTimingPermission::AsThoughHadFlash, 3));
+        obj.fused_split_spell = true;
+        obj.mana_spent_to_cast_amount = 4;
+        obj.is_commander = true;
+        obj.commander_tax = Some(2);
+        obj.signature_spell = Some(SignatureSpellState {});
+        obj.prepared = Some(PreparedState);
+        obj.prepared_copy_source = Some(ObjectId(80));
+
+        strip_non_copiable_state(&mut obj);
+
+        assert!(obj.counters.is_empty());
+        assert!(obj.stickers.is_empty());
+        assert_eq!(obj.damage_marked, 0);
+        assert!(!obj.dealt_deathtouch_damage);
+        assert!(obj.attachments.is_empty());
+        assert_eq!(obj.attached_to, None);
+        assert_eq!(obj.paired_with, None);
+        assert_eq!(obj.pair_controller, None);
+        assert!(!obj.tapped);
+        assert!(!obj.flipped);
+        assert!(!obj.face_down);
+        assert_eq!(obj.face_down_cause, None);
+        assert_eq!(obj.phase_status, PhaseStatus::PhasedIn);
+        assert!(obj.chosen_attributes.is_empty());
+        assert_eq!(obj.entered_battlefield_turn, None);
+        assert!(!obj.summoning_sick);
+        assert!(!obj.echo_due);
+        assert!(!obj.transformed);
+        assert!(!obj.modal_back_face);
+        assert!(!obj.monstrous);
+        assert!(!obj.is_suspected);
+        assert!(obj.goaded_by.is_empty());
+        assert!(obj.kickers_paid.is_empty());
+        assert_eq!(obj.additional_cost_payment_count, 0);
+        assert!(obj.chosen_modes.is_empty());
+        assert_eq!(obj.cast_variant_paid, None);
+        assert_eq!(obj.cast_timing_permission, None);
+        assert!(!obj.fused_split_spell);
+        assert_eq!(obj.mana_spent_to_cast_amount, 0);
+        assert!(!obj.is_commander);
+        assert_eq!(obj.commander_tax, None);
+        assert_eq!(obj.signature_spell, None);
+        assert!(!obj.uses_command_zone_rules());
+        assert_eq!(obj.prepared, None);
+        assert_eq!(obj.prepared_copy_source, None);
     }
 
     #[test]

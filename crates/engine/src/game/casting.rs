@@ -1491,7 +1491,7 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
     // cancel; both exile passes exclude it.
     objects.extend(state.exile.iter().copied().filter(|&obj_id| {
         state.objects.get(&obj_id).is_some_and(|obj| {
-            crate::game::effects::prepare::linked_prepared_copy_source(obj).is_none()
+            !crate::game::effects::prepare::is_linked_prepared_copy(obj)
                 && exile_object_castable_by_permission(state, obj, player)
         })
     }));
@@ -1502,7 +1502,7 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
     objects.extend(state.exile.iter().copied().filter(|&obj_id| {
         state.objects.get(&obj_id).is_some_and(|obj| {
             obj.owner != player
-                && crate::game::effects::prepare::linked_prepared_copy_source(obj).is_none()
+                && !crate::game::effects::prepare::is_linked_prepared_copy(obj)
                 && obj.casting_permissions.iter().any(|permission| {
                     exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
                 })

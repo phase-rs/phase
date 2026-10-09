@@ -11333,7 +11333,7 @@ fn apply_non_priority_pass_action(
             if state
                 .objects
                 .get(&object_id)
-                .is_some_and(|obj| effects::prepare::linked_prepared_copy_source(obj).is_some())
+                .is_some_and(effects::prepare::is_linked_prepared_copy)
             {
                 return Err(EngineError::InvalidAction(
                     "A prepared copy is cast only through its prepared permanent".to_string(),
