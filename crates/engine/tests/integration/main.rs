@@ -90,6 +90,7 @@ mod battlefield_entry_authority_census;
 mod bbfu10_entered_this_turn_snapshot;
 mod bbfu7_attacks_if_able_not_goad;
 mod become_choice_trailing_duration;
+mod become_prepared_declared_target;
 mod belbe_thornbow_life_loss;
 mod belladonna_took;
 mod betor_lifelink_counters_repro;

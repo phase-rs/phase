@@ -5568,18 +5568,28 @@ fn build_become_clause(
     )))
     .parse(become_lower.as_str())
     {
-        // CR 722.3a: Resolve the prepare/unprepare target from the subject.
-        // A targeted subject ("target creature becomes prepared", Biblioplex)
-        // binds to the chosen object via `ParentTarget` at resolution; a
-        // self-referential or anaphoric subject ("this creature becomes
-        // prepared" — Stensian Sanguinist, normalized to `~` → `SelfRef`) uses
-        // the subject's own `affected` filter. Mirrors
-        // `static_affected_for_application`'s targeted-vs-subject split so the
-        // self-reference is preserved instead of collapsing to `ParentTarget`.
-        let target = if application.target.is_some() || application.inherits_parent {
-            crate::types::ability::TargetFilter::ParentTarget
-        } else {
-            application.affected.clone()
+        // CR 722.3a + CR 722.3b: Resolve the prepare/unprepare target from the
+        // subject. Like `BecomeSaddled` below, the effect's `target` IS the
+        // selection slot:
+        // - CR 115.1c/115.1d + CR 601.2c/602.2b: a DECLARED target ("target
+        //   creature becomes prepared" — Skycoach Waypoint, Biblioplex
+        //   Tomekeeper; "target creature that attacked this turn" — Hexhaven
+        //   Dueling Arena) keeps its typed filter, so `build_target_slots`
+        //   surfaces a slot chosen at announcement and the filter's
+        //   restrictions are enforced.
+        // - A context-ref `target` (anaphor markers `ParentTarget` /
+        //   `TriggeringSource`) or an `inherits_parent` subject ("it becomes
+        //   unprepared") keeps the established `ParentTarget` binding.
+        // - A self-referential or untargeted subject ("this creature becomes
+        //   prepared" — Stensian Sanguinist, normalized to `~` → `SelfRef`)
+        //   uses the subject's own `affected` filter.
+        let target = match application.target.as_ref() {
+            Some(declared) if !declared.is_context_ref() => declared.clone(),
+            Some(_) => crate::types::ability::TargetFilter::ParentTarget,
+            None if application.inherits_parent => {
+                crate::types::ability::TargetFilter::ParentTarget
+            }
+            None => application.affected.clone(),
         };
         let effect = match kind {
             PreparedKind::Prepared => Effect::BecomePrepared { target },
