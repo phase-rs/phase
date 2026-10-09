@@ -11,6 +11,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
+use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{CastPaymentMode, GameState, LayersDirty, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
@@ -428,6 +429,8 @@ fn kind(name: &str, target: &TargetFilter) -> Effect {
         "Dig" => effect_json(
             json!({"type":"Dig","player":t,"count":q(2),"destination":"Hand","keep_count":1}),
         ),
+        "GainLife" => effect_json(json!({"type":"GainLife","amount":q(3),"player":t})),
+        "Shuffle" => effect_json(json!({"type":"Shuffle","target":t})),
         "Sacrifice" => effect_json(json!({"type":"Sacrifice","target":t,"count":q(1)})),
         "DestroyAll" => effect_json(json!({"type":"DestroyAll","target":t})),
         "PhaseOut" => effect_json(json!({"type":"PhaseOut","target":t})),
@@ -454,6 +457,7 @@ enum After {
     Nothing,
     Hexproof,
     Eliminate,
+    ExtraCreature,
 }
 
 #[derive(Clone, Copy)]
@@ -472,6 +476,11 @@ struct Out {
     fingerprint: String,
     asked: Vec<String>,
     affected: Vec<String>,
+    shuffled: Vec<u8>,
+    /// `(owner, controller)` of every token on the battlefield.
+    tokens: Vec<(u8, u8)>,
+    /// `StackPushed` events over the whole run.
+    pushed: usize,
 }
 
 fn grant_hexproof(state: &mut GameState, player: PlayerId) {
@@ -503,6 +512,17 @@ fn apply(state: &mut GameState, change: After) {
         After::Eliminate => {
             engine::game::elimination::eliminate_player(state, P1, &mut Vec::new());
             assert!(!engine::game::players::is_alive(state, P1));
+        }
+        After::ExtraCreature => {
+            let id = engine::game::zones::create_object(
+                state,
+                CardId(952),
+                P1,
+                "Extra Bear".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().card_types.core_types =
+                vec![engine::types::card_type::CoreType::Creature];
         }
     }
 }
@@ -564,7 +584,8 @@ fn run_deciding(
     let mut applied_before = false;
     let mut last_wait = String::new();
     let mut asked: Vec<String> = Vec::new();
-    let mut drive = |runner: &mut GameRunner| {
+    let mut events: Vec<GameEvent> = Vec::new();
+    let mut drive = |runner: &mut GameRunner, events: &mut Vec<GameEvent>| {
         for _ in 0..80 {
             match runner.state().waiting_for.clone() {
                 WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
@@ -586,7 +607,7 @@ fn run_deciding(
                         applied_before = true;
                         apply(runner.state_mut(), before_resolve);
                     }
-                    runner.act(GameAction::PassPriority).expect("pass");
+                    events.extend(runner.act(GameAction::PassPriority).expect("pass").events);
                 }
                 WaitingFor::OptionalEffectChoice { player, .. } if decide.is_some() => {
                     asked.push(format!("optional:{}", player.0));
@@ -616,11 +637,11 @@ fn run_deciding(
             }
         }
     };
-    drive(&mut runner);
+    drive(&mut runner, &mut events);
     apply(runner.state_mut(), after_install);
     for phase in phases {
-        runner.advance_to_phase(*phase);
-        drive(&mut runner);
+        advance_collecting(&mut runner, *phase, &mut events);
+        drive(&mut runner, &mut events);
     }
     let state = runner.state();
     Out {
@@ -638,6 +659,27 @@ fn run_deciding(
             .collect(),
         last_wait,
         asked,
+        shuffled: events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::PlayerPerformedAction {
+                    player_id,
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                } => Some(player_id.0),
+                _ => None,
+            })
+            .collect(),
+        pushed: events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::StackPushed { .. }))
+            .count(),
+        tokens: state
+            .objects
+            .values()
+            .filter(|o| o.is_token && o.zone == Zone::Battlefield)
+            .map(|o| (o.owner.0, o.controller.0))
+            .collect(),
         affected: state
             .transient_continuous_effects
             .iter()
@@ -657,6 +699,24 @@ fn run_deciding(
                 .map(|t| format!("{:?}", t.affected))
                 .collect::<Vec<_>>()
         ),
+    }
+}
+
+/// `GameRunner::advance_to_phase`, keeping the events it would drop.
+fn advance_collecting(runner: &mut GameRunner, phase: Phase, events: &mut Vec<GameEvent>) {
+    let state = runner.state_mut();
+    let mut waiting = engine::game::turns::auto_advance(state, events);
+    for _ in 0..32 {
+        if runner.state().phase == phase || !matches!(waiting, WaitingFor::Priority { .. }) {
+            break;
+        }
+        for _ in 0..2 {
+            let Ok(result) = runner.act(GameAction::PassPriority) else {
+                return;
+            };
+            events.extend(result.events);
+            waiting = result.waiting_for;
+        }
     }
 }
 
@@ -687,9 +747,10 @@ fn assert_out(out: &Out, life: &[i32], hand: &[usize], bears: &[bool], prompts: 
     );
 }
 
-const PLAYER_KINDS: [&str; 12] = [
+const PLAYER_KINDS: [&str; 13] = [
     "Draw",
     "LoseLife",
+    "GainLife",
     "DealDamage",
     "Mill",
     "Discard",
@@ -1276,4 +1337,480 @@ fn f1_force_attack_population_lowers_the_declared_player() {
         After::Nothing,
     );
     assert!(gone.affected.is_empty(), "{:?}", gone.affected);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Carried declarations: effect fields no install-time rewrite reaches
+// ---------------------------------------------------------------------------------------------
+
+fn spirit(owner: TargetFilter, count: QuantityExpr) -> Effect {
+    effect_json(json!({
+        "type": "Token", "name": "Spirit", "types": ["Creature", "Spirit"],
+        "power": {"type": "Fixed", "value": 1}, "toughness": {"type": "Fixed", "value": 1},
+        "count": serde_json::to_value(count).unwrap(), "owner": serde_json::to_value(owner).unwrap(),
+    }))
+}
+
+fn one() -> QuantityExpr {
+    QuantityExpr::Fixed { value: 1 }
+}
+
+fn shuffled(out: &Out) -> String {
+    format!("{:?}", out.shuffled)
+}
+
+fn life(out: &Out) -> String {
+    format!("{:?}", out.life)
+}
+
+fn tokens(out: &Out) -> String {
+    let mut tokens = out.tokens.clone();
+    tokens.sort();
+    format!("{tokens:?}")
+}
+
+/// Runs `effect` once reading G in the creating chain and once in an end-step payload, with
+/// `observe` as the observable, against an empty payload as the baseline, for four fates of
+/// G's player: alive, hexproof after install, eliminated after install, illegal before resolve.
+fn assert_carried(name: &str, effect: Effect, observe: fn(&Out) -> String) {
+    let baseline = same_chain_run(Effect::TargetOnly {
+        target: TargetFilter::Controller,
+    });
+    let reference = same_chain_run(effect.clone());
+    assert_ne!(
+        observe(&reference),
+        observe(&baseline),
+        "{name}: reach guard, the same-chain clause is observable"
+    );
+    let delayed_after = |after| payload_run(def(effect.clone()), After::Nothing, after);
+    let empty_after = |after| payload_run(noop_payload(), After::Nothing, after);
+    assert_eq!(
+        observe(&delayed_after(After::Nothing)),
+        observe(&reference),
+        "{name}: delayed vs same chain"
+    );
+    assert_eq!(
+        observe(&delayed_after(After::Hexproof)),
+        observe(&reference),
+        "{name}: hexproof after install is affected, not targeted"
+    );
+    assert_eq!(
+        observe(&delayed_after(After::Eliminate)),
+        observe(&empty_after(After::Eliminate)),
+        "{name}: eliminated after install is no one"
+    );
+    for before in [After::Hexproof, After::Eliminate] {
+        let payload = |payload| {
+            run(
+                with_bear(delayed(payload, Phase::End)),
+                &[Pick::Player(P1), Pick::Bear(1)],
+                &[Phase::End],
+                before,
+                After::Nothing,
+            )
+        };
+        assert_eq!(
+            observe(&payload(def(effect.clone()))),
+            observe(&payload(noop_payload())),
+            "{name}: {before:?} before resolve is no one at install"
+        );
+    }
+}
+
+/// CR 701.24a: "that player shuffles their library" in the payload.
+#[test]
+fn c1_shuffle_target_carries_the_declared_player() {
+    assert_carried("Shuffle", kind("Shuffle", &dp(G)), shuffled);
+    assert_eq!(
+        payload_run(def(kind("Shuffle", &dp(G))), After::Nothing, After::Nothing).shuffled,
+        vec![1]
+    );
+}
+
+/// CR 119.1: `GainLife.player`.
+#[test]
+fn c2_gain_life_player_carries_the_declared_player() {
+    assert_carried("GainLife", kind("GainLife", &dp(G)), life);
+    assert_eq!(
+        payload_run(
+            def(kind("GainLife", &dp(G))),
+            After::Nothing,
+            After::Nothing
+        )
+        .life,
+        vec![20, 23, 20]
+    );
+}
+
+/// CR 111.2: `Token.owner`.
+#[test]
+fn c3_token_owner_carries_the_declared_player() {
+    assert_carried("Token.owner", spirit(dp(G), one()), tokens);
+    assert_eq!(
+        payload_run(def(spirit(dp(G), one())), After::Nothing, After::Nothing)
+            .tokens
+            .iter()
+            .map(|(owner, _)| *owner)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+}
+
+fn creatures_of_g() -> QuantityExpr {
+    QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(creature_of(G)),
+        },
+    }
+}
+
+/// `Token.count`: the creature population is the declared player's, counted when the payload
+/// resolves.
+#[test]
+fn c4_token_count_counts_the_declared_players_creatures_live() {
+    let spirits = spirit(TargetFilter::Controller, creatures_of_g());
+    assert_carried("Token.count", spirits.clone(), tokens);
+    let counted = |after| {
+        payload_run(def(spirits.clone()), After::Nothing, after)
+            .tokens
+            .len()
+    };
+    assert_eq!(counted(After::Nothing), 1, "P1 controls one creature");
+    assert_eq!(
+        counted(After::ExtraCreature),
+        2,
+        "counted at firing, not at install"
+    );
+}
+
+/// A payload-local group stays local; the outer one is carried; distinct outer groups keep
+/// their own players.
+#[test]
+fn c5_local_group_shadows_and_distinct_groups_stay_distinct() {
+    let payload = then(
+        declaring(pick_player(), GL),
+        then(def(kind("Shuffle", &dp(GL))), def(kind("Shuffle", &dp(G)))),
+    );
+    let out = run(
+        then(head(), delayed(payload, Phase::End)),
+        &[Pick::Player(P1), Pick::Player(P2)],
+        &[Phase::End],
+        After::Nothing,
+        After::Nothing,
+    );
+    assert_eq!(
+        out.shuffled,
+        vec![2, 1],
+        "local GL=P2 first, carried G=P1 second"
+    );
+
+    let payload = then(def(kind("GainLife", &dp(G))), def(kind("Shuffle", &dp(G2))));
+    let out = run(
+        then(
+            head(),
+            then(declaring(pick_player(), G2), delayed(payload, Phase::End)),
+        ),
+        &[Pick::Player(P1), Pick::Player(P2)],
+        &[Phase::End],
+        After::Nothing,
+        After::Nothing,
+    );
+    assert_eq!((out.life, out.shuffled), (vec![20, 23, 20], vec![2]));
+}
+
+/// A payload that installs another delayed trigger hands the carried players on.
+#[test]
+fn c6_nested_payload_carries_the_outer_group() {
+    let inner = delayed(
+        then(def(kind("Shuffle", &dp(G))), def(kind("GainLife", &dp(G)))),
+        Phase::Upkeep,
+    );
+    let out = run(
+        then(head(), delayed(inner, Phase::End)),
+        &[Pick::Player(P1)],
+        &[Phase::End, Phase::Upkeep],
+        After::Nothing,
+        After::Nothing,
+    );
+    assert_eq!((out.life, out.shuffled), (vec![20, 23, 20], vec![1]));
+}
+
+/// A lasting effect whose affected filter reads G is lowered to G's player's objects when the
+/// payload resolves, as in the creating chain.
+#[test]
+fn c7_lasting_effect_filter_reads_the_carried_group() {
+    use engine::types::ability::ContinuousModification;
+    use engine::types::keywords::Keyword;
+    let flying_for_g = || Effect::GenericEffect {
+        static_abilities: vec![StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(creature_of(G)))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }])],
+        duration: Some(Duration::UntilEndOfTurn),
+        target: None,
+        end_cost: None,
+    };
+    let reference = same_chain_run(flying_for_g());
+    let delayed = payload_run(def(flying_for_g()), After::Nothing, After::Nothing);
+    assert_eq!(
+        reference.affected.len(),
+        1,
+        "reach guard: the clause grants once"
+    );
+    assert_eq!(delayed.affected, reference.affected);
+}
+
+/// A payload-local group read by a payload it installs is carried to that payload.
+#[test]
+fn c8_nested_payload_carries_a_payload_local_group() {
+    let payload = then(
+        declaring(pick_player(), GL),
+        delayed(def(kind("Shuffle", &dp(GL))), Phase::Upkeep),
+    );
+    let out = run(
+        then(head(), delayed(payload, Phase::End)),
+        &[Pick::Player(P1), Pick::Player(P2)],
+        &[Phase::End, Phase::Upkeep],
+        After::Nothing,
+        After::Nothing,
+    );
+    assert_eq!(out.shuffled, vec![2]);
+}
+
+/// The payload's own declaration of a group wins over the carried player of the same group.
+#[test]
+fn c9_payload_local_declaration_shadows_the_carried_player() {
+    let payload = then(declaring(pick_player(), G), def(kind("Shuffle", &dp(G))));
+    let out = run(
+        then(head(), delayed(payload, Phase::End)),
+        &[Pick::Player(P1), Pick::Player(P2)],
+        &[Phase::End],
+        After::Nothing,
+        After::Nothing,
+    );
+    assert_eq!(out.shuffled, vec![2]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Targeted payload slots that read a carried group
+// ---------------------------------------------------------------------------------------------
+
+fn destroy_creature_of(group: ChosenGroupId) -> AbilityDefinition {
+    def(Effect::Destroy {
+        target: TargetFilter::Typed(creature_of(group)),
+        cant_regenerate: false,
+    })
+}
+
+fn targeted_run(payload: AbilityDefinition, picks: &[Pick], after: After) -> Out {
+    run(
+        then(head(), delayed(payload, Phase::End)),
+        picks,
+        &[Phase::End],
+        After::Nothing,
+        after,
+    )
+}
+
+/// CR 603.7a + CR 608.2c: a payload slot filter that reads a carried group offers that player's
+/// objects, at the payload root and at a sub-node.
+#[test]
+fn b1_targeted_slot_reads_the_carried_group() {
+    let picks = [Pick::Player(P1), Pick::Bear(0)];
+    let reference = run(
+        then(head(), destroy_creature_of(G)),
+        &picks,
+        &[],
+        After::Nothing,
+        After::Nothing,
+    );
+    assert_eq!(
+        reference.bears,
+        vec![false, true],
+        "reach guard: same chain"
+    );
+    let root = targeted_run(destroy_creature_of(G), &picks, After::ExtraCreature);
+    assert_eq!(
+        (root.bears, root.prompts),
+        (vec![false, true], 2),
+        "root node"
+    );
+    let sub = then(
+        def(Effect::TargetOnly {
+            target: TargetFilter::Controller,
+        }),
+        destroy_creature_of(G),
+    );
+    let sub = targeted_run(sub, &picks, After::ExtraCreature);
+    assert_eq!((sub.bears, sub.prompts), (vec![false, true], 2), "sub node");
+}
+
+/// A group the payload itself declares earlier takes the payload's player, not the carried one.
+#[test]
+fn b1b_payload_local_announcement_wins_over_the_carried_player() {
+    let payload = then(declaring(pick_player(), G), destroy_creature_of(G));
+    let out = targeted_run(
+        payload,
+        &[Pick::Player(P1), Pick::Player(P2), Pick::Bear(1)],
+        After::Nothing,
+    );
+    assert_eq!(out.bears, vec![true, false]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// CR 603.4 fire-time gate that reads a carried group
+// ---------------------------------------------------------------------------------------------
+
+fn count_check(filter: TypedFilter, comparator: Comparator, n: i32) -> AbilityCondition {
+    AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(filter),
+            },
+        },
+        comparator,
+        rhs: QuantityExpr::Fixed { value: n },
+    }
+}
+
+fn gated_pushes(condition: Option<AbilityCondition>, after: After) -> usize {
+    let mut payload = def(lose(TargetFilter::Controller));
+    payload.condition = condition;
+    payload_run(payload, After::Nothing, after).pushed
+}
+
+/// A false gate keeps the delayed ability off the stack (CR 603.4); the true gate and the
+/// ungated payload put it there. Covers both `QuantityCheck` bridges and `Not`.
+#[test]
+fn g1_false_gate_on_a_carried_group_does_not_trigger() {
+    let lands = || TypedFilter::new(TypeFilter::Land).controller(declared(G));
+    let creatures = || creature_of(G);
+    let on_stack = gated_pushes(None, After::Nothing);
+    let not = |c| AbilityCondition::Not {
+        condition: Box::new(c),
+    };
+    for (name, condition, triggers) in [
+        (
+            "comparison, true",
+            count_check(creatures(), Comparator::LE, 5),
+            true,
+        ),
+        (
+            "comparison, false",
+            count_check(creatures(), Comparator::GE, 5),
+            false,
+        ),
+        (
+            "is-present, true",
+            count_check(creatures(), Comparator::GE, 1),
+            true,
+        ),
+        (
+            "is-present, false",
+            count_check(lands(), Comparator::GE, 1),
+            false,
+        ),
+        (
+            "not, true",
+            not(count_check(creatures(), Comparator::GE, 5)),
+            true,
+        ),
+        (
+            "not, false",
+            not(count_check(creatures(), Comparator::LE, 5)),
+            false,
+        ),
+    ] {
+        assert_eq!(
+            gated_pushes(Some(condition), After::Nothing),
+            on_stack - usize::from(!triggers),
+            "{name}"
+        );
+    }
+}
+
+/// A gate on a carried player who left the game is read at resolution, where it names no one and
+/// does nothing (CR 603.4 + CR 800.4).
+#[test]
+fn g2_gate_on_a_carried_player_who_left_does_nothing() {
+    let gated = |after| {
+        let mut payload = def(lose(TargetFilter::Controller));
+        payload.condition = Some(count_check(creature_of(G), Comparator::GE, 1));
+        payload_run(payload, After::Nothing, after)
+    };
+    let untouched = payload_run(noop_payload(), After::Nothing, After::Nothing);
+    assert!(
+        differs(&gated(After::Nothing), &untouched),
+        "reach guard: with P1 present the gate is true and the effect happens"
+    );
+    let empty = payload_run(noop_payload(), After::Nothing, After::Eliminate);
+    let gone = gated(After::Eliminate);
+    assert_eq!(
+        (&gone.fingerprint, &gone.last_wait),
+        (&empty.fingerprint, &empty.last_wait)
+    );
+}
+
+/// A declared player who was an illegal target as the creating chain began to resolve names no
+/// one at install, so the payload's slot offers none of their objects.
+#[test]
+fn b1c_slot_of_an_install_time_illegal_player_offers_nothing() {
+    let run = |before| {
+        run(
+            with_bear(delayed(destroy_creature_of(G), Phase::End)),
+            &[Pick::Player(P1), Pick::Bear(1)],
+            &[Phase::End],
+            before,
+            After::Nothing,
+        )
+    };
+    assert_eq!(
+        run(After::Nothing).bears,
+        vec![false, true],
+        "reach guard: a legal P1 loses a bear"
+    );
+    assert_eq!(run(After::Hexproof).bears, vec![true, true]);
+}
+
+/// A payload node that declares the group but announces no player names no one; it does not
+/// fall back to the carried player.
+#[test]
+fn b4_payload_declaration_without_a_player_names_no_one() {
+    let silent = declaring(
+        Effect::TargetOnly {
+            target: TargetFilter::Controller,
+        },
+        G,
+    );
+    let reader = || def(kind("Shuffle", &dp(G)));
+    assert_eq!(
+        payload_run(reader(), After::Nothing, After::Nothing).shuffled,
+        vec![1],
+        "reach guard: without the local declaration the carried player shuffles"
+    );
+    let out = payload_run(then(silent, reader()), After::Nothing, After::Nothing);
+    assert!(out.shuffled.is_empty());
+}
+
+/// The selection-time mirror of b4: a silent local declaration leaves a reader slot without
+/// candidates instead of offering the carried player's objects.
+#[test]
+fn b4b_slot_after_a_silent_declaration_offers_no_carried_objects() {
+    let silent = declaring(
+        Effect::TargetOnly {
+            target: TargetFilter::Controller,
+        },
+        G,
+    );
+    let picks = [Pick::Player(P1), Pick::Bear(0)];
+    let run = |payload| targeted_run(payload, &picks, After::ExtraCreature);
+    let reference = run(destroy_creature_of(G));
+    assert_eq!(
+        (reference.bears, reference.prompts),
+        (vec![false, true], 2),
+        "reach guard: without the local declaration the carried player's bear is offered"
+    );
+    let out = run(then(silent, destroy_creature_of(G)));
+    assert_eq!((out.bears, out.prompts), (vec![true, true], 1));
 }

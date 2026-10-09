@@ -3348,7 +3348,10 @@ mod tests {
 
     /// `TargetFilter::DeclaredPlayer` is new in serialized full-game state
     /// (CR 608.2c + CR 115.1a); a v120 peer cannot deserialize it, so it must be
-    /// refused before it receives v121 state.
+    /// refused before it receives v121 state. `SpellContext` also gains
+    /// `outer_declared_players` (CR 603.7a), the players a delayed ability's
+    /// creating chain named by group, omitted when empty; amended in place, not
+    /// bumped.
     /// The CR 601.2a spell announcement adds `GameObject::spell_announcement`,
     /// `GameState::next_spell_announcement` and `GameEvent::BecomesTarget.targeter`;
     /// a v119 peer cannot decode v120 state, so it must be refused before state

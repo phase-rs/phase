@@ -212,8 +212,11 @@ export class NativeEngineVersionMismatchError extends Error {
  *
  * 121 — TargetFilter gains DeclaredPlayer { group } (CR 608.2c + CR 115.1a), the
  *      player a later clause names after a declared target player. A v120 peer
- *      cannot deserialize it; the exact-match handshake refuses the pairing. P2P
- *      moves in lockstep (wire 103); lobby messages are unchanged.
+ *      cannot deserialize it; the exact-match handshake refuses the pairing.
+ *      SpellContext also gains outer_declared_players (CR 603.7a), the players a
+ *      delayed ability's creating chain named by group, omitted when empty;
+ *      amended in place, not bumped. P2P moves in lockstep (wire 103); lobby
+ *      messages are unchanged.
  * 120 — CR 601.2a spell announcement: GameObject gains spell_announcement,
  *      GameState gains next_spell_announcement, and GameEvent BecomesTarget
  *      gains the targeter that announced the target. A v119 peer cannot

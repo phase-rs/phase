@@ -1311,14 +1311,51 @@ pub(crate) fn resolve_live_declared_player(
     ability: &ResolvedAbility,
     group: crate::types::ability::ChosenGroupId,
 ) -> Option<PlayerId> {
-    let (slot, player) = super::ability_utils::declared_group_player_slot(
-        resolving_root_ability(state, ability),
-        group,
-    )??;
+    let root = resolving_root_ability(state, ability);
+    // A group the root declares is local even when it announced no player.
+    let Some(local) = super::ability_utils::declared_group_player_slot(root, group) else {
+        return carried_declared_player(state, root, group);
+    };
+    let (slot, player) = local?;
     let illegal = resolution_carrier_entry(state, ability)
         .and_then(StackEntry::ability)
         .is_some_and(|root| root.illegal_target_slots.contains(&slot));
     (!illegal && super::players::is_alive(state, player)).then_some(player)
+}
+
+/// CR 603.7a + CR 800.4: the player the creating chain announced for `group`, carried on the
+/// delayed payload `root`, while that player is in the game. Takes the root itself because a
+/// payload that is not yet on the stack has no stack root to find by source.
+pub(crate) fn carried_declared_player(
+    state: &GameState,
+    root: &ResolvedAbility,
+    group: crate::types::ability::ChosenGroupId,
+) -> Option<PlayerId> {
+    root.context
+        .outer_declared_players
+        .iter()
+        .find_map(|&(carried, player)| (carried == group).then_some(player))
+        .filter(|&player| super::players::is_alive(state, player))
+}
+
+/// CR 603.7a + CR 608.2c: every declared group the creating `ability` can name, with its player
+/// as `resolve_live_declared_player` reads it now: the groups its root declares and the groups
+/// it carries from an earlier delayed creation. A group that names no one is omitted.
+pub(crate) fn live_declared_players(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Vec<(crate::types::ability::ChosenGroupId, PlayerId)> {
+    let root = resolving_root_ability(state, ability);
+    let mut groups = super::ability_utils::declared_groups_in_chain(root);
+    for &(group, _) in &root.context.outer_declared_players {
+        if !groups.contains(&group) {
+            groups.push(group);
+        }
+    }
+    groups
+        .into_iter()
+        .filter_map(|group| Some((group, resolve_live_declared_player(state, ability, group)?)))
+        .collect()
 }
 
 /// CR 608.2b: whether `ability` is the resolving stack entry or a node of it.

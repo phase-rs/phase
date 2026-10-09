@@ -2140,6 +2140,21 @@ pub(crate) fn declared_group_player_slot(
     found
 }
 
+/// The groups declared by the nodes of `root`'s chain, first-seen order, distinct.
+pub(crate) fn declared_groups_in_chain(
+    root: &ResolvedAbility,
+) -> Vec<crate::types::ability::ChosenGroupId> {
+    let mut groups = Vec::new();
+    walk_declared_slots(root, &mut |node, _, _| {
+        if let Some(group) = node.declares_chosen_group {
+            if !groups.contains(&group) {
+                groups.push(group);
+            }
+        }
+    });
+    groups
+}
+
 type DeclaredSlotVisit<'a> = dyn FnMut(&'a ResolvedAbility, &[ChainStep], Option<usize>) + 'a;
 
 /// CR 601.2c + CR 115.10a: the single walk that numbers a chain's declared target slots for
@@ -7833,10 +7848,19 @@ fn legal_targets_for_selected_slot(
         }
         // CR 608.2c + CR 115.1a: a reader of a declared group names the player THAT
         // group's clause announced, not the latest player selected.
-        if !super::filter::bind_declared_groups(
-            &mut bound_filter,
-            &announced_group_players(prior_specs, selected_slots),
-        ) {
+        let mut players = announced_group_players(prior_specs, selected_slots);
+        // CR 603.7a: a group the chain does not declare is the delayed payload's carried player;
+        // one it does not carry stays unbound and offers nothing. A declaration that announced no
+        // player still shadows the carried one, as in `resolve_live_declared_player`.
+        for group in super::filter::declared_groups(&bound_filter) {
+            if declared_group_player_slot(ability, group).is_none() {
+                players.extend(
+                    targeting::carried_declared_player(state, ability, group)
+                        .map(|player| (group, player)),
+                );
+            }
+        }
+        if !super::filter::bind_declared_groups(&mut bound_filter, &players) {
             return Vec::new();
         }
         let relative_kind = relative_controller_kind(&bound_filter);
@@ -24427,6 +24451,142 @@ mod tests {
             !offered.contains(&TargetRef::Object(their_creature)),
             "their creature (a different card type) must never be offered"
         );
+    }
+
+    /// CR 603.7a: a delayed payload's slot filter that reads a carried group offers the carried
+    /// player's objects, even when a same-source stack entry declares the same id as another
+    /// player.
+    #[test]
+    fn carried_group_slot_filter_offers_the_carried_players_objects() {
+        use crate::types::ability::ChosenGroupId;
+        let group = ChosenGroupId(ChosenGroupId::DECLARED_PLAYER_BASE);
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(100);
+        let creature = |state: &mut GameState, card: u64, owner: PlayerId| {
+            let id = create_object(
+                state,
+                CardId(card),
+                owner,
+                format!("Creature {card}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            id
+        };
+        let mine = creature(&mut state, 1, PlayerId(0));
+        let theirs = creature(&mut state, 2, PlayerId(1));
+        let mut resident = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Player,
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            source,
+            PlayerId(0),
+        );
+        resident.declares_chosen_group = Some(group);
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: ObjectId(50),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(resident),
+            },
+        });
+        let payload = |carried: Option<PlayerId>| {
+            let mut ability = ResolvedAbility::new(
+                Effect::Destroy {
+                    target: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::DeclaredPlayer { group }),
+                    ),
+                    cant_regenerate: false,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            ability.context.outer_declared_players =
+                carried.map(|player| (group, player)).into_iter().collect();
+            ability
+        };
+        let offered = |state: &GameState, ability: &ResolvedAbility| {
+            let specs = target_slot_specs(state, ability);
+            assert_eq!(specs.len(), 1, "reach-guard: the payload has one slot");
+            legal_targets_for_selected_slot(state, ability, &specs[0], &[], &[])
+        };
+        assert_eq!(
+            offered(&state, &payload(Some(PlayerId(1)))),
+            vec![TargetRef::Object(theirs)]
+        );
+        assert_ne!(
+            theirs, mine,
+            "reach-guard: the two players' creatures differ"
+        );
+    }
+
+    /// CR 608.2c: a payload node that declares the group but announced no player shadows the
+    /// carried player, so a reader slot offers none of their objects.
+    #[test]
+    fn silent_local_declaration_shadows_the_carried_group_at_selection() {
+        use crate::types::ability::ChosenGroupId;
+        let group = ChosenGroupId(ChosenGroupId::DECLARED_PLAYER_BASE);
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(100);
+        let theirs = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Theirs".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&theirs)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let payload = |declares: bool| {
+            let mut root = ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            root.declares_chosen_group = declares.then_some(group);
+            root.sub_ability = Some(Box::new(ResolvedAbility::new(
+                Effect::Destroy {
+                    target: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::DeclaredPlayer { group }),
+                    ),
+                    cant_regenerate: false,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )));
+            root.context.outer_declared_players = vec![(group, PlayerId(1))];
+            root
+        };
+        let offered = |ability: &ResolvedAbility| {
+            let specs = target_slot_specs(&state, ability);
+            assert_eq!(specs.len(), 1, "reach-guard: only the reader has a slot");
+            legal_targets_for_selected_slot(&state, ability, &specs[0], &[], &[])
+        };
+        assert_eq!(
+            offered(&payload(false)),
+            vec![TargetRef::Object(theirs)],
+            "reach-guard: without the local declaration the carried player's creature is offered"
+        );
+        assert_eq!(offered(&payload(true)), Vec::<TargetRef>::new());
     }
 
     /// T7: a single-slot ability already carrying `ObjectScope::Target` — with

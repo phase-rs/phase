@@ -28567,6 +28567,13 @@ pub struct SpellContext {
     /// event-delayed trigger, which reads the event that fires it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creation_lookback_event: Option<Box<crate::types::events::GameEvent>>,
+    /// CR 603.7a + CR 608.2c: the players the creating chain's declared groups named when a
+    /// delayed ability was created, for the groups still legal then. The payload fires as a fresh
+    /// root with no declaring clause of those groups; `targeting::resolve_live_declared_player`
+    /// reads this map only for a group no node of the resolving root declares. Stamped on the
+    /// payload root by `delayed_trigger::resolve`; empty everywhere else.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outer_declared_players: Vec<(ChosenGroupId, PlayerId)>,
     /// CR 608.2c: The immediate `forward_result` producer's complete ordered
     /// result. `None` means no producer has run in this resolution; `Some([])`
     /// is a completed producer that moved no objects and intentionally blocks

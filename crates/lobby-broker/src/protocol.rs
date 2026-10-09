@@ -63,8 +63,11 @@ pub struct TournamentRequestId(pub u64);
 /// 121 — `TargetFilter` gains `DeclaredPlayer { group }` (CR 608.2c + CR 115.1a),
 ///      the player a later clause names after a declared target player. It
 ///      reaches every serialized ability, so a v120 peer cannot deserialize it
-///      and the exact-match handshake refuses the pairing. Full-game peers and
-///      P2P move in lockstep (wire 103); lobby messages are unchanged.
+///      and the exact-match handshake refuses the pairing. `SpellContext` also
+///      gains `outer_declared_players` (CR 603.7a), the players a delayed
+///      ability's creating chain named by group, omitted when empty; amended in
+///      place, not bumped. Full-game peers and P2P move in lockstep (wire 103);
+///      lobby messages are unchanged.
 /// 120 — CR 601.2a spell announcement: `GameObject::spell_announcement`,
 ///      `GameState::next_spell_announcement` and the `targeter` on
 ///      `GameEvent::BecomesTarget`. A v119 peer cannot deserialize the new
