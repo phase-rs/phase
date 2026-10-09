@@ -29,10 +29,11 @@
 //! (CR 608.2k + CR 603.2; CR 603.6a for "Whenever a [type] enters"). It is
 //! affected, not targeted (CR 115.10a), and is read from the trigger event at
 //! resolution. The watcher texts there are building-block fixtures, not
-//! printed cards: no printed card has this shape today. Regression mechanism:
-//! the parser rebound "that creature" to `ParentTarget`, which the resolver
-//! read as the trigger's own source; the resolver had no event-referent route,
-//! so even the bare "it" form prepared nothing.
+//! printed cards: no printed card has this shape today. Regression mechanism
+//! for events the stack does not seed into `ability.targets` (e.g. "becomes
+//! tapped"): the parser rebound "that creature" to `ParentTarget`, which the
+//! resolver read as the trigger's own source; the resolver had no event-referent
+//! route, so even the bare "it" form prepared nothing there.
 
 use engine::game::combat::AttackTarget;
 use engine::game::effects::prepare::prepare_object;
@@ -948,9 +949,11 @@ fn assert_event_referent_prepares_entering_creature(watcher_text: &str) {
 /// CR 608.2k + CR 603.6a + CR 722.3a: "that creature" is the creature that
 /// entered.
 ///
-/// DISCRIMINATION: with the parser arm reverted, the subject is `ParentTarget`
-/// and the watcher is prepared instead (negative flips); with the resolver
-/// branch reverted, nothing is prepared (positive flips).
+/// DISCRIMINATION: the parser half is pinned by
+/// `become_prepared_event_referent_parses_to_triggering_source` and the unseeded
+/// tap test (ETB events are seeded into `ability.targets`, so this test passes
+/// with the parser arm reverted); this test discriminates the resolver branch:
+/// with it reverted, nothing is prepared (positive flips).
 #[test]
 fn become_prepared_event_referent_that_creature_prepares_entering_creature() {
     assert_event_referent_prepares_entering_creature(ETB_THAT_CREATURE);
@@ -1005,8 +1008,9 @@ fn become_prepared_event_referent_ineligible_entering_creature_is_skipped() {
 /// CR 722.3b + CR 608.2k + CR 508.1m: "that creature" in an attack trigger is
 /// the attacking creature; only it loses the designation.
 ///
-/// DISCRIMINATION: with the parser arm reverted, the watcher (the source) is
-/// unprepared and the attacker stays prepared; with the resolver branch
+/// DISCRIMINATION: attack events are seeded into `ability.targets`, so this test
+/// passes with the parser arm reverted (that half is pinned by the shape row and
+/// the unseeded tap test); it discriminates the resolver branch: with it
 /// reverted, nothing is unprepared.
 #[test]
 fn become_unprepared_event_referent_attacker_loses_designation() {
