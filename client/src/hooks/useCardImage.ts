@@ -14,6 +14,7 @@ import {
   isLocaleArtReady,
   imageUrlSize,
   loadLocaleArt,
+  loadScryfallData,
   resolveFaceIndexSync,
   resolveOracleIdSync,
   resolvePrintingImageUrl,
@@ -853,7 +854,7 @@ export function useCardImage(
     generation: "",
     values: new Set(),
   });
-  const [, rerenderForArtCacheEvent] = useState(0);
+  const [, rerenderForMetadata] = useState(0);
   const remoteContinuation = useRef<RemoteContinuation>({
     generation: "",
     promise: null,
@@ -882,7 +883,7 @@ export function useCardImage(
       // global invalidation match. All in-tree dispatchers send a CustomEvent
       // with detail; this is defensive against future callers.
       if (detail && detail !== target) return;
-      rerenderForArtCacheEvent((generation) => generation + 1);
+      rerenderForMetadata((generation) => generation + 1);
     };
     artCacheEvents.addEventListener("update", handler);
     return () => artCacheEvents.removeEventListener("update", handler);
@@ -1101,6 +1102,21 @@ export function useCardImage(
         loadLocaleArtInBackground(language);
         try {
           let imageAsset = selectedRemoteOverride();
+          if (!isToken) {
+            const metadata = await loadScryfallData();
+            if (cancelled) return;
+            if (metadata) {
+              const nextOracleId = oracleId || resolveOracleIdSync(cardName) || "";
+              const nextFaceIndex = resolveFaceIndexSync(nextOracleId, faceName) ?? faceIndex;
+              if (nextOracleId !== resolvedOracleId || nextFaceIndex !== resolvedFaceIndex) {
+                rerenderForMetadata((generation) => generation + 1);
+                return;
+              }
+            }
+            // Printings can finish first and invalidate an awaiting request.
+            // Every active override binds its face and orientation after this load.
+            imageAsset = selectedRemoteOverride();
+          }
           if (!imageAsset) {
             acquiredRemoteCache = true;
             imageAsset = await acquireCachedImageSrc(
@@ -1177,6 +1193,24 @@ export function useCardImage(
       const installed = nextSources.some((source) => source.kind === "installed");
       const settled = installed || effectiveOffline || !canResolveRemotely;
       publish(nextSources, undefined, settled);
+      if (installed && !isToken && !effectiveOffline) {
+        // Metadata readiness does not change the availability of installed art
+        // or take ownership of its installed-to-remote continuation.
+        const metadata = await loadScryfallData();
+        if (cancelled || !metadata) return;
+        const nextOracleId = oracleId || resolveOracleIdSync(cardName) || "";
+        const nextFaceIndex = resolveFaceIndexSync(nextOracleId, faceName) ?? faceIndex;
+        if (nextOracleId !== resolvedOracleId || nextFaceIndex !== resolvedFaceIndex) {
+          rerenderForMetadata((generation) => generation + 1);
+          return;
+        }
+        const survivingSources = nextSources.filter((source) =>
+          source.src === null || !failedSources.current.values.has(source.src));
+        if (!continuation.promise && survivingSources.some((source) => source.kind === "installed")) {
+          publish(survivingSources);
+        }
+        return;
+      }
       if (settled) return;
       void continuation.start?.();
     }

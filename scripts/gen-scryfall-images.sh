@@ -69,7 +69,8 @@ mkdir -p "$(dirname "$OUTPUT")"
 #                        its back face (e.g. Awaken the Maelstrom on Invasion
 #                        of Alara, a `transform` card) is portrait.
 #   - layout           — Scryfall layout string (e.g. "flip", which the
-#                        frontend uses for the 180-degree preview spin)
+#                        frontend uses for the 180-degree preview spin).
+#                        Older faces without orientation fall back to split.
 #   - name, mana_cost, cmc, type_line, colors, color_identity, keywords
 #
 # Token entries are included separately with a "token:" prefix key to avoid
@@ -81,9 +82,9 @@ NON_PLAYABLE='["token","double_faced_token","emblem","art_series","vanguard","sc
 jq -c --argjson exclude "$NON_PLAYABLE" "$SCRYFALL_JQ_PRELUDE"'
   # Printed orientation of one face (a card_faces element, or the card itself
   # when it has none); see the `faces` entry above.
-  def face_orientation($layout):
+  def face_orientation($layout; $type_line):
     if $layout == "split"
-      or (((.type_line // "") | split(" — ") | .[0] // "") | split(" ") | index("Battle")) != null
+      or (((($type_line // "") | split(" — ") | .[0] // "") | split(" ") | index("Battle")) != null)
     then "landscape"
     else "portrait"
     end;
@@ -105,13 +106,13 @@ jq -c --argjson exclude "$NON_PLAYABLE" "$SCRYFALL_JQ_PRELUDE"'
         [$card.card_faces[] | {
           normal: (.image_uris.normal // $card.image_uris.normal),
           art_crop: (.image_uris.art_crop // $card.image_uris.art_crop),
-          orientation: face_orientation($card.layout)
+          orientation: face_orientation($card.layout; .type_line)
         }]
       else
         [{
           normal: $card.image_uris.normal,
           art_crop: $card.image_uris.art_crop,
-          orientation: ($card | face_orientation($card.layout))
+          orientation: face_orientation($card.layout; $card.type_line)
         }]
       end),
       layout: $card.layout,
@@ -149,7 +150,7 @@ jq -c --argjson exclude "$NON_PLAYABLE" "$SCRYFALL_JQ_PRELUDE"'
       faces: [{
         normal: $tok.image_uris.normal,
         art_crop: $tok.image_uris.art_crop,
-        orientation: ($tok | face_orientation($tok.layout))
+        orientation: face_orientation($tok.layout; $tok.type_line)
       }],
       layout: $tok.layout,
       name: $tok.name,

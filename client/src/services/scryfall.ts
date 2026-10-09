@@ -515,7 +515,7 @@ export function resolveFaceIndexSync(
 export function isCardImageRotatedSync(
   oracleId: string,
   cardName: string,
-  faceIndex: number,
+  faceIndex = 0,
 ): boolean {
   if (!scryfallDataResolved) return false;
   const entry = scryfallDataResolved[oracleId.toLowerCase()]

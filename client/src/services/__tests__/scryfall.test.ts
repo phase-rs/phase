@@ -162,6 +162,25 @@ describe("local Scryfall data authorities", () => {
     }).image_uris).toBeUndefined();
   });
 
+  it.each([{ orientation: null }, { orientation: "diagonal" }, { orientation: 1 }, { orientation: [] }])("rejects an invalid face orientation $orientation at both data boundaries and accepts a retry", async ({ orientation }) => {
+    const mod = await loadScryfallModule();
+    const card = { ...validCardEntry(), faces: [{ normal: "https://img.example/front.jpg", orientation }] };
+    const printing = { ...validPrintingEntry(), faces: [{ normal: "https://img.example/pin.jpg", orientation }] };
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ "lightning-bolt": card }))
+      .mockResolvedValueOnce(jsonResponse({ "lightning-bolt": { ...card, faces: [{ normal: "https://img.example/front.jpg", orientation: "landscape" }] } }))
+      .mockResolvedValueOnce(jsonResponse({ "lightning-bolt": [printing] }))
+      .mockResolvedValueOnce(jsonResponse({ "lightning-bolt": [{ ...printing, faces: [{ normal: "https://img.example/pin.jpg", orientation: "portrait" }] }] }));
+    await expect(mod.loadScryfallData()).resolves.toBeNull();
+    expect(mod.isCardImageRotatedSync("lightning-bolt", "Lightning Bolt")).toBe(false);
+    await expect(mod.loadScryfallData()).resolves.not.toBeNull();
+    expect(mod.isCardImageRotatedSync("lightning-bolt", "Lightning Bolt")).toBe(true);
+    await expect(mod.loadPrintingsData()).resolves.toBeNull();
+    await expect(mod.loadPrintingsData()).resolves.not.toBeNull();
+    const accepted = await mod.getCardPrintings("lightning-bolt");
+    expect(mod.resolvePrintingImageUrl(accepted[0], 0, "normal")).toBe("https://img.example/pin.jpg");
+  });
+
   it("rejects malformed printings payloads and keeps a valid retry cached", async () => {
     const fetchMock = vi.fn()
       .mockRejectedValueOnce(new Error("offline"))
@@ -872,6 +891,44 @@ describe("card image rotation — landscape faces (issue #9502)", () => {
     expect(secondDoor.isRotated).toBe(true);
     expect(isCardImageRotatedSync(legacyRoomOracleId, "Legacy Annex", 0)).toBe(true);
   });
+
+  it("uses the selected face, explicit portrait, and the same face-zero fallback as its URL", async () => {
+    const mod = await loadScryfallModule();
+    const mixed = multiFaceEntry("mixed", "split", "Instant // Sorcery", [
+      { name: "First", orientation: "portrait" }, { name: "Second" },
+    ]);
+    global.fetch = vi.fn().mockResolvedValue(jsonResponse({ mixed, first: mixed }));
+    const first = await mod.fetchCardImageAsset("First", 0);
+    const second = await mod.fetchCardImageAsset("First", 1);
+    const outOfRange = await mod.fetchCardImageAsset("First", 7);
+    expect(first.src).toBe("https://img.example/First.jpg");
+    expect(first.isRotated).toBe(false);
+    expect(second.src).toBe("https://img.example/Second.jpg");
+    expect(second.isRotated).toBe(true);
+    expect(outOfRange.src).toBe(first.src);
+    expect(outOfRange.isRotated).toBe(false);
+    expect(mod.isCardImageRotatedSync("mixed", "First")).toBe(false);
+    expect(mod.isCardImageRotatedSync("mixed", "First", 1)).toBe(true);
+    expect(mod.isCardImageRotatedSync("mixed", "First", 7)).toBe(false);
+    expect(mod.isCardImageRotatedSync("missing", "First", 1)).toBe(true);
+    expect(mod.isCardImageRotatedSync("missing", "Missing", 1)).toBe(false);
+    const unknownFace = await mod.fetchCardImageAssetByOracleId("mixed", "Missing Face");
+    expect(unknownFace.src).toBe(first.src);
+    expect(unknownFace.isRotated).toBe(false);
+  });
+
+  it("leaves an older transform face upright and accepts older printing faces", async () => {
+    const mod = await loadScryfallModule();
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ legacy: multiFaceEntry("legacy", "transform", "Creature // Creature", [{ name: "Legacy Front" }, { name: "Legacy Back" }]) }))
+      .mockResolvedValueOnce(jsonResponse({ legacy: [{ ...validPrintingEntry(), faces: [{ normal: "https://img.example/legacy-pin.jpg" }] }] }));
+    const image = await mod.fetchCardImageAssetByOracleId("legacy", "Legacy Back");
+    expect(image.src).toBe("https://img.example/Legacy%20Back.jpg");
+    expect(image.isRotated).toBe(false);
+    const printings = await mod.getCardPrintings("legacy");
+    expect(printings).toHaveLength(1);
+    expect(mod.resolvePrintingImageUrl(printings[0], 0, "normal")).toBe("https://img.example/legacy-pin.jpg");
+  });
 });
 
 describe("Scryfall generation scripts — face orientation (issue #9502)", () => {
@@ -941,6 +998,21 @@ describe("Scryfall generation scripts — face orientation (issue #9502)", () =>
             type_line: "Instant",
             ...sharedImages,
           },
+          {
+            oracle_id: "room", layout: "split", name: "Unholy Annex // Ritual Chamber",
+            type_line: "Enchantment — Room // Enchantment — Room", ...sharedImages,
+            card_faces: [scryfallFace("Unholy Annex", "Enchantment — Room", false), scryfallFace("Ritual Chamber", "Enchantment — Room", false)],
+          },
+          {
+            oracle_id: "mdfc", layout: "modal_dfc", name: "Pinnacle Monk // Mystic Peak",
+            type_line: "Creature — Djinn Monk // Land",
+            card_faces: [scryfallFace("Pinnacle Monk", "Creature — Djinn Monk", true), scryfallFace("Mystic Peak", "Land", true)],
+          },
+          { oracle_id: "battleborn", layout: "normal", name: "Battleborn Fixture", type_line: "Creature — Battleborn", ...sharedImages },
+          { oracle_id: "single-battle", layout: "normal", name: "Synthetic Single Battle", type_line: "Battle — Siege", ...sharedImages },
+          // Explicitly synthetic: real split records use card_faces and root images above.
+          { oracle_id: "synthetic-split", layout: "split", name: "Synthetic Split", type_line: "Instant", ...sharedImages },
+          { oracle_id: "token", layout: "token", name: "Saproling", type_line: "Token Creature — Saproling", ...sharedImages },
         ]),
       );
 
@@ -961,6 +1033,20 @@ describe("Scryfall generation scripts — face orientation (issue #9502)", () =>
       expect(orientations("delver")).toEqual(["portrait", "portrait"]);
       expect(orientations("commit")).toEqual(["landscape", "landscape"]);
       expect(orientations("bolt")).toEqual(["portrait"]);
+      expect(orientations("room")).toEqual(["landscape", "landscape"]);
+      expect(orientations("mdfc")).toEqual(["portrait", "portrait"]);
+      expect(orientations("battleborn")).toEqual(["portrait"]);
+      expect(orientations("single-battle")).toEqual(["landscape"]);
+      expect(orientations("synthetic-split")).toEqual(["landscape"]);
+      expect(orientations("token:saproling")).toEqual(["portrait"]);
+      for (const id of ["commit", "room"]) {
+        expect(generated[id].faces.map((face: { normal: string }) => face.normal)).toEqual([sharedImages.image_uris.normal, sharedImages.image_uris.normal]);
+      }
+      expect(generated.room.face_names).toEqual(["unholy annex", "ritual chamber"]);
+      expect(generated["unholy annex"]).toEqual(generated.room);
+      expect(generated["unholy annex // ritual chamber"]).toEqual(generated.room);
+      expect(generated.battle.face_names).toEqual(["invasion of alara", "awaken the maelstrom"]);
+      expect(generated["invasion of alara"]).toEqual(generated.battle);
     });
   });
 });
